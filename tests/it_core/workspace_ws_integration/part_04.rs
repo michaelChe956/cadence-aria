@@ -485,10 +485,7 @@ impl StreamingProviderAdapter for WorkingDirRecordingStreamingProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: VALID_STORY_SPEC.to_string(),
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(VALID_STORY_SPEC.to_string(), None)))
                 .await;
         });
         Ok(ProviderSession {
@@ -588,10 +585,7 @@ impl StreamingProviderAdapter for ChoiceThenArtifactProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: Some("author-provider-session-1".to_string()),
-                })
+                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("author-provider-session-1".to_string()))))
                 .await;
         });
         Ok(ProviderSession {
@@ -665,10 +659,7 @@ impl StreamingProviderAdapter for RoleResumeRecordingProvider {
         let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output.to_string(),
-                    provider_session_id,
-                })
+                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(output.to_string(), provider_session_id)))
                 .await;
         });
         Ok(ProviderSession {

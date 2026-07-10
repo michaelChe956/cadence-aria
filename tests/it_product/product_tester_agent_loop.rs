@@ -302,30 +302,32 @@ impl StreamingProviderAdapter for ScriptedTesterProvider {
         tokio::spawn(async move {
             if prompt.contains("Phase: plan_tests") {
                 event_tx
-                    .send(ProviderEvent::Completed {
-                        full_output: serde_json::json!({
-                            "summary": "controlled shell smoke",
-                            "steps": [
-                                {
-                                    "id": "planned_001",
-                                    "title": "Shell smoke",
-                                    "intent": "prove the configured shell command succeeds",
-                                    "required": true,
-                                    "tool": "run_command",
-                                    "risk_level": "low",
-                                    "command_or_tool_input": {
-                                        "command": ["sh", "-c", "printf ok"]
-                                    },
-                                    "evidence_expectation": "exit 0",
-                                    "related_requirements": ["REQ-SHELL"],
-                                    "related_design_constraints": ["DEC-SHELL"],
-                                    "related_work_item_tasks": ["TASK-SHELL"]
-                                }
-                            ]
-                        })
-                        .to_string(),
-                        provider_session_id: None,
-                    })
+                    .send(ProviderEvent::Completed(
+                        cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                            serde_json::json!({
+                                "summary": "controlled shell smoke",
+                                "steps": [
+                                    {
+                                        "id": "planned_001",
+                                        "title": "Shell smoke",
+                                        "intent": "prove the configured shell command succeeds",
+                                        "required": true,
+                                        "tool": "run_command",
+                                        "risk_level": "low",
+                                        "command_or_tool_input": {
+                                            "command": ["sh", "-c", "printf ok"]
+                                        },
+                                        "evidence_expectation": "exit 0",
+                                        "related_requirements": ["REQ-SHELL"],
+                                        "related_design_constraints": ["DEC-SHELL"],
+                                        "related_work_item_tasks": ["TASK-SHELL"]
+                                    }
+                                ]
+                            })
+                            .to_string(),
+                            None,
+                        ),
+                    ))
                     .await
                     .expect("send test plan");
                 return;
@@ -351,10 +353,12 @@ impl StreamingProviderAdapter for ScriptedTesterProvider {
                 other => panic!("expected tool result, got {other:?}"),
             }
             event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: r#"{"summary":"ok","bugs_found":[]}"#.to_string(),
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        r#"{"summary":"ok","bugs_found":[]}"#.to_string(),
+                        None,
+                    ),
+                ))
                 .await
                 .expect("send completed");
         });
@@ -411,10 +415,11 @@ impl StreamingProviderAdapter for RepairingTesterProvider {
                 return;
             }
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output, None,
+                    ),
+                ))
                 .await;
         });
 

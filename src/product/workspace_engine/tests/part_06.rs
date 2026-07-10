@@ -467,10 +467,7 @@ impl StreamingProviderAdapter for RecordingStreamingProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
                 .await;
         });
         Ok(ProviderSession {
@@ -661,10 +658,7 @@ impl StreamingProviderAdapter for StreamedArtifactSummaryProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: "Story Spec 候选已输出。等待 daemon 处理。".to_string(),
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain("Story Spec 候选已输出。等待 daemon 处理。".to_string(), None)))
                 .await;
         });
         Ok(ProviderSession {

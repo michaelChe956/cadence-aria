@@ -314,10 +314,7 @@ impl StreamingProviderAdapter for StoryOpenItemRetryProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: Some(format!("story-open-item-retry-{call_no}")),
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some(format!("story-open-item-retry-{call_no}")))))
                 .await;
         });
 

@@ -344,10 +344,9 @@ impl WorkspaceEngine {
                                 )
                                 .await;
                         }
-                        ProviderEvent::Completed {
-                            full_output,
-                            provider_session_id,
-                        } => {
+                        ProviderEvent::Completed(completion) => {
+                            let full_output = completion.full_output;
+                            let provider_session_id = completion.provider_session_id;
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }

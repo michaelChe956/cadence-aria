@@ -145,6 +145,7 @@ impl CodingWorkspaceEngine {
                 &attempt,
                 CodingProviderRole::Coder,
             )?,
+            structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: legacy_input.timeout,
         };

@@ -96,6 +96,7 @@ impl CodingWorkspaceEngine {
                 &attempt,
                 CodingProviderRole::Tester,
             )?,
+            structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: plan_adapter_input.timeout,
         };
@@ -188,6 +189,7 @@ impl CodingWorkspaceEngine {
                         &attempt,
                         CodingProviderRole::Tester,
                     )?,
+                    structured_output_contract: None,
                     env_vars: BTreeMap::new(),
                     timeout_secs: repair_adapter_input.timeout,
                 };

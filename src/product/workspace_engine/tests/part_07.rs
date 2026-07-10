@@ -22,10 +22,7 @@ impl StreamingProviderAdapter for DesignArtifactRetryProvider {
                     })
                     .await;
                 let _ = event_tx
-                    .send(ProviderEvent::Completed {
-                        full_output: output.to_string(),
-                        provider_session_id: Some("design-retry-session-1".to_string()),
-                    })
+                    .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output.to_string(), Some("design-retry-session-1".to_string()))))
                     .await;
                 return;
             }
@@ -44,10 +41,7 @@ impl StreamingProviderAdapter for DesignArtifactRetryProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: Some("design-retry-session-2".to_string()),
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("design-retry-session-2".to_string()))))
                 .await;
         });
         Ok(ProviderSession {
@@ -96,10 +90,7 @@ impl StreamingProviderAdapter for ExecutionEventStreamingProvider {
                 }))
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: "# Draft".to_string(),
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain("# Draft".to_string(), None)))
                 .await;
         });
         Ok(ProviderSession {
@@ -147,10 +138,7 @@ fn tool_event_provider_session(full_output: &str) -> ProviderSession {
         ))
         .expect("send tool result");
     event_tx
-        .try_send(ProviderEvent::Completed {
-            full_output: full_output.to_string(),
-            provider_session_id: None,
-        })
+        .try_send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output.to_string(), None)))
         .expect("send completed");
     ProviderSession {
         events: event_rx,
@@ -162,10 +150,7 @@ fn text_choice_provider_session(full_output: &str) -> ProviderSession {
     let (event_tx, event_rx) = mpsc::channel(8);
     let (command_tx, _command_rx) = mpsc::channel(8);
     event_tx
-        .try_send(ProviderEvent::Completed {
-            full_output: full_output.to_string(),
-            provider_session_id: Some("provider-author-session-1".to_string()),
-        })
+        .try_send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output.to_string(), Some("provider-author-session-1".to_string()))))
         .expect("send completed");
     ProviderSession {
         events: event_rx,
@@ -458,10 +443,7 @@ impl StreamingProviderAdapter for EmptyCompletedStreamingProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: String::new(),
-                    provider_session_id: Some("empty-session".to_string()),
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(String::new(), Some("empty-session".to_string()))))
                 .await;
         });
         Ok(ProviderSession {
@@ -497,10 +479,7 @@ impl StreamingProviderAdapter for InvalidArtifactStreamingProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: "我还需要继续分析，目前没有生成 Story Spec。".to_string(),
-                    provider_session_id: Some("invalid-artifact-session".to_string()),
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain("我还需要继续分析，目前没有生成 Story Spec。".to_string(), Some("invalid-artifact-session".to_string()))))
                 .await;
         });
         Ok(ProviderSession {

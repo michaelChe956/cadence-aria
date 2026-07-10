@@ -47,7 +47,7 @@ done
             .expect("provider event channel should stay open")
         {
             ProviderEvent::TextDelta { content } => streamed.push_str(&content),
-            ProviderEvent::Completed { full_output, .. } => break full_output,
+            ProviderEvent::Completed(completion) => break completion.full_output,
             ProviderEvent::StatusChanged(_)
             | ProviderEvent::Execution(_)
             | ProviderEvent::PermissionRequest(_)
@@ -173,7 +173,8 @@ async fn claude_provider_truncates_multibyte_tool_result_preview_without_panicki
                     preview = event.output;
                 }
             }
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 completed = Some(full_output);
                 break;
             }

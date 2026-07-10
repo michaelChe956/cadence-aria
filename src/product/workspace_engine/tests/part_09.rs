@@ -19,10 +19,7 @@ async fn drive_work_item_plan_provider_session_returns_output_and_persists_strea
         .await
         .expect("send text delta");
     provider_event_tx
-        .send(ProviderEvent::Completed {
-            full_output: "Final structured output".to_string(),
-            provider_session_id: Some("provider-work-item-plan-author-1".to_string()),
-        })
+        .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain("Final structured output".to_string(), Some("provider-work-item-plan-author-1".to_string()))))
         .await
         .expect("send completed");
     drop(provider_event_tx);
@@ -92,10 +89,7 @@ async fn drive_work_item_plan_provider_session_hides_structured_output_from_stre
         .await
         .expect("send structured delta");
     provider_event_tx
-        .send(ProviderEvent::Completed {
-            full_output: full_output.clone(),
-            provider_session_id: None,
-        })
+        .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output.clone(), None)))
         .await
         .expect("send completed");
     drop(provider_event_tx);

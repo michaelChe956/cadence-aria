@@ -60,10 +60,11 @@ impl StreamingProviderAdapter for ProviderDrivenTestingNoToolCallProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output, None,
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {
@@ -130,10 +131,11 @@ impl StreamingProviderAdapter for ProviderDrivenTestingMissingStepResultsProvide
                 "I ran the tests and they passed.".to_string()
             };
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output, None,
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {
@@ -167,10 +169,11 @@ impl StreamingProviderAdapter for NonJsonCodeReviewProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output, None,
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {
@@ -208,10 +211,12 @@ impl StreamingProviderAdapter for ReviewerDrivenReworkProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: Some("coder-session-after-rework".to_string()),
-                })
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output,
+                        Some("coder-session-after-rework".to_string()),
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {

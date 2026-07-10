@@ -40,10 +40,7 @@ impl StreamingProviderAdapter for EventEmittingCodingProvider {
             }))
             .expect("send tool result");
         event_tx
-            .try_send(ProviderEvent::Completed {
-                full_output: "done".to_string(),
-                provider_session_id: None,
-            })
+            .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain("done".to_string(), None)))
             .expect("send completed");
 
         Ok(ProviderSession {
@@ -91,10 +88,7 @@ impl StreamingProviderAdapter for ControlEventCodingProvider {
             }))
             .expect("send choice");
         event_tx
-            .try_send(ProviderEvent::Completed {
-                full_output: "done".to_string(),
-                provider_session_id: None,
-            })
+            .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain("done".to_string(), None)))
             .expect("send completed");
 
         Ok(ProviderSession {
@@ -132,10 +126,7 @@ impl StreamingProviderAdapter for PermissionAwaitingProvider {
                         ..
                     } if id == "permission_0001" && approved => {
                         let _ = event_tx
-                            .send(ProviderEvent::Completed {
-                                full_output: "approved".to_string(),
-                                provider_session_id: None,
-                            })
+                            .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain("approved".to_string(), None)))
                             .await;
                         return;
                     }
@@ -190,10 +181,7 @@ impl StreamingProviderAdapter for ChoiceAwaitingProvider {
                         && selected_option_ids == vec!["backend_first".to_string()] =>
                     {
                         let _ = event_tx
-                            .send(ProviderEvent::Completed {
-                                full_output: "selected backend_first".to_string(),
-                                provider_session_id: None,
-                            })
+                            .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain("selected backend_first".to_string(), None)))
                             .await;
                         return;
                     }
@@ -246,10 +234,7 @@ impl StreamingProviderAdapter for ChoiceThenPermissionProvider {
             }))
             .expect("send permission");
         event_tx
-            .try_send(ProviderEvent::Completed {
-                full_output: "done".to_string(),
-                provider_session_id: None,
-            })
+            .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain("done".to_string(), None)))
             .expect("send completed");
 
         Ok(ProviderSession {
@@ -286,10 +271,7 @@ impl StreamingProviderAdapter for EventThenCompletedProvider {
             }))
             .expect("send execution event");
         event_tx
-            .try_send(ProviderEvent::Completed {
-                full_output: self.output.clone(),
-                provider_session_id: None,
-            })
+            .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(self.output.clone(), None)))
             .expect("send completed");
         Ok(ProviderSession {
             events: event_rx,
@@ -353,11 +335,8 @@ impl StreamingProviderAdapter for ReviewControlEventProvider {
             }))
             .expect("send permission");
         event_tx
-            .try_send(ProviderEvent::Completed {
-                full_output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
-                    .to_string(),
-                provider_session_id: Some("review-session-0001".to_string()),
-            })
+            .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(r#"{"verdict":"approve","summary":"review ok","findings":[]}"#
+                .to_string(), Some("review-session-0001".to_string()))))
             .expect("send completed");
         Ok(ProviderSession {
             events: event_rx,

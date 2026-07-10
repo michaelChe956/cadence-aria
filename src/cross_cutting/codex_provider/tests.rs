@@ -52,6 +52,7 @@ fn streaming_input(
         workspace_session_id: None,
         resume_provider_session_id: None,
         permission_mode,
+        structured_output_contract: None,
         env_vars: BTreeMap::new(),
         timeout_secs: 60,
     }
@@ -64,7 +65,7 @@ async fn recv_completed(events: &mut mpsc::Receiver<ProviderEvent>) -> String {
             .expect("provider should emit completion")
             .expect("provider event channel should stay open")
         {
-            ProviderEvent::Completed { full_output, .. } => return full_output,
+            ProviderEvent::Completed(completion) => return completion.full_output,
             ProviderEvent::StatusChanged(_)
             | ProviderEvent::Execution(_)
             | ProviderEvent::TextDelta { .. }
@@ -244,7 +245,8 @@ async fn codex_provider_responds_to_current_command_approval_with_json_rpc_resul
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_) => {}
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 panic!("provider completed before permission request: {full_output}")
             }
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
@@ -295,7 +297,7 @@ async fn codex_provider_streams_completed_only_agent_messages() {
                 assert_eq!(content, "Codex completed-only chunk");
                 saw_text_delta = true;
             }
-            ProviderEvent::Completed { full_output, .. } => break full_output,
+            ProviderEvent::Completed(completion) => break completion.full_output,
             ProviderEvent::StatusChanged(_)
             | ProviderEvent::Execution(_)
             | ProviderEvent::PermissionRequest(_)
@@ -340,7 +342,8 @@ async fn codex_provider_bridges_request_user_input_and_completes() {
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_) => {}
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 panic!("provider completed before choice request: {full_output}")
             }
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
@@ -397,7 +400,8 @@ async fn codex_provider_bridges_all_request_user_input_questions() {
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_) => {}
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 panic!("provider completed before choice request: {full_output}")
             }
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
@@ -487,7 +491,7 @@ async fn codex_provider_emits_command_execution_events_from_current_protocol() {
                 assert!(event.output.as_deref().unwrap_or_default().contains('/'));
                 saw_completed = true;
             }
-            ProviderEvent::Completed { .. } if saw_started && saw_completed => return,
+            ProviderEvent::Completed(_) if saw_started && saw_completed => return,
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             _ => {}
         }
@@ -529,7 +533,8 @@ async fn codex_provider_times_out_when_turn_stops_emitting_events() {
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_) => {}
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 panic!("provider completed unexpectedly: {full_output}")
             }
             ProviderEvent::ProtocolError { message, .. } => {
@@ -575,7 +580,8 @@ async fn codex_provider_reports_resume_stall_when_resumed_turn_emits_no_events()
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_) => {}
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 panic!("provider completed unexpectedly: {full_output}")
             }
             ProviderEvent::ProtocolError { message, .. } => {
@@ -641,7 +647,7 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_bridge_failur
                 saw_protocol_error = true;
                 break;
             }
-            ProviderEvent::Completed { .. } => {
+            ProviderEvent::Completed(_) => {
                 panic!("expected protocol error before completion")
             }
             ProviderEvent::Failed { message } => {
@@ -721,7 +727,7 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
                 saw_protocol_error = true;
                 break;
             }
-            ProviderEvent::Completed { .. } => {
+            ProviderEvent::Completed(_) => {
                 panic!("expected protocol error before completion")
             }
             ProviderEvent::Failed { message } => {

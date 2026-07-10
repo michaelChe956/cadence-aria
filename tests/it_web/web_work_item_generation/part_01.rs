@@ -461,10 +461,7 @@ impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
                 return;
             }
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output, None)))
                 .await;
         });
 

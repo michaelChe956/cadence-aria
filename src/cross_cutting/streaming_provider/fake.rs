@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 
 use super::{
-    ProviderCommand, ProviderEvent, ProviderSession, StreamingProviderAdapter,
+    ProviderCommand, ProviderCompletion, ProviderEvent, ProviderSession, StreamingProviderAdapter,
     StreamingProviderInput,
 };
 
@@ -56,10 +56,7 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
             }
             let _ = fake_streaming_send_event(
                 &event_tx,
-                ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                },
+                ProviderEvent::Completed(ProviderCompletion::plain(output, None)),
                 &cancel,
                 &mut command_rx,
                 &mut commands_open,

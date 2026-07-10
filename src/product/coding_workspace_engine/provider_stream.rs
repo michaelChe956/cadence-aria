@@ -497,10 +497,9 @@ impl CodingWorkspaceEngine {
                                 }),
                             );
                         }
-                        ProviderEvent::Completed {
-                            full_output: completed_output,
-                            provider_session_id,
-                        } => {
+                        ProviderEvent::Completed(completion) => {
+                            let completed_output = completion.full_output;
+                            let provider_session_id = completion.provider_session_id;
                             if !open_choice_ids.is_empty() {
                                 return Err(self.unresolved_provider_choice_error(
                                     attempt,

@@ -385,6 +385,7 @@ pub(crate) fn streaming_input_from_adapter(
         workspace_session_id: None,
         resume_provider_session_id: None,
         permission_mode: ProviderPermissionMode::Supervised,
+        structured_output_contract: None,
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,
     }

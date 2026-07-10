@@ -371,6 +371,7 @@ mod tests {
                     workspace_session_id: Some("workspace_session_1".to_string()),
                     resume_provider_session_id: None,
                     permission_mode: ProviderPermissionMode::Auto,
+                    structured_output_contract: None,
                     env_vars: Default::default(),
                     timeout_secs: 60,
                 },

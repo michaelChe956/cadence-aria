@@ -243,10 +243,7 @@ impl StreamingProviderAdapter for TesterRetryPromptCaptureProvider {
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
         event_tx
-            .try_send(ProviderEvent::Completed {
-                full_output: r#"{"summary":"retry plan","context_warnings":[],"assumptions":[],"steps":[{"id":"unit","title":"unit","intent":"run unit tests","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(),
-                provider_session_id: None,
-            })
+            .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(r#"{"summary":"retry plan","context_warnings":[],"assumptions":[],"steps":[{"id":"unit","title":"unit","intent":"run unit tests","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"provider evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(), None)))
             .expect("send completed");
         Ok(ProviderSession {
             events: event_rx,
@@ -336,10 +333,7 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id,
-                })
+                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(output, provider_session_id)))
                 .await;
         });
         Ok(ProviderSession {
@@ -402,10 +396,7 @@ impl StreamingProviderAdapter for ExecutePlanToolCallTesterProvider {
         let (command_tx, mut command_rx) = mpsc::channel(8);
         if start_no == 1 {
             event_tx
-                .try_send(ProviderEvent::Completed {
-                    full_output: r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"run_command","risk_level":"low","command_or_tool_input":{"command":["true"]},"evidence_expectation":"unit evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(),
-                    provider_session_id: None,
-                })
+                .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"run_command","risk_level":"low","command_or_tool_input":{"command":["true"]},"evidence_expectation":"unit evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(), None)))
                 .expect("send plan completed");
             return Ok(ProviderSession {
                 events: event_rx,
@@ -430,10 +421,7 @@ impl StreamingProviderAdapter for ExecutePlanToolCallTesterProvider {
                         result,
                     ) if result.tool_use_id == "execute_tool_0001" => {
                         let _ = event_tx
-                            .send(ProviderEvent::Completed {
-                                full_output: r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#.to_string(),
-                                provider_session_id: None,
-                            })
+                            .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#.to_string(), None)))
                             .await;
                         return;
                     }
@@ -477,10 +465,7 @@ impl StreamingProviderAdapter for ExecutePlanChoiceThenCompletedTesterProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         if start_no == 1 {
             event_tx
-                .try_send(ProviderEvent::Completed {
-                    full_output: r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(),
-                    provider_session_id: None,
-                })
+                .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(r#"{"summary":"unit plan","steps":[{"id":"unit","title":"Unit","intent":"run unit checks","required":true,"tool":"provider_managed","risk_level":"low","command_or_tool_input":{},"evidence_expectation":"unit evidence","related_requirements":["REQ-UNIT"],"related_design_constraints":["DEC-UNIT"],"related_work_item_tasks":["TASK-UNIT"]}]}"#.to_string(), None)))
                 .expect("send plan completed");
             return Ok(ProviderSession {
                 events: event_rx,
@@ -504,10 +489,7 @@ impl StreamingProviderAdapter for ExecutePlanChoiceThenCompletedTesterProvider {
             }))
             .expect("send choice request");
         event_tx
-            .try_send(ProviderEvent::Completed {
-                full_output: r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#.to_string(),
-                provider_session_id: None,
-            })
+            .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(r#"{"step_results":[{"step_id":"unit","status":"passed","evidence_refs":["unit.log"],"provider_analysis":"ok"}]}"#.to_string(), None)))
             .expect("send completed");
 
         Ok(ProviderSession {
@@ -562,27 +544,24 @@ impl StreamingProviderAdapter for HangingExecutePlanStartTesterProvider {
                 .map(|warning| serde_json::json!([warning]))
                 .unwrap_or_else(|| serde_json::json!([]));
             event_tx
-                .try_send(ProviderEvent::Completed {
-                    full_output: serde_json::json!({
-                        "summary": "unit plan",
-                        "context_warnings": context_warnings,
-                        "steps": [{
-                            "id": "unit",
-                            "title": "Unit",
-                            "intent": "run unit checks",
-                            "required": true,
-                            "tool": "provider_managed",
-                            "risk_level": "low",
-                            "command_or_tool_input": {},
-                            "evidence_expectation": "unit evidence",
-                            "related_requirements": ["REQ-UNIT"],
-                            "related_design_constraints": ["DEC-UNIT"],
-                            "related_work_item_tasks": ["TASK-UNIT"]
-                        }]
-                    })
-                    .to_string(),
-                    provider_session_id: None,
+                .try_send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(serde_json::json!({
+                    "summary": "unit plan",
+                    "context_warnings": context_warnings,
+                    "steps": [{
+                        "id": "unit",
+                        "title": "Unit",
+                        "intent": "run unit checks",
+                        "required": true,
+                        "tool": "provider_managed",
+                        "risk_level": "low",
+                        "command_or_tool_input": {},
+                        "evidence_expectation": "unit evidence",
+                        "related_requirements": ["REQ-UNIT"],
+                        "related_design_constraints": ["DEC-UNIT"],
+                        "related_work_item_tasks": ["TASK-UNIT"]
+                    }]
                 })
+                .to_string(), None)))
                 .expect("send plan completed");
             return Ok(ProviderSession {
                 events: event_rx,

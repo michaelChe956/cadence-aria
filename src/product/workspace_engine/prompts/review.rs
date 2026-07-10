@@ -68,6 +68,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
@@ -242,6 +243,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
@@ -416,6 +418,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
@@ -479,6 +482,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
@@ -595,6 +599,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })

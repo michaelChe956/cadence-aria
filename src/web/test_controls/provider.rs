@@ -8,8 +8,9 @@ use tokio::sync::mpsc;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    FakeStreamingProvider, PermissionRequestData, ProviderCommand, ProviderEvent, ProviderSession,
-    RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
+    FakeStreamingProvider, PermissionRequestData, ProviderCommand, ProviderCompletion,
+    ProviderEvent, ProviderSession, RiskLevel, StreamChunk, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use crate::web::state::WebAppState;
@@ -287,10 +288,9 @@ fn start_review_fixture_session(
             return;
         }
         let _ = event_tx
-            .send(ProviderEvent::Completed {
-                full_output: output,
-                provider_session_id: None,
-            })
+            .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                output, None,
+            )))
             .await;
     });
 
@@ -329,10 +329,9 @@ fn start_testing_fixture_session(
                     return;
                 }
                 let _ = event_tx
-                    .send(ProviderEvent::Completed {
-                        full_output: output,
-                        provider_session_id: None,
-                    })
+                    .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                        output, None,
+                    )))
                     .await;
             }
         }
@@ -401,10 +400,9 @@ fn start_permission_fixture_session(
                                     })
                                     .await;
                                 let _ = event_tx
-                                    .send(ProviderEvent::Completed {
-                                        full_output: output,
-                                        provider_session_id: None,
-                                    })
+                                    .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                                        output, None,
+                                    )))
                                     .await;
                             } else {
                                 let _ = event_tx

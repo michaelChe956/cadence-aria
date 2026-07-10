@@ -149,12 +149,14 @@ impl StreamingProviderAdapter for ChoiceThenCompletingStreamingProvider {
                         match command {
                             Some(ProviderCommand::ChoiceResponse { .. }) => {
                                 let _ = event_tx
-                                    .send(ProviderEvent::Completed {
-                                        full_output: VALID_STORY_SPEC.to_string(),
-                                        provider_session_id: Some(
+                                    .send(ProviderEvent::Completed(
+                                        cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                                            VALID_STORY_SPEC.to_string(),
+                                            Some(
                                             "choice-completing-session".to_string(),
                                         ),
-                                    })
+                                        ),
+                                    ))
                                     .await;
                                 return;
                             }
@@ -228,12 +230,14 @@ impl StreamingProviderAdapter for SequencedChoiceCompletingProvider {
                         match command {
                             Some(ProviderCommand::ChoiceResponse { .. }) => {
                                 let _ = event_tx
-                                    .send(ProviderEvent::Completed {
-                                        full_output: VALID_STORY_SPEC.to_string(),
-                                        provider_session_id: Some(
+                                    .send(ProviderEvent::Completed(
+                                        cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                                            VALID_STORY_SPEC.to_string(),
+                                            Some(
                                             "choice-sequence-session".to_string(),
                                         ),
-                                    })
+                                        ),
+                                    ))
                                     .await;
                                 return;
                             }
@@ -288,10 +292,7 @@ impl StreamingProviderAdapter for ScriptedStreamingProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
                 .await;
         });
         Ok(ProviderSession {

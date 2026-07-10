@@ -307,7 +307,8 @@ async fn permission_fixture_fake_provider_waits_for_approval_and_completes() {
             .expect("completed event")
             .expect("completed")
         {
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 assert!(full_output.contains("Permission Fixture"));
                 return;
             }
@@ -345,6 +346,7 @@ async fn review_fixture_fake_provider_emits_json_contract_for_reviewer() {
                 workspace_session_id: Some("workspace_session_1".to_string()),
                 resume_provider_session_id: None,
                 permission_mode: ProviderPermissionMode::Supervised,
+                structured_output_contract: None,
                 env_vars: Default::default(),
                 timeout_secs: 60,
             },
@@ -357,7 +359,8 @@ async fn review_fixture_fake_provider_emits_json_contract_for_reviewer() {
     while let Some(event) = session.events.recv().await {
         match event {
             ProviderEvent::TextDelta { content } => output.push_str(&content),
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 output.push_str(&full_output);
                 break;
             }
@@ -426,6 +429,7 @@ async fn testing_fixture_fake_provider_emits_plan_and_step_results() {
                 workspace_session_id: Some("coding_attempt_0001".to_string()),
                 resume_provider_session_id: None,
                 permission_mode: ProviderPermissionMode::Supervised,
+                structured_output_contract: None,
                 env_vars: Default::default(),
                 timeout_secs: 60,
             },
@@ -446,6 +450,7 @@ async fn testing_fixture_fake_provider_emits_plan_and_step_results() {
                 workspace_session_id: Some("coding_attempt_0001".to_string()),
                 resume_provider_session_id: None,
                 permission_mode: ProviderPermissionMode::Supervised,
+                structured_output_contract: None,
                 env_vars: Default::default(),
                 timeout_secs: 60,
             },
@@ -493,6 +498,7 @@ async fn review_fixture_can_emit_alias_findings_and_malformed_json() {
                 workspace_session_id: Some("coding_attempt_0001".to_string()),
                 resume_provider_session_id: None,
                 permission_mode: ProviderPermissionMode::Supervised,
+                structured_output_contract: None,
                 env_vars: Default::default(),
                 timeout_secs: 60,
             },
@@ -529,6 +535,7 @@ async fn review_fixture_can_emit_alias_findings_and_malformed_json() {
                 workspace_session_id: Some("coding_attempt_0001".to_string()),
                 resume_provider_session_id: None,
                 permission_mode: ProviderPermissionMode::Supervised,
+                structured_output_contract: None,
                 env_vars: Default::default(),
                 timeout_secs: 60,
             },
@@ -594,6 +601,7 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
                 workspace_session_id: Some("coding_attempt_0001".to_string()),
                 resume_provider_session_id: None,
                 permission_mode: ProviderPermissionMode::Supervised,
+                structured_output_contract: None,
                 env_vars: Default::default(),
                 timeout_secs: 60,
             },
@@ -617,6 +625,7 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
                 workspace_session_id: Some("coding_attempt_0001".to_string()),
                 resume_provider_session_id: None,
                 permission_mode: ProviderPermissionMode::Supervised,
+                structured_output_contract: None,
                 env_vars: Default::default(),
                 timeout_secs: 60,
             },
@@ -634,7 +643,7 @@ async fn completed_output(
 ) -> String {
     while let Some(event) = session.events.recv().await {
         match event {
-            ProviderEvent::Completed { full_output, .. } => return full_output,
+            ProviderEvent::Completed(completion) => return completion.full_output,
             ProviderEvent::TextDelta { .. } => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
@@ -701,6 +710,7 @@ fn streaming_input(session_id: &str) -> StreamingProviderInput {
         workspace_session_id: Some(session_id.to_string()),
         resume_provider_session_id: None,
         permission_mode: ProviderPermissionMode::Supervised,
+        structured_output_contract: None,
         env_vars: Default::default(),
         timeout_secs: 60,
     }

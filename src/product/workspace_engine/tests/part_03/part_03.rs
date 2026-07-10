@@ -265,10 +265,7 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
                 .await;
         });
         Ok(ProviderSession {

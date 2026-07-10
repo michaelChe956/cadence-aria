@@ -25,10 +25,7 @@ impl StreamingProviderAdapter for RevisionResumeStallThenSuccessProvider {
                     .await;
             } else {
                 let _ = event_tx
-                    .send(ProviderEvent::Completed {
-                        full_output: output,
-                        provider_session_id: Some("codex-fresh-thread".to_string()),
-                    })
+                    .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("codex-fresh-thread".to_string()))))
                     .await;
             }
         });
@@ -65,10 +62,7 @@ impl StreamingProviderAdapter for RevisionInputRecordingProvider {
         let output = self.output.to_string();
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: Some("provider-author-session-1".to_string()),
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("provider-author-session-1".to_string()))))
                 .await;
         });
         Ok(ProviderSession {

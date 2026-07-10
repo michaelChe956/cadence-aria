@@ -367,10 +367,12 @@ pub(crate) async fn read_claude_stream(
             .await?;
             send_provider_event(
                 &event_tx,
-                ProviderEvent::Completed {
-                    full_output,
-                    provider_session_id,
-                },
+                ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        full_output,
+                        provider_session_id,
+                    ),
+                ),
                 &cancel,
             )
             .await?;
