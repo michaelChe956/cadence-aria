@@ -641,6 +641,7 @@ fn work_item_plan_review_reports_invalid_outline_reference() {
             crate::cross_cutting::structured_output::StructuredOutputState::Parsed(
                 serde_json::json!({
                     "verdict": "needs_human",
+                    "review_scope": "outline",
                     "target_outline_id": "outline_missing",
                     "generation_round_id": "round_0001"
                 }),
@@ -670,6 +671,7 @@ fn work_item_plan_review_reports_invalid_generation_round() {
             crate::cross_cutting::structured_output::StructuredOutputState::Parsed(
                 serde_json::json!({
                     "verdict": "needs_human",
+                    "review_scope": "outline",
                     "generation_round_id": ""
                 }),
             ),

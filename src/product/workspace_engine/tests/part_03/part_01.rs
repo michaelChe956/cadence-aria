@@ -26,6 +26,7 @@ fn parse_review_verdict_malformed_findings_require_user_triage() {
 fn work_item_plan_review_revise_batch_maps_to_needs_human_generic_verdict_with_extension() {
     let json = r#"{
         "verdict": "revise_batch",
+        "review_scope": "batch",
         "summary": "整组需要重写",
         "generation_round_id": "round_0001",
         "batch_id": "batch_0001"

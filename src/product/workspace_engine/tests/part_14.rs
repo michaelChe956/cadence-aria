@@ -185,7 +185,7 @@ async fn work_item_plan_outline_review_repair_keeps_active_scope_schema_strict()
         .structured_output_diagnostic
         .as_ref()
         .expect("scope schema diagnostic");
-    assert_eq!(diagnostic.code, "invalid_verdict");
+    assert_eq!(diagnostic.code, "invalid_review_scope");
     assert!(diagnostic.repair_attempted);
     assert!(!diagnostic.repair_succeeded);
     assert_eq!(
