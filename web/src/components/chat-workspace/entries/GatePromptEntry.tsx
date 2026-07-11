@@ -1,5 +1,6 @@
 import { Check, RotateCcw, X } from "lucide-react";
 import type { ChatEntry } from "../../../state/chat-entries";
+import { trustedReviewComments } from "../../../state/workspace-review-trust";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
 type HumanConfirmPayload = { description: string };
@@ -144,7 +145,7 @@ function requestChangePayload(entry: ChatEntry): HumanConfirmPayload {
 function requestChangeDescription(entry: ChatEntry) {
   const metadata = entry.metadata as Record<string, unknown> | undefined;
   const summary = summaryFromEntry(entry);
-  const comments = typeof metadata?.comments === "string" ? metadata.comments.trim() : "";
+  const comments = trustedReviewComments(metadata);
   const findings = findingsFromEntry(entry);
   const reviewGate = reviewGateFromEntry(entry);
   if (reviewGate === "user_confirm_allowed" && findings.length > 0) {

@@ -22,6 +22,7 @@ import {
 import { workItemPlanArtifactUpdateSummary } from "../state/work-item-plan-artifact-summary";
 import { stageChangeContent } from "../state/workspace-stage-labels";
 import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
+import { trustedReviewComments } from "../state/workspace-review-trust";
 
 export interface WsServerMessage {
   type: string;
@@ -626,7 +627,9 @@ function gatePromptEntryForState(state: ReturnType<typeof useWorkspaceStore.getS
   const latestReview = state.chatEntries.filter((entry) => entry.type === "review_verdict").at(-1);
   const summary = latestReview?.metadata?.summary?.toString() ?? "";
   const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
-  const comments = latestReview?.metadata?.comments?.toString() ?? "";
+  const comments = trustedReviewComments(
+    latestReview?.metadata as Record<string, unknown> | undefined,
+  );
   const findings = Array.isArray(latestReview?.metadata?.findings)
     ? latestReview.metadata.findings
     : [];
