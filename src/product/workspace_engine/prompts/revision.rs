@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::review::trusted_review_comments;
 
 impl WorkspaceEngine {
     pub(crate) fn build_revision_input(&self) -> Result<StreamingProviderInput, String> {
@@ -67,7 +68,9 @@ impl WorkspaceEngine {
         prompt.push_str("这是对当前 provider 会话的增量返修指令。不要重新调研完整上下文，不要只解释；请基于本会话已有上下文、上一版 artifact 和以下 reviewer 意见，直接输出完整更新后的 artifact markdown。\n");
         self.append_missing_context_notes_to_prompt(&mut prompt);
         prompt.push_str("\nReviewer 审核意见:\n\n");
-        prompt.push_str(&review.comments);
+        if let Some(comments) = trusted_review_comments(review) {
+            prompt.push_str(comments);
+        }
         prompt.push_str("\n\nReviewer 摘要:\n");
         prompt.push_str(&review.summary);
         if let Some(context) = &self.pending_revision_context {
@@ -98,7 +101,9 @@ impl WorkspaceEngine {
         prompt.push_str("\n上一版 Artifact:\n\n");
         prompt.push_str(artifact);
         prompt.push_str("\n\nReviewer 审核意见:\n\n");
-        prompt.push_str(&review.comments);
+        if let Some(comments) = trusted_review_comments(review) {
+            prompt.push_str(comments);
+        }
         prompt.push_str("\n\nReviewer 摘要:\n");
         prompt.push_str(&review.summary);
         if let Some(context) = &self.pending_revision_context {

@@ -396,3 +396,158 @@ async fn outline_revision_node_detail_save_failure_rolls_back_without_success_ev
     ));
     assert_no_outline_revision_success_events(&mut event_rx);
 }
+
+#[tokio::test]
+async fn outline_revision_prepared_journal_recovers_each_persistence_crash_point() {
+    for crash_point in [
+        OutlineRevisionCrashPoint::Status,
+        OutlineRevisionCrashPoint::ArtifactVersions,
+        OutlineRevisionCrashPoint::Timeline,
+        OutlineRevisionCrashPoint::SourceNodeDetail,
+        OutlineRevisionCrashPoint::RunNodeDetail,
+        OutlineRevisionCrashPoint::PlanDrafts,
+        OutlineRevisionCrashPoint::ActiveIndex,
+    ] {
+        let (_tmp, lifecycle, plan_id, source_node_id, mut engine) =
+            make_atomic_outline_revision_engine(
+                &format!("sess_outline_crash_{crash_point:?}"),
+                true,
+            )
+            .await;
+        save_batch_work_item_plan_index_with_accepted_drafts(&engine, &plan_id);
+        let persisted_before =
+            outline_revision_persisted_snapshot(&lifecycle, &engine, &plan_id, &source_node_id);
+        engine.outline_revision_crash_after = Some(crash_point);
+
+        let error = engine
+            .prepare_work_item_plan_outline_revision(
+                Some("crash-safe feedback".to_string()),
+                WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+                OutlineRevisionPersistencePolicy::RequireActiveRound,
+            )
+            .await
+            .expect_err("test crash must interrupt before in-memory commit");
+        assert!(error.contains("simulated outline revision crash"));
+
+        let session_record = lifecycle
+            .get_workspace_session(&engine.session.session_id)
+            .expect("persisted session after simulated crash");
+        let checkpoint_store = Arc::new(CheckpointStore::new(
+            lifecycle
+                .app_paths()
+                .issue_lifecycle_root("project_0001", "issue_0001"),
+        ));
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let recovered = WorkspaceEngine::new_persistent(
+            checkpoint_store,
+            lifecycle.clone(),
+            event_tx,
+            WorkspaceSession::from_record(session_record),
+        );
+
+        assert!(
+            recovered.outline_revision_recovery_error().is_none(),
+            "{crash_point:?}"
+        );
+        assert_eq!(
+            outline_revision_persisted_snapshot(
+                &lifecycle,
+                &recovered,
+                &plan_id,
+                &source_node_id,
+            ),
+            persisted_before,
+            "{crash_point:?} must roll back from the persisted journal"
+        );
+    }
+}
+
+#[tokio::test]
+async fn outline_revision_active_index_crash_happens_after_revising_index_is_persisted() {
+    let (_tmp, _lifecycle, plan_id, _source_node_id, mut engine) =
+        make_atomic_outline_revision_engine("sess_outline_crash_after_active_index", true).await;
+    save_batch_work_item_plan_index_with_accepted_drafts(&engine, &plan_id);
+    engine.outline_revision_crash_after = Some(OutlineRevisionCrashPoint::ActiveIndex);
+
+    engine
+        .prepare_work_item_plan_outline_revision(
+            Some("crash after active index".to_string()),
+            WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+            OutlineRevisionPersistencePolicy::RequireActiveRound,
+        )
+        .await
+        .expect_err("active-index crash hook must interrupt the transaction");
+
+    let index = engine
+        .work_item_plan_store()
+        .expect("work item plan store")
+        .load_active_index("project_0001", "issue_0001", &plan_id)
+        .expect("load persisted active index")
+        .expect("persisted active index");
+    assert_eq!(
+        index.outline_state, "revising",
+        "active-index crash hook must run after the revised index reaches disk"
+    );
+}
+
+#[tokio::test]
+async fn outline_revision_committed_journal_keeps_revision_state_on_restart() {
+    let (_tmp, lifecycle, plan_id, _source_node_id, mut engine) =
+        make_atomic_outline_revision_engine("sess_outline_committed_crash", true).await;
+    engine.outline_revision_crash_after = Some(OutlineRevisionCrashPoint::Committed);
+
+    let error = engine
+        .prepare_work_item_plan_outline_revision(
+            Some("committed feedback".to_string()),
+            WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+            OutlineRevisionPersistencePolicy::RequireActiveRound,
+        )
+        .await
+        .expect_err("committed crash hook must stop before memory commit");
+    assert!(error.contains("simulated outline revision crash"));
+
+    let session_record = lifecycle
+        .get_workspace_session(&engine.session.session_id)
+        .expect("committed persisted session");
+    let checkpoint_store = Arc::new(CheckpointStore::new(
+        lifecycle
+            .app_paths()
+            .issue_lifecycle_root("project_0001", "issue_0001"),
+    ));
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let recovered = WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle.clone(),
+        event_tx,
+        WorkspaceSession::from_record(session_record),
+    );
+
+    assert!(recovered.outline_revision_recovery_error().is_none());
+    assert_eq!(recovered.current_stage(), WorkspaceStage::Running);
+    assert_eq!(
+        recovered.active_node_type(),
+        Some(TimelineNodeType::WorkItemPlanOutlineRun)
+    );
+    let run_node_id = recovered
+        .active_timeline_node_id()
+        .expect("committed active outline revision run");
+    let detail = lifecycle
+        .load_node_detail(&recovered.session.session_id, &run_node_id)
+        .expect("committed run detail");
+    assert!(detail.is_revision);
+    assert!(detail
+        .revision_feedback
+        .as_deref()
+        .expect("committed feedback")
+        .contains("committed feedback"));
+    assert_eq!(
+        recovered
+            .work_item_plan_store()
+            .expect("work item plan store")
+            .load_active_index("project_0001", "issue_0001", &plan_id)
+            .expect("active index")
+            .expect("active index record")
+            .outline_state,
+        "revising"
+    );
+}

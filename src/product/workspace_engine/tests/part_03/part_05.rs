@@ -139,6 +139,7 @@ async fn work_item_plan_item_plan_reopen_review_decision_restarts_outline_revisi
 enum OutlineRevisionEntryCase {
     AuthorConfirmReject,
     RequestRevision,
+    RequestOutlineRevision,
     ReviewDecision,
     HumanConfirm,
 }
@@ -148,6 +149,7 @@ async fn work_item_plan_outline_revision_entry_points_share_preparation_state() 
     for case in [
         OutlineRevisionEntryCase::AuthorConfirmReject,
         OutlineRevisionEntryCase::RequestRevision,
+        OutlineRevisionEntryCase::RequestOutlineRevision,
         OutlineRevisionEntryCase::ReviewDecision,
         OutlineRevisionEntryCase::HumanConfirm,
     ] {
@@ -220,6 +222,31 @@ async fn work_item_plan_outline_revision_entry_points_share_preparation_state() 
                     outcome,
                     ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
                 ));
+                ("Author Confirm 已请求返修 WorkItemPlan Outline", node_id)
+            }
+            OutlineRevisionEntryCase::RequestOutlineRevision => {
+                engine.session.stage = WorkspaceStage::AuthorConfirm;
+                let node_id = engine
+                    .create_timeline_node(TimelineNodeDraft {
+                        node_type: TimelineNodeType::WorkItemPlanOutlineConfirm,
+                        agent: None,
+                        stage: WorkspaceStage::AuthorConfirm,
+                        round: None,
+                        title: "WorkItemPlan Outline 确认".to_string(),
+                        summary: None,
+                        status: TimelineNodeStatus::Active,
+                    })
+                    .await;
+                let feedback = engine
+                    .request_work_item_plan_outline_revision(Some(
+                        "保留用户 context 并补齐影响闭环".to_string(),
+                    ))
+                    .await
+                    .expect("dedicated request outline revision");
+                assert!(feedback
+                    .as_deref()
+                    .expect("persisted complete feedback")
+                    .contains("保留用户 context 并补齐影响闭环"));
                 ("Author Confirm 已请求返修 WorkItemPlan Outline", node_id)
             }
             OutlineRevisionEntryCase::ReviewDecision => {
@@ -321,6 +348,17 @@ async fn work_item_plan_outline_revision_entry_points_share_preparation_state() 
             Some(active_outline_runs[0].node_id.as_str()),
             "{case:?} active node should be the outline revision run"
         );
+        let run_detail = lifecycle
+            .load_node_detail(&session_id, &active_outline_runs[0].node_id)
+            .expect("persisted outline revision run detail");
+        assert!(run_detail.is_revision, "{case:?}");
+        if matches!(case, OutlineRevisionEntryCase::RequestOutlineRevision) {
+            assert!(run_detail
+                .revision_feedback
+                .as_deref()
+                .expect("persisted request outline feedback")
+                .contains("保留用户 context 并补齐影响闭环"));
+        }
         let source_node = engine
             .timeline_nodes
             .iter()

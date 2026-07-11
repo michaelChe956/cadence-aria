@@ -324,12 +324,6 @@ impl WorkspaceEngine {
         )
     }
 
-    pub(crate) fn mark_work_item_plan_outline_revising_if_present(&self) -> Result<(), String> {
-        self.persist_work_item_plan_outline_revising(
-            OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
-        )
-    }
-
     fn persist_work_item_plan_outline_revising(
         &self,
         policy: OutlineRevisionPersistencePolicy,

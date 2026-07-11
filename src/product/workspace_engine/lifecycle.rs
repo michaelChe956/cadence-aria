@@ -24,6 +24,8 @@ impl WorkspaceEngine {
             work_item_plan_author_retry_count: 0,
             work_item_plan_revision_retry_count: 0,
             work_item_batch_retry_counts: HashMap::new(),
+            outline_revision_recovery_error: None,
+            outline_revision_crash_after: None,
         }
     }
 
@@ -33,6 +35,14 @@ impl WorkspaceEngine {
         event_tx: mpsc::Sender<EngineEvent>,
         mut session: WorkspaceSession,
     ) -> Self {
+        let outline_revision_recovery_error = recover_work_item_plan_outline_revision_transaction(
+            &lifecycle_store,
+            &session.project_id,
+            &session.issue_id,
+            &session.entity_id,
+            &session.session_id,
+        )
+        .err();
         let persisted_timeline_nodes = lifecycle_store
             .load_timeline_nodes_for_issue_session(
                 &session.project_id,
@@ -100,7 +110,13 @@ impl WorkspaceEngine {
             work_item_plan_author_retry_count: 0,
             work_item_plan_revision_retry_count: 0,
             work_item_batch_retry_counts: HashMap::new(),
+            outline_revision_recovery_error,
+            outline_revision_crash_after: None,
         }
+    }
+
+    pub(crate) fn outline_revision_recovery_error(&self) -> Option<&str> {
+        self.outline_revision_recovery_error.as_deref()
     }
 
     pub fn session(&self) -> &WorkspaceSession {

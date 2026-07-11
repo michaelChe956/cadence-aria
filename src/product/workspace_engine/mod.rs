@@ -107,10 +107,10 @@ pub(crate) use prompts::*;
 pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;
 pub(crate) use types::{
-    ArtifactRetryContext, AuthorPromptMode, OutlineRevisionPersistencePolicy, PendingAuthorChoice,
-    ProviderSessionDriveInput, ReviewProviderRunResult, RevisionResumeFallbackContext,
-    StructuredOutputDisplayFilter, TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
-    WorkItemPlanOutlineRevisionSource,
+    ArtifactRetryContext, AuthorPromptMode, OutlineRevisionCrashPoint,
+    OutlineRevisionPersistencePolicy, PendingAuthorChoice, ProviderSessionDriveInput,
+    ReviewProviderRunResult, RevisionResumeFallbackContext, StructuredOutputDisplayFilter,
+    TimelineNodeDraft, WorkItemPlanCompileProjectionContext, WorkItemPlanOutlineRevisionSource,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;

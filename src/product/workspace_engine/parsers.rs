@@ -84,6 +84,7 @@ pub(crate) fn extract_markdown_fence_json(output: &str) -> Option<(String, Strin
 pub(crate) enum ReviewStructuredOutputErrorCode {
     MissingVerdict,
     InvalidVerdict,
+    InvalidReviewScope,
     MalformedFindings,
     InvalidOutlineReference,
     InvalidGenerationRound,
@@ -94,6 +95,7 @@ impl ReviewStructuredOutputErrorCode {
         match self {
             Self::MissingVerdict => "missing_verdict",
             Self::InvalidVerdict => "invalid_verdict",
+            Self::InvalidReviewScope => "invalid_review_scope",
             Self::MalformedFindings => "malformed_findings",
             Self::InvalidOutlineReference => "invalid_outline_reference",
             Self::InvalidGenerationRound => "invalid_generation_round",
@@ -104,6 +106,7 @@ impl ReviewStructuredOutputErrorCode {
         match self {
             Self::MissingVerdict => "审核结论缺失或不是字符串",
             Self::InvalidVerdict => "审核结论不符合当前范围的 schema",
+            Self::InvalidReviewScope => "审核 review_scope 缺失、无效或与当前范围不一致",
             Self::MalformedFindings => "审核 findings 结构不合法",
             Self::InvalidOutlineReference => "审核引用了无效的 outline",
             Self::InvalidGenerationRound => "审核 generation round 缺失或为空",
@@ -181,6 +184,18 @@ pub(crate) fn parse_work_item_plan_review_value(
     valid_outline_ids: &[String],
     scope: WorkItemPlanReviewScope,
 ) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
+    let payload_scope = value
+        .get("review_scope")
+        .and_then(|value| value.as_str())
+        .ok_or(ReviewStructuredOutputErrorCode::InvalidReviewScope)?;
+    let expected_scope = match scope {
+        WorkItemPlanReviewScope::Outline => "outline",
+        WorkItemPlanReviewScope::Item => "item",
+        WorkItemPlanReviewScope::Batch => "batch",
+    };
+    if payload_scope != expected_scope {
+        return Err(ReviewStructuredOutputErrorCode::InvalidReviewScope);
+    }
     let verdict = value
         .get("verdict")
         .and_then(|value| value.as_str())

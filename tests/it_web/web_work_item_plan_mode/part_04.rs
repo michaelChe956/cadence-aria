@@ -125,6 +125,62 @@ async fn persist_outline_revision_before_provider_spawn() -> (tempfile::TempDir,
     (root, session_id, run_node_id)
 }
 
+async fn persist_dedicated_request_outline_revision_before_provider_spawn(
+) -> (tempfile::TempDir, String, String) {
+    let (app, root, _initial_prompts) =
+        app_with_confirmed_story_and_design_and_streaming_raw_outputs(vec![
+            QueuedSplitOutput::Json(valid_outline_output()),
+        ])
+        .await;
+    let (session_id, _plan_id, mut ws) = prepare_plan_and_start(&app, false).await;
+    ws.close(None).await.ok();
+
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = cadence_aria::product::lifecycle_store::LifecycleStore::new(app_paths.clone());
+    let session_record = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("persisted workspace session");
+    let checkpoint_store = std::sync::Arc::new(
+        cadence_aria::product::checkpoint_store::CheckpointStore::new(
+            app_paths.issue_lifecycle_root("project_0001", "issue_0001"),
+        ),
+    );
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let mut session =
+        cadence_aria::product::workspace_engine::WorkspaceSession::from_record(session_record);
+    session.repository_path = Some(root.path().join("repo"));
+    let mut engine = cadence_aria::product::workspace_engine::WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle.clone(),
+        event_tx,
+        session,
+    );
+    let feedback = engine
+        .request_work_item_plan_outline_revision(Some(
+            "用户 context：补齐 API 影响闭环与 tests/it_core owner".to_string(),
+        ))
+        .await
+        .expect("persist dedicated request outline revision")
+        .expect("complete persisted revision feedback");
+    assert!(feedback.contains("用户 context：补齐 API 影响闭环"));
+    let run_node_id = engine
+        .active_timeline_node_id()
+        .expect("persisted active outline revision run");
+    let run_detail = lifecycle
+        .load_node_detail(&session_id, &run_node_id)
+        .expect("persisted dedicated request run detail");
+    assert!(run_detail.is_revision);
+    assert!(run_detail
+        .revision_feedback
+        .as_deref()
+        .expect("persisted dedicated request feedback")
+        .contains("tests/it_core owner"));
+    drop(engine);
+    drop(app);
+
+    (root, session_id, run_node_id)
+}
+
 fn persisted_run_detail_path(
     root: &tempfile::TempDir,
     session_id: &str,
@@ -136,6 +192,17 @@ fn persisted_run_detail_path(
         .join(session_id)
         .join("timeline_node_details")
         .join(format!("{run_node_id}.json"))
+}
+
+fn outline_revision_journal_path(
+    root: &tempfile::TempDir,
+    session_id: &str,
+) -> std::path::PathBuf {
+    ProductAppPaths::new(root.path().join(".aria"))
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("workspace-transactions")
+        .join(session_id)
+        .join("work_item_plan_outline_revision.json")
 }
 
 #[tokio::test]
@@ -178,6 +245,44 @@ async fn persisted_outline_revision_intent_resumes_incremental_prompt_on_new_app
 }
 
 #[tokio::test]
+async fn dedicated_request_outline_revision_resumes_incremental_prompt_on_new_app_websocket() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (root, session_id, run_node_id) =
+        persist_dedicated_request_outline_revision_before_provider_spawn().await;
+
+    let (restarted_app, restarted_prompts) = app_for_existing_root_with_streaming_raw_outputs(
+        root.path(),
+        vec![QueuedSplitOutput::Pending],
+    );
+    let mut reconnected_ws = connect_ws(restarted_app, &session_id).await;
+    let resumed_messages = recv_ws_until(
+        &mut reconnected_ws,
+        Duration::from_secs(15),
+        |messages| {
+            messages.iter().any(|message| {
+                message["type"] == "execution_event"
+                    && message["event"]["title"] == "Provider Prompt"
+            })
+        },
+    )
+    .await;
+    assert!(resumed_messages.iter().any(|message| {
+        message["type"] == "execution_event"
+            && message["event"]["title"] == "Provider Prompt"
+            && message["event"]["node_id"] == run_node_id
+    }));
+    let prompts = wait_for_recorded_prompts(&restarted_prompts, 1).await;
+    assert_eq!(prompts.len(), 1, "reconnect must resume one dedicated request");
+    let prompt = &prompts[0];
+    assert!(prompt.contains("用户 context：补齐 API 影响闭环"));
+    assert!(prompt.contains("tests/it_core owner"));
+    assert!(!prompt.contains("[confirmed_story_specs]"));
+    assert!(!prompt.contains("[repository_structure_summary]"));
+    reconnected_ws.close(None).await.ok();
+}
+
+#[tokio::test]
 async fn corrupt_outline_resume_detail_fails_closed_without_starting_provider() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
@@ -213,6 +318,47 @@ async fn corrupt_outline_resume_detail_fails_closed_without_starting_provider() 
         .as_str()
         .expect("websocket error message")
         .contains("resume outline run detail failed"));
+    assert!(messages.iter().all(|message| {
+        !(message["type"] == "execution_event"
+            && message["event"]["title"] == "Provider Prompt")
+    }));
+    assert!(restarted_prompts
+        .lock()
+        .expect("captured prompts lock")
+        .is_empty());
+    reconnected_ws.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn corrupt_outline_revision_journal_fails_closed_without_starting_provider() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (root, session_id, _run_node_id) = persist_outline_revision_before_provider_spawn().await;
+    let journal_path = outline_revision_journal_path(&root, &session_id);
+    std::fs::create_dir_all(journal_path.parent().expect("journal parent"))
+        .expect("create journal parent");
+    std::fs::write(&journal_path, "{corrupt outline revision journal")
+        .expect("corrupt outline revision journal");
+
+    let (restarted_app, restarted_prompts) = app_for_existing_root_with_streaming_raw_outputs(
+        root.path(),
+        vec![QueuedSplitOutput::Pending],
+    );
+    let mut reconnected_ws = connect_ws(restarted_app, &session_id).await;
+    let messages = recv_ws_until(
+        &mut reconnected_ws,
+        Duration::from_secs(5),
+        |messages| messages.iter().any(|message| message["type"] == "error"),
+    )
+    .await;
+    let error = messages
+        .iter()
+        .find(|message| message["type"] == "error")
+        .expect("corrupt journal must emit websocket error");
+    assert!(error["message"]
+        .as_str()
+        .expect("websocket error message")
+        .contains("outline revision recovery failed"));
     assert!(messages.iter().all(|message| {
         !(message["type"] == "execution_event"
             && message["event"]["title"] == "Provider Prompt")

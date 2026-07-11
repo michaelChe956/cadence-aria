@@ -257,12 +257,9 @@ pub(crate) async fn handle_workspace_inbound_message(
         WsInMessage::RequestOutlineRevision { feedback } => {
             let result = {
                 let mut engine = engine.lock().await;
-                let revision_feedback =
-                    engine.work_item_plan_outline_revision_feedback(feedback.as_deref());
                 engine
                     .request_work_item_plan_outline_revision(feedback)
                     .await
-                    .map(|_| revision_feedback)
             };
             match result {
                 Ok(feedback) => {

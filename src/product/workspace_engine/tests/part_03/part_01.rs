@@ -139,6 +139,7 @@ fn work_item_plan_outline_review_pass_with_strong_finding_requires_outline_revis
 fn parse_work_item_plan_review_value_reports_invalid_target_outline_id() {
     let json = r#"{
         "verdict": "plan_reopen_required",
+        "review_scope": "item",
         "summary": "outline 不可局部修复",
         "target_outline_id": "outline_missing",
         "generation_round_id": "round_0001",
@@ -164,6 +165,7 @@ fn parse_work_item_plan_review_value_reports_invalid_target_outline_id() {
 fn work_item_plan_review_drops_invalid_affects_items_below_threshold() {
     let json = r#"{
         "verdict": "needs_human",
+        "review_scope": "batch",
         "summary": "部分 item 需要人工判断",
         "generation_round_id": "round_0001",
         "affects_items": [
@@ -200,6 +202,7 @@ fn work_item_plan_review_drops_invalid_affects_items_below_threshold() {
 fn parse_work_item_plan_review_value_reports_too_many_invalid_affects_items() {
     let json = r#"{
         "verdict": "needs_human",
+        "review_scope": "batch",
         "summary": "引用大量不存在 item",
         "generation_round_id": "round_0001",
         "affects_items": [
@@ -234,8 +237,14 @@ fn parse_work_item_plan_review_value_rejects_cross_scope_verdicts() {
     ];
 
     for (scope, verdict) in cases {
+        let review_scope = match &scope {
+            WorkItemPlanReviewScope::Outline => "outline",
+            WorkItemPlanReviewScope::Item => "item",
+            WorkItemPlanReviewScope::Batch => "batch",
+        };
         let value = serde_json::json!({
             "verdict": verdict,
+            "review_scope": review_scope,
             "generation_round_id": "round_0001"
         });
 
@@ -245,6 +254,65 @@ fn parse_work_item_plan_review_value_rejects_cross_scope_verdicts() {
             "scope {scope:?} must reject verdict {verdict}"
         );
     }
+}
+
+#[test]
+fn parse_work_item_plan_review_value_rejects_payload_scope_mismatch_before_routing() {
+    let cases = [
+        (WorkItemPlanReviewScope::Outline, "item"),
+        (WorkItemPlanReviewScope::Outline, "batch"),
+        (WorkItemPlanReviewScope::Item, "outline"),
+        (WorkItemPlanReviewScope::Item, "batch"),
+        (WorkItemPlanReviewScope::Batch, "outline"),
+        (WorkItemPlanReviewScope::Batch, "item"),
+    ];
+
+    for (expected_scope, payload_scope) in cases {
+        for verdict in ["pass", "needs_human"] {
+            let value = serde_json::json!({
+                "verdict": verdict,
+                "review_scope": payload_scope,
+                "generation_round_id": "round_0001",
+                "summary": "cross scope",
+                "findings": []
+            });
+
+            let error = parse_work_item_plan_review_value(
+                &value,
+                "",
+                &["outline_a".to_string()],
+                expected_scope.clone(),
+            )
+            .expect_err("payload review_scope mismatch must fail before verdict routing");
+
+            assert_eq!(
+                error,
+                ReviewStructuredOutputErrorCode::InvalidReviewScope,
+                "expected={expected_scope:?}, payload={payload_scope}, verdict={verdict}"
+            );
+            assert_eq!(error.as_str(), "invalid_review_scope");
+        }
+    }
+}
+
+#[test]
+fn parse_work_item_plan_review_value_requires_payload_scope() {
+    let value = serde_json::json!({
+        "verdict": "pass",
+        "generation_round_id": "round_0001",
+        "summary": "missing scope",
+        "findings": []
+    });
+
+    let error = parse_work_item_plan_review_value(
+        &value,
+        "",
+        &["outline_a".to_string()],
+        WorkItemPlanReviewScope::Outline,
+    )
+    .expect_err("missing review_scope must fail strict parsing");
+
+    assert_eq!(error, ReviewStructuredOutputErrorCode::InvalidReviewScope);
 }
 
 #[test]

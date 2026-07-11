@@ -321,6 +321,35 @@ mod tests {
     }
 
     #[test]
+    fn classifies_missing_start_tag_without_recoverable_value() {
+        let output = "审核说明\n{\"verdict\":\"pass\"}";
+
+        let parsed = parse_structured_output(output, &contract());
+
+        let StructuredOutputState::Failed(error) = parsed.state else {
+            panic!("expected structured output failure");
+        };
+        assert_eq!(error.code, StructuredOutputErrorCode::MissingStartTag);
+        assert!(error.recoverable_value.is_none());
+        assert_eq!(parsed.readable_output, output);
+    }
+
+    #[test]
+    fn classifies_missing_end_tag_and_keeps_recoverable_value() {
+        let output =
+            "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">\n{\"verdict\":\"revise\"}";
+
+        let parsed = parse_structured_output(output, &contract());
+
+        let StructuredOutputState::Failed(error) = parsed.state else {
+            panic!("expected structured output failure");
+        };
+        assert_eq!(error.code, StructuredOutputErrorCode::MissingEndTag);
+        assert_eq!(error.recoverable_value, Some(json!({"verdict": "revise"})));
+        assert_eq!(parsed.readable_output, "审核说明");
+    }
+
+    #[test]
     fn classifies_missing_end_nonce_and_keeps_recoverable_value() {
         let output = "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">\n{\"verdict\":\"revise\"}\n</ARIA_STRUCTURED_OUTPUT>";
 

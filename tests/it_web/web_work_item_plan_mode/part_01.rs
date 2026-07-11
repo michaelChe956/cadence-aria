@@ -160,6 +160,7 @@ async fn enable_work_item_plan_review_fixture(app: &axum::Router, session_id: &s
             "comments": "outline review comments",
             "raw_json": {
                 "verdict": verdict,
+                "review_scope": "outline",
                 "summary": "outline review fixture",
                 "generation_round_id": "round_001",
                 "affects_items": [

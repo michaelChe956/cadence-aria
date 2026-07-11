@@ -401,6 +401,29 @@ fn build_work_item_plan_review_input_prefers_active_generation_round() {
 }
 
 #[test]
+fn build_work_item_plan_review_input_fails_closed_for_corrupt_active_index() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_review_corrupt_active_index");
+    let active_index_path = lifecycle
+        .app_paths()
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("work_item_plan_drafts")
+        .join(&plan_id)
+        .join("active_index.json");
+    std::fs::create_dir_all(active_index_path.parent().expect("active index parent"))
+        .expect("create active index parent");
+    std::fs::write(&active_index_path, "{corrupt active index")
+        .expect("corrupt active index");
+
+    let error = engine
+        .build_work_item_plan_review_input()
+        .expect_err("corrupt active index must fail closed");
+
+    assert!(error.contains("load work item plan active index failed"));
+    assert!(error.contains("product_store_json"));
+}
+
+#[test]
 fn build_review_input_carries_workspace_review_contract_for_general_artifacts() {
     for workspace_type in [
         WorkspaceType::Story,
