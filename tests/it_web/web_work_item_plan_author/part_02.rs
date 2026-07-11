@@ -438,6 +438,7 @@ async fn enable_work_item_plan_review_fixture(app: &axum::Router, session_id: &s
 fn outline_review_revise() -> Value {
     json!({
         "verdict": "revise",
+        "review_scope": "outline",
         "summary": "Outline 需要重写",
         "generation_round_id": "round_001",
         "affects_items": [{ "target_outline_id": "outline_backend_session" }],
@@ -454,6 +455,7 @@ fn outline_review_revise() -> Value {
 fn outline_review_pass() -> Value {
     json!({
         "verdict": "pass",
+        "review_scope": "outline",
         "summary": "Outline 可以进入下一阶段",
         "generation_round_id": "round_002",
         "affects_items": [],

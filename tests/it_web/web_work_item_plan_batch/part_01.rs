@@ -179,6 +179,7 @@ async fn enable_work_item_plan_review_fixture(app: &axum::Router, session_id: &s
 fn outline_review_pass() -> Value {
     json!({
         "verdict": "pass",
+        "review_scope": "outline",
         "summary": "Outline review 通过",
         "generation_round_id": "round_001",
         "affects_items": [],
@@ -643,4 +644,3 @@ async fn batch_accept_enters_batch_review_when_reviewer_enabled() {
 
     ws.close(None).await.ok();
 }
-

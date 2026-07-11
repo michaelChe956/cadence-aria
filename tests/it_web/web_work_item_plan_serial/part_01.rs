@@ -183,6 +183,7 @@ async fn enable_work_item_plan_review_fixture(app: &axum::Router, session_id: &s
 fn outline_review_pass() -> Value {
     json!({
         "verdict": "pass",
+        "review_scope": "outline",
         "summary": "Outline review 通过",
         "generation_round_id": "round_001",
         "affects_items": [],
@@ -193,6 +194,7 @@ fn outline_review_pass() -> Value {
 fn item_review_pass(outline_id: &str, draft_id: &str) -> Value {
     json!({
         "verdict": "pass",
+        "review_scope": "item",
         "summary": "Item review 通过",
         "target_outline_id": outline_id,
         "generation_round_id": "round_001",
@@ -205,6 +207,7 @@ fn item_review_pass(outline_id: &str, draft_id: &str) -> Value {
 fn item_review_revise(outline_id: &str, draft_id: &str) -> Value {
     json!({
         "verdict": "revise",
+        "review_scope": "item",
         "summary": "需要重写当前 item",
         "target_outline_id": outline_id,
         "generation_round_id": "round_001",
@@ -223,6 +226,7 @@ fn item_review_revise(outline_id: &str, draft_id: &str) -> Value {
 fn item_review_plan_reopen(outline_id: &str, draft_id: &str) -> Value {
     json!({
         "verdict": "plan_reopen_required",
+        "review_scope": "item",
         "summary": "需要重开 Outline",
         "target_outline_id": outline_id,
         "generation_round_id": "round_001",
@@ -640,4 +644,3 @@ async fn author_decision_is_rejected_on_draft_confirm_node() {
 
     ws.close(None).await.ok();
 }
-
