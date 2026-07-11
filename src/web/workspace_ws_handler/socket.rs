@@ -253,40 +253,50 @@ pub(crate) async fn handle_workspace_socket(
         std::time::Duration::from_secs(5),
     );
 
-    let outline_resume_kind = {
+    let outline_resume_kind: Result<Option<ProviderRunKind>, String> = {
         let engine = engine.lock().await;
         let should_resume = engine.session().workspace_type == WorkspaceType::WorkItemPlan
             && engine.session().stage == WorkspaceStage::Running
             && engine.active_node_type()
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun)
             && engine.active_run_id().is_none();
-        if should_resume {
-            let node_id = engine.active_timeline_node_id();
-            let detail = node_id.as_deref().and_then(|node_id| {
-                LifecycleStore::new(app_paths.clone())
-                    .load_node_detail(&session_id, node_id)
-                    .ok()
-            });
-            Some(match detail {
-                Some(detail) if detail.is_revision => {
+        if !should_resume {
+            Ok(None)
+        } else if let Some(node_id) = engine.active_timeline_node_id() {
+            match LifecycleStore::new(app_paths.clone()).load_node_detail(&session_id, &node_id) {
+                Ok(detail) => Ok(Some(if detail.is_revision {
                     ProviderRunKind::WorkItemPlanOutlineRevision {
                         feedback: detail.revision_feedback,
                     }
+                } else {
+                    ProviderRunKind::WorkItemPlanAuthor
+                })),
+                Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {
+                    Ok(Some(ProviderRunKind::WorkItemPlanAuthor))
                 }
-                _ => ProviderRunKind::WorkItemPlanAuthor,
-            })
+                Err(error) => Err(format!(
+                    "resume outline run detail failed for {node_id}: {error}"
+                )),
+            }
         } else {
-            None
+            Err("resume outline run detail failed: active node id unavailable".to_string())
         }
     };
-    if let Some(run_kind) = outline_resume_kind
-        && state.workspace_runs.run(&session_id).await.is_none()
-        && let Err(message) =
-            spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx.clone())
-                .await
-    {
-        let err = WsOutMessage::Error { message };
-        let _ = send_json_outbound(&outbound_tx, &err).await;
+    match outline_resume_kind {
+        Ok(Some(run_kind)) if state.workspace_runs.run(&session_id).await.is_none() => {
+            if let Err(message) =
+                spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx.clone())
+                    .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
+        Err(message) => {
+            let err = WsOutMessage::Error { message };
+            let _ = send_json_outbound(&outbound_tx, &err).await;
+        }
+        Ok(Some(_)) | Ok(None) => {}
     }
 
     while let Some(Ok(msg)) = ws_receiver.next().await {

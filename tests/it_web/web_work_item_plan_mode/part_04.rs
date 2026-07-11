@@ -33,13 +33,15 @@ async fn outline_author_confirm_reject_starts_revision_provider_over_websocket()
     }));
     let prompts = wait_for_recorded_prompts(&prompts, 2).await;
     assert_eq!(prompts.len(), 2, "reject must start exactly one revision provider");
+    let revision_prompt = &prompts[1];
+    assert!(revision_prompt.contains("增量返修"));
+    assert!(revision_prompt.contains("[revision_feedback]"));
+    assert!(!revision_prompt.contains("[confirmed_story_specs]"));
+    assert!(!revision_prompt.contains("[repository_structure_summary]"));
     ws.close(None).await.ok();
 }
 
-#[tokio::test]
-async fn persisted_outline_revision_intent_resumes_incremental_prompt_on_new_app_websocket() {
-    let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls().await;
+async fn persist_outline_revision_before_provider_spawn() -> (tempfile::TempDir, String, String) {
     let (app, root, _initial_prompts) =
         app_with_confirmed_story_and_design_and_streaming_raw_outputs(vec![
             QueuedSplitOutput::Json(valid_outline_output()),
@@ -120,6 +122,28 @@ async fn persisted_outline_revision_intent_resumes_incremental_prompt_on_new_app
     drop(engine);
     drop(app);
 
+    (root, session_id, run_node_id)
+}
+
+fn persisted_run_detail_path(
+    root: &tempfile::TempDir,
+    session_id: &str,
+    run_node_id: &str,
+) -> std::path::PathBuf {
+    ProductAppPaths::new(root.path().join(".aria"))
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("workspace-timelines")
+        .join(session_id)
+        .join("timeline_node_details")
+        .join(format!("{run_node_id}.json"))
+}
+
+#[tokio::test]
+async fn persisted_outline_revision_intent_resumes_incremental_prompt_on_new_app_websocket() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (root, session_id, run_node_id) = persist_outline_revision_before_provider_spawn().await;
+
     let (restarted_app, restarted_prompts) = app_for_existing_root_with_streaming_raw_outputs(
         root.path(),
         vec![QueuedSplitOutput::Pending],
@@ -150,5 +174,90 @@ async fn persisted_outline_revision_intent_resumes_incremental_prompt_on_new_app
     assert!(prompt.contains("按影响闭环契约修订 Outline"));
     assert!(!prompt.contains("[confirmed_story_specs]"));
     assert!(!prompt.contains("[repository_structure_summary]"));
+    reconnected_ws.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn corrupt_outline_resume_detail_fails_closed_without_starting_provider() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (root, session_id, run_node_id) = persist_outline_revision_before_provider_spawn().await;
+    std::fs::write(
+        persisted_run_detail_path(&root, &session_id, &run_node_id),
+        "{corrupt node detail",
+    )
+    .expect("corrupt persisted run detail");
+
+    let (restarted_app, restarted_prompts) = app_for_existing_root_with_streaming_raw_outputs(
+        root.path(),
+        vec![QueuedSplitOutput::Pending],
+    );
+    let mut reconnected_ws = connect_ws(restarted_app, &session_id).await;
+    let messages = recv_ws_until(
+        &mut reconnected_ws,
+        Duration::from_secs(5),
+        |messages| {
+            messages.iter().any(|message| {
+                message["type"] == "error"
+                    || (message["type"] == "execution_event"
+                        && message["event"]["title"] == "Provider Prompt")
+            })
+        },
+    )
+    .await;
+    let error = messages
+        .iter()
+        .find(|message| message["type"] == "error")
+        .expect("corrupt detail must emit websocket error");
+    assert!(error["message"]
+        .as_str()
+        .expect("websocket error message")
+        .contains("resume outline run detail failed"));
+    assert!(messages.iter().all(|message| {
+        !(message["type"] == "execution_event"
+            && message["event"]["title"] == "Provider Prompt")
+    }));
+    assert!(restarted_prompts
+        .lock()
+        .expect("captured prompts lock")
+        .is_empty());
+    reconnected_ws.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn missing_legacy_outline_resume_detail_falls_back_to_initial_author_prompt() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (root, session_id, run_node_id) = persist_outline_revision_before_provider_spawn().await;
+    std::fs::remove_file(persisted_run_detail_path(
+        &root,
+        &session_id,
+        &run_node_id,
+    ))
+    .expect("remove legacy-missing run detail");
+
+    let (restarted_app, restarted_prompts) = app_for_existing_root_with_streaming_raw_outputs(
+        root.path(),
+        vec![QueuedSplitOutput::Pending],
+    );
+    let mut reconnected_ws = connect_ws(restarted_app, &session_id).await;
+    let messages = recv_ws_until(
+        &mut reconnected_ws,
+        Duration::from_secs(15),
+        |messages| {
+            messages.iter().any(|message| {
+                message["type"] == "execution_event"
+                    && message["event"]["title"] == "Provider Prompt"
+            })
+        },
+    )
+    .await;
+    assert!(messages.iter().any(|message| {
+        message["type"] == "execution_event" && message["event"]["title"] == "Provider Prompt"
+    }));
+    let prompts = wait_for_recorded_prompts(&restarted_prompts, 1).await;
+    assert_eq!(prompts.len(), 1, "legacy missing detail resumes once");
+    assert!(prompts[0].contains("[confirmed_story_specs]"));
+    assert!(prompts[0].contains("[repository_structure_summary]"));
     reconnected_ws.close(None).await.ok();
 }

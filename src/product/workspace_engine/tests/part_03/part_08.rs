@@ -222,6 +222,26 @@ fn workspace_timeline_root(
         .join(&engine.session.session_id)
 }
 
+fn assert_no_outline_revision_success_events(event_rx: &mut mpsc::Receiver<EngineEvent>) {
+    while let Ok(event) = event_rx.try_recv() {
+        assert!(
+            !matches!(event, EngineEvent::TimelineNodeUpdated { .. }),
+            "failed transaction must not emit TimelineNodeUpdated"
+        );
+        assert!(
+            !matches!(event, EngineEvent::TimelineNodeCreated { .. }),
+            "failed transaction must not emit TimelineNodeCreated"
+        );
+        assert!(
+            !matches!(
+                event,
+                EngineEvent::StageChange { ref stage } if stage == "running"
+            ),
+            "failed transaction must not emit running StageChange"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn outline_revision_index_save_failure_restores_non_empty_drafts_and_session() {
@@ -244,6 +264,8 @@ async fn outline_revision_index_save_failure_restores_non_empty_drafts_and_sessi
         .permissions();
     std::fs::set_permissions(&plan_root, std::fs::Permissions::from_mode(0o555))
         .expect("make active index root read-only");
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    engine.event_tx = event_tx;
 
     let result = engine
         .prepare_work_item_plan_outline_revision(
@@ -267,6 +289,7 @@ async fn outline_revision_index_save_failure_restores_non_empty_drafts_and_sessi
         lifecycle.load_node_detail(&engine.session.session_id, &run_node_id),
         Err(ProductStoreError::NotFound { .. })
     ));
+    assert_no_outline_revision_success_events(&mut event_rx);
 }
 
 #[cfg(unix)]
@@ -371,17 +394,5 @@ async fn outline_revision_node_detail_save_failure_rolls_back_without_success_ev
         lifecycle.load_node_detail(&engine.session.session_id, &run_node_id),
         Err(ProductStoreError::NotFound { .. })
     ));
-    while let Ok(event) = event_rx.try_recv() {
-        assert!(
-            !matches!(
-                event,
-                EngineEvent::StageChange { ref stage } if stage == "running"
-            ),
-            "failed transaction must not emit running StageChange"
-        );
-        assert!(
-            !matches!(event, EngineEvent::TimelineNodeCreated { .. }),
-            "failed transaction must not emit TimelineNodeCreated"
-        );
-    }
+    assert_no_outline_revision_success_events(&mut event_rx);
 }
