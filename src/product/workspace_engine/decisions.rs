@@ -162,7 +162,6 @@ impl WorkspaceEngine {
                     OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
                 )
                 .await?;
-                self.begin_work_item_plan_outline_run().await;
                 Ok(AuthorDecisionOutcome::HumanConfirm)
             }
         }

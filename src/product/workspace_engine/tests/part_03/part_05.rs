@@ -300,6 +300,24 @@ async fn work_item_plan_outline_revision_entry_points_share_preparation_state() 
             }),
             "{case:?} should not create a generic Revision node"
         );
+        let active_outline_runs = engine
+            .timeline_nodes
+            .iter()
+            .filter(|node| {
+                node.node_type == TimelineNodeType::WorkItemPlanOutlineRun
+                    && node.status == TimelineNodeStatus::Active
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            active_outline_runs.len(),
+            1,
+            "{case:?} should create exactly one active outline revision run"
+        );
+        assert_eq!(
+            engine.active_node_id.as_deref(),
+            Some(active_outline_runs[0].node_id.as_str()),
+            "{case:?} active node should be the outline revision run"
+        );
         let source_node = engine
             .timeline_nodes
             .iter()

@@ -267,7 +267,8 @@ fn start_review_fixture_session(
     let (command_tx, _command_rx) = mpsc::channel(8);
 
     tokio::spawn(async move {
-        let output = if let Some(raw_text) = fixture.raw_text {
+        let preserve_raw_completion = fixture.raw_text.is_some();
+        let mut output = if let Some(raw_text) = fixture.raw_text {
             raw_text
         } else if let Some(raw_json) = fixture.raw_json {
             raw_json.to_string()
@@ -279,6 +280,9 @@ fn start_review_fixture_session(
             });
             format!("{}\n\n```json\n{}\n```", fixture.comments, contract)
         };
+        if preserve_raw_completion && let Some(contract) = structured_output_contract.as_ref() {
+            output = output.replace("__NONCE__", &contract.nonce);
+        }
         if cancel.is_cancelled() {
             return;
         }
@@ -298,6 +302,7 @@ fn start_review_fixture_session(
             .send(ProviderEvent::Completed(review_fixture_completion(
                 output,
                 structured_output_contract.as_ref(),
+                preserve_raw_completion,
             )))
             .await;
     });
@@ -311,16 +316,21 @@ fn start_review_fixture_session(
 fn review_fixture_completion(
     output: String,
     contract: Option<&StructuredOutputContract>,
+    preserve_raw_completion: bool,
 ) -> ProviderCompletion {
+    let provider_session_id = Some("test-review-session".to_string());
+    if preserve_raw_completion {
+        return ProviderCompletion::from_output(output, contract, provider_session_id);
+    }
     let Some(contract) = contract else {
-        return ProviderCompletion::plain(output, None);
+        return ProviderCompletion::plain(output, provider_session_id);
     };
     let (comments, json) = review_fixture_output_parts(&output);
     let full_output = format!(
         "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
         contract.nonce, contract.nonce
     );
-    ProviderCompletion::from_output(full_output, Some(contract), None)
+    ProviderCompletion::from_output(full_output, Some(contract), provider_session_id)
 }
 
 fn review_fixture_output_parts(output: &str) -> (&str, &str) {

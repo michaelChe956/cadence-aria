@@ -23,7 +23,9 @@ struct OutlineRevisionPersistenceSnapshot {
     artifact_versions_changed: bool,
     original_timeline_nodes: Vec<TimelineNode>,
     revised_timeline_nodes: Vec<TimelineNode>,
-    node: Option<OutlineRevisionNodeMutation>,
+    source_node: Option<OutlineRevisionNodeMutation>,
+    run_node: TimelineNode,
+    run_detail: NodeDetail,
 }
 
 #[derive(Default)]
@@ -31,7 +33,8 @@ struct OutlineRevisionPersistedSteps {
     status: bool,
     artifact_versions: bool,
     timeline: bool,
-    node_detail: bool,
+    source_node_detail: bool,
+    run_node_detail: bool,
 }
 
 impl OutlineRevisionPersistenceSnapshot {
@@ -43,8 +46,15 @@ impl OutlineRevisionPersistenceSnapshot {
         primary_error: String,
     ) -> String {
         let mut rollback_errors = Vec::new();
-        if steps.node_detail
-            && let Some(node) = &self.node
+        if steps.run_node_detail
+            && let Err(error) = lifecycle.delete_node_detail(session_id, &self.run_node.node_id)
+        {
+            rollback_errors.push(format!(
+                "delete outline revision run node detail failed: {error}"
+            ));
+        }
+        if steps.source_node_detail
+            && let Some(node) = &self.source_node
         {
             let result = match &node.original_detail {
                 Some(detail) => lifecycle.save_node_detail(session_id, &node.node_id, detail),
@@ -261,7 +271,7 @@ impl WorkspaceEngine {
             }
         }
         .to_string();
-        let node = if let Some(node_id) = self.active_node_id.clone() {
+        let source_node = if let Some(node_id) = self.active_node_id.clone() {
             let completed_at = chrono::Utc::now().to_rfc3339();
             let original_node = original_timeline_nodes
                 .iter()
@@ -298,6 +308,28 @@ impl WorkspaceEngine {
         } else {
             None
         };
+        let run_node = TimelineNode {
+            node_id: format!("timeline_node_{:03}", revised_timeline_nodes.len() + 1),
+            node_type: TimelineNodeType::WorkItemPlanOutlineRun,
+            agent: Some(self.session.author_provider.clone()),
+            stage: ws_stage(&WorkspaceStage::Running),
+            round: None,
+            status: TimelineNodeStatus::Active,
+            title: "WorkItemPlan Outline 生成".to_string(),
+            summary: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            duration_ms: None,
+            artifact_ref: self
+                .session
+                .artifact
+                .as_ref()
+                .map(|_| "artifact_current".to_string()),
+            provider_config_snapshot: self.provider_config_snapshot(),
+            retry: None,
+        };
+        let run_detail = self.empty_node_detail_for(&run_node);
+        revised_timeline_nodes.push(run_node.clone());
 
         Ok(OutlineRevisionPersistenceSnapshot {
             original_status,
@@ -306,7 +338,9 @@ impl WorkspaceEngine {
             artifact_versions_changed,
             original_timeline_nodes,
             revised_timeline_nodes,
-            node,
+            source_node,
+            run_node,
+            run_detail,
         })
     }
 
@@ -347,11 +381,11 @@ impl WorkspaceEngine {
                     })?;
                 steps.artifact_versions = true;
             }
-            if let Some(node) = &snapshot.node {
-                lifecycle
-                    .save_timeline_nodes(&self.session.session_id, &snapshot.revised_timeline_nodes)
-                    .map_err(|error| format!("save outline revision timeline failed: {error}"))?;
-                steps.timeline = true;
+            lifecycle
+                .save_timeline_nodes(&self.session.session_id, &snapshot.revised_timeline_nodes)
+                .map_err(|error| format!("save outline revision timeline failed: {error}"))?;
+            steps.timeline = true;
+            if let Some(node) = &snapshot.source_node {
                 lifecycle
                     .save_node_detail(
                         &self.session.session_id,
@@ -361,8 +395,18 @@ impl WorkspaceEngine {
                     .map_err(|error| {
                         format!("save outline revision node detail failed: {error}")
                     })?;
-                steps.node_detail = true;
+                steps.source_node_detail = true;
             }
+            lifecycle
+                .save_node_detail(
+                    &self.session.session_id,
+                    &snapshot.run_node.node_id,
+                    &snapshot.run_detail,
+                )
+                .map_err(|error| {
+                    format!("save outline revision run node detail failed: {error}")
+                })?;
+            steps.run_node_detail = true;
             if let Some(mutation) = plan_mutation.take() {
                 mutation.persist()?;
             }
@@ -375,10 +419,11 @@ impl WorkspaceEngine {
         self.pending_revision_context = feedback;
         self.artifact_versions = snapshot.revised_artifact_versions;
         self.timeline_nodes = snapshot.revised_timeline_nodes;
+        self.active_node_id = Some(snapshot.run_node.node_id.clone());
         self.session.stage = WorkspaceStage::Running;
         self.work_item_plan_author_retry_count = 0;
         self.work_item_plan_revision_retry_count = 0;
-        if let Some(node) = snapshot.node {
+        if let Some(node) = snapshot.source_node {
             let _ = self
                 .event_tx
                 .send(EngineEvent::TimelineNodeUpdated {
@@ -389,6 +434,12 @@ impl WorkspaceEngine {
                 })
                 .await;
         }
+        let _ = self
+            .event_tx
+            .send(EngineEvent::TimelineNodeCreated {
+                node: snapshot.run_node,
+            })
+            .await;
         let _ = self
             .event_tx
             .send(EngineEvent::StageChange {

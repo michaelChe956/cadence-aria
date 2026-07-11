@@ -368,6 +368,7 @@ pub(crate) struct QueuedSplitStreamingProvider {
 pub(crate) enum QueuedSplitOutput {
     Json(Value),
     RawStdout(String),
+    Pending,
 }
 
 impl QueuedSplitStreamingProvider {
@@ -432,19 +433,22 @@ impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
             .pop_front()
             .unwrap_or_else(|| QueuedSplitOutput::Json(valid_split_output()));
         let full_output = match output {
-            QueuedSplitOutput::Json(output) => {
-                format!(
+            QueuedSplitOutput::Json(output) => Some(format!(
                     "Fake Work Item Plan streaming draft\n\n\
                      <ARIA_STRUCTURED_OUTPUT>{}</ARIA_STRUCTURED_OUTPUT>",
                     output
-                )
-            }
-            QueuedSplitOutput::RawStdout(output) => output,
+                )),
+            QueuedSplitOutput::RawStdout(output) => Some(output),
+            QueuedSplitOutput::Pending => None,
         };
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
 
         tokio::spawn(async move {
+            let Some(full_output) = full_output else {
+                cancel.cancelled().await;
+                return;
+            };
             if cancel.is_cancelled() {
                 return;
             }

@@ -382,6 +382,70 @@ async fn review_fixture_fake_provider_emits_json_contract_for_reviewer() {
 }
 
 #[tokio::test]
+async fn review_fixture_raw_text_preserves_structured_output_failure() {
+    let controls = TestControls::default();
+    controls
+        .enable_review_fixture(
+            "workspace_session_raw_review".to_string(),
+            ReviewFixture {
+                verdict: "pass".to_string(),
+                summary: "raw completion".to_string(),
+                comments: String::new(),
+                raw_json: None,
+                raw_text: Some(
+                    "<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{\"verdict\":\"pass\",\"summary\":\"raw completion\",\"findings\":[]}</ARIA_STRUCTURED_OUTPUT>"
+                        .to_string(),
+                ),
+                findings: Vec::new(),
+            },
+        )
+        .await;
+    let provider = TestControlledFakeStreamingProvider::new(controls);
+    let mut session = provider
+        .start(
+            StreamingProviderInput {
+                provider_type: ProviderType::Codex,
+                role: AdapterRole::Reviewer,
+                prompt: "review raw completion".to_string(),
+                working_dir: std::env::current_dir().expect("current dir"),
+                workspace_session_id: Some("workspace_session_raw_review".to_string()),
+                resume_provider_session_id: None,
+                permission_mode: ProviderPermissionMode::Supervised,
+                structured_output_contract: Some(StructuredOutputContract {
+                    nonce: "rawrev01".to_string(),
+                    schema_name: "workspace_review".to_string(),
+                }),
+                env_vars: Default::default(),
+                timeout_secs: 60,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("raw review fixture provider session");
+
+    while let Some(event) = session.events.recv().await {
+        if let ProviderEvent::Completed(completion) = event {
+            assert_eq!(
+                completion.provider_session_id.as_deref(),
+                Some("test-review-session")
+            );
+            assert!(
+                matches!(
+                    &completion.structured_output,
+                    StructuredOutputState::Failed(error)
+                        if error.code.as_str() == "missing_end_nonce"
+                ),
+                "unexpected structured output state: {:?}; output={}",
+                completion.structured_output,
+                completion.full_output
+            );
+            return;
+        }
+    }
+    panic!("raw review fixture did not complete");
+}
+
+#[tokio::test]
 async fn testing_fixture_fake_provider_emits_plan_and_step_results() {
     let controls = TestControls::default();
     controls
