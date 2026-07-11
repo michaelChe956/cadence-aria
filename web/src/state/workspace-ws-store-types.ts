@@ -1,5 +1,6 @@
 import type {
   NodeDetail,
+  StructuredOutputDiagnostic,
   WorkItemBatchStatePayload,
   WorkItemDraftCandidatePayload,
   WorkItemPlanArtifactPayload,
@@ -157,6 +158,7 @@ export interface ReviewVerdict {
   summary: string;
   findings?: ReviewFinding[];
   review_gate?: ReviewGate;
+  structured_output_diagnostic?: StructuredOutputDiagnostic | null;
 }
 
 export type ReviewFindingSeverity =

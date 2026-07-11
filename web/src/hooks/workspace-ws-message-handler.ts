@@ -21,6 +21,7 @@ import {
 } from "../state/workspace-ws-store";
 import { workItemPlanArtifactUpdateSummary } from "../state/work-item-plan-artifact-summary";
 import { stageChangeContent } from "../state/workspace-stage-labels";
+import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
 
 export interface WsServerMessage {
   type: string;
@@ -293,6 +294,9 @@ const store = useWorkspaceStore.getState();
     case "review_complete":
       {
         const findings = Array.isArray(msg.findings) ? msg.findings : [];
+        const structuredOutputDiagnostic = structuredOutputDiagnosticFromUnknown(
+          msg.structured_output_diagnostic,
+        );
         const reviewGate =
           typeof msg.review_gate === "string" ? msg.review_gate : undefined;
         const verdict = {
@@ -301,6 +305,9 @@ const store = useWorkspaceStore.getState();
           summary: msg.summary,
           findings,
           ...(reviewGate ? { review_gate: reviewGate } : {}),
+          ...(structuredOutputDiagnostic
+            ? { structured_output_diagnostic: structuredOutputDiagnostic }
+            : {}),
         } as ReviewVerdict;
         store.setNodeVerdict(msg.node_id as string, verdict);
         store.appendChatEntry({
@@ -317,6 +324,9 @@ const store = useWorkspaceStore.getState();
             round: msg.round as number,
             findings,
             ...(reviewGate ? { review_gate: reviewGate } : {}),
+            ...(structuredOutputDiagnostic
+              ? { structured_output_diagnostic: structuredOutputDiagnostic }
+              : {}),
           },
         });
       }

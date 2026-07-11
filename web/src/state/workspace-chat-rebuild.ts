@@ -5,6 +5,7 @@ import type {
 } from "./chat-entries";
 import { workItemPlanArtifactUpdateSummary } from "./work-item-plan-artifact-summary";
 import { chatRoleForTimelineNode } from "./workspace-ws-store-helpers";
+import { structuredOutputDiagnosticFromUnknown } from "./structured-output-diagnostic";
 import type {
   ExecutionEvent,
   NodeDetailSummary,
@@ -255,7 +256,10 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       const verdictValue = getStringField(detail.verdict, "verdict") ?? "revise";
       const verdictComments = getStringField(detail.verdict, "comments") ?? "";
       const verdictFindings = getArrayField(detail.verdict, "findings");
-      const reviewGate = getStringField(detail.verdict, "review_gate") ?? "user_confirm_allowed";
+      const reviewGate = getStringField(detail.verdict, "review_gate");
+      const structuredOutputDiagnostic = structuredOutputDiagnosticFromUnknown(
+        detail.verdict.structured_output_diagnostic,
+      );
       entries.push({
         id: chatEntryId(node.node_id, "review-verdict"),
         type: "review_verdict",
@@ -268,7 +272,10 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
           comments: verdictComments,
           summary: verdictSummary,
           findings: verdictFindings,
-          review_gate: reviewGate,
+          ...(reviewGate ? { review_gate: reviewGate } : {}),
+          ...(structuredOutputDiagnostic
+            ? { structured_output_diagnostic: structuredOutputDiagnostic }
+            : {}),
         },
       });
     }

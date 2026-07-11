@@ -183,6 +183,14 @@ export type WorkspaceReviewFinding = {
   required_action: string;
 };
 
+export type StructuredOutputDiagnostic = {
+  code: string;
+  message: string;
+  repair_attempted: boolean;
+  repair_succeeded: boolean;
+  raw_output_preview?: string | null;
+};
+
 export type WsMessage = {
   id: string;
   role: string;
@@ -244,6 +252,7 @@ export type ReviewVerdict = {
   summary: string;
   findings?: WorkspaceReviewFinding[];
   review_gate?: ReviewGate;
+  structured_output_diagnostic?: StructuredOutputDiagnostic | null;
 };
 
 export type ExecutionEvent = {
@@ -419,6 +428,7 @@ export type WsOutMessage =
       summary: string;
       findings?: WorkspaceReviewFinding[];
       review_gate?: ReviewGate;
+      structured_output_diagnostic?: StructuredOutputDiagnostic | null;
     }
   | { type: "review_decision_required"; node_id: string; round: number; options: string[] }
   | {

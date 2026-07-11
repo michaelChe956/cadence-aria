@@ -3,6 +3,8 @@ import type { RevisionPath } from "../../../api/types";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ReviewDecisionActions } from "../ReviewDecisionActions";
 import { ChatEntryContainer } from "../ChatEntryContainer";
+import { structuredOutputDiagnosticFromUnknown } from "../../../state/structured-output-diagnostic";
+import { StructuredOutputDiagnosticView } from "./StructuredOutputDiagnostic";
 
 export function ReviewVerdictEntry({
   entry,
@@ -13,6 +15,9 @@ export function ReviewVerdictEntry({
 }) {
   const verdict = verdictFromEntry(entry);
   const findings = findingsFromEntry(entry);
+  const diagnostic = structuredOutputDiagnosticFromUnknown(
+    (entry.metadata as Record<string, unknown> | undefined)?.structured_output_diagnostic,
+  );
   const requiredFindings = findings.filter(isRequiredFinding);
   const optionalFindings = findings.filter((finding) => !isRequiredFinding(finding));
 
@@ -31,11 +36,17 @@ export function ReviewVerdictEntry({
             {verdict?.summary && verdict.summary !== entry.content ? (
               <div className="mt-1 text-xs font-medium text-amber-900">{verdict.summary}</div>
             ) : null}
-            {verdict?.comments ? (
+            {verdict?.comments && !diagnostic ? (
               <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">{verdict.comments}</div>
             ) : null}
           </div>
         </div>
+        {diagnostic ? (
+          <StructuredOutputDiagnosticView
+            diagnostic={diagnostic}
+            comments={verdict?.comments ?? null}
+          />
+        ) : null}
         {requiredFindings.length > 0 ? (
           <FindingGroup title="需要解决" tone="required" findings={requiredFindings} />
         ) : null}
@@ -103,7 +114,11 @@ function FindingGroup({
       <div className={`text-xs font-semibold ${titleClass}`}>{title}</div>
       <div className="space-y-2">
         {findings.map((finding, index) => (
-          <div key={`${finding.severity}-${index}`} className="space-y-1">
+          <div
+            key={`${finding.severity}-${index}`}
+            className="space-y-1"
+            data-testid="review-finding"
+          >
             <div className="flex flex-wrap items-center gap-2">
               <SeverityBadge severity={finding.severity} />
               <div className="text-sm font-medium text-[var(--aria-ink)]">{finding.message}</div>
