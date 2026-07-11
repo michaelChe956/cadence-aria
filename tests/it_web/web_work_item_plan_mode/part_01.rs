@@ -11,7 +11,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::web_work_item_generation::{
     QueuedSplitOutput, app_with_confirmed_story_and_design_and_streaming_outputs,
     app_with_confirmed_story_and_design_and_streaming_raw_outputs,
-    malformed_outline_structured_stdout, request_json, valid_outline_output,
+    app_for_existing_root_with_streaming_raw_outputs, malformed_outline_structured_stdout,
+    request_json, valid_outline_output,
 };
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -64,6 +65,23 @@ where
         }
     }
     messages
+}
+
+async fn wait_for_recorded_prompts(
+    prompts: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    expected: usize,
+) -> Vec<String> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = prompts.lock().expect("captured prompts lock").clone();
+            if snapshot.len() >= expected {
+                return snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provider prompt capture timeout")
 }
 
 async fn prepare_plan_and_start(
@@ -649,4 +667,3 @@ async fn select_batch_mode_enters_batch_run() {
 
     ws.close(None).await.ok();
 }
-

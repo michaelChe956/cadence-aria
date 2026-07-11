@@ -350,6 +350,7 @@ fn save_and_load_node_detail() {
         verdict: None,
         artifact_ref: None,
         is_revision: false,
+        revision_feedback: None,
         base_artifact_ref: None,
         started_at: "2026-05-20T14:30:00Z".to_string(),
         ended_at: None,

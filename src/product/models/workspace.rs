@@ -114,6 +114,8 @@ pub struct NodeDetail {
     pub verdict: Option<serde_json::Value>,
     pub artifact_ref: Option<ArtifactRef>,
     pub is_revision: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_feedback: Option<String>,
     pub base_artifact_ref: Option<ArtifactRef>,
     pub started_at: String,
     pub ended_at: Option<String>,

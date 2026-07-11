@@ -341,6 +341,7 @@ export type NodeDetail = {
   verdict: ReviewVerdict | null;
   artifact_ref: ArtifactRef | null;
   is_revision: boolean;
+  revision_feedback?: string | null;
   base_artifact_ref: ArtifactRef | null;
   started_at: string;
   ended_at: string | null;

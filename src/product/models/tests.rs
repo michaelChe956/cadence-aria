@@ -31,6 +31,7 @@ fn node_detail_roundtrip() {
             version: 2,
         }),
         is_revision: false,
+        revision_feedback: None,
         base_artifact_ref: None,
         started_at: "2026-05-20T14:30:00Z".to_string(),
         ended_at: Some("2026-05-20T14:35:00Z".to_string()),

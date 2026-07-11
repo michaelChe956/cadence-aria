@@ -112,6 +112,18 @@ pub(crate) async fn handle_author_decision_from_handler(
                 let _ = send_json_outbound(&outbound_tx, &err).await;
             }
         }
+        Ok(AuthorDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback }) => {
+            if let Err(message) = spawn_provider_run_from_handler(
+                run_context,
+                ProviderRunKind::WorkItemPlanOutlineRevision { feedback },
+                outbound_tx.clone(),
+            )
+            .await
+            {
+                let err = WsOutMessage::Error { message };
+                let _ = send_json_outbound(&outbound_tx, &err).await;
+            }
+        }
         Ok(AuthorDecisionOutcome::HumanConfirm) => {}
         Ok(AuthorDecisionOutcome::PrepareContext) => {
             let state_msg = {

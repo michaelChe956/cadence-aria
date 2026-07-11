@@ -156,13 +156,14 @@ impl WorkspaceEngine {
                 }
             }
             AuthorDecision::Reject => {
-                self.prepare_work_item_plan_outline_revision(
-                    None,
-                    WorkItemPlanOutlineRevisionSource::AuthorConfirm,
-                    OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
-                )
-                .await?;
-                Ok(AuthorDecisionOutcome::HumanConfirm)
+                let feedback = self
+                    .prepare_work_item_plan_outline_revision(
+                        None,
+                        WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+                        OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
+                    )
+                    .await?;
+                Ok(AuthorDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback })
             }
         }
     }

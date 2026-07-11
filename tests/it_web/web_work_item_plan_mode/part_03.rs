@@ -150,11 +150,9 @@ async fn outline_human_confirm_request_change_starts_dedicated_revision_over_web
         .expect("prompt event detail")
         .contains("增量返修提示词"));
 
-    let revision_prompt = {
-        let prompts = prompts.lock().expect("captured prompts lock");
-        assert_eq!(prompts.len(), 2, "one initial run and one outline revision");
-        prompts[1].clone()
-    };
+    let prompts = wait_for_recorded_prompts(&prompts, 2).await;
+    assert_eq!(prompts.len(), 2, "one initial run and one outline revision");
+    let revision_prompt = prompts[1].clone();
     assert!(revision_prompt.contains("[impact_closure_contract]"));
     assert!(revision_prompt.contains("tests/it_core/**"));
     assert!(revision_prompt.contains("owner_mapping"));

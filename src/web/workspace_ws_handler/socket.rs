@@ -253,22 +253,37 @@ pub(crate) async fn handle_workspace_socket(
         std::time::Duration::from_secs(5),
     );
 
-    let should_resume_outline_run = {
+    let outline_resume_kind = {
         let engine = engine.lock().await;
-        engine.session().workspace_type == WorkspaceType::WorkItemPlan
+        let should_resume = engine.session().workspace_type == WorkspaceType::WorkItemPlan
             && engine.session().stage == WorkspaceStage::Running
             && engine.active_node_type()
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun)
-            && engine.active_run_id().is_none()
+            && engine.active_run_id().is_none();
+        if should_resume {
+            let node_id = engine.active_timeline_node_id();
+            let detail = node_id.as_deref().and_then(|node_id| {
+                LifecycleStore::new(app_paths.clone())
+                    .load_node_detail(&session_id, node_id)
+                    .ok()
+            });
+            Some(match detail {
+                Some(detail) if detail.is_revision => {
+                    ProviderRunKind::WorkItemPlanOutlineRevision {
+                        feedback: detail.revision_feedback,
+                    }
+                }
+                _ => ProviderRunKind::WorkItemPlanAuthor,
+            })
+        } else {
+            None
+        }
     };
-    if should_resume_outline_run
+    if let Some(run_kind) = outline_resume_kind
         && state.workspace_runs.run(&session_id).await.is_none()
-        && let Err(message) = spawn_provider_run_from_handler(
-            run_context.clone(),
-            ProviderRunKind::WorkItemPlanAuthor,
-            outbound_tx.clone(),
-        )
-        .await
+        && let Err(message) =
+            spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx.clone())
+                .await
     {
         let err = WsOutMessage::Error { message };
         let _ = send_json_outbound(&outbound_tx, &err).await;

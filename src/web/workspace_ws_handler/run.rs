@@ -214,6 +214,10 @@ pub(crate) async fn spawn_provider_run_from_handler(
         ProviderRunKind::WorkItemPlanOutlineRevision { feedback } => feedback.clone(),
         _ => None,
     };
+    let is_outline_revision_run = matches!(
+        &run_kind,
+        ProviderRunKind::WorkItemPlanOutlineRevision { .. }
+    );
     tokio::spawn(async move {
         let mut engine = engine_for_run.lock().await;
         engine.use_run_token(run_cancel.clone());
@@ -300,7 +304,10 @@ pub(crate) async fn spawn_provider_run_from_handler(
 
                 // 首次生成：使用完整 prompt + context_resolutions；
                 // review/AutoRevision：使用同一会话增量返修 prompt，不重复完整上下文。
-                let mut invocation = if let Some(feedback) = outline_revision_feedback.as_deref() {
+                let mut invocation = if is_outline_revision_run {
+                    let feedback = outline_revision_feedback
+                        .as_deref()
+                        .unwrap_or("用户在 Author Confirm 阶段要求返修当前 Outline");
                     match WorkItemSplitEngine::build_outline_revision_invocation(
                         &request,
                         &issue,
@@ -381,7 +388,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     .emit_provider_prompt_event(
                         &node_id,
                         invocation.prompt.clone(),
-                        if outline_revision_feedback.is_some() {
+                        if is_outline_revision_run {
                             "发送给 WorkItemPlan provider 的增量返修提示词"
                         } else {
                             "发送给 WorkItemPlan provider 的完整提示词"

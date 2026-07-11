@@ -69,6 +69,15 @@ async fn outline_human_confirm_revision_is_recoverable_before_provider_spawn() {
         .expect("persisted active outline run");
     assert_eq!(active_node.node_type, TimelineNodeType::WorkItemPlanOutlineRun);
     assert_eq!(active_node.status, TimelineNodeStatus::Active);
+    let active_detail = lifecycle
+        .load_node_detail(&session_id, &active_node_id)
+        .expect("persisted outline revision detail");
+    let active_detail_json = serde_json::to_value(active_detail).expect("serialize node detail");
+    assert_eq!(active_detail_json["is_revision"], true);
+    assert!(active_detail_json["revision_feedback"]
+        .as_str()
+        .expect("persisted revision feedback")
+        .contains("补齐共享影响闭环"));
     assert_eq!(
         persisted_timeline
             .iter()

@@ -193,7 +193,10 @@ async fn work_item_plan_outline_revision_entry_points_share_preparation_state() 
                     .handle_author_decision(AuthorDecision::Reject)
                     .await
                     .expect("author confirm reject");
-                assert_eq!(outcome, AuthorDecisionOutcome::HumanConfirm);
+                assert_eq!(
+                    outcome,
+                    AuthorDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback: None }
+                );
                 ("Author Confirm 已请求返修 WorkItemPlan Outline", node_id)
             }
             OutlineRevisionEntryCase::RequestRevision => {

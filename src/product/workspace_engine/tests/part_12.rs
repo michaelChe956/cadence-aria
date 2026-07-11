@@ -206,6 +206,7 @@ async fn build_session_state_inlines_sanitized_work_item_plan_run_details() {
                 verdict: None,
                 artifact_ref: None,
                 is_revision: false,
+                revision_feedback: None,
                 base_artifact_ref: None,
                 started_at: "2026-05-20T14:30:00Z".to_string(),
                 ended_at: Some("2026-05-20T14:35:00Z".to_string()),

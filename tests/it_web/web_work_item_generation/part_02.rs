@@ -102,6 +102,45 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_raw_output
     (app, root, captured_prompts)
 }
 
+pub(crate) fn app_for_existing_root_with_streaming_raw_outputs(
+    root: &std::path::Path,
+    outputs: Vec<QueuedSplitOutput>,
+) -> (axum::Router, Arc<Mutex<Vec<String>>>) {
+    let runtime = WebRuntime::new_fake(root.to_path_buf());
+    let mut state = WebAppState::new(root.to_path_buf(), runtime).with_provider_adapter(Arc::new(
+        MockSplitProviderAdapter {
+            output: valid_split_output(),
+            revision_output: None,
+        },
+    ));
+    let captured_prompts = Arc::new(Mutex::new(Vec::new()));
+    let test_controls = cadence_aria::web::test_controls::TestControls::default();
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(QueuedSplitStreamingProvider::new_raw_recording(
+            outputs,
+            captured_prompts.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    state.test_controls = test_controls;
+    state.provider_registry = Arc::new(registry);
+
+    (build_web_router(state), captured_prompts)
+}
+
 /// 与 `app_with_confirmed_story_and_design` 相同，但额外把 codex/claude_code 也注册为
 /// TestControlledFakeStreamingProvider，以便在 review 阶段通过 review fixture 注入固定 verdict。
 pub(crate) async fn app_with_confirmed_story_and_design_and_test_providers(

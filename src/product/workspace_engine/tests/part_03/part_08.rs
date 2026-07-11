@@ -234,6 +234,7 @@ async fn outline_revision_index_save_failure_restores_non_empty_drafts_and_sessi
     let engine_before = outline_revision_engine_snapshot(&engine);
     let persisted_before =
         outline_revision_persisted_snapshot(&lifecycle, &engine, &plan_id, &source_node_id);
+    let run_node_id = format!("timeline_node_{:03}", engine.timeline_nodes.len() + 1);
     let plan_root = active_index_path(&lifecycle, &plan_id)
         .parent()
         .expect("plan root")
@@ -262,6 +263,10 @@ async fn outline_revision_index_save_failure_restores_non_empty_drafts_and_sessi
         persisted_before,
         "drafts, active index, session, artifact and timeline must all roll back"
     );
+    assert!(matches!(
+        lifecycle.load_node_detail(&engine.session.session_id, &run_node_id),
+        Err(ProductStoreError::NotFound { .. })
+    ));
 }
 
 #[cfg(unix)]
@@ -331,23 +336,18 @@ async fn outline_revision_timeline_save_failure_rolls_back_everything() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn outline_revision_node_detail_save_failure_rolls_back_without_success_events() {
-    use std::os::unix::fs::PermissionsExt;
-
     let (_tmp, lifecycle, plan_id, source_node_id, mut engine) =
         make_atomic_outline_revision_engine("sess_outline_atomic_node_detail_save", false).await;
     let engine_before = outline_revision_engine_snapshot(&engine);
     let persisted_before =
         outline_revision_persisted_snapshot(&lifecycle, &engine, &plan_id, &source_node_id);
+    let run_node_id = format!("timeline_node_{:03}", engine.timeline_nodes.len() + 1);
     let details_root = workspace_timeline_root(&lifecycle, &engine).join("timeline_node_details");
     std::fs::create_dir_all(&details_root).expect("create node details root");
-    let original_permissions = std::fs::metadata(&details_root)
-        .expect("node details metadata")
-        .permissions();
-    std::fs::set_permissions(&details_root, std::fs::Permissions::from_mode(0o555))
-        .expect("make node details read-only");
+    let run_detail_blocker = details_root.join(format!("{run_node_id}.json"));
+    std::fs::create_dir(&run_detail_blocker).expect("block only the new run detail target");
     let (event_tx, mut event_rx) = mpsc::channel(16);
     engine.event_tx = event_tx;
 
@@ -359,15 +359,18 @@ async fn outline_revision_node_detail_save_failure_rolls_back_without_success_ev
         )
         .await;
 
-    std::fs::set_permissions(&details_root, original_permissions)
-        .expect("restore node details permissions");
+    std::fs::remove_dir(&run_detail_blocker).expect("remove run detail blocker");
     let error = result.expect_err("node detail save failure must fail the transaction");
-    assert!(error.contains("save outline revision node detail failed"));
+    assert!(error.contains("save outline revision run node detail failed"));
     assert_eq!(outline_revision_engine_snapshot(&engine), engine_before);
     assert_eq!(
         outline_revision_persisted_snapshot(&lifecycle, &engine, &plan_id, &source_node_id),
         persisted_before
     );
+    assert!(matches!(
+        lifecycle.load_node_detail(&engine.session.session_id, &run_node_id),
+        Err(ProductStoreError::NotFound { .. })
+    ));
     while let Ok(event) = event_rx.try_recv() {
         assert!(
             !matches!(
@@ -377,8 +380,8 @@ async fn outline_revision_node_detail_save_failure_rolls_back_without_success_ev
             "failed transaction must not emit running StageChange"
         );
         assert!(
-            !matches!(event, EngineEvent::TimelineNodeUpdated { .. }),
-            "failed transaction must not emit TimelineNodeUpdated"
+            !matches!(event, EngineEvent::TimelineNodeCreated { .. }),
+            "failed transaction must not emit TimelineNodeCreated"
         );
     }
 }

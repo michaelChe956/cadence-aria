@@ -242,6 +242,7 @@ impl WorkspaceEngine {
         &self,
         lifecycle: &LifecycleStore,
         source: WorkItemPlanOutlineRevisionSource,
+        revision_feedback: Option<&str>,
     ) -> Result<OutlineRevisionPersistenceSnapshot, String> {
         let original_status = lifecycle
             .get_workspace_session(&self.session.session_id)
@@ -328,7 +329,9 @@ impl WorkspaceEngine {
             provider_config_snapshot: self.provider_config_snapshot(),
             retry: None,
         };
-        let run_detail = self.empty_node_detail_for(&run_node);
+        let mut run_detail = self.empty_node_detail_for(&run_node);
+        run_detail.is_revision = true;
+        run_detail.revision_feedback = revision_feedback.map(ToString::to_string);
         revised_timeline_nodes.push(run_node.clone());
 
         Ok(OutlineRevisionPersistenceSnapshot {
@@ -355,7 +358,11 @@ impl WorkspaceEngine {
             .lifecycle_store
             .clone()
             .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
-        let snapshot = self.outline_revision_persistence_snapshot(&lifecycle, source)?;
+        let snapshot = self.outline_revision_persistence_snapshot(
+            &lifecycle,
+            source,
+            outline_feedback.as_deref(),
+        )?;
         let mut plan_mutation = self.prepare_work_item_plan_outline_revising(policy)?;
         let mut steps = OutlineRevisionPersistedSteps::default();
         let persistence_result = (|| -> Result<(), String> {
