@@ -426,11 +426,11 @@ async fn optional_review_findings_enter_human_confirm_for_all_workspace_types() 
 
 #[tokio::test]
 async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
-    let (_tmp, store) = setup();
+    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_optional_review");
     let (tx, mut rx) = mpsc::channel(64);
-    let mut session = make_session("sess_wip_outline_optional_review");
-    session.workspace_type = WorkspaceType::WorkItemPlan;
-    session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
+    engine.event_tx = tx;
+    engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
         outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
             outline: test_work_item_plan_outline(Vec::new()),
             design_context_gaps: vec![],
@@ -440,7 +440,6 @@ async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
             selected_generation_mode: None,
         }),
     });
-    let mut engine = WorkspaceEngine::new(store, tx, session);
     engine.begin_work_item_plan_outline_review_run().await;
 
     engine

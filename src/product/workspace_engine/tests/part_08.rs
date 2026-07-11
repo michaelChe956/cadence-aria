@@ -423,6 +423,34 @@ fn build_work_item_plan_review_input_fails_closed_for_corrupt_active_index() {
     assert!(error.contains("product_store_json"));
 }
 
+#[tokio::test]
+async fn build_work_item_plan_outline_review_input_fails_closed_for_corrupt_active_index() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate(
+            "sess_wip_outline_review_corrupt_active_index",
+        );
+    engine.session.artifact = Some(work_item_plan_outline_artifact());
+    engine.begin_work_item_plan_outline_review_run().await;
+
+    let active_index_path = lifecycle
+        .app_paths()
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("work_item_plan_drafts")
+        .join(&plan_id)
+        .join("active_index.json");
+    std::fs::create_dir_all(active_index_path.parent().expect("active index parent"))
+        .expect("create active index parent");
+    std::fs::write(&active_index_path, "{corrupt active index")
+        .expect("corrupt active index");
+
+    let error = engine
+        .build_work_item_plan_review_input()
+        .expect_err("corrupt outline active index must fail closed");
+
+    assert!(error.contains("load work item plan active index failed"));
+    assert!(error.contains("product_store_json"));
+}
+
 #[test]
 fn build_review_input_carries_workspace_review_contract_for_general_artifacts() {
     for workspace_type in [
@@ -496,6 +524,9 @@ fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
     }
     assert!(input.prompt.contains("单个 Claude Code 或 Codex coding 会话"));
     assert!(input.prompt.contains("小于 20k"));
+    assert!(input.prompt.contains(
+        "\"generation_round_id\":\"generation_round_unknown\""
+    ));
     assert_review_contract(&input, "work_item_plan_outline_review");
 }
 

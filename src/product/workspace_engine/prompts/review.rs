@@ -287,18 +287,13 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         let generation_round_id = self
-            .work_item_plan_store()
-            .ok()
-            .and_then(|store| {
-                store
-                    .load_active_index(
-                        &self.session.project_id,
-                        &self.session.issue_id,
-                        &self.session.entity_id,
-                    )
-                    .ok()
-                    .flatten()
-            })
+            .work_item_plan_store()?
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
             .map(|index| index.current_generation_round_id)
             .unwrap_or_else(|| "generation_round_unknown".to_string());
 

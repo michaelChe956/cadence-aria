@@ -15,6 +15,7 @@ use cadence_aria::web::test_controls::TestControlledFakeStreamingProvider;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
@@ -369,6 +370,29 @@ pub(crate) enum QueuedSplitOutput {
     Json(Value),
     RawStdout(String),
     Pending,
+}
+
+#[derive(Clone)]
+pub(crate) struct CountedReviewerStreamingProvider {
+    starts: Arc<AtomicUsize>,
+}
+
+impl CountedReviewerStreamingProvider {
+    pub(crate) fn new(starts: Arc<AtomicUsize>) -> Self {
+        Self { starts }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CountedReviewerStreamingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        FakeStreamingProvider.start(input, cancel).await
+    }
 }
 
 impl QueuedSplitStreamingProvider {

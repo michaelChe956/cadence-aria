@@ -6,12 +6,11 @@ async fn queued_work_item_plan_outline_review_engine(
     mpsc::Receiver<EngineEvent>,
     String,
 ) {
-    let (tmp, store) = setup();
+    let (tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate(session_id);
     let (tx, rx) = mpsc::channel(64);
-    let mut session = make_session(session_id);
-    session.workspace_type = WorkspaceType::WorkItemPlan;
-    session.entity_id = "work_item_plan_0001".to_string();
-    session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
+    engine.event_tx = tx;
+    engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
         outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
             outline: test_work_item_plan_outline(Vec::new()),
             design_context_gaps: Vec::new(),
@@ -21,7 +20,6 @@ async fn queued_work_item_plan_outline_review_engine(
             selected_generation_mode: None,
         }),
     });
-    let mut engine = WorkspaceEngine::new(store, tx, session);
     engine.begin_work_item_plan_outline_review_run().await;
     let review_node_id = engine
         .active_node_id

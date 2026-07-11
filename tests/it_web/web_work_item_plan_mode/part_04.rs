@@ -206,6 +206,87 @@ fn outline_revision_journal_path(
 }
 
 #[tokio::test]
+async fn corrupt_outline_review_active_index_fails_closed_before_reviewer_start() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (app, root, _prompts) =
+        app_with_confirmed_story_and_design_and_streaming_raw_outputs(vec![
+            QueuedSplitOutput::Json(valid_outline_output()),
+        ])
+        .await;
+    let (session_id, plan_id, mut ws) = prepare_plan_and_start(&app, true).await;
+    ws.close(None).await.ok();
+
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = cadence_aria::product::lifecycle_store::LifecycleStore::new(app_paths.clone());
+    let session_record = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("persisted workspace session");
+    let checkpoint_store = std::sync::Arc::new(
+        cadence_aria::product::checkpoint_store::CheckpointStore::new(
+            app_paths.issue_lifecycle_root("project_0001", "issue_0001"),
+        ),
+    );
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+    let mut session =
+        cadence_aria::product::workspace_engine::WorkspaceSession::from_record(session_record);
+    session.repository_path = Some(root.path().join("repo"));
+    let mut engine = cadence_aria::product::workspace_engine::WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle,
+        event_tx,
+        session,
+    );
+    engine.begin_work_item_plan_outline_review_run().await;
+
+    let active_index_path = app_paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("work_item_plan_drafts")
+        .join(&plan_id)
+        .join("active_index.json");
+    std::fs::create_dir_all(active_index_path.parent().expect("active index parent"))
+        .expect("create active index parent");
+    std::fs::write(active_index_path, "{corrupt active index")
+        .expect("corrupt active index");
+
+    let reviewer_starts =
+        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (_command_tx, command_rx) = tokio::sync::mpsc::channel(1);
+    engine
+        .drive_review_session(
+            std::sync::Arc::new(CountedReviewerStreamingProvider::new(
+                reviewer_starts.clone(),
+            )),
+            command_rx,
+        )
+        .await;
+
+    let mut error_message = None;
+    let mut provider_prompt_count = 0;
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            cadence_aria::product::workspace_engine::EngineEvent::Error { message } => {
+                error_message = Some(message);
+            }
+            cadence_aria::product::workspace_engine::EngineEvent::ExecutionEvent {
+                event,
+                ..
+            } if event.title == "Provider Prompt" => provider_prompt_count += 1,
+            _ => {}
+        }
+    }
+    let error_message = error_message.expect("corrupt active index must emit drive error");
+    assert!(error_message.contains("load work item plan active index failed"));
+    assert!(error_message.contains("product_store_json"));
+    assert_eq!(provider_prompt_count, 0);
+    assert_eq!(
+        reviewer_starts.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "corrupt active index must fail before reviewer provider start"
+    );
+}
+
+#[tokio::test]
 async fn persisted_outline_revision_intent_resumes_incremental_prompt_on_new_app_websocket() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
