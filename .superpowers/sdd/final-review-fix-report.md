@@ -128,6 +128,7 @@
 ## 最终验证
 
 - `cargo check --locked`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS。
 - `cargo test --locked --lib`：553 passed，0 failed。
 - `cargo fmt --check`：PASS。
 - `git diff --check`：PASS。
@@ -193,6 +194,5 @@
 
 ## Concerns / 未运行门禁
 
-- 未运行 `cargo clippy --all-targets --all-features --locked -- -D warnings`。
 - 未运行包含所有 integration test targets 的 `cargo test --locked`；已运行完整 `cargo test --locked --lib`（553/553）及所有新增/受影响定向测试。
 - worktree 仍有任务开始前已存在的未提交改动；这些改动未被 stage、commit、reset、stash、clean 或覆盖。

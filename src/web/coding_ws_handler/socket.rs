@@ -21,9 +21,10 @@ use super::{
 };
 
 mod admission;
+pub(crate) use admission::{CodingMessageAdmission, coding_message_admission};
+#[cfg(test)]
 pub(crate) use admission::{
-    CodingMessageAdmission, coding_message_admission, failed_code_review_recovery_request,
-    unfinished_failed_code_review_recovery_message_allowed,
+    failed_code_review_recovery_request, unfinished_failed_code_review_recovery_message_allowed,
 };
 
 pub(crate) type CodingWsSender = SplitSink<WebSocket, Message>;
