@@ -34,6 +34,50 @@ pub struct CodingRunRegistry {
 struct CodingRunRegistryInner {
     next_run_id: u64,
     runs: HashMap<String, HashMap<u64, mpsc::Sender<CodingRunnerCommand>>>,
+    reservations: HashMap<String, u64>,
+}
+
+pub struct CodingRunReservation {
+    registry: CodingRunRegistry,
+    attempt_id: String,
+    reservation_id: u64,
+    released: bool,
+}
+
+impl CodingRunReservation {
+    pub fn activate(mut self, command_tx: mpsc::Sender<CodingRunnerCommand>) -> Option<u64> {
+        let mut inner = self
+            .registry
+            .inner
+            .lock()
+            .expect("coding run registry lock");
+        if inner.reservations.get(&self.attempt_id) != Some(&self.reservation_id) {
+            return None;
+        }
+        inner.reservations.remove(&self.attempt_id);
+        inner
+            .runs
+            .entry(self.attempt_id.clone())
+            .or_default()
+            .insert(self.reservation_id, command_tx);
+        self.released = true;
+        Some(self.reservation_id)
+    }
+
+    pub fn release(mut self) {
+        self.registry
+            .release_reservation(&self.attempt_id, self.reservation_id);
+        self.released = true;
+    }
+}
+
+impl Drop for CodingRunReservation {
+    fn drop(&mut self) {
+        if !self.released {
+            self.registry
+                .release_reservation(&self.attempt_id, self.reservation_id);
+        }
+    }
 }
 
 impl CodingRunRegistry {
@@ -62,6 +106,7 @@ impl CodingRunRegistry {
     pub async fn abort_attempt(&self, attempt_id: &str) -> usize {
         let senders = {
             let mut inner = self.inner.lock().expect("coding run registry lock");
+            inner.reservations.remove(attempt_id);
             inner
                 .runs
                 .remove(attempt_id)
@@ -85,6 +130,45 @@ impl CodingRunRegistry {
             .get(attempt_id)
             .map(HashMap::len)
             .unwrap_or(0)
+    }
+
+    pub fn try_reserve_attempt(&self, attempt_id: &str) -> Option<CodingRunReservation> {
+        let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner
+            .runs
+            .get(attempt_id)
+            .is_some_and(|runs| !runs.is_empty())
+            || inner.reservations.contains_key(attempt_id)
+        {
+            return None;
+        }
+        inner.next_run_id += 1;
+        let reservation_id = inner.next_run_id;
+        inner
+            .reservations
+            .insert(attempt_id.to_string(), reservation_id);
+        Some(CodingRunReservation {
+            registry: self.clone(),
+            attempt_id: attempt_id.to_string(),
+            reservation_id,
+            released: false,
+        })
+    }
+
+    pub fn attempt_is_reserved_or_running(&self, attempt_id: &str) -> bool {
+        let inner = self.inner.lock().expect("coding run registry lock");
+        inner.reservations.contains_key(attempt_id)
+            || inner
+                .runs
+                .get(attempt_id)
+                .is_some_and(|runs| !runs.is_empty())
+    }
+
+    fn release_reservation(&self, attempt_id: &str, reservation_id: u64) {
+        let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner.reservations.get(attempt_id) == Some(&reservation_id) {
+            inner.reservations.remove(attempt_id);
+        }
     }
 }
 

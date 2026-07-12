@@ -11,7 +11,7 @@ use crate::product::coding_workspace_engine::{
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::state::{CodingRunRegistry, WebAppState};
+use crate::web::state::{CodingRunReservation, WebAppState};
 
 use super::runner_support::{handle_pending_runner_commands, provider_for};
 use super::{
@@ -30,6 +30,55 @@ pub(crate) fn spawn_coding_runner(
     let registry_run_id = state
         .coding_runs
         .insert(registry_attempt_id.clone(), command_tx.clone());
+    spawn_coding_runner_task(
+        state,
+        coding_store,
+        event_tx,
+        attempt,
+        command_rx,
+        registry_run_id,
+    );
+    command_tx
+}
+
+pub(crate) fn spawn_coding_runner_reserved(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    recovery_gate_id: &str,
+    reservation: CodingRunReservation,
+) -> Result<mpsc::Sender<CodingRunnerCommand>, CodingWorkspaceEngineError> {
+    let (command_tx, command_rx) = mpsc::channel(32);
+    let registry_run_id = reservation.activate(command_tx.clone()).ok_or_else(|| {
+        CodingWorkspaceEngineError::ProviderStream("coding_recovery_reservation_lost".to_string())
+    })?;
+    if let Err(error) =
+        coding_store.complete_failed_code_review_recovery_journal(&attempt.id, recovery_gate_id)
+    {
+        state.coding_runs.remove(&attempt.id, registry_run_id);
+        return Err(error.into());
+    }
+    spawn_coding_runner_task(
+        state,
+        coding_store,
+        event_tx,
+        attempt,
+        command_rx,
+        registry_run_id,
+    );
+    Ok(command_tx)
+}
+
+fn spawn_coding_runner_task(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    command_rx: mpsc::Receiver<CodingRunnerCommand>,
+    registry_run_id: u64,
+) {
+    let registry_attempt_id = attempt.id.clone();
     let coding_runs = state.coding_runs.clone();
     tokio::spawn(async move {
         let engine = CodingWorkspaceEngine::with_provider(
@@ -65,14 +114,6 @@ pub(crate) fn spawn_coding_runner(
         }
         coding_runs.remove(&registry_attempt_id, registry_run_id);
     });
-    command_tx
-}
-
-pub(crate) fn failed_review_recovery_runner_is_active(
-    coding_runs: &CodingRunRegistry,
-    attempt_id: &str,
-) -> bool {
-    coding_runs.runner_count(attempt_id) > 0
 }
 
 pub(crate) fn should_resume_runner_after_gate_response(

@@ -17,9 +17,9 @@ use crate::web::state::WebAppState;
 
 use super::{
     CodingWsInMessage, CodingWsOutMessage, build_coding_session_state, confirm_open_stage_gate,
-    context_note_chat_entry, failed_review_recovery_runner_is_active,
-    provider_selection_targets_current_running_stage, should_resume_runner_after_gate_response,
-    spawn_coding_runner, update_provider_permission_mode, update_provider_selection,
+    context_note_chat_entry, provider_selection_targets_current_running_stage,
+    should_resume_runner_after_gate_response, spawn_coding_runner, spawn_coding_runner_reserved,
+    update_provider_permission_mode, update_provider_selection,
 };
 
 pub(crate) type CodingWsSender = SplitSink<WebSocket, Message>;
@@ -93,7 +93,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                 if inbound == CodingWsInMessage::CodingPing {
                     if !send_coding_json(&mut socket_tx, &CodingWsOutMessage::CodingPong).await {
                         break;
-                    }
+                    };
                     continue;
                 }
                 let Ok(current_attempt) = coding_store.get_attempt_by_id(&attempt_id) else {
@@ -120,10 +120,10 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     continue;
                 }
                 if failed_review_recovery {
-                    if failed_review_recovery_runner_is_active(
-                        &state.coding_runs,
-                        &current_attempt.id,
-                    ) {
+                    let Some(reservation) = state
+                        .coding_runs
+                        .try_reserve_attempt(&current_attempt.id)
+                    else {
                         let _ = send_coding_json(
                             &mut socket_tx,
                             &CodingWsOutMessage::CodingProtocolError {
@@ -134,7 +134,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         )
                         .await;
                         continue;
-                    }
+                    };
                     let CodingWsInMessage::GateResponse { gate_id, .. } = &inbound else {
                         unreachable!("failed review recovery guard only accepts gate responses");
                     };
@@ -168,13 +168,29 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             continue;
                         }
                     };
-                    runner_started = true;
-                    runner_command_tx = Some(spawn_coding_runner(
+                    let command_tx = match spawn_coding_runner_reserved(
                         state.clone(),
                         coding_store.clone(),
                         event_tx.clone(),
                         updated.clone(),
-                    ));
+                        gate_id,
+                        reservation,
+                    ) {
+                        Ok(command_tx) => command_tx,
+                        Err(error) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_recovery_runner_activation_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    runner_started = true;
+                    runner_command_tx = Some(command_tx);
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }

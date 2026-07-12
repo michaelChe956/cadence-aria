@@ -1,10 +1,13 @@
 use std::fs;
 use std::process::Command;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use tokio::sync::mpsc;
 
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CreateBlockedGateInput, CreateCodingExecutionUnitInput,
+    FailedCodeReviewRecoveryPhase,
 };
 use crate::product::coding_models::{
     CodingAgentRole, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
@@ -12,12 +15,12 @@ use crate::product::coding_models::{
     CodingGateRequired, CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger,
     CodingTimelineNode, CodingTimelineNodeStatus,
 };
-use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+use crate::product::coding_workspace_engine::{
+    CodingWorkspaceEngine, recoverable_failed_code_review,
+};
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::coding_ws_handler::socket::failed_code_review_recovery_request;
-use crate::web::coding_ws_handler::{
-    CodingWsInMessage, failed_review_recovery_runner_is_active, is_coding_ws_message_allowed,
-};
+use crate::web::coding_ws_handler::{CodingWsInMessage, is_coding_ws_message_allowed};
 use crate::web::state::CodingRunRegistry;
 
 use super::{CodingWsOutMessage, build_coding_session_state, seed_compiled_work_item_fixture};
@@ -41,6 +44,15 @@ enum FixtureCase {
     MissingDirtyGate,
     MissingWorktreePath,
     MissingWorktree,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RecoveryPrefix {
+    Prepared,
+    AttemptReopened,
+    RetryRunCreated,
+    AttemptRunning,
+    GateResolved,
 }
 
 struct FailedReviewFixture {
@@ -280,6 +292,18 @@ async fn failed_code_review_recovery_rejects_stale_identity_without_writes() {
             runs_before,
             "{name}"
         );
+        assert!(
+            fixture
+                .store
+                .get_failed_code_review_recovery_journal(
+                    &fixture.attempt.project_id,
+                    &fixture.attempt.issue_id,
+                    &fixture.attempt.id,
+                )
+                .expect("journal after rejected recovery")
+                .is_none(),
+            "{name}"
+        );
     }
 }
 
@@ -329,6 +353,302 @@ async fn failed_code_review_recovery_reloads_attempt_and_rejects_status_change()
             .expect("role runs after status change rejection"),
         runs_before
     );
+    assert!(
+        fixture
+            .store
+            .get_failed_code_review_recovery_journal(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("journal after status change rejection")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn failed_code_review_recovery_journal_prefixes_converge_idempotently() {
+    for prefix in [
+        RecoveryPrefix::Prepared,
+        RecoveryPrefix::AttemptReopened,
+        RecoveryPrefix::RetryRunCreated,
+        RecoveryPrefix::AttemptRunning,
+        RecoveryPrefix::GateResolved,
+    ] {
+        let fixture =
+            failed_review_fixture(CodingAttemptScope::WorkItemGroup, FixtureCase::Recoverable);
+        let recovery = recoverable_failed_code_review(&fixture.store, &fixture.attempt)
+            .expect("recoverable failed review")
+            .expect("recovery identity");
+        let journal = fixture
+            .store
+            .prepare_failed_code_review_recovery_journal(
+                &fixture.attempt,
+                &recovery.gate_id,
+                &recovery.failed_node_id,
+                &recovery.stale_role_run_id,
+            )
+            .expect("prepare recovery journal");
+
+        if matches!(
+            prefix,
+            RecoveryPrefix::AttemptReopened
+                | RecoveryPrefix::RetryRunCreated
+                | RecoveryPrefix::AttemptRunning
+                | RecoveryPrefix::GateResolved
+        ) {
+            fixture
+                .store
+                .reopen_failed_code_review_attempt(
+                    &fixture.attempt.project_id,
+                    &fixture.attempt.issue_id,
+                    &fixture.attempt.id,
+                )
+                .expect("persist reopened attempt prefix");
+        }
+        if matches!(
+            prefix,
+            RecoveryPrefix::RetryRunCreated
+                | RecoveryPrefix::AttemptRunning
+                | RecoveryPrefix::GateResolved
+        ) {
+            let reopened = fixture
+                .store
+                .get_attempt(
+                    &fixture.attempt.project_id,
+                    &fixture.attempt.issue_id,
+                    &fixture.attempt.id,
+                )
+                .expect("reopened attempt");
+            fixture
+                .store
+                .ensure_failed_code_review_retry_role_run(&reopened, &journal)
+                .expect("persist retry role run prefix");
+        }
+        if matches!(
+            prefix,
+            RecoveryPrefix::AttemptRunning | RecoveryPrefix::GateResolved
+        ) {
+            fixture
+                .store
+                .update_attempt_status(
+                    &fixture.attempt.project_id,
+                    &fixture.attempt.issue_id,
+                    &fixture.attempt.id,
+                    CodingAttemptStatus::Running,
+                )
+                .expect("persist running attempt prefix");
+        }
+        if matches!(prefix, RecoveryPrefix::GateResolved) {
+            fixture
+                .store
+                .resolve_blocked_gate(
+                    &fixture.attempt.project_id,
+                    &fixture.attempt.issue_id,
+                    &fixture.attempt.id,
+                    &recovery.gate_id,
+                )
+                .expect("persist resolved gate prefix");
+        }
+
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let engine =
+            CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+        let first = engine
+            .recover_failed_code_review(&recovery.gate_id)
+            .await
+            .unwrap_or_else(|error| panic!("{prefix:?}: first recovery: {error}"));
+        let second = engine
+            .recover_failed_code_review(&recovery.gate_id)
+            .await
+            .unwrap_or_else(|error| panic!("{prefix:?}: second recovery: {error}"));
+
+        assert_eq!(first.id, fixture.attempt.id, "{prefix:?}");
+        assert_eq!(second.id, fixture.attempt.id, "{prefix:?}");
+        assert_eq!(second.status, CodingAttemptStatus::Running, "{prefix:?}");
+        assert_eq!(second.stage, CodingExecutionStage::CodeReview, "{prefix:?}");
+        assert_eq!(second.completed_at, None, "{prefix:?}");
+        let runs = fixture
+            .store
+            .list_role_runs(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("role runs after prefix convergence");
+        assert_eq!(runs.len(), 2, "{prefix:?}: {runs:?}");
+        let retry = runs
+            .iter()
+            .find(|run| run.trigger == CodingRoleRunTrigger::RetryReview)
+            .expect("stable retry role run");
+        assert_eq!(
+            retry.supersedes_run_id.as_deref(),
+            Some(recovery.stale_role_run_id.as_str()),
+            "{prefix:?}"
+        );
+        let converged = fixture
+            .store
+            .get_failed_code_review_recovery_journal(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("converged journal")
+            .expect("journal remains until runner activation");
+        assert_eq!(
+            converged.phase,
+            FailedCodeReviewRecoveryPhase::GateResolved,
+            "{prefix:?}"
+        );
+        assert_eq!(
+            converged.retry_role_run_id.as_deref(),
+            Some(retry.id.as_str()),
+            "{prefix:?}"
+        );
+        let state = build_coding_session_state(&fixture.store, second)
+            .expect("session state while journal incomplete");
+        let CodingWsOutMessage::CodingSessionState { pending_gates, .. } = state else {
+            panic!("expected coding session state");
+        };
+        assert!(
+            pending_gates
+                .iter()
+                .any(|gate| gate.gate_id == recovery.gate_id),
+            "{prefix:?}: incomplete journal must keep recovery gate"
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_review_recovery_journal_completes_only_after_reserved_runner_activation() {
+    let fixture =
+        failed_review_fixture(CodingAttemptScope::WorkItemGroup, FixtureCase::Recoverable);
+    let gate_id = fixture
+        .dirty_gate
+        .as_ref()
+        .expect("dirty gate")
+        .gate_id
+        .clone();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+    let updated = engine
+        .recover_failed_code_review(&gate_id)
+        .await
+        .expect("recover failed review");
+    let registry = CodingRunRegistry::default();
+    let reservation = registry
+        .try_reserve_attempt(&updated.id)
+        .expect("reserve recovered attempt");
+    let before_activation = fixture
+        .store
+        .get_failed_code_review_recovery_journal(
+            &updated.project_id,
+            &updated.issue_id,
+            &updated.id,
+        )
+        .expect("journal before activation")
+        .expect("incomplete recovery journal");
+    assert_eq!(
+        before_activation.phase,
+        FailedCodeReviewRecoveryPhase::GateResolved
+    );
+    assert!(before_activation.runner_started_at.is_none());
+    assert!(before_activation.completed_at.is_none());
+
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    let run_id = reservation
+        .activate(command_tx)
+        .expect("activate reserved runner");
+    fixture
+        .store
+        .complete_failed_code_review_recovery_journal(&updated.id, &gate_id)
+        .expect("complete recovery journal after activation");
+
+    let completed = fixture
+        .store
+        .get_failed_code_review_recovery_journal(
+            &updated.project_id,
+            &updated.issue_id,
+            &updated.id,
+        )
+        .expect("completed journal")
+        .expect("recovery journal");
+    assert_eq!(completed.phase, FailedCodeReviewRecoveryPhase::Completed);
+    assert!(completed.runner_started_at.is_some());
+    assert!(completed.completed_at.is_some());
+    let state = build_coding_session_state(&fixture.store, updated)
+        .expect("session state after journal completion");
+    let CodingWsOutMessage::CodingSessionState { pending_gates, .. } = state else {
+        panic!("expected coding session state");
+    };
+    assert!(pending_gates.iter().all(|gate| gate.gate_id != gate_id));
+    registry.remove(&fixture.attempt.id, run_id);
+}
+
+#[test]
+fn failed_review_recovery_supersedes_the_journal_stale_run_not_the_latest_run() {
+    let fixture =
+        failed_review_fixture(CodingAttemptScope::WorkItemGroup, FixtureCase::Recoverable);
+    let recovery = recoverable_failed_code_review(&fixture.store, &fixture.attempt)
+        .expect("recoverable failed review")
+        .expect("recovery identity");
+    let journal = fixture
+        .store
+        .prepare_failed_code_review_recovery_journal(
+            &fixture.attempt,
+            &recovery.gate_id,
+            &recovery.failed_node_id,
+            &recovery.stale_role_run_id,
+        )
+        .expect("prepare recovery journal");
+    let reopened = fixture
+        .store
+        .reopen_failed_code_review_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("reopen failed review attempt");
+    let unrelated_latest = fixture
+        .store
+        .create_role_run(
+            &reopened,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0008".to_string()),
+        )
+        .expect("newer unrelated reviewer run");
+
+    let retry = fixture
+        .store
+        .ensure_failed_code_review_retry_role_run(&reopened, &journal)
+        .expect("ensure stable retry reviewer run");
+
+    let runs = fixture
+        .store
+        .list_role_runs(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("role runs after precise supersede");
+    let stale = runs
+        .iter()
+        .find(|run| run.id == recovery.stale_role_run_id)
+        .expect("journal stale run");
+    let unrelated = runs
+        .iter()
+        .find(|run| run.id == unrelated_latest.id)
+        .expect("unrelated latest run");
+    assert_eq!(stale.status, CodingRoleRunStatus::Superseded);
+    assert_eq!(
+        stale.superseded_by_run_id.as_deref(),
+        Some(retry.id.as_str())
+    );
+    assert_eq!(unrelated.status, CodingRoleRunStatus::Running);
+    assert_eq!(retry.supersedes_run_id.as_deref(), Some(stale.id.as_str()));
 }
 
 #[test]
@@ -375,19 +695,55 @@ fn failed_review_websocket_guard_allows_only_the_exact_retry_gate_request() {
 }
 
 #[test]
-fn failed_review_recovery_refuses_to_duplicate_an_active_runner() {
-    let registry = CodingRunRegistry::default();
-    assert!(!failed_review_recovery_runner_is_active(
-        &registry,
-        "coding_attempt_0001"
-    ));
-    let (command_tx, _command_rx) = mpsc::channel(1);
-    registry.insert("coding_attempt_0001".to_string(), command_tx);
+fn failed_review_recovery_reservation_is_atomic_and_releasable() {
+    let registry = Arc::new(CodingRunRegistry::default());
+    let barrier = Arc::new(Barrier::new(3));
+    let attempts = (0..2)
+        .map(|_| {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                registry.try_reserve_attempt("coding_attempt_0001")
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let reservations = attempts
+        .into_iter()
+        .map(|attempt| attempt.join().expect("reservation thread"))
+        .collect::<Vec<_>>();
 
-    assert!(failed_review_recovery_runner_is_active(
-        &registry,
-        "coding_attempt_0001"
-    ));
+    assert_eq!(
+        reservations
+            .iter()
+            .filter(|reservation| reservation.is_some())
+            .count(),
+        1
+    );
+    assert!(registry.attempt_is_reserved_or_running("coding_attempt_0001"));
+    drop(reservations);
+    assert!(!registry.attempt_is_reserved_or_running("coding_attempt_0001"));
+
+    let reservation = registry
+        .try_reserve_attempt("coding_attempt_0001")
+        .expect("reservation after release");
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    let run_id = reservation
+        .activate(command_tx)
+        .expect("activate reserved runner");
+    assert_eq!(registry.runner_count("coding_attempt_0001"), 1);
+    assert!(
+        registry
+            .try_reserve_attempt("coding_attempt_0001")
+            .is_none()
+    );
+    registry.remove("coding_attempt_0001", run_id);
+    assert!(
+        registry
+            .try_reserve_attempt("coding_attempt_0001")
+            .is_some()
+    );
 }
 
 fn attempt_data_fingerprint(attempt: &CodingExecutionAttempt) -> serde_json::Value {
