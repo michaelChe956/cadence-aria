@@ -66,6 +66,7 @@ use crate::web::workspace_ws_types::{
 
 mod code_review;
 mod coding;
+mod failed_review_recovery;
 mod gates;
 mod group;
 mod handoffs;
@@ -152,6 +153,8 @@ pub(crate) fn extract_json_object(output: &str) -> Option<&str> {
     None
 }
 
+#[allow(unused_imports)]
+pub(crate) use failed_review_recovery::{FailedCodeReviewRecovery, recoverable_failed_code_review};
 #[allow(unused_imports)]
 pub(crate) use gates::*;
 #[allow(unused_imports)]

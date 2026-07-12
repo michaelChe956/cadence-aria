@@ -26,6 +26,8 @@ use super::{
     should_resume_runner_after_gate_response,
 };
 
+mod failed_review_recovery;
+
 #[test]
 fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
     let session = WorkspaceSessionRecord {
