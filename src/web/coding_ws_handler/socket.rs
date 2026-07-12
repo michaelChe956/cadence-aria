@@ -207,13 +207,25 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         .await;
                         continue;
                     }
-                    runner_started = true;
-                    runner_command_tx = Some(spawn_coding_runner(
+                    let Some(command_tx) = spawn_coding_runner(
                         state.clone(),
                         coding_store.clone(),
                         event_tx.clone(),
                         current_attempt.clone(),
-                    ));
+                    ) else {
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_runner_already_started".to_string(),
+                                message: "coding runner is already active for this attempt"
+                                    .to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    };
+                    runner_started = true;
+                    runner_command_tx = Some(command_tx);
                 } else if inbound == CodingWsInMessage::FinalConfirm {
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
@@ -340,21 +352,21 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
-                    if should_resume_runner_after_gate_response(&action_id, &current_attempt) {
-                        runner_started = true;
-                        if let Ok(updated) = coding_store.get_attempt(
+                    if should_resume_runner_after_gate_response(&action_id, &current_attempt)
+                        && let Ok(updated) = coding_store.get_attempt(
                             &current_attempt.project_id,
                             &current_attempt.issue_id,
                             &current_attempt.id,
                         ) && updated.status == CodingAttemptStatus::Running
-                        {
-                            runner_command_tx = Some(spawn_coding_runner(
-                                state.clone(),
-                                coding_store.clone(),
-                                event_tx.clone(),
-                                updated,
-                            ));
-                        }
+                        && let Some(command_tx) = spawn_coding_runner(
+                            state.clone(),
+                            coding_store.clone(),
+                            event_tx.clone(),
+                            updated,
+                        )
+                    {
+                        runner_started = true;
+                        runner_command_tx = Some(command_tx);
                     }
                 } else if let CodingWsInMessage::ProviderSelect { role, provider } = inbound {
                     if let Some(command_tx) = runner_command_tx.as_ref() {

@@ -35,6 +35,7 @@ struct CodingRunRegistryInner {
     next_run_id: u64,
     runs: HashMap<String, HashMap<u64, mpsc::Sender<CodingRunnerCommand>>>,
     reservations: HashMap<String, u64>,
+    exclusive_runs: HashMap<String, u64>,
 }
 
 pub struct CodingRunReservation {
@@ -60,6 +61,9 @@ impl CodingRunReservation {
             .entry(self.attempt_id.clone())
             .or_default()
             .insert(self.reservation_id, command_tx);
+        inner
+            .exclusive_runs
+            .insert(self.attempt_id.clone(), self.reservation_id);
         self.released = true;
         Some(self.reservation_id)
     }
@@ -81,8 +85,17 @@ impl Drop for CodingRunReservation {
 }
 
 impl CodingRunRegistry {
-    pub fn insert(&self, attempt_id: String, command_tx: mpsc::Sender<CodingRunnerCommand>) -> u64 {
+    pub fn insert(
+        &self,
+        attempt_id: String,
+        command_tx: mpsc::Sender<CodingRunnerCommand>,
+    ) -> Option<u64> {
         let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner.reservations.contains_key(&attempt_id)
+            || inner.exclusive_runs.contains_key(&attempt_id)
+        {
+            return None;
+        }
         inner.next_run_id += 1;
         let run_id = inner.next_run_id;
         inner
@@ -90,11 +103,14 @@ impl CodingRunRegistry {
             .entry(attempt_id)
             .or_default()
             .insert(run_id, command_tx);
-        run_id
+        Some(run_id)
     }
 
     pub fn remove(&self, attempt_id: &str, run_id: u64) {
         let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner.exclusive_runs.get(attempt_id) == Some(&run_id) {
+            inner.exclusive_runs.remove(attempt_id);
+        }
         if let Some(runs) = inner.runs.get_mut(attempt_id) {
             runs.remove(&run_id);
             if runs.is_empty() {
@@ -107,6 +123,7 @@ impl CodingRunRegistry {
         let senders = {
             let mut inner = self.inner.lock().expect("coding run registry lock");
             inner.reservations.remove(attempt_id);
+            inner.exclusive_runs.remove(attempt_id);
             inner
                 .runs
                 .remove(attempt_id)
@@ -410,9 +427,15 @@ mod tests {
         let (second_tx, mut second_rx) = mpsc::channel(1);
         let (other_tx, mut other_rx) = mpsc::channel(1);
 
-        registry.insert("coding_attempt_0001".to_string(), first_tx);
-        registry.insert("coding_attempt_0001".to_string(), second_tx);
-        registry.insert("coding_attempt_0002".to_string(), other_tx);
+        registry
+            .insert("coding_attempt_0001".to_string(), first_tx)
+            .expect("first runner");
+        registry
+            .insert("coding_attempt_0001".to_string(), second_tx)
+            .expect("second runner");
+        registry
+            .insert("coding_attempt_0002".to_string(), other_tx)
+            .expect("other runner");
 
         assert_eq!(registry.runner_count("coding_attempt_0001"), 2);
         assert_eq!(registry.abort_attempt("coding_attempt_0001").await, 2);

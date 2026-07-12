@@ -30,9 +30,12 @@ pub(crate) fn recoverable_failed_code_review(
         &attempt.issue_id,
         &attempt.id,
     )? {
-        if journal.is_completed()
-            || !journal_recovery_prefix_is_valid(coding_store, attempt, &journal)?
-        {
+        let valid = if journal.is_completed() {
+            completed_journal_waits_for_retry_node(coding_store, attempt, &journal)?
+        } else {
+            journal_recovery_prefix_is_valid(coding_store, attempt, &journal)?
+        };
+        if !valid {
             return Ok(None);
         }
         return Ok(Some(FailedCodeReviewRecovery {
@@ -138,7 +141,7 @@ impl CodingWorkspaceEngine {
                 &current.issue_id,
                 &current.id,
             )? {
-            if existing.is_completed() || existing.expected_gate_id != gate_id {
+            if existing.expected_gate_id != gate_id {
                 return Err(recovery_state_changed());
             }
             existing
@@ -261,9 +264,7 @@ fn failed_review_gate_attempts(
                 let attempt = coding_store.get_attempt(project_id, issue_id, attempt_id)?;
                 let matching_journal = coding_store
                     .get_failed_code_review_recovery_journal(project_id, issue_id, attempt_id)?
-                    .is_some_and(|journal| {
-                        !journal.is_completed() && journal.expected_gate_id == gate_id
-                    });
+                    .is_some_and(|journal| journal.expected_gate_id == gate_id);
                 if open_gate_exists || matching_journal {
                     attempts.push(attempt);
                 }
@@ -271,6 +272,53 @@ fn failed_review_gate_attempts(
         }
     }
     Ok(attempts)
+}
+
+fn completed_journal_waits_for_retry_node(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    journal: &FailedCodeReviewRecoveryJournal,
+) -> Result<bool, CodingWorkspaceEngineError> {
+    if journal.attempt_id != attempt.id
+        || journal.project_id != attempt.project_id
+        || journal.issue_id != attempt.issue_id
+        || attempt.status != CodingAttemptStatus::Running
+        || attempt.stage != CodingExecutionStage::CodeReview
+        || attempt.completed_at.is_some()
+        || !attempt_execution_fingerprint_is_valid(coding_store, attempt)?
+    {
+        return Ok(false);
+    }
+    let Some(retry_role_run_id) = journal.retry_role_run_id.as_deref() else {
+        return Ok(false);
+    };
+    let retry = coding_store.get_role_run(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+        retry_role_run_id,
+    )?;
+    if retry.stage != CodingExecutionStage::CodeReview
+        || retry.role != CodingProviderRole::CodeReviewer
+        || retry.status != CodingRoleRunStatus::Running
+        || retry.trigger != CodingRoleRunTrigger::RetryReview
+        || retry.node_id.is_some()
+        || retry.supersedes_run_id.as_deref() != Some(journal.expected_stale_role_run_id.as_str())
+        || retry.reason_code.as_deref() != Some(journal.recovery_key.as_str())
+    {
+        return Ok(false);
+    }
+    let stale = coding_store.get_role_run(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+        &journal.expected_stale_role_run_id,
+    )?;
+    Ok(stale.stage == CodingExecutionStage::CodeReview
+        && stale.role == CodingProviderRole::CodeReviewer
+        && stale.status == CodingRoleRunStatus::Superseded
+        && stale.node_id.as_deref() == Some(journal.expected_failed_node_id.as_str())
+        && stale.superseded_by_run_id.as_deref() == Some(retry.id.as_str()))
 }
 
 fn journal_recovery_prefix_is_valid(
