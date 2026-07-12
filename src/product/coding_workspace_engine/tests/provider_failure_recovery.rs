@@ -184,4 +184,128 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
         shared.current_active_work_item_id.as_deref(),
         Some(WORK_ITEM_ID)
     );
+
+    let missing_context_error = engine
+        .handle_blocked_gate_response(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt.id,
+            &recovery_gate.gate_id,
+            "send_to_coder",
+            Some("   ".to_string()),
+        )
+        .await
+        .expect_err("operator context is required");
+    assert!(matches!(
+        missing_context_error,
+        CodingWorkspaceEngineError::ProviderStream(ref message)
+            if message == "coding_gate_extra_context_required"
+    ));
+
+    let operator_context = "请 Coder 检查权限请求超时前未完成的改动并继续修复";
+    let resumed = engine
+        .handle_blocked_gate_response(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt.id,
+            &recovery_gate.gate_id,
+            "send_to_coder",
+            Some(operator_context.to_string()),
+        )
+        .await
+        .expect("send interrupted review to coder");
+    assert_eq!(resumed.status, CodingAttemptStatus::Running);
+    assert_eq!(resumed.stage, CodingExecutionStage::Coding);
+    assert_eq!(resumed.rework_count, 1);
+    assert!(
+        store
+            .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("resolved recovery gate")
+            .is_empty()
+    );
+    let notes = store
+        .list_context_notes(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("context notes");
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].content, operator_context);
+    let instructions = store
+        .list_rework_instructions(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("rework instructions");
+    assert_eq!(instructions.len(), 1);
+    assert_eq!(
+        instructions[0].source_stage,
+        CodingExecutionStage::CodeReview
+    );
+    assert_eq!(instructions[0].rework_round, 1);
+    assert_eq!(instructions[0].summary, operator_context);
+}
+
+#[tokio::test]
+async fn internal_review_blocked_gate_uses_internal_review_retry_action() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("attempt");
+    let attempt = store
+        .update_attempt_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt");
+    let attempt = store
+        .update_attempt_stage(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt.id,
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("internal review stage");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    engine
+        .create_review_blocked_gate(ReviewBlockedGateInput {
+            attempt: &attempt,
+            node_id: "coding_node_0010",
+            stage: CodingExecutionStage::InternalPrReview,
+            role: CodingProviderRole::InternalReviewer,
+            title: "Internal PR review blocked".to_string(),
+            description: "review interrupted".to_string(),
+            reason_code: "internal_review_blocked",
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+        })
+        .await
+        .expect("internal review blocked gate");
+
+    let gate = store
+        .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("open gates")
+        .into_iter()
+        .next()
+        .expect("internal review gate");
+    assert_eq!(
+        gate.available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["retry_internal_review", "send_to_coder", "abort"]
+    );
+    assert_eq!(gate.available_actions[0].label, "重试 Internal Review");
 }

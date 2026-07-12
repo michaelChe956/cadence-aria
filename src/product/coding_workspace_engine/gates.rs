@@ -28,6 +28,18 @@ impl CodingWorkspaceEngine {
             evidence_refs,
             raw_provider_output_ref,
         } = input;
+        let retry_action = match stage {
+            CodingExecutionStage::CodeReview => CodingGateAction {
+                action_id: "retry_review".to_string(),
+                label: "重试代码审查".to_string(),
+                action_type: CodingGateActionType::RetryReview,
+            },
+            CodingExecutionStage::InternalPrReview => {
+                coding_gate_action_for_id("retry_internal_review")
+                    .expect("retry internal review action")
+            }
+            _ => coding_gate_action_for_id("retry_review").expect("retry review action"),
+        };
         let updated = self.store.update_attempt_status(
             &attempt.project_id,
             &attempt.issue_id,
@@ -45,7 +57,7 @@ impl CodingWorkspaceEngine {
             evidence_refs,
             raw_provider_output_ref,
             available_actions: vec![
-                coding_gate_action_for_id("retry_review").expect("retry review action"),
+                retry_action,
                 coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ],
@@ -655,7 +667,9 @@ impl CodingWorkspaceEngine {
                 )?
             }
             CodingGateActionType::SendToCoder => {
-                if is_code_review_blocked_gate(&gate) {
+                if is_code_review_provider_interrupted_gate(&gate) {
+                    self.send_interrupted_code_review_to_coder(&current, extra_context)?
+                } else if is_code_review_blocked_gate(&gate) {
                     self.send_code_review_feedback_to_coder(&current, extra_context)?
                 } else {
                     self.send_review_limit_feedback_to_coder(&current, extra_context)?
@@ -728,6 +742,70 @@ impl CodingWorkspaceEngine {
         Ok(updated)
     }
 
+    pub(crate) fn send_interrupted_code_review_to_coder(
+        &self,
+        current: &CodingExecutionAttempt,
+        extra_context: Option<String>,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if current.stage != CodingExecutionStage::CodeReview
+            || current.status != CodingAttemptStatus::Blocked
+        {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "send_to_coder_not_available".to_string(),
+            ));
+        }
+
+        let operator_context = extra_context
+            .map(|content| content.trim().to_string())
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "coding_gate_extra_context_required".to_string(),
+                )
+            })?;
+        self.store
+            .create_context_note(&current.id, operator_context.clone())?;
+
+        let existing = self.store.list_rework_instructions(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+        )?;
+        self.store
+            .save_rework_instruction(&CodingReworkInstruction {
+                id: next_sequential_id("coding_rework_instruction", existing.len()),
+                attempt_id: current.id.clone(),
+                source_stage: CodingExecutionStage::CodeReview,
+                rework_round: current.rework_count + 1,
+                summary: operator_context,
+                fix_hints: Vec::new(),
+                questions: Vec::new(),
+                created_at: Utc::now().to_rfc3339(),
+                consumed_by_node_id: None,
+                consumed_at: None,
+            })?;
+
+        let running = self.store.update_attempt_status(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+            CodingAttemptStatus::Running,
+        )?;
+        let coding_attempt = self.store.update_attempt_stage(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingExecutionStage::Coding,
+        )?;
+        self.store
+            .increment_attempt_rework_count(
+                &coding_attempt.project_id,
+                &coding_attempt.issue_id,
+                &coding_attempt.id,
+            )
+            .map_err(CodingWorkspaceEngineError::from)
+    }
+
     pub(crate) fn latest_missing_required_steps(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -785,6 +863,12 @@ impl CodingWorkspaceEngine {
 
 fn is_code_review_blocked_gate(gate: &CodingGateRequired) -> bool {
     gate.reason_code.as_deref() == Some("code_review_blocked")
+        && gate.stage == Some(CodingExecutionStage::CodeReview)
+        && gate.role == Some(CodingProviderRole::CodeReviewer)
+}
+
+fn is_code_review_provider_interrupted_gate(gate: &CodingGateRequired) -> bool {
+    gate.reason_code.as_deref() == Some("code_review_provider_interrupted")
         && gate.stage == Some(CodingExecutionStage::CodeReview)
         && gate.role == Some(CodingProviderRole::CodeReviewer)
 }

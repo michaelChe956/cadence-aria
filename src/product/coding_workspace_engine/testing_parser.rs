@@ -357,7 +357,7 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
         }),
         "retry_review" => Some(CodingGateAction {
             action_id: "retry_review".to_string(),
-            label: "重试代码审查".to_string(),
+            label: "重试审查".to_string(),
             action_type: CodingGateActionType::RetryReview,
         }),
         "retry_internal_review" => Some(CodingGateAction {
