@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ProviderErrorCode {
     ProviderCommandMissing,
+    ProviderUnavailable,
     ProviderUnauthorized,
     ProviderPermissionDenied,
     ProviderIncompatibleOutput,
@@ -16,6 +17,7 @@ impl ProviderErrorCode {
     pub fn as_str(&self) -> &'static str {
         match self {
             ProviderErrorCode::ProviderCommandMissing => "provider_command_missing",
+            ProviderErrorCode::ProviderUnavailable => "provider_unavailable",
             ProviderErrorCode::ProviderUnauthorized => "provider_unauthorized",
             ProviderErrorCode::ProviderPermissionDenied => "provider_permission_denied",
             ProviderErrorCode::ProviderIncompatibleOutput => "provider_incompatible_output",
@@ -44,7 +46,9 @@ pub fn route_provider_error(
         ProviderErrorCode::ProviderCommandMissing
         | ProviderErrorCode::ProviderUnauthorized
         | ProviderErrorCode::ProviderPermissionDenied => ProviderErrorRoute::ManualIntervention,
-        ProviderErrorCode::ProviderIncompatibleOutput => ProviderErrorRoute::Gate,
+        ProviderErrorCode::ProviderUnavailable | ProviderErrorCode::ProviderIncompatibleOutput => {
+            ProviderErrorRoute::Gate
+        }
         ProviderErrorCode::ProviderTimeout => {
             if retry_count < max_retries {
                 ProviderErrorRoute::Retry
@@ -60,5 +64,22 @@ pub fn route_provider_error(
             }
         }
         ProviderErrorCode::ProviderExecutionFailed => ProviderErrorRoute::FailureRoute,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_unavailable_routes_to_gate_without_retry_or_fallback() {
+        assert_eq!(
+            route_provider_error(&ProviderErrorCode::ProviderUnavailable, 0, 3),
+            ProviderErrorRoute::Gate
+        );
+        assert_eq!(
+            ProviderErrorCode::ProviderUnavailable.as_str(),
+            "provider_unavailable"
+        );
     }
 }

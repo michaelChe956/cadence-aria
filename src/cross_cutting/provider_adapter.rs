@@ -32,6 +32,10 @@ impl ProviderAdapterError {
         Self::new(ProviderErrorCode::ProviderCommandMissing, details)
     }
 
+    pub fn provider_unavailable(details: impl Into<String>) -> Self {
+        Self::new(ProviderErrorCode::ProviderUnavailable, details)
+    }
+
     pub fn unauthorized(
         details: impl Into<String>,
         stdout: impl Into<String>,

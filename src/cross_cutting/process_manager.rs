@@ -28,11 +28,34 @@ impl ProcessManager {
         env_vars: &BTreeMap<String, String>,
         _cancel: CancellationToken,
     ) -> Result<ManagedProcess, ProviderAdapterError> {
+        Self::spawn_with_environment(command, args, working_dir, env_vars, true).await
+    }
+
+    pub async fn spawn_isolated(
+        command: &str,
+        args: &[&str],
+        working_dir: &Path,
+        env_vars: &BTreeMap<String, String>,
+        _cancel: CancellationToken,
+    ) -> Result<ManagedProcess, ProviderAdapterError> {
+        Self::spawn_with_environment(command, args, working_dir, env_vars, false).await
+    }
+
+    async fn spawn_with_environment(
+        command: &str,
+        args: &[&str],
+        working_dir: &Path,
+        env_vars: &BTreeMap<String, String>,
+        inherit_environment: bool,
+    ) -> Result<ManagedProcess, ProviderAdapterError> {
         if !command_is_resolvable(command, working_dir, env_vars) {
             return Err(command_missing(command));
         }
 
         let mut command_builder = Command::new(command);
+        if !inherit_environment {
+            command_builder.env_clear();
+        }
         command_builder
             .args(args)
             .current_dir(working_dir)
