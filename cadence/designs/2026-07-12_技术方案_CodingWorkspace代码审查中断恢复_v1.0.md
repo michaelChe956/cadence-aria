@@ -73,7 +73,7 @@ Code Review Provider 失败后将 Attempt 转为 `blocked`，创建带 `retry_re
 
 1. Gate 必须处于 open 状态，stage 为 `code_review`，action 为 `retry_review`。
 2. Attempt 必须是 `blocked`，或满足第 6 节定义的可恢复历史 `failed` 状态。
-3. 当前不能存在 running Reviewer Role Run。
+3. 当前不能存在仍由运行注册表持有的 Reviewer Run。若持久化 Role Run 仍为 `running`，但它绑定的 Timeline Node 已是 `failed`，则视为旧故障路径留下的僵尸记录，允许在恢复时 supersede。
 4. active Unit 必须仍是 `running`，共享 worktree 路径必须存在。
 5. 将 Attempt 更新为 `running + code_review`。
 6. supersede 上一个失败 Reviewer Role Run，创建 trigger 为 `retry_review` 的新 Role Run。
@@ -93,15 +93,16 @@ Code Review Provider 失败后将 Attempt 转为 `blocked`，创建带 `retry_re
 - 不存在更新的 completed Code Review Node；
 - Attempt 没有 `completed_at` 之后的新业务执行；
 - 共享 worktree 存在；
-- 没有正在运行的 Reviewer Role Run。
+- 不存在仍由运行注册表持有的 Reviewer Run；允许最新持久化 Reviewer Role Run 为 `running`，但仅限其 `node_id` 精确绑定最新失败 Code Review Node 的历史僵尸记录。
 
 SessionState 重建时，若只存在 `shared_worktree_dirty_manual_gate`，后端输出一个派生的 Code Review 恢复 Gate，不直接修改持久化文件。用户首次点击 `retry_review` 时，在单个后端事务式流程中：
 
 1. 校验上述历史状态仍未变化；
 2. 关闭或 supersede `shared_worktree_dirty_manual_gate`；
 3. 清除终态完成时间；
-4. 将 Attempt 恢复为 `running + code_review`；
-5. 创建新的 Reviewer Role Run并启动 Runner。
+4. 若旧 Reviewer Role Run 是与失败 Node 绑定的僵尸 `running` 记录，将其 supersede；
+5. 将 Attempt 恢复为 `running + code_review`；
+6. 创建新的 Reviewer Role Run并启动 Runner。
 
 该兼容路径只允许 Code Review 恢复，不能把任意 failed Attempt 通用地重新打开。
 
@@ -143,7 +144,7 @@ SessionState 重建时，若只存在 `shared_worktree_dirty_manual_gate`，后�
 - 恢复 Gate 已失效；
 - Attempt 状态已变化；
 - active Unit 已变化或不存在；
-- Reviewer Run 已在运行；
+- Reviewer Run 仍由运行注册表持有，或持久化 `running` Role Run 未绑定最新失败 Node；
 - 共享 worktree 不存在；
 - 当前 Failed Attempt 不符合历史恢复条件。
 
@@ -157,6 +158,7 @@ SessionState 重建时，若只存在 `shared_worktree_dirty_manual_gate`，后�
 - 创建的 Gate 包含 `retry_review`、`send_to_coder`、`abort`。
 - 失败时不释放 active work item lock，不创建 dirty cleanup Gate。
 - `retry_review` 保留 active Unit 和 worktree，supersede 旧 Reviewer Role Run。
+- 新失败路径会把失败 Reviewer Role Run 持久化为 `failed`；历史恢复允许 supersede 与失败 Node 绑定的僵尸 `running` Role Run。
 - 重复 `retry_review` 不创建第二个 Role Run。
 
 ### 10.2 历史状态恢复
