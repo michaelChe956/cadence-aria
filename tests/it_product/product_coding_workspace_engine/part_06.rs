@@ -100,8 +100,27 @@ async fn code_review_provider_start_failure_marks_attempt_blocked_and_node_faile
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Failed);
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
     assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
+        .expect("open blocked gates");
+    assert_eq!(gates.len(), 1);
+    let gate = &gates[0];
+    assert_eq!(gate.stage, Some(CodingExecutionStage::CodeReview));
+    assert_eq!(gate.role, Some(CodingProviderRole::CodeReviewer));
+    assert_eq!(
+        gate.reason_code.as_deref(),
+        Some("code_review_provider_interrupted")
+    );
+    assert_eq!(
+        gate.available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["retry_review", "send_to_coder", "abort"]
+    );
+    assert_eq!(gate.available_actions[0].label, "重试代码审查");
     let nodes = store
         .get_timeline_nodes("project_0001", "issue_0001", &attempt.id)
         .expect("timeline nodes");
