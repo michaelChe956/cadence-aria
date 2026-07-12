@@ -1,10 +1,15 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingProviderRole, CodingRoleRunStatus, CodingTimelineNodeStatus,
+    CodingExecutionUnitStatus, CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingTimelineNodeStatus,
 };
+use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
-use super::CodingWorkspaceEngineError;
+use super::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FailedCodeReviewRecovery {
@@ -98,4 +103,143 @@ pub(crate) fn recoverable_failed_code_review(
         failed_node_id: failed_node.id,
         stale_role_run_id: stale_role_run.id,
     }))
+}
+
+impl CodingWorkspaceEngine {
+    pub async fn recover_failed_code_review(
+        &self,
+        gate_id: &str,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let candidates = failed_review_gate_attempts(&self.store, gate_id)?;
+        let mut recoverable = Vec::new();
+        for candidate in candidates {
+            let current = self.store.get_attempt(
+                &candidate.project_id,
+                &candidate.issue_id,
+                &candidate.id,
+            )?;
+            if matches!(
+                recoverable_failed_code_review(&self.store, &current)?,
+                Some(recovery) if recovery.gate_id == gate_id
+            ) {
+                recoverable.push(current);
+            }
+        }
+        if recoverable.len() != 1 {
+            return Err(recovery_state_changed());
+        }
+        self.recover_failed_code_review_for_attempt(&recoverable[0].id, gate_id)
+            .await
+    }
+
+    pub(crate) async fn recover_failed_code_review_for_attempt(
+        &self,
+        attempt_id: &str,
+        gate_id: &str,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        validate_relative_id(gate_id)?;
+        let located = self.store.get_attempt_by_id(attempt_id)?;
+        let current =
+            self.store
+                .get_attempt(&located.project_id, &located.issue_id, &located.id)?;
+        let Some(recovery) = recoverable_failed_code_review(&self.store, &current)? else {
+            return Err(recovery_state_changed());
+        };
+        if recovery.gate_id != gate_id {
+            return Err(recovery_state_changed());
+        }
+
+        let reopened = self.store.reopen_failed_code_review_attempt(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+        )?;
+        self.store.supersede_latest_role_run_and_create(
+            &reopened,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::RetryReview,
+            None,
+            Some("failed_code_review_recoverable".to_string()),
+        )?;
+        self.store.update_attempt_status(
+            &reopened.project_id,
+            &reopened.issue_id,
+            &reopened.id,
+            CodingAttemptStatus::Running,
+        )?;
+        self.store.resolve_blocked_gate(
+            &reopened.project_id,
+            &reopened.issue_id,
+            &reopened.id,
+            &recovery.gate_id,
+        )?;
+        Ok(self
+            .store
+            .get_attempt(&reopened.project_id, &reopened.issue_id, &reopened.id)?)
+    }
+}
+
+fn failed_review_gate_attempts(
+    coding_store: &CodingAttemptStore,
+    gate_id: &str,
+) -> Result<Vec<CodingExecutionAttempt>, ProductStoreError> {
+    validate_relative_id(gate_id)?;
+    let mut attempts = Vec::new();
+    for project_path in child_directories(&coding_store.paths().projects_root())? {
+        let Some(project_id) = project_path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        for issue_path in child_directories(&project_path.join("issues"))? {
+            let Some(issue_id) = issue_path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let attempts_root = issue_path.join("coding-attempts");
+            for attempt_path in child_directories(&attempts_root)? {
+                let Some(attempt_id) = attempt_path.file_name().and_then(|value| value.to_str())
+                else {
+                    continue;
+                };
+                if attempt_path
+                    .join("blocked-gates")
+                    .join(format!("{gate_id}.json"))
+                    .is_file()
+                {
+                    attempts.push(coding_store.get_attempt(project_id, issue_id, attempt_id)?);
+                }
+            }
+        }
+    }
+    Ok(attempts)
+}
+
+fn child_directories(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut directories = Vec::new();
+    for entry in fs::read_dir(path)
+        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
+    {
+        let entry = entry.map_err(|error| {
+            ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
+        })?;
+        if entry
+            .file_type()
+            .map_err(|error| {
+                ProductStoreError::Io(format!("read {} type: {error}", entry.path().display()))
+            })?
+            .is_dir()
+        {
+            directories.push(entry.path());
+        }
+    }
+    directories.sort();
+    Ok(directories)
+}
+
+fn recovery_state_changed() -> CodingWorkspaceEngineError {
+    CodingWorkspaceEngineError::ProviderStream(
+        "coding_failed_review_recovery_state_changed".to_string(),
+    )
 }

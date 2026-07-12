@@ -8,16 +8,18 @@ use tokio::sync::mpsc;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
-use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+use crate::product::coding_workspace_engine::{
+    CodingWorkspaceEngine, recoverable_failed_code_review,
+};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::WebAppState;
 
 use super::{
     CodingWsInMessage, CodingWsOutMessage, build_coding_session_state, confirm_open_stage_gate,
-    context_note_chat_entry, provider_selection_targets_current_running_stage,
-    should_resume_runner_after_gate_response, spawn_coding_runner, update_provider_permission_mode,
-    update_provider_selection,
+    context_note_chat_entry, failed_review_recovery_runner_is_active,
+    provider_selection_targets_current_running_stage, should_resume_runner_after_gate_response,
+    spawn_coding_runner, update_provider_permission_mode, update_provider_selection,
 };
 
 pub(crate) type CodingWsSender = SplitSink<WebSocket, Message>;
@@ -97,11 +99,16 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                 let Ok(current_attempt) = coding_store.get_attempt_by_id(&attempt_id) else {
                     break;
                 };
+                let failed_review_recovery = failed_code_review_recovery_request(
+                    &coding_store,
+                    &current_attempt,
+                    &inbound,
+                );
                 if !is_coding_ws_message_allowed(
                     &current_attempt.status,
                     &current_attempt.stage,
                     &inbound,
-                ) {
+                ) && !failed_review_recovery {
                     let _ = send_coding_json(
                         &mut socket_tx,
                         &CodingWsOutMessage::CodingProtocolError {
@@ -112,7 +119,67 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     .await;
                     continue;
                 }
-                if inbound == CodingWsInMessage::StartCoding {
+                if failed_review_recovery {
+                    if failed_review_recovery_runner_is_active(
+                        &state.coding_runs,
+                        &current_attempt.id,
+                    ) {
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_recovery_already_active".to_string(),
+                                message: "coding runner is already active for failed review recovery"
+                                    .to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                    let CodingWsInMessage::GateResponse { gate_id, .. } = &inbound else {
+                        unreachable!("failed review recovery guard only accepts gate responses");
+                    };
+                    let engine = CodingWorkspaceEngine::new(
+                        coding_store.clone(),
+                        GitWorkspaceService::new(),
+                        event_tx.clone(),
+                    );
+                    let updated = match engine
+                        .recover_failed_code_review_for_attempt(&current_attempt.id, gate_id)
+                        .await
+                    {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            let code = if error
+                                .to_string()
+                                .contains("coding_failed_review_recovery_state_changed")
+                            {
+                                "coding_recovery_state_changed"
+                            } else {
+                                "coding_failed_review_recovery_failed"
+                            };
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: code.to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    runner_started = true;
+                    runner_command_tx = Some(spawn_coding_runner(
+                        state.clone(),
+                        coding_store.clone(),
+                        event_tx.clone(),
+                        updated.clone(),
+                    ));
+                    if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
+                    continue;
+                } else if inbound == CodingWsInMessage::StartCoding {
                     if runner_started {
                         let _ = send_coding_json(
                             &mut socket_tx,
@@ -546,6 +613,26 @@ pub(crate) async fn send_coding_json(
         Ok(json) => socket.send(Message::Text(json.into())).await.is_ok(),
         Err(_) => false,
     }
+}
+
+pub(crate) fn failed_code_review_recovery_request(
+    coding_store: &CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    message: &CodingWsInMessage,
+) -> bool {
+    let CodingWsInMessage::GateResponse {
+        gate_id, action_id, ..
+    } = message
+    else {
+        return false;
+    };
+    if action_id != "retry_review" {
+        return false;
+    }
+    matches!(
+        recoverable_failed_code_review(coding_store, attempt),
+        Ok(Some(recovery)) if recovery.gate_id == *gate_id
+    )
 }
 
 pub fn is_coding_ws_message_allowed(

@@ -1,4 +1,7 @@
 use std::fs;
+use std::process::Command;
+
+use tokio::sync::mpsc;
 
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CreateBlockedGateInput, CreateCodingExecutionUnitInput,
@@ -9,6 +12,13 @@ use crate::product::coding_models::{
     CodingGateRequired, CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger,
     CodingTimelineNode, CodingTimelineNodeStatus,
 };
+use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+use crate::product::git_workspace_service::GitWorkspaceService;
+use crate::web::coding_ws_handler::socket::failed_code_review_recovery_request;
+use crate::web::coding_ws_handler::{
+    CodingWsInMessage, failed_review_recovery_runner_is_active, is_coding_ws_message_allowed,
+};
+use crate::web::state::CodingRunRegistry;
 
 use super::{CodingWsOutMessage, build_coding_session_state, seed_compiled_work_item_fixture};
 
@@ -107,6 +117,312 @@ fn failed_review_recovery_requires_the_complete_historical_shape() {
             .iter()
             .all(|gate| gate.reason_code.as_deref() != Some("failed_code_review_recoverable"))
     );
+}
+
+#[tokio::test]
+async fn failed_code_review_is_recovered_in_place_without_changing_execution_fingerprints() {
+    let fixture =
+        failed_review_fixture(CodingAttemptScope::WorkItemGroup, FixtureCase::Recoverable);
+    let dirty_gate = fixture.dirty_gate.clone().expect("dirty gate");
+    let attempt_before = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("attempt before recovery");
+    let units_before = fixture
+        .store
+        .list_coding_units(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("units before recovery");
+    let worktree_status_before = git_status_porcelain(
+        fixture
+            .attempt
+            .worktree_path
+            .as_deref()
+            .expect("worktree path"),
+    );
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+
+    let updated = engine
+        .recover_failed_code_review(&dirty_gate.gate_id)
+        .await
+        .expect("recover failed review");
+
+    assert_eq!(updated.id, attempt_before.id);
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(updated.completed_at, None);
+    assert_eq!(
+        attempt_data_fingerprint(&updated),
+        attempt_data_fingerprint(&attempt_before)
+    );
+    assert_eq!(updated.active_unit_id, attempt_before.active_unit_id);
+    assert_eq!(
+        fixture
+            .store
+            .list_coding_units(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("units after recovery"),
+        units_before
+    );
+    assert_eq!(
+        git_status_porcelain(
+            fixture
+                .attempt
+                .worktree_path
+                .as_deref()
+                .expect("worktree path")
+        ),
+        worktree_status_before
+    );
+    assert!(
+        fixture
+            .store
+            .list_open_blocked_gates(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("open gates after recovery")
+            .iter()
+            .all(|gate| gate.gate_id != dirty_gate.gate_id)
+    );
+
+    let runs = fixture
+        .store
+        .list_role_runs(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("role runs after recovery");
+    assert_eq!(runs.len(), 2);
+    let stale = runs
+        .iter()
+        .find(|run| run.id == fixture.stale_role_run_id)
+        .expect("stale reviewer run");
+    let retry = runs
+        .iter()
+        .find(|run| run.id != fixture.stale_role_run_id)
+        .expect("retry reviewer run");
+    assert_eq!(stale.status, CodingRoleRunStatus::Superseded);
+    assert_eq!(
+        stale.superseded_by_run_id.as_deref(),
+        Some(retry.id.as_str())
+    );
+    assert_eq!(retry.status, CodingRoleRunStatus::Running);
+    assert_eq!(retry.trigger, CodingRoleRunTrigger::RetryReview);
+    assert_eq!(retry.node_id, None);
+    assert_eq!(
+        retry.supersedes_run_id.as_deref(),
+        Some(fixture.stale_role_run_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn failed_code_review_recovery_rejects_stale_identity_without_writes() {
+    for (name, case, gate_id) in [
+        (
+            "stale gate",
+            FixtureCase::Recoverable,
+            "coding_blocked_gate_9999",
+        ),
+        (
+            "node and run mismatch",
+            FixtureCase::RoleRunNodeMismatch,
+            "coding_blocked_gate_0001",
+        ),
+    ] {
+        let fixture = failed_review_fixture(CodingAttemptScope::WorkItemGroup, case);
+        let runs_before = fixture
+            .store
+            .list_role_runs(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("role runs before rejected recovery");
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let engine =
+            CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+
+        let error = engine
+            .recover_failed_code_review(gate_id)
+            .await
+            .expect_err(name);
+
+        assert!(
+            error
+                .to_string()
+                .contains("coding_failed_review_recovery_state_changed"),
+            "{name}: {error}"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .list_role_runs(
+                    &fixture.attempt.project_id,
+                    &fixture.attempt.issue_id,
+                    &fixture.attempt.id,
+                )
+                .expect("role runs after rejected recovery"),
+            runs_before,
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_code_review_recovery_reloads_attempt_and_rejects_status_change() {
+    let fixture =
+        failed_review_fixture(CodingAttemptScope::WorkItemGroup, FixtureCase::Recoverable);
+    let dirty_gate = fixture.dirty_gate.clone().expect("dirty gate");
+    let mut changed = fixture.attempt.clone();
+    changed.status = CodingAttemptStatus::Blocked;
+    changed.completed_at = None;
+    fixture
+        .store
+        .save_coding_attempt(&changed)
+        .expect("persist changed attempt status");
+    let runs_before = fixture
+        .store
+        .list_role_runs(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("role runs before status change rejection");
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+
+    let error = engine
+        .recover_failed_code_review(&dirty_gate.gate_id)
+        .await
+        .expect_err("status change must reject recovery");
+
+    assert!(
+        error
+            .to_string()
+            .contains("coding_failed_review_recovery_state_changed"),
+        "{error}"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_role_runs(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("role runs after status change rejection"),
+        runs_before
+    );
+}
+
+#[test]
+fn failed_review_websocket_guard_allows_only_the_exact_retry_gate_request() {
+    let fixture =
+        failed_review_fixture(CodingAttemptScope::WorkItemGroup, FixtureCase::Recoverable);
+    let dirty_gate = fixture.dirty_gate.as_ref().expect("dirty gate");
+    let retry = CodingWsInMessage::GateResponse {
+        gate_id: dirty_gate.gate_id.clone(),
+        action_id: "retry_review".to_string(),
+        extra_context: None,
+    };
+
+    assert!(failed_code_review_recovery_request(
+        &fixture.store,
+        &fixture.attempt,
+        &retry,
+    ));
+    assert!(!failed_code_review_recovery_request(
+        &fixture.store,
+        &fixture.attempt,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_9999".to_string(),
+            action_id: "retry_review".to_string(),
+            extra_context: None,
+        },
+    ));
+    assert!(!failed_code_review_recovery_request(
+        &fixture.store,
+        &fixture.attempt,
+        &CodingWsInMessage::GateResponse {
+            gate_id: dirty_gate.gate_id.clone(),
+            action_id: "manual_continue".to_string(),
+            extra_context: None,
+        },
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::Failed,
+        &CodingExecutionStage::CodeReview,
+        &CodingWsInMessage::ContextNote {
+            content: "continue".to_string(),
+        },
+    ));
+}
+
+#[test]
+fn failed_review_recovery_refuses_to_duplicate_an_active_runner() {
+    let registry = CodingRunRegistry::default();
+    assert!(!failed_review_recovery_runner_is_active(
+        &registry,
+        "coding_attempt_0001"
+    ));
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    registry.insert("coding_attempt_0001".to_string(), command_tx);
+
+    assert!(failed_review_recovery_runner_is_active(
+        &registry,
+        "coding_attempt_0001"
+    ));
+}
+
+fn attempt_data_fingerprint(attempt: &CodingExecutionAttempt) -> serde_json::Value {
+    serde_json::json!({
+        "id": attempt.id,
+        "project_id": attempt.project_id,
+        "issue_id": attempt.issue_id,
+        "work_item_id": attempt.work_item_id,
+        "attempt_no": attempt.attempt_no,
+        "scope": attempt.scope,
+        "base_branch": attempt.base_branch,
+        "branch_name": attempt.branch_name,
+        "worktree_path": attempt.worktree_path,
+        "provider_config_snapshot": attempt.provider_config_snapshot,
+        "rework_count": attempt.rework_count,
+        "max_auto_rework": attempt.max_auto_rework,
+        "work_item_group_id": attempt.work_item_group_id,
+        "current_work_item_id": attempt.current_work_item_id,
+        "active_unit_id": attempt.active_unit_id,
+        "head_commit": attempt.head_commit,
+        "pushed_remote": attempt.pushed_remote,
+        "review_request_id": attempt.review_request_id,
+        "provider_conversations": attempt.provider_conversations,
+        "created_at": attempt.created_at,
+    })
+}
+
+fn git_status_porcelain(worktree_path: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_path)
+        .output()
+        .expect("git status --porcelain");
+    assert!(output.status.success(), "git status failed: {output:?}");
+    String::from_utf8(output.stdout).expect("git status utf8")
 }
 
 fn assert_recovery_gate(scope: CodingAttemptScope) {
@@ -242,6 +558,15 @@ fn failed_review_fixture(scope: CodingAttemptScope, case: FixtureCase) -> Failed
     let worktree_path = attempt.worktree_path.clone().expect("worktree path");
     if !matches!(case, FixtureCase::MissingWorktree) {
         fs::create_dir_all(&worktree_path).expect("shared worktree directory");
+        let output = Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(&worktree_path)
+            .output()
+            .expect("git init fixture worktree");
+        assert!(output.status.success(), "git init failed: {output:?}");
+        fs::write(worktree_path.join("dirty-review.txt"), "preserve me\n")
+            .expect("dirty worktree fixture");
     }
 
     attempt.scope = scope.clone();

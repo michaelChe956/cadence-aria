@@ -11,7 +11,7 @@ use crate::product::coding_workspace_engine::{
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::state::WebAppState;
+use crate::web::state::{CodingRunRegistry, WebAppState};
 
 use super::runner_support::{handle_pending_runner_commands, provider_for};
 use super::{
@@ -66,6 +66,13 @@ pub(crate) fn spawn_coding_runner(
         coding_runs.remove(&registry_attempt_id, registry_run_id);
     });
     command_tx
+}
+
+pub(crate) fn failed_review_recovery_runner_is_active(
+    coding_runs: &CodingRunRegistry,
+    attempt_id: &str,
+) -> bool {
+    coding_runs.runner_count(attempt_id) > 0
 }
 
 pub(crate) fn should_resume_runner_after_gate_response(
