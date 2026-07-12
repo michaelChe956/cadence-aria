@@ -378,7 +378,15 @@ pub(crate) struct ProviderSessionDriveInput {
 
 pub(crate) enum ReviewProviderRunResult {
     Completed(ProviderCompletion),
-    Terminal,
+    Aborted,
+    Failed(ReviewProviderRunFailure),
+}
+
+pub(crate) enum ReviewProviderRunFailure {
+    Start(String),
+    EmptyOutput,
+    Provider(String),
+    PermissionTimeout(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

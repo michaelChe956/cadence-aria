@@ -78,19 +78,18 @@ impl StreamingProviderAdapter for RepairTerminalProvider {
                 "repair provider start failed",
                 1,
             )),
-            RepairTerminalMode::EmptyCompletion => Ok(Self::session_with_event(Some(
-                ProviderEvent::Completed(ProviderCompletion::plain(
-                    String::new(),
-                    Some("repair-session-2".to_string()),
-                )),
-            ))
-            .await),
-            RepairTerminalMode::Failed => Ok(Self::session_with_event(Some(
-                ProviderEvent::Failed {
+            RepairTerminalMode::EmptyCompletion => {
+                Ok(Self::session_with_event(Some(ProviderEvent::Completed(
+                    ProviderCompletion::plain(String::new(), Some("repair-session-2".to_string())),
+                )))
+                .await)
+            }
+            RepairTerminalMode::Failed => {
+                Ok(Self::session_with_event(Some(ProviderEvent::Failed {
                     message: "repair provider failed".to_string(),
-                },
-            ))
-            .await),
+                }))
+                .await)
+            }
             RepairTerminalMode::PermissionTimeout => Ok(Self::session_with_event(Some(
                 ProviderEvent::PermissionTimeout {
                     permission_id: "permission-repair".to_string(),
@@ -144,7 +143,10 @@ async fn review_structured_output_repair_succeeds_for_all_general_workspace_type
         ),
         (
             WorkspaceType::Design,
-            artifact_payload(&complete_design_artifact("保持业务 payload", "复用 reviewer session")),
+            artifact_payload(&complete_design_artifact(
+                "保持业务 payload",
+                "复用 reviewer session",
+            )),
         ),
         (
             WorkspaceType::WorkItem,
@@ -224,17 +226,31 @@ async fn repair_terminal_paths_close_started_event_as_failed() {
         RepairTerminalMode::PermissionTimeout,
         RepairTerminalMode::StreamClosed,
     ] {
-        let provider = RepairTerminalProvider::new(
-            mode,
-            Some("review-session-1".to_string()),
-        );
-        let (_tmp, mut engine, mut rx, review_node_id) =
-            queued_review_engine(&format!("sess_repair_terminal_{mode:?}")).await;
+        let provider = RepairTerminalProvider::new(mode, Some("review-session-1".to_string()));
+        let session_id = format!("sess_repair_terminal_{mode:?}");
+        let (_tmp, mut engine, mut rx, review_node_id) = queued_review_engine(&session_id).await;
 
         engine
             .drive_review_session(Arc::new(provider), empty_provider_commands())
             .await;
 
+        assert_eq!(
+            engine.session.stage,
+            WorkspaceStage::HumanConfirm,
+            "repair terminal mode {mode:?} must safely degrade the review"
+        );
+        let verdict = engine
+            .latest_review_verdict
+            .as_ref()
+            .unwrap_or_else(|| panic!("repair terminal mode {mode:?} must persist a verdict"));
+        assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+        let diagnostic = verdict
+            .structured_output_diagnostic
+            .as_ref()
+            .unwrap_or_else(|| panic!("repair terminal mode {mode:?} diagnostic"));
+        assert_eq!(diagnostic.code, "missing_end_nonce");
+        assert!(diagnostic.repair_attempted);
+        assert!(!diagnostic.repair_succeeded);
         assert_eq!(
             repair_event_statuses(&mut rx),
             vec![
@@ -242,10 +258,7 @@ async fn repair_terminal_paths_close_started_event_as_failed() {
                     ProviderExecutionEventStatus::Started,
                     Some(review_node_id.clone())
                 ),
-                (
-                    ProviderExecutionEventStatus::Failed,
-                    Some(review_node_id)
-                ),
+                (ProviderExecutionEventStatus::Failed, Some(review_node_id)),
             ],
             "repair terminal mode {mode:?} must close its execution event"
         );
@@ -281,21 +294,16 @@ async fn repair_abort_closes_started_event_as_failed() {
                 ProviderExecutionEventStatus::Started,
                 Some(review_node_id.clone())
             ),
-            (
-                ProviderExecutionEventStatus::Failed,
-                Some(review_node_id)
-            ),
+            (ProviderExecutionEventStatus::Failed, Some(review_node_id)),
         ]
     );
 }
 
 #[tokio::test]
-async fn missing_or_blank_first_provider_session_id_does_not_start_repair() {
+async fn missing_or_blank_first_provider_session_id_starts_one_fresh_session_repair() {
     for first_session_id in [None, Some("   ".to_string())] {
-        let provider = RepairTerminalProvider::new(
-            RepairTerminalMode::StartError,
-            first_session_id,
-        );
+        let provider =
+            RepairTerminalProvider::new(RepairTerminalMode::StartError, first_session_id);
         let (_tmp, mut engine, mut rx, _review_node_id) =
             queued_review_engine("sess_repair_missing_provider_session").await;
 
@@ -303,15 +311,39 @@ async fn missing_or_blank_first_provider_session_id_does_not_start_repair() {
             .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
             .await;
 
-        assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            provider.resume_provider_session_ids.lock().unwrap()[1],
+            None
+        );
         let diagnostic = engine
             .latest_review_verdict
             .as_ref()
             .and_then(|verdict| verdict.structured_output_diagnostic.as_ref())
             .expect("missing provider session diagnostic");
         assert_eq!(diagnostic.code, "missing_end_nonce");
-        assert!(!diagnostic.repair_attempted);
+        assert!(diagnostic.repair_attempted);
         assert!(!diagnostic.repair_succeeded);
-        assert!(repair_event_statuses(&mut rx).is_empty());
+        assert_eq!(
+            repair_event_statuses(&mut rx),
+            vec![
+                (
+                    ProviderExecutionEventStatus::Started,
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .find(|node| node.node_type == TimelineNodeType::ReviewerRun)
+                        .map(|node| node.node_id.clone()),
+                ),
+                (
+                    ProviderExecutionEventStatus::Failed,
+                    engine
+                        .timeline_nodes
+                        .iter()
+                        .find(|node| node.node_type == TimelineNodeType::ReviewerRun)
+                        .map(|node| node.node_id.clone()),
+                ),
+            ]
+        );
     }
 }

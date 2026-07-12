@@ -1449,7 +1449,8 @@ impl WorkspaceEngine {
 ```rust
 pub(crate) enum ReviewProviderRunResult {
     Completed(ProviderCompletion),
-    Terminal,
+    Aborted,
+    Failed(ReviewProviderRunFailure),
 }
 
 pub(crate) fn structured_output_repair_event(
@@ -1481,7 +1482,13 @@ pub(crate) async fn drive_reviewer_provider_session_once(
 ) -> ReviewProviderRunResult;
 ```
 
-该函数保留 permission、choice、tool、stream、abort、failure 全部处理，但收到 `Completed(completion)` 时：
+该函数保留 permission、choice、tool、stream、abort、failure 全部处理，并明确区分：
+
+- 用户明确 Abort / cancellation → `ReviewProviderRunResult::Aborted`，业务 Review 终止。
+- Provider 启动失败、空 completion、`ProviderEvent::Failed`、权限超时或空 stream close → `ReviewProviderRunResult::Failed(...)`，由调用方决定首次 Review 失败或 repair 安全降级；repair 路径不得先把业务 Review Run 置 Failed。
+- 正常完成 → `ReviewProviderRunResult::Completed(completion)`。
+
+收到 `Completed(completion)` 时：
 
 - flush stream。
 - record provider session。
@@ -1532,11 +1539,21 @@ match self.parse_review_completion_for_active_node(&first_completion) {
             }
         };
         let repair_session = provider.start(repair_input, self.cancel.clone()).await;
-        let ReviewProviderRunResult::Completed(repaired_completion) = self
+        let repaired_completion = match self
             .drive_reviewer_provider_session_once(repair_session, &mut command_rx, &reviewer)
             .await
-        else {
-            return;
+        {
+            ReviewProviderRunResult::Completed(completion) => completion,
+            ReviewProviderRunResult::Aborted => return,
+            ReviewProviderRunResult::Failed(_) => {
+                let verdict = fallback_review_verdict(
+                    &first_completion,
+                    &first_error,
+                    true,
+                );
+                self.complete_review(first_completion, verdict).await;
+                return;
+            }
         };
         match self.parse_review_completion_for_active_node(&repaired_completion) {
             Ok(mut verdict) if repair_payload_is_compatible(&first_error, &repaired_completion) => {

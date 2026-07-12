@@ -86,7 +86,10 @@ async fn work_item_plan_outline_review_repair_preserves_scope_and_business_paylo
     assert_eq!(review.verdict, WorkItemPlanReviewVerdict::Revise);
     assert_eq!(review.review_scope, WorkItemPlanReviewScope::Outline);
     assert_eq!(review.generation_round_id, "round_0001");
-    assert_eq!(review.review_action, WorkItemPlanReviewAction::ReviseOutline);
+    assert_eq!(
+        review.review_action,
+        WorkItemPlanReviewAction::ReviseOutline
+    );
     let diagnostic = verdict
         .structured_output_diagnostic
         .as_ref()
@@ -105,6 +108,45 @@ async fn work_item_plan_outline_review_repair_preserves_scope_and_business_paylo
                 ProviderExecutionEventStatus::Completed,
                 Some(review_node_id)
             ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn work_item_plan_outline_repair_provider_failure_safely_degrades() {
+    let provider = RepairTerminalProvider::new(
+        RepairTerminalMode::StartError,
+        Some("review-session-1".to_string()),
+    );
+    let (_tmp, mut engine, mut rx, review_node_id) =
+        queued_work_item_plan_outline_review_engine("sess_wip_outline_repair_terminal").await;
+
+    engine
+        .drive_review_session(Arc::new(provider), empty_provider_commands())
+        .await;
+
+    assert_eq!(engine.session.stage, WorkspaceStage::HumanConfirm);
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("work item plan fallback verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+    assert!(verdict.work_item_plan_review.is_none());
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("work item plan repair diagnostic");
+    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert!(diagnostic.repair_attempted);
+    assert!(!diagnostic.repair_succeeded);
+    assert_eq!(
+        repair_event_statuses(&mut rx),
+        vec![
+            (
+                ProviderExecutionEventStatus::Started,
+                Some(review_node_id.clone())
+            ),
+            (ProviderExecutionEventStatus::Failed, Some(review_node_id)),
         ]
     );
 }
@@ -130,7 +172,10 @@ async fn work_item_plan_outline_review_repair_rejects_payload_change() {
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
     assert!(verdict.work_item_plan_review.is_none());
     let diagnostic = verdict
@@ -147,10 +192,7 @@ async fn work_item_plan_outline_review_repair_rejects_payload_change() {
                 ProviderExecutionEventStatus::Started,
                 Some(review_node_id.clone())
             ),
-            (
-                ProviderExecutionEventStatus::Failed,
-                Some(review_node_id)
-            ),
+            (ProviderExecutionEventStatus::Failed, Some(review_node_id)),
         ]
     );
 }
@@ -176,7 +218,10 @@ async fn work_item_plan_outline_review_repair_keeps_active_scope_schema_strict()
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
     assert!(verdict.work_item_plan_review.is_none());
     let diagnostic = verdict
@@ -193,10 +238,7 @@ async fn work_item_plan_outline_review_repair_keeps_active_scope_schema_strict()
                 ProviderExecutionEventStatus::Started,
                 Some(review_node_id.clone())
             ),
-            (
-                ProviderExecutionEventStatus::Failed,
-                Some(review_node_id)
-            ),
+            (ProviderExecutionEventStatus::Failed, Some(review_node_id)),
         ]
     );
 }

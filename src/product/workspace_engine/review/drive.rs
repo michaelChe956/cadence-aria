@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::types::ReviewProviderRunFailure;
 
 impl WorkspaceEngine {
     pub async fn drive_review_session(
@@ -36,11 +37,16 @@ impl WorkspaceEngine {
         }
         let mut command_rx = command_rx;
         let first_session = provider.start(input.clone(), self.cancel.clone()).await;
-        let ReviewProviderRunResult::Completed(first_completion) = self
+        let first_completion = match self
             .drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
             .await
-        else {
-            return;
+        {
+            ReviewProviderRunResult::Completed(completion) => completion,
+            ReviewProviderRunResult::Aborted => return,
+            ReviewProviderRunResult::Failed(failure) => {
+                self.finish_review_provider_run_failure(failure).await;
+                return;
+            }
         };
 
         match self.parse_review_completion_for_active_node(&first_completion) {
@@ -80,7 +86,7 @@ impl WorkspaceEngine {
                     .await;
                 let repaired_completion = match repair_result {
                     ReviewProviderRunResult::Completed(completion) => completion,
-                    ReviewProviderRunResult::Terminal => {
+                    ReviewProviderRunResult::Aborted => {
                         self.emit_execution_event(
                             structured_output_repair_event(
                                 ProviderExecutionEventStatus::Failed,
@@ -90,6 +96,21 @@ impl WorkspaceEngine {
                             Some(reviewer.clone()),
                         )
                         .await;
+                        return;
+                    }
+                    ReviewProviderRunResult::Failed(_) => {
+                        self.emit_execution_event(
+                            structured_output_repair_event(
+                                ProviderExecutionEventStatus::Failed,
+                                first_error.code(),
+                            ),
+                            repair_node_id,
+                            Some(reviewer.clone()),
+                        )
+                        .await;
+                        let verdict =
+                            fallback_review_verdict(&first_completion, &first_error, true);
+                        self.complete_review(first_completion, verdict).await;
                         return;
                     }
                 };
@@ -233,15 +254,57 @@ impl WorkspaceEngine {
         mut command_rx: mpsc::Receiver<ProviderCommand>,
         reviewer: ProviderName,
     ) {
-        if let ReviewProviderRunResult::Completed(completion) = self
+        match self
             .drive_reviewer_provider_session_once(session, &mut command_rx, &reviewer)
             .await
         {
-            let verdict = match self.parse_review_completion_for_active_node(&completion) {
-                Ok(verdict) => verdict,
-                Err(error) => fallback_review_verdict(&completion, &error, false),
-            };
-            self.complete_review(completion, verdict).await;
+            ReviewProviderRunResult::Completed(completion) => {
+                let verdict = match self.parse_review_completion_for_active_node(&completion) {
+                    Ok(verdict) => verdict,
+                    Err(error) => fallback_review_verdict(&completion, &error, false),
+                };
+                self.complete_review(completion, verdict).await;
+            }
+            ReviewProviderRunResult::Aborted => {}
+            ReviewProviderRunResult::Failed(failure) => {
+                self.finish_review_provider_run_failure(failure).await;
+            }
+        }
+    }
+
+    async fn finish_review_provider_run_failure(&mut self, failure: ReviewProviderRunFailure) {
+        match failure {
+            ReviewProviderRunFailure::Start(message) => {
+                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                if let Some(node_id) = self.active_node_id.clone() {
+                    self.update_timeline_node(
+                        &node_id,
+                        TimelineNodeStatus::Failed,
+                        Some("Provider 启动失败".to_string()),
+                    )
+                    .await;
+                }
+                self.finish_failed_run().await;
+            }
+            ReviewProviderRunFailure::EmptyOutput => {
+                self.finish_empty_assistant_output().await;
+            }
+            ReviewProviderRunFailure::Provider(message) => {
+                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                if let Some(node_id) = self.active_node_id.clone() {
+                    self.update_timeline_node(
+                        &node_id,
+                        TimelineNodeStatus::Failed,
+                        Some("Provider 运行失败".to_string()),
+                    )
+                    .await;
+                }
+                self.finish_failed_run().await;
+            }
+            ReviewProviderRunFailure::PermissionTimeout(permission_id) => {
+                self.handle_permission_timeout(permission_id, self.active_node_id.clone())
+                    .await;
+            }
         }
     }
 
@@ -257,14 +320,9 @@ impl WorkspaceEngine {
         let mut session = match session {
             Ok(session) => session,
             Err(error) => {
-                let _ = self
-                    .event_tx
-                    .send(EngineEvent::Error {
-                        message: error.details.clone(),
-                    })
-                    .await;
-                self.finish_failed_run().await;
-                return ReviewProviderRunResult::Terminal;
+                return ReviewProviderRunResult::Failed(ReviewProviderRunFailure::Start(
+                    error.details,
+                ));
             }
         };
 
@@ -283,7 +341,7 @@ impl WorkspaceEngine {
                         let _ = self.flush_stream_buffer(node_id).await;
                     }
                     self.finish_aborted_run().await;
-                    return ReviewProviderRunResult::Terminal;
+                    return ReviewProviderRunResult::Aborted;
                 }
                 command = command_rx.recv(), if commands_open => {
                     match command {
@@ -294,7 +352,7 @@ impl WorkspaceEngine {
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }
                             self.finish_aborted_run().await;
-                            return ReviewProviderRunResult::Terminal;
+                            return ReviewProviderRunResult::Aborted;
                         }
                         Some(ProviderCommand::PermissionResponse {
                             id,
@@ -505,27 +563,19 @@ impl WorkspaceEngine {
                             )
                             .await;
                             if completion.full_output.is_empty() {
-                                self.finish_empty_assistant_output().await;
-                                return ReviewProviderRunResult::Terminal;
+                                return ReviewProviderRunResult::Failed(
+                                    ReviewProviderRunFailure::EmptyOutput,
+                                );
                             }
                             return ReviewProviderRunResult::Completed(completion);
                         }
                         ProviderEvent::Failed { message } => {
-                            let _ = self
-                                .event_tx
-                                .send(EngineEvent::Error { message })
-                                .await;
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.flush_stream_buffer(node_id).await;
-                                self.update_timeline_node(
-                                    node_id,
-                                    TimelineNodeStatus::Failed,
-                                    Some("Provider 运行失败".to_string()),
-                                )
-                                .await;
                             }
-                            self.finish_failed_run().await;
-                            return ReviewProviderRunResult::Terminal;
+                            return ReviewProviderRunResult::Failed(
+                                ReviewProviderRunFailure::Provider(message),
+                            );
                         }
                         ProviderEvent::ProtocolError {
                             code,
@@ -542,9 +592,12 @@ impl WorkspaceEngine {
                                 .await;
                         }
                         ProviderEvent::PermissionTimeout { permission_id } => {
-                            self.handle_permission_timeout(permission_id, node_id.clone())
-                                .await;
-                            return ReviewProviderRunResult::Terminal;
+                            if let Some(node_id) = node_id.as_deref() {
+                                let _ = self.flush_stream_buffer(node_id).await;
+                            }
+                            return ReviewProviderRunResult::Failed(
+                                ReviewProviderRunFailure::PermissionTimeout(permission_id),
+                            );
                         }
                     }
                 }
@@ -556,13 +609,12 @@ impl WorkspaceEngine {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
             self.finish_aborted_run().await;
-            ReviewProviderRunResult::Terminal
+            ReviewProviderRunResult::Aborted
         } else if full_content.is_empty() {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
             }
-            self.finish_empty_assistant_output().await;
-            ReviewProviderRunResult::Terminal
+            ReviewProviderRunResult::Failed(ReviewProviderRunFailure::EmptyOutput)
         } else {
             if let Some(node_id) = node_id.as_deref() {
                 let _ = self.flush_stream_buffer(node_id).await;
