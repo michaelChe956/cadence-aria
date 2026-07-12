@@ -63,6 +63,47 @@ impl CodingWorkspaceEngine {
         node_id: &str,
         message: String,
     ) -> Result<T, CodingWorkspaceEngineError> {
+        if attempt.stage == CodingExecutionStage::CodeReview {
+            self.complete_timeline_node(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                node_id,
+                CodingTimelineNodeStatus::Failed,
+                Some(message.clone()),
+            )
+            .await?;
+            if let Some(role_run) = self.store.latest_role_run(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingExecutionStage::CodeReview,
+                CodingProviderRole::CodeReviewer,
+            )? && role_run.status == CodingRoleRunStatus::Running
+            {
+                self.store.update_role_run_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &role_run.id,
+                    CodingRoleRunStatus::Failed,
+                    Some("code_review_provider_interrupted".to_string()),
+                )?;
+            }
+            self.create_review_blocked_gate(ReviewBlockedGateInput {
+                attempt,
+                node_id,
+                stage: CodingExecutionStage::CodeReview,
+                role: CodingProviderRole::CodeReviewer,
+                title: "代码审查中断".to_string(),
+                description: message.clone(),
+                reason_code: "code_review_provider_interrupted",
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+            })
+            .await?;
+            return Err(CodingWorkspaceEngineError::ProviderStream(message));
+        }
         self.store.update_attempt_status(
             &attempt.project_id,
             &attempt.issue_id,
