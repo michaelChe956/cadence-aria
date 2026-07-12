@@ -3,9 +3,9 @@ use tempfile::TempDir;
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
-    CodingGateActionType, CodingProviderRole, TestPlan, TestPlanRiskLevel, TestPlanStep,
-    TestPlanTool,
+    CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage, CodingExecutionUnitStatus,
+    CodingGateAction, CodingGateActionType, CodingProviderRole, TestPlan, TestPlanRiskLevel,
+    TestPlanStep, TestPlanTool,
 };
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -106,6 +106,105 @@ fn code_review_can_route_directly_back_to_coding_for_reviewer_feedback() {
         .expect("code review can return to coder");
 
     assert_eq!(updated.stage, CodingExecutionStage::Coding);
+}
+
+#[test]
+fn reopen_failed_code_review_attempt_is_narrow_and_clears_completed_at() {
+    let (_tmp, store, attempt) = setup();
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("start attempt");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("enter code review");
+    let failed = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Failed,
+        )
+        .expect("fail attempt");
+    assert!(failed.completed_at.is_some());
+
+    let reopened = store
+        .reopen_failed_code_review_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reopen failed code review");
+
+    assert_eq!(reopened.status, CodingAttemptStatus::Blocked);
+    assert_eq!(reopened.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(reopened.completed_at, None);
+}
+
+#[test]
+fn reopen_failed_code_review_attempt_rejects_other_terminal_states_without_persisting_changes() {
+    let cases = [
+        (
+            "completed code review",
+            CodingExecutionStage::CodeReview,
+            CodingAttemptStatus::Completed,
+        ),
+        (
+            "aborted code review",
+            CodingExecutionStage::CodeReview,
+            CodingAttemptStatus::Aborted,
+        ),
+        (
+            "failed testing",
+            CodingExecutionStage::Testing,
+            CodingAttemptStatus::Failed,
+        ),
+    ];
+
+    for (case_name, stage, status) in cases {
+        let (_tmp, store, attempt) = setup();
+        let attempt = store
+            .update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Running,
+            )
+            .unwrap_or_else(|error| panic!("{case_name}: start attempt: {error}"));
+        let attempt = store
+            .update_attempt_stage(&attempt.project_id, &attempt.issue_id, &attempt.id, stage)
+            .unwrap_or_else(|error| panic!("{case_name}: enter terminal stage: {error}"));
+        let terminal = store
+            .update_attempt_status(&attempt.project_id, &attempt.issue_id, &attempt.id, status)
+            .unwrap_or_else(|error| panic!("{case_name}: enter terminal status: {error}"));
+
+        let rejected = store.reopen_failed_code_review_attempt(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        );
+
+        assert!(
+            matches!(
+                rejected,
+                Err(ProductStoreError::Io(ref message))
+                    if message == "coding_failed_review_not_recoverable"
+            ),
+            "{case_name}: unexpected result: {rejected:?}"
+        );
+        let persisted = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap_or_else(|error| panic!("{case_name}: reload attempt: {error}"));
+        assert_eq!(
+            persisted, terminal,
+            "{case_name}: persisted attempt changed"
+        );
+    }
 }
 
 #[test]
