@@ -373,6 +373,52 @@ fn review_parser_preserves_findings_with_common_aliases() {
 }
 
 #[test]
+fn review_parser_accepts_blocked_finding_severity_as_error() {
+    let payload = r#"{
+      "verdict": "blocked",
+      "summary": "dependency handoff blocker",
+      "findings": [
+        {
+          "severity": "blocked",
+          "file_path": "src/web/runtime/provider.rs",
+          "line": 109,
+          "message": "shared gate is not wired",
+          "required_action": "inject the shared gate",
+          "source_stage": "code_review"
+        }
+      ]
+    }"#;
+
+    let parsed = parse_review_payload(payload, CodingExecutionStage::CodeReview);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Blocked);
+    assert_eq!(parsed.summary, "dependency handoff blocker");
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(
+        parsed.findings[0].severity,
+        crate::product::coding_models::FindingSeverity::Error
+    );
+    assert_eq!(parsed.findings[0].message, "shared gate is not wired");
+}
+
+#[test]
+fn review_parser_distinguishes_schema_error_from_json_syntax_error() {
+    let schema_error = parse_review_payload(
+        r#"{"verdict":"blocked","findings":[{"severity":"unexpected"}]}"#,
+        CodingExecutionStage::CodeReview,
+    );
+    assert!(schema_error.summary.contains("review JSON Schema 校验失败"));
+    assert!(schema_error.summary.contains("unknown variant"));
+
+    let syntax_error = parse_review_payload(
+        r#"{"verdict":"blocked","findings":["#,
+        CodingExecutionStage::CodeReview,
+    );
+    assert!(syntax_error.summary.contains("review 输出不是有效 JSON"));
+    assert!(!syntax_error.summary.contains("Schema 校验失败"));
+}
+
+#[test]
 fn review_parser_accepts_fenced_json_with_reviewer_blocker_severity() {
     let payload = r#"Reviewer summary before the structured payload.
 
