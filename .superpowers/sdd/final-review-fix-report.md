@@ -8,10 +8,11 @@
   - `9026fcf fix: safely degrade structured review repair`
   - `b30680c fix: close recovery admission races`
   - `380cad6 fix: gate recovery test exports`
-  - 第三轮 Attempt guard 生命周期修复与本报告更新将在同一原子提交中落地。
+  - `f6cefa2 fix: narrow recovery attempt lock scope`
+  - 第四轮 ordinary-first mutation lease 修复与本报告更新位于同一原子提交。
 - 工作目录：`/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0709`
 - 未触碰真实 `coding_attempt_0001`，未访问或修改共享 issue worktree。
-- dirty worktree 中原有 Workspace 中断恢复、结构化审核及前端改动均保留，三个实现提交只包含本任务文件。
+- dirty worktree 中原有 Workspace 中断恢复、结构化审核及前端改动均保留，本任务实现提交只包含各轮审查修复文件。
 
 ## 根因复核与修复
 
@@ -173,13 +174,22 @@
 - `src/product/workspace_engine/review/drive.rs`
 - `src/product/workspace_engine/tests/part_03/part_06.rs`
 
-### 第三轮原子提交
+### Commit `f6cefa2`
 
 - `src/web/coding_ws_handler/socket.rs`
 - `src/web/coding_ws_handler/socket/preparation.rs`
 - `src/web/coding_ws_handler/tests/failed_review_recovery/runner.rs`
 - `tests/it_web/web_coding_ws_handler.rs`
 - `tests/it_web/web_coding_ws_handler/part_10.rs`
+- `.superpowers/sdd/final-review-fix-report.md`
+
+### 第四轮原子提交（本提交）
+
+- `src/web/state.rs`
+- `src/web/coding_ws_handler/socket.rs`
+- `src/web/coding_ws_handler/socket/preparation.rs`
+- `src/web/coding_ws_handler/tests/failed_review_recovery/runner.rs`
+- `src/web/coding_ws_handler/tests/failed_review_recovery/runner/ordinary_mutation.rs`
 - `.superpowers/sdd/final-review-fix-report.md`
 
 ## 第二轮复审 RED / GREEN
@@ -229,7 +239,55 @@
 - `cargo check --locked`：PASS。
 - `git diff --check`：PASS。
 
+## 第四轮复审 RED / GREEN
+
+### ordinary-first admission → mutation TOCTOU
+
+根因：
+
+- 普通消息在 `prepare_coding_message()` 的 Attempt guard 内完成 reload/admission 后，以 `Allowed` 返回 Attempt 快照并释放 guard。
+- socket 随后才执行 Abort、GateResponse、ContextNote 等持久化 mutation；反向 retry 可在这个窗口取得 Attempt guard、建立 reservation并推进 recovery journal，导致两个请求都基于各自旧判断继续。
+
+RED：
+
+- `cargo test --locked --lib ordinary_allowed_mutation_finishes_before_retry_reloads_state`
+- 首次编译先发现测试夹具将 `ordinary_event_tx` move 两次；仅补 `clone()` 后重跑，测试稳定失败于 `AbortAttempt: retry crossed Allowed→mutation window`。
+- 测试中的 A 使用生产 `prepare_coding_message()` 得到 `Allowed` 后暂停，B 发起真实 retry preparation；旧实现中 B 在 A mutation 前完成，直接证明 ordinary-first 窗口存在。
+
+GREEN：
+
+- `CodingRunRegistry` 新增独立的 Attempt 级 mutation AsyncMutex，`CodingAttemptMutationLease` 持有 `OwnedMutexGuard` 并通过 Drop 自动释放。
+- 非 Hello/Ping 消息按 Attempt guard → mutation lease 的固定顺序进入 preparation；在取得 mutation lease 后才 reload/admission，避免 recovery 等待普通 mutation 后继续使用等待前的旧快照。
+- 普通 `Allowed` 返回 Attempt 与 RAII lease，并在返回前释放 Attempt guard；socket 仅把 lease 保持到实际 mutation/runner command 完成或失败，所有 snapshot 和 `send_coding_json()` 前均显式释放。
+- recovery 在同一顺序下先等待 mutation lease，再 reload/admission、取得 reservation并推进 journal；普通 mutation完成后，retry 必须基于最终状态重新判断。
+- Hello/Ping 仍在 Attempt guard 与 mutation lease 之前返回，非变更快路径未退化。
+
+对称线性结果：
+
+- AbortAttempt 先完成：retry 重新读取 `Aborted + CodeReview` 后返回 `Rejected`；无 recovery journal、reservation 或 runner，原 Role Run 数量不变。
+- ContextNote 先完成：note 与 chat entry 先持久化，retry 随后恢复；Attempt=`Running + CodeReview`、journal=`Completed`、唯一 RetryReview Role Run、runner 从 1 清理到 0。
+- recovery-first 既有生产生命周期测试仍验证 AbortAttempt/ContextNote 均在 reservation/journal 后被拒绝。
+
+### 锁序与 RAII 释放审计
+
+- 固定顺序为 Attempt AsyncMutex → mutation AsyncMutex → registry StdMutex 短锁。
+- `lock_attempt()` 与 `lock_attempt_mutation()` 只在 registry StdMutex 内 clone 对应 Arc，释放 StdMutex 后才 await AsyncMutex；不存在持 registry 锁等待 Attempt/mutation 的反向边。
+- mutation lease Drop 只释放 Tokio `OwnedMutexGuard`，不获取 Attempt guard或 registry StdMutex；普通 mutation结束不会被正在等待的 recovery 反向阻塞。
+- recovery reservation 的创建仍在 Attempt guard 与 mutation lease 内完成；reserved spawn、provider entry、snapshot 与 socket I/O 均不持 Attempt guard或 mutation lease。
+- `StartCoding`、`FinalConfirm`、`AbortAttempt`、普通 `GateResponse`、`ProviderSelect`、`PermissionModeSelect`、`MaxAutoReworkSelect`、`StageGateConfirm`、`PermissionResponse`、`ChoiceResponse`、`ContextNote` 全部分支均审计；错误、`continue`、task cancellation 与 unwind 由显式 drop 或 RAII Drop 释放。
+
+### 第四轮测试与门禁
+
+- `cargo test --locked --lib ordinary_allowed_mutation_finishes_before_retry_reloads_state`：1 passed。
+- `cargo test --locked --lib failed_review_recovery`：22 passed，包含 ordinary-first、recovery-first、双 socket、journal/reservation 与真实 reserved spawn。
+- `cargo test --locked --test it_web coding_ws_hello_and_ping_do_not_wait_for_attempt_recovery_lock`：sandbox 内因监听端口被拒绝；按权限规则在 sandbox 外用同一命令重跑，1 passed。
+- `cargo fmt --check`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS。
+- `cargo check --locked`：PASS。
+- `git diff --check`：PASS。
+- 行数：`socket.rs` 754、`socket/preparation.rs` 145、`state.rs` 543、`runner.rs` 676、`runner/ordinary_mutation.rs` 274；均低于 800 行。
+
 ## Concerns / 未运行门禁
 
-- 未运行包含所有 integration test targets 的 `cargo test --locked`；已运行完整 `cargo test --locked --lib`（553/553）及所有新增/受影响定向测试。
+- 第四轮未运行包含所有 integration test targets 的 `cargo test --locked`，由主 Agent 负责完整 integration；本轮运行了 22 个 failed review recovery 单测与 Hello/Ping 定向 integration。
 - worktree 仍有任务开始前已存在的未提交改动；这些改动未被 stage、commit、reset、stash、clean 或覆盖。

@@ -37,6 +37,11 @@ struct CodingRunRegistryInner {
     reservations: HashMap<String, u64>,
     exclusive_runs: HashMap<String, u64>,
     attempt_guards: HashMap<String, Arc<AsyncMutex<()>>>,
+    attempt_mutation_guards: HashMap<String, Arc<AsyncMutex<()>>>,
+}
+
+pub(crate) struct CodingAttemptMutationLease {
+    _guard: OwnedMutexGuard<()>,
 }
 
 pub struct CodingRunReservation {
@@ -183,6 +188,24 @@ impl CodingRunRegistry {
             )
         };
         guard.lock_owned().await
+    }
+
+    pub(crate) async fn lock_attempt_mutation(
+        &self,
+        attempt_id: &str,
+    ) -> CodingAttemptMutationLease {
+        let guard = {
+            let mut inner = self.inner.lock().expect("coding run registry lock");
+            Arc::clone(
+                inner
+                    .attempt_mutation_guards
+                    .entry(attempt_id.to_string())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        CodingAttemptMutationLease {
+            _guard: guard.lock_owned().await,
+        }
     }
 
     pub fn has_active_recovery_reservation(&self, attempt_id: &str) -> bool {

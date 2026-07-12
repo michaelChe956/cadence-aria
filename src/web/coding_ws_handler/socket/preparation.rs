@@ -7,7 +7,7 @@ use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::state::{CodingRunRegistry, CodingRunReservation};
+use crate::web::state::{CodingAttemptMutationLease, CodingRunRegistry, CodingRunReservation};
 
 use super::{
     CodingMessageAdmission, CodingWsInMessage, CodingWsOutMessage, coding_message_admission,
@@ -16,7 +16,10 @@ use super::{
 pub(crate) enum CodingMessagePreparation {
     Hello,
     Ping,
-    Allowed(CodingExecutionAttempt),
+    Allowed {
+        attempt: CodingExecutionAttempt,
+        mutation_lease: CodingAttemptMutationLease,
+    },
     FailedReviewRecovery {
         attempt: CodingExecutionAttempt,
         gate_id: String,
@@ -92,6 +95,7 @@ async fn prepare_coding_message_inner(
     }
 
     let attempt_guard = coding_runs.lock_attempt(attempt_id).await;
+    let mutation_lease = coding_runs.lock_attempt_mutation(attempt_id).await;
     let current_attempt = coding_store
         .get_attempt_by_id(attempt_id)
         .map_err(|_| CodingMessagePreparationError::AttemptUnavailable)?;
@@ -102,7 +106,10 @@ async fn prepare_coding_message_inner(
         }
         CodingMessageAdmission::Allowed => {
             drop(attempt_guard);
-            Ok(CodingMessagePreparation::Allowed(current_attempt))
+            Ok(CodingMessagePreparation::Allowed {
+                attempt: current_attempt,
+                mutation_lease,
+            })
         }
         CodingMessageAdmission::FailedReviewRecovery => {
             let Some(reservation) = coding_runs.try_reserve_attempt(&current_attempt.id) else {
@@ -126,6 +133,7 @@ async fn prepare_coding_message_inner(
                 .recover_failed_code_review_for_attempt(&current_attempt.id, gate_id)
                 .await
                 .map_err(CodingMessagePreparationError::Recovery)?;
+            drop(mutation_lease);
             drop(attempt_guard);
             Ok(CodingMessagePreparation::FailedReviewRecovery {
                 attempt: updated,

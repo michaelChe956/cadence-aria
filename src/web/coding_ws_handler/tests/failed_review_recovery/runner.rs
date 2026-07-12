@@ -23,6 +23,8 @@ use crate::web::state::{CodingRunRegistry, WebAppState};
 
 use super::support::{FixtureCase, failed_review_fixture};
 
+mod ordinary_mutation;
+
 #[tokio::test]
 async fn reserved_spawn_creates_task_then_completes_journal_before_provider_entry() {
     let fixture =

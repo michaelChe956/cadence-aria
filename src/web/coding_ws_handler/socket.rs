@@ -131,7 +131,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         continue;
                     }
                 };
-                let current_attempt = match preparation {
+                let (current_attempt, mutation_lease) = match preparation {
                     CodingMessagePreparation::Hello => continue,
                     CodingMessagePreparation::Ping => {
                         if !send_coding_json(&mut socket_tx, &CodingWsOutMessage::CodingPong).await {
@@ -162,7 +162,10 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         .await;
                         continue;
                     }
-                    CodingMessagePreparation::Allowed(current_attempt) => current_attempt,
+                    CodingMessagePreparation::Allowed {
+                        attempt,
+                        mutation_lease,
+                    } => (attempt, mutation_lease),
                     CodingMessagePreparation::FailedReviewRecovery {
                         attempt: updated,
                         gate_id,
@@ -200,6 +203,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                 };
                 if inbound == CodingWsInMessage::StartCoding {
                     if runner_started {
+                        drop(mutation_lease);
                         let _ = send_coding_json(
                             &mut socket_tx,
                             &CodingWsOutMessage::CodingProtocolError {
@@ -216,6 +220,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         event_tx.clone(),
                         current_attempt.clone(),
                     ) else {
+                        drop(mutation_lease);
                         let _ = send_coding_json(
                             &mut socket_tx,
                             &CodingWsOutMessage::CodingProtocolError {
@@ -229,6 +234,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     };
                     runner_started = true;
                     runner_command_tx = Some(command_tx);
+                    drop(mutation_lease);
                 } else if inbound == CodingWsInMessage::FinalConfirm {
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
@@ -245,6 +251,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     {
                         Ok(updated) => updated,
                         Err(error) => {
+                            drop(mutation_lease);
                             let _ = send_coding_json(
                                 &mut socket_tx,
                                 &CodingWsOutMessage::CodingProtocolError {
@@ -256,6 +263,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             continue;
                         }
                     };
+                    drop(mutation_lease);
                     while let Ok(event) = event_rx.try_recv() {
                         if !send_coding_json(&mut socket_tx, &event).await {
                             break;
@@ -276,6 +284,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     runner_command_tx = None;
                     runner_started = false;
                     if aborted_runners > 0 && !open_gates.is_empty() {
+                        drop(mutation_lease);
                         continue;
                     }
                     let engine = CodingWorkspaceEngine::new(
@@ -293,6 +302,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     {
                         Ok(updated) => updated,
                         Err(error) => {
+                            drop(mutation_lease);
                             let _ = send_coding_json(
                                 &mut socket_tx,
                                 &CodingWsOutMessage::CodingProtocolError {
@@ -304,6 +314,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             continue;
                         }
                     };
+                    drop(mutation_lease);
                     while let Ok(event) = event_rx.try_recv() {
                         if !send_coding_json(&mut socket_tx, &event).await {
                             break;
@@ -336,6 +347,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     {
                         Ok(updated) => updated,
                         Err(error) => {
+                            drop(mutation_lease);
                             let _ = send_coding_json(
                                 &mut socket_tx,
                                 &CodingWsOutMessage::CodingProtocolError {
@@ -347,6 +359,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             continue;
                         }
                     };
+                    drop(mutation_lease);
                     while let Ok(event) = event_rx.try_recv() {
                         if !send_coding_json(&mut socket_tx, &event).await {
                             break;
@@ -384,10 +397,12 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             let _ = command_tx
                                 .send(CodingRunnerCommand::ProviderSelect { role, provider })
                                 .await;
+                            drop(mutation_lease);
                             continue;
                         }
                     }
                     if provider_selection_targets_current_running_stage(&current_attempt, &role) {
+                        drop(mutation_lease);
                         let _ = send_coding_json(
                             &mut socket_tx,
                             &CodingWsOutMessage::CodingProtocolError {
@@ -406,6 +421,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     ) {
                         Ok(updated) => updated,
                         Err(error) => {
+                            drop(mutation_lease);
                             let _ = send_coding_json(
                                 &mut socket_tx,
                                 &CodingWsOutMessage::CodingProtocolError {
@@ -417,6 +433,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             continue;
                         }
                     };
+                    drop(mutation_lease);
                     let _ = send_coding_json(
                         &mut socket_tx,
                         &CodingWsOutMessage::CodingProviderConfigUpdated {
@@ -441,6 +458,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     ) {
                         Ok(updated) => updated,
                         Err(error) => {
+                            drop(mutation_lease);
                             let _ = send_coding_json(
                                 &mut socket_tx,
                                 &CodingWsOutMessage::CodingProtocolError {
@@ -452,6 +470,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             continue;
                         }
                     };
+                    drop(mutation_lease);
                     let _ = send_coding_json(
                         &mut socket_tx,
                         &CodingWsOutMessage::CodingProviderConfigUpdated {
@@ -475,6 +494,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     ) {
                         Ok(updated) => updated,
                         Err(error) => {
+                            drop(mutation_lease);
                             let code = if error.to_string().contains("invalid_max_auto_rework") {
                                 "invalid_max_auto_rework"
                             } else {
@@ -491,6 +511,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             continue;
                         }
                     };
+                    drop(mutation_lease);
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
@@ -509,10 +530,14 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                                     stage: stage.clone(),
                                 })
                                 .await;
+                            drop(mutation_lease);
                             continue;
                         }
                     }
-                    match confirm_open_stage_gate(&coding_store, &current_attempt, &stage) {
+                    let confirmation =
+                        confirm_open_stage_gate(&coding_store, &current_attempt, &stage);
+                    drop(mutation_lease);
+                    match confirmation {
                         Ok(Some(_gate)) => {
                             if let Ok(snapshot) =
                                 build_coding_session_state(&coding_store, current_attempt)
@@ -556,6 +581,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             })
                             .await;
                     }
+                    drop(mutation_lease);
                 } else if let CodingWsInMessage::ChoiceResponse {
                     id,
                     selected_option_ids,
@@ -570,7 +596,9 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                                 free_text,
                             })
                             .await;
+                        drop(mutation_lease);
                     } else {
+                        drop(mutation_lease);
                         let _ = send_coding_json(
                             &mut socket_tx,
                             &CodingWsOutMessage::CodingProtocolError {
@@ -587,6 +615,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     {
                         Ok(note) => note,
                         Err(error) => {
+                            drop(mutation_lease);
                             let _ = send_coding_json(
                                 &mut socket_tx,
                                 &CodingWsOutMessage::CodingProtocolError {
@@ -602,6 +631,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     {
                         Ok(entry) => entry,
                         Err(error) => {
+                            drop(mutation_lease);
                             let _ = send_coding_json(
                                 &mut socket_tx,
                                 &CodingWsOutMessage::CodingProtocolError {
@@ -614,6 +644,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         }
                     };
                     let _ = coding_store.save_chat_entry(&entry);
+                    drop(mutation_lease);
                     if !send_coding_json(
                         &mut socket_tx,
                         &CodingWsOutMessage::CodingChatEntryCreated { entry },
