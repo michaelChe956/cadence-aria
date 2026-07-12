@@ -26,6 +26,12 @@ pub(crate) use admission::{CodingMessageAdmission, coding_message_admission};
 pub(crate) use admission::{
     failed_code_review_recovery_request, unfinished_failed_code_review_recovery_message_allowed,
 };
+mod preparation;
+pub(crate) use preparation::{
+    CodingMessagePreparation, CodingMessagePreparationError, prepare_coding_message,
+};
+#[cfg(test)]
+pub(crate) use preparation::{CodingRecoveryPreparationProbe, prepare_coding_message_with_probe};
 
 pub(crate) type CodingWsSender = SplitSink<WebSocket, Message>;
 
@@ -95,40 +101,56 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     .await;
                     continue;
                 };
-                if inbound == CodingWsInMessage::CodingPing {
-                    if !send_coding_json(&mut socket_tx, &CodingWsOutMessage::CodingPong).await {
-                        break;
-                    };
-                    continue;
-                }
-                let _attempt_guard = state.coding_runs.lock_attempt(&attempt_id).await;
-                let Ok(current_attempt) = coding_store.get_attempt_by_id(&attempt_id) else {
-                    break;
-                };
-                let admission = coding_message_admission(
+                let preparation = match prepare_coding_message(
                     &coding_store,
                     &state.coding_runs,
-                    &current_attempt,
+                    &event_tx,
+                    &attempt_id,
                     &inbound,
-                );
-                if admission == CodingMessageAdmission::Rejected {
-                    let _ = send_coding_json(
-                        &mut socket_tx,
-                        &CodingWsOutMessage::CodingProtocolError {
-                            code: "coding_message_not_allowed".to_string(),
-                            message: "message is not allowed in current coding stage".to_string(),
-                        },
-                    )
-                    .await;
-                    continue;
-                }
-                let failed_review_recovery =
-                    admission == CodingMessageAdmission::FailedReviewRecovery;
-                if failed_review_recovery {
-                    let Some(reservation) = state
-                        .coding_runs
-                        .try_reserve_attempt(&current_attempt.id)
-                    else {
+                )
+                .await {
+                    Ok(preparation) => preparation,
+                    Err(CodingMessagePreparationError::AttemptUnavailable) => break,
+                    Err(CodingMessagePreparationError::Recovery(error)) => {
+                        let code = if error
+                            .to_string()
+                            .contains("coding_failed_review_recovery_state_changed")
+                        {
+                            "coding_recovery_state_changed"
+                        } else {
+                            "coding_failed_review_recovery_failed"
+                        };
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: code.to_string(),
+                                message: error.to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let current_attempt = match preparation {
+                    CodingMessagePreparation::Hello => continue,
+                    CodingMessagePreparation::Ping => {
+                        if !send_coding_json(&mut socket_tx, &CodingWsOutMessage::CodingPong).await {
+                            break;
+                        }
+                        continue;
+                    }
+                    CodingMessagePreparation::Rejected => {
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_message_not_allowed".to_string(),
+                                message: "message is not allowed in current coding stage".to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                    CodingMessagePreparation::RecoveryAlreadyActive => {
                         let _ = send_coding_json(
                             &mut socket_tx,
                             &CodingWsOutMessage::CodingProtocolError {
@@ -139,68 +161,44 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         )
                         .await;
                         continue;
-                    };
-                    let CodingWsInMessage::GateResponse { gate_id, .. } = &inbound else {
-                        unreachable!("failed review recovery guard only accepts gate responses");
-                    };
-                    let engine = CodingWorkspaceEngine::new(
-                        coding_store.clone(),
-                        GitWorkspaceService::new(),
-                        event_tx.clone(),
-                    );
-                    let updated = match engine
-                        .recover_failed_code_review_for_attempt(&current_attempt.id, gate_id)
-                        .await
-                    {
-                        Ok(updated) => updated,
-                        Err(error) => {
-                            let code = if error
-                                .to_string()
-                                .contains("coding_failed_review_recovery_state_changed")
-                            {
-                                "coding_recovery_state_changed"
-                            } else {
-                                "coding_failed_review_recovery_failed"
-                            };
-                            let _ = send_coding_json(
-                                &mut socket_tx,
-                                &CodingWsOutMessage::CodingProtocolError {
-                                    code: code.to_string(),
-                                    message: error.to_string(),
-                                },
-                            )
-                            .await;
-                            continue;
-                        }
-                    };
-                    let command_tx = match spawn_coding_runner_reserved(
-                        state.clone(),
-                        coding_store.clone(),
-                        event_tx.clone(),
-                        updated.clone(),
+                    }
+                    CodingMessagePreparation::Allowed(current_attempt) => current_attempt,
+                    CodingMessagePreparation::FailedReviewRecovery {
+                        attempt: updated,
                         gate_id,
                         reservation,
-                    ) {
-                        Ok(command_tx) => command_tx,
-                        Err(error) => {
-                            let _ = send_coding_json(
-                                &mut socket_tx,
-                                &CodingWsOutMessage::CodingProtocolError {
-                                    code: "coding_recovery_runner_activation_failed".to_string(),
-                                    message: error.to_string(),
-                                },
-                            )
-                            .await;
-                            continue;
+                    } => {
+                        let command_tx = match spawn_coding_runner_reserved(
+                            state.clone(),
+                            coding_store.clone(),
+                            event_tx.clone(),
+                            updated.clone(),
+                            &gate_id,
+                            reservation,
+                        ) {
+                            Ok(command_tx) => command_tx,
+                            Err(error) => {
+                                let _ = send_coding_json(
+                                    &mut socket_tx,
+                                    &CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_recovery_runner_activation_failed"
+                                            .to_string(),
+                                        message: error.to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
+                        runner_started = true;
+                        runner_command_tx = Some(command_tx);
+                        if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
+                            let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                         }
-                    };
-                    runner_started = true;
-                    runner_command_tx = Some(command_tx);
-                    if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
-                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                        continue;
                     }
-                    continue;
-                } else if inbound == CodingWsInMessage::StartCoding {
+                };
+                if inbound == CodingWsInMessage::StartCoding {
                     if runner_started {
                         let _ = send_coding_json(
                             &mut socket_tx,

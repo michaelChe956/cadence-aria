@@ -7,6 +7,8 @@
   - `58b03e5 fix: serialize interrupted code review retries`
   - `9026fcf fix: safely degrade structured review repair`
   - `b30680c fix: close recovery admission races`
+  - `380cad6 fix: gate recovery test exports`
+  - 第三轮 Attempt guard 生命周期修复与本报告更新将在同一原子提交中落地。
 - 工作目录：`/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0709`
 - 未触碰真实 `coding_attempt_0001`，未访问或修改共享 issue worktree。
 - dirty worktree 中原有 Workspace 中断恢复、结构化审核及前端改动均保留，三个实现提交只包含本任务文件。
@@ -28,7 +30,9 @@
 - 新 `Blocked + CodeReview` Gate 通过内部 blocked-gate record 精确绑定 Gate ID、失败 Timeline Node ID 与失败 Reviewer Role Run ID。
 - 新旧两种入口统一复用 `FailedCodeReviewRecoveryJournal` 状态机。
 - socket 在任何恢复写入前取得 Attempt 级 reservation，并只使用 `spawn_coding_runner_reserved()` 激活该 reservation。
-- admission、reservation 与 journal 推进现在由同一 Attempt 级异步临界区串行化；active recovery reservation 在 journal 创建前即拒绝其他 mutating message。
+- `prepare_coding_message()` 统一生产 admission 生命周期：Hello/Ping 在 Attempt lock 前返回；其他消息在锁内 reload/admission，普通消息返回前释放锁。
+- recovery 在同一 Attempt 临界区内完成 reload、admission、reservation 与 journal 幂等推进至 GateResolved；helper 返回前显式释放 guard，此时 reservation 仍 active、journal 仍 unfinished。
+- `spawn_coding_runner_reserved()` 在 guard 释放后激活 reservation 并完成 journal；snapshot 构建与所有 socket I/O 也不再持有 Attempt lock。
 - `abort_attempt()` 不再删除 recovery reservation；reservation 只由其持有者激活、显式释放或 Drop 释放。
 - 普通 `handle_blocked_gate_response()` 对 `code_review_provider_interrupted + retry_review` 返回 `coding_failed_review_recovery_requires_reservation`，彻底关闭普通 Role Run/Runner 旁路。
 - 新失败 Role Run 保持 `Failed` 状态，仅记录 `superseded_by_run_id`；历史遗留 `Running` stale run 仍按旧兼容语义转为 `Superseded`。
@@ -49,7 +53,7 @@
 - 错误 Gate ID、`manual_continue`、`send_to_coder`、`abort` Gate action、普通 `ContextNote` 与 `AbortAttempt` 均稳定进入 `coding_message_not_allowed` 分支。
 - Prepared、AttemptReopened、RetryRunCreated、AttemptRunning、GateResolved 前缀均验证精确 retry 可继续、Abort 不可绕过。
 - 普通 terminal/stage 消息规则未放宽。
-- 可控双 barrier 测试证明 AbortAttempt、错误 Gate、`manual_continue`、`send_to_coder`、`ContextNote` 在 reservation 已建立但 journal 未 Prepared 时全部阻塞；journal 推进后全部 Reject，且 reservation 不丢失。
+- 生产共用 preparation helper 的可控测试证明：winner 在 reservation 建立且 journal 尚未创建时持锁，AbortAttempt/ContextNote 等待；helper 推进至 GateResolved 并释放 guard 后，两条竞争消息均因 active reservation/unfinished journal 被 Reject，随后 winner 正常激活 reserved runner 并将 journal 完成至 Completed。
 
 ### Important 3：repair Provider 失败未安全降级
 
@@ -92,7 +96,7 @@
   - 失败原因：普通 Gate API 返回 Running Attempt，而非 reservation-required 错误，证明旁路存在。
 - GREEN：以上两个命令均通过。
 - GREEN 汇总：`cargo test --locked --lib failed_review_recovery`
-  - 结果：21 passed，包含旧 Runner、双 socket、mixed-message barrier、reserved spawn、journal 完成顺序与新旧多前缀幂等收敛。
+  - 结果：21 passed，包含旧 Runner、双 socket、生产 preparation 生命周期、reserved spawn、journal 完成顺序与新旧多前缀幂等收敛。
 
 ### Important 2
 
@@ -134,7 +138,7 @@
 - `git diff --check`：PASS。
 - coding provider failure 回归：`code_review_provider_failure_blocks_attempt_without_cleaning_shared_worktree` PASS。
 - 前端：本任务未修改前端文件，未运行前端测试。
-- 行数：所有本任务修改的 Rust 文件均小于 800 行；本轮 `socket.rs` 拆分后 724 行，`socket/admission.rs` 90 行，最大本轮测试文件 626 行。
+- 行数：所有本任务修改文件均小于 800 行；第三轮 `socket.rs` 723 行、`socket/admission.rs` 90 行、`socket/preparation.rs` 137 行、recovery runner 测试 674 行、WebSocket 集成测试分片 41 行。
 
 ## 文件清单
 
@@ -169,6 +173,15 @@
 - `src/product/workspace_engine/review/drive.rs`
 - `src/product/workspace_engine/tests/part_03/part_06.rs`
 
+### 第三轮原子提交
+
+- `src/web/coding_ws_handler/socket.rs`
+- `src/web/coding_ws_handler/socket/preparation.rs`
+- `src/web/coding_ws_handler/tests/failed_review_recovery/runner.rs`
+- `tests/it_web/web_coding_ws_handler.rs`
+- `tests/it_web/web_coding_ws_handler/part_10.rs`
+- `.superpowers/sdd/final-review-fix-report.md`
+
 ## 第二轮复审 RED / GREEN
 
 ### Reservation 到 journal Prepared 临界窗口
@@ -191,6 +204,30 @@
 - RED：`cargo test --locked --lib repair_permission_timeout_resolves_persisted_request_before_fallback_reload`
   - 失败原因：NodeDetail 中 permission event 的 response 仍为 `None`。
 - GREEN：同命令通过；response 持久化为 `{ "status": "timeout" }`，fallback Review 保持 Completed/HumanConfirm，reload 后无 pending permission。
+
+## 第三轮复审 RED / GREEN
+
+### 生产 recovery guard 释放时点
+
+- RED：`cargo test --locked --lib production_recovery_lifecycle_rejects_competing_abort_and_context_note`
+  - 测试先按旧生产顺序执行 lock→reservation→recover→reserved spawn/Completed→释放 lock；竞争 AbortAttempt/ContextNote 取得锁后实际返回 `Allowed`，期望 `Rejected`。
+- GREEN：winner 与竞争者均改用生产共用 `prepare_coding_message()` 内核；测试 probe 仅控制 reservation 后的暂停点，不替代 admission/recovery 生命周期。
+- guard 释放证据：winner helper 已返回、reserved spawn 尚未执行时，reservation 仍 active，journal phase=`GateResolved`；竞争 AbortAttempt/ContextNote 均为 `Rejected`。
+- 完成证据：放行 winner 后真实 `spawn_coding_runner_reserved_with_probe()` 依次记录 `task_created`、`journal_completed`、`provider_entry`，journal 最终为 `Completed`，runner 正常清理。
+
+### Hello/Ping 非变更快路径
+
+- RED：`cargo test --locked --test it_web coding_ws_hello_and_ping_do_not_wait_for_attempt_recovery_lock`
+  - 真实 WebSocket 收到初始 snapshot 后，测试持有对应 Attempt lock，依次发送 Hello 与 CodingPing；旧实现因 Hello 等待 lock，100ms 内收不到 Pong。
+- GREEN：同命令通过；Hello/Ping 在 preparation helper 获取 lock 前返回，同一 socket 的 Pong 在 guard 被外部持有时仍可立即到达。
+
+### 第三轮回归与门禁
+
+- `cargo test --locked --lib failed_review_recovery`：21 passed。
+- `cargo fmt --check`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS。
+- `cargo check --locked`：PASS。
+- `git diff --check`：PASS。
 
 ## Concerns / 未运行门禁
 

@@ -7,3 +7,4 @@ include!("web_coding_ws_handler/part_06.rs");
 include!("web_coding_ws_handler/part_07.rs");
 include!("web_coding_ws_handler/part_08.rs");
 include!("web_coding_ws_handler/part_09.rs");
+include!("web_coding_ws_handler/part_10.rs");
