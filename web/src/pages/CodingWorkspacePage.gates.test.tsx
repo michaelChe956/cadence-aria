@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -155,6 +155,72 @@ describe("CodingWorkspacePage gate panels", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "不满意，重新测试" }));
     expect(api.respondGate).toHaveBeenCalledWith("gate_0001", "rerun_testing", undefined);
+  });
+
+  it("recovers an interrupted code review through the generic blocked gate", async () => {
+    const api = mockCodingWs();
+    vi.mocked(api.respondGate).mockImplementation((gateId) => {
+      useCodingWorkspaceStore.getState().markGateSubmitting(gateId);
+    });
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "code_review",
+      pendingGates: [
+        {
+          gate_id: "coding_blocked_gate_0001",
+          kind: "blocked",
+          title: "代码审查中断",
+          description: "上次代码审查已中断，可保留当前修改并重试 Reviewer。",
+          stage: "code_review",
+          role: "code_reviewer",
+          available_actions: [
+            {
+              action_id: "retry_review",
+              label: "重试代码审查",
+              action_type: "retry_review",
+            },
+          ],
+          reason_code: "failed_code_review_recoverable",
+          evidence_refs: [],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByTestId("coding-pending-gate")).toHaveTextContent("代码审查中断");
+    expect(screen.queryByRole("button", { name: "发送上下文" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("补充 Coding 上下文")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "重试代码审查" }));
+
+    expect(api.respondGate).toHaveBeenCalledWith(
+      "coding_blocked_gate_0001",
+      "retry_review",
+      undefined,
+    );
+    expect(api.sendContextNote).not.toHaveBeenCalled();
+
+    const submittingButton = screen.getByRole("button", { name: "处理中" });
+    expect(submittingButton).toBeDisabled();
+    await userEvent.click(submittingButton);
+    expect(api.respondGate).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      const store = useCodingWorkspaceStore.getState();
+      store.setProtocolError({
+        code: "coding_gate_response_failed",
+        message: "Gate response failed",
+      });
+      store.setGateError("coding_blocked_gate_0001", "coding_gate_response_failed");
+    });
+
+    const retryButton = screen.getByRole("button", { name: "重试代码审查" });
+    expect(retryButton).toBeEnabled();
+    expect(screen.getByTestId("coding-pending-gate")).toHaveTextContent(
+      "coding_gate_response_failed",
+    );
   });
 
   it("renders skipped_required_steps blocked gate with dedicated label", async () => {
