@@ -2,6 +2,31 @@ use super::*;
 use crate::product::coding_models::{CodingExecutionUnit, CodingExecutionUnitStatus};
 
 impl CodingWorkspaceEngine {
+    pub(crate) fn latest_missing_required_steps(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<String>, ProductStoreError> {
+        let Some(report) = self
+            .store
+            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .last()
+        else {
+            return Ok(Vec::new());
+        };
+        let mut steps = Vec::new();
+        for step in report
+            .missing_required_steps
+            .into_iter()
+            .chain(report.skipped_required_steps)
+        {
+            if !steps.contains(&step) {
+                steps.push(step);
+            }
+        }
+        Ok(steps)
+    }
+
     pub(crate) fn collect_completed_group_unit_handoffs(
         &self,
         attempt: &CodingExecutionAttempt,
