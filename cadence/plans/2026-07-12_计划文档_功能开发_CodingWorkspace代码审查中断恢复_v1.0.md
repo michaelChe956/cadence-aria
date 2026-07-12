@@ -370,7 +370,10 @@ git commit -m "feat: expose failed code review recovery gate"
 ### Task 4: WebSocket 原地恢复并防止重复 Reviewer
 
 **Files:**
+- Create: `src/product/coding_attempt_store/recovery.rs`
+- Modify: `src/product/coding_attempt_store/mod.rs`
 - Modify: `src/product/coding_workspace_engine/failed_review_recovery.rs`
+- Modify: `src/web/state.rs`
 - Modify: `src/web/coding_ws_handler/socket.rs`
 - Modify: `src/web/coding_ws_handler/runner.rs`
 - Modify: `src/web/coding_ws_handler/tests/failed_review_recovery.rs`
@@ -379,6 +382,8 @@ git commit -m "feat: expose failed code review recovery gate"
 - Consumes: `CodingAttemptStore::reopen_failed_code_review_attempt`
 - Produces: `CodingWorkspaceEngine::recover_failed_code_review(gate_id) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError>`
 - Produces: `failed_code_review_recovery_request(...)` WebSocket guard。
+- Produces: `CodingRunRegistry::try_reserve_attempt(attempt_id) -> Option<CodingRunReservation>`，同一 Attempt 的 reservation/active Runner 原子互斥。
+- Produces: Attempt 级 `FailedCodeReviewRecoveryJournal` 与幂等 phase 继续能力。
 
 - [ ] **Step 1: 写恢复执行失败测试**
 
@@ -402,6 +407,8 @@ assert_eq!(updated.completed_at, None);
 - 新 Role Run 为 Running、trigger 为 RetryReview、`supersedes_run_id` 指向旧 Run；
 - active Unit、全部 Unit 顺序和 worktree `git status --porcelain` 前后完全相同；
 - stale gate ID、状态变化、node/run 不匹配均返回错误且不创建新 Role Run。
+- 同一 Attempt 两次并发 reservation 只有一次成功；释放未激活 reservation 后可再次取得。
+- 手工构造 prepared、attempt reopened、retry run prepared、attempt running、gate resolved 等 journal/持久化前缀，重复调用后均收敛为同一个 RetryReview Role Run、Running CodeReview Attempt 和 resolved Gate。
 
 - [ ] **Step 2: 写 WebSocket guard RED 测试**
 
@@ -437,18 +444,22 @@ Expected: FAIL，恢复方法与特殊 guard 尚不存在。
 `recover_failed_code_review` 必须：
 
 1. 重新加载 Attempt；
-2. 调用同文件的 `recoverable_failed_code_review` 确认 gate/node/run 未变化；
-3. 调用 `reopen_failed_code_review_attempt`；
-4. supersede 最新 Reviewer Role Run并创建 RetryReview Run；
-5. 将 Attempt 从 Blocked 更新为 Running；
-6. resolve 原 dirty Gate；
-7. 返回最新 Attempt。
+2. 若不存在 journal，调用同文件的 `recoverable_failed_code_review` 确认 gate/node/run，写入包含 expected IDs 的 prepared journal；
+3. 若 journal 已存在，只接受相同 attempt/gate，并按 journal expected node/run 继续；
+4. 幂等执行 Failed→Blocked；
+5. 用 stable recovery key 创建或复用唯一 RetryReview Run，并精确 supersede journal 指定的 stale Run；
+6. 幂等执行 Blocked→Running；
+7. 幂等 resolve 原 dirty Gate；
+8. 返回可启动 Runner 的 Attempt，但此时 journal 保持未完成；
+9. Runner 使用 reservation 激活后，再标记 journal runner started/completed。
 
 禁止放宽全局 `valid_status_transition`，禁止让任意 Failed Attempt 通用地转回 Running。
 
+每个 phase 操作必须允许“操作已成功但 phase 写入尚未完成”的重复进入。禁止在校验后再次按“最新 Role Run”选择写入目标；必须使用 journal 中的 expected stale role run ID。Store 新增的幂等 Role Run 方法必须通过 recovery key 复用已创建的 RetryReview Run。
+
 - [ ] **Step 4: 接入 WebSocket 并检查运行注册表**
 
-在普通 `is_coding_ws_message_allowed` 拒绝前单独计算恢复请求：
+在普通 `is_coding_ws_message_allowed` 拒绝前单独计算恢复请求。恢复请求既可来自原始 Failed 形态，也可来自匹配未完成 journal 的 Blocked/Running CodeReview 前缀：
 
 ```rust
 let failed_review_recovery = failed_code_review_recovery_request(
@@ -465,16 +476,19 @@ if !is_coding_ws_message_allowed(
 }
 ```
 
-执行恢复前检查：
+执行恢复前原子取得 reservation：
 
 ```rust
-if state.coding_runs.runner_count(&current_attempt.id) > 0 {
+let Some(reservation) = state
+    .coding_runs
+    .try_reserve_attempt(&current_attempt.id)
+else {
     send coding_recovery_already_active;
     continue;
-}
+};
 ```
 
-恢复成功后调用 `spawn_coding_runner`，并让 `should_resume_runner_after_gate_response` 继续只处理普通 Blocked/WaitingForHuman 路径。
+Engine 恢复失败时 reservation 通过 Drop/显式 release 释放。恢复成功后使用新增的 reserved spawn 接口激活同一 reservation，禁止再次 insert。激活后标记 recovery journal completed。`should_resume_runner_after_gate_response` 继续只处理普通 Blocked/WaitingForHuman 路径。
 
 - [ ] **Step 5: 验证 GREEN 和重复点击**
 
@@ -485,12 +499,12 @@ cargo test --locked --lib failed_review_recovery
 cargo test --locked --lib web::coding_ws_handler::tests
 ```
 
-Expected: 恢复成功；第二次请求返回 state changed/already active；普通 failed Attempt 仍返回 `coding_message_not_allowed`。
+Expected: 恢复成功；并发请求只有一个 reservation/Runner；各 journal 前缀重试均收敛；第二次请求返回 already active 或复用未完成 journal；普通 failed Attempt 仍返回 `coding_message_not_allowed`。
 
 - [ ] **Step 6: 提交原子变更**
 
 ```bash
-git add src/product/coding_workspace_engine/failed_review_recovery.rs src/web/coding_ws_handler/socket.rs src/web/coding_ws_handler/runner.rs src/web/coding_ws_handler/tests/failed_review_recovery.rs
+git add src/product/coding_attempt_store/recovery.rs src/product/coding_attempt_store/mod.rs src/product/coding_workspace_engine/failed_review_recovery.rs src/web/state.rs src/web/coding_ws_handler/socket.rs src/web/coding_ws_handler/runner.rs src/web/coding_ws_handler/tests/failed_review_recovery.rs
 git commit -m "feat: retry interrupted code review in place"
 ```
 

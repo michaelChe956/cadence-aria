@@ -81,6 +81,38 @@ Code Review Provider 失败后将 Attempt 转为 `blocked`，创建带 `retry_re
 
 重复点击时，第二次请求必须被稳定拒绝，不得创建第二个 Reviewer Run。
 
+### 5.3 原子 Runner Reservation
+
+`runner_count()` 只读检查不能作为并发互斥。恢复请求必须在首次持久化写入前，通过 `CodingRunRegistry` 原子取得 Attempt 级 reservation：
+
+- 同一 Attempt 同一时刻只能存在一个 reservation 或 active Runner；
+- 第二个并发请求在任何 Attempt、Gate、Role Run 写入前返回 `coding_recovery_already_active`；
+- Engine 恢复失败时 reservation 自动释放；
+- Engine 恢复成功后，现有 `spawn_coding_runner` 使用同一个 reservation 激活 Runner，不允许再次无条件 insert；
+- socket 或任务提前退出时，未激活 reservation 必须自动释放。
+
+### 5.4 幂等恢复 Journal
+
+历史恢复使用 Attempt 目录内的轻量 journal 记录预期身份与阶段，不引入全仓通用事务框架。Journal 至少包含：
+
+- attempt ID；
+- gate ID；
+- failed Timeline Node ID；
+- stale Reviewer Role Run ID；
+- 新 RetryReview Role Run ID（创建后写入）；
+- 当前恢复 phase；
+- created/updated timestamp。
+
+恢复 phase 至少区分：prepared、attempt reopened、retry run prepared、attempt running、gate resolved、runner started。每个 phase 必须满足：
+
+- 进入 phase 前按 journal 中的 expected IDs 精确校验，不重新选择“最新”Node 或 Role Run；
+- phase 对应操作可重复执行；进程在操作完成、phase 更新前退出时，下次调用能够识别已完成的前缀并继续；
+- 已创建的 RetryReview Run 使用稳定 recovery key，重试时复用，不创建第二个 Run；
+- Gate 已 resolved 但 journal 未完成时，SessionState 仍派生恢复 Gate；
+- Runner 激活后才把 journal 标为 completed/runner started；若标记失败，registry reservation/active Runner 仍阻止重复启动。
+
+Journal 未完成时，Attempt 可以处于 Failed、Blocked 或 Running CodeReview；这些状态仅能通过匹配 journal 的 `retry_review` 继续，不能放宽普通 terminal 消息规则。
+
 ## 6. 历史 Failed Attempt 兼容恢复
 
 历史数据只有同时满足以下条件才允许恢复：
@@ -95,14 +127,17 @@ Code Review Provider 失败后将 Attempt 转为 `blocked`，创建带 `retry_re
 - 共享 worktree 存在；
 - 不存在仍由运行注册表持有的 Reviewer Run；允许最新持久化 Reviewer Role Run 为 `running`，但仅限其 `node_id` 精确绑定最新失败 Code Review Node 的历史僵尸记录。
 
-SessionState 重建时，若只存在 `shared_worktree_dirty_manual_gate`，后端输出一个派生的 Code Review 恢复 Gate，不直接修改持久化文件。用户首次点击 `retry_review` 时，在单个后端事务式流程中：
+SessionState 重建时，若存在 `shared_worktree_dirty_manual_gate`，或存在未完成的匹配 recovery journal，后端输出一个派生的 Code Review 恢复 Gate，不直接修改 Attempt、Gate、Role Run 或 Unit。用户首次点击 `retry_review` 时：
 
 1. 校验上述历史状态仍未变化；
 2. 关闭或 supersede `shared_worktree_dirty_manual_gate`；
 3. 清除终态完成时间；
-4. 若旧 Reviewer Role Run 是与失败 Node 绑定的僵尸 `running` 记录，将其 supersede；
-5. 将 Attempt 恢复为 `running + code_review`；
-6. 创建新的 Reviewer Role Run并启动 Runner。
+4. 原子取得 Attempt 级 Runner reservation；
+5. 创建或继续幂等 recovery journal；
+6. 若旧 Reviewer Role Run 是与失败 Node 绑定的僵尸 `running` 记录，将其 supersede；
+7. 将 Attempt 恢复为 `running + code_review`；
+8. 创建或复用新的 RetryReview Role Run并启动 Runner；
+9. Runner 激活后完成 journal。
 
 该兼容路径只允许 Code Review 恢复，不能把任意 failed Attempt 通用地重新打开。
 
@@ -145,6 +180,7 @@ SessionState 重建时，若只存在 `shared_worktree_dirty_manual_gate`，后�
 - Attempt 状态已变化；
 - active Unit 已变化或不存在；
 - Reviewer Run 仍由运行注册表持有，或持久化 `running` Role Run 未绑定最新失败 Node；
+- recovery journal 的 expected gate/node/run 与当前持久化身份不一致；
 - 共享 worktree 不存在；
 - 当前 Failed Attempt 不符合历史恢复条件。
 
@@ -160,6 +196,8 @@ SessionState 重建时，若只存在 `shared_worktree_dirty_manual_gate`，后�
 - `retry_review` 保留 active Unit 和 worktree，supersede 旧 Reviewer Role Run。
 - 新失败路径会把失败 Reviewer Role Run 持久化为 `failed`；历史恢复允许 supersede 与失败 Node 绑定的僵尸 `running` Role Run。
 - 重复 `retry_review` 不创建第二个 Role Run。
+- 两个并发 socket 同时恢复时只有一个能取得 reservation，另一个在首次业务写入前失败。
+- 对 prepared、attempt reopened、retry run prepared、attempt running、gate resolved 等持久化前缀逐项重试，最终收敛到唯一 RetryReview Run 和 resolved Gate。
 
 ### 10.2 历史状态恢复
 
