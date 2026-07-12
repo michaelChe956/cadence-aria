@@ -593,6 +593,9 @@ impl WorkspaceEngine {
                         }
                         ProviderEvent::PermissionTimeout { permission_id } => {
                             if let Some(node_id) = node_id.as_deref() {
+                                let _ = self
+                                    .persist_permission_timeout(node_id, permission_id.clone())
+                                    .await;
                                 let _ = self.flush_stream_buffer(node_id).await;
                             }
                             return ReviewProviderRunResult::Failed(

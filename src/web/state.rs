@@ -13,7 +13,7 @@ use crate::web::events::EventHub;
 use crate::web::provider_availability::provider_name_available;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
@@ -36,6 +36,7 @@ struct CodingRunRegistryInner {
     runs: HashMap<String, HashMap<u64, mpsc::Sender<CodingRunnerCommand>>>,
     reservations: HashMap<String, u64>,
     exclusive_runs: HashMap<String, u64>,
+    attempt_guards: HashMap<String, Arc<AsyncMutex<()>>>,
 }
 
 pub struct CodingRunReservation {
@@ -122,7 +123,6 @@ impl CodingRunRegistry {
     pub async fn abort_attempt(&self, attempt_id: &str) -> usize {
         let senders = {
             let mut inner = self.inner.lock().expect("coding run registry lock");
-            inner.reservations.remove(attempt_id);
             inner.exclusive_runs.remove(attempt_id);
             inner
                 .runs
@@ -170,6 +170,27 @@ impl CodingRunRegistry {
             reservation_id,
             released: false,
         })
+    }
+
+    pub async fn lock_attempt(&self, attempt_id: &str) -> OwnedMutexGuard<()> {
+        let guard = {
+            let mut inner = self.inner.lock().expect("coding run registry lock");
+            Arc::clone(
+                inner
+                    .attempt_guards
+                    .entry(attempt_id.to_string())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        guard.lock_owned().await
+    }
+
+    pub fn has_active_recovery_reservation(&self, attempt_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("coding run registry lock")
+            .reservations
+            .contains_key(attempt_id)
     }
 
     pub fn attempt_is_reserved_or_running(&self, attempt_id: &str) -> bool {

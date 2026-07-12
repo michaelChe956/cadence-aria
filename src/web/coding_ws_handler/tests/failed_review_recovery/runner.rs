@@ -1,7 +1,7 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Barrier as AsyncBarrier, mpsc, oneshot};
 
 use crate::product::coding_attempt_store::FailedCodeReviewRecoveryPhase;
 use crate::product::coding_models::{
@@ -10,7 +10,8 @@ use crate::product::coding_models::{
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::coding_ws_handler::socket::{
-    failed_code_review_recovery_request, unfinished_failed_code_review_recovery_message_allowed,
+    CodingMessageAdmission, coding_message_admission, failed_code_review_recovery_request,
+    unfinished_failed_code_review_recovery_message_allowed,
 };
 use crate::web::coding_ws_handler::{
     CodingRunnerStartProbe, CodingWsInMessage, is_coding_ws_message_allowed,
@@ -385,6 +386,167 @@ async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner()
         1
     );
     registry.remove(&updated.id, run_id);
+}
+
+#[tokio::test]
+async fn active_recovery_reservation_serializes_all_competing_attempt_messages() {
+    let fixture = failed_review_fixture(
+        CodingAttemptScope::WorkItemGroup,
+        FixtureCase::BlockedProviderInterrupted,
+    );
+    let attempt_id = fixture.attempt.id.clone();
+    let gate_id = fixture
+        .dirty_gate
+        .as_ref()
+        .expect("provider interrupted gate")
+        .gate_id
+        .clone();
+    let registry = Arc::new(CodingRunRegistry::default());
+    let reserved_barrier = Arc::new(AsyncBarrier::new(2));
+    let continue_barrier = Arc::new(AsyncBarrier::new(2));
+    let winner_registry = Arc::clone(&registry);
+    let winner_store = fixture.store.clone();
+    let winner_attempt_id = attempt_id.clone();
+    let winner_gate_id = gate_id.clone();
+    let winner_reserved_barrier = Arc::clone(&reserved_barrier);
+    let winner_continue_barrier = Arc::clone(&continue_barrier);
+    let winner = tokio::spawn(async move {
+        let _attempt_guard = winner_registry.lock_attempt(&winner_attempt_id).await;
+        let reservation = winner_registry
+            .try_reserve_attempt(&winner_attempt_id)
+            .expect("winning recovery reservation");
+        winner_reserved_barrier.wait().await;
+        winner_continue_barrier.wait().await;
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let engine = CodingWorkspaceEngine::new(winner_store, GitWorkspaceService::new(), event_tx);
+        let updated = engine
+            .recover_failed_code_review_for_attempt(&winner_attempt_id, &winner_gate_id)
+            .await
+            .expect("winning recovery persists journal");
+        (reservation, updated)
+    });
+
+    reserved_barrier.wait().await;
+    assert!(registry.has_active_recovery_reservation(&attempt_id));
+    assert!(
+        fixture
+            .store
+            .get_failed_code_review_recovery_journal(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &attempt_id,
+            )
+            .expect("journal before winner continues")
+            .is_none()
+    );
+
+    let competing_messages = [
+        CodingWsInMessage::AbortAttempt,
+        CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_9999".to_string(),
+            action_id: "retry_review".to_string(),
+            extra_context: None,
+        },
+        CodingWsInMessage::GateResponse {
+            gate_id: gate_id.clone(),
+            action_id: "manual_continue".to_string(),
+            extra_context: Some("manual bypass".to_string()),
+        },
+        CodingWsInMessage::GateResponse {
+            gate_id: gate_id.clone(),
+            action_id: "send_to_coder".to_string(),
+            extra_context: Some("send back".to_string()),
+        },
+        CodingWsInMessage::ContextNote {
+            content: "competing note".to_string(),
+        },
+    ];
+    let mut competitors = competing_messages
+        .into_iter()
+        .map(|message| {
+            let registry = Arc::clone(&registry);
+            let store = fixture.store.clone();
+            let attempt_id = attempt_id.clone();
+            tokio::spawn(async move {
+                let _attempt_guard = registry.lock_attempt(&attempt_id).await;
+                let attempt = store
+                    .get_attempt_by_id(&attempt_id)
+                    .expect("competing socket reloads attempt");
+                coding_message_admission(&store, &registry, &attempt, &message)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        competitors
+            .iter()
+            .all(|competitor| !competitor.is_finished())
+    );
+    assert!(registry.has_active_recovery_reservation(&attempt_id));
+    assert_eq!(
+        fixture
+            .store
+            .get_attempt_by_id(&attempt_id)
+            .expect("attempt while winner paused")
+            .status,
+        CodingAttemptStatus::Blocked
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_role_runs(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &attempt_id,
+            )
+            .expect("role runs while winner paused")
+            .len(),
+        1
+    );
+
+    continue_barrier.wait().await;
+    let (reservation, updated) = winner.await.expect("winning recovery task");
+    for competitor in competitors.drain(..) {
+        assert_eq!(
+            competitor.await.expect("competing admission task"),
+            CodingMessageAdmission::Rejected
+        );
+    }
+
+    assert!(registry.has_active_recovery_reservation(&attempt_id));
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(
+        fixture
+            .store
+            .list_role_runs(&updated.project_id, &updated.issue_id, &updated.id)
+            .expect("role runs after winner recovery")
+            .iter()
+            .filter(|run| run.trigger
+                == crate::product::coding_models::CodingRoleRunTrigger::RetryReview)
+            .count(),
+        1
+    );
+    assert!(
+        fixture
+            .store
+            .list_context_notes(&updated.project_id, &updated.issue_id, &updated.id)
+            .expect("context notes after competitors")
+            .is_empty()
+    );
+    let journal = fixture
+        .store
+        .get_failed_code_review_recovery_journal(
+            &updated.project_id,
+            &updated.issue_id,
+            &updated.id,
+        )
+        .expect("journal after winner recovery")
+        .expect("winner recovery journal");
+    assert_eq!(journal.phase, FailedCodeReviewRecoveryPhase::GateResolved);
+    drop(reservation);
+    assert!(!registry.has_active_recovery_reservation(&attempt_id));
 }
 
 #[test]

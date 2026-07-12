@@ -8,9 +8,7 @@ use tokio::sync::mpsc;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
-use crate::product::coding_workspace_engine::{
-    CodingWorkspaceEngine, recoverable_failed_code_review,
-};
+use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::WebAppState;
@@ -20,6 +18,12 @@ use super::{
     context_note_chat_entry, provider_selection_targets_current_running_stage,
     should_resume_runner_after_gate_response, spawn_coding_runner, spawn_coding_runner_reserved,
     update_provider_permission_mode, update_provider_selection,
+};
+
+mod admission;
+pub(crate) use admission::{
+    CodingMessageAdmission, coding_message_admission, failed_code_review_recovery_request,
+    unfinished_failed_code_review_recovery_message_allowed,
 };
 
 pub(crate) type CodingWsSender = SplitSink<WebSocket, Message>;
@@ -96,29 +100,17 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     };
                     continue;
                 }
+                let _attempt_guard = state.coding_runs.lock_attempt(&attempt_id).await;
                 let Ok(current_attempt) = coding_store.get_attempt_by_id(&attempt_id) else {
                     break;
                 };
-                let unfinished_recovery_message_allowed =
-                    unfinished_failed_code_review_recovery_message_allowed(
-                        &coding_store,
-                        &current_attempt,
-                        &inbound,
-                    );
-                let failed_review_recovery = failed_code_review_recovery_request(
+                let admission = coding_message_admission(
                     &coding_store,
+                    &state.coding_runs,
                     &current_attempt,
                     &inbound,
                 );
-                if matches!(unfinished_recovery_message_allowed, Some(false))
-                    || (unfinished_recovery_message_allowed == Some(true)
-                        && !failed_review_recovery)
-                    || (!is_coding_ws_message_allowed(
-                    &current_attempt.status,
-                    &current_attempt.stage,
-                    &inbound,
-                ) && !failed_review_recovery)
-                {
+                if admission == CodingMessageAdmission::Rejected {
                     let _ = send_coding_json(
                         &mut socket_tx,
                         &CodingWsOutMessage::CodingProtocolError {
@@ -129,6 +121,8 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     .await;
                     continue;
                 }
+                let failed_review_recovery =
+                    admission == CodingMessageAdmission::FailedReviewRecovery;
                 if failed_review_recovery {
                     let Some(reservation) = state
                         .coding_runs
@@ -651,50 +645,6 @@ pub(crate) async fn send_coding_json(
         Ok(json) => socket.send(Message::Text(json.into())).await.is_ok(),
         Err(_) => false,
     }
-}
-
-pub(crate) fn failed_code_review_recovery_request(
-    coding_store: &CodingAttemptStore,
-    attempt: &crate::product::coding_models::CodingExecutionAttempt,
-    message: &CodingWsInMessage,
-) -> bool {
-    let CodingWsInMessage::GateResponse {
-        gate_id, action_id, ..
-    } = message
-    else {
-        return false;
-    };
-    if action_id != "retry_review" {
-        return false;
-    }
-    matches!(
-        recoverable_failed_code_review(coding_store, attempt),
-        Ok(Some(recovery)) if recovery.gate_id == *gate_id
-    )
-}
-
-pub(crate) fn unfinished_failed_code_review_recovery_message_allowed(
-    coding_store: &CodingAttemptStore,
-    attempt: &crate::product::coding_models::CodingExecutionAttempt,
-    message: &CodingWsInMessage,
-) -> Option<bool> {
-    let journal = match coding_store.get_failed_code_review_recovery_journal(
-        &attempt.project_id,
-        &attempt.issue_id,
-        &attempt.id,
-    ) {
-        Ok(Some(journal)) if !journal.is_completed() => journal,
-        Ok(_) => return None,
-        Err(_) => return Some(false),
-    };
-    Some(matches!(
-        message,
-        CodingWsInMessage::GateResponse {
-            gate_id,
-            action_id,
-            ..
-        } if gate_id == &journal.expected_gate_id && action_id == "retry_review"
-    ))
 }
 
 pub fn is_coding_ws_message_allowed(
