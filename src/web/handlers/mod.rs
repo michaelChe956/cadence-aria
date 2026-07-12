@@ -75,6 +75,7 @@ mod dto;
 mod health;
 mod lifecycle;
 mod product_resources;
+mod providers;
 mod runtime;
 mod support;
 mod workspace_session;
@@ -82,6 +83,7 @@ mod workspace_session;
 #[rustfmt::skip]
 pub use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, create_coding_attempt, create_group_coding_attempt, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
 pub use health::{health, runtime_info};
+pub use providers::{providers_recheck, providers_status};
 #[rustfmt::skip]
 pub use lifecycle::{confirm_gate, delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan, generate_design_specs, generate_story_specs, issue_lifecycle, prepare_work_item_plan, request_gate_change, terminate_gate};
 #[rustfmt::skip]

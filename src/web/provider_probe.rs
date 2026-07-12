@@ -1,59 +1,102 @@
-//! 启动时探测外部 provider CLI（codex / claude）是否可用。
-//! 缺失仅提示、不阻断 `aria web` 启动——工作台 UI 与 FakeProvider 演示不依赖外部 CLI。
+//! 基于共享 Provider 健康快照生成启动提示。
+//! 健康状态的唯一 truth 来自 `ProviderHealthService`，本模块不执行独立探测。
 
 use crate::cross_cutting::adapter_compatibility::default_compatibility_matrix;
+use crate::cross_cutting::provider_health::{ProviderHealthReasonCode, ProviderHealthSnapshot};
+use crate::product::models::ProviderName;
 use crate::protocol::contracts::ProviderType;
 
-/// 一个待探测的 provider：展示名 + 可执行程序名。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderProbe {
     pub display: String,
     pub program: String,
 }
 
-/// 从兼容性矩阵取出 codex / claude 的程序名（避免硬编码漂移）。
+/// 旧测试与 runtime 的矩阵读取兼容入口；不执行命令，也不用于 Web 健康状态。
 pub fn provider_probes() -> Vec<ProviderProbe> {
     let matrix = default_compatibility_matrix();
-    let mut probes = Vec::new();
-    for (display, ty) in [
+    [
         ("Claude Code", ProviderType::ClaudeCode),
         ("Codex", ProviderType::Codex),
-    ] {
-        if let Some(entry) = matrix.entry_for(ty) {
-            probes.push(ProviderProbe {
-                display: display.to_string(),
-                program: entry.provider_command.to_string_lossy().to_string(),
-            });
-        }
-    }
-    probes
+    ]
+    .into_iter()
+    .filter_map(|(display, provider_type)| {
+        matrix.entry_for(provider_type).map(|entry| ProviderProbe {
+            display: display.to_string(),
+            program: entry.provider_command.to_string_lossy().into_owned(),
+        })
+    })
+    .collect()
 }
 
-/// 纯函数：给定待探测项与「程序是否在 PATH」的判定闭包，返回提示文案。
-/// 返回 None 表示全部就绪（无需提示）；Some(text) 为面向用户的中文提示。
+/// 旧集成测试兼容入口；产品启动提示必须调用 `snapshot_probe_message`。
 pub fn probe_message<F>(probes: &[ProviderProbe], is_on_path: F) -> Option<String>
 where
     F: Fn(&str) -> bool,
 {
-    let missing: Vec<&ProviderProbe> = probes.iter().filter(|p| !is_on_path(&p.program)).collect();
+    let missing = probes
+        .iter()
+        .filter(|probe| !is_on_path(&probe.program))
+        .collect::<Vec<_>>();
     if missing.is_empty() {
         return None;
     }
-    let mut lines = vec![
-        "提示：以下 provider CLI 未在 PATH 中找到，相关真实执行功能将不可用（工作台界面与 Fake 演示不受影响）："
-            .to_string(),
-    ];
-    for p in &missing {
-        lines.push(format!(
-            "  - {} (`{}`)：安装后即可使用其真实 provider。",
-            p.display, p.program
-        ));
+    let mut lines = vec!["以下 provider CLI 不可用：".to_string()];
+    for probe in missing {
+        lines.push(format!("  - {} (`{}`)", probe.display, probe.program));
     }
-    lines.push("如需启用真实执行，请安装对应 CLI 并确保其在 PATH 中。".to_string());
     Some(lines.join("\n"))
 }
 
-/// 真实 PATH 查找：在 `PATH` 各目录下查找可执行文件。
+pub fn snapshot_probe_message(snapshot: &ProviderHealthSnapshot, degraded: bool) -> Option<String> {
+    let unavailable = snapshot
+        .providers
+        .iter()
+        .filter(|entry| !entry.available)
+        .collect::<Vec<_>>();
+    if unavailable.is_empty() && !degraded {
+        return None;
+    }
+
+    let mut lines = vec![format!(
+        "Provider 健康状态 generation {}{}：",
+        snapshot.generation,
+        if degraded { " (degraded)" } else { "" }
+    )];
+    for entry in unavailable {
+        let display = match entry.provider {
+            ProviderName::ClaudeCode => "Claude Code",
+            ProviderName::Codex => "Codex",
+            ProviderName::Fake => continue,
+        };
+        let reason_code = entry
+            .reason_code
+            .map(reason_code_text)
+            .unwrap_or("io_error");
+        let reason = entry.reason.as_deref().unwrap_or("provider unavailable");
+        lines.push(format!(
+            "  - {display}: {reason_code}: {reason}（安装或修复 CLI 后可通过状态 API 重检）"
+        ));
+    }
+    if degraded {
+        lines.push(
+            "  - 共享健康状态存储 degraded；真实工作流保持阻断，Web 服务继续启动。".to_string(),
+        );
+    }
+    Some(lines.join("\n"))
+}
+
+fn reason_code_text(code: ProviderHealthReasonCode) -> &'static str {
+    match code {
+        ProviderHealthReasonCode::CommandMissing => "command_missing",
+        ProviderHealthReasonCode::Timeout => "timeout",
+        ProviderHealthReasonCode::NonZeroExit => "non_zero_exit",
+        ProviderHealthReasonCode::VersionUnparseable => "version_unparseable",
+        ProviderHealthReasonCode::IoError => "io_error",
+    }
+}
+
+/// 旧 runtime 兼容入口；新 Web 状态、API 和启动提示不得依赖此函数。
 pub fn is_program_on_path(program: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
@@ -64,10 +107,73 @@ pub fn is_program_on_path(program: &str) -> bool {
     })
 }
 
-/// 启动时调用：探测并把提示打印到 stderr（不阻断）。
-pub fn emit_provider_probe_notice() {
-    let probes = provider_probes();
-    if let Some(msg) = probe_message(&probes, is_program_on_path) {
+pub fn emit_provider_probe_notice(snapshot: &ProviderHealthSnapshot, degraded: bool) {
+    if let Some(msg) = snapshot_probe_message(snapshot, degraded) {
         eprintln!("{msg}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::snapshot_probe_message;
+    use crate::cross_cutting::provider_health::{
+        ProviderHealthEntry, ProviderHealthReasonCode, ProviderHealthSnapshot,
+    };
+    use crate::product::models::ProviderName;
+
+    fn entry(provider: ProviderName, available: bool) -> ProviderHealthEntry {
+        let checked_at = Utc::now();
+        ProviderHealthEntry {
+            command: match provider {
+                ProviderName::ClaudeCode => "claude --version",
+                ProviderName::Codex => "codex --version",
+                ProviderName::Fake => "fake",
+            }
+            .to_string(),
+            provider,
+            available,
+            version: available.then(|| "1.0".to_string()),
+            reason_code: (!available).then_some(ProviderHealthReasonCode::CommandMissing),
+            reason: (!available).then(|| "not found".to_string()),
+            checked_at,
+        }
+    }
+
+    fn snapshot(claude_available: bool, codex_available: bool) -> ProviderHealthSnapshot {
+        let checked_at = Utc::now();
+        ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 7,
+            checked_at,
+            providers: vec![
+                entry(ProviderName::ClaudeCode, claude_available),
+                entry(ProviderName::Codex, codex_available),
+            ],
+        }
+    }
+
+    #[test]
+    fn provider_probe_uses_snapshot_and_stays_silent_when_all_available() {
+        assert_eq!(snapshot_probe_message(&snapshot(true, true), false), None);
+    }
+
+    #[test]
+    fn provider_probe_reports_unavailable_provider_from_snapshot() {
+        let message = snapshot_probe_message(&snapshot(false, true), false).expect("notice");
+
+        assert!(message.contains("Claude Code"));
+        assert!(message.contains("command_missing"));
+        assert!(message.contains("not found"));
+        assert!(!message.contains("Codex (`codex`)"));
+    }
+
+    #[test]
+    fn provider_probe_reports_degraded_shared_state() {
+        let message = snapshot_probe_message(&snapshot(true, true), true).expect("degraded notice");
+
+        assert!(message.contains("degraded"));
+        assert!(message.contains("generation 7"));
     }
 }

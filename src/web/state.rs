@@ -1,16 +1,24 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
+use crate::cross_cutting::aria_state_paths::AriaStatePaths;
+use crate::cross_cutting::bounded_command_runner::{
+    BoundedCommandRunner, TokioBoundedCommandRunner,
+};
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
+use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use crate::cross_cutting::provider_health::{
+    ProviderHealthService, ProviderHealthSnapshot, SystemProviderHealthClock,
+};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCommand;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
-use crate::web::provider_availability::provider_name_available;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -153,6 +161,11 @@ pub struct WebAppState {
     pub provider_registry: Arc<ProviderRegistry>,
     pub provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync>,
     pub provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>,
+    pub provider_health: Arc<ProviderHealthService>,
+    pub provider_gate: Arc<ProviderAvailabilityGate>,
+    pub command_runner: Arc<dyn BoundedCommandRunner>,
+    pub test_provider_enabled: bool,
+    provider_health_error: Arc<StdMutex<Option<String>>>,
     pub test_controls: TestControls,
     pub workspace_runs: WorkspaceRunRegistry,
     pub coding_runs: CodingRunRegistry,
@@ -165,9 +178,19 @@ impl WebAppState {
 
     pub fn with_events(workspace_root: PathBuf, runtime: WebRuntime, events: EventHub) -> Self {
         let test_controls = TestControls::default();
+        let test_provider_enabled = provider_mode_is_fake();
+        let command_runner: Arc<dyn BoundedCommandRunner> = Arc::new(TokioBoundedCommandRunner);
+        let provider_health = Arc::new(ProviderHealthService::with_dependencies(
+            AriaStatePaths::from_workspace_root(&workspace_root),
+            command_runner.clone(),
+            Arc::new(SystemProviderHealthClock),
+            Duration::from_secs(5),
+            4096,
+        ));
+        let provider_gate = Arc::new(ProviderAvailabilityGate::new(provider_health.clone()));
         let provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync> =
-            if runtime.enforces_real_provider_availability() {
-                Arc::new(provider_name_available)
+            if runtime.enforces_real_provider_availability() && !test_provider_enabled {
+                availability_from_gate(provider_gate.clone())
             } else {
                 Arc::new(|_| true)
             };
@@ -176,9 +199,18 @@ impl WebAppState {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
             events,
-            provider_registry: default_provider_registry(test_controls.clone()),
+            provider_registry: default_provider_registry(
+                test_controls.clone(),
+                provider_gate.clone(),
+                test_provider_enabled,
+            ),
             provider_availability,
             provider_adapter,
+            provider_health,
+            provider_gate,
+            command_runner,
+            test_provider_enabled,
+            provider_health_error: Arc::new(StdMutex::new(None)),
             test_controls,
             workspace_runs: WorkspaceRunRegistry::default(),
             coding_runs: CodingRunRegistry::default(),
@@ -217,24 +249,9 @@ impl WebAppState {
         events: EventHub,
         provider_registry: Arc<ProviderRegistry>,
     ) -> Self {
-        let provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync> =
-            if runtime.enforces_real_provider_availability() {
-                Arc::new(provider_name_available)
-            } else {
-                Arc::new(|_| true)
-            };
-        let provider_adapter = runtime.provider_adapter();
-        Self {
-            workspace_root,
-            runtime: Arc::new(StdMutex::new(runtime)),
-            events,
-            provider_registry,
-            provider_availability,
-            provider_adapter,
-            test_controls: TestControls::default(),
-            workspace_runs: WorkspaceRunRegistry::default(),
-            coding_runs: CodingRunRegistry::default(),
-        }
+        let mut state = Self::with_events(workspace_root, runtime, events);
+        state.provider_registry = provider_registry;
+        state
     }
 
     pub fn with_provider_adapter(
@@ -244,11 +261,72 @@ impl WebAppState {
         self.provider_adapter = provider_adapter;
         self
     }
+
+    pub fn with_provider_health(
+        mut self,
+        provider_health: Arc<ProviderHealthService>,
+        provider_gate: Arc<ProviderAvailabilityGate>,
+        command_runner: Arc<dyn BoundedCommandRunner>,
+    ) -> Self {
+        self.provider_availability = if self.test_provider_enabled {
+            Arc::new(|_| true)
+        } else {
+            availability_from_gate(provider_gate.clone())
+        };
+        self.provider_health = provider_health;
+        self.provider_gate = provider_gate;
+        self.command_runner = command_runner;
+        *self
+            .provider_health_error
+            .lock()
+            .expect("provider health error lock") = None;
+        self
+    }
+
+    pub async fn refresh_provider_health(&self) -> Arc<ProviderHealthSnapshot> {
+        match self.provider_health.refresh(CancellationToken::new()).await {
+            Ok(snapshot) => {
+                *self
+                    .provider_health_error
+                    .lock()
+                    .expect("provider health error lock") = None;
+                snapshot
+            }
+            Err(error) => {
+                *self
+                    .provider_health_error
+                    .lock()
+                    .expect("provider health error lock") = Some(error.to_string());
+                self.provider_health.latest_diagnostic()
+            }
+        }
+    }
+
+    pub fn provider_health_error(&self) -> Option<String> {
+        self.provider_health_error
+            .lock()
+            .expect("provider health error lock")
+            .clone()
+    }
 }
 
-fn default_provider_registry(test_controls: TestControls) -> Arc<ProviderRegistry> {
+fn availability_from_gate(
+    gate: Arc<ProviderAvailabilityGate>,
+) -> Arc<dyn Fn(&ProviderName) -> bool + Send + Sync> {
+    Arc::new(move |provider| gate.ensure_available(provider).is_ok())
+}
+
+fn provider_mode_is_fake() -> bool {
+    std::env::var("ARIA_PROVIDER_MODE").as_deref() == Ok("fake")
+}
+
+fn default_provider_registry(
+    test_controls: TestControls,
+    provider_gate: Arc<ProviderAvailabilityGate>,
+    test_provider_enabled: bool,
+) -> Arc<ProviderRegistry> {
     let mut registry = ProviderRegistry::new();
-    if std::env::var("ARIA_PROVIDER_MODE").as_deref() == Ok("fake") {
+    if test_provider_enabled {
         registry.register(
             ProviderName::Fake,
             Arc::new(TestControlledFakeStreamingProvider::new(
@@ -272,25 +350,37 @@ fn default_provider_registry(test_controls: TestControls) -> Arc<ProviderRegistr
         ProviderName::Fake,
         Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
     );
-    registry.register(
+    registry.register_gated(
         ProviderName::ClaudeCode,
         Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),
+        provider_gate.clone(),
     );
-    registry.register(
+    registry.register_gated(
         ProviderName::Codex,
         Arc::new(CodexProvider::new(PathBuf::from("codex"))),
+        provider_gate,
     );
     Arc::new(registry)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use chrono::{DateTime, Utc};
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
+    use crate::cross_cutting::aria_state_paths::AriaStatePaths;
+    use crate::cross_cutting::bounded_command_runner::{
+        BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
+    };
+    use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+    use crate::cross_cutting::provider_health::{ProviderHealthClock, ProviderHealthService};
     use crate::cross_cutting::streaming_provider::{
         ProviderEvent, ProviderPermissionMode, StreamingProviderInput,
     };
@@ -300,21 +390,103 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    struct ProviderModeGuard;
+    struct FixedClock(DateTime<Utc>);
+
+    impl ProviderHealthClock for FixedClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.0
+        }
+    }
+
+    struct ScriptedRunner {
+        calls: AtomicUsize,
+        results: Mutex<VecDeque<Result<BoundedCommandResult, BoundedCommandError>>>,
+    }
+
+    impl ScriptedRunner {
+        fn new(results: Vec<Result<BoundedCommandResult, BoundedCommandError>>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                results: Mutex::new(results.into()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BoundedCommandRunner for ScriptedRunner {
+        async fn run(
+            &self,
+            _request: BoundedCommandRequest,
+        ) -> Result<BoundedCommandResult, BoundedCommandError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.results
+                .lock()
+                .expect("scripted results")
+                .pop_front()
+                .expect("scripted result")
+        }
+    }
+
+    fn success(version: &str) -> Result<BoundedCommandResult, BoundedCommandError> {
+        Ok(BoundedCommandResult {
+            exit_code: Some(0),
+            stdout: format!("provider {version}"),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            duration_ms: 1,
+        })
+    }
+
+    fn provider_health(
+        root: &std::path::Path,
+        runner: Arc<dyn BoundedCommandRunner>,
+    ) -> Arc<ProviderHealthService> {
+        Arc::new(ProviderHealthService::with_dependencies(
+            AriaStatePaths::from_workspace_root(root),
+            runner,
+            Arc::new(FixedClock(Utc::now())),
+            Duration::from_secs(1),
+            4096,
+        ))
+    }
+
+    struct ProviderModeGuard {
+        previous: Option<OsString>,
+    }
 
     impl ProviderModeGuard {
         fn fake() -> Self {
+            let previous = std::env::var_os("ARIA_PROVIDER_MODE");
             unsafe {
                 std::env::set_var("ARIA_PROVIDER_MODE", "fake");
             }
-            Self
+            Self { previous }
+        }
+
+        fn disabled() -> Self {
+            let previous = std::env::var_os("ARIA_PROVIDER_MODE");
+            unsafe {
+                std::env::remove_var("ARIA_PROVIDER_MODE");
+            }
+            Self { previous }
         }
     }
 
     impl Drop for ProviderModeGuard {
         fn drop(&mut self) {
             unsafe {
-                std::env::remove_var("ARIA_PROVIDER_MODE");
+                if let Some(previous) = &self.previous {
+                    std::env::set_var("ARIA_PROVIDER_MODE", previous);
+                } else {
+                    std::env::remove_var("ARIA_PROVIDER_MODE");
+                }
             }
         }
     }
@@ -387,5 +559,52 @@ mod tests {
             ProviderEvent::TextDelta { content } => assert!(content.contains("Story Spec")),
             other => panic!("unexpected provider event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn provider_availability_reads_latest_shared_health_snapshot() {
+        let (_root, health, state) = {
+            let _guard = ENV_LOCK.lock().expect("env lock");
+            let _provider_mode = ProviderModeGuard::disabled();
+            let root = tempdir().expect("root");
+            let runner = Arc::new(ScriptedRunner::new(vec![success("1.0"), success("2.0")]));
+            let health = provider_health(root.path(), runner.clone());
+            let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
+            let state = WebAppState::new(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+            )
+            .with_provider_health(health.clone(), gate, runner);
+            assert!(!(state.provider_availability)(&ProviderName::Codex));
+            (root, health, state)
+        };
+        health
+            .refresh(CancellationToken::new())
+            .await
+            .expect("refresh");
+        assert!((state.provider_availability)(&ProviderName::Codex));
+        assert_eq!(state.provider_health.snapshot().generation, 1);
+    }
+
+    #[test]
+    fn provider_availability_fake_mode_does_not_execute_real_probe() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner.clone());
+        let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
+        let state = {
+            let _guard = ENV_LOCK.lock().expect("env lock");
+            let _provider_mode = ProviderModeGuard::fake();
+            WebAppState::new(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+            )
+            .with_provider_health(health, gate, runner.clone())
+        };
+
+        assert_eq!(runner.calls(), 0);
+        assert!(state.test_provider_enabled);
+        assert!((state.provider_availability)(&ProviderName::Fake));
+        assert!((state.provider_availability)(&ProviderName::Codex));
     }
 }

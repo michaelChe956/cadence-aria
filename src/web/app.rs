@@ -13,6 +13,8 @@ use crate::web::workspace_ws_handler;
 pub fn build_web_router(state: WebAppState) -> Router {
     let router = Router::new()
         .route("/api/health", get(handlers::health))
+        .route("/api/providers/status", get(handlers::providers_status))
+        .route("/api/providers/recheck", post(handlers::providers_recheck))
         .route("/api/runtime-info", get(handlers::runtime_info))
         .route("/api/events", get(handlers::events))
         .route("/api/projection", get(handlers::projection))
@@ -274,15 +276,149 @@ pub async fn serve_web(
             .map_err(|error| anyhow::anyhow!("{:?}: {}", error.code, error.message))?,
         events,
     );
+    refresh_provider_health_for_startup(&state).await;
     let static_service = crate::web::static_assets::static_dist_service();
     let app = build_web_router(state).fallback(move |req: axum::extract::Request| {
         let static_service = static_service.clone();
         async move { crate::web::static_assets::serve_static(static_service, req).await }
     });
-    crate::web::provider_probe::emit_provider_probe_notice();
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
     eprintln!("{}", listening_line(&bound_addr));
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn refresh_provider_health_for_startup(state: &WebAppState) {
+    if !state.test_provider_enabled {
+        state.refresh_provider_health().await;
+    }
+    let snapshot = state.provider_health.latest_diagnostic();
+    crate::web::provider_probe::emit_provider_probe_notice(
+        snapshot.as_ref(),
+        state.provider_health.degraded(),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use chrono::Utc;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    use super::{build_web_router, refresh_provider_health_for_startup};
+    use crate::cross_cutting::aria_state_paths::AriaStatePaths;
+    use crate::cross_cutting::bounded_command_runner::{
+        BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
+    };
+    use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+    use crate::cross_cutting::provider_health::{ProviderHealthClock, ProviderHealthService};
+    use crate::web::runtime::WebRuntime;
+    use crate::web::state::WebAppState;
+
+    struct FixedClock;
+
+    impl ProviderHealthClock for FixedClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            Utc::now()
+        }
+    }
+
+    struct MissingRunner;
+
+    #[async_trait::async_trait]
+    impl BoundedCommandRunner for MissingRunner {
+        async fn run(
+            &self,
+            request: BoundedCommandRequest,
+        ) -> Result<BoundedCommandResult, BoundedCommandError> {
+            Err(BoundedCommandError::CommandMissing {
+                executable: request.executable,
+                details: "not found".to_string(),
+            })
+        }
+    }
+
+    fn state(root: &std::path::Path) -> WebAppState {
+        let runner: Arc<dyn BoundedCommandRunner> = Arc::new(MissingRunner);
+        let health = Arc::new(ProviderHealthService::with_dependencies(
+            AriaStatePaths::from_workspace_root(root),
+            runner.clone(),
+            Arc::new(FixedClock),
+            Duration::from_secs(1),
+            4096,
+        ));
+        let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
+        let mut state =
+            WebAppState::new(root.to_path_buf(), WebRuntime::new_fake(root.to_path_buf()))
+                .with_provider_health(health, gate, runner);
+        state.test_provider_enabled = false;
+        state
+    }
+
+    #[tokio::test]
+    async fn providers_status_routes_exist_and_health_stays_ok_when_degraded() {
+        let root = tempdir().expect("root");
+        let state = state(root.path());
+        let app = build_web_router(state);
+
+        for (method, uri) in [
+            ("GET", "/api/health"),
+            ("GET", "/api/providers/status"),
+            ("POST", "/api/providers/recheck"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn providers_status_startup_refresh_storage_error_does_not_block_router() {
+        let root = tempdir().expect("root");
+        let blocked_root = root.path().join("not-a-directory");
+        std::fs::write(&blocked_root, "blocked").expect("blocked root");
+        let mut state = state(&blocked_root);
+        state.test_provider_enabled = false;
+
+        refresh_provider_health_for_startup(&state).await;
+        let response = build_web_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/providers/status")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert!(state.provider_health.degraded());
+        assert_eq!(state.provider_health.latest_diagnostic().generation, 1);
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn providers_status_startup_fake_mode_skips_real_refresh() {
+        let root = tempdir().expect("root");
+        let mut state = state(root.path());
+        state.test_provider_enabled = true;
+
+        refresh_provider_health_for_startup(&state).await;
+
+        assert_eq!(state.provider_health.latest_diagnostic().generation, 0);
+    }
 }
