@@ -20,6 +20,7 @@ pub(super) const FAILED_NODE_ID: &str = "coding_node_0009";
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FixtureCase {
     Recoverable,
+    BlockedProviderInterrupted,
     CompletedAttempt,
     AbortedAttempt,
     TestingStage,
@@ -228,6 +229,7 @@ pub(super) fn failed_review_fixture(
 
     attempt.scope = scope.clone();
     attempt.status = match case {
+        FixtureCase::BlockedProviderInterrupted => CodingAttemptStatus::Blocked,
         FixtureCase::CompletedAttempt => CodingAttemptStatus::Completed,
         FixtureCase::AbortedAttempt => CodingAttemptStatus::Aborted,
         _ => CodingAttemptStatus::Failed,
@@ -237,8 +239,11 @@ pub(super) fn failed_review_fixture(
     } else {
         CodingExecutionStage::CodeReview
     };
-    attempt.completed_at = (!matches!(case, FixtureCase::MissingCompletedAt))
-        .then(|| "2026-07-12T04:30:59Z".to_string());
+    attempt.completed_at = (!matches!(
+        case,
+        FixtureCase::MissingCompletedAt | FixtureCase::BlockedProviderInterrupted
+    ))
+    .then(|| "2026-07-12T04:30:59Z".to_string());
     attempt.work_item_group_id = matches!(scope, CodingAttemptScope::WorkItemGroup)
         .then(|| "work_item_plan_0001".to_string());
     attempt.active_unit_id = None;
@@ -351,7 +356,10 @@ pub(super) fn failed_review_fixture(
             Some(role_node_id.to_string()),
         )
         .expect("stale reviewer role run");
-    if matches!(case, FixtureCase::RoleRunNotRunning) {
+    if matches!(
+        case,
+        FixtureCase::RoleRunNotRunning | FixtureCase::BlockedProviderInterrupted
+    ) {
         store
             .update_role_run_status(
                 &attempt.project_id,
@@ -359,30 +367,77 @@ pub(super) fn failed_review_fixture(
                 &attempt.id,
                 &role_run.id,
                 CodingRoleRunStatus::Failed,
-                Some("provider_failed".to_string()),
+                Some(
+                    if matches!(case, FixtureCase::BlockedProviderInterrupted) {
+                        "code_review_provider_interrupted"
+                    } else {
+                        "provider_failed"
+                    }
+                    .to_string(),
+                ),
             )
             .expect("complete stale role run");
     }
 
     let dirty_gate = (!matches!(case, FixtureCase::MissingDirtyGate)).then(|| {
+        let provider_interrupted = matches!(case, FixtureCase::BlockedProviderInterrupted);
         store
             .create_blocked_gate(CreateBlockedGateInput {
                 attempt_id: attempt.id.clone(),
-                stage: CodingExecutionStage::FinalConfirm,
-                node_id: None,
-                role: None,
-                title: "Shared worktree has uncommitted changes".to_string(),
-                description: "Issue shared worktree has uncommitted changes".to_string(),
-                reason_code: Some("shared_worktree_dirty_manual_gate".to_string()),
+                stage: if provider_interrupted {
+                    CodingExecutionStage::CodeReview
+                } else {
+                    CodingExecutionStage::FinalConfirm
+                },
+                node_id: provider_interrupted.then(|| FAILED_NODE_ID.to_string()),
+                role: provider_interrupted.then_some(CodingProviderRole::CodeReviewer),
+                title: if provider_interrupted {
+                    "代码审查中断".to_string()
+                } else {
+                    "Shared worktree has uncommitted changes".to_string()
+                },
+                description: if provider_interrupted {
+                    "review provider interrupted".to_string()
+                } else {
+                    "Issue shared worktree has uncommitted changes".to_string()
+                },
+                reason_code: Some(
+                    if provider_interrupted {
+                        "code_review_provider_interrupted"
+                    } else {
+                        "shared_worktree_dirty_manual_gate"
+                    }
+                    .to_string(),
+                ),
                 evidence_refs: Vec::new(),
                 raw_provider_output_ref: None,
-                available_actions: vec![CodingGateAction {
-                    action_id: "manual_continue".to_string(),
-                    label: "人工继续".to_string(),
-                    action_type: CodingGateActionType::ManualContinue,
-                }],
+                available_actions: if provider_interrupted {
+                    vec![
+                        CodingGateAction {
+                            action_id: "retry_review".to_string(),
+                            label: "重试代码审查".to_string(),
+                            action_type: CodingGateActionType::RetryReview,
+                        },
+                        CodingGateAction {
+                            action_id: "send_to_coder".to_string(),
+                            label: "发送给 Coder".to_string(),
+                            action_type: CodingGateActionType::SendToCoder,
+                        },
+                        CodingGateAction {
+                            action_id: "abort".to_string(),
+                            label: "终止".to_string(),
+                            action_type: CodingGateActionType::Abort,
+                        },
+                    ]
+                } else {
+                    vec![CodingGateAction {
+                        action_id: "manual_continue".to_string(),
+                        label: "人工继续".to_string(),
+                        action_type: CodingGateActionType::ManualContinue,
+                    }]
+                },
             })
-            .expect("historical dirty worktree gate")
+            .expect("review recovery gate")
     });
 
     FailedReviewFixture {

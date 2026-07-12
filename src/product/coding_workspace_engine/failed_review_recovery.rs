@@ -48,6 +48,64 @@ pub(crate) fn recoverable_failed_code_review(
         }));
     }
 
+    if attempt.status == CodingAttemptStatus::Blocked
+        && attempt.stage == CodingExecutionStage::CodeReview
+        && attempt.completed_at.is_none()
+        && attempt_execution_fingerprint_is_valid(coding_store, attempt)?
+    {
+        let mut gates = coding_store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .filter(is_code_review_provider_interrupted_gate);
+        let Some(gate) = gates.next() else {
+            return Ok(None);
+        };
+        if gates.next().is_some() {
+            return Ok(None);
+        }
+        let Some(failed_node_id) = coding_store.open_blocked_gate_node_id(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &gate.gate_id,
+        )?
+        else {
+            return Ok(None);
+        };
+        let failed_node_matches = coding_store
+            .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .any(|node| {
+                node.id == failed_node_id
+                    && node.stage == CodingExecutionStage::CodeReview
+                    && node.status == CodingTimelineNodeStatus::Failed
+            });
+        if !failed_node_matches {
+            return Ok(None);
+        }
+        let mut failed_runs = coding_store
+            .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .filter(|run| {
+                run.stage == CodingExecutionStage::CodeReview
+                    && run.role == CodingProviderRole::CodeReviewer
+                    && run.node_id.as_deref() == Some(failed_node_id.as_str())
+                    && run.status == CodingRoleRunStatus::Failed
+                    && run.reason_code.as_deref() == Some("code_review_provider_interrupted")
+            });
+        let Some(failed_run) = failed_runs.next() else {
+            return Ok(None);
+        };
+        if failed_runs.next().is_some() {
+            return Ok(None);
+        }
+        return Ok(Some(FailedCodeReviewRecovery {
+            gate_id: gate.gate_id,
+            failed_node_id,
+            stale_role_run_id: failed_run.id,
+        }));
+    }
+
     if attempt.status != CodingAttemptStatus::Failed
         || attempt.stage != CodingExecutionStage::CodeReview
         || attempt.completed_at.is_none()
@@ -389,7 +447,10 @@ fn completed_journal_waits_for_retry_node(
     )?;
     Ok(stale.stage == CodingExecutionStage::CodeReview
         && stale.role == CodingProviderRole::CodeReviewer
-        && stale.status == CodingRoleRunStatus::Superseded
+        && matches!(
+            stale.status,
+            CodingRoleRunStatus::Failed | CodingRoleRunStatus::Superseded
+        )
         && stale.node_id.as_deref() == Some(journal.expected_failed_node_id.as_str())
         && stale.superseded_by_run_id.as_deref() == Some(retry.id.as_str()))
 }
@@ -439,7 +500,9 @@ fn journal_recovery_prefix_is_valid(
         || stale.node_id.as_deref() != Some(journal.expected_failed_node_id.as_str())
         || !matches!(
             stale.status,
-            CodingRoleRunStatus::Running | CodingRoleRunStatus::Superseded
+            CodingRoleRunStatus::Running
+                | CodingRoleRunStatus::Failed
+                | CodingRoleRunStatus::Superseded
         )
     {
         return Ok(false);
@@ -465,10 +528,17 @@ fn journal_recovery_prefix_is_valid(
                 .is_some_and(|expected| expected != retry.id)
             || (stale.status == CodingRoleRunStatus::Superseded
                 && stale.superseded_by_run_id.as_deref() != Some(retry.id.as_str()))
+            || (stale.status == CodingRoleRunStatus::Failed
+                && stale
+                    .superseded_by_run_id
+                    .as_deref()
+                    .is_some_and(|run_id| run_id != retry.id))
         {
             return Ok(false);
         }
-    } else if stale.status == CodingRoleRunStatus::Superseded || journal.retry_role_run_id.is_some()
+    } else if stale.status == CodingRoleRunStatus::Superseded
+        || stale.superseded_by_run_id.is_some()
+        || journal.retry_role_run_id.is_some()
     {
         return Ok(false);
     }

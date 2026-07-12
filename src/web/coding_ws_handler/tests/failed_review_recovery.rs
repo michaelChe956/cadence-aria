@@ -15,6 +15,7 @@ use crate::web::state::CodingRunRegistry;
 
 use super::{CodingWsOutMessage, build_coding_session_state};
 
+mod blocked;
 mod runner;
 mod support;
 

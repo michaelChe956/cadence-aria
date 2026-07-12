@@ -9,7 +9,9 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::coding_ws_handler::socket::failed_code_review_recovery_request;
+use crate::web::coding_ws_handler::socket::{
+    failed_code_review_recovery_request, unfinished_failed_code_review_recovery_message_allowed,
+};
 use crate::web::coding_ws_handler::{
     CodingRunnerStartProbe, CodingWsInMessage, is_coding_ws_message_allowed,
     spawn_coding_runner_reserved_with_probe,
@@ -187,6 +189,202 @@ fn failed_review_websocket_guard_allows_only_the_exact_retry_gate_request() {
             content: "continue".to_string(),
         },
     ));
+}
+
+#[test]
+fn unfinished_blocked_review_journal_allows_only_its_exact_retry_message() {
+    let fixture = failed_review_fixture(
+        CodingAttemptScope::WorkItemGroup,
+        FixtureCase::BlockedProviderInterrupted,
+    );
+    let gate = fixture
+        .dirty_gate
+        .as_ref()
+        .expect("provider interrupted gate");
+    let recovery = crate::product::coding_workspace_engine::recoverable_failed_code_review(
+        &fixture.store,
+        &fixture.attempt,
+    )
+    .expect("inspect recovery")
+    .expect("blocked recovery identity");
+    fixture
+        .store
+        .prepare_failed_code_review_recovery_journal(
+            &fixture.attempt,
+            &recovery.gate_id,
+            &recovery.failed_node_id,
+            &recovery.stale_role_run_id,
+        )
+        .expect("prepare blocked recovery journal");
+
+    let allowed = CodingWsInMessage::GateResponse {
+        gate_id: gate.gate_id.clone(),
+        action_id: "retry_review".to_string(),
+        extra_context: None,
+    };
+    assert_eq!(
+        unfinished_failed_code_review_recovery_message_allowed(
+            &fixture.store,
+            &fixture.attempt,
+            &allowed,
+        ),
+        Some(true)
+    );
+
+    for rejected in [
+        CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_9999".to_string(),
+            action_id: "retry_review".to_string(),
+            extra_context: None,
+        },
+        CodingWsInMessage::GateResponse {
+            gate_id: gate.gate_id.clone(),
+            action_id: "manual_continue".to_string(),
+            extra_context: None,
+        },
+        CodingWsInMessage::GateResponse {
+            gate_id: gate.gate_id.clone(),
+            action_id: "send_to_coder".to_string(),
+            extra_context: None,
+        },
+        CodingWsInMessage::GateResponse {
+            gate_id: gate.gate_id.clone(),
+            action_id: "abort".to_string(),
+            extra_context: None,
+        },
+        CodingWsInMessage::ContextNote {
+            content: "continue".to_string(),
+        },
+        CodingWsInMessage::AbortAttempt,
+    ] {
+        assert_eq!(
+            unfinished_failed_code_review_recovery_message_allowed(
+                &fixture.store,
+                &fixture.attempt,
+                &rejected,
+            ),
+            Some(false),
+            "unfinished recovery must reject {rejected:?}"
+        );
+    }
+}
+
+#[test]
+fn blocked_review_retry_reservation_rejects_an_old_runner_before_persistence() {
+    let fixture = failed_review_fixture(
+        CodingAttemptScope::WorkItemGroup,
+        FixtureCase::BlockedProviderInterrupted,
+    );
+    let gate = fixture
+        .dirty_gate
+        .as_ref()
+        .expect("provider interrupted gate");
+    let retry = CodingWsInMessage::GateResponse {
+        gate_id: gate.gate_id.clone(),
+        action_id: "retry_review".to_string(),
+        extra_context: None,
+    };
+    assert!(failed_code_review_recovery_request(
+        &fixture.store,
+        &fixture.attempt,
+        &retry,
+    ));
+
+    let registry = CodingRunRegistry::default();
+    let (old_runner_tx, _old_runner_rx) = mpsc::channel(1);
+    let old_runner_id = registry
+        .insert(fixture.attempt.id.clone(), old_runner_tx)
+        .expect("register old runner");
+    assert!(registry.try_reserve_attempt(&fixture.attempt.id).is_none());
+    assert!(
+        fixture
+            .store
+            .get_failed_code_review_recovery_journal(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("journal before reservation")
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_role_runs(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("role runs before reservation")
+            .len(),
+        1
+    );
+    registry.remove(&fixture.attempt.id, old_runner_id);
+}
+
+#[tokio::test]
+async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner() {
+    let fixture = failed_review_fixture(
+        CodingAttemptScope::WorkItemGroup,
+        FixtureCase::BlockedProviderInterrupted,
+    );
+    let gate_id = fixture
+        .dirty_gate
+        .as_ref()
+        .expect("provider interrupted gate")
+        .gate_id
+        .clone();
+    let registry = Arc::new(CodingRunRegistry::default());
+    let barrier = Arc::new(Barrier::new(3));
+    let attempts = (0..2)
+        .map(|_| {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            let attempt_id = fixture.attempt.id.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                registry.try_reserve_attempt(&attempt_id)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let mut reservations = attempts
+        .into_iter()
+        .filter_map(|attempt| attempt.join().expect("socket reservation"))
+        .collect::<Vec<_>>();
+    assert_eq!(reservations.len(), 1);
+
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+    let updated = engine
+        .recover_failed_code_review_for_attempt(&fixture.attempt.id, &gate_id)
+        .await
+        .expect("winning socket recovers review");
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    let run_id = reservations
+        .pop()
+        .expect("winning reservation")
+        .activate(command_tx)
+        .expect("activate winning runner");
+    fixture
+        .store
+        .complete_failed_code_review_recovery_journal(&updated.id, &gate_id)
+        .expect("complete winning recovery journal");
+
+    assert_eq!(registry.runner_count(&updated.id), 1);
+    let runs = fixture
+        .store
+        .list_role_runs(&updated.project_id, &updated.issue_id, &updated.id)
+        .expect("role runs after concurrent retries");
+    assert_eq!(
+        runs.iter()
+            .filter(|run| run.trigger
+                == crate::product::coding_models::CodingRoleRunTrigger::RetryReview)
+            .count(),
+        1
+    );
+    registry.remove(&updated.id, run_id);
 }
 
 #[test]

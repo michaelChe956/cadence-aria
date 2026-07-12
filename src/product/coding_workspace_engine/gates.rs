@@ -566,6 +566,13 @@ impl CodingWorkspaceEngine {
                     "coding_gate_action_not_allowed".to_string(),
                 )
             })?;
+        if action.action_type == CodingGateActionType::RetryReview
+            && super::failed_review_recovery::is_code_review_provider_interrupted_gate(&gate)
+        {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "coding_failed_review_recovery_requires_reservation".to_string(),
+            ));
+        }
         let should_resolve_gate =
             !matches!(action.action_type, CodingGateActionType::ProvideContext);
 

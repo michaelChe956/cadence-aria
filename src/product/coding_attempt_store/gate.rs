@@ -103,6 +103,26 @@ impl super::CodingAttemptStore {
             .collect())
     }
 
+    pub fn open_blocked_gate_node_id(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+    ) -> Result<Option<String>, ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let path = self
+            .blocked_gates_root(project_id, issue_id, attempt_id)
+            .join(format!("{gate_id}.json"));
+        if !super::path_is_regular_file(&path)? {
+            return Ok(None);
+        }
+        let record: BlockedGateRecord = read_json(&path)?;
+        Ok((record.status == BlockedGateStatus::Open)
+            .then_some(record.node_id)
+            .flatten())
+    }
+
     pub fn resolve_blocked_gate(
         &self,
         project_id: &str,

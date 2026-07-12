@@ -99,16 +99,26 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                 let Ok(current_attempt) = coding_store.get_attempt_by_id(&attempt_id) else {
                     break;
                 };
+                let unfinished_recovery_message_allowed =
+                    unfinished_failed_code_review_recovery_message_allowed(
+                        &coding_store,
+                        &current_attempt,
+                        &inbound,
+                    );
                 let failed_review_recovery = failed_code_review_recovery_request(
                     &coding_store,
                     &current_attempt,
                     &inbound,
                 );
-                if !is_coding_ws_message_allowed(
+                if matches!(unfinished_recovery_message_allowed, Some(false))
+                    || (unfinished_recovery_message_allowed == Some(true)
+                        && !failed_review_recovery)
+                    || (!is_coding_ws_message_allowed(
                     &current_attempt.status,
                     &current_attempt.stage,
                     &inbound,
-                ) && !failed_review_recovery {
+                ) && !failed_review_recovery)
+                {
                     let _ = send_coding_json(
                         &mut socket_tx,
                         &CodingWsOutMessage::CodingProtocolError {
@@ -661,6 +671,30 @@ pub(crate) fn failed_code_review_recovery_request(
         recoverable_failed_code_review(coding_store, attempt),
         Ok(Some(recovery)) if recovery.gate_id == *gate_id
     )
+}
+
+pub(crate) fn unfinished_failed_code_review_recovery_message_allowed(
+    coding_store: &CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    message: &CodingWsInMessage,
+) -> Option<bool> {
+    let journal = match coding_store.get_failed_code_review_recovery_journal(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &attempt.id,
+    ) {
+        Ok(Some(journal)) if !journal.is_completed() => journal,
+        Ok(_) => return None,
+        Err(_) => return Some(false),
+    };
+    Some(matches!(
+        message,
+        CodingWsInMessage::GateResponse {
+            gate_id,
+            action_id,
+            ..
+        } if gate_id == &journal.expected_gate_id && action_id == "retry_review"
+    ))
 }
 
 pub fn is_coding_ws_message_allowed(

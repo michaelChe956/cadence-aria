@@ -203,10 +203,15 @@ impl super::CodingAttemptStore {
             &journal.expected_stale_role_run_id,
         )?;
         validate_stale_role_run(&stale, journal, &retry.id)?;
-        if stale.status == CodingRoleRunStatus::Running {
-            stale.status = CodingRoleRunStatus::Superseded;
+        if matches!(
+            stale.status,
+            CodingRoleRunStatus::Running | CodingRoleRunStatus::Failed
+        ) {
+            if stale.status == CodingRoleRunStatus::Running {
+                stale.status = CodingRoleRunStatus::Superseded;
+                stale.completed_at = Some(Utc::now().to_rfc3339());
+            }
             stale.superseded_by_run_id = Some(retry.id.clone());
-            stale.completed_at = Some(Utc::now().to_rfc3339());
             self.save_role_run(&attempt.project_id, &attempt.issue_id, &stale)?;
         }
         Ok(retry)
@@ -374,10 +379,17 @@ fn validate_stale_role_run(
         || stale.node_id.as_deref() != Some(journal.expected_failed_node_id.as_str())
         || !matches!(
             stale.status,
-            CodingRoleRunStatus::Running | CodingRoleRunStatus::Superseded
+            CodingRoleRunStatus::Running
+                | CodingRoleRunStatus::Failed
+                | CodingRoleRunStatus::Superseded
         )
         || (stale.status == CodingRoleRunStatus::Superseded
             && stale.superseded_by_run_id.as_deref() != Some(retry_role_run_id))
+        || (stale.status == CodingRoleRunStatus::Failed
+            && stale
+                .superseded_by_run_id
+                .as_deref()
+                .is_some_and(|run_id| run_id != retry_role_run_id))
     {
         return Err(recovery_state_changed());
     }
