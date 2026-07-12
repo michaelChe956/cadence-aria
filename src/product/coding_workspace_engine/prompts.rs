@@ -301,6 +301,9 @@ pub(crate) fn code_review_material_protocol() -> &'static str {
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
      - 如果测试输出显示没有实际测试被执行，不能把它当作有效覆盖；必须结合 Work Item 要求判断是否需要修复。\n\
      - 不得提出执行材料之外的技术栈默认要求。\n\
+     - verdict 只能使用 approve、request_changes、blocked。\n\
+     - finding.severity 只能使用 error、warning、info。\n\
+     - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
 }
 
@@ -314,6 +317,9 @@ pub(crate) fn group_final_review_material_protocol() -> &'static str {
      - 如果 ReviewRequest 已 push 的 commit 与 completed units、diff 或验证证据不一致，必须 request_changes 或 blocked。\n\
      - impact_scope、pr_description、commit_message_suggestion 必须基于实际 diff、completed units 和 handoff，不得编造未实现内容。\n\
      - 不得用平台默认技术栈假设替代 unit handoff 或 Work Item 内容。\n\
+     - verdict 只能使用 approve、request_changes、blocked。\n\
+     - finding.severity 只能使用 error、warning、info。\n\
+     - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 source_stage=group_final_review。\n"
 }
 

@@ -200,6 +200,19 @@ fn code_review_material_protocol_requires_material_derived_checklist() {
     assert!(protocol.contains("No markdown, no explanations"));
 }
 
+#[test]
+fn review_prompts_list_exact_finding_severity_values() {
+    for protocol in [
+        code_review_material_protocol(),
+        group_final_review_material_protocol(),
+    ] {
+        assert!(protocol.contains("verdict 只能使用 approve、request_changes、blocked"));
+        assert!(protocol.contains("severity 只能使用 error、warning、info"));
+        assert!(protocol.contains("verdict=blocked 时，阻塞 finding 使用 severity=error"));
+        assert!(protocol.contains("不得使用 severity=blocked"));
+    }
+}
+
 #[tokio::test]
 async fn group_attempt_prompts_use_current_work_item_id() {
     let tmp = tempdir().expect("tempdir");
