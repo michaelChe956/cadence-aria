@@ -81,6 +81,21 @@ fn assert_no_fixed_stack_terms(prompt: &str) {
     }
 }
 
+fn assert_reviewer_browser_environment_boundary(prompt: &str) {
+    assert!(prompt.contains("Reviewer 非 E2E 测试边界"));
+    assert!(
+        prompt.contains(
+            "上述测试及其所需浏览器环境的安装、配置、缺失、失败或相关证据（包括缺少证据）"
+        )
+    );
+    assert!(prompt.contains("均不得成为 finding，也不得导致 request_changes 或 blocked"));
+    assert!(prompt.contains("不得作为 verdict 或 summary 中的否决理由"));
+    assert!(prompt.contains("不得成为 Coder required_action 或任何返修要求"));
+    assert!(prompt.contains(
+        "即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试及其所需浏览器环境"
+    ));
+}
+
 #[test]
 fn coding_prompt_requires_material_driven_execution_without_fixed_stack_terms() {
     let attempt = test_attempt("coding_attempt_0001");
@@ -99,6 +114,8 @@ fn coding_prompt_requires_material_driven_execution_without_fixed_stack_terms() 
     assert!(prompt.contains("依赖初始化或环境诊断要求"));
     assert!(prompt.contains("不得用平台默认技术栈假设"));
     assert!(prompt.contains("完成报告要求"));
+    assert!(!prompt.contains("Reviewer 非 E2E 测试边界"));
+    assert!(!prompt.contains("上述测试及其所需浏览器环境"));
 }
 
 #[test]
@@ -145,6 +162,8 @@ fn coding_delta_prompt_requires_material_driven_rework_without_fixed_stack_terms
     assert!(prompt.contains("人工修复意见优先级最高"));
     assert!(prompt.contains("reviewer findings"));
     assert!(prompt.contains("不得引入平台默认技术栈假设"));
+    assert!(!prompt.contains("Reviewer 非 E2E 测试边界"));
+    assert!(!prompt.contains("上述测试及其所需浏览器环境"));
 }
 
 #[test]
@@ -189,6 +208,7 @@ fn reviewer_test_scope_contract_forbids_e2e_findings_without_restricting_other_t
     let contract = reviewer_test_scope_contract();
 
     assert_no_fixed_stack_terms(contract);
+    assert_reviewer_browser_environment_boundary(contract);
     assert!(contract.contains("单元测试"));
     assert!(contract.contains("非浏览器自动化的集成测试"));
     assert!(contract.contains("编译、构建、类型检查、静态分析、格式检查或 lint"));
@@ -196,9 +216,7 @@ fn reviewer_test_scope_contract_forbids_e2e_findings_without_restricting_other_t
     assert!(contract.contains("E2E"));
     assert!(contract.contains("Playwright"));
     assert!(contract.contains("浏览器自动化测试"));
-    assert!(contract.contains("不得因为上述测试缺失、失败或缺少证据"));
     assert!(contract.contains("request_changes 或 blocked"));
-    assert!(contract.contains("不得将其转换成 finding、否决理由或 Coder 返修要求"));
 }
 
 #[test]
@@ -350,7 +368,7 @@ async fn group_attempt_prompts_use_current_work_item_id() {
         .build_code_review_prompt(&attempt, &worktree, None)
         .await
         .expect("code review prompt");
-    assert!(review_prompt.contains("Reviewer 非 E2E 测试边界"));
+    assert_reviewer_browser_environment_boundary(&review_prompt);
     assert!(review_prompt.contains("Playwright"));
     assert!(review_prompt.contains("单元测试"));
     assert!(!coding_prompt.contains("Reviewer 非 E2E 测试边界"));

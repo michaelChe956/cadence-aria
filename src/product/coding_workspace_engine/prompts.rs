@@ -263,8 +263,8 @@ pub(crate) fn reviewer_test_scope_contract() -> &'static str {
      - 你可以根据需求、当前 diff、仓库事实、测试证据和代码风险提出单元测试、非浏览器自动化的集成测试、编译、构建、类型检查、静态分析、格式检查或 lint 等验证要求。\n\
      - 这些测试建议不受 Verification Plan 已列命令的严格限制，但测试框架、命令和技术栈判断必须来自任务材料、仓库事实或项目规则，不得凭平台默认假设生成。\n\
      - 不得创建以新增、执行、补充、修复、配置或安装 E2E、端到端测试、Playwright、浏览器自动化测试或运行这些测试所需浏览器环境为目的的 finding。\n\
-     - 不得因为上述测试缺失、失败或缺少证据而给出 request_changes 或 blocked。\n\
-     - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试，也不得将其转换成 finding、否决理由或 Coder 返修要求。\n"
+     - 上述测试及其所需浏览器环境的安装、配置、缺失、失败或相关证据（包括缺少证据），均不得成为 finding，也不得导致 request_changes 或 blocked；不得作为 verdict 或 summary 中的否决理由，也不得成为 Coder required_action 或任何返修要求。\n\
+     - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试及其所需浏览器环境，也不得将其转换成 finding、verdict/summary 否决理由、Coder required_action 或任何返修要求。\n"
 }
 
 pub(crate) fn coding_execution_protocol() -> &'static str {
