@@ -47,6 +47,7 @@ pub fn build_evaluation_context_pack(
         .as_deref()
         .unwrap_or(&attempt.work_item_id);
     let mut context_warnings = Vec::new();
+    let repo_diff_base = evaluation_repo_diff_base(attempt, &provider_role, &mut context_warnings);
     let coder_evidence = coder_evidence_pack(
         &coding_store,
         attempt,
@@ -86,7 +87,7 @@ pub fn build_evaluation_context_pack(
                 workspace_session_id: None,
             },
             group_context,
-            repo_context: repo_context(attempt, None, &mut context_warnings),
+            repo_context: repo_context(attempt, None, repo_diff_base, &mut context_warnings),
             openspec_context: OpenSpecContext {
                 enabled: false,
                 active_change_id: None,
@@ -144,7 +145,12 @@ pub fn build_evaluation_context_pack(
         design_specs,
         work_item: work_item_context,
         group_context,
-        repo_context: repo_context(attempt, Some(&work_item), &mut context_warnings),
+        repo_context: repo_context(
+            attempt,
+            Some(&work_item),
+            repo_diff_base,
+            &mut context_warnings,
+        ),
         openspec_context: OpenSpecContext {
             enabled: openspec_enabled,
             active_change_id: None,
@@ -158,6 +164,22 @@ pub fn build_evaluation_context_pack(
         quality_bypass_audits,
         context_warnings,
     })
+}
+
+fn evaluation_repo_diff_base<'a>(
+    attempt: &'a CodingExecutionAttempt,
+    provider_role: &EvaluationContextRole,
+    context_warnings: &mut Vec<String>,
+) -> Option<&'a str> {
+    if *provider_role == EvaluationContextRole::CodeReviewer
+        && attempt.scope == CodingAttemptScope::WorkItemGroup
+    {
+        if attempt.head_commit.is_none() {
+            context_warnings.push("code_review_diff_base_missing".to_string());
+        }
+        return attempt.head_commit.as_deref();
+    }
+    Some(&attempt.base_branch)
 }
 
 fn coder_evidence_pack(

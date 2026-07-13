@@ -59,7 +59,12 @@ pub fn build_tester_execution_context_pack(
                 design_specs: Vec::new(),
             },
             group_context,
-            repo_context: repo_context(attempt, None, &mut context_warnings),
+            repo_context: repo_context(
+                attempt,
+                None,
+                Some(&attempt.base_branch),
+                &mut context_warnings,
+            ),
             context_warnings,
         });
     };
@@ -94,7 +99,12 @@ pub fn build_tester_execution_context_pack(
         work_item: work_item_context_ref(&work_item, work_item_session),
         source_artifacts,
         group_context,
-        repo_context: repo_context(attempt, Some(&work_item), &mut context_warnings),
+        repo_context: repo_context(
+            attempt,
+            Some(&work_item),
+            Some(&attempt.base_branch),
+            &mut context_warnings,
+        ),
         context_warnings,
     })
 }

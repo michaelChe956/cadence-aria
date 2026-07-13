@@ -327,6 +327,94 @@ async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
 }
 
 #[tokio::test]
+async fn group_code_review_uses_previous_unit_head_commit_as_diff_base() {
+    let tmp = tempdir().expect("tempdir");
+    let worktree = tmp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree dir");
+    init_prompt_git_repo(&worktree);
+    let base_commit = prompt_git_stdout(&worktree, &["rev-parse", "HEAD"]);
+    fs::write(worktree.join("previous_unit.txt"), "previous unit\n").expect("previous unit file");
+    run_prompt_git(&worktree, &["add", "."]);
+    run_prompt_git(&worktree, &["commit", "-m", "previous unit"]);
+    let previous_unit_commit = prompt_git_stdout(&worktree, &["rev-parse", "HEAD"]);
+    fs::write(worktree.join("current_unit.txt"), "current unit\n").expect("current unit file");
+
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    LifecycleStore::new(paths.clone())
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0002".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Current unit".to_string(),
+            planned_implementation_context: Some("review current unit only".to_string()),
+            planned_handoff_summary: Some("current unit handoff".to_string()),
+            ..Default::default()
+        })
+        .expect("create current work item");
+    let store = CodingAttemptStore::new(paths);
+    let (tx, _rx) = mpsc::channel(1);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let mut attempt = test_attempt("coding_attempt_0001");
+    attempt.scope = CodingAttemptScope::WorkItemGroup;
+    attempt.work_item_id = "work_item_0001".to_string();
+    attempt.current_work_item_id = Some("work_item_0002".to_string());
+    attempt.active_unit_id = Some("coding_unit_0002".to_string());
+    attempt.base_branch = base_commit;
+    attempt.head_commit = Some(previous_unit_commit);
+    attempt.worktree_path = Some(worktree.clone());
+
+    let prompt = engine
+        .build_code_review_prompt(&attempt, &worktree, None)
+        .await
+        .expect("code review prompt");
+
+    assert!(prompt.contains("current_unit.txt"));
+    assert!(!prompt.contains("previous_unit.txt"));
+}
+
+#[tokio::test]
+async fn group_code_review_rejects_missing_head_commit() {
+    let tmp = tempdir().expect("tempdir");
+    let worktree = tmp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree dir");
+    init_prompt_git_repo(&worktree);
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    LifecycleStore::new(paths.clone())
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0002".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Current unit".to_string(),
+            planned_implementation_context: Some("review current unit only".to_string()),
+            planned_handoff_summary: Some("current unit handoff".to_string()),
+            ..Default::default()
+        })
+        .expect("create current work item");
+    let store = CodingAttemptStore::new(paths);
+    let (tx, _rx) = mpsc::channel(1);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let mut attempt = test_attempt("coding_attempt_0001");
+    attempt.scope = CodingAttemptScope::WorkItemGroup;
+    attempt.current_work_item_id = Some("work_item_0002".to_string());
+    attempt.active_unit_id = Some("coding_unit_0002".to_string());
+    attempt.head_commit = None;
+    attempt.worktree_path = Some(worktree.clone());
+
+    let error = engine
+        .build_code_review_prompt(&attempt, &worktree, None)
+        .await
+        .expect_err("group review requires previous unit commit");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::CompletionCommitMissing(ref attempt_id)
+            if attempt_id == "coding_attempt_0001"
+    ));
+}
+
+#[tokio::test]
 async fn group_attempt_prompts_use_current_work_item_id() {
     let tmp = tempdir().expect("tempdir");
     let worktree = tmp.path().join("worktree");
@@ -429,6 +517,7 @@ async fn group_attempt_prompts_use_current_work_item_id() {
     attempt.active_unit_id = Some("coding_unit_0002".to_string());
     attempt.branch_name = "aria/issues/issue_0001".to_string();
     attempt.worktree_path = Some(worktree.clone());
+    attempt.head_commit = Some(prompt_git_stdout(&worktree, &["rev-parse", "HEAD"]));
 
     let coding_prompt = build_coding_prompt(
         &attempt,
@@ -719,4 +808,21 @@ fn run_prompt_git(cwd: &std::path::Path, args: &[&str]) {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+fn prompt_git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = StdCommand::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args.join(" ")));
+    if !output.status.success() {
+        panic!(
+            "git {} failed\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }

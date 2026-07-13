@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
     pub(crate) async fn build_code_review_prompt(
@@ -7,10 +8,8 @@ impl CodingWorkspaceEngine {
         worktree_path: &Path,
         retry_diagnostic: Option<&str>,
     ) -> Result<String, CodingWorkspaceEngineError> {
-        let diff = self
-            ._git_service
-            .git_diff(worktree_path, &attempt.base_branch)
-            .await?;
+        let diff_base = code_review_diff_base(attempt)?;
+        let diff = self._git_service.git_diff(worktree_path, diff_base).await?;
         let work_item = self.work_item_markdown_for_attempt(attempt)?;
         let evaluation_context_json =
             self.evaluation_context_json_for_role(attempt, EvaluationContextRole::CodeReviewer)?;
@@ -448,6 +447,17 @@ pub(crate) fn active_work_item_id_for_prompt(attempt: &CodingExecutionAttempt) -
         .current_work_item_id
         .as_deref()
         .unwrap_or(&attempt.work_item_id)
+}
+
+pub(crate) fn code_review_diff_base(
+    attempt: &CodingExecutionAttempt,
+) -> Result<&str, CodingWorkspaceEngineError> {
+    if attempt.scope == CodingAttemptScope::WorkItemGroup {
+        return attempt.head_commit.as_deref().ok_or_else(|| {
+            CodingWorkspaceEngineError::CompletionCommitMissing(attempt.id.clone())
+        });
+    }
+    Ok(&attempt.base_branch)
 }
 
 pub(crate) struct ReworkContextNoteInput {
