@@ -192,6 +192,23 @@ impl LifecycleStore {
         Ok(record)
     }
 
+    pub(crate) fn ensure_version(
+        &self,
+        input: AppendSpecVersionInput,
+    ) -> Result<SpecVersionRecord, ProductStoreError> {
+        let versions = self.list_versions(&input.project_id, &input.issue_id, &input.entity_id)?;
+        if let Some(latest) = versions
+            .last()
+            .filter(|record| record.markdown.trim() == input.markdown.trim())
+        {
+            let spec =
+                self.load_existing_spec(&input.project_id, &input.issue_id, &input.entity_id)?;
+            self.update_spec_current_version(spec, latest.version, Utc::now().to_rfc3339())?;
+            return Ok(latest.clone());
+        }
+        self.append_version(input)
+    }
+
     pub fn list_versions(
         &self,
         project_id: &str,

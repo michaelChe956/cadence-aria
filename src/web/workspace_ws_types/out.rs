@@ -16,6 +16,20 @@ use super::review::{
 };
 use super::timeline::{NodeDetailSummary, TimelineNode, TimelineNodeStatus};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoverableInterruptedOperation {
+    Review,
+    WorkItemDraftGeneration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverableInterruptedRun {
+    pub failed_node_id: String,
+    pub operation: RecoverableInterruptedOperation,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsOutMessage {
@@ -106,6 +120,8 @@ pub enum WsOutMessage {
         timeline_node_details: HashMap<String, NodeDetail>,
         timeline_node_summaries: HashMap<String, NodeDetailSummary>,
         active_run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recoverable_interrupted_run: Option<RecoverableInterruptedRun>,
     },
     Error {
         message: String,

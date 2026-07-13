@@ -18,6 +18,34 @@ import {
 describe("workspace ws store chat rebuild", () => {
   installWorkspaceStoreTestHooks();
 
+  it("hydrates recoverable interrupted run from session state", () => {
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_recoverable_run",
+      workspace_type: "work_item_plan",
+      stage: "prepare_context",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [],
+      active_node_id: null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      active_run_id: null,
+      recoverable_interrupted_run: {
+        failed_node_id: "timeline_node_054",
+        operation: "review",
+        label: "重试中断审核",
+      },
+    });
+
+    expect(useWorkspaceStore.getState().recoverableInterruptedRun).toEqual({
+      failed_node_id: "timeline_node_054",
+      operation: "review",
+      label: "重试中断审核",
+    });
+  });
+
   it("groups stream chunks and execution events by timeline node", () => {
     const store = useWorkspaceStore.getState();
     store.addTimelineNode({

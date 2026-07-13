@@ -235,17 +235,28 @@ pub(crate) fn parse_work_item_plan_review_value(
     {
         return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference);
     }
-
-    let (affects_items, warnings, total_affects, invalid_affects) =
-        parse_work_item_plan_review_affects_items(value.get("affects_items"), valid_outline_ids);
-    if total_affects > 0 && invalid_affects * 2 > total_affects {
-        return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference);
-    }
-
     let parsed_findings = parse_review_findings(value.get("findings"));
     if parsed_findings.malformed {
         return Err(ReviewStructuredOutputErrorCode::MalformedFindings);
     }
+    let effective_verdict =
+        effective_work_item_plan_review_verdict(&parsed_verdict, &scope, &parsed_findings);
+
+    let (affects_items, warnings, total_affects, invalid_affects) =
+        parse_work_item_plan_review_affects_items(
+            value.get("affects_items"),
+            value.get("findings"),
+            valid_outline_ids,
+            &scope,
+        );
+    let invalid_affects_are_fatal = total_affects > 0
+        && invalid_affects * 2 > total_affects
+        && !(scope == WorkItemPlanReviewScope::Outline
+            && effective_verdict == WorkItemPlanReviewVerdict::Pass);
+    if invalid_affects_are_fatal {
+        return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference);
+    }
+
     let generation_round_id = value
         .get("generation_round_id")
         .and_then(|value| value.as_str())
@@ -260,8 +271,6 @@ pub(crate) fn parse_work_item_plan_review_value(
         .get("batch_id")
         .and_then(|value| value.as_str())
         .map(ToString::to_string);
-    let effective_verdict =
-        effective_work_item_plan_review_verdict(&parsed_verdict, &scope, &parsed_findings);
     let (generic_verdict, review_gate, review_action, gates) =
         work_item_plan_review_routing(&effective_verdict, &scope);
     let extension = WorkItemPlanReviewComplete {
@@ -371,55 +380,113 @@ pub(crate) fn work_item_plan_review_routing(
 }
 
 pub(crate) fn parse_work_item_plan_review_affects_items(
-    value: Option<&serde_json::Value>,
+    legacy_value: Option<&serde_json::Value>,
+    findings_value: Option<&serde_json::Value>,
     valid_outline_ids: &[String],
+    scope: &WorkItemPlanReviewScope,
 ) -> (
     Vec<WorkItemPlanReviewAffectedItem>,
     Vec<String>,
     usize,
     usize,
 ) {
-    let Some(items) = value.and_then(|value| value.as_array()) else {
-        return (Vec::new(), Vec::new(), 0, 0);
-    };
-
     let mut valid_items = Vec::new();
     let mut warnings = Vec::new();
+    let mut total_count = 0;
     let mut invalid_count = 0;
-    for item in items {
-        let outline_index = item
-            .get("outline_index")
-            .and_then(|value| value.as_u64())
-            .and_then(|value| u32::try_from(value).ok());
-        let target_outline_id = item
-            .get("target_outline_id")
-            .and_then(|value| value.as_str())
-            .map(ToString::to_string);
-        let index_valid = outline_index.is_none_or(|index| {
-            usize::try_from(index)
-                .ok()
-                .is_some_and(|index| index < valid_outline_ids.len())
+    let findings = findings_value.and_then(|value| value.as_array());
+    let findings_have_targets = scope == &WorkItemPlanReviewScope::Outline
+        && findings.is_some_and(|findings| {
+            findings.iter().any(|finding| {
+                finding
+                    .get("target_outline_id")
+                    .is_some_and(|value| !value.is_null())
+            })
         });
-        let target_valid = target_outline_id
-            .as_ref()
-            .is_some_and(|id| valid_outline_ids.iter().any(|valid| valid == id));
-        let valid = index_valid && (target_outline_id.is_none() || target_valid);
 
-        if valid && (outline_index.is_some() || target_outline_id.is_some()) {
-            valid_items.push(WorkItemPlanReviewAffectedItem {
+    if !findings_have_targets && let Some(items) = legacy_value.and_then(|value| value.as_array()) {
+        for item in items {
+            total_count += 1;
+            let (outline_index, target_outline_id) = if let Some(id) = item.as_str() {
+                (None, Some(id.to_string()))
+            } else {
+                (
+                    item.get("outline_index")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| u32::try_from(value).ok()),
+                    item.get("target_outline_id")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string),
+                )
+            };
+            collect_work_item_plan_review_reference(
                 outline_index,
                 target_outline_id,
-            });
-        } else {
-            invalid_count += 1;
-            warnings.push(format!(
-                "invalid_reference: target_outline_id={} not found",
-                target_outline_id.as_deref().unwrap_or("<missing>")
-            ));
+                valid_outline_ids,
+                &mut valid_items,
+                &mut warnings,
+                &mut invalid_count,
+            );
         }
     }
 
-    (valid_items, warnings, items.len(), invalid_count)
+    if findings_have_targets && let Some(findings) = findings {
+        for finding in findings {
+            let Some(target_value) = finding.get("target_outline_id") else {
+                continue;
+            };
+            if target_value.is_null() {
+                continue;
+            }
+            total_count += 1;
+            let target_outline_id = target_value.as_str().map(ToString::to_string);
+            collect_work_item_plan_review_reference(
+                None,
+                target_outline_id,
+                valid_outline_ids,
+                &mut valid_items,
+                &mut warnings,
+                &mut invalid_count,
+            );
+        }
+    }
+
+    (valid_items, warnings, total_count, invalid_count)
+}
+
+fn collect_work_item_plan_review_reference(
+    outline_index: Option<u32>,
+    target_outline_id: Option<String>,
+    valid_outline_ids: &[String],
+    valid_items: &mut Vec<WorkItemPlanReviewAffectedItem>,
+    warnings: &mut Vec<String>,
+    invalid_count: &mut usize,
+) {
+    let index_valid = outline_index.is_none_or(|index| {
+        usize::try_from(index)
+            .ok()
+            .is_some_and(|index| index < valid_outline_ids.len())
+    });
+    let target_valid = target_outline_id
+        .as_ref()
+        .is_some_and(|id| valid_outline_ids.iter().any(|valid| valid == id));
+    let valid = index_valid && (target_outline_id.is_none() || target_valid);
+
+    if valid && (outline_index.is_some() || target_outline_id.is_some()) {
+        let affected_item = WorkItemPlanReviewAffectedItem {
+            outline_index,
+            target_outline_id,
+        };
+        if !valid_items.contains(&affected_item) {
+            valid_items.push(affected_item);
+        }
+    } else {
+        *invalid_count += 1;
+        warnings.push(format!(
+            "invalid_reference: target_outline_id={} not found",
+            target_outline_id.as_deref().unwrap_or("<missing>")
+        ));
+    }
 }
 
 pub(crate) struct ParsedReviewFindings {

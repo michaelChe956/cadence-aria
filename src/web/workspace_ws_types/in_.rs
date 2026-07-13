@@ -17,6 +17,9 @@ pub enum WsInMessage {
         provider_config: ProviderConfigSnapshot,
         reviewer_enabled: bool,
     },
+    RetryInterruptedRun {
+        failed_node_id: String,
+    },
     Hello {
         session_id: String,
         last_seen_node_id: Option<String>,

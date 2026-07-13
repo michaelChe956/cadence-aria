@@ -527,6 +527,12 @@ fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
     assert!(input.prompt.contains(
         "\"generation_round_id\":\"generation_round_unknown\""
     ));
+    assert!(input.prompt.contains("\"target_outline_id\":\"outline id\""));
+    assert!(input.prompt.contains("从 findings[].target_outline_id 推导"));
+    assert!(
+        !input.prompt.contains("\"affects_items\""),
+        "new outline review schema should not duplicate affected outline references"
+    );
     assert_review_contract(&input, "work_item_plan_outline_review");
 }
 

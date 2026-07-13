@@ -54,20 +54,20 @@ use crate::web::types::GenerateWorkItemsRequest;
 use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption,
     ChoiceQuestion, HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot,
-    RepositoryProfileDto, ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict,
-    ReviewVerdictType, StructuredOutputDiagnostic, TimelineNode, TimelineNodeRetry,
-    TimelineNodeRetryError, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
-    VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
-    WorkItemBatchDecisionDto, WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload,
-    WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto,
-    WorkItemDraftCandidatePayload, WorkItemDraftDecisionDto, WorkItemGenerationModeDto,
-    WorkItemPlanCandidateDto, WorkItemPlanCompileRecoveryActionDto,
-    WorkItemPlanCompileReportPayload, WorkItemPlanContextBlockerDto,
-    WorkItemPlanContextBlockerPayload, WorkItemPlanDto, WorkItemPlanOutlineCandidateDto,
-    WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem, WorkItemPlanReviewComplete,
-    WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
-    WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto,
-    WsOutMessage, WsProviderConfig,
+    RecoverableInterruptedOperation, RecoverableInterruptedRun, RepositoryProfileDto,
+    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
+    StructuredOutputDiagnostic, TimelineNode, TimelineNodeRetry, TimelineNodeRetryError,
+    TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto, VerificationCommandDto,
+    VerificationManualCheckDto, VerificationPlanDto, WorkItemBatchDecisionDto,
+    WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload, WorkItemCandidateDto,
+    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemDraftCandidatePayload,
+    WorkItemDraftDecisionDto, WorkItemGenerationModeDto, WorkItemPlanCandidateDto,
+    WorkItemPlanCompileRecoveryActionDto, WorkItemPlanCompileReportPayload,
+    WorkItemPlanContextBlockerDto, WorkItemPlanContextBlockerPayload, WorkItemPlanDto,
+    WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem,
+    WorkItemPlanReviewComplete, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
+    WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
+    WsCheckpointDto, WsMessageDto, WsOutMessage, WsProviderConfig,
 };
 
 mod artifact_constraints;
@@ -77,7 +77,9 @@ mod compile_parse;
 mod controls;
 mod decisions;
 mod draft_batch;
+mod interrupted_run_recovery;
 mod lifecycle;
+mod lifecycle_recovery;
 mod mappings;
 mod parsers;
 mod plan_outline;
@@ -90,6 +92,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use interrupted_run_recovery::{InterruptedRunRecoveryError, InterruptedRunRecoveryOutcome};
 pub use types::{
     AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome,
     SessionMessage, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,
@@ -99,6 +102,7 @@ pub use types::{
 
 pub(crate) use artifact_constraints::*;
 pub(crate) use compile_parse::*;
+pub(crate) use lifecycle_recovery::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;
 pub(crate) use plan_outline::*;

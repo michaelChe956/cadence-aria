@@ -8,6 +8,9 @@ use crate::web::workspace_ws_types::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "tests/interrupted_run_recovery.rs"]
+mod interrupted_run_recovery;
+
 fn provider_config() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {
         author: ProviderName::ClaudeCode,

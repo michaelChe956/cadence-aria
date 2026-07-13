@@ -72,6 +72,7 @@ export function ChatWorkspacePage({
   const {
     sendContextNote,
     sendStartGeneration,
+    retryInterruptedRun,
     sendSelectRevisionPath,
     sendAuthorDecision,
     sendRequestRevision,
@@ -124,8 +125,12 @@ export function ChatWorkspacePage({
     (state) => state.workItemPlanArtifactVersions,
   );
   const protocolError = useWorkspaceStore((state) => state.protocolError);
+  const workspaceError = useWorkspaceStore((state) => state.error);
   const acknowledgedAbortedNodes = useWorkspaceStore(
     (state) => state.acknowledgedAbortedNodes,
+  );
+  const recoverableInterruptedRun = useWorkspaceStore(
+    (state) => state.recoverableInterruptedRun,
   );
   const reviewerEnabled = useWorkspaceStore((state) => state.reviewerEnabled);
   const stageConfig = useStageUI(stage);
@@ -467,6 +472,13 @@ export function ChatWorkspacePage({
                   .setSelectedNode(abortedByDisconnectNode.node_id)
             : undefined
         }
+        recoverableInterruptedRun={recoverableInterruptedRun}
+        onRetryInterruptedRun={retryInterruptedRun}
+        retryResetKey={
+          protocolError
+            ? `${protocolError.code}:${protocolError.message}`
+            : workspaceError
+        }
       />
 
       <WorkspaceHeader
@@ -603,6 +615,7 @@ export function ChatWorkspacePage({
                 disabled={inputDisabled}
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
+                hideStartGeneration={Boolean(recoverableInterruptedRun)}
                 onSendHumanDecision={(content) =>
                   sendHumanConfirm("request-change", content)
                 }

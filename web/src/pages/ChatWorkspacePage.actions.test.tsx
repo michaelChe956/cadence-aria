@@ -99,6 +99,47 @@ describe("ChatWorkspacePage chat actions", () => {
     );
   });
 
+  it("retries the recoverable interrupted run and hides start generation", async () => {
+    const api = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "work_item_plan",
+      stage: "prepare_context",
+      providers: { author: "claude_code", reviewer: "codex" },
+      recoverableInterruptedRun: {
+        failed_node_id: "timeline_node_054",
+        operation: "review",
+        label: "重试中断审核",
+      },
+      timelineNodes: [
+        timelineNode({
+          node_id: "timeline_node_058",
+          node_type: "aborted_by_disconnect",
+          stage: "prepare_context",
+          status: "failed",
+          title: "运行因断开中止",
+          completed_at: "2026-07-11T17:41:03Z",
+        }),
+      ],
+      acknowledgedAbortedNodes: [],
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+
+    expect(screen.queryByRole("button", { name: "开始生成" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "重试中断审核" }));
+
+    expect(api.retryInterruptedRun).toHaveBeenCalledWith("timeline_node_054");
+    expect(screen.getByRole("button", { name: "重试中断审核" })).toBeDisabled();
+
+    useWorkspaceStore.setState({ error: "provider unavailable: Codex" });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "重试中断审核" })).toBeEnabled(),
+    );
+  });
+
   it("exposes focused selectors for the workspace header and chat panel", () => {
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",

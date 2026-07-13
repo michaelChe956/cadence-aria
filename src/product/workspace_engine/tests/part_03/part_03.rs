@@ -240,6 +240,57 @@ fn detect_author_choice_request_uses_nearest_question_for_codex_numbered_options
     assert_eq!(options[2].id, "3");
 }
 
+#[test]
+fn four_backtick_artifact_extracts_across_workspace_types_and_suppresses_story_design_fallback() {
+    for (workspace_type, artifact) in [
+        (
+            WorkspaceType::Story,
+            complete_story_artifact(
+                "用户遇到失败时应该如何处理？",
+                "失败路径有明确提示。",
+            ),
+        ),
+        (
+            WorkspaceType::Design,
+            complete_design_artifact(
+                "明确失败时应该如何处理？",
+                "返回类型化失败原因。",
+            ),
+        ),
+        (
+            WorkspaceType::WorkItem,
+            complete_work_item_artifact("实现失败时应该如何处理？"),
+        ),
+    ] {
+        let output = format!(
+            "基于 reviewer 意见完成两处返修：\n\n\
+             1. 补齐失败处理。\n\
+             2. 保留既有兼容约束。\n\n\
+             更新后的完整 artifact：\n\n\
+             ````artifact\n{artifact}````\n\n\
+             返修完成。"
+        );
+
+        let extracted = extract_artifact_content(&output);
+        assert_eq!(
+            extracted,
+            artifact.trim(),
+            "{workspace_type:?} 应抽取四反引号 artifact 正文"
+        );
+        assert!(
+            content_has_complete_workspace_artifact(&extracted, &workspace_type),
+            "{workspace_type:?} 抽取后的 artifact 应通过完整性校验"
+        );
+
+        if matches!(workspace_type, WorkspaceType::Story | WorkspaceType::Design) {
+            assert!(
+                detect_author_choice_request(&output, &workspace_type).is_none(),
+                "完整四反引号 artifact 不应被误判为 {workspace_type:?} 文本选择题"
+            );
+        }
+    }
+}
+
 struct ReviewVerdictStreamingProvider {
     output: &'static str,
     provider_type: Arc<Mutex<Option<ProviderType>>>,

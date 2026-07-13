@@ -419,7 +419,7 @@ impl WorkspaceEngine {
             schema_name: "work_item_plan_outline_review".to_string(),
         };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","affects_items":[{{"target_outline_id":"outline id"}}],"findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"Outline 中的具体证据","impact":"为什么影响或不影响 Draft 生成","required_action":"需要 Outline author 执行的最小动作"}}]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","target_outline_id":"outline id","message":"问题描述","evidence":"Outline 中的具体证据","impact":"为什么影响或不影响 Draft 生成","required_action":"需要 Outline author 执行的最小动作"}}]}}"#,
             generation_round_id
         );
         prompt.push_str(&reviewer_output_contract(
@@ -429,7 +429,9 @@ impl WorkspaceEngine {
              - `pass`：Outline 可进入生成模式选择。\n\
              - `revise`：Outline 需要返修，且必须给出至少一个 blocking/must_fix/strong_recommend_fix finding。\n\
              - `needs_human`：需要用户做产品/范围判断。\n\
-             - `affects_items.target_outline_id` 只能引用当前 Outline 中存在的 outline_id。\n",
+             - 每条 finding 如果针对具体 outline，必须填写 `target_outline_id`，且只能引用当前 Outline 中存在的 outline_id。\n\
+             - 如果 finding 针对整个 Outline 方案而不是某个具体 outline，可以省略 `target_outline_id`。\n\
+             - 系统会从 findings[].target_outline_id 推导受影响 outline，不要额外输出 affects_items。\n",
         ));
 
         Ok(StreamingProviderInput {

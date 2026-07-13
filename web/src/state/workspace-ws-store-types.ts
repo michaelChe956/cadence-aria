@@ -228,6 +228,12 @@ export interface ProtocolErrorState {
   message: string;
 }
 
+export interface RecoverableInterruptedRun {
+  failed_node_id: string;
+  operation: "review" | "work_item_draft_generation";
+  label: string;
+}
+
 export interface WorkspaceWsState {
   sessionId: string | null;
   workspaceType: string | null;
@@ -261,6 +267,7 @@ export interface WorkspaceWsState {
   pendingDecision: ReviewDecisionRequired | null;
   error: string | null;
   activeRunId: string | null;
+  recoverableInterruptedRun: RecoverableInterruptedRun | null;
   protocolError: ProtocolErrorState | null;
   providerLocked: boolean;
   providerSnapshot: ProviderConfigSnapshot | null;
@@ -290,6 +297,7 @@ export interface WorkspaceWsActions {
     timeline_node_details?: Record<string, TimelineNodeDetail>;
     timeline_node_summaries?: Record<string, NodeDetailSummary>;
     active_run_id?: string | null;
+    recoverable_interrupted_run?: RecoverableInterruptedRun | null;
   }) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   appendBufferedStreamChunk: (content: string, nodeId: string, role: ChatEntryRole) => void;

@@ -404,6 +404,7 @@ impl WorkspaceEngine {
             timeline_node_details,
             timeline_node_summaries,
             active_run_id: self.active_run_id.clone(),
+            recoverable_interrupted_run: self.recoverable_interrupted_run(),
         }
     }
 }

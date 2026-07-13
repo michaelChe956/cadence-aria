@@ -51,6 +51,62 @@ describe("DisconnectBanner", () => {
     expect(loadAcknowledgedAbortedNodes()).toEqual(["node-aborted-1"]);
   });
 
+  it("retries the recoverable interrupted review only once", () => {
+    const onRetryInterruptedRun = vi.fn(() => true);
+
+    const view = render(
+      <DisconnectBanner
+        abortedByDisconnect={{ nodeId: "node-aborted-1", ts: "2026-05-20T14:32:00Z" }}
+        recoverableInterruptedRun={{
+          failed_node_id: "timeline_node_054",
+          operation: "review",
+          label: "重试中断审核",
+        }}
+        onRetryInterruptedRun={onRetryInterruptedRun}
+        retryResetKey={null}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "重试中断审核" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(onRetryInterruptedRun).toHaveBeenCalledTimes(1);
+    expect(onRetryInterruptedRun).toHaveBeenCalledWith("timeline_node_054");
+    expect(button).toBeDisabled();
+
+    view.rerender(
+      <DisconnectBanner
+        abortedByDisconnect={{ nodeId: "node-aborted-1", ts: "2026-05-20T14:32:00Z" }}
+        recoverableInterruptedRun={{
+          failed_node_id: "timeline_node_054",
+          operation: "review",
+          label: "重试中断审核",
+        }}
+        onRetryInterruptedRun={onRetryInterruptedRun}
+        retryResetKey="INTERRUPTED_RUN_STATE_CHANGED"
+      />,
+    );
+    expect(screen.getByRole("button", { name: "重试中断审核" })).toBeEnabled();
+  });
+
+  it("keeps the recovery action visible after the abort warning was acknowledged", () => {
+    render(
+      <DisconnectBanner
+        recoverableInterruptedRun={{
+          failed_node_id: "timeline_node_020",
+          operation: "work_item_draft_generation",
+          label: "重新生成中断的 Work Item Draft",
+        }}
+        onRetryInterruptedRun={vi.fn(() => true)}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "重新生成中断的 Work Item Draft" }),
+    ).toBeInTheDocument();
+  });
+
   it("deduplicates acknowledged aborted nodes in localStorage", () => {
     saveAcknowledgedAbortedNode("node-aborted-1");
     const result = saveAcknowledgedAbortedNode("node-aborted-1");

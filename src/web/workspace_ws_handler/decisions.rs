@@ -243,3 +243,7 @@ pub(crate) async fn handle_human_confirm_from_handler(
 
 mod inbound;
 pub(crate) use inbound::{WorkspaceInboundContext, handle_workspace_inbound_message};
+#[cfg(test)]
+pub(crate) use inbound::{
+    finish_interrupted_recovery_spawn_error, provider_run_kind_for_interrupted_recovery,
+};

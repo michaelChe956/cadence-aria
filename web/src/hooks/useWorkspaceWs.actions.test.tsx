@@ -117,6 +117,24 @@ describe("useWorkspaceWs outgoing actions", () => {
     expect(useWorkspaceStore.getState().providerStatus).toBe("running");
   });
 
+  it("sends retry interrupted run and marks provider running", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.retryInterruptedRun("timeline_node_054");
+    });
+
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "retry_interrupted_run",
+        failed_node_id: "timeline_node_054",
+      }),
+    ]);
+    expect(useWorkspaceStore.getState().providerStatus).toBe("running");
+  });
+
   it("syncs provider selection locally after sending it", () => {
     const harness = renderWorkspaceHook();
     useWorkspaceStore.setState({

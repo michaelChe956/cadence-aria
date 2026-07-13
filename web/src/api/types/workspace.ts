@@ -82,6 +82,12 @@ export type WorkItemPlanCompileRecoveryAction =
   | "abort_and_rollback"
   | "human_triage";
 
+export type RecoverableInterruptedRun = {
+  failed_node_id: string;
+  operation: "review" | "work_item_draft_generation";
+  label: string;
+};
+
 export type WsInMessage =
   | { type: "user_message"; content: string }
   | { type: "context_note"; content: string }
@@ -90,6 +96,7 @@ export type WsInMessage =
       provider_config: ProviderConfigSnapshot;
       reviewer_enabled: boolean;
     }
+  | { type: "retry_interrupted_run"; failed_node_id: string }
   | { type: "rollback"; checkpoint_id: string }
   | { type: "confirm" }
   | { type: "provider_select"; role: string; provider: WorkspaceProviderName }
@@ -453,6 +460,7 @@ export type WsOutMessage =
       artifact_version_summaries?: ArtifactVersionSummary[];
       timeline_node_details: Record<string, NodeDetail>;
       active_run_id: string | null;
+      recoverable_interrupted_run?: RecoverableInterruptedRun | null;
     }
   | { type: "error"; message: string }
   | { type: "protocol_error"; code: string; message: string; context?: unknown }

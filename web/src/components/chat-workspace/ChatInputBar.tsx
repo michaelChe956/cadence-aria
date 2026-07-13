@@ -27,6 +27,7 @@ interface ChatInputBarProps {
   ) => void;
   onAbort: () => void;
   disabled?: boolean;
+  hideStartGeneration?: boolean;
 }
 
 const BUSY_STAGES = new Set(["running", "cross_review", "revision"]);
@@ -45,6 +46,7 @@ export function ChatInputBar({
   onWorkItemBatchDecision = () => undefined,
   onAbort,
   disabled = false,
+  hideStartGeneration = false,
 }: ChatInputBarProps) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -291,7 +293,7 @@ export function ChatInputBar({
               </button>
             </>
           ) : null}
-          {isPrepareContext ? (
+          {isPrepareContext && !hideStartGeneration ? (
             <button
               data-testid="start-generation"
               type="button"

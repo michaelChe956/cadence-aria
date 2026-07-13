@@ -1,7 +1,8 @@
 use tempfile::TempDir;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::models::{ProviderName, WorkspaceType};
+use crate::product::json_store::{read_json, write_json};
+use crate::product::models::{ProviderName, StorySpecRecord, WorkspaceType};
 
 use super::*;
 
@@ -33,6 +34,56 @@ fn create_session(
             openspec_enabled: true,
         })
         .unwrap()
+}
+
+#[test]
+fn ensure_version_repairs_current_version_without_appending_duplicate() {
+    let (_tmp, store) = setup();
+    let story = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "Recover current version".to_string(),
+        })
+        .unwrap();
+    let input = AppendSpecVersionInput {
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        entity_id: story.id.clone(),
+        markdown: "# Story Spec\n\nRecovered markdown".to_string(),
+        provider_run_refs: vec![],
+        review_refs: vec![],
+        confirmed_by: None,
+    };
+    store.append_version(input.clone()).unwrap();
+
+    let story_path = store
+        .story_specs_root(PROJECT_ID, ISSUE_ID)
+        .join(format!("{}.json", story.id));
+    let mut stale_story: StorySpecRecord = read_json(&story_path).unwrap();
+    stale_story.current_version = None;
+    write_json(&story_path, &stale_story).unwrap();
+
+    let ensured = store.ensure_version(input).unwrap();
+
+    assert_eq!(ensured.version, 1);
+    assert_eq!(
+        store
+            .list_versions(PROJECT_ID, ISSUE_ID, &story.id)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_story_specs(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.id == story.id)
+            .and_then(|record| record.current_version),
+        Some(1)
+    );
 }
 
 #[test]
