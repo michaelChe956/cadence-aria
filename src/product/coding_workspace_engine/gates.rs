@@ -116,6 +116,60 @@ impl CodingWorkspaceEngine {
             .await?;
             return Err(CodingWorkspaceEngineError::ProviderStream(message));
         }
+        if attempt.stage == CodingExecutionStage::Coding {
+            self.complete_timeline_node(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                node_id,
+                CodingTimelineNodeStatus::Failed,
+                Some(message.clone()),
+            )
+            .await?;
+            if let Some(role_run) = self.store.latest_role_run(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingExecutionStage::Coding,
+                CodingProviderRole::Coder,
+            )? && role_run.status == CodingRoleRunStatus::Running
+            {
+                self.store.update_role_run_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &role_run.id,
+                    CodingRoleRunStatus::Failed,
+                    Some("coder_provider_interrupted".to_string()),
+                )?;
+            }
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Blocked,
+            )?;
+            let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Coding,
+                node_id: Some(node_id.to_string()),
+                role: Some(CodingProviderRole::Coder),
+                title: "Coder 执行中断".to_string(),
+                description: message.clone(),
+                reason_code: Some("coder_provider_interrupted".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    coding_gate_action_for_id("retry_coding").expect("retry coding action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            })?;
+            let _ = self
+                .event_tx
+                .send(CodingWsOutMessage::CodingGateRequired { gate })
+                .await;
+            return Err(CodingWorkspaceEngineError::ProviderStream(message));
+        }
         self.store.update_attempt_status(
             &attempt.project_id,
             &attempt.issue_id,
@@ -580,6 +634,22 @@ impl CodingWorkspaceEngine {
         let updated = match action.action_type {
             CodingGateActionType::Abort => {
                 self.handle_abort(project_id, issue_id, attempt_id).await?
+            }
+            CodingGateActionType::RetryCoding => {
+                let coder_provider = self
+                    .store
+                    .get_role_provider_config_snapshot(
+                        &current.project_id,
+                        &current.issue_id,
+                        &current.id,
+                    )?
+                    .coder;
+                let cleared = self.clear_attempt_provider_conversation(
+                    &current,
+                    &CodingProviderRole::Coder,
+                    &coder_provider,
+                )?;
+                self.resume_blocked_attempt_at_stage(&cleared, CodingExecutionStage::Coding)?
             }
             CodingGateActionType::RetryTestPlan
             | CodingGateActionType::RerunMissingSteps

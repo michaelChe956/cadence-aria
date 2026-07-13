@@ -309,3 +309,117 @@ async fn internal_review_blocked_gate_uses_internal_review_retry_action() {
     );
     assert_eq!(gate.available_actions[0].label, "重试 Internal Review");
 }
+
+#[tokio::test]
+async fn retry_coding_gate_clears_latest_coder_provider_conversation() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let mut role_provider_config = store
+        .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role provider config");
+    role_provider_config.coder = ProviderName::ClaudeCode;
+    store
+        .update_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            role_provider_config,
+        )
+        .expect("update role provider config");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Coder,
+                    provider: ProviderName::Codex,
+                    provider_session_id: "old-codex-coder-thread".to_string(),
+                    updated_at: "2026-07-13T00:00:00Z".to_string(),
+                    last_node_id: Some("coding_node_0001".to_string()),
+                },
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Coder,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "latest-claude-coder-thread".to_string(),
+                    updated_at: "2026-07-13T00:00:01Z".to_string(),
+                    last_node_id: Some("coding_node_0002".to_string()),
+                },
+                ProviderConversationRef {
+                    role: ProviderConversationRole::CodeReviewer,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "review-thread".to_string(),
+                    updated_at: "2026-07-13T00:00:02Z".to_string(),
+                    last_node_id: Some("coding_node_0003".to_string()),
+                },
+            ],
+        )
+        .expect("seed provider conversations");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Coding,
+        )
+        .expect("coding stage");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("blocked attempt");
+    let gate = store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::Coding,
+            node_id: Some("coding_node_0002".to_string()),
+            role: Some(CodingProviderRole::Coder),
+            title: "Coder 执行中断".to_string(),
+            description: "provider interrupted".to_string(),
+            reason_code: Some("coder_provider_interrupted".to_string()),
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+            available_actions: vec![
+                coding_gate_action_for_id("retry_coding").expect("retry coding action"),
+                coding_gate_action_for_id("abort").expect("abort action"),
+            ],
+        })
+        .expect("coder recovery gate");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let resumed = engine
+        .handle_blocked_gate_response(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &gate.gate_id,
+            "retry_coding",
+            None,
+        )
+        .await
+        .expect("retry coding gate response");
+
+    assert_eq!(resumed.status, CodingAttemptStatus::Running);
+    assert_eq!(resumed.stage, CodingExecutionStage::Coding);
+    assert!(resumed.provider_conversations.iter().any(|conversation| {
+        conversation.role == ProviderConversationRole::Coder
+            && conversation.provider == ProviderName::Codex
+            && conversation.provider_session_id == "old-codex-coder-thread"
+    }));
+    assert!(resumed.provider_conversations.iter().all(|conversation| {
+        !(conversation.role == ProviderConversationRole::Coder
+            && conversation.provider == ProviderName::ClaudeCode)
+    }));
+    assert!(resumed.provider_conversations.iter().any(|conversation| {
+        conversation.role == ProviderConversationRole::CodeReviewer
+            && conversation.provider_session_id == "review-thread"
+    }));
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("resolved gate")
+            .is_empty()
+    );
+}

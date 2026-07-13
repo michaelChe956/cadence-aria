@@ -334,9 +334,10 @@ fn coder_role_run_failure_status(
                 Some("provider_choice_unresolved".to_string()),
             )
         }
-        CodingWorkspaceEngineError::ProviderStream(message) => {
-            (CodingRoleRunStatus::Failed, Some(message.clone()))
-        }
+        CodingWorkspaceEngineError::ProviderStream(_) => (
+            CodingRoleRunStatus::Failed,
+            Some("coder_provider_interrupted".to_string()),
+        ),
         other => (CodingRoleRunStatus::Failed, Some(other.to_string())),
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
 use crate::product::coding_models::FindingSeverity;
+use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -204,6 +205,148 @@ async fn coder_resume_stall_does_not_retry_non_codex_provider() {
 
     assert!(error.to_string().contains("Codex resume stalled"));
     assert_eq!(provider.inputs.lock().expect("inputs").len(), 1);
+}
+
+#[tokio::test]
+async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() {
+    let root = tempdir().expect("tempdir");
+    let shared_worktree = root.path().join("shared-worktree");
+    fs::create_dir_all(&shared_worktree).expect("shared worktree dir");
+    init_test_git_repo(&shared_worktree);
+    fs::write(shared_worktree.join("dirty.txt"), "uncommitted\n").expect("dirty worktree");
+
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: shared_worktree.clone(),
+            base_branch: "HEAD".to_string(),
+        })
+        .expect("shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .expect("shared worktree lock");
+
+    let store = CodingAttemptStore::new(paths);
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(shared_worktree.clone()),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+    store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: attempt.id.clone(),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            plan_id: "work_item_plan_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .expect("active coding unit");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt");
+    let prior_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("prior coder role run");
+    store
+        .update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &prior_run.id,
+            CodingRoleRunStatus::Completed,
+            None,
+        )
+        .expect("complete prior coder role run");
+    let attempt = seed_stale_coder_conversation(&store, &attempt);
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = AlwaysResumeStallProvider::default();
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = engine
+        .execute_coding_with_commands(&attempt, &provider, &coding_context(), &mut command_rx)
+        .await
+        .expect_err("repeated provider failure remains surfaced");
+
+    assert!(
+        matches!(
+            error,
+            CodingWorkspaceEngineError::ProviderStream(ref message)
+                if message.contains("Codex resume stalled")
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(provider.inputs.lock().expect("inputs").len(), 2);
+    let persisted = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("persisted attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
+    assert_eq!(persisted.stage, CodingExecutionStage::Coding);
+    let role_run = store
+        .latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+        )
+        .expect("latest coder role run")
+        .expect("coder role run");
+    assert_eq!(role_run.status, CodingRoleRunStatus::Failed);
+    assert_eq!(
+        role_run.reason_code.as_deref(),
+        Some("coder_provider_interrupted")
+    );
+    let open_gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("open gates");
+    let gate = open_gates
+        .iter()
+        .find(|gate| gate.reason_code.as_deref() == Some("coder_provider_interrupted"))
+        .expect("coder recovery gate");
+    assert_eq!(
+        gate.available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["retry_coding", "abort"]
+    );
+    assert!(
+        open_gates.iter().all(|gate| {
+            gate.reason_code.as_deref() != Some("shared_worktree_dirty_manual_gate")
+        })
+    );
+    assert!(!git_stdout(&shared_worktree, &["status", "--porcelain"]).is_empty());
 }
 
 fn seed_stale_coder_conversation(

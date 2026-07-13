@@ -355,6 +355,11 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
             label: "补跑缺失步骤".to_string(),
             action_type: CodingGateActionType::RerunMissingSteps,
         }),
+        "retry_coding" => Some(CodingGateAction {
+            action_id: "retry_coding".to_string(),
+            label: "重新启动 Coder".to_string(),
+            action_type: CodingGateActionType::RetryCoding,
+        }),
         "retry_review" => Some(CodingGateAction {
             action_id: "retry_review".to_string(),
             label: "重试审查".to_string(),
