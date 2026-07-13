@@ -191,18 +191,34 @@ fn spawn_coding_runner_task(task: CodingRunnerTask) {
         if let Err(error) = result
             && !matches!(error, CodingWorkspaceEngineError::Aborted)
         {
-            let code = match &error {
-                CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
-                    "work_item_execution_plan_not_confirmed".to_string()
+            let latest_attempt =
+                coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id);
+            if let Ok(latest_attempt) = latest_attempt
+                && !should_emit_coding_runner_protocol_error(&latest_attempt.status)
+            {
+                if let Err(snapshot_error) =
+                    emit_current_session_state(&event_tx, &coding_store, &latest_attempt).await
+                {
+                    tracing::warn!(
+                        attempt_id = attempt.id.as_str(),
+                        error = %snapshot_error,
+                        "failed to rebuild recoverable coding session state"
+                    );
                 }
-                _ => "coding_start_failed".to_string(),
-            };
-            let _ = event_tx
-                .send(CodingWsOutMessage::CodingProtocolError {
-                    code,
-                    message: error.to_string(),
-                })
-                .await;
+            } else {
+                let code = match &error {
+                    CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
+                        "work_item_execution_plan_not_confirmed".to_string()
+                    }
+                    _ => "coding_start_failed".to_string(),
+                };
+                let _ = event_tx
+                    .send(CodingWsOutMessage::CodingProtocolError {
+                        code,
+                        message: error.to_string(),
+                    })
+                    .await;
+            }
         }
         coding_runs.remove(&registry_attempt_id, registry_run_id);
     });
@@ -224,6 +240,7 @@ pub(crate) fn should_resume_runner_after_gate_response(
     matches!(
         action_id,
         "retry_test_plan"
+            | "retry_coding"
             | "send_to_coder"
             | "rerun_missing_steps"
             | "retry_review"
@@ -232,6 +249,13 @@ pub(crate) fn should_resume_runner_after_gate_response(
             | "rerun_testing"
     ) && matches!(
         previous_attempt.status,
+        CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
+    )
+}
+
+pub(crate) fn should_emit_coding_runner_protocol_error(status: &CodingAttemptStatus) -> bool {
+    !matches!(
+        status,
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
     )
 }

@@ -223,6 +223,45 @@ describe("CodingWorkspacePage gate panels", () => {
     );
   });
 
+  it("restarts an interrupted coder without requiring extra context", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "coding",
+      pendingGates: [
+        {
+          gate_id: "coding_blocked_gate_0001",
+          kind: "blocked",
+          title: "Coder 执行中断",
+          description: "Codex resume stalled before provider progress",
+          stage: "coding",
+          role: "coder",
+          reason_code: "coder_provider_interrupted",
+          available_actions: [
+            {
+              action_id: "retry_coding",
+              label: "重新启动 Coder",
+              action_type: "retry_coding",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    expect(screen.queryByLabelText("补充 Coding 上下文")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "重新启动 Coder" }));
+
+    expect(api.respondGate).toHaveBeenCalledWith(
+      "coding_blocked_gate_0001",
+      "retry_coding",
+      undefined,
+    );
+    expect(api.sendContextNote).not.toHaveBeenCalled();
+  });
+
   it("renders skipped_required_steps blocked gate with dedicated label", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({

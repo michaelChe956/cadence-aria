@@ -23,7 +23,7 @@ use super::{
     CodeReviewFlowDecision, CodingExecutionAttempt, CodingWsInMessage, CodingWsOutMessage,
     ProviderConfigSnapshot, build_coding_session_state, code_review_flow_decision,
     coding_execution_context, is_coding_ws_message_allowed, select_work_item_markdown,
-    should_resume_runner_after_gate_response,
+    should_emit_coding_runner_protocol_error, should_resume_runner_after_gate_response,
 };
 
 mod failed_review_recovery;
@@ -494,11 +494,28 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
         "accept_testing_result",
         &attempt
     ));
+    assert!(should_resume_runner_after_gate_response(
+        "retry_coding",
+        &attempt
+    ));
 
     attempt.status = CodingAttemptStatus::Running;
     assert!(!should_resume_runner_after_gate_response(
         "retry_test_plan",
         &attempt
+    ));
+}
+
+#[test]
+fn recoverable_attempt_status_suppresses_coding_start_failed() {
+    assert!(!should_emit_coding_runner_protocol_error(
+        &CodingAttemptStatus::Blocked
+    ));
+    assert!(!should_emit_coding_runner_protocol_error(
+        &CodingAttemptStatus::WaitingForHuman
+    ));
+    assert!(should_emit_coding_runner_protocol_error(
+        &CodingAttemptStatus::Failed
     ));
 }
 
