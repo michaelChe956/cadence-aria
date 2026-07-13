@@ -263,9 +263,8 @@ fn role_run_event_payload_text(event: &CodingRoleRunEvent, field: &str) -> Optio
 
 pub(crate) fn active_coding_timeline_node_id(nodes: &[CodingTimelineNode]) -> Option<String> {
     nodes
-        .iter()
-        .rev()
-        .find(|node| {
+        .last()
+        .filter(|node| {
             matches!(
                 node.status,
                 CodingTimelineNodeStatus::Pending

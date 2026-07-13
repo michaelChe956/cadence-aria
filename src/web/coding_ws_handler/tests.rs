@@ -1,8 +1,9 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
-    CodingGateAction, CodingGateActionType, FindingSeverity, ReviewFinding, ReviewVerdict,
+    CodeReviewReport, CodingAgentRole, CodingAttemptScope, CodingAttemptStatus,
+    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, ReviewFinding, ReviewVerdict,
 };
 use crate::product::lifecycle_store::{
     CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
@@ -417,6 +418,50 @@ fn coding_session_state_keeps_final_confirm_blocked_gate_for_current_stage() {
         gate.reason_code.as_deref() == Some("shared_worktree_dirty_manual_gate")
             && gate.stage.as_ref() == Some(&CodingExecutionStage::FinalConfirm)
     }));
+}
+
+#[test]
+fn coding_session_state_does_not_reactivate_historical_blocked_node() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+    let coding_store = CodingAttemptStore::new(app_paths);
+    coding_store
+        .save_coding_attempt(&attempt)
+        .expect("save coding attempt");
+    coding_store
+        .save_timeline_node(CodingTimelineNode {
+            id: "coding_node_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::CodeReview,
+            title: "代码审查".to_string(),
+            status: CodingTimelineNodeStatus::Blocked,
+            agent_role: Some(CodingAgentRole::Reviewer),
+            summary: Some("code review 被阻塞".to_string()),
+            started_at: "2026-07-13T00:00:00Z".to_string(),
+            completed_at: Some("2026-07-13T00:01:00Z".to_string()),
+            artifact_refs: Vec::new(),
+        })
+        .expect("save blocked node");
+    coding_store
+        .save_timeline_node(CodingTimelineNode {
+            id: "coding_node_0002".to_string(),
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::CodeReview,
+            title: "代码审查".to_string(),
+            status: CodingTimelineNodeStatus::Completed,
+            agent_role: Some(CodingAgentRole::Reviewer),
+            summary: Some("code review 通过".to_string()),
+            started_at: "2026-07-13T00:02:00Z".to_string(),
+            completed_at: Some("2026-07-13T00:03:00Z".to_string()),
+            artifact_refs: Vec::new(),
+        })
+        .expect("save completed retry node");
+
+    let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");
+    let CodingWsOutMessage::CodingSessionState { active_node_id, .. } = state else {
+        panic!("expected coding session state");
+    };
+
+    assert!(active_node_id.is_none());
 }
 
 #[test]
