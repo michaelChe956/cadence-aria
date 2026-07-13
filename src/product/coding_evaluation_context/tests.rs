@@ -381,6 +381,74 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
 }
 
 #[test]
+fn code_reviewer_does_not_require_final_handoff_before_approval() {
+    let tmp = TempDir::new().expect("tempdir");
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let work_item = lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "Pre-review evidence Work Item".to_string(),
+            ..Default::default()
+        })
+        .expect("create work item");
+    let attempt = CodingExecutionAttempt {
+        id: "coding_attempt_0001".to_string(),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        work_item_id: work_item.id.clone(),
+        attempt_no: 1,
+        scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
+        status: CodingAttemptStatus::Running,
+        stage: CodingExecutionStage::CodeReview,
+        base_branch: "main".to_string(),
+        branch_name: "aria/issues/issue_0001".to_string(),
+        worktree_path: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::Codex,
+            reviewer: Some(ProviderName::ClaudeCode),
+            review_rounds: 1,
+        },
+        rework_count: 0,
+        max_auto_rework: 2,
+        work_item_group_id: None,
+        current_work_item_id: Some(work_item.id.clone()),
+        active_unit_id: None,
+        head_commit: Some("abc123".to_string()),
+        pushed_remote: None,
+        review_request_id: None,
+        provider_conversations: Vec::new(),
+        created_at: "2026-06-10T00:00:00Z".to_string(),
+        updated_at: "2026-06-10T00:00:00Z".to_string(),
+        completed_at: None,
+    };
+
+    let reviewer_pack =
+        build_evaluation_context_pack(paths.clone(), &attempt, EvaluationContextRole::CodeReviewer)
+            .expect("code reviewer pack");
+    assert!(
+        !reviewer_pack
+            .coder_evidence
+            .expect("code reviewer evidence")
+            .evidence_warnings
+            .contains(&"work_item_handoff_missing".to_string())
+    );
+
+    let final_pack =
+        build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::InternalReviewer)
+            .expect("internal reviewer pack");
+    assert!(
+        final_pack
+            .coder_evidence
+            .expect("internal reviewer evidence")
+            .evidence_warnings
+            .contains(&"work_item_handoff_missing".to_string())
+    );
+}
+
+#[test]
 fn code_reviewer_context_pack_includes_coder_evidence() {
     let tmp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(tmp.path().join(".aria"));

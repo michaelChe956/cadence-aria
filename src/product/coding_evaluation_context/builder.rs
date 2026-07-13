@@ -208,7 +208,7 @@ fn coder_evidence_pack(
     if latest_run.is_none() {
         evidence_warnings.push("coder_role_run_missing".to_string());
     }
-    if handoff.is_none() {
+    if handoff.is_none() && matches!(provider_role, EvaluationContextRole::InternalReviewer) {
         evidence_warnings.push("work_item_handoff_missing".to_string());
     }
 

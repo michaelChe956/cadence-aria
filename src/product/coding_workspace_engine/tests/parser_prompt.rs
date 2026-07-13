@@ -237,6 +237,13 @@ fn code_review_material_protocol_requires_material_derived_checklist() {
     assert!(protocol.contains("required 验证命令的执行证据"));
     assert!(protocol.contains("测试输出显示没有实际测试被执行"));
     assert!(protocol.contains("不得提出执行材料之外的技术栈默认要求"));
+    assert!(
+        protocol.contains(
+            "completion commit 与平台 final unit handoff 在 Code Review approve 后才生成"
+        )
+    );
+    assert!(protocol.contains("Code Review 前为空是正常状态"));
+    assert!(protocol.contains("不得据此创建 finding、request_changes 或 blocked"));
     assert!(protocol.contains("Return ONLY a single JSON object"));
     assert!(protocol.contains("No markdown, no explanations"));
 }

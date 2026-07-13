@@ -306,6 +306,8 @@ pub(crate) fn code_review_material_protocol() -> &'static str {
      - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
      - 审查清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、验证命令与证据、完成前自检要求、handoff 承诺、需求/设计追踪关系。\n\
      - EvaluationContextPack.CoderEvidencePack 是 coder 已执行工作的证据包；必须优先审查其中的 role run、raw/artifact refs、completion report、handoff tests_run/test_result_summary 和 evidence_warnings。\n\
+     - WorkItemGroup 当前 Unit 的 completion commit 与平台 final unit handoff 在 Code Review approve 后才生成；Code Review 前为空是正常状态，不得据此创建 finding、request_changes 或 blocked。\n\
+     - Code Review 阶段应以 Coder completion report、raw/artifact refs、实际测试输出和当前 Unit diff 判断验证证据；真正缺失或自相矛盾的 required verification evidence 仍必须记录。\n\
      - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
      - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和 handoff 承诺。\n\
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
