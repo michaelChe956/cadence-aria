@@ -297,6 +297,48 @@ fn coding_provider_resume_session_id_is_isolated_by_role_and_provider() {
     );
 }
 
+#[test]
+fn clearing_coder_conversation_preserves_other_roles() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt.id,
+            vec![
+                ProviderConversationRef {
+                    role: ProviderConversationRole::Coder,
+                    provider: ProviderName::Codex,
+                    provider_session_id: "stale-coder-thread".to_string(),
+                    updated_at: "2026-07-13T00:00:00Z".to_string(),
+                    last_node_id: Some("coding_node_0001".to_string()),
+                },
+                ProviderConversationRef {
+                    role: ProviderConversationRole::CodeReviewer,
+                    provider: ProviderName::ClaudeCode,
+                    provider_session_id: "review-thread".to_string(),
+                    updated_at: "2026-07-13T00:00:01Z".to_string(),
+                    last_node_id: Some("coding_node_0002".to_string()),
+                },
+            ],
+        )
+        .expect("seed conversations");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    let updated = engine
+        .clear_attempt_provider_conversation(
+            &attempt,
+            &CodingProviderRole::Coder,
+            &ProviderName::Codex,
+        )
+        .expect("clear coder conversation");
+
+    assert_eq!(updated.provider_conversations.len(), 1);
+    assert_eq!(
+        updated.provider_conversations[0].role,
+        ProviderConversationRole::CodeReviewer
+    );
+}
+
 #[tokio::test]
 async fn testing_without_provider_driven_capability_creates_tester_blocked_gate() {
     let (_root, store, attempt) = running_attempt_with_worktree();
