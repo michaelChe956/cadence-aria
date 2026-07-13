@@ -4,6 +4,7 @@ use crate::product::coding_models::{
     CodingAgentRole, CodingAttemptScope, CodingEntryType, CodingExecutionAttempt,
     CodingExecutionStage, CodingProviderRole,
 };
+use crate::product::coding_work_item_context::load_coding_work_item_context;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
@@ -123,9 +124,11 @@ pub fn build_evaluation_context_pack(
     )?;
     let work_item_session = latest_session_for(&sessions, &work_item.id, &WorkspaceType::WorkItem);
     let work_item_version = latest_artifact_version_for_session(&lifecycle, work_item_session)?;
+    let compiled_work_item_context = load_coding_work_item_context(&lifecycle_paths, attempt)?;
     let work_item_context = work_item_context(
         &work_item,
         work_item_version.as_ref(),
+        compiled_work_item_context.markdown.as_deref(),
         work_item_session,
         &mut context_warnings,
     );
