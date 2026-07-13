@@ -9,6 +9,7 @@ use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorks
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
+use crate::web::provider_availability::host_real_workflow_ready;
 use crate::web::state::WebAppState;
 
 use super::{
@@ -58,10 +59,62 @@ pub(super) fn provider_for(
     provider_name: &ProviderName,
     kind: &'static str,
 ) -> Result<Arc<dyn StreamingProviderAdapter>, CodingWorkspaceEngineError> {
+    if !state.test_provider_enabled {
+        state
+            .provider_gate
+            .ensure_available(provider_name)
+            .map_err(|error| {
+                CodingWorkspaceEngineError::Store(ProductStoreError::Io(format!(
+                    "{}: {}",
+                    error.code(),
+                    error
+                )))
+            })?;
+        host_real_workflow_ready().map_err(|error| {
+            CodingWorkspaceEngineError::Store(ProductStoreError::Io(format!(
+                "{}: {}",
+                error.code, error.message
+            )))
+        })?;
+    }
     state.provider_registry.get(provider_name).ok_or_else(|| {
         CodingWorkspaceEngineError::Store(ProductStoreError::NotFound {
             kind,
             id: format!("{provider_name:?}"),
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::web::runtime::WebRuntime;
+
+    #[test]
+    fn coding_provider_for_rejects_real_provider_when_health_is_unavailable() {
+        let root = tempdir().expect("workspace");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+
+        let error = provider_for(&state, &ProviderName::Codex, "coding provider")
+            .err()
+            .expect("degraded initial health must reject real provider");
+
+        assert!(error.to_string().contains("provider_unavailable"));
+    }
+
+    #[test]
+    fn coding_provider_for_allows_fake_provider_from_test_registry() {
+        let root = tempdir().expect("workspace");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+
+        assert!(provider_for(&state, &ProviderName::Fake, "coding provider").is_ok());
+    }
 }

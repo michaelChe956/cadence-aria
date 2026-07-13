@@ -176,7 +176,7 @@ impl WebAppState {
         Self::with_events(workspace_root, runtime, EventHub::new())
     }
 
-    pub fn with_events(workspace_root: PathBuf, runtime: WebRuntime, events: EventHub) -> Self {
+    pub fn with_events(workspace_root: PathBuf, mut runtime: WebRuntime, events: EventHub) -> Self {
         let test_controls = TestControls::default();
         let test_provider_enabled = provider_mode_is_fake();
         let command_runner: Arc<dyn BoundedCommandRunner> = Arc::new(TokioBoundedCommandRunner);
@@ -188,6 +188,9 @@ impl WebAppState {
             4096,
         ));
         let provider_gate = Arc::new(ProviderAvailabilityGate::new(provider_health.clone()));
+        runtime
+            .install_provider_gate(provider_gate.clone())
+            .expect("install shared provider gate");
         let provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync> =
             if runtime.enforces_real_provider_availability() && !test_provider_enabled {
                 availability_from_gate(provider_gate.clone())
@@ -276,6 +279,13 @@ impl WebAppState {
         self.provider_health = provider_health;
         self.provider_gate = provider_gate;
         self.command_runner = command_runner;
+        {
+            let mut runtime = self.runtime.lock().expect("web runtime lock");
+            runtime
+                .install_provider_gate(self.provider_gate.clone())
+                .expect("install shared provider gate");
+            self.provider_adapter = runtime.provider_adapter();
+        }
         *self
             .provider_health_error
             .lock()
