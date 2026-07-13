@@ -1,6 +1,12 @@
 use super::*;
-use crate::product::lifecycle_store::{CreateIssueWorkItemPlanInput, CreateWorkspaceSessionInput};
-use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus};
+use crate::product::lifecycle_store::{
+    CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkspaceSessionInput,
+};
+use crate::product::models::{
+    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, RepositoryProfileConfidence,
+    VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
+    VerificationFallbackPolicy, VerificationScope, WorkItemKind, WorkItemPlanStatus,
+};
 use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
 use std::fs;
 use std::process::Command as StdCommand;
@@ -246,6 +252,78 @@ fn review_prompts_list_exact_finding_severity_values() {
         assert!(protocol.contains("verdict=blocked 时，阻塞 finding 使用 severity=error"));
         assert!(protocol.contains("不得使用 severity=blocked"));
     }
+}
+
+#[tokio::test]
+async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
+    let tmp = tempdir().expect("tempdir");
+    let worktree = tmp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree dir");
+    init_prompt_git_repo(&worktree);
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let verification_plan_id = "verification_plan_0001";
+
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Compiled reviewer context".to_string(),
+            planned_implementation_context: Some("compiled implementation context".to_string()),
+            planned_handoff_summary: Some("compiled handoff context".to_string()),
+            kind: WorkItemKind::Backend,
+            exclusive_write_scopes: vec!["src/product/**".to_string()],
+            forbidden_write_scopes: vec!["tests/**".to_string()],
+            verification_plan_ref: Some(verification_plan_id.to_string()),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create work item");
+    lifecycle
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some(verification_plan_id.to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            repository_profile_ref: None,
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_compiled_context".to_string(),
+                label: "compiled context test".to_string(),
+                command: "cargo test --locked --lib compiled_context".to_string(),
+                cwd: ".".to_string(),
+                purpose: "prove reviewer loads compiled context".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: vec!["cmd_compiled_context".to_string()],
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("create verification plan");
+
+    let store = CodingAttemptStore::new(paths);
+    let (tx, _rx) = mpsc::channel(1);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let mut attempt = test_attempt("coding_attempt_0001");
+    attempt.worktree_path = Some(worktree.clone());
+
+    let prompt = engine
+        .build_code_review_prompt(&attempt, &worktree, None)
+        .await
+        .expect("code review prompt");
+
+    assert!(prompt.contains("compiled implementation context"));
+    assert!(prompt.contains("tests/**"));
+    assert!(prompt.contains("cargo test --locked --lib compiled_context"));
+    assert!(!prompt.contains("未找到 Work Item markdown"));
 }
 
 #[tokio::test]

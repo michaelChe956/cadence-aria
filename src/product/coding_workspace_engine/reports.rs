@@ -134,20 +134,13 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<Option<String>, ProductStoreError> {
-        let lifecycle = LifecycleStore::new(self.store.paths());
-        let sessions = lifecycle.list_workspace_sessions(&attempt.project_id, &attempt.issue_id)?;
-        let active_work_item_id = self.active_work_item_id_for_attempt(attempt);
-        let Some(session) = sessions.iter().rev().find(|session| {
-            session.entity_id == active_work_item_id
-                && session.workspace_type == WorkspaceType::WorkItem
-        }) else {
-            return Ok(None);
-        };
-        Ok(lifecycle
-            .list_artifact_versions(&session.id)?
-            .into_iter()
-            .last()
-            .map(|version| version.to_markdown_string()))
+        Ok(
+            crate::product::coding_work_item_context::load_coding_work_item_context(
+                &self.store.paths(),
+                attempt,
+            )?
+            .markdown,
+        )
     }
 
     pub(crate) fn build_code_review_report(
