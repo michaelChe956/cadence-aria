@@ -14,17 +14,9 @@ use crate::cross_cutting::streaming_provider::{
 use crate::cross_cutting::structured_output::{StructuredOutputContract, StructuredOutputState};
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
-use super::{CodexProvider, is_resume_stall_failure};
+use super::CodexProvider;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[test]
-fn resume_stall_failure_uses_stable_marker() {
-    assert!(is_resume_stall_failure(
-        "Codex resume stalled before provider progress for thread stale-thread"
-    ));
-    assert!(!is_resume_stall_failure("provider stream ended"));
-}
 
 #[test]
 fn codex_provider_supports_provider_driven_testing() {

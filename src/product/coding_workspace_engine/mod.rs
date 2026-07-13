@@ -73,6 +73,7 @@ mod handoffs;
 mod internal_pr_review;
 mod lifecycle;
 mod prompts;
+mod provider_failure;
 mod provider_stream;
 mod reports;
 mod review_parser;
@@ -161,6 +162,8 @@ pub(crate) use gates::*;
 pub(crate) use group::*;
 #[allow(unused_imports)]
 pub(crate) use prompts::*;
+#[allow(unused_imports)]
+pub(crate) use provider_failure::*;
 #[allow(unused_imports)]
 pub(crate) use reports::*;
 #[allow(unused_imports)]
