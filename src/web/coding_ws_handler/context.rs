@@ -18,7 +18,7 @@ use crate::product::json_store::ProductStoreError;
 
 use super::active_coding_timeline_node_id;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::{ProviderName, WorkItemExecutionPlanStatus, WorkspaceSessionRecord};
+use crate::product::models::{ProviderName, WorkItemExecutionPlanStatus};
 use crate::product::repository_store::RepositoryStore;
 
 pub(crate) fn current_work_item_id_for_attempt(attempt: &CodingExecutionAttempt) -> &str {
@@ -211,11 +211,4 @@ pub(crate) fn context_note_chat_entry(
 
 fn chat_entry_id_for_context_note(note_id: &str) -> String {
     note_id.replacen("coding_context_note", "coding_chat_entry", 1)
-}
-
-pub(crate) fn select_work_item_markdown(
-    version_markdown: Option<String>,
-    session: &WorkspaceSessionRecord,
-) -> Option<String> {
-    crate::product::coding_work_item_context::select_work_item_markdown(version_markdown, session)
 }

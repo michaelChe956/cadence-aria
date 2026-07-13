@@ -47,7 +47,7 @@ use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     LifecycleWorkItemRecord, ProviderConversationRef, ProviderConversationRole, ProviderName,
-    WorkItemStatus, WorkspaceType,
+    WorkItemStatus,
 };
 use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
 use crate::product::tester_agent_loop::{

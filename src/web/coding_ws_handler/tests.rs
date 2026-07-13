@@ -5,6 +5,7 @@ use crate::product::coding_models::{
     CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, ReviewFinding, ReviewVerdict,
 };
+use crate::product::coding_work_item_context::select_work_item_markdown;
 use crate::product::lifecycle_store::{
     CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
@@ -23,7 +24,7 @@ use tempfile::TempDir;
 use super::{
     CodeReviewFlowDecision, CodingExecutionAttempt, CodingWsInMessage, CodingWsOutMessage,
     ProviderConfigSnapshot, build_coding_session_state, code_review_flow_decision,
-    coding_execution_context, is_coding_ws_message_allowed, select_work_item_markdown,
+    coding_execution_context, is_coding_ws_message_allowed,
     should_emit_coding_runner_protocol_error, should_resume_runner_after_gate_response,
 };
 

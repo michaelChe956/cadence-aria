@@ -5,7 +5,7 @@ use crate::product::lifecycle_store::{
 use crate::product::models::{
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, RepositoryProfileConfidence,
     VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
-    VerificationFallbackPolicy, VerificationScope, WorkItemKind, WorkItemPlanStatus,
+    VerificationFallbackPolicy, VerificationScope, WorkItemKind, WorkItemPlanStatus, WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
 use std::fs;
