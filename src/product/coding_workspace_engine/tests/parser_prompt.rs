@@ -185,6 +185,23 @@ fn coding_prompt_preserves_stack_terms_when_they_come_from_work_item_material() 
 }
 
 #[test]
+fn reviewer_test_scope_contract_forbids_e2e_findings_without_restricting_other_tests() {
+    let contract = reviewer_test_scope_contract();
+
+    assert_no_fixed_stack_terms(contract);
+    assert!(contract.contains("单元测试"));
+    assert!(contract.contains("非浏览器自动化的集成测试"));
+    assert!(contract.contains("编译、构建、类型检查、静态分析、格式检查或 lint"));
+    assert!(contract.contains("不受 Verification Plan 已列命令的严格限制"));
+    assert!(contract.contains("E2E"));
+    assert!(contract.contains("Playwright"));
+    assert!(contract.contains("浏览器自动化测试"));
+    assert!(contract.contains("不得因为上述测试缺失、失败或缺少证据"));
+    assert!(contract.contains("request_changes 或 blocked"));
+    assert!(contract.contains("不得将其转换成 finding、否决理由或 Coder 返修要求"));
+}
+
+#[test]
 fn code_review_material_protocol_requires_material_derived_checklist() {
     let protocol = code_review_material_protocol();
 
@@ -333,6 +350,10 @@ async fn group_attempt_prompts_use_current_work_item_id() {
         .build_code_review_prompt(&attempt, &worktree, None)
         .await
         .expect("code review prompt");
+    assert!(review_prompt.contains("Reviewer 非 E2E 测试边界"));
+    assert!(review_prompt.contains("Playwright"));
+    assert!(review_prompt.contains("单元测试"));
+    assert!(!coding_prompt.contains("Reviewer 非 E2E 测试边界"));
     assert!(review_prompt.contains("Work Item: work_item_0002"));
     assert!(review_prompt.contains("Current active work item"));
     assert!(!review_prompt.contains("Work Item: work_item_0001"));

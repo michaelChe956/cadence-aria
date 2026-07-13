@@ -29,6 +29,7 @@ impl CodingWorkspaceEngine {
              Base: {}\n\
              {}\
              {}\
+             {}\
              \n代码规范:\n\
              - 优先检查正确性、边界条件、测试覆盖、安全、性能和可维护性。\n\
              - findings 必须包含 severity、file_path、line、message、required_action、source_stage=code_review。\n\
@@ -46,6 +47,7 @@ impl CodingWorkspaceEngine {
             attempt.branch_name,
             attempt.base_branch,
             code_review_material_protocol(),
+            reviewer_test_scope_contract(),
             no_default_stack_assumption_contract(),
             work_item.unwrap_or_else(
                 || "未找到 Work Item markdown，上下文仅包含 attempt 元数据。".to_string()
@@ -254,6 +256,15 @@ pub(crate) fn build_coding_delta_prompt(
 
 pub(crate) fn no_default_stack_assumption_contract() -> &'static str {
     "\n不得用平台默认技术栈假设替代任务材料。语言、构建系统、包管理器、测试框架、依赖初始化和模块接入要求，必须来自 Work Item、Source Draft Supplement、Verification Plan、EvaluationContextPack、项目规则、仓库文件事实或用户补充上下文。若材料不足，必须报告不确定性，不得臆造具体命令或工具。\n"
+}
+
+pub(crate) fn reviewer_test_scope_contract() -> &'static str {
+    "\nReviewer 非 E2E 测试边界:\n\
+     - 你可以根据需求、当前 diff、仓库事实、测试证据和代码风险提出单元测试、非浏览器自动化的集成测试、编译、构建、类型检查、静态分析、格式检查或 lint 等验证要求。\n\
+     - 这些测试建议不受 Verification Plan 已列命令的严格限制，但测试框架、命令和技术栈判断必须来自任务材料、仓库事实或项目规则，不得凭平台默认假设生成。\n\
+     - 不得创建以新增、执行、补充、修复、配置或安装 E2E、端到端测试、Playwright、浏览器自动化测试或运行这些测试所需浏览器环境为目的的 finding。\n\
+     - 不得因为上述测试缺失、失败或缺少证据而给出 request_changes 或 blocked。\n\
+     - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试，也不得将其转换成 finding、否决理由或 Coder 返修要求。\n"
 }
 
 pub(crate) fn coding_execution_protocol() -> &'static str {
