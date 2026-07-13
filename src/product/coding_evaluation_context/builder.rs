@@ -174,6 +174,13 @@ fn evaluation_repo_diff_base<'a>(
     if *provider_role == EvaluationContextRole::CodeReviewer
         && attempt.scope == CodingAttemptScope::WorkItemGroup
     {
+        let current_work_item_id = attempt
+            .current_work_item_id
+            .as_deref()
+            .unwrap_or(&attempt.work_item_id);
+        if current_work_item_id == attempt.work_item_id {
+            return Some(&attempt.base_branch);
+        }
         if attempt.head_commit.is_none() {
             context_warnings.push("code_review_diff_base_missing".to_string());
         }

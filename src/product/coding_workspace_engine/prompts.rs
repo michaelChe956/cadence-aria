@@ -455,6 +455,9 @@ pub(crate) fn code_review_diff_base(
     attempt: &CodingExecutionAttempt,
 ) -> Result<&str, CodingWorkspaceEngineError> {
     if attempt.scope == CodingAttemptScope::WorkItemGroup {
+        if active_work_item_id_for_prompt(attempt) == attempt.work_item_id {
+            return Ok(&attempt.base_branch);
+        }
         return attempt.head_commit.as_deref().ok_or_else(|| {
             CodingWorkspaceEngineError::CompletionCommitMissing(attempt.id.clone())
         });

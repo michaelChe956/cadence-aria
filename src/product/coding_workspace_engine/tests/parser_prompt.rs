@@ -336,6 +336,48 @@ async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
 }
 
 #[tokio::test]
+async fn first_group_code_review_uses_base_branch_without_head_commit() {
+    let tmp = tempdir().expect("tempdir");
+    let worktree = tmp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree dir");
+    init_prompt_git_repo(&worktree);
+    let base_commit = prompt_git_stdout(&worktree, &["rev-parse", "HEAD"]);
+    fs::write(worktree.join("first_unit.txt"), "first unit\n").expect("first unit file");
+
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    LifecycleStore::new(paths.clone())
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "First unit".to_string(),
+            planned_implementation_context: Some("review first unit".to_string()),
+            planned_handoff_summary: Some("first unit handoff".to_string()),
+            ..Default::default()
+        })
+        .expect("create first work item");
+    let store = CodingAttemptStore::new(paths);
+    let (tx, _rx) = mpsc::channel(1);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let mut attempt = test_attempt("coding_attempt_0001");
+    attempt.scope = CodingAttemptScope::WorkItemGroup;
+    attempt.work_item_id = "work_item_0001".to_string();
+    attempt.current_work_item_id = Some("work_item_0001".to_string());
+    attempt.active_unit_id = Some("coding_unit_0001".to_string());
+    attempt.base_branch = base_commit;
+    attempt.head_commit = None;
+    attempt.worktree_path = Some(worktree.clone());
+
+    let prompt = engine
+        .build_code_review_prompt(&attempt, &worktree, None)
+        .await
+        .expect("first group review uses base branch");
+
+    assert!(prompt.contains("first_unit.txt"));
+}
+
+#[tokio::test]
 async fn group_code_review_uses_previous_unit_head_commit_as_diff_base() {
     let tmp = tempdir().expect("tempdir");
     let worktree = tmp.path().join("worktree");
@@ -383,7 +425,7 @@ async fn group_code_review_uses_previous_unit_head_commit_as_diff_base() {
 }
 
 #[tokio::test]
-async fn group_code_review_rejects_missing_head_commit() {
+async fn later_group_code_review_rejects_missing_head_commit() {
     let tmp = tempdir().expect("tempdir");
     let worktree = tmp.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree dir");

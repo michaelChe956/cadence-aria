@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn first_group_code_reviewer_does_not_warn_about_missing_diff_base() {
+    let (_tmp, paths, mut attempt) = group_attempt_with_two_work_items(false);
+    attempt.stage = CodingExecutionStage::CodeReview;
+
+    let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
+        .expect("context pack");
+
+    assert!(
+        !pack
+            .context_warnings
+            .contains(&"code_review_diff_base_missing".to_string())
+    );
+}
+
+#[test]
 fn group_attempt_uses_current_work_item_as_execution_context() {
     let (_tmp, paths, attempt) = group_attempt_with_two_work_items(false);
 
