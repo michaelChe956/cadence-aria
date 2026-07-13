@@ -118,7 +118,23 @@ impl CodingWorkspaceEngine {
             .store
             .get_role_provider_config_snapshot(&updated.project_id, &updated.issue_id, &updated.id)?
             .coder;
-        let prompt = build_coding_delta_prompt(&updated, context, Some(&instruction), None);
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &updated,
+            &CodingProviderRole::Coder,
+            &coder_provider_name,
+        );
+        let full_prompt = build_coding_prompt(&updated, context, Some(&instruction), None);
+        let prompt_mode = if resume_provider_session_id.is_some() {
+            CodingPromptMode::DeltaOnly
+        } else {
+            CodingPromptMode::FullConversation
+        };
+        let prompt = match prompt_mode {
+            CodingPromptMode::FullConversation => full_prompt.clone(),
+            CodingPromptMode::DeltaOnly => {
+                build_coding_delta_prompt(&updated, context, Some(&instruction), None)
+            }
+        };
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -126,7 +142,7 @@ impl CodingWorkspaceEngine {
                     &node.id,
                     &coder_provider_name,
                     prompt.clone(),
-                    CodingPromptMode::DeltaOnly.event_detail(),
+                    prompt_mode.event_detail(),
                 ),
             })
             .await;
@@ -148,16 +164,26 @@ impl CodingWorkspaceEngine {
             timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
-        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
-            &updated,
-            &CodingProviderRole::Coder,
-            &coder_provider_name,
-        );
         let mut provider_input = streaming_input_from_adapter(&input, worktree_path);
         provider_input.workspace_session_id = Some(updated.id.clone());
-        provider_input.resume_provider_session_id = resume_provider_session_id;
+        provider_input.resume_provider_session_id = resume_provider_session_id.clone();
         provider_input.permission_mode =
             role_permission_mode_for_attempt(&self.store, &updated, CodingProviderRole::Coder)?;
+        let fresh_retry = (coder_provider_name == ProviderName::Codex
+            && resume_provider_session_id.is_some())
+        .then(|| {
+            let fresh_legacy_input = AdapterInput {
+                prompt: full_prompt.clone(),
+                ..input.clone()
+            };
+            let mut fresh_input = provider_input.clone();
+            fresh_input.prompt = full_prompt;
+            fresh_input.resume_provider_session_id = None;
+            CodingProviderFreshRetry {
+                legacy_input: fresh_legacy_input,
+                input: fresh_input,
+            }
+        });
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &updated,
@@ -170,6 +196,7 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::Coder,
                 command_rx,
                 allow_legacy_stream_fallback: true,
+                fresh_retry,
                 timeout: None,
                 timeout_reason_code: None,
             })

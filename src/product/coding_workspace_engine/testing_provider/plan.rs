@@ -112,6 +112,7 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::Tester,
                 command_rx,
                 allow_legacy_stream_fallback: false,
+                fresh_retry: None,
                 timeout: Some(options.timeout),
                 timeout_reason_code: Some("plan_tests_timeout"),
             })
@@ -205,6 +206,7 @@ impl CodingWorkspaceEngine {
                         provider_role: CodingProviderRole::Tester,
                         command_rx,
                         allow_legacy_stream_fallback: false,
+                        fresh_retry: None,
                         timeout: Some(options.timeout),
                         timeout_reason_code: Some("plan_tests_timeout"),
                     })

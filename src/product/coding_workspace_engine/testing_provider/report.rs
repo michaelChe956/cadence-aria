@@ -124,6 +124,7 @@ impl CodingWorkspaceEngine {
                     provider_role: CodingProviderRole::Tester,
                     command_rx,
                     allow_legacy_stream_fallback: false,
+                    fresh_retry: None,
                     timeout: None,
                     timeout_reason_code: None,
                 })

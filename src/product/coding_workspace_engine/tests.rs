@@ -39,6 +39,7 @@ fn blocked_report_with(missing: Vec<String>, skipped: Vec<String>) -> TestingRep
     }
 }
 
+mod coder_resume_recovery;
 mod gate_coder_feedback;
 mod gate_rework;
 mod parser_prompt;

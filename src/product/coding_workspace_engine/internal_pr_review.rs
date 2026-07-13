@@ -236,6 +236,7 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::InternalReviewer,
                 command_rx,
                 allow_legacy_stream_fallback: true,
+                fresh_retry: None,
                 timeout: None,
                 timeout_reason_code: None,
             })
