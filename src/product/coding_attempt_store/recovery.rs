@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::PathBuf;
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +13,8 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 
 pub(crate) const FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE: &str =
     "failed-code-review-recovery.json";
+const FAILED_CODE_REVIEW_RECOVERIES_DIR: &str = "failed-code-review-recoveries";
+const COMPLETED_FAILED_CODE_REVIEW_RECOVERIES_DIR: &str = "completed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,22 +51,112 @@ impl FailedCodeReviewRecoveryJournal {
 }
 
 impl super::CodingAttemptStore {
+    fn failed_code_review_recovery_journal_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        Ok(self
+            .attempt_dir(project_id, issue_id, attempt_id)
+            .join(FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE))
+    }
+
+    fn archived_failed_code_review_recovery_journal_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(gate_id)?;
+        Ok(self
+            .attempt_dir(project_id, issue_id, attempt_id)
+            .join(FAILED_CODE_REVIEW_RECOVERIES_DIR)
+            .join(COMPLETED_FAILED_CODE_REVIEW_RECOVERIES_DIR)
+            .join(format!("{gate_id}.json")))
+    }
+
     pub fn get_failed_code_review_recovery_journal(
         &self,
         project_id: &str,
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<Option<FailedCodeReviewRecoveryJournal>, ProductStoreError> {
-        validate_relative_id(project_id)?;
-        validate_relative_id(issue_id)?;
-        validate_relative_id(attempt_id)?;
-        let path = self
-            .attempt_dir(project_id, issue_id, attempt_id)
-            .join(FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE);
+        let path =
+            self.failed_code_review_recovery_journal_path(project_id, issue_id, attempt_id)?;
         if !super::path_is_regular_file(&path)? {
             return Ok(None);
         }
         read_json(&path).map(Some)
+    }
+
+    pub fn get_archived_failed_code_review_recovery_journal(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+    ) -> Result<Option<FailedCodeReviewRecoveryJournal>, ProductStoreError> {
+        let path = self.archived_failed_code_review_recovery_journal_path(
+            project_id, issue_id, attempt_id, gate_id,
+        )?;
+        if !super::path_is_regular_file(&path)? {
+            return Ok(None);
+        }
+        read_json(&path).map(Some)
+    }
+
+    fn archive_completed_failed_code_review_recovery_journal(
+        &self,
+        journal: &FailedCodeReviewRecoveryJournal,
+    ) -> Result<(), ProductStoreError> {
+        if !journal.is_completed()
+            || journal.runner_started_at.is_none()
+            || journal.completed_at.is_none()
+        {
+            return Err(recovery_state_changed());
+        }
+        let current_path = self.failed_code_review_recovery_journal_path(
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.attempt_id,
+        )?;
+        if !super::path_is_regular_file(&current_path)? {
+            return Err(recovery_state_changed());
+        }
+        let archived_path = self.archived_failed_code_review_recovery_journal_path(
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.attempt_id,
+            &journal.expected_gate_id,
+        )?;
+        if super::path_is_regular_file(&archived_path)? {
+            let archived: FailedCodeReviewRecoveryJournal = read_json(&archived_path)?;
+            if archived != *journal {
+                return Err(recovery_state_changed());
+            }
+            super::remove_file_if_exists(&current_path)?;
+            return Ok(());
+        }
+        if let Some(parent) = archived_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                ProductStoreError::Io(format!("create {}: {error}", parent.display()))
+            })?;
+        }
+        fs::rename(&current_path, &archived_path).map_err(|error| {
+            ProductStoreError::Io(format!(
+                "rename {} to {}: {error}",
+                current_path.display(),
+                archived_path.display()
+            ))
+        })
     }
 
     pub fn prepare_failed_code_review_recovery_journal(
@@ -85,7 +180,10 @@ impl super::CodingAttemptStore {
             {
                 return Ok(existing);
             }
-            return Err(recovery_state_changed());
+            if !existing.is_completed() {
+                return Err(recovery_state_changed());
+            }
+            self.archive_completed_failed_code_review_recovery_journal(&existing)?;
         }
 
         let now = Utc::now().to_rfc3339();
@@ -315,9 +413,11 @@ impl super::CodingAttemptStore {
         validate_relative_id(&journal.attempt_id)?;
         validate_relative_id(&journal.project_id)?;
         validate_relative_id(&journal.issue_id)?;
-        let path = self
-            .attempt_dir(&journal.project_id, &journal.issue_id, &journal.attempt_id)
-            .join(FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE);
+        let path = self.failed_code_review_recovery_journal_path(
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.attempt_id,
+        )?;
         write_json(&path, journal)
     }
 }

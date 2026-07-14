@@ -10,6 +10,8 @@ use crate::product::coding_models::{
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
+mod failed_review_recovery;
+
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
 const WORK_ITEM_ID: &str = "work_item_0001";
