@@ -261,5 +261,6 @@ ls "$BASE"/choice-gates/*.json 2>/dev/null || echo "OK: none"
 - 不在没有向用户展示 diff 的情况下丢弃 worktree 里的未提交变更（即便不做备份，仍必须让用户看清楚要丢弃的具体内容再确认，`git restore`/`git reset` 不可逆）。
 - 遇到边界判断（Step 1）不一致、`head_commit`/`HEAD` 不匹配、或 worktree 有意料之外的改动，停下来问用户，不自行假设。
 - 禁止出现 `active_unit_id` 指向 `pending` Unit；`prepare_context + running Unit` 才是目标 Work Item 尚未 Coding 的合法恢复状态。
+- **如果回退过程中还需要人工修订 Verification Plan，`commands[].source` 必须严格使用当前数据模型支持的枚举值；当前 `VerificationCommandSource` 只允许 `"provider"`，禁止写入自造值 `"amendment"`。** `jq empty` 只能验证 JSON 语法，不能证明枚举可反序列化；写入后必须确认后端能够重新读取该 Verification Plan。
 - 每次删除前先列出具体文件名做目视核对，不要用宽泛的 glob（如 `rm -rf role-runs/*`）一次性清空整个目录——本 skill 默认不做备份，删除前的目视核对是唯一的安全网，务必执行到位。
 - 不需要为了"看起来更完整"而额外备份/重启服务；如果用户明确要求本次要备份，按用户要求单独执行，不是默认行为。
