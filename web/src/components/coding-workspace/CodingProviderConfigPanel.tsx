@@ -7,8 +7,11 @@ import type {
   CodingRoleProviderConfigSnapshot,
   WorkspaceProviderName,
 } from "../../api/types";
-
-const PROVIDERS: WorkspaceProviderName[] = ["fake", "codex", "claude_code"];
+import {
+  getProviderOptions,
+  type ProviderOption,
+} from "../../state/provider-options";
+import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 
 type ProviderConfigRow = {
   selectRole: CodingProviderSelectRole;
@@ -19,7 +22,13 @@ type ProviderConfigRow = {
 };
 
 const BASE_ROLES: ProviderConfigRow[] = [
-  { selectRole: "coder", providerKey: "coder", modeRole: "coder", lockRole: "coder", label: "Coder" },
+  {
+    selectRole: "coder",
+    providerKey: "coder",
+    modeRole: "coder",
+    lockRole: "coder",
+    label: "Coder",
+  },
   {
     selectRole: "code_reviewer",
     providerKey: "code_reviewer",
@@ -35,12 +44,6 @@ const GROUP_FINAL_REVIEW_ROLE: ProviderConfigRow = {
   modeRole: "internal_reviewer",
   lockRole: "internal_reviewer",
   label: "GroupFinalReview",
-};
-
-const PROVIDER_LABELS: Record<WorkspaceProviderName, string> = {
-  fake: "Fake",
-  codex: "Codex",
-  claude_code: "Claude Code",
 };
 
 const PERMISSION_MODE_LABELS: Record<CodingProviderPermissionMode, string> = {
@@ -63,18 +66,27 @@ export function CodingProviderConfigPanel({
   lockedRole: CodingProviderRole | null;
   configLocked: boolean;
   maxAutoRework: number;
-  onSelect: (role: CodingProviderSelectRole, provider: WorkspaceProviderName) => void;
+  onSelect: (
+    role: CodingProviderSelectRole,
+    provider: WorkspaceProviderName,
+  ) => void;
   onPermissionModeSelect: (
     role: CodingProviderRole,
     permissionMode: CodingProviderPermissionMode,
   ) => void;
   onMaxAutoReworkSelect: (maxAutoRework: number) => void;
 }) {
+  const availabilitySnapshot = useProviderAvailabilityStore(
+    (state) => state.snapshot,
+  );
   if (!snapshot) {
     return null;
   }
+  const providerOptions = getProviderOptions(availabilitySnapshot);
   const roles =
-    attemptScope === "work_item_group" ? [...BASE_ROLES, GROUP_FINAL_REVIEW_ROLE] : BASE_ROLES;
+    attemptScope === "work_item_group"
+      ? [...BASE_ROLES, GROUP_FINAL_REVIEW_ROLE]
+      : BASE_ROLES;
 
   return (
     <div
@@ -83,11 +95,17 @@ export function CodingProviderConfigPanel({
     >
       {roles.map(({ selectRole, providerKey, modeRole, lockRole, label }) => {
         const current = snapshot[providerKey];
-        const permissionMode = modeRole ? snapshot.permission_modes[modeRole] : null;
+        const permissionMode = modeRole
+          ? snapshot.permission_modes[modeRole]
+          : null;
         const locked = configLocked || lockedRole === lockRole;
+        const options = providerOptionsForValue(providerOptions, current);
+        const unavailableOptions = options.filter((option) => option.disabled);
         return (
           <div
             key={selectRole}
+            role="group"
+            aria-label={`${label} Provider 配置`}
             className="grid min-w-0 gap-2 rounded-md border border-[var(--aria-line)] px-3 py-2.5 md:grid-cols-[9rem_minmax(0,1fr)]"
           >
             <div className="min-w-0">
@@ -96,7 +114,10 @@ export function CodingProviderConfigPanel({
                   {label}
                 </span>
                 {locked ? (
-                  <Lock aria-label={`${label} 已锁定`} className="h-3.5 w-3.5 shrink-0" />
+                  <Lock
+                    aria-label={`${label} 已锁定`}
+                    className="h-3.5 w-3.5 shrink-0"
+                  />
                 ) : null}
               </div>
               <div className="mt-1 truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
@@ -105,25 +126,44 @@ export function CodingProviderConfigPanel({
             </div>
             <div className="grid min-w-0 gap-2">
               <div className="flex min-w-0 flex-wrap gap-1">
-                {PROVIDERS.map((provider) => (
+                {options.map((provider) => (
                   <button
-                    key={provider}
+                    key={provider.value}
                     type="button"
-                    disabled={locked || provider === current}
-                    onClick={() => onSelect(selectRole, provider)}
-                    aria-label={`将 ${label} 切换为 ${PROVIDER_LABELS[provider]}`}
-                    aria-pressed={provider === current}
+                    disabled={
+                      locked || provider.disabled || provider.value === current
+                    }
+                    onClick={() => onSelect(selectRole, provider.value)}
+                    aria-label={`将 ${label} 切换为 ${provider.label}`}
+                    aria-pressed={provider.value === current}
+                    title={
+                      [provider.reason, provider.installHint]
+                        .filter(Boolean)
+                        .join("；") || undefined
+                    }
                     className={[
                       "inline-flex h-7 cursor-pointer items-center rounded-md border px-2 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-45",
-                      provider === current
+                      provider.value === current
                         ? "border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] text-[var(--aria-primary)]"
                         : "border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]",
                     ].join(" ")}
                   >
-                    {PROVIDER_LABELS[provider]}
+                    {provider.label}
                   </button>
                 ))}
               </div>
+              {unavailableOptions.length > 0 ? (
+                <div className="space-y-1 text-[11px] text-amber-700">
+                  {unavailableOptions.map((provider) => (
+                    <p key={provider.value}>
+                      <span>{provider.reason}</span>
+                      {provider.installHint ? (
+                        <span className="ml-1">{provider.installHint}</span>
+                      ) : null}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
               {modeRole ? (
                 <div className="flex min-w-0 flex-wrap gap-1">
                   {(["auto", "supervised"] as const).map((mode) => (
@@ -178,4 +218,11 @@ export function CodingProviderConfigPanel({
       </div>
     </div>
   );
+}
+
+function providerOptionsForValue(
+  options: ProviderOption[],
+  current: WorkspaceProviderName,
+) {
+  return options.filter((option) => option.visible || option.value === current);
 }

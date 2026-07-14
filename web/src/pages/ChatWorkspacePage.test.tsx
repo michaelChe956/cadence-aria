@@ -1,6 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ProviderHealthResponse } from "../api/types";
 import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceEventOutput,
@@ -17,6 +18,7 @@ import {
   selectWorkspaceHeaderState,
   useWorkspaceStore,
 } from "../state/workspace-ws-store";
+import { useProviderAvailabilityStore } from "../state/provider-availability-store";
 import { ChatWorkspacePage } from "./ChatWorkspacePage";
 import {
   chatEntry,
@@ -69,10 +71,69 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
   ),
 }));
 
+function setPageProviderHealth() {
+  const snapshot: ProviderHealthResponse = {
+    schema_version: 1,
+    generation: 1,
+    checked_at: "2026-07-14T00:00:00Z",
+    state_status: "ready",
+    state_error: null,
+    real_workflow_blocked: false,
+    test_provider_enabled: false,
+    providers: [
+      {
+        provider: "claude_code",
+        display_name: "Claude Code",
+        available: false,
+        version: null,
+        reason_code: "command_missing",
+        reason: "Claude Code 未安装",
+        checked_at: "2026-07-14T00:00:00Z",
+        install_hint: "请先安装 Claude Code",
+      },
+      {
+        provider: "codex",
+        display_name: "Codex",
+        available: true,
+        version: "1.0.0",
+        reason_code: null,
+        reason: null,
+        checked_at: "2026-07-14T00:00:00Z",
+        install_hint: "",
+      },
+    ],
+  };
+  useProviderAvailabilityStore.setState({ snapshot, loadStatus: "loaded" });
+}
+
+afterEach(() => {
+  useProviderAvailabilityStore.getState().reset();
+});
+
 describe("ChatWorkspacePage shell and content loading", () => {
   installChatWorkspacePageTestHooks();
   beforeEach(() => {
     vi.mocked(fetchWorkspaceNodeDetail).mockResolvedValue(makeNodeDetail());
+  });
+
+  it("assembles the shared Provider catalog without page-level availability wiring", async () => {
+    mockWorkspaceWs();
+    setPageProviderHealth();
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "story",
+      stage: "prepare_context",
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Provider 配置" }));
+
+    const author = screen.getByLabelText("Author");
+    expect(within(author).getByRole("option", { name: "Claude Code" })).toBeDisabled();
+    expect(screen.getByText("Claude Code 未安装")).toBeInTheDocument();
   });
 
   it("renders chat workspace shell with timeline and keeps artifact content secondary until selected", async () => {
