@@ -6,6 +6,7 @@ import type {
   CodingAttemptSnapshotResponse,
   CreateProductIssueRequest,
   CreateRepositoryRequest,
+  CreateRepositoryResponse,
   GenerateDesignSpecsRequest,
   GenerateDesignSpecsResponse,
   GenerateStorySpecsRequest,
@@ -17,14 +18,16 @@ import type {
   ProductIssue,
   ProductIssueListResponse,
   Project,
+  ProviderHealthResponse,
   Repository,
+  RepositoryRegistrationErrorDetails,
   RepositoryListResponse,
   WorkItemExecutionPlan,
 } from "./types";
 
 export class ApiRequestError extends Error implements ApiError {
   code: string;
-  details: Record<string, unknown>;
+  details: RepositoryRegistrationErrorDetails;
 
   constructor(error: ApiError) {
     super(error.message);
@@ -35,16 +38,18 @@ export class ApiRequestError extends Error implements ApiError {
 }
 
 export async function normalizeApiError(response: Response): Promise<ApiError> {
-  const body = await response.json().catch(() => ({}));
+  const body: unknown = await response.json().catch(() => ({}));
+  const error = isRecord(body) ? body : {};
   return {
-    code: typeof body.code === "string" ? body.code : "web_client_error",
+    code: typeof error.code === "string" ? error.code : "web_client_error",
     message:
-      typeof body.message === "string" ? body.message : response.statusText,
-    details:
-      typeof body.details === "object" && body.details !== null
-        ? body.details
-        : {},
+      typeof error.message === "string" ? error.message : response.statusText,
+    details: isRecord(error.details) ? error.details : {},
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -99,14 +104,24 @@ export function listRepositories(
 export function createRepository(
   projectId: string,
   payload: CreateRepositoryRequest,
-): Promise<Repository> {
-  return requestJson<Repository>(
+): Promise<CreateRepositoryResponse> {
+  return requestJson<CreateRepositoryResponse>(
     `/api/projects/${encodeURIComponent(projectId)}/repositories`,
     {
       method: "POST",
       body: JSON.stringify(payload),
     },
   );
+}
+
+export function getProviderStatus(): Promise<ProviderHealthResponse> {
+  return requestJson<ProviderHealthResponse>("/api/providers/status");
+}
+
+export function recheckProviders(): Promise<ProviderHealthResponse> {
+  return requestJson<ProviderHealthResponse>("/api/providers/recheck", {
+    method: "POST",
+  });
 }
 
 export function deleteRepository(
