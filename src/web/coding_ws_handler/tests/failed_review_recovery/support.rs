@@ -1,8 +1,11 @@
 use std::fs;
 use std::process::Command;
 
+use tokio::sync::mpsc;
+
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CreateBlockedGateInput, CreateCodingExecutionUnitInput,
+    FailedCodeReviewRecoveryJournal,
 };
 use crate::product::coding_models::{
     CodingAgentRole, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
@@ -10,6 +13,8 @@ use crate::product::coding_models::{
     CodingGateRequired, CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger,
     CodingTimelineNode, CodingTimelineNodeStatus,
 };
+use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+use crate::product::git_workspace_service::GitWorkspaceService;
 
 use super::super::{
     CodingWsOutMessage, build_coding_session_state, seed_compiled_work_item_fixture,
@@ -43,6 +48,13 @@ pub(super) struct FailedReviewFixture {
     pub(super) attempt: CodingExecutionAttempt,
     pub(super) dirty_gate: Option<CodingGateRequired>,
     pub(super) stale_role_run_id: String,
+}
+
+pub(super) struct RepeatedInterruptedReview {
+    pub(super) blocked_attempt: CodingExecutionAttempt,
+    pub(super) first_journal: FailedCodeReviewRecoveryJournal,
+    pub(super) first_retry_role_run_id: String,
+    pub(super) second_gate: CodingGateRequired,
 }
 
 pub(super) fn attempt_data_fingerprint(attempt: &CodingExecutionAttempt) -> serde_json::Value {
@@ -205,6 +217,116 @@ pub(super) fn assert_recovery_gate(scope: CodingAttemptScope) {
             .expect("units after SessionState"),
         units_before
     );
+}
+
+pub(super) async fn seed_repeated_interrupted_review(
+    fixture: &FailedReviewFixture,
+) -> RepeatedInterruptedReview {
+    let first_gate_id = fixture
+        .dirty_gate
+        .as_ref()
+        .expect("first provider interrupted gate")
+        .gate_id
+        .clone();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+    let first_running = engine
+        .recover_failed_code_review_for_attempt(&fixture.attempt.id, &first_gate_id)
+        .await
+        .expect("first interrupted review recovery");
+    let first_journal = fixture
+        .store
+        .complete_failed_code_review_recovery_journal(&first_running.id, &first_gate_id)
+        .expect("complete first recovery journal");
+    let first_retry_role_run_id = first_journal
+        .retry_role_run_id
+        .clone()
+        .expect("first retry reviewer run");
+    let second_failed_node_id = "coding_node_0010";
+    fixture
+        .store
+        .save_timeline_node(CodingTimelineNode {
+            id: second_failed_node_id.to_string(),
+            attempt_id: first_running.id.clone(),
+            stage: CodingExecutionStage::CodeReview,
+            title: "代码审查".to_string(),
+            status: CodingTimelineNodeStatus::Failed,
+            agent_role: Some(CodingAgentRole::Reviewer),
+            summary: Some("second review provider interrupted".to_string()),
+            started_at: "2026-07-12T04:40:00Z".to_string(),
+            completed_at: Some("2026-07-12T04:40:59Z".to_string()),
+            artifact_refs: Vec::new(),
+        })
+        .expect("second failed review node");
+    fixture
+        .store
+        .attach_role_run_node(
+            &first_running.project_id,
+            &first_running.issue_id,
+            &first_running.id,
+            &first_retry_role_run_id,
+            second_failed_node_id.to_string(),
+        )
+        .expect("bind first retry reviewer node");
+    fixture
+        .store
+        .update_role_run_status(
+            &first_running.project_id,
+            &first_running.issue_id,
+            &first_running.id,
+            &first_retry_role_run_id,
+            CodingRoleRunStatus::Failed,
+            Some("code_review_provider_interrupted".to_string()),
+        )
+        .expect("fail first retry reviewer");
+    let blocked_attempt = fixture
+        .store
+        .update_attempt_status(
+            &first_running.project_id,
+            &first_running.issue_id,
+            &first_running.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("block attempt for second interruption");
+    let second_gate = fixture
+        .store
+        .create_blocked_gate(CreateBlockedGateInput {
+            attempt_id: blocked_attempt.id.clone(),
+            stage: CodingExecutionStage::CodeReview,
+            node_id: Some(second_failed_node_id.to_string()),
+            role: Some(CodingProviderRole::CodeReviewer),
+            title: "代码审查中断".to_string(),
+            description: "second review provider interrupted".to_string(),
+            reason_code: Some("code_review_provider_interrupted".to_string()),
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+            available_actions: vec![
+                CodingGateAction {
+                    action_id: "retry_review".to_string(),
+                    label: "重试代码审查".to_string(),
+                    action_type: CodingGateActionType::RetryReview,
+                },
+                CodingGateAction {
+                    action_id: "send_to_coder".to_string(),
+                    label: "发送给 Coder".to_string(),
+                    action_type: CodingGateActionType::SendToCoder,
+                },
+                CodingGateAction {
+                    action_id: "abort".to_string(),
+                    label: "终止".to_string(),
+                    action_type: CodingGateActionType::Abort,
+                },
+            ],
+        })
+        .expect("second provider interrupted gate");
+
+    RepeatedInterruptedReview {
+        blocked_attempt,
+        first_journal,
+        first_retry_role_run_id,
+        second_gate,
+    }
 }
 
 pub(super) fn failed_review_fixture(

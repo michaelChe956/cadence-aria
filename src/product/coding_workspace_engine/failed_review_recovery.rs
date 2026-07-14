@@ -33,19 +33,23 @@ pub(crate) fn recoverable_failed_code_review(
         &attempt.issue_id,
         &attempt.id,
     )? {
-        let valid = if journal.is_completed() {
-            completed_journal_waits_for_retry_node(coding_store, attempt, &journal)?
-        } else {
-            journal_recovery_prefix_is_valid(coding_store, attempt, &journal)?
-        };
-        if !valid {
-            return Ok(None);
+        if !journal.is_completed() {
+            if !journal_recovery_prefix_is_valid(coding_store, attempt, &journal)? {
+                return Ok(None);
+            }
+            return Ok(Some(FailedCodeReviewRecovery {
+                gate_id: journal.expected_gate_id,
+                failed_node_id: journal.expected_failed_node_id,
+                stale_role_run_id: journal.expected_stale_role_run_id,
+            }));
         }
-        return Ok(Some(FailedCodeReviewRecovery {
-            gate_id: journal.expected_gate_id,
-            failed_node_id: journal.expected_failed_node_id,
-            stale_role_run_id: journal.expected_stale_role_run_id,
-        }));
+        if completed_journal_waits_for_retry_node(coding_store, attempt, &journal)? {
+            return Ok(Some(FailedCodeReviewRecovery {
+                gate_id: journal.expected_gate_id,
+                failed_node_id: journal.expected_failed_node_id,
+                stale_role_run_id: journal.expected_stale_role_run_id,
+            }));
+        }
     }
 
     if attempt.status == CodingAttemptStatus::Blocked
@@ -260,30 +264,18 @@ impl CodingWorkspaceEngine {
         let current =
             self.store
                 .get_attempt(&located.project_id, &located.issue_id, &located.id)?;
-        let mut journal = if let Some(existing) =
-            self.store.get_failed_code_review_recovery_journal(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-            )? {
-            if existing.expected_gate_id != gate_id {
-                return Err(recovery_state_changed());
-            }
-            existing
-        } else {
-            let Some(recovery) = recoverable_failed_code_review(&self.store, &current)? else {
-                return Err(recovery_state_changed());
-            };
-            if recovery.gate_id != gate_id {
-                return Err(recovery_state_changed());
-            }
-            self.store.prepare_failed_code_review_recovery_journal(
-                &current,
-                &recovery.gate_id,
-                &recovery.failed_node_id,
-                &recovery.stale_role_run_id,
-            )?
+        let Some(recovery) = recoverable_failed_code_review(&self.store, &current)? else {
+            return Err(recovery_state_changed());
         };
+        if recovery.gate_id != gate_id {
+            return Err(recovery_state_changed());
+        }
+        let mut journal = self.store.prepare_failed_code_review_recovery_journal(
+            &current,
+            &recovery.gate_id,
+            &recovery.failed_node_id,
+            &recovery.stale_role_run_id,
+        )?;
 
         let current =
             self.store
