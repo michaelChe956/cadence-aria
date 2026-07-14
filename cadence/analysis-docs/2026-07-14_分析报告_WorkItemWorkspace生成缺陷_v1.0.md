@@ -10,7 +10,7 @@
 
 ## 结论摘要
 
-本次 Coding Attempt 先后在 Work Item 4、Work Item 6 和 Work Item 8 暴露了同一类生成缺陷：Work Item Draft 对前置接口、真实调用链和受影响测试的判断不完整，导致完成任务所必需的文件被排除在 Exclusive Write Scopes 之外，甚至被放入 Forbidden Write Scopes。
+本次 Coding Attempt 先后在 Work Item 4、Work Item 6 和 Work Item 8 暴露了一组关联生成缺陷：Work Item Draft 对前置接口、真实调用链、受影响测试和跨 Work Item 累积结构变化的判断不完整。Work Item 4、6 出现了完成任务所必需的文件被排除在 Exclusive Write Scopes 之外、甚至被放入 Forbidden Write Scopes 的直接冲突；Work Item 8 主要表现为前置依赖未验证就绪、潜在旧测试迁移无人归属，却仍被调度进入 Coding。除此之外，前序 Work Item 可能把文件推过代码拆分门禁阈值，后续 Work Item 才发现并承担失败，但没有原文件和拆分接线文件的写入权限。
 
 Coder 遵守范围时只能报告 blocker；人工临时扩大范围后，Reviewer 又可能因为拿不到权威修订上下文而持续报告越界。这不是 Story Spec 或 Design Spec 的主要问题，核心问题位于 Work Item Workspace 的 Draft 生成、Compile 同步、依赖 handoff 校验、受影响测试归属和 Reviewer 上下文传递。
 
@@ -165,6 +165,99 @@ Work Item 8 的 Draft 已经明确列出以下旧测试可能受到 HTTP 201/env
 
 Draft 的处理方式是让 Coder 在发现旧测试失败后报告 blocker。这个设计没有为 blocker 指定任何可以实际修改旧测试的 Work Item，只是把生成期可以发现的问题推迟到 Coding 阶段。
 
+### 结论校正：Work Item 8 没有要求 Coder 越界修改实现
+
+Work Item 8 明确规定“只增加后端集成测试与 fixture，不修改实现”，并禁止修改 `src/**`、`web/src/**`、`web/e2e/**`。因此，不能把 Reviewer 提出的所有未完成测试场景都归类为“完成行为所需文件位于 Forbidden Scopes”。
+
+以下内容可以在 Work Item 8 的合法测试范围内完成，不构成写入范围冲突：
+
+- Provider 健康测试矩阵。
+- Cadence online clone、online update、offline 三分支。
+- 软链安全矩阵。
+- Repository 初始化成功、失败、交互和并发场景。
+- AC 到测试函数的追踪表及相关 fixture。
+
+Work Item 8 中真正需要区分的是“直接写入范围冲突”和“前置依赖未就绪”。
+
+### 行为要求与范围问题的精确对应
+
+#### 1. 旧 Repository POST 测试迁移：条件成立后属于直接范围冲突
+
+Work Item 8 要求先检索并运行仍使用旧 HTTP 200 或旧顶层 Repository JSON 的集成测试，最终 Verification Plan 又要求 `cargo test --locked` 全量通过。如果下列测试被实际证明仍依赖旧契约，就必须修改这些测试才能满足全量门禁：
+
+- `tests/it_web/web_lifecycle_api/part_01.rs`
+- `tests/it_web/web_coding_attempt_api/part_02.rs`
+- `tests/it_web/web_coding_attempt_api/part_05.rs`
+- `tests/it_web/web_work_item_generation/part_01.rs`
+
+这些文件不在 Work Item 8 的 Exclusive Scopes 中。`tests/it_web/web_product_api.rs` 被 Draft 声明为已由 Work Item 6 完成迁移，因此不能在未核验前把它继续算作 Work Item 8 的必改文件。
+
+该冲突只有在旧测试确实失败后才能确认；Draft 只是提前识别了风险。Draft 要求正式扩展范围或创建前置迁移项，但平台没有提供对应的合法处理路径。
+
+#### 2. Repository API 集成注入：属于前置公开 seam 就绪性问题
+
+Work Item 8 要求 Repository API 在构造 router/state 时能够注入：
+
+- 临时用户根。
+- 共享 `BoundedCommandRunner`。
+- Provider 健康 gate。
+- 脚本化 `ProviderRegistry`。
+
+测试文件只能消费公开的 integration-safe builder 或其他公开 seam。如果前置 Work Item 只交付了单元测试私有 seam，新增公开 builder 就需要修改 `src/**`，而 `src/**` 被 Work Item 8 禁止。
+
+但 Work Item 8 并没有要求当前 Coder 越界补接口；它明确要求在这种情况下报告 `handoff blocker`。因此其准确分类是“依赖接口未就绪仍被调度”，不是“Reviewer 要求当前 Work Item 修改 Forbidden 文件”。
+
+#### 3. AC-011 实际 HTTP 调用链：属于前置实现正确性问题
+
+Work Item 8 要求通过 `coding.rs` 和 `lifecycle.rs` 的实际 HTTP 请求入口验证共享 Provider gate，而不是直接调用解析函数。如果请求仍绕过 gate，修复位置会落在 `coding.rs`、`lifecycle.rs` 或 `provider_availability.rs` 等 `src/**` 文件。
+
+Work Item 8 同样没有授权当前 Coder 修改这些文件，而是明确要求记录调用证据并退回 `outline_provider_execution_gate` 修复。因此这里暴露的是：已完成依赖缺少正式返修或 amendment 路径，平台却继续把同一 Work Item 送入 Coding。
+
+### Work Item 8 的准确缺陷分类
+
+1. 只有旧测试被实际证明需要迁移时，才形成当前 Work Item 的直接写入范围冲突。
+2. 公开 integration-safe seam 不存在时，形成依赖就绪性 blocker。
+3. 实际 HTTP 调用链仍绕过 gate 时，形成前置实现返修 blocker。
+4. 普通测试矩阵或断言缺失仍属于 Work Item 8 的正常 Coding 内容，不能误判为范围冲突。
+5. 平台缺陷在于 Compile/Coding 前没有验证依赖就绪性，并且 blocker 没有合法处理者或自动回退目标。
+
+## 事件四：前序改动触发结构或质量门禁，后续 Work Item 无权修复
+
+### 问题定义
+
+Cadence Aria 是通用 AI 开发平台，本问题不绑定 Rust、React 或任何特定语言、框架和构建工具。这里的“format 门禁”是用户口径，平台侧应将其建模为仓库定义的结构或质量门禁，例如格式化、静态检查、复杂度、文件或模块规模、生成代码布局，以及“超长后必须拆分”等项目自定义规则。当前 Rust 项目只是本次复现案例，不应成为平台规则的适用边界。
+
+可能出现以下跨 Work Item 链路：
+
+1. 前序 Work Item 在自己的 Exclusive Scopes 内合法修改某个文件。
+2. 累积修改使该文件超过代码拆分门禁阈值，或者使下一次新增内容必然触发拆分要求。
+3. 前序 Work Item 完成时没有执行同一套结构或质量门禁，或者平台没有把门禁失败归因到引入超限的 Work Item。
+4. 后续 Work Item 运行仓库全量验证或 Review 门禁时，首次发现必须拆分该文件。
+5. 拆分通常需要同时修改原文件、拆出的新文件、模块或包注册入口、公共导入导出、清单或配置，以及相关测试接线文件；具体集合由目标仓库技术栈决定。
+6. 这些文件可能不在后续 Work Item 的 Exclusive Scopes 中，甚至位于 Forbidden Scopes，导致后续 Coder 无法同时满足门禁和写入边界。
+
+### 准确分类
+
+- 如果超限由前序 Work Item 引入，但前序完成门禁没有发现，这是“完成门禁覆盖不足和违规归因错误”。该判断与实现语言无关。
+- 如果后续 Work Item 自身的预期改动会把文件推过阈值，而 Draft 没有预留拆分所需文件，这是“写入范围闭包计算不足”。
+- 如果门禁规则或阈值在两个 Work Item 之间发生变化，这是“门禁版本和基线未固化”。
+- 后续 Reviewer 发现问题本身可能是正确的，但不能把修复责任直接交给没有权限的当前 Coder。
+
+### 不应采用的处理方式
+
+- 不应让后续 Coder 任意扩大 Forbidden Scopes。
+- 不应为了让当前 Work Item 通过而关闭或放宽代码拆分门禁。
+- 不应把前序 Work Item 引入的既有失败算作后续 Work Item 的新增缺陷。
+- 不应要求后续 Coder 在未获得正式 amendment 的情况下顺手重构无归属文件。
+
+### 正确的流程要求
+
+1. 每个 Work Item 完成前必须执行目标仓库声明的同一版本结构与质量门禁，违规应在引入它的 Work Item 内处理。
+2. 下一个 Work Item 开始前应保存并验证门禁基线，区分既有失败和当前 diff 新增失败。
+3. Draft 生成器应根据目标仓库的门禁规则、当前结构和预计增量判断是否会触发拆分，并把原文件、拆分产物、注册入口、清单配置及测试接线文件纳入范围闭包。
+4. 如果依赖已经完成才发现必须拆分，平台应生成独立修复 Work Item、正式 amend 当前 Work Item 或重新 Compile，而不是继续把 blocker 送回同一 Coder。
+5. Reviewer 应报告门禁失败的首次引入 Work Item、当前基线状态和所需修复文件，避免把正确 finding 路由给错误的执行者。
+
 ## 生成器根因归类
 
 ### 1. 未验证依赖接口是否真实存在
@@ -173,7 +266,7 @@ Draft 生成只消费前序 handoff 文本，没有确认依赖声称交付的�
 
 ### 2. 未验证写入范围能否覆盖真实调用链
 
-生成器没有从目标行为反向追踪入口、状态构造、factory、registry、错误映射和既有测试，导致必改文件被放入 Forbidden Scopes。
+生成器没有从目标行为反向追踪入口、状态构造、factory、registry、错误映射和既有测试。Work Item 4、6 因此出现必改文件被排除或禁止；Work Item 8 则主要表现为依赖公开 seam 未经验证、旧测试迁移风险未被正式归属。
 
 ### 3. 未把契约变更传播到既有测试
 
@@ -181,11 +274,11 @@ HTTP status、JSON 字段层级或错误码发生变化时，生成器没有自�
 
 ### 4. Verification Plan 与写入范围未做一致性检查
 
-生成器允许同时出现“全量测试必须通过”和“禁止修改必然失败的旧测试”。
+生成器允许同时出现“全量测试必须通过”和“已识别可能失败的旧测试不属于任何可修改范围”。只有运行结果证明旧测试确实失败后，才能认定为直接冲突。
 
 ### 5. Blocker 没有合法处理者
 
-Work Item 8 已提前识别旧测试风险，却只要求 Coder 报告 blocker，没有生成迁移项或授予任何 Work Item 修改权限。
+Work Item 8 已提前识别旧测试迁移、公开 integration-safe seam 和实际 HTTP gate 三类风险，却只要求 Coder 报告 blocker，没有生成迁移项、依赖返修项或正式 amendment，也没有授予任何 Work Item 对应修改权限。
 
 ### 6. 已完成依赖没有正式修订路径
 
@@ -198,6 +291,10 @@ Work Item 4 的人工修订只落在 Compiled Work Item，Source Draft 仍为旧
 ### 8. Reviewer 上下文不完整时会自行补全要求
 
 Reviewer 没有正式 Work Item、amendment 和完整证据时，可能凭模型习惯扩展验证要求，包括错误引入 E2E/Playwright。
+
+### 9. 跨 Work Item 结构或质量门禁缺少基线与责任归属
+
+平台没有在每个 Work Item 边界固化目标仓库声明的结构或质量门禁、相关结构指标和失败基线，也没有把违规首次出现的位置归因到具体 Work Item。结果是前序改动产生的拆分义务被延迟到后续 Work Item，而后续 Work Item 的写入范围并未覆盖完成拆分所需的完整文件集合。该缺陷适用于任意技术栈和用户自定义门禁。
 
 ## Work Item Workspace 后续优化要求
 
@@ -265,6 +362,18 @@ Code Reviewer 和 GroupFinalReview 必须直接取得：
 
 当 Work Item 上下文缺失时，Reviewer 不得自行扩展验证要求，尤其不得引入 E2E/Playwright。
 
+### 8. 通用结构与质量门禁的范围闭包和基线校验
+
+Work Item Draft、Compile 和 Coding 门禁应共同记录：
+
+- 目标仓库声明的门禁标识、命令、配置及版本。
+- Work Item 开始前的门禁基线。
+- 当前目标代码单元的结构状态、相关指标和预计增量。
+- 拆分需要修改的原文件、拆分产物、模块或包注册入口、公共导入导出、清单配置及测试接线文件。
+- 门禁失败首次由哪个 Work Item 引入。
+
+如果当前计划会触发拆分，但完整拆分文件集合不属于 Exclusive Scopes，Draft validator 应在进入 Coding 前阻止接受，并要求生成修复项、正式 amendment 或重新 Compile。
+
 ## 回归案例清单
 
 1. Work Item 4：目标要求共享 gate，但构造 gate 的 `state.rs` 被禁止。
@@ -276,6 +385,7 @@ Code Reviewer 和 GroupFinalReview 必须直接取得：
 7. Work Item 6：API 改为 201/envelope，但旧测试文件被禁止且全量测试必跑。
 8. Work Item 8：Draft 已识别旧测试 blocker，却没有任何 Work Item 获得修改权限。
 9. 人工 context note 只传给 Coder，Reviewer 无法验证正式范围修订。
+10. 任意技术栈中，前序 Work Item 使代码触发仓库声明的拆分门禁，后续 Work Item 首次发现失败，但原文件、拆分产物、注册入口、清单配置或测试接线文件不在其 Exclusive Scopes 中。
 
 ## 证据索引
 
