@@ -163,7 +163,7 @@ coding_attempt_0001/
 第二次及后续恢复继续复用原有业务语义：
 
 1. 保留失败 Code Review Timeline Node 及其错误原因；
-2. 将该 Node 对应的失败 Reviewer Role Run 标记为 `superseded`，并记录新的 `superseded_by_run_id`；
+2. 该 Node 对应的 Reviewer Role Run 已是 `failed` 时保留失败状态并记录新的 `superseded_by_run_id`；只有历史僵尸 `running` Run 才转为 `superseded`；
 3. 创建 trigger 为 `retry_review` 的新 Reviewer Role Run；
 4. `supersedes_run_id` 只指向本次 journal 精确记录的 stale Role Run，不按“最新 Run”模糊选择；
 5. Attempt 从 `blocked + code_review` 恢复为 `running + code_review`；

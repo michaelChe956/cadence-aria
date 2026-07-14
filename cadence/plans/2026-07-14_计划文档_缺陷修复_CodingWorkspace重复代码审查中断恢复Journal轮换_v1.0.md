@@ -797,7 +797,7 @@ async fn completed_journal_rotates_when_later_review_is_interrupted() {
         .iter()
         .find(|run| run.reason_code.as_deref() == Some(current.recovery_key.as_str()))
         .expect("second retry reviewer run");
-    assert_eq!(first_retry.status, CodingRoleRunStatus::Superseded);
+    assert_eq!(first_retry.status, CodingRoleRunStatus::Failed);
     assert_eq!(
         first_retry.superseded_by_run_id.as_deref(),
         Some(second_retry.id.as_str())
