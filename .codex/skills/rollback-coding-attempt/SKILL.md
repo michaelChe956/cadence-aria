@@ -1,13 +1,13 @@
 ---
 name: rollback-coding-attempt
-description: Use when the user asks to roll back / revert a Cadence Aria Coding Attempt to an earlier work-item (unit) boundary, e.g. references a specific attempt like [Coding Attempt #coding_attempt_0001] and wants it reset to "after draft N reviewed, before draft N+1 started", and/or wants the attempt's worktree uncommitted changes cleaned so they can redo a work item from scratch.
+description: Use when the user asks to roll back / revert a Cadence Aria Coding Attempt to an earlier work-item (unit) boundary, wants to redo a work item from scratch, or a previous rollback left active_unit_id/status inconsistent and caused work_item_handoff_missing.
 ---
 
 # Rollback Coding Attempt
 
 ## 目标
 
-把一个 `CodingWorkspaceEngine`（`scope: work_item_group`）的 Coding Attempt，从当前状态（可能卡在 `waiting_for_human` / `blocked`，也可能只是想重新开始某个 work item）安全地回退到「某个 unit（work item）刚完成、下一个 unit 还未开始」的状态，并清理对应 worktree 分支上的未提交变更。回退动作只操作 `.aria/` 下的持久化 JSON/文本文件和目标 worktree，不涉及重新生成 Work Item Plan、不修改任何 work item 的 `exclusive_write_scopes`/`forbidden_write_scopes`（范围调整是另一件事，不属于本 skill）。
+把一个 `CodingWorkspaceEngine`（`scope: work_item_group`）的 Coding Attempt，从当前状态（可能卡在 `waiting_for_human` / `blocked`，也可能只是想重新开始某个 work item）安全地回退到「某个 unit（work item）刚完成、下一个 unit 已激活但尚未进入 Coding」的状态，并清理对应 worktree 分支上的未提交变更。这个边界由 `attempt.stage = prepare_context` 和目标 Unit `status = running` 共同表达。回退动作只操作 `.aria/` 下的持久化 JSON/文本文件和目标 worktree，不涉及重新生成 Work Item Plan、不修改任何 work item 的 `exclusive_write_scopes`/`forbidden_write_scopes`（范围调整是另一件事，不属于本 skill）。
 
 ## 何时使用
 
@@ -97,6 +97,8 @@ jq '[.[] | {id, work_item_id, order_index, status, completed_at, completion_comm
 - `U_t` 的 `status` 是 `running` / `blocked` / `waiting_for_human` 之一（不是 `pending`，不是 `completed`）。
 - `U_b` 和 `U_t` 之间没有其他 unit，或者中间的 unit 全部 `completed`。
 
+如果 Attempt 的 `active_unit_id` 已指向 `U_t`，但 `U_t.status == pending`，这是非法恢复状态，不是“尚未开始 Coding”的正常表达。必须先按本 skill 的 Step 4/5 恢复为 `running / prepare_context`；不能让 Coder 在这个矛盾状态上继续运行，否则 Review 通过后的 commit/handoff 阶段会报 `work_item_handoff_missing`。
+
 任何一条不满足，停下来向用户确认，不要继续删除。
 
 ### Step 2：确定要清理的时间线切点
@@ -147,23 +149,25 @@ rm -f  "$BASE"/blocked-gates/coding_blocked_gate_XXXX.json ...
 rm -f  "$BASE"/rework-instructions/coding_rework_instruction_XXXX.json ...
 ```
 
-### Step 4：重置目标 unit（`U_t`）
+### Step 4：恢复目标 unit（`U_t`）为当前活动 Unit
 
 `.aria/.../coding-attempts/{attempt_id}/units/coding_unit_{U_t}.json`：
 
 ```json
 {
-  "status": "pending",
-  "started_at": null,
+  "status": "running",
+  "started_at": "<boundary_time>",
   "completed_at": null,
   "handoff_ref": null,
   "completion_commit": null,
-  "summary": null,
-  "updated_at": "<等于该文件的 created_at，即恢复成从未启动过的样子>"
+  "summary": "进入下一个 Work Item",
+  "updated_at": "<boundary_time>"
 }
 ```
 
-其余字段（`id`、`work_item_id`、`order_index`、`created_at`）不动。如果这个文件在被回退前本来就已经是这个"从未启动过"的样子（比如上一次回退已经处理过、这次只是 `U_t` 重新跑了一轮又失败），说明本步骤不需要改动，跳过即可。
+其余字段（`id`、`work_item_id`、`order_index`、`created_at`）不动。如果原始 `started_at` 能证明它就是 `U_b` 完成后首次激活 `U_t` 的时间，也可以保留该值；否则使用 `boundary_time`。
+
+**不要把 `U_t` 写成 `pending`。** 在 Work Item Group 中，前一个 Unit 完成后，下一个 Unit 会先被激活为 `running`，然后 Attempt 才进入 `prepare_context`。这里的“尚未开始 Coding”由 `stage = prepare_context` 表达，而不是由 `status = pending` 表达。
 
 ### Step 5：重置 attempt 顶层字段
 
@@ -181,6 +185,16 @@ rm -f  "$BASE"/rework-instructions/coding_rework_instruction_XXXX.json ...
   "updated_at": "<boundary_time，即 U_b 完成的时间>"
 }
 ```
+
+写入后必须满足以下不变量：
+
+- `active_unit_id` 和 `current_work_item_id` 同时非空。
+- `active_unit_id` 指向的 Unit 正好是 `U_t`。
+- `U_t.work_item_id == current_work_item_id`。
+- `U_t.status == running`，且所有 units 中只有一个活动状态 Unit。
+- `attempt.stage == prepare_context`。
+
+如果无法同时满足，停止恢复并还原备份；禁止保留“Attempt 指向 `U_t`，但 `U_t` 为 pending”的半恢复状态。
 
 三个需要跟用户明确说明、不能自行悄悄决定的点：
 
@@ -208,6 +222,11 @@ jq empty .aria/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_
 jq empty "$BASE/units/coding_unit_{U_t}.json" && echo OK
 jq empty "$BASE/timeline-nodes.json" && echo OK
 
+# 强制状态不变量校验；必须输出 rollback_state_ok 才能继续
+bash .codex/skills/rollback-coding-attempt/scripts/validate-rollback-state.sh \
+  .aria/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}.json \
+  "$BASE/units"
+
 # role-runs / role-run-events / artifacts 三者数量必须一致
 ls "$BASE"/role-runs/ | wc -l
 ls "$BASE"/role-run-events/ | wc -l
@@ -232,6 +251,7 @@ ls "$BASE"/choice-gates/*.json 2>/dev/null || echo "OK: none"
 - `rework_count`、`provider_conversations` 这两处做了什么决定，以及原因。
 - worktree 最终状态（clean / HEAD commit）。
 - attempt 现在停在什么状态，用户下一步应该在 UI 里做什么（比如"刷新页面后点击开始编码重新启动 `U_t`"）。
+- `validate-rollback-state.sh` 是否输出 `rollback_state_ok`；没有通过就不能宣称恢复完成。
 - 如果这次遇到了「已知问题：abort 后状态未同步」，明确告知用户这是产品本身的 bug（不是回退操作导致的），值得单独跟进，但已经在清理过程中一并处理，不影响本次回退结果。
 
 ## 安全约束
@@ -240,5 +260,6 @@ ls "$BASE"/choice-gates/*.json 2>/dev/null || echo "OK: none"
 - 不修改任何 work item 的 `exclusive_write_scopes`/`forbidden_write_scopes`——那是独立的编辑动作，不属于回退。
 - 不在没有向用户展示 diff 的情况下丢弃 worktree 里的未提交变更（即便不做备份，仍必须让用户看清楚要丢弃的具体内容再确认，`git restore`/`git reset` 不可逆）。
 - 遇到边界判断（Step 1）不一致、`head_commit`/`HEAD` 不匹配、或 worktree 有意料之外的改动，停下来问用户，不自行假设。
+- 禁止出现 `active_unit_id` 指向 `pending` Unit；`prepare_context + running Unit` 才是目标 Work Item 尚未 Coding 的合法恢复状态。
 - 每次删除前先列出具体文件名做目视核对，不要用宽泛的 glob（如 `rm -rf role-runs/*`）一次性清空整个目录——本 skill 默认不做备份，删除前的目视核对是唯一的安全网，务必执行到位。
 - 不需要为了"看起来更完整"而额外备份/重启服务；如果用户明确要求本次要备份，按用户要求单独执行，不是默认行为。
