@@ -12,6 +12,30 @@ use crate::product::json_store::{
 use super::{CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput};
 
 impl super::CodingAttemptStore {
+    pub fn get_attempt_for_work_item_group(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Option<CodingExecutionAttempt>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
+        let mut attempts: Vec<CodingExecutionAttempt> =
+            super::list_json_records(&self.coding_attempts_root(project_id, issue_id))?
+                .into_iter()
+                .filter(|attempt: &CodingExecutionAttempt| {
+                    attempt.work_item_group_id.as_deref() == Some(plan_id)
+                })
+                .collect();
+        attempts.sort_by(|left, right| {
+            left.attempt_no
+                .cmp(&right.attempt_no)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(attempts.into_iter().next())
+    }
+
     pub fn create_group_attempt(
         &self,
         input: CreateGroupCodingAttemptInput,
@@ -21,6 +45,17 @@ impl super::CodingAttemptStore {
         validate_relative_id(&input.plan_id)?;
         validate_relative_id(&input.current_work_item_id)?;
         super::validate_max_auto_rework(input.max_auto_rework)?;
+
+        if let Some(existing) = self.get_attempt_for_work_item_group(
+            &input.project_id,
+            &input.issue_id,
+            &input.plan_id,
+        )? {
+            return Err(ProductStoreError::Io(format!(
+                "coding_attempt_group_already_exists: {}",
+                existing.id
+            )));
+        }
 
         let existing_attempts: Vec<CodingExecutionAttempt> = super::list_json_records(
             &self.coding_attempts_root(&input.project_id, &input.issue_id),
