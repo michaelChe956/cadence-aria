@@ -258,6 +258,40 @@ Cadence Aria 是通用 AI 开发平台，本问题不绑定 Rust、React 或任�
 4. 如果依赖已经完成才发现必须拆分，平台应生成独立修复 Work Item、正式 amend 当前 Work Item 或重新 Compile，而不是继续把 blocker 送回同一 Coder。
 5. Reviewer 应报告门禁失败的首次引入 Work Item、当前基线状态和所需修复文件，避免把正确 finding 路由给错误的执行者。
 
+## 事件五：Code Review 返修扩展了写入文件，但 Work Item 有效范围未同步
+
+### 当前复现
+
+Work Item 1“Provider 健康检查、状态路径与统一执行门禁基础”的原始 Exclusive Write Scopes 没有包含：
+
+- `src/cross_cutting/provider_adapter.rs`
+- `src/protocol/provider_errors.rs`
+
+后续 Code Reviewer 发现 `provider_unavailable` 错误码在门禁错误转换中丢失，要求 Coder 修改这两个文件。该修复在技术上必要，文件也不属于 Forbidden Write Scopes；单项 Code Review 和 Group Final Review 均确认实现正确，Group Final Review 最终返回 `approve`。
+
+但平台没有将 Code Review 返修引入的精确文件同步到 Work Item 的有效写入范围。Work Item 1 handoff 的 `files_changed` 已包含上述文件，而最终完成门禁仍只读取原始 `exclusive_write_scopes`，因此在 Group Final Review 通过后报错：
+
+```text
+coding_start_failed: work_item_diff_scope_violation: src/cross_cutting/provider_adapter.rs
+```
+
+`src/protocol/provider_errors.rs` 同样不在原始 Exclusive Write Scopes 中，因此第一个文件被处理后，仍可能继续出现同类范围错误。
+
+### 问题分类
+
+1. **Work Item 写入范围闭包不完整**：原始范围没有包含错误码契约修复的直接依赖文件。
+2. **缺少 Code Review 返修范围的正式 amendment**：Reviewer 要求范围外修改后，平台没有生成可审计的范围修订记录。
+3. **不同阶段消费的范围不一致**：Coder 和 Reviewer 根据返修上下文接受了额外文件，最终确定性门禁却仍使用原始范围。
+4. **门禁失败暴露过晚**：范围冲突没有在当前 Work Item 返修或完成时处理，而是延迟到全部 Work Item 和 Group Final Review 通过后才阻断 Attempt 收尾。
+
+### 后续优化方向
+
+- Work Item Draft 生成时应计算完成目标所需的直接契约、错误类型和 adapter 文件范围闭包。
+- Code Review 要求修改 Exclusive Scopes 之外的文件时，应产生精确、可审计的范围 amendment，不得仅依赖 prompt、handoff 叙述或 Reviewer 自行默认。
+- Coder、Code Reviewer、Group Final Review 和最终完成门禁必须消费同一份有效写入范围。
+- 范围不一致应在当前 Work Item 完成前阻断并提供合法处理路径，不应等到 Group Final Review 通过后再以 `coding_start_failed` 终止流程。
+- Forbidden Write Scopes 仍必须保持绝对禁止，不能由 Reviewer 或 amendment 自动扩展。
+
 ## 生成器根因归类
 
 ### 1. 未验证依赖接口是否真实存在
