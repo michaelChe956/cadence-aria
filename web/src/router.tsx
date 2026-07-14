@@ -8,13 +8,23 @@ import {
   useNavigate,
   useParams,
   useSearch,
+  type RouterHistory,
 } from "@tanstack/react-router";
 import { useCallback } from "react";
 import { AppShell } from "./app-shell";
+import { ProviderAvailabilityGuard } from "./components/providers/ProviderAvailabilityGuard";
 import { ChatWorkspacePage } from "./pages/ChatWorkspacePage";
 import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
 
-const rootRoute = createRootRoute({ component: Outlet });
+function RootRouteComponent() {
+  return (
+    <ProviderAvailabilityGuard>
+      <Outlet />
+    </ProviderAvailabilityGuard>
+  );
+}
+
+const rootRoute = createRootRoute({ component: RootRouteComponent });
 
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -102,7 +112,14 @@ const routeTree = rootRoute.addChildren([
   codingWorkspaceRoute,
 ]);
 
-export const router = createRouter({ routeTree });
+export function createAppRouter(history?: RouterHistory) {
+  return createRouter({
+    routeTree,
+    ...(history ? { history } : {}),
+  });
+}
+
+export const router = createAppRouter();
 
 export function AppRouter() {
   return <RouterProvider router={router} />;
