@@ -53,7 +53,7 @@ use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::provider_workspace_runner::{
     ProviderWorkspaceRunner, WorkspaceProviderRunInput,
 };
-use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use crate::product::repository_store::RepositoryStore;
 use crate::product::runtime_binding_store::RuntimeBindingStore;
 
 use crate::web::error::{ApiError, ApiResult};
@@ -76,6 +76,7 @@ mod health;
 mod lifecycle;
 mod product_resources;
 mod providers;
+mod repository_registration;
 mod runtime;
 mod support;
 mod workspace_session;
@@ -87,8 +88,12 @@ pub use providers::{providers_recheck, providers_status};
 #[rustfmt::skip]
 pub use lifecycle::{confirm_gate, delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan, generate_design_specs, generate_story_specs, issue_lifecycle, prepare_work_item_plan, request_gate_change, terminate_gate};
 #[rustfmt::skip]
-pub use product_resources::{create_issue, create_product_issue, create_project, create_repository, create_workspace, delete_issue, delete_product_issue, delete_project, delete_repository, delete_workspace, get_project, list_issues, list_product_issues, list_projects, list_repositories, list_workspaces, open_project};
+pub use product_resources::{create_issue, create_product_issue, create_project, create_workspace, delete_issue, delete_product_issue, delete_project, delete_repository, delete_workspace, get_project, list_issues, list_product_issues, list_projects, list_repositories, list_workspaces, open_project};
 pub(crate) use dto::{coding_attempt_scope_text, coding_execution_unit_dto};
+pub use repository_registration::{
+    RepositoryRegistrationDependencies, RepositoryRegistrationDependenciesBuilder,
+    create_repository,
+};
 #[rustfmt::skip]
 pub use runtime::{advance_task, artifact_content, confirm_task, create_task, file_content, file_diff, issue_rollback, issue_rollback_preview, list_tasks, projection, provider_input_content, rollback_preview, rollback_task, stop_task};
 #[rustfmt::skip]

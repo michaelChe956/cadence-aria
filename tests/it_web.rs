@@ -59,10 +59,14 @@ mod web_projection;
 mod web_provider_availability;
 #[path = "it_web/web_provider_execution_events.rs"]
 mod web_provider_execution_events;
+#[path = "it_web/web_provider_health_api.rs"]
+mod web_provider_health_api;
 #[path = "it_web/web_provider_output_events.rs"]
 mod web_provider_output_events;
 #[path = "it_web/web_provider_probe.rs"]
 mod web_provider_probe;
+#[path = "it_web/web_repository_initialization.rs"]
+mod web_repository_initialization;
 #[path = "it_web/web_resource_handlers.rs"]
 mod web_resource_handlers;
 #[path = "it_web/web_runtime_fake.rs"]

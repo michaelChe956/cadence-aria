@@ -19,6 +19,7 @@ use crate::cross_cutting::streaming_provider::ProviderCommand;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
+use crate::web::handlers::RepositoryRegistrationDependencies;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -164,6 +165,7 @@ pub struct WebAppState {
     pub provider_health: Arc<ProviderHealthService>,
     pub provider_gate: Arc<ProviderAvailabilityGate>,
     pub command_runner: Arc<dyn BoundedCommandRunner>,
+    repository_registration_dependencies: Option<RepositoryRegistrationDependencies>,
     pub test_provider_enabled: bool,
     provider_health_error: Arc<StdMutex<Option<String>>>,
     pub test_controls: TestControls,
@@ -212,6 +214,7 @@ impl WebAppState {
             provider_health,
             provider_gate,
             command_runner,
+            repository_registration_dependencies: None,
             test_provider_enabled,
             provider_health_error: Arc::new(StdMutex::new(None)),
             test_controls,
@@ -291,6 +294,20 @@ impl WebAppState {
             .lock()
             .expect("provider health error lock") = None;
         self
+    }
+
+    pub fn with_repository_registration_dependencies(
+        mut self,
+        dependencies: RepositoryRegistrationDependencies,
+    ) -> Self {
+        self.repository_registration_dependencies = Some(dependencies);
+        self
+    }
+
+    pub(crate) fn repository_registration_dependencies(
+        &self,
+    ) -> Option<RepositoryRegistrationDependencies> {
+        self.repository_registration_dependencies.clone()
     }
 
     pub async fn refresh_provider_health(&self) -> Arc<ProviderHealthSnapshot> {
