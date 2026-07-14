@@ -267,6 +267,39 @@ async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
 }
 
 #[tokio::test]
+async fn repeated_group_coding_attempt_create_returns_original_attempt() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let path = "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts";
+
+    let (first_status, first) =
+        request_json(app.clone(), Method::POST, path, json!({})).await;
+    let (second_status, second) =
+        request_json(app.clone(), Method::POST, path, json!({})).await;
+
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(second["attempt_id"], first["attempt_id"]);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    assert_eq!(
+        store
+            .list_coding_units(
+                "project_0001",
+                "issue_0001",
+                first["attempt_id"].as_str().expect("attempt id"),
+            )
+            .expect("units")
+            .len(),
+        2,
+    );
+}
+
+#[tokio::test]
 async fn returns_group_coding_attempt_snapshot_with_units() {
     let root = tempdir().expect("root");
     let repo = git_repo();

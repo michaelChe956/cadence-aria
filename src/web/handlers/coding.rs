@@ -19,6 +19,16 @@ pub async fn create_group_coding_attempt(
         ));
     }
 
+    let group_lock_key = format!("work_item_group:{project_id}:{issue_id}:{plan_id}");
+    let _group_guard = state.coding_runs.lock_attempt(&group_lock_key).await;
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    if let Some(existing) = coding_store
+        .get_attempt_for_work_item_group(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?
+    {
+        return Ok(Json(coding_attempt_dto(&existing)));
+    }
+
     let all_work_items = lifecycle
         .list_work_items(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
@@ -91,7 +101,6 @@ pub async fn create_group_coding_attempt(
         &repository.default_provider_mode,
         &*state.provider_availability,
     )?;
-    let coding_store = CodingAttemptStore::new(app_paths.clone());
     let attempt = match coding_store.create_group_attempt(CreateGroupCodingAttemptInput {
         project_id: project_id.clone(),
         issue_id: issue_id.clone(),
@@ -104,6 +113,25 @@ pub async fn create_group_coding_attempt(
         max_auto_rework: 2,
     }) {
         Ok(attempt) => attempt,
+        Err(ProductStoreError::Io(message))
+            if message.starts_with("coding_attempt_group_already_exists:") =>
+        {
+            if !already_locked_by_current {
+                let _ = lifecycle.release_issue_worktree_lock(
+                    &project_id,
+                    &issue_id,
+                    &current_work_item.id,
+                );
+            }
+            let existing_id = message
+                .strip_prefix("coding_attempt_group_already_exists:")
+                .expect("matched prefix")
+                .trim();
+            let existing = coding_store
+                .get_attempt(&project_id, &issue_id, existing_id)
+                .map_err(product_store_api_error)?;
+            return Ok(Json(coding_attempt_dto(&existing)));
+        }
         Err(error) => {
             if !already_locked_by_current {
                 let _ = lifecycle.release_issue_worktree_lock(
