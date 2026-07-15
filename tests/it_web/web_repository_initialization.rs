@@ -24,8 +24,9 @@ use cadence_aria::cross_cutting::provider_availability_gate::{
 use cadence_aria::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCommand, ProviderEvent,
-    ProviderPermissionMode, ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCommand, ProviderCompletion,
+    ProviderEvent, ProviderPermissionMode, ProviderSession, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::cadence_skills::{
@@ -160,10 +161,10 @@ impl StreamingProviderAdapter for ScriptedClaude {
         });
         match script {
             TurnScript::Complete => event_tx
-                .try_send(ProviderEvent::Completed {
-                    full_output: "completed".to_string(),
-                    provider_session_id: None,
-                })
+                .try_send(ProviderEvent::Completed(ProviderCompletion::plain(
+                    "completed",
+                    None,
+                )))
                 .expect("completed event"),
             TurnScript::Fail => event_tx
                 .try_send(ProviderEvent::Failed {
