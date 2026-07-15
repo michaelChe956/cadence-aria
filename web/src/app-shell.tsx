@@ -2,13 +2,13 @@ import { useEffect } from "react";
 import { IssueLifecycleWorkbench } from "./components/lifecycle/IssueLifecycleWorkbench";
 
 export function AppShell({
-  focusEntityId,
+  focusEntityKey,
   onDrawerFocusChange,
   onOpenWorkspace,
   onOpenCodingWorkspace,
 }: {
-  focusEntityId?: string | null;
-  onDrawerFocusChange?: (entityId: string | null) => void;
+  focusEntityKey?: string | null;
+  onDrawerFocusChange?: (entityKey: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
   onOpenCodingWorkspace?: (attemptId: string) => void;
 }) {
@@ -24,7 +24,7 @@ export function AppShell({
 
   return (
     <IssueLifecycleWorkbench
-      focusEntityId={focusEntityId}
+      focusEntityKey={focusEntityKey}
       onDrawerFocusChange={onDrawerFocusChange}
       onOpenWorkspace={onOpenWorkspace}
       onOpenCodingWorkspace={onOpenCodingWorkspace}

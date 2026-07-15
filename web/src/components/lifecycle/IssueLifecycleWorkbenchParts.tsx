@@ -83,7 +83,7 @@ export function IssueCardList({
       ) : (
         <ul className="space-y-2">
           {cards.map((card) => (
-            <li key={`${card.kind}:${card.id}`}>
+            <li key={lifecycleCardKey(card)}>
               <LifecycleCard
                 card={card}
                 selected={selectedKey === lifecycleCardKey(card)}
@@ -277,7 +277,7 @@ function LifecycleContentSection({
       ) : (
         <ul className="space-y-2">
           {cards.map((card) => (
-            <li key={`${card.kind}:${card.id}`}>
+            <li key={lifecycleCardKey(card)}>
               <LifecycleCard
                 card={card}
                 selected={selectedKey === lifecycleCardKey(card)}
@@ -407,8 +407,16 @@ function isWorkItemSplitFindings(value: unknown) {
   );
 }
 
+export function lifecycleEntityKey(
+  kind: LifecycleCardData["kind"],
+  issueId: string,
+  entityId: string,
+) {
+  return `${kind}:${issueId}:${entityId}`;
+}
+
 export function lifecycleCardKey(card: LifecycleCardData) {
-  return `${card.kind}:${card.id}`;
+  return lifecycleEntityKey(card.kind, card.issueId, card.id);
 }
 
 export function selectedLifecycleColumns(
@@ -435,9 +443,9 @@ export function selectedLifecycleColumns(
 
 export function findCardInColumns(
   columns: LifecycleColumns,
-  entityId: string | null,
+  entityKey: string | null,
 ): LifecycleCardData | null {
-  if (!entityId) {
+  if (!entityKey) {
     return null;
   }
 
@@ -447,7 +455,7 @@ export function findCardInColumns(
       ...columns.story_spec,
       ...columns.design_spec,
       ...columns.work_item,
-    ].find((card) => card.id === entityId) ?? null
+    ].find((card) => lifecycleCardKey(card) === entityKey) ?? null
   );
 }
 

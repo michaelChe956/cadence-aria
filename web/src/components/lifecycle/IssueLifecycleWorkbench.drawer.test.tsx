@@ -29,6 +29,59 @@ vi.mock("../shared/MonacoViewer", () => ({
 describe("IssueLifecycleWorkbench drawer and work item groups", () => {
   installIssueLifecycleWorkbenchTestHooks();
 
+  it.each([
+    [
+      "Story Spec",
+      "issue_0002 Story",
+      "issue_0002 Story",
+      "workspace_session_issue_0002_story",
+    ],
+    [
+      "Design Spec",
+      "issue_0002 Design",
+      "issue_0002 Design",
+      "workspace_session_issue_0002_design",
+    ],
+    [
+      "Work Item",
+      "Work Item Group",
+      "issue_0002 Child",
+      "workspace_session_issue_0002_work_item_plan",
+    ],
+  ] as const)(
+    "opens issue2 %s drawer and workspace when local ids collide",
+    async (regionName, cardName, drawerText, sessionId) => {
+      vi.stubGlobal(
+        "fetch",
+        lifecycleFetch({ sharedLifecycleIdsAcrossIssues: true }),
+      );
+      const user = userEvent.setup();
+      const onOpenWorkspace = vi.fn();
+
+      render(
+        <IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />,
+      );
+
+      await user.click(
+        await screen.findByRole("button", { name: "Issue Two" }),
+      );
+      const region = screen.getByRole("region", {
+        name: `${regionName} 内容`,
+      });
+      await user.click(
+        within(region).getByRole("button", { name: cardName }),
+      );
+
+      expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
+        drawerText,
+      );
+      await user.click(screen.getByTestId("drawer-open-workspace"));
+      await waitFor(() =>
+        expect(onOpenWorkspace).toHaveBeenCalledWith(sessionId),
+      );
+    },
+  );
+
   it("opens the work item plan workspace from the group drawer", async () => {
     const fetchMock = lifecycleFetch({ confirmedWorkItem: true });
     vi.stubGlobal("fetch", fetchMock);
@@ -279,7 +332,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
 
     render(
       <IssueLifecycleWorkbench
-        focusEntityId="issue_plan_0001"
+        focusEntityKey="work_item_group:issue_0001:issue_plan_0001"
         onDrawerFocusChange={onDrawerFocusChange}
         onOpenWorkspace={onOpenWorkspace}
       />,

@@ -40,9 +40,9 @@ function WorkbenchRouteComponent() {
   const search = useSearch({ from: "/workbench" });
   const navigate = useNavigate({ from: "/workbench" });
   const syncDrawerFocus = useCallback(
-    (entityId: string | null) => {
+    (entityKey: string | null) => {
       void navigate({
-        search: (prev: WorkbenchSearch) => ({ ...prev, focus: entityId ?? undefined }),
+        search: (prev: WorkbenchSearch) => ({ ...prev, focus: entityKey ?? undefined }),
         replace: true,
       });
     },
@@ -50,7 +50,7 @@ function WorkbenchRouteComponent() {
   );
   return (
     <AppShell
-      focusEntityId={search.focus ?? null}
+      focusEntityKey={search.focus ?? null}
       onDrawerFocusChange={syncDrawerFocus}
       onOpenWorkspace={(sessionId) =>
         void navigate({ to: "/workbench/workspace/$sessionId", params: { sessionId } })

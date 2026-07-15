@@ -429,27 +429,29 @@ describe("lifecycle workbench store", () => {
 describe("drawer state", () => {
   beforeEach(() => {
     useLifecycleWorkbenchStore.setState({
-      focusedEntityId: null,
+      focusedEntityKey: null,
       isDrawerOpen: false,
     });
   });
 
-  it("opens drawer with entity id", () => {
+  it("opens drawer with a composite entity key", () => {
     const store = useLifecycleWorkbenchStore.getState();
 
-    store.openDrawer("story-id");
+    store.openDrawer("story_spec:issue_0001:story_spec_0001");
 
-    expect(useLifecycleWorkbenchStore.getState().focusedEntityId).toBe("story-id");
+    expect(useLifecycleWorkbenchStore.getState().focusedEntityKey).toBe(
+      "story_spec:issue_0001:story_spec_0001",
+    );
     expect(useLifecycleWorkbenchStore.getState().isDrawerOpen).toBe(true);
   });
 
   it("closes drawer and clears focus", () => {
     const store = useLifecycleWorkbenchStore.getState();
 
-    store.openDrawer("story-id");
+    store.openDrawer("story_spec:issue_0001:story_spec_0001");
     store.closeDrawer();
 
-    expect(useLifecycleWorkbenchStore.getState().focusedEntityId).toBeNull();
+    expect(useLifecycleWorkbenchStore.getState().focusedEntityKey).toBeNull();
     expect(useLifecycleWorkbenchStore.getState().isDrawerOpen).toBe(false);
   });
 });
