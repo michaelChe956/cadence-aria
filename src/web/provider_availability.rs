@@ -139,14 +139,14 @@ pub fn provider_type_available(provider: &ProviderType) -> bool {
 pub fn host_real_workflow_ready() -> Result<(), TaskRunError> {
     if cfg!(windows) {
         return Err(TaskRunError::new(
-            "real_workflow_blocked",
+            "host_real_workflow_blocked",
             "real workflow is blocked on Windows hosts",
         ));
     }
     for program in ["node", "npm"] {
         if !is_program_on_path(program) {
             return Err(TaskRunError::new(
-                "real_workflow_blocked",
+                "host_real_workflow_blocked",
                 format!("real workflow is blocked because `{program}` is not available on PATH"),
             ));
         }

@@ -1,7 +1,20 @@
+import type { RealProviderName } from "./provider";
+
+export type RepositoryRegistrationErrorDetails = Record<string, unknown> & {
+  stage?: string;
+  provider?: RealProviderName | null;
+  command?: string | null;
+  reason_code?: string;
+  stderr_summary?: string | null;
+  changed_paths?: string[];
+  retryable?: boolean;
+  action?: string;
+};
+
 export type ApiError = {
   code: string;
   message: string;
-  details: Record<string, unknown>;
+  details: RepositoryRegistrationErrorDetails;
 };
 
 export type Project = {
@@ -35,6 +48,32 @@ export type CreateRepositoryRequest = {
   path: string;
   default_policy_preset?: string | null;
   default_provider_mode?: string | null;
+};
+
+export type RepositoryInitializationSource =
+  | "online_clone"
+  | "online_update"
+  | "offline";
+
+export type RepositoryInitializationCommandStatus = "completed";
+
+export type RepositoryInitializationCommand = {
+  index: number;
+  command: string;
+  status: RepositoryInitializationCommandStatus;
+};
+
+export type RepositoryInitializationSummary = {
+  source: RepositoryInitializationSource;
+  commands: RepositoryInitializationCommand[];
+  warnings: string[];
+  changed_paths: string[];
+  completed_at: string;
+};
+
+export type CreateRepositoryResponse = {
+  repository: Repository;
+  initialization: RepositoryInitializationSummary;
 };
 
 export type ProductIssue = {
@@ -148,7 +187,7 @@ export type WorkItemContextBudget = {
   max_dependency_handoffs: number;
 };
 
-export type WorkspaceProviderName = "claude_code" | "codex" | "fake";
+export type WorkspaceProviderName = RealProviderName | "fake";
 
 export type ProviderWorkspaceConfig = {
   author_provider: WorkspaceProviderName;

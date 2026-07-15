@@ -7,6 +7,8 @@ use crate::cross_cutting::cli_adapter::{CliOutputChunk, ProviderOutputSink};
 use crate::cross_cutting::provider_adapter::{
     FakeProviderAdapter, ProviderAdapter, ProviderAdapterError,
 };
+use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use crate::product::models::ProviderName;
 use crate::protocol::contracts::{AdapterInput, ProviderType};
 use crate::task_run::orchestrator::TaskRunOrchestrator;
 use crate::task_run::provider_factory::{
@@ -15,8 +17,8 @@ use crate::task_run::provider_factory::{
 use crate::task_run::types::{ProviderMode, TaskRunError, TaskRunRequest};
 use crate::web::events::EventHub;
 use crate::web::provider_availability::{
-    host_real_workflow_ready, provider_type_available, provider_type_key,
-    resolve_default_runtime_provider_type, resolve_runtime_provider_type,
+    host_real_workflow_ready, provider_type_key, resolve_default_runtime_provider_type,
+    resolve_runtime_provider_type,
 };
 use crate::web::redaction::redact_sensitive_lines;
 use crate::web::runtime_store::WebRuntimeStore;
@@ -51,6 +53,9 @@ impl WebRuntime {
             workspace_root,
             next_projection_version: 1,
             real_provider: None,
+            provider_gate: None,
+            output_sink: None,
+            host_readiness: Arc::new(|| Ok(())),
             provider_availability: Arc::new(|_| true),
             enforce_real_provider_availability: false,
         }
@@ -67,6 +72,9 @@ impl WebRuntime {
             workspace_root,
             next_projection_version: 1,
             real_provider: None,
+            provider_gate: None,
+            output_sink: None,
+            host_readiness: Arc::new(|| Ok(())),
             provider_availability: Arc::new(provider_availability),
             enforce_real_provider_availability: false,
         }
@@ -76,8 +84,11 @@ impl WebRuntime {
         Ok(Self {
             workspace_root,
             next_projection_version: 1,
-            real_provider: Some(Arc::new(real_routing_provider()?)),
-            provider_availability: Arc::new(provider_type_available),
+            real_provider: None,
+            provider_gate: None,
+            output_sink: None,
+            host_readiness: Arc::new(host_real_workflow_ready),
+            provider_availability: Arc::new(|_| false),
             enforce_real_provider_availability: true,
         })
     }
@@ -103,11 +114,12 @@ impl WebRuntime {
         Ok(Self {
             workspace_root,
             next_projection_version: 1,
-            real_provider: Some(Arc::new(real_routing_provider_with_output_sink(Some(
-                output_sink,
-            ))?)),
-            provider_availability: Arc::new(provider_type_available),
+            real_provider: None,
+            provider_gate: None,
+            host_readiness: Arc::new(host_real_workflow_ready),
+            provider_availability: Arc::new(|_| false),
             enforce_real_provider_availability: true,
+            output_sink: Some(output_sink),
         })
     }
 
@@ -119,6 +131,9 @@ impl WebRuntime {
             workspace_root,
             next_projection_version: 1,
             real_provider: Some(Arc::from(real_provider)),
+            provider_gate: None,
+            output_sink: None,
+            host_readiness: Arc::new(|| Ok(())),
             provider_availability: Arc::new(|_| true),
             enforce_real_provider_availability: false,
         }
@@ -128,11 +143,47 @@ impl WebRuntime {
         self.enforce_real_provider_availability
     }
 
+    pub fn with_host_readiness<F>(mut self, host_readiness: F) -> Self
+    where
+        F: Fn() -> Result<(), TaskRunError> + Send + Sync + 'static,
+    {
+        self.host_readiness = Arc::new(host_readiness);
+        self
+    }
+
+    pub fn install_provider_gate(
+        &mut self,
+        provider_gate: Arc<ProviderAvailabilityGate>,
+    ) -> Result<(), TaskRunError> {
+        let gate_changed = self
+            .provider_gate
+            .as_ref()
+            .is_none_or(|current| !Arc::ptr_eq(current, &provider_gate));
+        if self.enforce_real_provider_availability && gate_changed {
+            let provider = match self.output_sink.clone() {
+                Some(output_sink) => real_routing_provider_with_output_sink(
+                    provider_gate.clone(),
+                    Some(output_sink),
+                )?,
+                None => real_routing_provider(provider_gate.clone())?,
+            };
+            self.real_provider = Some(Arc::new(provider));
+        }
+        self.provider_gate = Some(provider_gate.clone());
+        if self.enforce_real_provider_availability {
+            self.provider_availability = Arc::new(move |provider| {
+                provider_type_to_name(provider)
+                    .is_some_and(|provider| provider_gate.ensure_available(&provider).is_ok())
+            });
+        }
+        Ok(())
+    }
+
     pub fn provider_adapter(&self) -> Arc<dyn ProviderAdapter + Send + Sync> {
         if self.enforce_real_provider_availability {
             self.real_provider
                 .clone()
-                .unwrap_or_else(|| Arc::new(real_routing_provider().expect("real provider")))
+                .expect("real provider gate must be installed before adapter access")
         } else {
             Arc::new(FakeProviderAdapter)
         }
@@ -145,15 +196,27 @@ impl WebRuntime {
         if !self.enforce_real_provider_availability {
             return provider_type.map(parse_confirm_provider_type).transpose();
         }
-        host_real_workflow_ready()?;
-        let is_available = |provider: &ProviderType| (self.provider_availability)(provider);
+        let gate = self.provider_gate.as_ref().ok_or_else(|| {
+            TaskRunError::new(
+                "provider_gate_missing",
+                "real provider gate is not installed",
+            )
+        })?;
+        let is_available = |provider: &ProviderType| {
+            provider_type_to_name(provider)
+                .is_some_and(|provider| gate.ensure_available(&provider).is_ok())
+        };
         match provider_type {
-            Some(provider_type) => Ok(Some(
-                resolve_runtime_provider_type(provider_type, is_available)?.provider,
-            )),
-            None => Ok(Some(
-                resolve_default_runtime_provider_type(is_available)?.provider,
-            )),
+            Some(provider_type) => {
+                let selected = resolve_runtime_provider_type(provider_type, is_available)?.provider;
+                (self.host_readiness)()?;
+                Ok(Some(selected))
+            }
+            None => {
+                let selected = resolve_default_runtime_provider_type(is_available)?.provider;
+                (self.host_readiness)()?;
+                Ok(Some(selected))
+            }
         }
     }
 
@@ -425,5 +488,171 @@ impl WebRuntime {
             node_id: "N16".to_string(),
             turn_id: "turn_0001".to_string(),
         })
+    }
+}
+
+fn provider_type_to_name(provider: &ProviderType) -> Option<ProviderName> {
+    match provider {
+        ProviderType::ClaudeCode => Some(ProviderName::ClaudeCode),
+        ProviderType::Codex => Some(ProviderName::Codex),
+        ProviderType::Fake => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::cross_cutting::provider_availability_gate::{
+        ProviderAvailabilityGate, ProviderHealthSource,
+    };
+    use crate::cross_cutting::provider_health::{
+        ProviderHealthEntry, ProviderHealthReasonCode, ProviderHealthSnapshot,
+    };
+    use crate::product::models::ProviderName;
+    use crate::protocol::contracts::{AdapterInput, AdapterRole};
+
+    struct FixedHealth(Arc<ProviderHealthSnapshot>);
+
+    impl ProviderHealthSource for FixedHealth {
+        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    fn gate(claude_available: bool, codex_available: bool) -> Arc<ProviderAvailabilityGate> {
+        let checked_at = Utc::now();
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(FixedHealth(
+            Arc::new(ProviderHealthSnapshot {
+                schema_version: 1,
+                generation: 1,
+                checked_at,
+                providers: vec![
+                    entry(ProviderName::ClaudeCode, claude_available, checked_at),
+                    entry(ProviderName::Codex, codex_available, checked_at),
+                ],
+            }),
+        ))))
+    }
+
+    fn entry(
+        provider: ProviderName,
+        available: bool,
+        checked_at: chrono::DateTime<Utc>,
+    ) -> ProviderHealthEntry {
+        ProviderHealthEntry {
+            provider,
+            command: "provider --version".to_string(),
+            available,
+            version: available.then(|| "1.0".to_string()),
+            reason_code: (!available).then_some(ProviderHealthReasonCode::CommandMissing),
+            reason: (!available).then(|| "not found".to_string()),
+            checked_at,
+        }
+    }
+
+    #[test]
+    fn web_runtime_rejects_explicit_unavailable_provider_without_fallback() {
+        let mut runtime = WebRuntime::new_real(tempdir().expect("workspace").path().to_path_buf())
+            .expect("real runtime")
+            .with_host_readiness(|| Ok(()));
+        runtime
+            .install_provider_gate(gate(false, true))
+            .expect("install gate");
+
+        let error = runtime
+            .resolve_real_confirm_provider(Some("claude_code"))
+            .expect_err("explicit unavailable provider must fail");
+
+        assert_eq!(error.code, "provider_unavailable");
+    }
+
+    #[test]
+    fn web_runtime_selects_healthy_default_fallback() {
+        let mut runtime = WebRuntime::new_real(tempdir().expect("workspace").path().to_path_buf())
+            .expect("real runtime")
+            .with_host_readiness(|| Ok(()));
+        runtime
+            .install_provider_gate(gate(true, false))
+            .expect("install gate");
+
+        assert_eq!(
+            runtime
+                .resolve_real_confirm_provider(None)
+                .expect("default fallback")
+                .expect("provider"),
+            ProviderType::ClaudeCode
+        );
+    }
+
+    #[test]
+    fn web_runtime_blocks_when_all_real_providers_are_unavailable() {
+        let mut runtime = WebRuntime::new_real(tempdir().expect("workspace").path().to_path_buf())
+            .expect("real runtime")
+            .with_host_readiness(|| Ok(()));
+        runtime
+            .install_provider_gate(gate(false, false))
+            .expect("install gate");
+
+        let error = runtime
+            .resolve_real_confirm_provider(None)
+            .expect_err("no provider must block real workflow");
+
+        assert_eq!(error.code, "real_workflow_blocked");
+    }
+
+    #[test]
+    fn web_runtime_reports_host_block_after_provider_health_passes() {
+        let mut runtime = WebRuntime::new_real(tempdir().expect("workspace").path().to_path_buf())
+            .expect("real runtime")
+            .with_host_readiness(|| {
+                Err(TaskRunError::new(
+                    "host_real_workflow_blocked",
+                    "host is not ready",
+                ))
+            });
+        runtime
+            .install_provider_gate(gate(true, true))
+            .expect("install gate");
+
+        let error = runtime
+            .resolve_real_confirm_provider(Some("codex"))
+            .expect_err("host must block provider execution");
+
+        assert_eq!(error.code, "host_real_workflow_blocked");
+    }
+
+    #[test]
+    fn web_runtime_provider_adapter_rechecks_shared_gate() {
+        let mut runtime = WebRuntime::new_real(tempdir().expect("workspace").path().to_path_buf())
+            .expect("real runtime")
+            .with_host_readiness(|| Ok(()));
+        runtime
+            .install_provider_gate(gate(false, true))
+            .expect("install gate");
+
+        let error = runtime
+            .provider_adapter()
+            .run(&AdapterInput {
+                provider_type: ProviderType::ClaudeCode,
+                role: AdapterRole::Executor,
+                worktree_path: None,
+                prompt: "test".to_string(),
+                context_files: Vec::new(),
+                output_schema: String::new(),
+                timeout: 1,
+                max_retries: 0,
+            })
+            .expect_err("adapter must recheck the shared gate");
+
+        assert_eq!(error.code.as_str(), "provider_unavailable");
     }
 }

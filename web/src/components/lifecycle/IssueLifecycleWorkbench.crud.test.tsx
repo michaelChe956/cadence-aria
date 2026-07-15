@@ -1,7 +1,9 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ProviderHealthResponse } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
+import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 import {
   defaultLaunchTitle,
   IssueLifecycleWorkbench,
@@ -26,13 +28,112 @@ vi.mock("../shared/MonacoViewer", () => ({
   ),
 }));
 
+function setRepositoryProviderHealth() {
+  const snapshot: ProviderHealthResponse = {
+    schema_version: 1,
+    generation: 1,
+    checked_at: "2026-07-14T00:00:00Z",
+    state_status: "ready",
+    state_error: null,
+    real_workflow_blocked: false,
+    test_provider_enabled: false,
+    providers: [
+      {
+        provider: "claude_code",
+        display_name: "Claude Code",
+        available: true,
+        version: "1.0.0",
+        reason_code: null,
+        reason: null,
+        checked_at: "2026-07-14T00:00:00Z",
+        install_hint: "",
+      },
+      {
+        provider: "codex",
+        display_name: "Codex",
+        available: true,
+        version: "1.0.0",
+        reason_code: null,
+        reason: null,
+        checked_at: "2026-07-14T00:00:00Z",
+        install_hint: "",
+      },
+    ],
+  };
+  useProviderAvailabilityStore.setState({ snapshot, loadStatus: "loaded" });
+}
+
+function repositoryEnvelopeFetch(baseFetch: ReturnType<typeof lifecycleFetch>) {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await baseFetch(input, init);
+    if (
+      init?.method === "POST" &&
+      /^\/api\/projects\/[^/]+\/repositories$/u.test(String(input))
+    ) {
+      const repository = (await response.json()) as ReturnType<typeof repositoryRecord>;
+      return new Response(
+        JSON.stringify({
+          repository,
+          initialization: {
+            source: "offline",
+            commands: [
+              { index: 1, command: "/cadence-init:pre-check", status: "completed" },
+              { index: 2, command: "/cadence-init:rule-config", status: "completed" },
+            ],
+            warnings: ["cadence_skills_conflict:<path>"],
+            changed_paths: [".claude/rules/project.md"],
+            completed_at: "2026-07-14T00:01:00Z",
+          },
+        }),
+        { status: 201 },
+      );
+    }
+    return response;
+  });
+}
+
+function repositoryFailureFetch(baseFetch: ReturnType<typeof lifecycleFetch>) {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (
+      init?.method === "POST" &&
+      /^\/api\/projects\/[^/]+\/repositories$/u.test(String(input))
+    ) {
+      return new Response(
+        JSON.stringify({
+          code: "repository_init_command_failed",
+          message: "repository registration failed",
+          details: {
+            reason: "初始化命令执行失败",
+            stage: "repository_init_command",
+            provider: "claude_code",
+            command: "/rule-config",
+            reason_code: "repository_init_command_failed",
+            stderr_summary: "permission denied",
+            changed_paths: [".claude/rules/project.md"],
+            retryable: true,
+            action: "修复权限后重试",
+          },
+        }),
+        { status: 500 },
+      );
+    }
+    return baseFetch(input, init);
+  });
+}
+
 describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
   installIssueLifecycleWorkbenchTestHooks();
+  beforeEach(() => {
+    setRepositoryProviderHealth();
+  });
+  afterEach(() => {
+    useProviderAvailabilityStore.getState().reset();
+  });
 
-  it("creates repository from the left sidebar and enables issue creation", async () => {
-    const fetchMock = lifecycleFetch({
-      repositoriesByProject: { project_0001: [] },
-    });
+  it("refreshes repositories and keeps the initialization result open until confirmed", async () => {
+    const fetchMock = repositoryEnvelopeFetch(
+      lifecycleFetch({ repositoriesByProject: { project_0001: [] } }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
@@ -59,6 +160,15 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
 
     expect(await screen.findByText("New Repo")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建 Issue" })).toBeEnabled();
+    expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
+      "代码库初始化完成",
+    );
+    expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
+      "offline",
+    );
+    expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
+      "cadence_skills_conflict:<path>",
+    );
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0001/repositories",
       expect.objectContaining({
@@ -71,6 +181,33 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
         }),
       }),
     );
+
+    await user.click(within(dialog).getByRole("button", { name: "完成" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "添加代码库" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("keeps structured repository registration failure details in the dialog", async () => {
+    const fetchMock = repositoryFailureFetch(lifecycleFetch());
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+    await screen.findByRole("button", { name: "添加代码库" });
+    await user.click(screen.getByRole("button", { name: "添加代码库" }));
+    const dialog = screen.getByRole("dialog", { name: "添加代码库" });
+    await user.type(within(dialog).getByLabelText("代码库名称"), "New Repo");
+    await user.type(within(dialog).getByLabelText("本地路径"), "/tmp/new-repo");
+    await user.click(within(dialog).getByRole("button", { name: "添加代码库" }));
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("repository registration failed");
+    expect(alert).toHaveTextContent("repository_init_command");
+    expect(alert).toHaveTextContent(".claude/rules/project.md");
+    expect(alert).toHaveTextContent("修复权限后重试");
+    expect(alert).toHaveTextContent("系统未执行破坏性回滚");
+    expect(screen.getByRole("dialog", { name: "添加代码库" })).toBeInTheDocument();
   });
 
   it("deletes project repositories and lifecycle issues from the lifecycle workbench", async () => {

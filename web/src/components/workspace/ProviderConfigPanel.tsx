@@ -1,21 +1,23 @@
 import { useState } from "react";
 import type { WorkspaceProviderName, WsProviderConfig } from "../../api/types";
+import {
+  getProviderOptions,
+  type ProviderOption,
+} from "../../state/provider-options";
+import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 
 interface ProviderConfigPanelProps {
   providers: WsProviderConfig | null;
   editable: boolean;
-  onSelectProvider: (role: "author" | "reviewer", provider: WorkspaceProviderName) => void;
+  onSelectProvider: (
+    role: "author" | "reviewer",
+    provider: WorkspaceProviderName,
+  ) => void;
   reviewerEnabled: boolean;
   onToggleReviewer: (enabled: boolean) => void;
   rounds?: number;
   onChangeRounds?: (rounds: number) => void;
 }
-
-const PROVIDER_OPTIONS: Array<{ value: WorkspaceProviderName; label: string }> = [
-  { value: "claude_code", label: "Claude Code" },
-  { value: "codex", label: "Codex" },
-  { value: "fake", label: "Fake" },
-];
 
 export function ProviderConfigPanel({
   providers,
@@ -27,11 +29,26 @@ export function ProviderConfigPanel({
   onChangeRounds,
 }: ProviderConfigPanelProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const snapshot = useProviderAvailabilityStore((state) => state.snapshot);
+  const providerOptions = getProviderOptions(snapshot);
+  const authorProvider = providerValue(providers?.author, "claude_code");
+  const reviewerProvider = providerValue(providers?.reviewer, "codex");
+  const currentProviders = new Set<WorkspaceProviderName>([
+    authorProvider,
+    ...(reviewerEnabled ? [reviewerProvider] : []),
+  ]);
+  const unavailableOptions = providerOptions.filter(
+    (option) =>
+      option.disabled &&
+      (option.visible || currentProviders.has(option.value)),
+  );
 
   return (
     <section className="space-y-3" aria-label="Provider 配置">
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-[var(--aria-ink)]">Provider 配置</h2>
+        <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
+          Provider 配置
+        </h2>
         <span className="text-xs text-[var(--aria-ink-muted)]">
           {editable ? "可编辑" : "已锁定"}
         </span>
@@ -39,21 +56,32 @@ export function ProviderConfigPanel({
 
       <div className="space-y-2">
         <label className="flex items-center gap-2 text-sm">
-          <span className="w-16 shrink-0 text-[var(--aria-ink-muted)]">Author</span>
+          <span className="w-16 shrink-0 text-[var(--aria-ink-muted)]">
+            Author
+          </span>
           <select
             aria-label="Author"
-            value={providerValue(providers?.author, "claude_code")}
+            value={authorProvider}
             onChange={(event) =>
-              onSelectProvider("author", event.target.value as WorkspaceProviderName)
+              onSelectProvider(
+                "author",
+                event.target.value as WorkspaceProviderName,
+              )
             }
             disabled={!editable}
             className="min-w-0 flex-1 rounded-md border border-[var(--aria-line)] bg-white px-2 py-1.5 text-sm text-[var(--aria-ink)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
           >
-            {PROVIDER_OPTIONS.map((provider) => (
-              <option key={provider.value} value={provider.value}>
-                {provider.label}
-              </option>
-            ))}
+            {providerOptionsForValue(providerOptions, authorProvider).map(
+              (provider) => (
+                <option
+                  key={provider.value}
+                  value={provider.value}
+                  disabled={provider.disabled}
+                >
+                  {provider.label}
+                </option>
+              ),
+            )}
           </select>
         </label>
 
@@ -70,21 +98,32 @@ export function ProviderConfigPanel({
 
         {reviewerEnabled ? (
           <label className="flex items-center gap-2 text-sm">
-            <span className="w-16 shrink-0 text-[var(--aria-ink-muted)]">Reviewer</span>
+            <span className="w-16 shrink-0 text-[var(--aria-ink-muted)]">
+              Reviewer
+            </span>
             <select
               aria-label="Reviewer"
-              value={providerValue(providers?.reviewer, "codex")}
+              value={reviewerProvider}
               onChange={(event) =>
-                onSelectProvider("reviewer", event.target.value as WorkspaceProviderName)
+                onSelectProvider(
+                  "reviewer",
+                  event.target.value as WorkspaceProviderName,
+                )
               }
               disabled={!editable}
               className="min-w-0 flex-1 rounded-md border border-[var(--aria-line)] bg-white px-2 py-1.5 text-sm text-[var(--aria-ink)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
             >
-              {PROVIDER_OPTIONS.map((provider) => (
-                <option key={provider.value} value={provider.value}>
-                  {provider.label}
-                </option>
-              ))}
+              {providerOptionsForValue(providerOptions, reviewerProvider).map(
+                (provider) => (
+                  <option
+                    key={provider.value}
+                    value={provider.value}
+                    disabled={provider.disabled}
+                  >
+                    {provider.label}
+                  </option>
+                ),
+              )}
             </select>
           </label>
         ) : editable ? (
@@ -93,6 +132,20 @@ export function ProviderConfigPanel({
           </div>
         ) : null}
       </div>
+
+      {unavailableOptions.length > 0 ? (
+        <div className="space-y-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+          {unavailableOptions.map((provider) => (
+            <p key={provider.value}>
+              <span className="font-semibold">{provider.label}：</span>
+              {provider.reason ? <span>{provider.reason}</span> : null}
+              {provider.installHint ? (
+                <span className="ml-1">{provider.installHint}</span>
+              ) : null}
+            </p>
+          ))}
+        </div>
+      ) : null}
 
       <button
         type="button"
@@ -105,14 +158,18 @@ export function ProviderConfigPanel({
       {showAdvanced ? (
         <div className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2">
           <label className="flex items-center gap-2 text-sm">
-            <span className="w-20 shrink-0 text-[var(--aria-ink-muted)]">审核轮次</span>
+            <span className="w-20 shrink-0 text-[var(--aria-ink-muted)]">
+              审核轮次
+            </span>
             <input
               aria-label="审核轮次"
               type="number"
               min={1}
               max={3}
               value={rounds}
-              onChange={(event) => onChangeRounds?.(Number.parseInt(event.target.value, 10))}
+              onChange={(event) =>
+                onChangeRounds?.(Number.parseInt(event.target.value, 10))
+              }
               disabled={!editable}
               className="h-8 w-20 rounded-md border border-[var(--aria-line)] bg-white px-2 text-sm text-[var(--aria-ink)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
             />
@@ -128,4 +185,11 @@ function providerValue(
   fallback: WorkspaceProviderName,
 ) {
   return value ?? fallback;
+}
+
+function providerOptionsForValue(
+  options: ProviderOption[],
+  current: WorkspaceProviderName,
+) {
+  return options.filter((option) => option.visible || option.value === current);
 }

@@ -97,24 +97,6 @@ pub async fn list_repositories(
     }))
 }
 
-pub async fn create_repository(
-    State(state): State<WebAppState>,
-    Path(project_id): Path<String>,
-    Json(request): Json<CreateRepositoryRequest>,
-) -> ApiResult<Json<RepositoryDto>> {
-    let store = RepositoryStore::new(product_app_paths(&state));
-    let repository = store
-        .create(CreateRepositoryInput {
-            project_id,
-            name: request.name,
-            path: request.path.into(),
-            default_policy_preset: request.default_policy_preset,
-            default_provider_mode: request.default_provider_mode,
-        })
-        .map_err(product_store_api_error)?;
-    Ok(Json(repository_dto(repository)))
-}
-
 pub async fn delete_repository(
     State(state): State<WebAppState>,
     Path((project_id, repository_id)): Path<(String, String)>,
@@ -202,4 +184,57 @@ pub async fn delete_issue(
     let registry = IssueRegistry::new(state.workspace_root.clone());
     registry.delete(&issue_id)?;
     Ok(Json(json!({"status":"deleted"})))
+}
+
+#[cfg(test)]
+pub(super) mod create_repository_tests {
+    use std::path::PathBuf;
+
+    use crate::product::models::RepositoryRecord;
+    use crate::product::repository_store::{
+        CadenceSkillsPreparationSummary, RepositoryInitializationCommandSummary,
+        RepositoryInitializationSummary, RepositoryRegistrationSuccess,
+    };
+
+    pub(crate) fn registration_success() -> RepositoryRegistrationSuccess {
+        RepositoryRegistrationSuccess {
+            repository: RepositoryRecord {
+                id: "repository_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                name: "Aria".to_string(),
+                path: PathBuf::from("/work/aria"),
+                repo_hash: "repo-hash".to_string(),
+                runtime_root: PathBuf::from("/work/aria/.aria"),
+                default_policy_preset: "balanced".to_string(),
+                default_provider_mode: "claude_code".to_string(),
+                created_at: "2026-07-14T00:00:00Z".to_string(),
+                updated_at: "2026-07-14T00:00:00Z".to_string(),
+            },
+            cadence_skills: CadenceSkillsPreparationSummary {
+                source_mode: "offline".to_string(),
+                source_root: PathBuf::from("/skills/source"),
+                skills_root: PathBuf::from("/skills"),
+                git_updated: false,
+                link_sync_status: "synchronized".to_string(),
+                warnings: Vec::new(),
+            },
+            initialization: RepositoryInitializationSummary {
+                provider: "claude_code".to_string(),
+                source: PathBuf::from("/skills/source"),
+                source_mode: "offline".to_string(),
+                skills_root: PathBuf::from("/skills"),
+                git_updated: false,
+                link_sync_status: "synchronized".to_string(),
+                commands: vec![RepositoryInitializationCommandSummary {
+                    command_index: 1,
+                    command: "/pre-check".to_string(),
+                    status: "completed".to_string(),
+                    output_summary: None,
+                }],
+            },
+            warnings: Vec::new(),
+            changed_paths: Vec::new(),
+            completed_at: "2026-07-14T00:01:00Z".to_string(),
+        }
+    }
 }

@@ -26,6 +26,7 @@ import type {
   Project,
   Repository,
   CreateRepositoryRequest,
+  CreateRepositoryResponse,
 } from "../../api/types";
 import {
   groupLifecycleCards,
@@ -381,15 +382,18 @@ export function IssueLifecycleWorkbench({
     await refresh(project.project_id);
   }
 
-  async function handleCreateRepository(payload: CreateRepositoryRequest) {
+  async function handleCreateRepository(
+    payload: CreateRepositoryRequest,
+  ): Promise<CreateRepositoryResponse> {
     if (!selectedProjectId) {
-      setError("缺少 Project");
-      return;
+      const message = "缺少 Project";
+      setError(message);
+      throw new Error(message);
     }
 
-    await createRepository(selectedProjectId, payload);
-    setRepositoryDialogOpen(false);
+    const response = await createRepository(selectedProjectId, payload);
     await refresh(selectedProjectId);
+    return response;
   }
 
   async function handleDeleteProject(projectId: string) {

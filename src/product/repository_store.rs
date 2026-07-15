@@ -8,6 +8,21 @@ use crate::product::id::{next_sequential_id, repo_hash_for_path};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::RepositoryRecord;
 
+mod initializer;
+mod registration;
+mod types;
+
+pub use initializer::ClaudeRepositoryInitializer;
+pub use registration::{
+    CadenceSkillsPreparation, ProjectLookup, RepositoryInitializer, RepositoryPersistence,
+    RepositoryRegistrationCoordinator,
+};
+pub use types::{
+    CadenceSkillsPreparationSummary, RepositoryInitializationCommandSummary,
+    RepositoryInitializationSummary, RepositoryRegistrationError, RepositoryRegistrationInput,
+    RepositoryRegistrationSuccess,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRepositoryInput {
     pub project_id: String,

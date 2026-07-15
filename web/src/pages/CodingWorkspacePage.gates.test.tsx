@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ProviderHealthResponse } from "../api/types";
 import {
   confirmWorkItemExecutionPlan,
   deleteCodingAttempt,
@@ -9,6 +10,7 @@ import {
 } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useProviderAvailabilityStore } from "../state/provider-availability-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
   DEFAULT_PERMISSION_MODES,
@@ -67,6 +69,45 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
     </div>
   ),
 }));
+
+function setCodingPageProviderHealth() {
+  const snapshot: ProviderHealthResponse = {
+    schema_version: 1,
+    generation: 1,
+    checked_at: "2026-07-14T00:00:00Z",
+    state_status: "ready",
+    state_error: null,
+    real_workflow_blocked: false,
+    test_provider_enabled: true,
+    providers: [
+      {
+        provider: "claude_code",
+        display_name: "Claude Code",
+        available: false,
+        version: null,
+        reason_code: "command_missing",
+        reason: "Claude Code 未安装",
+        checked_at: "2026-07-14T00:00:00Z",
+        install_hint: "请先安装 Claude Code",
+      },
+      {
+        provider: "codex",
+        display_name: "Codex",
+        available: true,
+        version: "1.0.0",
+        reason_code: null,
+        reason: null,
+        checked_at: "2026-07-14T00:00:00Z",
+        install_hint: "",
+      },
+    ],
+  };
+  useProviderAvailabilityStore.setState({ snapshot, loadStatus: "loaded" });
+}
+
+afterEach(() => {
+  useProviderAvailabilityStore.getState().reset();
+});
 
 describe("CodingWorkspacePage gate panels", () => {
   installCodingWorkspacePageTestHooks();
@@ -396,6 +437,7 @@ describe("CodingWorkspacePage gate panels", () => {
 
   it("renders role provider panel and sends role-level provider selection", async () => {
     const api = mockCodingWs();
+    setCodingPageProviderHealth();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "created",
@@ -430,6 +472,10 @@ describe("CodingWorkspacePage gate panels", () => {
     expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Internal Reviewer");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("自动修复次数");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Auto");
+    expect(
+      screen.getByRole("button", { name: "将 Coder 切换为 Claude Code" }),
+    ).toBeDisabled();
+    expect(screen.getAllByText("Claude Code 未安装").length).toBeGreaterThan(0);
 
     await userEvent.click(screen.getByRole("button", { name: "将 Code Reviewer 切换为 Codex" }));
     await userEvent.click(
