@@ -443,6 +443,7 @@ mod tests {
             workspace_session_id: None,
             resume_provider_session_id: None,
             permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            structured_output_contract: None,
             env_vars: Default::default(),
             timeout_secs: 1,
         }

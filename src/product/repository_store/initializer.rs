@@ -85,6 +85,7 @@ impl ClaudeRepositoryInitializer {
                 workspace_session_id: None,
                 resume_provider_session_id: None,
                 permission_mode: ProviderPermissionMode::Auto,
+                structured_output_contract: None,
                 env_vars: BTreeMap::new(),
                 timeout_secs: command_timeout.as_secs().max(1),
             };
@@ -170,9 +171,9 @@ impl ClaudeRepositoryInitializer {
                     }
                 }
                 Some(ProviderEvent::ToolResult(result)) => output.push(&result.output),
-                Some(ProviderEvent::Completed { full_output, .. }) => {
+                Some(ProviderEvent::Completed(completion)) => {
                     if output.is_empty() {
-                        output.push(&full_output);
+                        output.push(&completion.full_output);
                     }
                     return Ok(RepositoryInitializationCommandSummary {
                         command_index,

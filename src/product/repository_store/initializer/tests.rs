@@ -15,9 +15,9 @@ use crate::cross_cutting::provider_availability_gate::{
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::{
-    ChoiceRequestData, ChoiceRequestSource, PermissionRequestData, ProviderCommand, ProviderEvent,
-    ProviderPermissionMode, ProviderSession, ProviderStatus, RiskLevel, StreamingProviderAdapter,
-    StreamingProviderInput,
+    ChoiceRequestData, ChoiceRequestSource, PermissionRequestData, ProviderCommand,
+    ProviderCompletion, ProviderEvent, ProviderPermissionMode, ProviderSession, ProviderStatus,
+    RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::models::ProviderName;
 
@@ -142,12 +142,9 @@ impl ScriptedProvider {
     fn disabling_after_first_start(available: Arc<AtomicBool>) -> Self {
         Self {
             disable_after_first_start: Some(available),
-            ..Self::new(vec![SessionScript::Events(vec![
-                ProviderEvent::Completed {
-                    full_output: "completed".to_string(),
-                    provider_session_id: None,
-                },
-            ])])
+            ..Self::new(vec![SessionScript::Events(vec![ProviderEvent::Completed(
+                ProviderCompletion::plain("completed", None),
+            )])])
         }
     }
 }
@@ -202,10 +199,10 @@ impl StreamingProviderAdapter for RecordingProvider {
         let (event_tx, event_rx) = mpsc::channel(2);
         let (command_tx, _command_rx) = mpsc::channel(2);
         event_tx
-            .send(ProviderEvent::Completed {
-                full_output: "completed".to_string(),
-                provider_session_id: Some("provider-session".to_string()),
-            })
+            .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                "completed",
+                Some("provider-session".to_string()),
+            )))
             .await
             .unwrap();
         Ok(ProviderSession {
