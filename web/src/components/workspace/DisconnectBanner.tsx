@@ -1,4 +1,6 @@
 import { Check, ListTree, RefreshCw, TriangleAlert } from "lucide-react";
+import { useEffect, useState } from "react";
+import type { RecoverableInterruptedRun } from "../../state/workspace-ws-store";
 
 const ACK_STORAGE_KEY = "aria.workspace.aborted_ack_nodes";
 
@@ -9,6 +11,9 @@ interface DisconnectBannerProps {
   abortedByDisconnect?: { nodeId?: string; ts: string } | null;
   onAcknowledge?: (acknowledgedNodeIds: string[]) => void;
   onViewTimeline?: () => void;
+  recoverableInterruptedRun?: RecoverableInterruptedRun | null;
+  onRetryInterruptedRun?: (failedNodeId: string) => boolean | void;
+  retryResetKey?: string | null;
 }
 
 export function DisconnectBanner({
@@ -18,7 +23,17 @@ export function DisconnectBanner({
   abortedByDisconnect,
   onAcknowledge,
   onViewTimeline,
+  recoverableInterruptedRun,
+  onRetryInterruptedRun,
+  retryResetKey,
 }: DisconnectBannerProps) {
+  const [retrying, setRetrying] = useState(false);
+
+  useEffect(() => {
+    if (retryResetKey) {
+      setRetrying(false);
+    }
+  }, [retryResetKey]);
   if (isReconnecting && attemptCount > 0) {
     const displayAttemptCount = Math.max(attemptCount, 2);
     return (
@@ -41,16 +56,39 @@ export function DisconnectBanner({
     );
   }
 
-  if (abortedByDisconnect) {
+  if (abortedByDisconnect || recoverableInterruptedRun) {
     return (
       <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
         <span className="inline-flex min-w-0 items-center gap-2">
           <TriangleAlert className="h-4 w-4 shrink-0" />
           <span>
-            上次运行因断开被中止（{new Date(abortedByDisconnect.ts).toLocaleTimeString()}）
+            {abortedByDisconnect
+              ? `上次运行因断开被中止（${new Date(abortedByDisconnect.ts).toLocaleTimeString()}）`
+              : "检测到可恢复的中断任务"}
           </span>
         </span>
         <span className="inline-flex items-center gap-2">
+          {recoverableInterruptedRun && onRetryInterruptedRun ? (
+            <button
+              type="button"
+              disabled={retrying}
+              onClick={() => {
+                if (retrying) {
+                  return;
+                }
+                const sent = onRetryInterruptedRun(
+                  recoverableInterruptedRun.failed_node_id,
+                );
+                if (sent !== false) {
+                  setRetrying(true);
+                }
+              }}
+              className="inline-flex h-8 items-center justify-center gap-2 rounded-md bg-red-700 px-3 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              {recoverableInterruptedRun.label}
+            </button>
+          ) : null}
           {onViewTimeline ? (
             <button
               type="button"
@@ -61,7 +99,7 @@ export function DisconnectBanner({
               查看 Timeline
             </button>
           ) : null}
-          {onAcknowledge ? (
+          {abortedByDisconnect && onAcknowledge ? (
             <button
               type="button"
               onClick={() => {

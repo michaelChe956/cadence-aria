@@ -1,4 +1,6 @@
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::{mpsc, oneshot};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
@@ -11,7 +13,7 @@ use crate::product::coding_workspace_engine::{
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::state::WebAppState;
+use crate::web::state::{CodingRunReservation, WebAppState};
 
 use super::runner_support::{handle_pending_runner_commands, provider_for};
 use super::{
@@ -19,19 +21,158 @@ use super::{
     ensure_work_item_execution_plan_confirmed, repository_path_for_attempt,
 };
 
+pub(crate) struct CodingRunnerStartProbe {
+    pub(crate) events: Arc<Mutex<Vec<&'static str>>>,
+    pub(crate) provider_entry_tx: oneshot::Sender<()>,
+    pub(crate) continue_rx: oneshot::Receiver<()>,
+}
+
+struct CodingRunnerTask {
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    command_rx: mpsc::Receiver<CodingRunnerCommand>,
+    registry_run_id: u64,
+    start_rx: Option<oneshot::Receiver<()>>,
+    probe: Option<CodingRunnerStartProbe>,
+}
+
 pub(crate) fn spawn_coding_runner(
     state: WebAppState,
     coding_store: CodingAttemptStore,
     event_tx: mpsc::Sender<CodingWsOutMessage>,
     attempt: CodingExecutionAttempt,
-) -> mpsc::Sender<CodingRunnerCommand> {
+) -> Option<mpsc::Sender<CodingRunnerCommand>> {
     let (command_tx, command_rx) = mpsc::channel(32);
     let registry_attempt_id = attempt.id.clone();
     let registry_run_id = state
         .coding_runs
-        .insert(registry_attempt_id.clone(), command_tx.clone());
+        .insert(registry_attempt_id.clone(), command_tx.clone())?;
+    spawn_coding_runner_task(CodingRunnerTask {
+        state,
+        coding_store,
+        event_tx,
+        attempt,
+        command_rx,
+        registry_run_id,
+        start_rx: None,
+        probe: None,
+    });
+    Some(command_tx)
+}
+
+pub(crate) fn spawn_coding_runner_reserved(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    recovery_gate_id: &str,
+    reservation: CodingRunReservation,
+) -> Result<mpsc::Sender<CodingRunnerCommand>, CodingWorkspaceEngineError> {
+    spawn_coding_runner_reserved_inner(
+        state,
+        coding_store,
+        event_tx,
+        attempt,
+        recovery_gate_id,
+        reservation,
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_coding_runner_reserved_with_probe(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    recovery_gate_id: &str,
+    reservation: CodingRunReservation,
+    probe: CodingRunnerStartProbe,
+) -> Result<mpsc::Sender<CodingRunnerCommand>, CodingWorkspaceEngineError> {
+    spawn_coding_runner_reserved_inner(
+        state,
+        coding_store,
+        event_tx,
+        attempt,
+        recovery_gate_id,
+        reservation,
+        Some(probe),
+    )
+}
+
+fn spawn_coding_runner_reserved_inner(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    recovery_gate_id: &str,
+    reservation: CodingRunReservation,
+    probe: Option<CodingRunnerStartProbe>,
+) -> Result<mpsc::Sender<CodingRunnerCommand>, CodingWorkspaceEngineError> {
+    let (command_tx, command_rx) = mpsc::channel(32);
+    let registry_run_id = reservation.activate(command_tx.clone()).ok_or_else(|| {
+        CodingWorkspaceEngineError::ProviderStream("coding_recovery_reservation_lost".to_string())
+    })?;
+    let (start_tx, start_rx) = oneshot::channel();
+    let probe_events = probe.as_ref().map(|probe| Arc::clone(&probe.events));
+    spawn_coding_runner_task(CodingRunnerTask {
+        state: state.clone(),
+        coding_store: coding_store.clone(),
+        event_tx,
+        attempt: attempt.clone(),
+        command_rx,
+        registry_run_id,
+        start_rx: Some(start_rx),
+        probe,
+    });
+    record_runner_start_event(probe_events.as_ref(), "task_created");
+    if let Err(error) =
+        coding_store.complete_failed_code_review_recovery_journal(&attempt.id, recovery_gate_id)
+    {
+        state.coding_runs.remove(&attempt.id, registry_run_id);
+        drop(start_tx);
+        return Err(error.into());
+    }
+    record_runner_start_event(probe_events.as_ref(), "journal_completed");
+    if start_tx.send(()).is_err() {
+        state.coding_runs.remove(&attempt.id, registry_run_id);
+        return Err(CodingWorkspaceEngineError::ProviderStream(
+            "coding_recovery_runner_start_failed".to_string(),
+        ));
+    }
+    Ok(command_tx)
+}
+
+fn spawn_coding_runner_task(task: CodingRunnerTask) {
+    let CodingRunnerTask {
+        state,
+        coding_store,
+        event_tx,
+        attempt,
+        command_rx,
+        registry_run_id,
+        start_rx,
+        probe,
+    } = task;
+    let registry_attempt_id = attempt.id.clone();
     let coding_runs = state.coding_runs.clone();
     tokio::spawn(async move {
+        if let Some(start_rx) = start_rx
+            && start_rx.await.is_err()
+        {
+            coding_runs.remove(&registry_attempt_id, registry_run_id);
+            return;
+        }
+        if let Some(probe) = probe {
+            record_runner_start_event(Some(&probe.events), "provider_entry");
+            let _ = probe.provider_entry_tx.send(());
+            if probe.continue_rx.await.is_err() {
+                coding_runs.remove(&registry_attempt_id, registry_run_id);
+                return;
+            }
+        }
         let engine = CodingWorkspaceEngine::with_provider(
             coding_store.clone(),
             GitWorkspaceService::new(),
@@ -50,22 +191,46 @@ pub(crate) fn spawn_coding_runner(
         if let Err(error) = result
             && !matches!(error, CodingWorkspaceEngineError::Aborted)
         {
-            let code = match &error {
-                CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
-                    "work_item_execution_plan_not_confirmed".to_string()
+            let latest_attempt =
+                coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id);
+            if let Ok(latest_attempt) = latest_attempt
+                && !should_emit_coding_runner_protocol_error(&latest_attempt.status)
+            {
+                if let Err(snapshot_error) =
+                    emit_current_session_state(&event_tx, &coding_store, &latest_attempt).await
+                {
+                    tracing::warn!(
+                        attempt_id = attempt.id.as_str(),
+                        error = %snapshot_error,
+                        "failed to rebuild recoverable coding session state"
+                    );
                 }
-                _ => "coding_start_failed".to_string(),
-            };
-            let _ = event_tx
-                .send(CodingWsOutMessage::CodingProtocolError {
-                    code,
-                    message: error.to_string(),
-                })
-                .await;
+            } else {
+                let code = match &error {
+                    CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
+                        "work_item_execution_plan_not_confirmed".to_string()
+                    }
+                    _ => "coding_start_failed".to_string(),
+                };
+                let _ = event_tx
+                    .send(CodingWsOutMessage::CodingProtocolError {
+                        code,
+                        message: error.to_string(),
+                    })
+                    .await;
+            }
         }
         coding_runs.remove(&registry_attempt_id, registry_run_id);
     });
-    command_tx
+}
+
+fn record_runner_start_event(events: Option<&Arc<Mutex<Vec<&'static str>>>>, event: &'static str) {
+    if let Some(events) = events {
+        events
+            .lock()
+            .expect("coding runner start events")
+            .push(event);
+    }
 }
 
 pub(crate) fn should_resume_runner_after_gate_response(
@@ -75,6 +240,7 @@ pub(crate) fn should_resume_runner_after_gate_response(
     matches!(
         action_id,
         "retry_test_plan"
+            | "retry_coding"
             | "send_to_coder"
             | "rerun_missing_steps"
             | "retry_review"
@@ -83,6 +249,13 @@ pub(crate) fn should_resume_runner_after_gate_response(
             | "rerun_testing"
     ) && matches!(
         previous_attempt.status,
+        CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
+    )
+}
+
+pub(crate) fn should_emit_coding_runner_protocol_error(status: &CodingAttemptStatus) -> bool {
+    !matches!(
+        status,
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
     )
 }

@@ -191,6 +191,7 @@ pub enum EngineEvent {
         findings: Vec<ReviewFinding>,
         review_gate: ReviewGate,
         work_item_plan_review: Option<WorkItemPlanReviewComplete>,
+        structured_output_diagnostic: Option<StructuredOutputDiagnostic>,
     },
     ReviewDecisionRequired {
         node_id: String,
@@ -228,6 +229,31 @@ pub enum ReviewDecisionOutcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkItemPlanOutlineRevisionSource {
+    AuthorConfirm,
+    ReviewDecision,
+    HumanConfirm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutlineRevisionPersistencePolicy {
+    AllowMissingInitialRound,
+    RequireActiveRound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutlineRevisionCrashPoint {
+    Status,
+    ArtifactVersions,
+    Timeline,
+    SourceNodeDetail,
+    RunNodeDetail,
+    PlanDrafts,
+    ActiveIndex,
+    Committed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceConfirmOutcome {
     WorkItemPlan {
@@ -239,6 +265,7 @@ pub enum WorkspaceConfirmOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorDecisionOutcome {
     StartReview,
+    StartWorkItemPlanOutlineRevision { feedback: Option<String> },
     HumanConfirm,
     PrepareContext,
 }
@@ -300,6 +327,8 @@ pub struct WorkspaceEngine {
     pub(crate) work_item_plan_author_retry_count: u32,
     pub(crate) work_item_plan_revision_retry_count: u32,
     pub(crate) work_item_batch_retry_counts: HashMap<String, u32>,
+    pub(crate) outline_revision_recovery_error: Option<String>,
+    pub(crate) outline_revision_crash_after: Option<OutlineRevisionCrashPoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +374,19 @@ pub(crate) struct ProviderSessionDriveInput {
     pub(crate) role: ProviderConversationRole,
     pub(crate) artifact_retry: Option<ArtifactRetryContext>,
     pub(crate) revision_resume_fallback: Option<RevisionResumeFallbackContext>,
+}
+
+pub(crate) enum ReviewProviderRunResult {
+    Completed(ProviderCompletion),
+    Aborted,
+    Failed(ReviewProviderRunFailure),
+}
+
+pub(crate) enum ReviewProviderRunFailure {
+    Start(String),
+    EmptyOutput,
+    Provider(String),
+    PermissionTimeout(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

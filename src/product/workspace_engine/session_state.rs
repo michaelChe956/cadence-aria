@@ -253,12 +253,15 @@ pub(crate) fn recover_pending_author_choice(
 
 pub(crate) fn latest_review_verdict_from_messages(
     messages: &[SessionMessage],
+    workspace_type: &WorkspaceType,
 ) -> Option<ReviewVerdict> {
     messages
         .iter()
         .rev()
         .find(|message| message.role == "reviewer")
-        .map(|message| WorkspaceEngine::parse_review_verdict(&message.content))
+        .map(|message| {
+            WorkspaceEngine::parse_review_verdict_for_workspace(&message.content, workspace_type)
+        })
 }
 
 pub(crate) fn latest_review_verdict_from_node_details(
@@ -303,6 +306,7 @@ pub(crate) fn review_complete_event_from_verdict(
         findings: verdict.findings.clone(),
         review_gate: verdict.review_gate.clone(),
         work_item_plan_review: verdict.work_item_plan_review.clone(),
+        structured_output_diagnostic: verdict.structured_output_diagnostic.clone(),
     }
 }
 
@@ -400,6 +404,7 @@ impl WorkspaceEngine {
             timeline_node_details,
             timeline_node_summaries,
             active_run_id: self.active_run_id.clone(),
+            recoverable_interrupted_run: self.recoverable_interrupted_run(),
         }
     }
 }

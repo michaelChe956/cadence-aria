@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
     pub(crate) async fn build_code_review_prompt(
@@ -7,10 +8,8 @@ impl CodingWorkspaceEngine {
         worktree_path: &Path,
         retry_diagnostic: Option<&str>,
     ) -> Result<String, CodingWorkspaceEngineError> {
-        let diff = self
-            ._git_service
-            .git_diff(worktree_path, &attempt.base_branch)
-            .await?;
+        let diff_base = code_review_diff_base(attempt)?;
+        let diff = self._git_service.git_diff(worktree_path, diff_base).await?;
         let work_item = self.work_item_markdown_for_attempt(attempt)?;
         let evaluation_context_json =
             self.evaluation_context_json_for_role(attempt, EvaluationContextRole::CodeReviewer)?;
@@ -27,6 +26,7 @@ impl CodingWorkspaceEngine {
              Attempt: {}\n\
              Branch: {}\n\
              Base: {}\n\
+             {}\
              {}\
              {}\
              \n代码规范:\n\
@@ -46,6 +46,7 @@ impl CodingWorkspaceEngine {
             attempt.branch_name,
             attempt.base_branch,
             code_review_material_protocol(),
+            reviewer_test_scope_contract(),
             no_default_stack_assumption_contract(),
             work_item.unwrap_or_else(
                 || "未找到 Work Item markdown，上下文仅包含 attempt 元数据。".to_string()
@@ -256,6 +257,15 @@ pub(crate) fn no_default_stack_assumption_contract() -> &'static str {
     "\n不得用平台默认技术栈假设替代任务材料。语言、构建系统、包管理器、测试框架、依赖初始化和模块接入要求，必须来自 Work Item、Source Draft Supplement、Verification Plan、EvaluationContextPack、项目规则、仓库文件事实或用户补充上下文。若材料不足，必须报告不确定性，不得臆造具体命令或工具。\n"
 }
 
+pub(crate) fn reviewer_test_scope_contract() -> &'static str {
+    "\nReviewer 非 E2E 测试边界:\n\
+     - 你可以根据需求、当前 diff、仓库事实、测试证据和代码风险提出单元测试、非浏览器自动化的集成测试、编译、构建、类型检查、静态分析、格式检查或 lint 等验证要求。\n\
+     - 这些测试建议不受 Verification Plan 已列命令的严格限制，但测试框架、命令和技术栈判断必须来自任务材料、仓库事实或项目规则，不得凭平台默认假设生成。\n\
+     - 不得创建以新增、执行、补充、修复、配置或安装 E2E、端到端测试、Playwright、浏览器自动化测试或运行这些测试所需浏览器环境为目的的 finding。\n\
+     - 上述测试及其所需浏览器环境的安装、配置、缺失、失败或相关证据（包括缺少证据），均不得成为 finding，也不得导致 request_changes 或 blocked；不得作为 verdict 或 summary 中的否决理由，也不得成为 Coder required_action 或任何返修要求。\n\
+     - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试及其所需浏览器环境，也不得将其转换成 finding、verdict/summary 否决理由、Coder required_action 或任何返修要求。\n"
+}
+
 pub(crate) fn coding_execution_protocol() -> &'static str {
     "\nCoder 执行协议:\n\
      - 在修改代码前，必须先阅读“已确认 Work Item”，并从其中提取本次任务的执行清单。\n\
@@ -296,11 +306,16 @@ pub(crate) fn code_review_material_protocol() -> &'static str {
      - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
      - 审查清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、验证命令与证据、完成前自检要求、handoff 承诺、需求/设计追踪关系。\n\
      - EvaluationContextPack.CoderEvidencePack 是 coder 已执行工作的证据包；必须优先审查其中的 role run、raw/artifact refs、completion report、handoff tests_run/test_result_summary 和 evidence_warnings。\n\
+     - WorkItemGroup 当前 Unit 的 completion commit 与平台 final unit handoff 在 Code Review approve 后才生成；Code Review 前为空是正常状态，不得据此创建 finding、request_changes 或 blocked。\n\
+     - Code Review 阶段应以 Coder completion report、raw/artifact refs、实际测试输出和当前 Unit diff 判断验证证据；真正缺失或自相矛盾的 required verification evidence 仍必须记录。\n\
      - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
      - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和 handoff 承诺。\n\
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
      - 如果测试输出显示没有实际测试被执行，不能把它当作有效覆盖；必须结合 Work Item 要求判断是否需要修复。\n\
      - 不得提出执行材料之外的技术栈默认要求。\n\
+     - verdict 只能使用 approve、request_changes、blocked。\n\
+     - finding.severity 只能使用 error、warning、info。\n\
+     - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
 }
 
@@ -314,6 +329,9 @@ pub(crate) fn group_final_review_material_protocol() -> &'static str {
      - 如果 ReviewRequest 已 push 的 commit 与 completed units、diff 或验证证据不一致，必须 request_changes 或 blocked。\n\
      - impact_scope、pr_description、commit_message_suggestion 必须基于实际 diff、completed units 和 handoff，不得编造未实现内容。\n\
      - 不得用平台默认技术栈假设替代 unit handoff 或 Work Item 内容。\n\
+     - verdict 只能使用 approve、request_changes、blocked。\n\
+     - finding.severity 只能使用 error、warning、info。\n\
+     - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 source_stage=group_final_review。\n"
 }
 
@@ -385,6 +403,7 @@ pub(crate) fn streaming_input_from_adapter(
         workspace_session_id: None,
         resume_provider_session_id: None,
         permission_mode: ProviderPermissionMode::Supervised,
+        structured_output_contract: None,
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,
     }
@@ -430,6 +449,20 @@ pub(crate) fn active_work_item_id_for_prompt(attempt: &CodingExecutionAttempt) -
         .current_work_item_id
         .as_deref()
         .unwrap_or(&attempt.work_item_id)
+}
+
+pub(crate) fn code_review_diff_base(
+    attempt: &CodingExecutionAttempt,
+) -> Result<&str, CodingWorkspaceEngineError> {
+    if attempt.scope == CodingAttemptScope::WorkItemGroup {
+        if active_work_item_id_for_prompt(attempt) == attempt.work_item_id {
+            return Ok(&attempt.base_branch);
+        }
+        return attempt.head_commit.as_deref().ok_or_else(|| {
+            CodingWorkspaceEngineError::CompletionCommitMissing(attempt.id.clone())
+        });
+    }
+    Ok(&attempt.base_branch)
 }
 
 pub(crate) struct ReworkContextNoteInput {

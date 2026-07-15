@@ -10,6 +10,28 @@ pub(crate) struct WorkspaceInboundContext {
     pub(crate) session_id: String,
 }
 
+pub(crate) fn provider_run_kind_for_interrupted_recovery(
+    outcome: InterruptedRunRecoveryOutcome,
+) -> ProviderRunKind {
+    match outcome {
+        InterruptedRunRecoveryOutcome::Review => ProviderRunKind::ReviewOnly,
+        InterruptedRunRecoveryOutcome::WorkItemDraftGeneration => {
+            ProviderRunKind::WorkItemPlanDraft { feedback: None }
+        }
+    }
+}
+
+pub(crate) async fn finish_interrupted_recovery_spawn_error(
+    engine: &Arc<Mutex<WorkspaceEngine>>,
+    message: &str,
+) {
+    engine
+        .lock()
+        .await
+        .finish_active_run_with_failed_node(message.to_string())
+        .await;
+}
+
 pub(crate) async fn handle_workspace_inbound_message(
     context: WorkspaceInboundContext,
     in_msg: WsInMessage,
@@ -257,12 +279,9 @@ pub(crate) async fn handle_workspace_inbound_message(
         WsInMessage::RequestOutlineRevision { feedback } => {
             let result = {
                 let mut engine = engine.lock().await;
-                let revision_feedback =
-                    engine.work_item_plan_outline_revision_feedback(feedback.as_deref());
                 engine
                     .request_work_item_plan_outline_revision(feedback)
                     .await
-                    .map(|_| revision_feedback)
             };
             match result {
                 Ok(feedback) => {
@@ -495,6 +514,38 @@ pub(crate) async fn handle_workspace_inbound_message(
                 }
                 Err(message) => {
                     let err = WsOutMessage::Error { message };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                }
+            }
+        }
+        WsInMessage::RetryInterruptedRun { failed_node_id } => {
+            let result = {
+                let mut engine = engine.lock().await;
+                engine.retry_interrupted_run(&failed_node_id).await
+            };
+            match result {
+                Ok(outcome) => {
+                    let run_kind = provider_run_kind_for_interrupted_recovery(outcome);
+                    if let Err(message) = spawn_provider_run_from_handler(
+                        run_context.clone(),
+                        run_kind,
+                        outbound_tx.clone(),
+                    )
+                    .await
+                    {
+                        finish_interrupted_recovery_spawn_error(&engine, &message).await;
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
+                }
+                Err(error) => {
+                    let err = WsOutMessage::ProtocolError {
+                        code: error.code().to_string(),
+                        message: error.to_string(),
+                        context: Some(serde_json::json!({
+                            "failed_node_id": failed_node_id,
+                        })),
+                    };
                     let _ = send_json_outbound(&outbound_tx, &err).await;
                 }
             }

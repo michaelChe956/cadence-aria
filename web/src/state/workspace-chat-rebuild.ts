@@ -5,6 +5,8 @@ import type {
 } from "./chat-entries";
 import { workItemPlanArtifactUpdateSummary } from "./work-item-plan-artifact-summary";
 import { chatRoleForTimelineNode } from "./workspace-ws-store-helpers";
+import { structuredOutputDiagnosticFromUnknown } from "./structured-output-diagnostic";
+import { trustedReviewComments } from "./workspace-review-trust";
 import type {
   ExecutionEvent,
   NodeDetailSummary,
@@ -255,7 +257,10 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       const verdictValue = getStringField(detail.verdict, "verdict") ?? "revise";
       const verdictComments = getStringField(detail.verdict, "comments") ?? "";
       const verdictFindings = getArrayField(detail.verdict, "findings");
-      const reviewGate = getStringField(detail.verdict, "review_gate") ?? "user_confirm_allowed";
+      const reviewGate = getStringField(detail.verdict, "review_gate");
+      const structuredOutputDiagnostic = structuredOutputDiagnosticFromUnknown(
+        detail.verdict.structured_output_diagnostic,
+      );
       entries.push({
         id: chatEntryId(node.node_id, "review-verdict"),
         type: "review_verdict",
@@ -268,7 +273,10 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
           comments: verdictComments,
           summary: verdictSummary,
           findings: verdictFindings,
-          review_gate: reviewGate,
+          ...(reviewGate ? { review_gate: reviewGate } : {}),
+          ...(structuredOutputDiagnostic
+            ? { structured_output_diagnostic: structuredOutputDiagnostic }
+            : {}),
         },
       });
     }
@@ -518,7 +526,9 @@ function buildGatePromptEntry(
   const latestReview = entries.filter((entry) => entry.type === "review_verdict").at(-1);
   const summary = latestReview?.metadata?.summary?.toString() ?? "";
   const verdict = latestReview?.metadata?.verdict?.toString() ?? "";
-  const comments = latestReview?.metadata?.comments?.toString() ?? "";
+  const comments = trustedReviewComments(
+    latestReview?.metadata as Record<string, unknown> | undefined,
+  );
   const findings = Array.isArray(latestReview?.metadata?.findings)
     ? latestReview.metadata.findings
     : [];

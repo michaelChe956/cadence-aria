@@ -369,6 +369,7 @@ export type CodingGateActionType =
   | "rerun_missing_steps"
   | "provide_context"
   | "manual_continue"
+  | "retry_coding"
   | "retry_review"
   | "retry_internal_review"
   | "accept_testing_result"

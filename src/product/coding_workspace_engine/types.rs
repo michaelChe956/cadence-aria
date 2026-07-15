@@ -61,6 +61,11 @@ pub struct ProviderTestingAdapters<'a> {
     pub execute: &'a dyn StreamingProviderAdapter,
 }
 
+pub(crate) struct CodingProviderFreshRetry {
+    pub(crate) legacy_input: AdapterInput,
+    pub(crate) input: StreamingProviderInput,
+}
+
 pub(crate) struct CodingProviderStreamRun<'a> {
     pub(crate) attempt: &'a CodingExecutionAttempt,
     pub(crate) node_id: &'a str,
@@ -72,6 +77,7 @@ pub(crate) struct CodingProviderStreamRun<'a> {
     pub(crate) provider_role: CodingProviderRole,
     pub(crate) command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
     pub(crate) allow_legacy_stream_fallback: bool,
+    pub(crate) fresh_retry: Option<CodingProviderFreshRetry>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) timeout_reason_code: Option<&'static str>,
 }

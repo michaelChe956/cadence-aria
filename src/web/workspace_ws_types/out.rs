@@ -10,8 +10,25 @@ use super::common::{
     ChoiceOption, ChoiceQuestion, ProviderConfigSnapshot, ProviderDefaults, WsCheckpointDto,
     WsExecutionEvent, WsMessageDto, WsPermissionRiskLevel, WsProviderConfig, WsProviderStatus,
 };
-use super::review::{ReviewFinding, ReviewGate, ReviewVerdictType, WorkItemPlanReviewComplete};
+use super::review::{
+    ReviewFinding, ReviewGate, ReviewVerdictType, StructuredOutputDiagnostic,
+    WorkItemPlanReviewComplete,
+};
 use super::timeline::{NodeDetailSummary, TimelineNode, TimelineNodeStatus};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoverableInterruptedOperation {
+    Review,
+    WorkItemDraftGeneration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverableInterruptedRun {
+    pub failed_node_id: String,
+    pub operation: RecoverableInterruptedOperation,
+    pub label: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -78,6 +95,8 @@ pub enum WsOutMessage {
         review_gate: ReviewGate,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         work_item_plan_review: Option<WorkItemPlanReviewComplete>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output_diagnostic: Option<StructuredOutputDiagnostic>,
     },
     ReviewDecisionRequired {
         node_id: String,
@@ -101,6 +120,8 @@ pub enum WsOutMessage {
         timeline_node_details: HashMap<String, NodeDetail>,
         timeline_node_summaries: HashMap<String, NodeDetailSummary>,
         active_run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recoverable_interrupted_run: Option<RecoverableInterruptedRun>,
     },
     Error {
         message: String,

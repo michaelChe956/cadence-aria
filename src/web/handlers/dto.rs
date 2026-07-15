@@ -1,6 +1,7 @@
 use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
 use crate::product::models::WorkspaceSessionSummaryRecord;
+use crate::web::error::sanitize_repository_api_warnings;
 
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
@@ -97,6 +98,33 @@ pub(crate) fn repository_dto(record: RepositoryRecord) -> RepositoryDto {
         created_at: record.created_at,
         updated_at: record.updated_at,
     }
+}
+
+#[derive(serde::Serialize)]
+struct RepositoryRegistrationInitializationDto {
+    source: String,
+    commands: Vec<serde_json::Value>,
+    warnings: Vec<String>,
+    changed_paths: Vec<String>,
+    completed_at: String,
+}
+pub(crate) fn repository_registration_response(
+    success: crate::product::repository_store::RepositoryRegistrationSuccess,
+) -> serde_json::Value {
+    let commands = success
+        .initialization
+        .commands
+        .into_iter()
+        .map(|item| json!({"index": item.command_index, "command": item.command, "status": item.status}))
+        .collect();
+    let initialization = RepositoryRegistrationInitializationDto {
+        source: success.initialization.source_mode,
+        commands,
+        warnings: sanitize_repository_api_warnings(success.warnings),
+        changed_paths: success.changed_paths,
+        completed_at: success.completed_at,
+    };
+    json!({"repository": repository_dto(success.repository), "initialization": initialization})
 }
 
 pub(crate) fn product_issue_dto_with_binding(
@@ -442,9 +470,8 @@ pub(crate) fn coding_execution_unit_status_text(
 
 pub(crate) fn active_coding_timeline_node_id(nodes: &[CodingTimelineNode]) -> Option<String> {
     nodes
-        .iter()
-        .rev()
-        .find(|node| {
+        .last()
+        .filter(|node| {
             matches!(
                 node.status,
                 CodingTimelineNodeStatus::Pending
@@ -756,5 +783,17 @@ pub(crate) fn issue_status_text(status: &IssueStatus) -> &'static str {
         IssueStatus::Running => "running",
         IssueStatus::Completed => "completed",
         IssueStatus::Blocked => "blocked",
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn repository_registration_success_preserves_all_source_modes() {
+    for source_mode in ["online_clone", "online_update", "offline"] {
+        let mut success = super::product_resources::create_repository_tests::registration_success();
+        success.initialization.source_mode = source_mode.to_string();
+        let value = repository_registration_response(success);
+        assert_eq!(value["initialization"]["source"], source_mode);
+        assert!(value.get("warnings").is_none() && value.get("completed_at").is_none());
     }
 }

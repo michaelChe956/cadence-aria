@@ -16,13 +16,6 @@ import type { DrawerEntity } from "./LifecycleCardDrawer";
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 
 const DELETE_EXIT_ANIMATION_MS = 220;
-const ACTIVE_GROUP_ATTEMPT_STATUSES = new Set<CodingAttempt["status"]>([
-  "created",
-  "running",
-  "waiting_for_human",
-  "blocked",
-]);
-
 export function resolveGroupCodingAttempt(
   raw: unknown,
   codingAttempts: CodingAttempt[],
@@ -44,8 +37,7 @@ export function resolveGroupCodingAttempt(
   return (
     codingAttempts.find(
       (attempt) =>
-        attempt.work_item_group_id === planId &&
-        ACTIVE_GROUP_ATTEMPT_STATUSES.has(attempt.status),
+        attempt.work_item_group_id === planId,
     ) ?? null
   );
 }

@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ProviderHealthResponse } from "../api/types";
 import {
   confirmWorkItemExecutionPlan,
   deleteCodingAttempt,
@@ -9,6 +10,7 @@ import {
 } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useProviderAvailabilityStore } from "../state/provider-availability-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
   DEFAULT_PERMISSION_MODES,
@@ -67,6 +69,45 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
     </div>
   ),
 }));
+
+function setCodingPageProviderHealth() {
+  const snapshot: ProviderHealthResponse = {
+    schema_version: 1,
+    generation: 1,
+    checked_at: "2026-07-14T00:00:00Z",
+    state_status: "ready",
+    state_error: null,
+    real_workflow_blocked: false,
+    test_provider_enabled: true,
+    providers: [
+      {
+        provider: "claude_code",
+        display_name: "Claude Code",
+        available: false,
+        version: null,
+        reason_code: "command_missing",
+        reason: "Claude Code 未安装",
+        checked_at: "2026-07-14T00:00:00Z",
+        install_hint: "请先安装 Claude Code",
+      },
+      {
+        provider: "codex",
+        display_name: "Codex",
+        available: true,
+        version: "1.0.0",
+        reason_code: null,
+        reason: null,
+        checked_at: "2026-07-14T00:00:00Z",
+        install_hint: "",
+      },
+    ],
+  };
+  useProviderAvailabilityStore.setState({ snapshot, loadStatus: "loaded" });
+}
+
+afterEach(() => {
+  useProviderAvailabilityStore.getState().reset();
+});
 
 describe("CodingWorkspacePage gate panels", () => {
   installCodingWorkspacePageTestHooks();
@@ -155,6 +196,111 @@ describe("CodingWorkspacePage gate panels", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "不满意，重新测试" }));
     expect(api.respondGate).toHaveBeenCalledWith("gate_0001", "rerun_testing", undefined);
+  });
+
+  it("recovers an interrupted code review through the generic blocked gate", async () => {
+    const api = mockCodingWs();
+    vi.mocked(api.respondGate).mockImplementation((gateId) => {
+      useCodingWorkspaceStore.getState().markGateSubmitting(gateId);
+    });
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "code_review",
+      pendingGates: [
+        {
+          gate_id: "coding_blocked_gate_0001",
+          kind: "blocked",
+          title: "代码审查中断",
+          description: "上次代码审查已中断，可保留当前修改并重试 Reviewer。",
+          stage: "code_review",
+          role: "code_reviewer",
+          available_actions: [
+            {
+              action_id: "retry_review",
+              label: "重试代码审查",
+              action_type: "retry_review",
+            },
+          ],
+          reason_code: "failed_code_review_recoverable",
+          evidence_refs: [],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    expect(screen.getByTestId("coding-pending-gate")).toHaveTextContent("代码审查中断");
+    expect(screen.queryByRole("button", { name: "发送上下文" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("补充 Coding 上下文")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "重试代码审查" }));
+
+    expect(api.respondGate).toHaveBeenCalledWith(
+      "coding_blocked_gate_0001",
+      "retry_review",
+      undefined,
+    );
+    expect(api.sendContextNote).not.toHaveBeenCalled();
+
+    const submittingButton = screen.getByRole("button", { name: "处理中" });
+    expect(submittingButton).toBeDisabled();
+    await userEvent.click(submittingButton);
+    expect(api.respondGate).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      const store = useCodingWorkspaceStore.getState();
+      store.setProtocolError({
+        code: "coding_gate_response_failed",
+        message: "Gate response failed",
+      });
+      store.setGateError("coding_blocked_gate_0001", "coding_gate_response_failed");
+    });
+
+    const retryButton = screen.getByRole("button", { name: "重试代码审查" });
+    expect(retryButton).toBeEnabled();
+    expect(screen.getByTestId("coding-pending-gate")).toHaveTextContent(
+      "coding_gate_response_failed",
+    );
+  });
+
+  it("restarts an interrupted coder without requiring extra context", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "blocked",
+      stage: "coding",
+      pendingGates: [
+        {
+          gate_id: "coding_blocked_gate_0001",
+          kind: "blocked",
+          title: "Coder 执行中断",
+          description: "Codex resume stalled before provider progress",
+          stage: "coding",
+          role: "coder",
+          reason_code: "coder_provider_interrupted",
+          available_actions: [
+            {
+              action_id: "retry_coding",
+              label: "重新启动 Coder",
+              action_type: "retry_coding",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+
+    expect(screen.queryByLabelText("补充 Coding 上下文")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "重新启动 Coder" }));
+
+    expect(api.respondGate).toHaveBeenCalledWith(
+      "coding_blocked_gate_0001",
+      "retry_coding",
+      undefined,
+    );
+    expect(api.sendContextNote).not.toHaveBeenCalled();
   });
 
   it("renders skipped_required_steps blocked gate with dedicated label", async () => {
@@ -291,6 +437,7 @@ describe("CodingWorkspacePage gate panels", () => {
 
   it("renders role provider panel and sends role-level provider selection", async () => {
     const api = mockCodingWs();
+    setCodingPageProviderHealth();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "created",
@@ -325,6 +472,10 @@ describe("CodingWorkspacePage gate panels", () => {
     expect(screen.getByTestId("coding-provider-config-panel")).not.toHaveTextContent("Internal Reviewer");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("自动修复次数");
     expect(screen.getByTestId("coding-provider-config-panel")).toHaveTextContent("Auto");
+    expect(
+      screen.getByRole("button", { name: "将 Coder 切换为 Claude Code" }),
+    ).toBeDisabled();
+    expect(screen.getAllByText("Claude Code 未安装").length).toBeGreaterThan(0);
 
     await userEvent.click(screen.getByRole("button", { name: "将 Code Reviewer 切换为 Codex" }));
     await userEvent.click(

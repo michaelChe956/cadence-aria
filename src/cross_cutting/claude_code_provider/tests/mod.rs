@@ -51,6 +51,7 @@ fn streaming_input(
         workspace_session_id: None,
         resume_provider_session_id: None,
         permission_mode,
+        structured_output_contract: None,
         env_vars: BTreeMap::new(),
         timeout_secs: 60,
     }
@@ -62,7 +63,7 @@ async fn recv_completed(events: &mut mpsc::Receiver<ProviderEvent>) -> String {
             .expect("provider should emit completion")
             .expect("provider event channel should stay open")
         {
-            ProviderEvent::Completed { full_output, .. } => return full_output,
+            ProviderEvent::Completed(completion) => return completion.full_output,
             ProviderEvent::StatusChanged(_)
             | ProviderEvent::Execution(_)
             | ProviderEvent::TextDelta { .. }

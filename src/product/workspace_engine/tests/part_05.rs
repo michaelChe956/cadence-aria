@@ -25,10 +25,7 @@ impl StreamingProviderAdapter for RevisionResumeStallThenSuccessProvider {
                     .await;
             } else {
                 let _ = event_tx
-                    .send(ProviderEvent::Completed {
-                        full_output: output,
-                        provider_session_id: Some("codex-fresh-thread".to_string()),
-                    })
+                    .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("codex-fresh-thread".to_string()))))
                     .await;
             }
         });
@@ -65,10 +62,7 @@ impl StreamingProviderAdapter for RevisionInputRecordingProvider {
         let output = self.output.to_string();
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: Some("provider-author-session-1".to_string()),
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("provider-author-session-1".to_string()))))
                 .await;
         });
         Ok(ProviderSession {
@@ -425,6 +419,7 @@ async fn build_session_state_omits_unneeded_work_item_plan_details_and_keeps_act
             version: 2,
         }),
         is_revision: false,
+        revision_feedback: None,
         base_artifact_ref: None,
         started_at: "2026-05-20T14:30:00Z".to_string(),
         ended_at: Some("2026-05-20T14:35:00Z".to_string()),
@@ -527,6 +522,7 @@ async fn build_session_state_keeps_story_details_out_of_inline_payload() {
                 verdict: None,
                 artifact_ref: None,
                 is_revision: false,
+                revision_feedback: None,
                 base_artifact_ref: None,
                 started_at: "2026-05-20T14:30:00Z".to_string(),
                 ended_at: Some("2026-05-20T14:35:00Z".to_string()),
@@ -615,6 +611,7 @@ async fn persistent_session_state_ignores_malformed_unrelated_session_files() {
                 verdict: None,
                 artifact_ref: None,
                 is_revision: false,
+                revision_feedback: None,
                 base_artifact_ref: None,
                 started_at: "2026-05-20T14:30:00Z".to_string(),
                 ended_at: Some("2026-05-20T14:35:00Z".to_string()),

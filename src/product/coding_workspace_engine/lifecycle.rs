@@ -90,6 +90,26 @@ impl CodingWorkspaceEngine {
         Ok(())
     }
 
+    pub(crate) fn clear_attempt_provider_conversation(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: &CodingProviderRole,
+        provider: &ProviderName,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let conversation_role = provider_conversation_role_for_coding_role(role);
+        let conversations = attempt
+            .provider_conversations
+            .iter()
+            .filter(|conversation| {
+                conversation.role != conversation_role || &conversation.provider != provider
+            })
+            .cloned()
+            .collect();
+        self.store
+            .replace_attempt_provider_conversations(&attempt.id, conversations)
+            .map_err(CodingWorkspaceEngineError::from)
+    }
+
     pub async fn start_attempt(
         &self,
         project_id: &str,

@@ -29,6 +29,7 @@ pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceSta
             msg,
             WsInMessage::ContextNote { .. }
                 | WsInMessage::StartGeneration { .. }
+                | WsInMessage::RetryInterruptedRun { .. }
                 | WsInMessage::Abort
                 | WsInMessage::UserMessage { .. }
                 | WsInMessage::ProviderSelect { .. }
@@ -93,6 +94,7 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::UserMessage { .. } => "user_message",
         WsInMessage::ContextNote { .. } => "context_note",
         WsInMessage::StartGeneration { .. } => "start_generation",
+        WsInMessage::RetryInterruptedRun { .. } => "retry_interrupted_run",
         WsInMessage::Hello { .. } => "hello",
         WsInMessage::Rollback { .. } => "rollback",
         WsInMessage::Confirm => "confirm",

@@ -4,6 +4,7 @@ use crate::product::coding_models::{
     CodingAgentRole, CodingAttemptScope, CodingEntryType, CodingExecutionAttempt,
     CodingExecutionStage, CodingProviderRole,
 };
+use crate::product::coding_work_item_context::load_coding_work_item_context;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
@@ -46,6 +47,7 @@ pub fn build_evaluation_context_pack(
         .as_deref()
         .unwrap_or(&attempt.work_item_id);
     let mut context_warnings = Vec::new();
+    let repo_diff_base = evaluation_repo_diff_base(attempt, &provider_role, &mut context_warnings);
     let coder_evidence = coder_evidence_pack(
         &coding_store,
         attempt,
@@ -85,7 +87,7 @@ pub fn build_evaluation_context_pack(
                 workspace_session_id: None,
             },
             group_context,
-            repo_context: repo_context(attempt, None, &mut context_warnings),
+            repo_context: repo_context(attempt, None, repo_diff_base, &mut context_warnings),
             openspec_context: OpenSpecContext {
                 enabled: false,
                 active_change_id: None,
@@ -123,9 +125,11 @@ pub fn build_evaluation_context_pack(
     )?;
     let work_item_session = latest_session_for(&sessions, &work_item.id, &WorkspaceType::WorkItem);
     let work_item_version = latest_artifact_version_for_session(&lifecycle, work_item_session)?;
+    let compiled_work_item_context = load_coding_work_item_context(&lifecycle_paths, attempt)?;
     let work_item_context = work_item_context(
         &work_item,
         work_item_version.as_ref(),
+        compiled_work_item_context.markdown.as_deref(),
         work_item_session,
         &mut context_warnings,
     );
@@ -141,7 +145,12 @@ pub fn build_evaluation_context_pack(
         design_specs,
         work_item: work_item_context,
         group_context,
-        repo_context: repo_context(attempt, Some(&work_item), &mut context_warnings),
+        repo_context: repo_context(
+            attempt,
+            Some(&work_item),
+            repo_diff_base,
+            &mut context_warnings,
+        ),
         openspec_context: OpenSpecContext {
             enabled: openspec_enabled,
             active_change_id: None,
@@ -155,6 +164,29 @@ pub fn build_evaluation_context_pack(
         quality_bypass_audits,
         context_warnings,
     })
+}
+
+fn evaluation_repo_diff_base<'a>(
+    attempt: &'a CodingExecutionAttempt,
+    provider_role: &EvaluationContextRole,
+    context_warnings: &mut Vec<String>,
+) -> Option<&'a str> {
+    if *provider_role == EvaluationContextRole::CodeReviewer
+        && attempt.scope == CodingAttemptScope::WorkItemGroup
+    {
+        let current_work_item_id = attempt
+            .current_work_item_id
+            .as_deref()
+            .unwrap_or(&attempt.work_item_id);
+        if current_work_item_id == attempt.work_item_id {
+            return Some(&attempt.base_branch);
+        }
+        if attempt.head_commit.is_none() {
+            context_warnings.push("code_review_diff_base_missing".to_string());
+        }
+        return attempt.head_commit.as_deref();
+    }
+    Some(&attempt.base_branch)
 }
 
 fn coder_evidence_pack(
@@ -183,7 +215,7 @@ fn coder_evidence_pack(
     if latest_run.is_none() {
         evidence_warnings.push("coder_role_run_missing".to_string());
     }
-    if handoff.is_none() {
+    if handoff.is_none() && matches!(provider_role, EvaluationContextRole::InternalReviewer) {
         evidence_warnings.push("work_item_handoff_missing".to_string());
     }
 

@@ -290,6 +290,7 @@ impl WorkspaceEngine {
             artifact_ref: None,
             is_revision: node.node_type == TimelineNodeType::AuthorRun
                 && node.stage == WsWorkspaceStage::Revision,
+            revision_feedback: None,
             base_artifact_ref: None,
             started_at: node.started_at.clone(),
             ended_at: node.completed_at.clone(),

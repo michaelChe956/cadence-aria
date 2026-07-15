@@ -1,101 +1,6 @@
 use super::*;
 
-pub(crate) struct ReviewBlockedGateInput<'a> {
-    pub(crate) attempt: &'a CodingExecutionAttempt,
-    pub(crate) node_id: &'a str,
-    pub(crate) stage: CodingExecutionStage,
-    pub(crate) role: CodingProviderRole,
-    pub(crate) title: String,
-    pub(crate) description: String,
-    pub(crate) reason_code: &'static str,
-    pub(crate) evidence_refs: Vec<String>,
-    pub(crate) raw_provider_output_ref: Option<String>,
-}
-
 impl CodingWorkspaceEngine {
-    pub(crate) async fn create_review_blocked_gate(
-        &self,
-        input: ReviewBlockedGateInput<'_>,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let ReviewBlockedGateInput {
-            attempt,
-            node_id,
-            stage,
-            role,
-            title,
-            description,
-            reason_code,
-            evidence_refs,
-            raw_provider_output_ref,
-        } = input;
-        let updated = self.store.update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Blocked,
-        )?;
-        let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage,
-            node_id: Some(node_id.to_string()),
-            role: Some(role),
-            title,
-            description,
-            reason_code: Some(reason_code.to_string()),
-            evidence_refs,
-            raw_provider_output_ref,
-            available_actions: vec![
-                coding_gate_action_for_id("retry_review").expect("retry review action"),
-                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
-                coding_gate_action_for_id("abort").expect("abort action"),
-            ],
-        })?;
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingGateRequired { gate })
-            .await;
-        Ok(updated)
-    }
-
-    pub(crate) async fn fail_provider_stream<T>(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        node_id: &str,
-        message: String,
-    ) -> Result<T, CodingWorkspaceEngineError> {
-        self.store.update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Failed,
-        )?;
-        self.complete_timeline_node(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            node_id,
-            CodingTimelineNodeStatus::Failed,
-            Some(message.clone()),
-        )
-        .await?;
-        self.handle_attempt_failed(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .await?;
-        Err(CodingWorkspaceEngineError::ProviderStream(message))
-    }
-
-    pub(crate) async fn fail_provider_stream_ended<T>(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        node_id: &str,
-    ) -> Result<T, CodingWorkspaceEngineError> {
-        self.fail_provider_stream(
-            attempt,
-            node_id,
-            "provider stream ended before completion".to_string(),
-        )
-        .await
-    }
-
     pub(crate) async fn emit_permission_request(
         &self,
         node_id: &str,
@@ -513,6 +418,13 @@ impl CodingWorkspaceEngine {
                     "coding_gate_action_not_allowed".to_string(),
                 )
             })?;
+        if action.action_type == CodingGateActionType::RetryReview
+            && super::failed_review_recovery::is_code_review_provider_interrupted_gate(&gate)
+        {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "coding_failed_review_recovery_requires_reservation".to_string(),
+            ));
+        }
         let should_resolve_gate =
             !matches!(action.action_type, CodingGateActionType::ProvideContext);
 
@@ -520,6 +432,22 @@ impl CodingWorkspaceEngine {
         let updated = match action.action_type {
             CodingGateActionType::Abort => {
                 self.handle_abort(project_id, issue_id, attempt_id).await?
+            }
+            CodingGateActionType::RetryCoding => {
+                let coder_provider = self
+                    .store
+                    .get_role_provider_config_snapshot(
+                        &current.project_id,
+                        &current.issue_id,
+                        &current.id,
+                    )?
+                    .coder;
+                let cleared = self.clear_attempt_provider_conversation(
+                    &current,
+                    &CodingProviderRole::Coder,
+                    &coder_provider,
+                )?;
+                self.resume_blocked_attempt_at_stage(&cleared, CodingExecutionStage::Coding)?
             }
             CodingGateActionType::RetryTestPlan
             | CodingGateActionType::RerunMissingSteps
@@ -614,7 +542,9 @@ impl CodingWorkspaceEngine {
                 )?
             }
             CodingGateActionType::SendToCoder => {
-                if is_code_review_blocked_gate(&gate) {
+                if super::failed_review_recovery::is_code_review_provider_interrupted_gate(&gate) {
+                    self.send_interrupted_code_review_to_coder(&current, extra_context)?
+                } else if is_code_review_blocked_gate(&gate) {
                     self.send_code_review_feedback_to_coder(&current, extra_context)?
                 } else {
                     self.send_review_limit_feedback_to_coder(&current, extra_context)?
@@ -685,31 +615,6 @@ impl CodingWorkspaceEngine {
                 .resolve_blocked_gate(project_id, issue_id, attempt_id, gate_id)?;
         }
         Ok(updated)
-    }
-
-    pub(crate) fn latest_missing_required_steps(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<Vec<String>, ProductStoreError> {
-        let Some(report) = self
-            .store
-            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .last()
-        else {
-            return Ok(Vec::new());
-        };
-        let mut steps = Vec::new();
-        for step in report
-            .missing_required_steps
-            .into_iter()
-            .chain(report.skipped_required_steps)
-        {
-            if !steps.contains(&step) {
-                steps.push(step);
-            }
-        }
-        Ok(steps)
     }
 
     pub(crate) fn resume_blocked_attempt_at_stage(

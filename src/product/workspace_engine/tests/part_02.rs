@@ -175,6 +175,7 @@ fn workspace_provider_inputs_use_three_hour_timeout() {
         findings: Vec::new(),
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
 
     assert_eq!(
@@ -578,6 +579,30 @@ async fn verdict_and_artifact_ref_are_persisted_to_node_detail() {
         .unwrap();
     assert_eq!(detail.verdict.as_ref().unwrap()["verdict"], "pass");
     assert_eq!(detail.artifact_ref.as_ref().unwrap().version, 2);
+}
+
+#[tokio::test]
+async fn complete_review_persists_structured_output_diagnostic() {
+    let (_tmp, lifecycle_store, mut engine) = persistent_test_engine();
+    let node_id = create_reviewer_run_node(&mut engine).await;
+    let completion = crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+        "review without requested structured output",
+        None,
+    );
+    let error = engine
+        .parse_review_completion_for_active_node(&completion)
+        .expect_err("plain completion should not be trusted as a review verdict");
+    let verdict = fallback_review_verdict(&completion, &error, false);
+
+    engine.complete_review(completion, verdict).await;
+
+    let detail = lifecycle_store
+        .load_node_detail(&engine.session().session_id, &node_id)
+        .unwrap();
+    let diagnostic = &detail.verdict.as_ref().unwrap()["structured_output_diagnostic"];
+    assert_eq!(diagnostic["code"], "structured_output_not_requested");
+    assert_eq!(diagnostic["repair_attempted"], false);
+    assert_eq!(diagnostic["repair_succeeded"], false);
 }
 
 #[tokio::test]

@@ -15,6 +15,7 @@ use cadence_aria::web::test_controls::TestControlledFakeStreamingProvider;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
@@ -368,6 +369,30 @@ pub(crate) struct QueuedSplitStreamingProvider {
 pub(crate) enum QueuedSplitOutput {
     Json(Value),
     RawStdout(String),
+    Pending,
+}
+
+#[derive(Clone)]
+pub(crate) struct CountedReviewerStreamingProvider {
+    starts: Arc<AtomicUsize>,
+}
+
+impl CountedReviewerStreamingProvider {
+    pub(crate) fn new(starts: Arc<AtomicUsize>) -> Self {
+        Self { starts }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CountedReviewerStreamingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        FakeStreamingProvider.start(input, cancel).await
+    }
 }
 
 impl QueuedSplitStreamingProvider {
@@ -432,19 +457,22 @@ impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
             .pop_front()
             .unwrap_or_else(|| QueuedSplitOutput::Json(valid_split_output()));
         let full_output = match output {
-            QueuedSplitOutput::Json(output) => {
-                format!(
+            QueuedSplitOutput::Json(output) => Some(format!(
                     "Fake Work Item Plan streaming draft\n\n\
                      <ARIA_STRUCTURED_OUTPUT>{}</ARIA_STRUCTURED_OUTPUT>",
                     output
-                )
-            }
-            QueuedSplitOutput::RawStdout(output) => output,
+                )),
+            QueuedSplitOutput::RawStdout(output) => Some(output),
+            QueuedSplitOutput::Pending => None,
         };
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel(8);
 
         tokio::spawn(async move {
+            let Some(full_output) = full_output else {
+                cancel.cancelled().await;
+                return;
+            };
             if cancel.is_cancelled() {
                 return;
             }
@@ -461,10 +489,7 @@ impl StreamingProviderAdapter for QueuedSplitStreamingProvider {
                 return;
             }
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output, None)))
                 .await;
         });
 

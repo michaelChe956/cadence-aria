@@ -14,13 +14,16 @@ use crate::product::coding_models::{
 };
 use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
-    CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+    CreateStorySpecInput, CreateVerificationPlanInput, CreateWorkItemInput,
+    CreateWorkspaceSessionInput, LifecycleStore,
 };
 use crate::product::models::{
     IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName,
+    RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
+    VerificationCommandSource, VerificationFallbackPolicy, VerificationScope,
     WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus, WorkItemGenerationMode,
-    WorkItemPlanCommitState, WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction,
-    WorkItemPlanStatus, WorkspaceType,
+    WorkItemKind, WorkItemPlanCommitState, WorkItemPlanCompileStatus,
+    WorkItemPlanCompileTransaction, WorkItemPlanStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot};
@@ -31,6 +34,106 @@ mod tester_execution;
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
 const REPOSITORY_ID: &str = "repository_0001";
+
+#[test]
+fn evaluation_context_uses_compiled_work_item_without_artifact_version() {
+    let tmp = TempDir::new().expect("tempdir");
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let verification_plan_id = "verification_plan_0001";
+
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "Compiled evaluation context".to_string(),
+            planned_implementation_context: Some(
+                "compiled evaluation implementation context".to_string(),
+            ),
+            planned_handoff_summary: Some("compiled evaluation handoff".to_string()),
+            kind: WorkItemKind::Backend,
+            forbidden_write_scopes: vec!["tests/**".to_string()],
+            verification_plan_ref: Some(verification_plan_id.to_string()),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create work item");
+    lifecycle
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some(verification_plan_id.to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            repository_profile_ref: None,
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "cmd_evaluation_context".to_string(),
+                label: "evaluation context test".to_string(),
+                command: "cargo test --locked --lib evaluation_context".to_string(),
+                cwd: ".".to_string(),
+                purpose: "prove evaluation context uses compiled work item".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: vec!["cmd_evaluation_context".to_string()],
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("create verification plan");
+
+    let attempt = CodingExecutionAttempt {
+        id: "coding_attempt_0001".to_string(),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        work_item_id: "work_item_0001".to_string(),
+        attempt_no: 1,
+        scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
+        status: CodingAttemptStatus::Running,
+        stage: CodingExecutionStage::CodeReview,
+        base_branch: "main".to_string(),
+        branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+        worktree_path: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::Codex,
+            reviewer: Some(ProviderName::ClaudeCode),
+            review_rounds: 1,
+        },
+        provider_conversations: Vec::new(),
+        rework_count: 0,
+        max_auto_rework: 2,
+        work_item_group_id: None,
+        current_work_item_id: Some("work_item_0001".to_string()),
+        active_unit_id: None,
+        head_commit: None,
+        pushed_remote: None,
+        review_request_id: None,
+        created_at: "2026-07-14T00:00:00Z".to_string(),
+        updated_at: "2026-07-14T00:00:00Z".to_string(),
+        completed_at: None,
+    };
+
+    let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
+        .expect("evaluation context");
+
+    assert!(
+        pack.work_item
+            .raw_markdown_or_sections
+            .contains("compiled evaluation implementation context")
+    );
+    assert!(pack.work_item.raw_markdown_or_sections.contains("tests/**"));
+    assert!(
+        pack.work_item
+            .raw_markdown_or_sections
+            .contains("cargo test --locked --lib evaluation_context")
+    );
+}
 
 #[test]
 fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
@@ -275,6 +378,74 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
     assert!(pack.repo_context.diff_stat.contains("Untracked files"));
     assert!(pack.repo_context.diff_stat.contains("new.txt"));
     assert!(!pack.repo_context.diff_truncated);
+}
+
+#[test]
+fn code_reviewer_does_not_require_final_handoff_before_approval() {
+    let tmp = TempDir::new().expect("tempdir");
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let work_item = lifecycle
+        .create_work_item(CreateWorkItemInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "Pre-review evidence Work Item".to_string(),
+            ..Default::default()
+        })
+        .expect("create work item");
+    let attempt = CodingExecutionAttempt {
+        id: "coding_attempt_0001".to_string(),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        work_item_id: work_item.id.clone(),
+        attempt_no: 1,
+        scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
+        status: CodingAttemptStatus::Running,
+        stage: CodingExecutionStage::CodeReview,
+        base_branch: "main".to_string(),
+        branch_name: "aria/issues/issue_0001".to_string(),
+        worktree_path: None,
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: ProviderName::Codex,
+            reviewer: Some(ProviderName::ClaudeCode),
+            review_rounds: 1,
+        },
+        rework_count: 0,
+        max_auto_rework: 2,
+        work_item_group_id: None,
+        current_work_item_id: Some(work_item.id.clone()),
+        active_unit_id: None,
+        head_commit: Some("abc123".to_string()),
+        pushed_remote: None,
+        review_request_id: None,
+        provider_conversations: Vec::new(),
+        created_at: "2026-06-10T00:00:00Z".to_string(),
+        updated_at: "2026-06-10T00:00:00Z".to_string(),
+        completed_at: None,
+    };
+
+    let reviewer_pack =
+        build_evaluation_context_pack(paths.clone(), &attempt, EvaluationContextRole::CodeReviewer)
+            .expect("code reviewer pack");
+    assert!(
+        !reviewer_pack
+            .coder_evidence
+            .expect("code reviewer evidence")
+            .evidence_warnings
+            .contains(&"work_item_handoff_missing".to_string())
+    );
+
+    let final_pack =
+        build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::InternalReviewer)
+            .expect("internal reviewer pack");
+    assert!(
+        final_pack
+            .coder_evidence
+            .expect("internal reviewer evidence")
+            .evidence_warnings
+            .contains(&"work_item_handoff_missing".to_string())
+    );
 }
 
 #[test]

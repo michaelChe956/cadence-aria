@@ -215,10 +215,9 @@ impl WorkspaceEngine {
                                 )
                                 .await;
                         }
-                        ProviderEvent::Completed {
-                            full_output,
-                            provider_session_id,
-                        } => {
+                        ProviderEvent::Completed(completion) => {
+                            let full_output = completion.full_output;
+                            let provider_session_id = completion.provider_session_id;
                             let display_content = display_filter.finish();
                             self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
                             let _ = self.flush_stream_buffer(&node_id).await;

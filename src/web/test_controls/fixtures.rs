@@ -190,6 +190,7 @@ pub(super) fn create_large_workspace_fixture(
                     verdict: None,
                     artifact_ref: None,
                     is_revision: false,
+                    revision_feedback: None,
                     base_artifact_ref: None,
                     started_at: now.clone(),
                     ended_at: Some(now.clone()),

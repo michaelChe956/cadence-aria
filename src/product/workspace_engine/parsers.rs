@@ -80,13 +80,58 @@ pub(crate) fn extract_markdown_fence_json(output: &str) -> Option<(String, Strin
     Some((comments, json))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewStructuredOutputErrorCode {
+    MissingVerdict,
+    InvalidVerdict,
+    InvalidReviewScope,
+    MalformedFindings,
+    InvalidOutlineReference,
+    InvalidGenerationRound,
+}
+
+impl ReviewStructuredOutputErrorCode {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::MissingVerdict => "missing_verdict",
+            Self::InvalidVerdict => "invalid_verdict",
+            Self::InvalidReviewScope => "invalid_review_scope",
+            Self::MalformedFindings => "malformed_findings",
+            Self::InvalidOutlineReference => "invalid_outline_reference",
+            Self::InvalidGenerationRound => "invalid_generation_round",
+        }
+    }
+
+    pub(crate) fn message(&self) -> &'static str {
+        match self {
+            Self::MissingVerdict => "审核结论缺失或不是字符串",
+            Self::InvalidVerdict => "审核结论不符合当前范围的 schema",
+            Self::InvalidReviewScope => "审核 review_scope 缺失、无效或与当前范围不一致",
+            Self::MalformedFindings => "审核 findings 结构不合法",
+            Self::InvalidOutlineReference => "审核引用了无效的 outline",
+            Self::InvalidGenerationRound => "审核 generation round 缺失或为空",
+        }
+    }
+}
+
 pub(crate) fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerdict> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let parsed_verdict = match value.get("verdict")?.as_str()? {
+    parse_review_value(&value, comments).ok()
+}
+
+pub(crate) fn parse_review_value(
+    value: &serde_json::Value,
+    comments: &str,
+) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
+    let verdict = value
+        .get("verdict")
+        .and_then(|value| value.as_str())
+        .ok_or(ReviewStructuredOutputErrorCode::MissingVerdict)?;
+    let parsed_verdict = match verdict {
         "pass" => ReviewVerdictType::Pass,
         "revise" => ReviewVerdictType::Revise,
         "needs_human" => ReviewVerdictType::NeedsHuman,
-        _ => return None,
+        _ => return Err(ReviewStructuredOutputErrorCode::InvalidVerdict),
     };
     let summary = value
         .get("summary")
@@ -98,6 +143,9 @@ pub(crate) fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerd
         })
         .to_string();
     let parsed_findings = parse_review_findings(value.get("findings"));
+    if parsed_findings.malformed {
+        return Err(ReviewStructuredOutputErrorCode::MalformedFindings);
+    }
     let review_gate = review_gate_for(&parsed_verdict, &parsed_findings);
     let verdict = match review_gate {
         ReviewGate::RequiresRevision => ReviewVerdictType::Revise,
@@ -109,13 +157,14 @@ pub(crate) fn parse_review_json(json: &str, comments: &str) -> Option<ReviewVerd
         },
         ReviewGate::UserTriageRequired => ReviewVerdictType::NeedsHuman,
     };
-    Some(ReviewVerdict {
+    Ok(ReviewVerdict {
         verdict,
         comments: comments.trim().to_string(),
         summary,
         findings: parsed_findings.findings,
         review_gate,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     })
 }
 
@@ -126,7 +175,44 @@ pub(crate) fn parse_work_item_plan_review_json(
     scope: WorkItemPlanReviewScope,
 ) -> Option<ReviewVerdict> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let parsed_verdict = parse_work_item_plan_review_verdict(value.get("verdict")?.as_str()?);
+    parse_work_item_plan_review_value(&value, comments, valid_outline_ids, scope).ok()
+}
+
+pub(crate) fn parse_work_item_plan_review_value(
+    value: &serde_json::Value,
+    comments: &str,
+    valid_outline_ids: &[String],
+    scope: WorkItemPlanReviewScope,
+) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
+    let payload_scope = value
+        .get("review_scope")
+        .and_then(|value| value.as_str())
+        .ok_or(ReviewStructuredOutputErrorCode::InvalidReviewScope)?;
+    let expected_scope = match scope {
+        WorkItemPlanReviewScope::Outline => "outline",
+        WorkItemPlanReviewScope::Item => "item",
+        WorkItemPlanReviewScope::Batch => "batch",
+    };
+    if payload_scope != expected_scope {
+        return Err(ReviewStructuredOutputErrorCode::InvalidReviewScope);
+    }
+    let verdict = value
+        .get("verdict")
+        .and_then(|value| value.as_str())
+        .ok_or(ReviewStructuredOutputErrorCode::MissingVerdict)?;
+    let parsed_verdict = match (&scope, verdict) {
+        (_, "pass") => WorkItemPlanReviewVerdict::Pass,
+        (WorkItemPlanReviewScope::Outline | WorkItemPlanReviewScope::Item, "revise") => {
+            WorkItemPlanReviewVerdict::Revise
+        }
+        (WorkItemPlanReviewScope::Batch, "revise_batch") => WorkItemPlanReviewVerdict::ReviseBatch,
+        (_, "needs_human") => WorkItemPlanReviewVerdict::NeedsHuman,
+        (
+            WorkItemPlanReviewScope::Item | WorkItemPlanReviewScope::Batch,
+            "plan_reopen_required",
+        ) => WorkItemPlanReviewVerdict::PlanReopenRequired,
+        _ => return Err(ReviewStructuredOutputErrorCode::InvalidVerdict),
+    };
     let summary = value
         .get("summary")
         .and_then(|value| value.as_str())
@@ -138,28 +224,44 @@ pub(crate) fn parse_work_item_plan_review_json(
             WorkItemPlanReviewVerdict::PlanReopenRequired => "需要重开 Outline",
         })
         .to_string();
-    let target_outline_id = value
-        .get("target_outline_id")
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string);
+    let target_outline_id = match value.get("target_outline_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) => Some(id.clone()),
+        Some(_) => return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference),
+    };
     if target_outline_id
         .as_ref()
         .is_some_and(|id| !valid_outline_ids.iter().any(|valid| valid == id))
     {
-        return Some(work_item_plan_review_invalid_reference(comments));
+        return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference);
     }
+    let parsed_findings = parse_review_findings(value.get("findings"));
+    if parsed_findings.malformed {
+        return Err(ReviewStructuredOutputErrorCode::MalformedFindings);
+    }
+    let effective_verdict =
+        effective_work_item_plan_review_verdict(&parsed_verdict, &scope, &parsed_findings);
 
     let (affects_items, warnings, total_affects, invalid_affects) =
-        parse_work_item_plan_review_affects_items(value.get("affects_items"), valid_outline_ids);
-    if total_affects > 0 && invalid_affects * 2 > total_affects {
-        return Some(work_item_plan_review_invalid_reference(comments));
+        parse_work_item_plan_review_affects_items(
+            value.get("affects_items"),
+            value.get("findings"),
+            valid_outline_ids,
+            &scope,
+        );
+    let invalid_affects_are_fatal = total_affects > 0
+        && invalid_affects * 2 > total_affects
+        && !(scope == WorkItemPlanReviewScope::Outline
+            && effective_verdict == WorkItemPlanReviewVerdict::Pass);
+    if invalid_affects_are_fatal {
+        return Err(ReviewStructuredOutputErrorCode::InvalidOutlineReference);
     }
 
-    let parsed_findings = parse_review_findings(value.get("findings"));
     let generation_round_id = value
         .get("generation_round_id")
         .and_then(|value| value.as_str())
-        .unwrap_or("generation_round_unknown")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ReviewStructuredOutputErrorCode::InvalidGenerationRound)?
         .to_string();
     let draft_id = value
         .get("draft_id")
@@ -169,8 +271,6 @@ pub(crate) fn parse_work_item_plan_review_json(
         .get("batch_id")
         .and_then(|value| value.as_str())
         .map(ToString::to_string);
-    let effective_verdict =
-        effective_work_item_plan_review_verdict(&parsed_verdict, &scope, &parsed_findings);
     let (generic_verdict, review_gate, review_action, gates) =
         work_item_plan_review_routing(&effective_verdict, &scope);
     let extension = WorkItemPlanReviewComplete {
@@ -186,25 +286,15 @@ pub(crate) fn parse_work_item_plan_review_json(
         warnings,
     };
 
-    Some(ReviewVerdict {
+    Ok(ReviewVerdict {
         verdict: generic_verdict,
         comments: comments.trim().to_string(),
         summary,
         findings: parsed_findings.findings,
         review_gate,
         work_item_plan_review: Some(extension),
+        structured_output_diagnostic: None,
     })
-}
-
-pub(crate) fn parse_work_item_plan_review_verdict(value: &str) -> WorkItemPlanReviewVerdict {
-    match value {
-        "pass" => WorkItemPlanReviewVerdict::Pass,
-        "revise" => WorkItemPlanReviewVerdict::Revise,
-        "revise_batch" => WorkItemPlanReviewVerdict::ReviseBatch,
-        "needs_human" => WorkItemPlanReviewVerdict::NeedsHuman,
-        "plan_reopen_required" => WorkItemPlanReviewVerdict::PlanReopenRequired,
-        _ => WorkItemPlanReviewVerdict::NeedsHuman,
-    }
 }
 
 fn effective_work_item_plan_review_verdict(
@@ -290,65 +380,112 @@ pub(crate) fn work_item_plan_review_routing(
 }
 
 pub(crate) fn parse_work_item_plan_review_affects_items(
-    value: Option<&serde_json::Value>,
+    legacy_value: Option<&serde_json::Value>,
+    findings_value: Option<&serde_json::Value>,
     valid_outline_ids: &[String],
+    scope: &WorkItemPlanReviewScope,
 ) -> (
     Vec<WorkItemPlanReviewAffectedItem>,
     Vec<String>,
     usize,
     usize,
 ) {
-    let Some(items) = value.and_then(|value| value.as_array()) else {
-        return (Vec::new(), Vec::new(), 0, 0);
-    };
-
     let mut valid_items = Vec::new();
     let mut warnings = Vec::new();
+    let mut total_count = 0;
     let mut invalid_count = 0;
-    for item in items {
-        let outline_index = item
-            .get("outline_index")
-            .and_then(|value| value.as_u64())
-            .and_then(|value| u32::try_from(value).ok());
-        let target_outline_id = item
-            .get("target_outline_id")
-            .and_then(|value| value.as_str())
-            .map(ToString::to_string);
-        let index_valid = outline_index.is_none_or(|index| {
-            usize::try_from(index)
-                .ok()
-                .is_some_and(|index| index < valid_outline_ids.len())
+    let findings = findings_value.and_then(|value| value.as_array());
+    let findings_have_targets = scope == &WorkItemPlanReviewScope::Outline
+        && findings.is_some_and(|findings| {
+            findings.iter().any(|finding| {
+                finding
+                    .get("target_outline_id")
+                    .is_some_and(|value| !value.is_null())
+            })
         });
-        let target_valid = target_outline_id
-            .as_ref()
-            .is_some_and(|id| valid_outline_ids.iter().any(|valid| valid == id));
-        let valid = index_valid && (target_outline_id.is_none() || target_valid);
 
-        if valid && (outline_index.is_some() || target_outline_id.is_some()) {
-            valid_items.push(WorkItemPlanReviewAffectedItem {
+    if !findings_have_targets && let Some(items) = legacy_value.and_then(|value| value.as_array()) {
+        for item in items {
+            total_count += 1;
+            let (outline_index, target_outline_id) = if let Some(id) = item.as_str() {
+                (None, Some(id.to_string()))
+            } else {
+                (
+                    item.get("outline_index")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| u32::try_from(value).ok()),
+                    item.get("target_outline_id")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string),
+                )
+            };
+            collect_work_item_plan_review_reference(
                 outline_index,
                 target_outline_id,
-            });
-        } else {
-            invalid_count += 1;
-            warnings.push(format!(
-                "invalid_reference: target_outline_id={} not found",
-                target_outline_id.as_deref().unwrap_or("<missing>")
-            ));
+                valid_outline_ids,
+                &mut valid_items,
+                &mut warnings,
+                &mut invalid_count,
+            );
         }
     }
 
-    (valid_items, warnings, items.len(), invalid_count)
+    if findings_have_targets && let Some(findings) = findings {
+        for finding in findings {
+            let Some(target_value) = finding.get("target_outline_id") else {
+                continue;
+            };
+            if target_value.is_null() {
+                continue;
+            }
+            total_count += 1;
+            let target_outline_id = target_value.as_str().map(ToString::to_string);
+            collect_work_item_plan_review_reference(
+                None,
+                target_outline_id,
+                valid_outline_ids,
+                &mut valid_items,
+                &mut warnings,
+                &mut invalid_count,
+            );
+        }
+    }
+
+    (valid_items, warnings, total_count, invalid_count)
 }
 
-pub(crate) fn work_item_plan_review_invalid_reference(comments: &str) -> ReviewVerdict {
-    ReviewVerdict {
-        verdict: ReviewVerdictType::NeedsHuman,
-        comments: comments.trim().to_string(),
-        summary: "WorkItemPlan reviewer 引用无效，需要人工确认".to_string(),
-        findings: Vec::new(),
-        review_gate: ReviewGate::UserTriageRequired,
-        work_item_plan_review: None,
+fn collect_work_item_plan_review_reference(
+    outline_index: Option<u32>,
+    target_outline_id: Option<String>,
+    valid_outline_ids: &[String],
+    valid_items: &mut Vec<WorkItemPlanReviewAffectedItem>,
+    warnings: &mut Vec<String>,
+    invalid_count: &mut usize,
+) {
+    let index_valid = outline_index.is_none_or(|index| {
+        usize::try_from(index)
+            .ok()
+            .is_some_and(|index| index < valid_outline_ids.len())
+    });
+    let target_valid = target_outline_id
+        .as_ref()
+        .is_some_and(|id| valid_outline_ids.iter().any(|valid| valid == id));
+    let valid = index_valid && (target_outline_id.is_none() || target_valid);
+
+    if valid && (outline_index.is_some() || target_outline_id.is_some()) {
+        let affected_item = WorkItemPlanReviewAffectedItem {
+            outline_index,
+            target_outline_id,
+        };
+        if !valid_items.contains(&affected_item) {
+            valid_items.push(affected_item);
+        }
+    } else {
+        *invalid_count += 1;
+        warnings.push(format!(
+            "invalid_reference: target_outline_id={} not found",
+            target_outline_id.as_deref().unwrap_or("<missing>")
+        ));
     }
 }
 

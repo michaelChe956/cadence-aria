@@ -95,6 +95,56 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
 }
 
 #[tokio::test]
+async fn coding_attempt_snapshot_does_not_reactivate_historical_blocked_node() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
+
+    let (status, attempt) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
+
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut blocked_node = sample_running_node(attempt_id);
+    blocked_node.id = "coding_node_0001".to_string();
+    blocked_node.status = CodingTimelineNodeStatus::Blocked;
+    blocked_node.summary = Some("code review 被阻塞".to_string());
+    blocked_node.completed_at = Some("2026-05-23T00:03:00Z".to_string());
+    let mut completed_retry_node = sample_completed_node(attempt_id);
+    completed_retry_node.id = "coding_node_0002".to_string();
+    completed_retry_node.stage = CodingExecutionStage::CodeReview;
+    completed_retry_node.started_at = "2026-05-23T00:04:00Z".to_string();
+    completed_retry_node.completed_at = Some("2026-05-23T00:05:00Z".to_string());
+    store
+        .save_timeline_node(blocked_node)
+        .expect("save blocked node");
+    store
+        .save_timeline_node(completed_retry_node)
+        .expect("save completed retry node");
+
+    let (status, snapshot) = request_json(
+        app,
+        Method::GET,
+        "/api/coding-attempts/coding_attempt_0001",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(snapshot["active_node_id"], Value::Null);
+}
+
+#[tokio::test]
 async fn aborts_coding_attempt_and_allows_next_attempt_for_same_work_item() {
     let root = tempdir().expect("root");
     let repo = git_repo();

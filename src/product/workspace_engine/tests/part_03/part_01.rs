@@ -26,6 +26,7 @@ fn parse_review_verdict_malformed_findings_require_user_triage() {
 fn work_item_plan_review_revise_batch_maps_to_needs_human_generic_verdict_with_extension() {
     let json = r#"{
         "verdict": "revise_batch",
+        "review_scope": "batch",
         "summary": "整组需要重写",
         "generation_round_id": "round_0001",
         "batch_id": "batch_0001"
@@ -136,33 +137,36 @@ fn work_item_plan_outline_review_pass_with_strong_finding_requires_outline_revis
 }
 
 #[test]
-fn work_item_plan_review_invalid_target_outline_id_downgrades_to_needs_human() {
+fn parse_work_item_plan_review_value_reports_invalid_target_outline_id() {
     let json = r#"{
         "verdict": "plan_reopen_required",
+        "review_scope": "item",
         "summary": "outline 不可局部修复",
         "target_outline_id": "outline_missing",
         "generation_round_id": "round_0001",
         "draft_id": "draft_0001"
     }"#;
 
-    let verdict = parse_work_item_plan_review_json(
-        json,
+    let value = serde_json::from_str(json).expect("review json");
+    let error = parse_work_item_plan_review_value(
+        &value,
         "raw comments",
         &["outline_api".to_string()],
         WorkItemPlanReviewScope::Item,
     )
-    .expect("work item plan review");
+    .expect_err("invalid target outline should fail");
 
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
-    assert!(verdict.work_item_plan_review.is_none());
-    assert!(verdict.summary.contains("引用无效"));
+    assert_eq!(
+        error,
+        ReviewStructuredOutputErrorCode::InvalidOutlineReference
+    );
 }
 
 #[test]
 fn work_item_plan_review_drops_invalid_affects_items_below_threshold() {
     let json = r#"{
         "verdict": "needs_human",
+        "review_scope": "batch",
         "summary": "部分 item 需要人工判断",
         "generation_round_id": "round_0001",
         "affects_items": [
@@ -196,9 +200,10 @@ fn work_item_plan_review_drops_invalid_affects_items_below_threshold() {
 }
 
 #[test]
-fn work_item_plan_review_invalid_affects_items_over_half_downgrades() {
+fn parse_work_item_plan_review_value_reports_too_many_invalid_affects_items() {
     let json = r#"{
         "verdict": "needs_human",
+        "review_scope": "batch",
         "summary": "引用大量不存在 item",
         "generation_round_id": "round_0001",
         "affects_items": [
@@ -208,18 +213,107 @@ fn work_item_plan_review_invalid_affects_items_over_half_downgrades() {
         ]
     }"#;
 
-    let verdict = parse_work_item_plan_review_json(
-        json,
+    let value = serde_json::from_str(json).expect("review json");
+    let error = parse_work_item_plan_review_value(
+        &value,
         "raw comments",
         &["outline_api".to_string(), "outline_ui".to_string()],
         WorkItemPlanReviewScope::Batch,
     )
-    .expect("work item plan review");
+    .expect_err("too many invalid references should fail");
 
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
-    assert!(verdict.work_item_plan_review.is_none());
-    assert!(verdict.summary.contains("引用无效"));
+    assert_eq!(
+        error,
+        ReviewStructuredOutputErrorCode::InvalidOutlineReference
+    );
+}
+
+#[test]
+fn parse_work_item_plan_review_value_rejects_cross_scope_verdicts() {
+    let cases = [
+        (WorkItemPlanReviewScope::Outline, "revise_batch"),
+        (WorkItemPlanReviewScope::Outline, "plan_reopen_required"),
+        (WorkItemPlanReviewScope::Item, "revise_batch"),
+        (WorkItemPlanReviewScope::Batch, "revise"),
+    ];
+
+    for (scope, verdict) in cases {
+        let review_scope = match &scope {
+            WorkItemPlanReviewScope::Outline => "outline",
+            WorkItemPlanReviewScope::Item => "item",
+            WorkItemPlanReviewScope::Batch => "batch",
+        };
+        let value = serde_json::json!({
+            "verdict": verdict,
+            "review_scope": review_scope,
+            "generation_round_id": "round_0001"
+        });
+
+        assert_eq!(
+            parse_work_item_plan_review_value(&value, "", &[], scope.clone()),
+            Err(ReviewStructuredOutputErrorCode::InvalidVerdict),
+            "scope {scope:?} must reject verdict {verdict}"
+        );
+    }
+}
+
+#[test]
+fn parse_work_item_plan_review_value_rejects_payload_scope_mismatch_before_routing() {
+    let cases = [
+        (WorkItemPlanReviewScope::Outline, "item"),
+        (WorkItemPlanReviewScope::Outline, "batch"),
+        (WorkItemPlanReviewScope::Item, "outline"),
+        (WorkItemPlanReviewScope::Item, "batch"),
+        (WorkItemPlanReviewScope::Batch, "outline"),
+        (WorkItemPlanReviewScope::Batch, "item"),
+    ];
+
+    for (expected_scope, payload_scope) in cases {
+        for verdict in ["pass", "needs_human"] {
+            let value = serde_json::json!({
+                "verdict": verdict,
+                "review_scope": payload_scope,
+                "generation_round_id": "round_0001",
+                "summary": "cross scope",
+                "findings": []
+            });
+
+            let error = parse_work_item_plan_review_value(
+                &value,
+                "",
+                &["outline_a".to_string()],
+                expected_scope.clone(),
+            )
+            .expect_err("payload review_scope mismatch must fail before verdict routing");
+
+            assert_eq!(
+                error,
+                ReviewStructuredOutputErrorCode::InvalidReviewScope,
+                "expected={expected_scope:?}, payload={payload_scope}, verdict={verdict}"
+            );
+            assert_eq!(error.as_str(), "invalid_review_scope");
+        }
+    }
+}
+
+#[test]
+fn parse_work_item_plan_review_value_requires_payload_scope() {
+    let value = serde_json::json!({
+        "verdict": "pass",
+        "generation_round_id": "round_0001",
+        "summary": "missing scope",
+        "findings": []
+    });
+
+    let error = parse_work_item_plan_review_value(
+        &value,
+        "",
+        &["outline_a".to_string()],
+        WorkItemPlanReviewScope::Outline,
+    )
+    .expect_err("missing review_scope must fail strict parsing");
+
+    assert_eq!(error, ReviewStructuredOutputErrorCode::InvalidReviewScope);
 }
 
 #[test]
@@ -243,6 +337,15 @@ fn review_complete_event_preserves_work_item_plan_extension() {
         findings: Vec::new(),
         review_gate: ReviewGate::UserTriageRequired,
         work_item_plan_review: Some(extension.clone()),
+        structured_output_diagnostic: Some(
+            crate::web::workspace_ws_types::StructuredOutputDiagnostic {
+                code: "invalid_outline_reference".to_string(),
+                message: "review target outline reference is invalid".to_string(),
+                repair_attempted: false,
+                repair_succeeded: false,
+                raw_output_preview: Some("invalid outline".to_string()),
+            },
+        ),
     };
 
     let event = review_complete_event_from_verdict("node_review_001".to_string(), 2, &verdict);
@@ -250,8 +353,12 @@ fn review_complete_event_preserves_work_item_plan_extension() {
     match event {
         EngineEvent::ReviewComplete {
             work_item_plan_review: Some(actual),
+            structured_output_diagnostic: Some(diagnostic),
             ..
-        } => assert_eq!(actual, extension),
+        } => {
+            assert_eq!(actual, extension);
+            assert_eq!(diagnostic.code, "invalid_outline_reference");
+        }
         _ => panic!("expected review extension"),
     }
 }
@@ -319,11 +426,11 @@ async fn optional_review_findings_enter_human_confirm_for_all_workspace_types() 
 
 #[tokio::test]
 async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
-    let (_tmp, store) = setup();
+    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_optional_review");
     let (tx, mut rx) = mpsc::channel(64);
-    let mut session = make_session("sess_wip_outline_optional_review");
-    session.workspace_type = WorkspaceType::WorkItemPlan;
-    session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
+    engine.event_tx = tx;
+    engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
         outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
             outline: test_work_item_plan_outline(Vec::new()),
             design_context_gaps: vec![],
@@ -333,7 +440,6 @@ async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
             selected_generation_mode: None,
         }),
     });
-    let mut engine = WorkspaceEngine::new(store, tx, session);
     engine.begin_work_item_plan_outline_review_run().await;
 
     engine
@@ -437,6 +543,7 @@ async fn work_item_plan_outline_optional_choice_can_skip_and_continue() {
             affects_items: Vec::new(),
             warnings: Vec::new(),
         }),
+        structured_output_diagnostic: None,
     });
     engine
         .enter_review_decision(1, "仅有可选建议".to_string())
@@ -504,6 +611,7 @@ async fn work_item_plan_optional_outline_review_actions_survive_session_restore(
             affects_items: Vec::new(),
             warnings: Vec::new(),
         }),
+        structured_output_diagnostic: None,
     };
     let review_node_id = engine
         .create_timeline_node(TimelineNodeDraft {
@@ -646,4 +754,3 @@ async fn request_outline_revision_is_allowed_from_outline_confirm_node() {
         "requesting outline revision from confirm should start a new outline run"
     );
 }
-

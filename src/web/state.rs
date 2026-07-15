@@ -1,19 +1,28 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
+use crate::cross_cutting::aria_state_paths::AriaStatePaths;
+use crate::cross_cutting::bounded_command_runner::{
+    BoundedCommandRunner, TokioBoundedCommandRunner,
+};
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
+use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use crate::cross_cutting::provider_health::{
+    ProviderHealthService, ProviderHealthSnapshot, SystemProviderHealthClock,
+};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCommand;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
-use crate::web::provider_availability::provider_name_available;
+use crate::web::handlers::RepositoryRegistrationDependencies;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
@@ -34,11 +43,74 @@ pub struct CodingRunRegistry {
 struct CodingRunRegistryInner {
     next_run_id: u64,
     runs: HashMap<String, HashMap<u64, mpsc::Sender<CodingRunnerCommand>>>,
+    reservations: HashMap<String, u64>,
+    exclusive_runs: HashMap<String, u64>,
+    attempt_guards: HashMap<String, Arc<AsyncMutex<()>>>,
+    attempt_mutation_guards: HashMap<String, Arc<AsyncMutex<()>>>,
+}
+
+pub(crate) struct CodingAttemptMutationLease {
+    _guard: OwnedMutexGuard<()>,
+}
+
+pub struct CodingRunReservation {
+    registry: CodingRunRegistry,
+    attempt_id: String,
+    reservation_id: u64,
+    released: bool,
+}
+
+impl CodingRunReservation {
+    pub fn activate(mut self, command_tx: mpsc::Sender<CodingRunnerCommand>) -> Option<u64> {
+        let mut inner = self
+            .registry
+            .inner
+            .lock()
+            .expect("coding run registry lock");
+        if inner.reservations.get(&self.attempt_id) != Some(&self.reservation_id) {
+            return None;
+        }
+        inner.reservations.remove(&self.attempt_id);
+        inner
+            .runs
+            .entry(self.attempt_id.clone())
+            .or_default()
+            .insert(self.reservation_id, command_tx);
+        inner
+            .exclusive_runs
+            .insert(self.attempt_id.clone(), self.reservation_id);
+        self.released = true;
+        Some(self.reservation_id)
+    }
+
+    pub fn release(mut self) {
+        self.registry
+            .release_reservation(&self.attempt_id, self.reservation_id);
+        self.released = true;
+    }
+}
+
+impl Drop for CodingRunReservation {
+    fn drop(&mut self) {
+        if !self.released {
+            self.registry
+                .release_reservation(&self.attempt_id, self.reservation_id);
+        }
+    }
 }
 
 impl CodingRunRegistry {
-    pub fn insert(&self, attempt_id: String, command_tx: mpsc::Sender<CodingRunnerCommand>) -> u64 {
+    pub fn insert(
+        &self,
+        attempt_id: String,
+        command_tx: mpsc::Sender<CodingRunnerCommand>,
+    ) -> Option<u64> {
         let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner.reservations.contains_key(&attempt_id)
+            || inner.exclusive_runs.contains_key(&attempt_id)
+        {
+            return None;
+        }
         inner.next_run_id += 1;
         let run_id = inner.next_run_id;
         inner
@@ -46,11 +118,14 @@ impl CodingRunRegistry {
             .entry(attempt_id)
             .or_default()
             .insert(run_id, command_tx);
-        run_id
+        Some(run_id)
     }
 
     pub fn remove(&self, attempt_id: &str, run_id: u64) {
         let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner.exclusive_runs.get(attempt_id) == Some(&run_id) {
+            inner.exclusive_runs.remove(attempt_id);
+        }
         if let Some(runs) = inner.runs.get_mut(attempt_id) {
             runs.remove(&run_id);
             if runs.is_empty() {
@@ -62,6 +137,7 @@ impl CodingRunRegistry {
     pub async fn abort_attempt(&self, attempt_id: &str) -> usize {
         let senders = {
             let mut inner = self.inner.lock().expect("coding run registry lock");
+            inner.exclusive_runs.remove(attempt_id);
             inner
                 .runs
                 .remove(attempt_id)
@@ -85,6 +161,84 @@ impl CodingRunRegistry {
             .get(attempt_id)
             .map(HashMap::len)
             .unwrap_or(0)
+    }
+
+    pub fn try_reserve_attempt(&self, attempt_id: &str) -> Option<CodingRunReservation> {
+        let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner
+            .runs
+            .get(attempt_id)
+            .is_some_and(|runs| !runs.is_empty())
+            || inner.reservations.contains_key(attempt_id)
+        {
+            return None;
+        }
+        inner.next_run_id += 1;
+        let reservation_id = inner.next_run_id;
+        inner
+            .reservations
+            .insert(attempt_id.to_string(), reservation_id);
+        Some(CodingRunReservation {
+            registry: self.clone(),
+            attempt_id: attempt_id.to_string(),
+            reservation_id,
+            released: false,
+        })
+    }
+
+    pub async fn lock_attempt(&self, attempt_id: &str) -> OwnedMutexGuard<()> {
+        let guard = {
+            let mut inner = self.inner.lock().expect("coding run registry lock");
+            Arc::clone(
+                inner
+                    .attempt_guards
+                    .entry(attempt_id.to_string())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        guard.lock_owned().await
+    }
+
+    pub(crate) async fn lock_attempt_mutation(
+        &self,
+        attempt_id: &str,
+    ) -> CodingAttemptMutationLease {
+        let guard = {
+            let mut inner = self.inner.lock().expect("coding run registry lock");
+            Arc::clone(
+                inner
+                    .attempt_mutation_guards
+                    .entry(attempt_id.to_string())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        CodingAttemptMutationLease {
+            _guard: guard.lock_owned().await,
+        }
+    }
+
+    pub fn has_active_recovery_reservation(&self, attempt_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("coding run registry lock")
+            .reservations
+            .contains_key(attempt_id)
+    }
+
+    pub fn attempt_is_reserved_or_running(&self, attempt_id: &str) -> bool {
+        let inner = self.inner.lock().expect("coding run registry lock");
+        inner.reservations.contains_key(attempt_id)
+            || inner
+                .runs
+                .get(attempt_id)
+                .is_some_and(|runs| !runs.is_empty())
+    }
+
+    fn release_reservation(&self, attempt_id: &str, reservation_id: u64) {
+        let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner.reservations.get(attempt_id) == Some(&reservation_id) {
+            inner.reservations.remove(attempt_id);
+        }
     }
 }
 
@@ -153,6 +307,12 @@ pub struct WebAppState {
     pub provider_registry: Arc<ProviderRegistry>,
     pub provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync>,
     pub provider_adapter: Arc<dyn ProviderAdapter + Send + Sync>,
+    pub provider_health: Arc<ProviderHealthService>,
+    pub provider_gate: Arc<ProviderAvailabilityGate>,
+    pub command_runner: Arc<dyn BoundedCommandRunner>,
+    repository_registration_dependencies: Option<RepositoryRegistrationDependencies>,
+    pub test_provider_enabled: bool,
+    provider_health_error: Arc<StdMutex<Option<String>>>,
     pub test_controls: TestControls,
     pub workspace_runs: WorkspaceRunRegistry,
     pub coding_runs: CodingRunRegistry,
@@ -163,11 +323,24 @@ impl WebAppState {
         Self::with_events(workspace_root, runtime, EventHub::new())
     }
 
-    pub fn with_events(workspace_root: PathBuf, runtime: WebRuntime, events: EventHub) -> Self {
+    pub fn with_events(workspace_root: PathBuf, mut runtime: WebRuntime, events: EventHub) -> Self {
         let test_controls = TestControls::default();
+        let test_provider_enabled = provider_mode_is_fake();
+        let command_runner: Arc<dyn BoundedCommandRunner> = Arc::new(TokioBoundedCommandRunner);
+        let provider_health = Arc::new(ProviderHealthService::with_dependencies(
+            AriaStatePaths::from_workspace_root(&workspace_root),
+            command_runner.clone(),
+            Arc::new(SystemProviderHealthClock),
+            Duration::from_secs(5),
+            4096,
+        ));
+        let provider_gate = Arc::new(ProviderAvailabilityGate::new(provider_health.clone()));
+        runtime
+            .install_provider_gate(provider_gate.clone())
+            .expect("install shared provider gate");
         let provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync> =
-            if runtime.enforces_real_provider_availability() {
-                Arc::new(provider_name_available)
+            if runtime.enforces_real_provider_availability() && !test_provider_enabled {
+                availability_from_gate(provider_gate.clone())
             } else {
                 Arc::new(|_| true)
             };
@@ -176,9 +349,19 @@ impl WebAppState {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
             events,
-            provider_registry: default_provider_registry(test_controls.clone()),
+            provider_registry: default_provider_registry(
+                test_controls.clone(),
+                provider_gate.clone(),
+                test_provider_enabled,
+            ),
             provider_availability,
             provider_adapter,
+            provider_health,
+            provider_gate,
+            command_runner,
+            repository_registration_dependencies: None,
+            test_provider_enabled,
+            provider_health_error: Arc::new(StdMutex::new(None)),
             test_controls,
             workspace_runs: WorkspaceRunRegistry::default(),
             coding_runs: CodingRunRegistry::default(),
@@ -217,24 +400,9 @@ impl WebAppState {
         events: EventHub,
         provider_registry: Arc<ProviderRegistry>,
     ) -> Self {
-        let provider_availability: Arc<dyn Fn(&ProviderName) -> bool + Send + Sync> =
-            if runtime.enforces_real_provider_availability() {
-                Arc::new(provider_name_available)
-            } else {
-                Arc::new(|_| true)
-            };
-        let provider_adapter = runtime.provider_adapter();
-        Self {
-            workspace_root,
-            runtime: Arc::new(StdMutex::new(runtime)),
-            events,
-            provider_registry,
-            provider_availability,
-            provider_adapter,
-            test_controls: TestControls::default(),
-            workspace_runs: WorkspaceRunRegistry::default(),
-            coding_runs: CodingRunRegistry::default(),
-        }
+        let mut state = Self::with_events(workspace_root, runtime, events);
+        state.provider_registry = provider_registry;
+        state
     }
 
     pub fn with_provider_adapter(
@@ -244,11 +412,93 @@ impl WebAppState {
         self.provider_adapter = provider_adapter;
         self
     }
+
+    pub fn with_provider_health(
+        mut self,
+        provider_health: Arc<ProviderHealthService>,
+        provider_gate: Arc<ProviderAvailabilityGate>,
+        command_runner: Arc<dyn BoundedCommandRunner>,
+    ) -> Self {
+        self.provider_availability = if self.test_provider_enabled {
+            Arc::new(|_| true)
+        } else {
+            availability_from_gate(provider_gate.clone())
+        };
+        self.provider_health = provider_health;
+        self.provider_gate = provider_gate;
+        self.command_runner = command_runner;
+        {
+            let mut runtime = self.runtime.lock().expect("web runtime lock");
+            runtime
+                .install_provider_gate(self.provider_gate.clone())
+                .expect("install shared provider gate");
+            self.provider_adapter = runtime.provider_adapter();
+        }
+        *self
+            .provider_health_error
+            .lock()
+            .expect("provider health error lock") = None;
+        self
+    }
+
+    pub fn with_repository_registration_dependencies(
+        mut self,
+        dependencies: RepositoryRegistrationDependencies,
+    ) -> Self {
+        self.repository_registration_dependencies = Some(dependencies);
+        self
+    }
+
+    pub(crate) fn repository_registration_dependencies(
+        &self,
+    ) -> Option<RepositoryRegistrationDependencies> {
+        self.repository_registration_dependencies.clone()
+    }
+
+    pub async fn refresh_provider_health(&self) -> Arc<ProviderHealthSnapshot> {
+        match self.provider_health.refresh(CancellationToken::new()).await {
+            Ok(snapshot) => {
+                *self
+                    .provider_health_error
+                    .lock()
+                    .expect("provider health error lock") = None;
+                snapshot
+            }
+            Err(error) => {
+                *self
+                    .provider_health_error
+                    .lock()
+                    .expect("provider health error lock") = Some(error.to_string());
+                self.provider_health.latest_diagnostic()
+            }
+        }
+    }
+
+    pub fn provider_health_error(&self) -> Option<String> {
+        self.provider_health_error
+            .lock()
+            .expect("provider health error lock")
+            .clone()
+    }
 }
 
-fn default_provider_registry(test_controls: TestControls) -> Arc<ProviderRegistry> {
+fn availability_from_gate(
+    gate: Arc<ProviderAvailabilityGate>,
+) -> Arc<dyn Fn(&ProviderName) -> bool + Send + Sync> {
+    Arc::new(move |provider| gate.ensure_available(provider).is_ok())
+}
+
+fn provider_mode_is_fake() -> bool {
+    std::env::var("ARIA_PROVIDER_MODE").as_deref() == Ok("fake")
+}
+
+fn default_provider_registry(
+    test_controls: TestControls,
+    provider_gate: Arc<ProviderAvailabilityGate>,
+    test_provider_enabled: bool,
+) -> Arc<ProviderRegistry> {
     let mut registry = ProviderRegistry::new();
-    if std::env::var("ARIA_PROVIDER_MODE").as_deref() == Ok("fake") {
+    if test_provider_enabled {
         registry.register(
             ProviderName::Fake,
             Arc::new(TestControlledFakeStreamingProvider::new(
@@ -272,25 +522,37 @@ fn default_provider_registry(test_controls: TestControls) -> Arc<ProviderRegistr
         ProviderName::Fake,
         Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
     );
-    registry.register(
+    registry.register_gated(
         ProviderName::ClaudeCode,
         Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),
+        provider_gate.clone(),
     );
-    registry.register(
+    registry.register_gated(
         ProviderName::Codex,
         Arc::new(CodexProvider::new(PathBuf::from("codex"))),
+        provider_gate,
     );
     Arc::new(registry)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use chrono::{DateTime, Utc};
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
+    use crate::cross_cutting::aria_state_paths::AriaStatePaths;
+    use crate::cross_cutting::bounded_command_runner::{
+        BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
+    };
+    use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+    use crate::cross_cutting::provider_health::{ProviderHealthClock, ProviderHealthService};
     use crate::cross_cutting::streaming_provider::{
         ProviderEvent, ProviderPermissionMode, StreamingProviderInput,
     };
@@ -300,21 +562,103 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    struct ProviderModeGuard;
+    struct FixedClock(DateTime<Utc>);
+
+    impl ProviderHealthClock for FixedClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.0
+        }
+    }
+
+    struct ScriptedRunner {
+        calls: AtomicUsize,
+        results: Mutex<VecDeque<Result<BoundedCommandResult, BoundedCommandError>>>,
+    }
+
+    impl ScriptedRunner {
+        fn new(results: Vec<Result<BoundedCommandResult, BoundedCommandError>>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                results: Mutex::new(results.into()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BoundedCommandRunner for ScriptedRunner {
+        async fn run(
+            &self,
+            _request: BoundedCommandRequest,
+        ) -> Result<BoundedCommandResult, BoundedCommandError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.results
+                .lock()
+                .expect("scripted results")
+                .pop_front()
+                .expect("scripted result")
+        }
+    }
+
+    fn success(version: &str) -> Result<BoundedCommandResult, BoundedCommandError> {
+        Ok(BoundedCommandResult {
+            exit_code: Some(0),
+            stdout: format!("provider {version}"),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            duration_ms: 1,
+        })
+    }
+
+    fn provider_health(
+        root: &std::path::Path,
+        runner: Arc<dyn BoundedCommandRunner>,
+    ) -> Arc<ProviderHealthService> {
+        Arc::new(ProviderHealthService::with_dependencies(
+            AriaStatePaths::from_workspace_root(root),
+            runner,
+            Arc::new(FixedClock(Utc::now())),
+            Duration::from_secs(1),
+            4096,
+        ))
+    }
+
+    struct ProviderModeGuard {
+        previous: Option<OsString>,
+    }
 
     impl ProviderModeGuard {
         fn fake() -> Self {
+            let previous = std::env::var_os("ARIA_PROVIDER_MODE");
             unsafe {
                 std::env::set_var("ARIA_PROVIDER_MODE", "fake");
             }
-            Self
+            Self { previous }
+        }
+
+        fn disabled() -> Self {
+            let previous = std::env::var_os("ARIA_PROVIDER_MODE");
+            unsafe {
+                std::env::remove_var("ARIA_PROVIDER_MODE");
+            }
+            Self { previous }
         }
     }
 
     impl Drop for ProviderModeGuard {
         fn drop(&mut self) {
             unsafe {
-                std::env::remove_var("ARIA_PROVIDER_MODE");
+                if let Some(previous) = &self.previous {
+                    std::env::set_var("ARIA_PROVIDER_MODE", previous);
+                } else {
+                    std::env::remove_var("ARIA_PROVIDER_MODE");
+                }
             }
         }
     }
@@ -326,9 +670,15 @@ mod tests {
         let (second_tx, mut second_rx) = mpsc::channel(1);
         let (other_tx, mut other_rx) = mpsc::channel(1);
 
-        registry.insert("coding_attempt_0001".to_string(), first_tx);
-        registry.insert("coding_attempt_0001".to_string(), second_tx);
-        registry.insert("coding_attempt_0002".to_string(), other_tx);
+        registry
+            .insert("coding_attempt_0001".to_string(), first_tx)
+            .expect("first runner");
+        registry
+            .insert("coding_attempt_0001".to_string(), second_tx)
+            .expect("second runner");
+        registry
+            .insert("coding_attempt_0002".to_string(), other_tx)
+            .expect("other runner");
 
         assert_eq!(registry.runner_count("coding_attempt_0001"), 2);
         assert_eq!(registry.abort_attempt("coding_attempt_0001").await, 2);
@@ -371,6 +721,7 @@ mod tests {
                     workspace_session_id: Some("workspace_session_1".to_string()),
                     resume_provider_session_id: None,
                     permission_mode: ProviderPermissionMode::Auto,
+                    structured_output_contract: None,
                     env_vars: Default::default(),
                     timeout_secs: 60,
                 },
@@ -387,5 +738,52 @@ mod tests {
             ProviderEvent::TextDelta { content } => assert!(content.contains("Story Spec")),
             other => panic!("unexpected provider event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn provider_availability_reads_latest_shared_health_snapshot() {
+        let (_root, health, state) = {
+            let _guard = ENV_LOCK.lock().expect("env lock");
+            let _provider_mode = ProviderModeGuard::disabled();
+            let root = tempdir().expect("root");
+            let runner = Arc::new(ScriptedRunner::new(vec![success("1.0"), success("2.0")]));
+            let health = provider_health(root.path(), runner.clone());
+            let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
+            let state = WebAppState::new(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+            )
+            .with_provider_health(health.clone(), gate, runner);
+            assert!(!(state.provider_availability)(&ProviderName::Codex));
+            (root, health, state)
+        };
+        health
+            .refresh(CancellationToken::new())
+            .await
+            .expect("refresh");
+        assert!((state.provider_availability)(&ProviderName::Codex));
+        assert_eq!(state.provider_health.snapshot().generation, 1);
+    }
+
+    #[test]
+    fn provider_availability_fake_mode_does_not_execute_real_probe() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner.clone());
+        let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
+        let state = {
+            let _guard = ENV_LOCK.lock().expect("env lock");
+            let _provider_mode = ProviderModeGuard::fake();
+            WebAppState::new(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+            )
+            .with_provider_health(health, gate, runner.clone())
+        };
+
+        assert_eq!(runner.calls(), 0);
+        assert!(state.test_provider_enabled);
+        assert!((state.provider_availability)(&ProviderName::Fake));
+        assert!((state.provider_availability)(&ProviderName::Codex));
     }
 }

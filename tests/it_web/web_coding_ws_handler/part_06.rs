@@ -345,10 +345,7 @@ fn start_web_test_provider_driven_testing_session(
             return;
         }
         let _ = event_tx
-            .send(ProviderEvent::Completed {
-                full_output: output,
-                provider_session_id: None,
-            })
+            .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
             .await;
     });
 

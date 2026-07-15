@@ -93,6 +93,23 @@ impl WorkItemPlanStore {
         write_json(&self.active_index_path(index), index)
     }
 
+    pub(crate) fn delete_active_index(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let path = self.active_index_path_for(project_id, issue_id, plan_id);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ProductStoreError::Io(format!(
+                "remove {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
     pub fn put_compile_transaction(
         &self,
         tx: &WorkItemPlanCompileTransaction,

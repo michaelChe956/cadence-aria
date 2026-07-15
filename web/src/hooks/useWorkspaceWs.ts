@@ -234,6 +234,23 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  const retryInterruptedRun = useCallback(
+    (failedNodeId: string) => {
+      const sent = sendJson({
+        type: "retry_interrupted_run",
+        failed_node_id: failedNodeId,
+      });
+      if (sent) {
+        const store = useWorkspaceStore.getState();
+        store.setError(null);
+        store.clearExecutionEvents();
+        store.setProviderStatus("running");
+      }
+      return sent;
+    },
+    [sendJson],
+  );
+
   const sendHello = useCallback(
     (targetSessionId: string, lastSeenNodeId?: string | null) => {
       sendJson({
@@ -507,6 +524,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendMessage,
     sendContextNote,
     sendStartGeneration,
+    retryInterruptedRun,
     sendSelectRevisionPath,
     sendAuthorDecision,
     sendRequestRevision,

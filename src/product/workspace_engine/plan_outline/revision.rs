@@ -1,5 +1,37 @@
 use super::*;
-use crate::product::workspace_engine::review::format_review_feedback;
+use crate::product::workspace_engine::review::{format_review_feedback, trusted_review_comments};
+
+mod transaction;
+
+pub(crate) use transaction::recover_work_item_plan_outline_revision_transaction;
+use transaction::*;
+
+const WORK_ITEM_PLAN_IMPACT_CLOSURE_CONTRACT: &str = "[impact_closure_contract]
+当 finding 涉及 API 契约、共享状态或测试迁移时：
+1. 不得只修改 reviewer 点名的文件。
+2. 必须重新检索 src/**、tests/it_web/**、tests/it_core/**、tests/it_product/**、web/src/**。
+3. 必须为每个 matched file 声明 owner，或明确无需修改的原因。
+4. 返修摘要必须包含 searched_scopes、matched_files、owner_mapping。";
+
+struct OutlineRevisionNodeMutation {
+    node_id: String,
+    summary: String,
+    completed_at: String,
+    original_detail: Option<NodeDetail>,
+    revised_detail: NodeDetail,
+}
+
+struct OutlineRevisionPersistenceSnapshot {
+    original_status: WorkspaceSessionStatus,
+    original_artifact_versions: Vec<ArtifactVersion>,
+    revised_artifact_versions: Vec<ArtifactVersion>,
+    artifact_versions_changed: bool,
+    original_timeline_nodes: Vec<TimelineNode>,
+    revised_timeline_nodes: Vec<TimelineNode>,
+    source_node: Option<OutlineRevisionNodeMutation>,
+    run_node: TimelineNode,
+    run_detail: NodeDetail,
+}
 
 /// 从当前 session artifact 与 lifecycle 构建 WorkItemPlan revision 的输入三元组。
 ///
@@ -92,6 +124,345 @@ pub(crate) fn build_work_item_plan_revision_input(
 }
 
 impl WorkspaceEngine {
+    pub(crate) fn review_decision_restarts_work_item_plan_outline(&self) -> bool {
+        self.session.workspace_type == WorkspaceType::WorkItemPlan
+            && self
+                .latest_review_verdict
+                .as_ref()
+                .and_then(|verdict| verdict.work_item_plan_review.as_ref())
+                .is_some_and(|review| {
+                    review.review_action == WorkItemPlanReviewAction::ReviseOutline
+                        || review.verdict == WorkItemPlanReviewVerdict::PlanReopenRequired
+                        || review
+                            .gates
+                            .contains(&WorkItemPlanReviewGate::RequiresPlanReopen)
+                })
+    }
+
+    pub(crate) fn human_confirm_should_revise_work_item_plan_outline(&self) -> bool {
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            || !self.current_artifact_is_work_item_plan_outline_candidate()
+        {
+            return false;
+        }
+
+        self.timeline_nodes
+            .iter()
+            .rev()
+            .find(|node| {
+                node.status == TimelineNodeStatus::Completed
+                    && matches!(
+                        &node.node_type,
+                        TimelineNodeType::WorkItemPlanOutlineReview
+                            | TimelineNodeType::WorkItemDraftReview
+                            | TimelineNodeType::WorkItemBatchReview
+                    )
+            })
+            .is_some_and(|node| node.node_type == TimelineNodeType::WorkItemPlanOutlineReview)
+    }
+
+    pub(crate) fn review_decision_outline_revision_persistence_policy(
+        &self,
+    ) -> OutlineRevisionPersistencePolicy {
+        match self
+            .latest_review_verdict
+            .as_ref()
+            .and_then(|verdict| verdict.work_item_plan_review.as_ref())
+            .map(|review| &review.review_scope)
+        {
+            Some(WorkItemPlanReviewScope::Item | WorkItemPlanReviewScope::Batch) => {
+                OutlineRevisionPersistencePolicy::RequireActiveRound
+            }
+            Some(WorkItemPlanReviewScope::Outline) | None => {
+                OutlineRevisionPersistencePolicy::AllowMissingInitialRound
+            }
+        }
+    }
+
+    fn outline_revision_persistence_snapshot(
+        &self,
+        lifecycle: &LifecycleStore,
+        source: WorkItemPlanOutlineRevisionSource,
+        revision_feedback: Option<&str>,
+    ) -> Result<OutlineRevisionPersistenceSnapshot, String> {
+        let original_status = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| {
+                format!("load workspace session status before outline revision failed: {error}")
+            })?
+            .status;
+        let original_artifact_versions = self.artifact_versions.clone();
+        let mut revised_artifact_versions = original_artifact_versions.clone();
+        let artifact_versions_changed = revised_artifact_versions
+            .last_mut()
+            .map(|version| {
+                version.is_current = false;
+            })
+            .is_some();
+        let original_timeline_nodes = self.timeline_nodes.clone();
+        let mut revised_timeline_nodes = original_timeline_nodes.clone();
+        let summary = match source {
+            WorkItemPlanOutlineRevisionSource::AuthorConfirm => {
+                "Author Confirm 已请求返修 WorkItemPlan Outline"
+            }
+            WorkItemPlanOutlineRevisionSource::ReviewDecision => {
+                "Review Decision 已请求返修 WorkItemPlan Outline"
+            }
+            WorkItemPlanOutlineRevisionSource::HumanConfirm => {
+                "Human Confirm 已请求返修 WorkItemPlan Outline"
+            }
+        }
+        .to_string();
+        let source_node = if let Some(node_id) = self.active_node_id.clone() {
+            let completed_at = chrono::Utc::now().to_rfc3339();
+            let original_node = original_timeline_nodes
+                .iter()
+                .find(|node| node.node_id == node_id)
+                .cloned()
+                .ok_or_else(|| format!("timeline node not found: {node_id}"))?;
+            let revised_node = revised_timeline_nodes
+                .iter_mut()
+                .find(|node| node.node_id == node_id)
+                .ok_or_else(|| format!("timeline node not found: {node_id}"))?;
+            revised_node.status = TimelineNodeStatus::Completed;
+            revised_node.summary = Some(summary.clone());
+            revised_node.completed_at = Some(completed_at.clone());
+            let original_detail =
+                match lifecycle.load_node_detail(&self.session.session_id, &node_id) {
+                    Ok(detail) => Some(detail),
+                    Err(ProductStoreError::NotFound { .. }) => None,
+                    Err(error) => {
+                        return Err(format!("load outline revision node detail failed: {error}"));
+                    }
+                };
+            let mut revised_detail = original_detail
+                .clone()
+                .unwrap_or_else(|| self.empty_node_detail_for(&original_node));
+            revised_detail.status = TimelineNodeStatus::Completed;
+            revised_detail.ended_at = Some(completed_at.clone());
+            Some(OutlineRevisionNodeMutation {
+                node_id,
+                summary,
+                completed_at,
+                original_detail,
+                revised_detail,
+            })
+        } else {
+            None
+        };
+        let run_node = TimelineNode {
+            node_id: format!("timeline_node_{:03}", revised_timeline_nodes.len() + 1),
+            node_type: TimelineNodeType::WorkItemPlanOutlineRun,
+            agent: Some(self.session.author_provider.clone()),
+            stage: ws_stage(&WorkspaceStage::Running),
+            round: None,
+            status: TimelineNodeStatus::Active,
+            title: "WorkItemPlan Outline 生成".to_string(),
+            summary: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            duration_ms: None,
+            artifact_ref: self
+                .session
+                .artifact
+                .as_ref()
+                .map(|_| "artifact_current".to_string()),
+            provider_config_snapshot: self.provider_config_snapshot(),
+            retry: None,
+        };
+        let mut run_detail = self.empty_node_detail_for(&run_node);
+        run_detail.is_revision = true;
+        run_detail.revision_feedback = revision_feedback.map(ToString::to_string);
+        revised_timeline_nodes.push(run_node.clone());
+
+        Ok(OutlineRevisionPersistenceSnapshot {
+            original_status,
+            original_artifact_versions,
+            revised_artifact_versions,
+            artifact_versions_changed,
+            original_timeline_nodes,
+            revised_timeline_nodes,
+            source_node,
+            run_node,
+            run_detail,
+        })
+    }
+
+    pub(crate) async fn prepare_work_item_plan_outline_revision(
+        &mut self,
+        feedback: Option<String>,
+        source: WorkItemPlanOutlineRevisionSource,
+        policy: OutlineRevisionPersistencePolicy,
+    ) -> Result<Option<String>, String> {
+        let outline_feedback = self.work_item_plan_outline_revision_feedback(feedback.as_deref());
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let snapshot = self.outline_revision_persistence_snapshot(
+            &lifecycle,
+            source,
+            outline_feedback.as_deref(),
+        )?;
+        let plan_mutation = self.prepare_work_item_plan_outline_revising(policy)?;
+        let mut journal = OutlineRevisionTransactionJournal::prepared(
+            self,
+            &snapshot,
+            plan_mutation.as_ref(),
+            outline_feedback.clone(),
+        );
+        save_outline_revision_journal(&lifecycle, &journal)?;
+        let crash_after = self.outline_revision_crash_after;
+        let persistence_result = (|| -> Result<(), OutlineRevisionPersistenceFailure> {
+            lifecycle
+                .update_workspace_session_status(
+                    &self.session.session_id,
+                    WorkspaceSessionStatus::Open,
+                )
+                .map_err(|error| {
+                    OutlineRevisionPersistenceFailure::Error(format!(
+                        "update workspace session status before outline revision failed: {error}"
+                    ))
+                })?;
+            maybe_simulate_outline_revision_crash(crash_after, OutlineRevisionCrashPoint::Status)?;
+            if snapshot.artifact_versions_changed {
+                lifecycle
+                    .save_artifact_versions(
+                        &self.session.session_id,
+                        &snapshot.revised_artifact_versions,
+                    )
+                    .map_err(|error| {
+                        OutlineRevisionPersistenceFailure::Error(format!(
+                            "save outline revision artifact versions failed: {error}"
+                        ))
+                    })?;
+            }
+            maybe_simulate_outline_revision_crash(
+                crash_after,
+                OutlineRevisionCrashPoint::ArtifactVersions,
+            )?;
+            lifecycle
+                .save_timeline_nodes(&self.session.session_id, &snapshot.revised_timeline_nodes)
+                .map_err(|error| {
+                    OutlineRevisionPersistenceFailure::Error(format!(
+                        "save outline revision timeline failed: {error}"
+                    ))
+                })?;
+            maybe_simulate_outline_revision_crash(
+                crash_after,
+                OutlineRevisionCrashPoint::Timeline,
+            )?;
+            if let Some(node) = &snapshot.source_node {
+                lifecycle
+                    .save_node_detail(
+                        &self.session.session_id,
+                        &node.node_id,
+                        &node.revised_detail,
+                    )
+                    .map_err(|error| {
+                        OutlineRevisionPersistenceFailure::Error(format!(
+                            "save outline revision node detail failed: {error}"
+                        ))
+                    })?;
+            }
+            maybe_simulate_outline_revision_crash(
+                crash_after,
+                OutlineRevisionCrashPoint::SourceNodeDetail,
+            )?;
+            lifecycle
+                .save_node_detail(
+                    &self.session.session_id,
+                    &snapshot.run_node.node_id,
+                    &snapshot.run_detail,
+                )
+                .map_err(|error| {
+                    OutlineRevisionPersistenceFailure::Error(format!(
+                        "save outline revision run node detail failed: {error}"
+                    ))
+                })?;
+            maybe_simulate_outline_revision_crash(
+                crash_after,
+                OutlineRevisionCrashPoint::RunNodeDetail,
+            )?;
+            if let Some(mutation) = plan_mutation {
+                persist_outline_revision_plan_mutation(mutation, crash_after)?;
+            }
+            journal.mark_committed();
+            save_outline_revision_journal(&lifecycle, &journal)
+                .map_err(OutlineRevisionPersistenceFailure::Error)?;
+            maybe_simulate_outline_revision_crash(
+                crash_after,
+                OutlineRevisionCrashPoint::Committed,
+            )?;
+            Ok(())
+        })();
+        match persistence_result {
+            Ok(()) => {}
+            Err(OutlineRevisionPersistenceFailure::SimulatedCrash(point)) => {
+                return Err(format!("simulated outline revision crash after {point:?}"));
+            }
+            Err(OutlineRevisionPersistenceFailure::Error(error)) => {
+                let rollback_errors = rollback_outline_revision_journal(&lifecycle, &journal);
+                if rollback_errors.is_empty() {
+                    if let Err(delete_error) = delete_outline_revision_journal(
+                        &lifecycle,
+                        &journal.project_id,
+                        &journal.issue_id,
+                        &journal.session_id,
+                    ) {
+                        return Err(combine_outline_revision_rollback_errors(
+                            error,
+                            vec![delete_error],
+                        ));
+                    }
+                    return Err(error);
+                }
+                return Err(combine_outline_revision_rollback_errors(
+                    error,
+                    rollback_errors,
+                ));
+            }
+        }
+
+        self.pending_revision_context = feedback;
+        self.artifact_versions = snapshot.revised_artifact_versions;
+        self.timeline_nodes = snapshot.revised_timeline_nodes;
+        self.active_node_id = Some(snapshot.run_node.node_id.clone());
+        self.session.stage = WorkspaceStage::Running;
+        self.work_item_plan_author_retry_count = 0;
+        self.work_item_plan_revision_retry_count = 0;
+        if let Some(node) = snapshot.source_node {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::TimelineNodeUpdated {
+                    node_id: node.node_id,
+                    status: TimelineNodeStatus::Completed,
+                    summary: Some(node.summary),
+                    completed_at: Some(node.completed_at),
+                })
+                .await;
+        }
+        let _ = self
+            .event_tx
+            .send(EngineEvent::TimelineNodeCreated {
+                node: snapshot.run_node,
+            })
+            .await;
+        let _ = self
+            .event_tx
+            .send(EngineEvent::StageChange {
+                stage: WorkspaceStage::Running.as_str().to_string(),
+            })
+            .await;
+        delete_outline_revision_journal(
+            &lifecycle,
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.session_id,
+        )?;
+        Ok(outline_feedback)
+    }
+
     /// WorkItemPlan Revision 完成：validate → replace Draft candidate → 组装 DTO →
     /// `update_artifact(WorkItemPlanCandidate)`（新 version）→ 回 AuthorConfirm。
     ///
@@ -194,24 +565,22 @@ impl WorkspaceEngine {
                 "request_revision is only available during author_confirm stage".to_string(),
             );
         }
-        if self.active_node_type() == Some(TimelineNodeType::WorkItemPlanOutlineConfirm)
-            || self.current_artifact_is_work_item_plan_outline_candidate()
+        let is_initial_outline_confirm =
+            self.active_node_type() == Some(TimelineNodeType::WorkItemPlanOutlineConfirm);
+        if is_initial_outline_confirm || self.current_artifact_is_work_item_plan_outline_candidate()
         {
-            let outline_feedback =
-                self.work_item_plan_outline_revision_feedback(feedback.as_deref());
-            self.pending_revision_context = feedback;
-            self.work_item_plan_revision_retry_count = 0;
-            self.mark_latest_artifact_rejected();
-            self.complete_active_node(Some("已请求重写 WorkItemPlan Outline".to_string()))
-                .await;
-            if let Some(store) = &self.lifecycle_store {
-                let _ = store.update_workspace_session_status(
-                    &self.session.session_id,
-                    WorkspaceSessionStatus::Open,
-                );
-            }
-            self.transition_stage(WorkspaceStage::Running).await;
-            self.work_item_plan_author_retry_count = 0;
+            let policy = if is_initial_outline_confirm {
+                OutlineRevisionPersistencePolicy::AllowMissingInitialRound
+            } else {
+                OutlineRevisionPersistencePolicy::RequireActiveRound
+            };
+            let outline_feedback = self
+                .prepare_work_item_plan_outline_revision(
+                    feedback,
+                    WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+                    policy,
+                )
+                .await?;
             return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
                 feedback: outline_feedback,
             });
@@ -246,8 +615,8 @@ impl WorkspaceEngine {
     pub fn work_item_plan_revision_feedback(&self) -> Option<String> {
         let mut parts = Vec::new();
         if let Some(verdict) = &self.latest_review_verdict {
-            if !verdict.comments.is_empty() {
-                parts.push(format!("Reviewer 审核意见:\n{}", verdict.comments));
+            if let Some(comments) = trusted_review_comments(verdict) {
+                parts.push(format!("Reviewer 审核意见:\n{comments}"));
             }
             if !verdict.summary.is_empty() {
                 parts.push(format!("摘要: {}", verdict.summary));
@@ -287,8 +656,8 @@ impl WorkspaceEngine {
             if !verdict.summary.is_empty() {
                 parts.push(format!("Reviewer 摘要: {}", verdict.summary));
             }
-            if !verdict.comments.is_empty() {
-                parts.push(format!("Reviewer 审核意见:\n{}", verdict.comments));
+            if let Some(comments) = trusted_review_comments(verdict) {
+                parts.push(format!("Reviewer 审核意见:\n{comments}"));
             }
             for finding in &verdict.findings {
                 parts.push(format!(
@@ -304,6 +673,22 @@ impl WorkspaceEngine {
         }
         if let Some(context) = context.map(str::trim).filter(|c| !c.is_empty()) {
             parts.push(format!("用户补充信息:\n{}", context));
+        }
+        let requires_impact_closure = self.latest_review_verdict.as_ref().is_some_and(|verdict| {
+            verdict.findings.iter().any(|finding| {
+                matches!(
+                    &finding.severity,
+                    ReviewFindingSeverity::Blocking
+                        | ReviewFindingSeverity::MustFix
+                        | ReviewFindingSeverity::StrongRecommendFix
+                )
+            }) || verdict
+                .structured_output_diagnostic
+                .as_ref()
+                .is_some_and(|diagnostic| !diagnostic.repair_succeeded)
+        });
+        if requires_impact_closure {
+            parts.push(WORK_ITEM_PLAN_IMPACT_CLOSURE_CONTRACT.to_string());
         }
         if parts.is_empty() {
             None

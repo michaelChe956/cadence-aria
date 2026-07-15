@@ -82,6 +82,12 @@ export type WorkItemPlanCompileRecoveryAction =
   | "abort_and_rollback"
   | "human_triage";
 
+export type RecoverableInterruptedRun = {
+  failed_node_id: string;
+  operation: "review" | "work_item_draft_generation";
+  label: string;
+};
+
 export type WsInMessage =
   | { type: "user_message"; content: string }
   | { type: "context_note"; content: string }
@@ -90,6 +96,7 @@ export type WsInMessage =
       provider_config: ProviderConfigSnapshot;
       reviewer_enabled: boolean;
     }
+  | { type: "retry_interrupted_run"; failed_node_id: string }
   | { type: "rollback"; checkpoint_id: string }
   | { type: "confirm" }
   | { type: "provider_select"; role: string; provider: WorkspaceProviderName }
@@ -183,6 +190,14 @@ export type WorkspaceReviewFinding = {
   required_action: string;
 };
 
+export type StructuredOutputDiagnostic = {
+  code: string;
+  message: string;
+  repair_attempted: boolean;
+  repair_succeeded: boolean;
+  raw_output_preview?: string | null;
+};
+
 export type WsMessage = {
   id: string;
   role: string;
@@ -244,6 +259,7 @@ export type ReviewVerdict = {
   summary: string;
   findings?: WorkspaceReviewFinding[];
   review_gate?: ReviewGate;
+  structured_output_diagnostic?: StructuredOutputDiagnostic | null;
 };
 
 export type ExecutionEvent = {
@@ -332,6 +348,7 @@ export type NodeDetail = {
   verdict: ReviewVerdict | null;
   artifact_ref: ArtifactRef | null;
   is_revision: boolean;
+  revision_feedback?: string | null;
   base_artifact_ref: ArtifactRef | null;
   started_at: string;
   ended_at: string | null;
@@ -419,6 +436,7 @@ export type WsOutMessage =
       summary: string;
       findings?: WorkspaceReviewFinding[];
       review_gate?: ReviewGate;
+      structured_output_diagnostic?: StructuredOutputDiagnostic | null;
     }
   | { type: "review_decision_required"; node_id: string; round: number; options: string[] }
   | {
@@ -442,6 +460,7 @@ export type WsOutMessage =
       artifact_version_summaries?: ArtifactVersionSummary[];
       timeline_node_details: Record<string, NodeDetail>;
       active_run_id: string | null;
+      recoverable_interrupted_run?: RecoverableInterruptedRun | null;
     }
   | { type: "error"; message: string }
   | { type: "protocol_error"; code: string; message: string; context?: unknown }

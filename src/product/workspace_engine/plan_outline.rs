@@ -1,5 +1,86 @@
 use super::*;
 
+struct OutlineRevisingDraftMutation {
+    original: WorkItemDraftRecord,
+    revised: WorkItemDraftRecord,
+}
+
+pub(crate) struct OutlineRevisingMutation {
+    store: WorkItemPlanStore,
+    original_index: WorkItemPlanDraftActiveIndex,
+    revised_index: WorkItemPlanDraftActiveIndex,
+    drafts: Vec<OutlineRevisingDraftMutation>,
+}
+
+impl OutlineRevisingMutation {
+    pub(crate) fn persist(self) -> Result<(), String> {
+        let mut written_originals = Vec::new();
+        for draft in &self.drafts {
+            if let Err(error) = self.store.put_draft_record(&draft.revised) {
+                let mut rollback_errors = restore_outline_revision_drafts(
+                    &self.store,
+                    written_originals.into_iter().rev(),
+                );
+                if let Err(rollback_error) = self.store.save_active_index(&self.original_index) {
+                    rollback_errors.push(format!(
+                        "restore original work item plan active index failed: {rollback_error}"
+                    ));
+                }
+                return Err(combine_outline_revision_rollback_errors(
+                    format!("save superseded outline revision draft failed: {error}"),
+                    rollback_errors,
+                ));
+            }
+            written_originals.push(draft.original.clone());
+        }
+
+        if let Err(error) = self.store.save_active_index(&self.revised_index) {
+            let mut rollback_errors =
+                restore_outline_revision_drafts(&self.store, written_originals.into_iter().rev());
+            if let Err(rollback_error) = self.store.save_active_index(&self.original_index) {
+                rollback_errors.push(format!(
+                    "restore original work item plan active index failed: {rollback_error}"
+                ));
+            }
+            return Err(combine_outline_revision_rollback_errors(
+                format!("save work item plan active index failed: {error}"),
+                rollback_errors,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn restore_outline_revision_drafts(
+    store: &WorkItemPlanStore,
+    originals: impl Iterator<Item = WorkItemDraftRecord>,
+) -> Vec<String> {
+    originals
+        .filter_map(|original| {
+            store.put_draft_record(&original).err().map(|error| {
+                format!(
+                    "restore work item plan draft {} failed: {error}",
+                    original.draft_id
+                )
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn combine_outline_revision_rollback_errors(
+    primary_error: String,
+    rollback_errors: Vec<String>,
+) -> String {
+    if rollback_errors.is_empty() {
+        primary_error
+    } else {
+        format!(
+            "{primary_error}; rollback outline revision persistence failed: {}",
+            rollback_errors.join(" | ")
+        )
+    }
+}
+
 mod authoring;
 mod dto;
 mod revision;
@@ -238,41 +319,59 @@ impl WorkspaceEngine {
     }
 
     pub(crate) fn mark_work_item_plan_outline_revising(&self) -> Result<(), String> {
+        self.persist_work_item_plan_outline_revising(
+            OutlineRevisionPersistencePolicy::RequireActiveRound,
+        )
+    }
+
+    fn persist_work_item_plan_outline_revising(
+        &self,
+        policy: OutlineRevisionPersistencePolicy,
+    ) -> Result<(), String> {
+        if let Some(mutation) = self.prepare_work_item_plan_outline_revising(policy)? {
+            mutation.persist()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_work_item_plan_outline_revising(
+        &self,
+        policy: OutlineRevisionPersistencePolicy,
+    ) -> Result<Option<OutlineRevisingMutation>, String> {
         let store = self.work_item_plan_store()?;
         let project_id = self.session.project_id.clone();
         let issue_id = self.session.issue_id.clone();
         let plan_id = self.session.entity_id.clone();
-        let mut index = store
+        let index = store
             .load_active_index(&project_id, &issue_id, &plan_id)
-            .map_err(|error| format!("load work item plan active index failed: {error}"))?
-            .unwrap_or_else(|| WorkItemPlanDraftActiveIndex {
-                project_id,
-                issue_id,
-                plan_id,
-                current_generation_round_id: "round_001".to_string(),
-                outline_state: "revising".to_string(),
-                active_outline_id: None,
-                outline_to_current_draft_id: BTreeMap::new(),
-                draft_statuses: BTreeMap::new(),
-                batches: Vec::new(),
-                updated_at: chrono::Utc::now().to_rfc3339(),
-            });
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?;
+        let mut index = match index {
+            Some(index) => index,
+            None if policy == OutlineRevisionPersistencePolicy::AllowMissingInitialRound => {
+                return Ok(None);
+            }
+            None => return Err("work item plan active index missing".to_string()),
+        };
+        let original_index = index.clone();
         let now = chrono::Utc::now().to_rfc3339();
-        self.supersede_current_generation_drafts_for_outline_revision(&store, &mut index, &now)?;
+        let drafts = self.prepare_outline_revision_draft_mutations(&store, &mut index, &now)?;
         index.outline_state = "revising".to_string();
         index.active_outline_id = None;
         index.updated_at = now;
-        store
-            .save_active_index(&index)
-            .map_err(|error| format!("save work item plan active index failed: {error}"))
+        Ok(Some(OutlineRevisingMutation {
+            store,
+            original_index,
+            revised_index: index,
+            drafts,
+        }))
     }
 
-    pub(crate) fn supersede_current_generation_drafts_for_outline_revision(
+    fn prepare_outline_revision_draft_mutations(
         &self,
         store: &WorkItemPlanStore,
         index: &mut WorkItemPlanDraftActiveIndex,
         now: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<OutlineRevisingDraftMutation>, String> {
         let draft_ids: Vec<String> = index
             .draft_statuses
             .iter()
@@ -285,8 +384,9 @@ impl WorkspaceEngine {
             })
             .collect();
 
+        let mut drafts = Vec::with_capacity(draft_ids.len());
         for draft_id in draft_ids {
-            let mut record = store
+            let original = store
                 .get_draft_record(
                     &index.project_id,
                     &index.issue_id,
@@ -295,22 +395,21 @@ impl WorkspaceEngine {
                     &draft_id,
                 )
                 .map_err(|error| format!("load draft for outline revision failed: {error}"))?;
+            let mut revised = original.clone();
             mark_draft_record_superseded(
-                &mut record,
+                &mut revised,
                 None,
                 WorkItemDraftSupersedeReason::OutlineRevised,
                 now,
             );
-            store.put_draft_record(&record).map_err(|error| {
-                format!("save superseded outline revision draft failed: {error}")
-            })?;
             index
                 .draft_statuses
-                .insert(draft_id, WorkItemDraftStatus::Superseded);
+                .insert(draft_id.clone(), WorkItemDraftStatus::Superseded);
+            drafts.push(OutlineRevisingDraftMutation { original, revised });
         }
 
         index.outline_to_current_draft_id.clear();
-        Ok(())
+        Ok(drafts)
     }
 
     pub(crate) fn set_active_work_item_plan_outline(&self, outline_id: &str) -> Result<(), String> {

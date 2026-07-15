@@ -2,6 +2,31 @@ use super::*;
 use crate::product::coding_models::{CodingExecutionUnit, CodingExecutionUnitStatus};
 
 impl CodingWorkspaceEngine {
+    pub(crate) fn latest_missing_required_steps(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<String>, ProductStoreError> {
+        let Some(report) = self
+            .store
+            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .last()
+        else {
+            return Ok(Vec::new());
+        };
+        let mut steps = Vec::new();
+        for step in report
+            .missing_required_steps
+            .into_iter()
+            .chain(report.skipped_required_steps)
+        {
+            if !steps.contains(&step) {
+                steps.push(step);
+            }
+        }
+        Ok(steps)
+    }
+
     pub(crate) fn collect_completed_group_unit_handoffs(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -109,20 +134,13 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<Option<String>, ProductStoreError> {
-        let lifecycle = LifecycleStore::new(self.store.paths());
-        let sessions = lifecycle.list_workspace_sessions(&attempt.project_id, &attempt.issue_id)?;
-        let active_work_item_id = self.active_work_item_id_for_attempt(attempt);
-        let Some(session) = sessions.iter().rev().find(|session| {
-            session.entity_id == active_work_item_id
-                && session.workspace_type == WorkspaceType::WorkItem
-        }) else {
-            return Ok(None);
-        };
-        Ok(lifecycle
-            .list_artifact_versions(&session.id)?
-            .into_iter()
-            .last()
-            .map(|version| version.to_markdown_string()))
+        Ok(
+            crate::product::coding_work_item_context::load_coding_work_item_context(
+                &self.store.paths(),
+                attempt,
+            )?
+            .markdown,
+        )
     }
 
     pub(crate) fn build_code_review_report(

@@ -3,11 +3,14 @@ use tokio::sync::mpsc;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingGateRequired as CodingGateRequiredModel, CodingRoleRunEvent, CodingRoleRunEventPreview,
-    CodingRoleRunEventSummary, CodingRoleRunEventType, CodingRoleRunSnapshot, CodingTimelineNode,
-    CodingTimelineNodeStatus,
+    CodingGateAction, CodingGateActionType, CodingGateKind,
+    CodingGateRequired as CodingGateRequiredModel, CodingProviderRole, CodingRoleRunEvent,
+    CodingRoleRunEventPreview, CodingRoleRunEventSummary, CodingRoleRunEventType,
+    CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus,
 };
-use crate::product::coding_workspace_engine::CodingWorkspaceEngineError;
+use crate::product::coding_workspace_engine::{
+    CodingWorkspaceEngineError, recoverable_failed_code_review,
+};
 use crate::product::json_store::ProductStoreError;
 use crate::web::handlers::{coding_attempt_scope_text, coding_execution_unit_dto};
 
@@ -16,7 +19,7 @@ use super::{CodingWsOutMessage, coding_execution_context, stage_gate_required};
 pub(crate) fn build_coding_session_state(
     coding_store: &CodingAttemptStore,
     attempt: CodingExecutionAttempt,
-) -> Result<CodingWsOutMessage, ProductStoreError> {
+) -> Result<CodingWsOutMessage, CodingWorkspaceEngineError> {
     let execution_context = coding_execution_context(&coding_store.paths(), &attempt)?;
     let timeline_nodes =
         coding_store.get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
@@ -49,6 +52,26 @@ pub(crate) fn build_coding_session_state(
             .into_iter()
             .filter(|gate| blocked_gate_is_actionable_for_attempt(&attempt, gate)),
     );
+    if let Some(recovery) = recoverable_failed_code_review(coding_store, &attempt)? {
+        pending_gates.push(CodingGateRequiredModel {
+            gate_id: recovery.gate_id,
+            kind: CodingGateKind::Blocked,
+            title: "代码审查中断".to_string(),
+            description: "上次代码审查已中断，可保留当前修改并重试 Reviewer。".to_string(),
+            stage: Some(CodingExecutionStage::CodeReview),
+            role: Some(CodingProviderRole::CodeReviewer),
+            expires_at: None,
+            provider_snapshot: None,
+            available_actions: vec![CodingGateAction {
+                action_id: "retry_review".to_string(),
+                label: "重试代码审查".to_string(),
+                action_type: CodingGateActionType::RetryReview,
+            }],
+            reason_code: Some("failed_code_review_recoverable".to_string()),
+            evidence_refs: vec![recovery.failed_node_id, recovery.stale_role_run_id],
+            raw_provider_output_ref: None,
+        });
+    }
     let role_provider_config_snapshot = coding_store.get_role_provider_config_snapshot(
         &attempt.project_id,
         &attempt.issue_id,
@@ -240,9 +263,8 @@ fn role_run_event_payload_text(event: &CodingRoleRunEvent, field: &str) -> Optio
 
 pub(crate) fn active_coding_timeline_node_id(nodes: &[CodingTimelineNode]) -> Option<String> {
     nodes
-        .iter()
-        .rev()
-        .find(|node| {
+        .last()
+        .filter(|node| {
             matches!(
                 node.status,
                 CodingTimelineNodeStatus::Pending

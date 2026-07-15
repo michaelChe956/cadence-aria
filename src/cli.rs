@@ -1,11 +1,19 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
+use crate::cross_cutting::aria_state_paths::AriaStatePaths;
+use crate::cross_cutting::bounded_command_runner::{
+    BoundedCommandRunner, TokioBoundedCommandRunner,
+};
+use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use crate::cross_cutting::provider_health::{ProviderHealthService, SystemProviderHealthClock};
 use crate::daemon::discovery::{DaemonStatus, inspect_daemon};
 use crate::daemon::runner::{run_daemon_serve_one, run_daemon_until_shutdown};
 use crate::repl::discovery::{DiscoveryMode, resolve_daemon_connection};
 use crate::task_run::command::parse_task_run_args;
 use crate::task_run::orchestrator::TaskRunOrchestrator;
-use crate::task_run::provider_factory::real_routing_provider;
+use crate::task_run::provider_factory::real_routing_provider_with_host_readiness;
 use crate::task_run::types::{ReportMode, TaskRunRequest, TaskRunStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +110,29 @@ where
                 .change_id
                 .clone()
                 .unwrap_or_else(|| "aria-login-jwt".to_string());
-            let provider = real_routing_provider().map_err(task_run_error)?;
+            let command_runner: Arc<dyn BoundedCommandRunner> = Arc::new(TokioBoundedCommandRunner);
+            let provider_health = Arc::new(ProviderHealthService::with_dependencies(
+                AriaStatePaths::from_workspace_root(&options.workspace),
+                command_runner,
+                Arc::new(SystemProviderHealthClock),
+                Duration::from_secs(5),
+                4096,
+            ));
+            provider_health
+                .refresh(tokio_util::sync::CancellationToken::new())
+                .await
+                .map_err(|error| {
+                    task_run_error(crate::task_run::types::TaskRunError::new(
+                        "provider_health_refresh_failed",
+                        error.to_string(),
+                    ))
+                })?;
+            let provider_gate = Arc::new(ProviderAvailabilityGate::new(provider_health));
+            let provider = real_routing_provider_with_host_readiness(
+                provider_gate,
+                crate::web::provider_availability::host_real_workflow_ready,
+            )
+            .map_err(task_run_error)?;
             let outcome = TaskRunOrchestrator::run_with_provider(
                 TaskRunRequest {
                     task_id: None,

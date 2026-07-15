@@ -6,6 +6,7 @@ import {
   defaultLaunchTitle,
   IssueLifecycleWorkbench,
 } from "./IssueLifecycleWorkbench";
+import { resolveGroupCodingAttempt } from "./IssueLifecycleWorkbenchParts";
 import {
   codingGroupAttemptRecord,
   deferred,
@@ -207,7 +208,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     );
   });
 
-  it("creates a new group coding attempt when fallback only finds a completed group attempt", async () => {
+  it("reuses a completed group coding attempt instead of creating another one", async () => {
     const fetchMock = lifecycleFetch({
       confirmedWorkItem: true,
       splitWorkItems: true,
@@ -238,18 +239,37 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
       await screen.findByRole("button", { name: "Work Item Group" }),
     );
 
-    expect(screen.getByRole("button", { name: "开始 Coding" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "进入 Coding Workspace" }),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByTestId("drawer-open-coding-workspace"));
 
     await waitFor(() =>
-      expect(onOpenCodingWorkspace).toHaveBeenCalledWith("coding_attempt_0001"),
+      expect(onOpenCodingWorkspace).toHaveBeenCalledWith(
+        "coding_attempt_completed_group_0001",
+      ),
     );
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchMock).not.toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it.each(["failed", "aborted"] as const)(
+    "resolves an existing %s group coding attempt",
+    (status) => {
+      const attempt = {
+        ...codingGroupAttemptRecord("issue_plan_0001"),
+        attempt_id: `coding_attempt_${status}_group_0001`,
+        status,
+      };
+
+      expect(
+        resolveGroupCodingAttempt({}, [attempt], "issue_plan_0001"),
+      ).toEqual(attempt);
+    },
+  );
 
   it("keeps drawer URL focus while opening the work item plan workspace", async () => {
     vi.stubGlobal("fetch", lifecycleFetch({ confirmedWorkItem: true }));

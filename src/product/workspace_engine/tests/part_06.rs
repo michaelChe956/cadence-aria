@@ -184,6 +184,7 @@ async fn handle_human_confirm_request_change_starts_revision() {
         findings: Vec::new(),
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     });
     engine
         .enter_human_confirm(Some("等待人工确认".to_string()))
@@ -467,10 +468,7 @@ impl StreamingProviderAdapter for RecordingStreamingProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
                 .await;
         });
         Ok(ProviderSession {
@@ -661,10 +659,7 @@ impl StreamingProviderAdapter for StreamedArtifactSummaryProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: "Story Spec 候选已输出。等待 daemon 处理。".to_string(),
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain("Story Spec 候选已输出。等待 daemon 处理。".to_string(), None)))
                 .await;
         });
         Ok(ProviderSession {

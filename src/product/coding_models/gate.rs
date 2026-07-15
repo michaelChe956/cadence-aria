@@ -95,6 +95,7 @@ pub enum CodingGateActionType {
     RerunMissingSteps,
     ProvideContext,
     ManualContinue,
+    RetryCoding,
     RetryReview,
     RetryInternalReview,
     AcceptTestingResult,

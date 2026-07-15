@@ -100,7 +100,7 @@ pub(crate) fn parse_review_payload(
     let json = extract_json_object(full_output).unwrap_or(full_output);
     match serde_json::from_str::<RawCodeReviewProviderPayload>(json) {
         Ok(raw) => raw.into_payload(default_source_stage),
-        Err(_) => blocked_review_payload(full_output),
+        Err(error) => blocked_review_payload(full_output, &error),
     }
 }
 
@@ -153,11 +153,21 @@ impl RawReviewFinding {
     }
 }
 
-pub(crate) fn blocked_review_payload(full_output: &str) -> CodeReviewProviderPayload {
+pub(crate) fn blocked_review_payload(
+    full_output: &str,
+    error: &serde_json::Error,
+) -> CodeReviewProviderPayload {
+    let prefix = match error.classify() {
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+            "review 输出不是有效 JSON"
+        }
+        serde_json::error::Category::Data => "review JSON Schema 校验失败",
+        serde_json::error::Category::Io => "review JSON 解析失败",
+    };
     CodeReviewProviderPayload {
         verdict: ReviewVerdict::Blocked,
         summary: format!(
-            "review 输出不是有效 JSON，已阻塞并等待人工确认: {}",
+            "{prefix}，已阻塞并等待人工确认: {error}; 原始输出: {}",
             non_empty_trimmed(full_output).unwrap_or_else(|| "<empty>".to_string())
         ),
         findings: Vec::new(),

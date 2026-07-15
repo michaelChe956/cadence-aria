@@ -39,10 +39,12 @@ fn blocked_report_with(missing: Vec<String>, skipped: Vec<String>) -> TestingRep
     }
 }
 
+mod coder_resume_recovery;
 mod gate_coder_feedback;
 mod gate_rework;
 mod parser_prompt;
 mod provider_driven;
+mod provider_failure_recovery;
 
 #[tokio::test]
 async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node() {

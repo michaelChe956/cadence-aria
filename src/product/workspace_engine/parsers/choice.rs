@@ -7,7 +7,8 @@ pub(crate) fn detect_author_choice_request(
     if !matches!(workspace_type, WorkspaceType::Story | WorkspaceType::Design) {
         return None;
     }
-    if content_has_complete_workspace_artifact(content, workspace_type) {
+    let artifact_markdown = extract_artifact_content(content);
+    if content_has_complete_workspace_artifact(&artifact_markdown, workspace_type) {
         return None;
     }
     if !looks_like_user_question(content) {

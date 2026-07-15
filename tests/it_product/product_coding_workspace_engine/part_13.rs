@@ -502,6 +502,19 @@ async fn group_final_review_prompt_includes_all_unit_handoffs() {
     assert!(prompt.contains("work_item_0002"));
     assert!(prompt.contains("handoff summary for backend"));
     assert!(prompt.contains("handoff summary for frontend"));
+    assert!(prompt.contains("Reviewer 非 E2E 测试边界"));
+    assert!(prompt.contains("Playwright"));
+    assert!(prompt.contains("单元测试"));
+    assert!(prompt.contains("不受 Verification Plan 已列命令的严格限制"));
+    assert!(prompt.contains(
+        "上述测试及其所需浏览器环境的安装、配置、缺失、失败或相关证据（包括缺少证据）"
+    ));
+    assert!(prompt.contains("均不得成为 finding，也不得导致 request_changes 或 blocked"));
+    assert!(prompt.contains("不得作为 verdict 或 summary 中的否决理由"));
+    assert!(prompt.contains("不得成为 Coder required_action 或任何返修要求"));
+    assert!(prompt.contains(
+        "即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试及其所需浏览器环境"
+    ));
 }
 
 #[tokio::test]

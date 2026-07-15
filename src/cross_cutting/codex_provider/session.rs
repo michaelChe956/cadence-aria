@@ -9,9 +9,9 @@ use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ChoiceRequestData, ChoiceRequestSource, ProviderEvent, ProviderExecutionEvent,
-    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
-    ProviderStatus, RiskLevel, StreamingProviderInput,
+    ChoiceRequestData, ChoiceRequestSource, ProviderCompletion, ProviderEvent,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
+    ProviderPermissionMode, ProviderStatus, RiskLevel, StreamingProviderInput,
 };
 
 use super::{
@@ -295,15 +295,12 @@ where
                 &cancel,
             )
             .await?;
-            send_provider_event(
-                &event_tx,
-                ProviderEvent::Completed {
-                    full_output,
-                    provider_session_id: thread_id,
-                },
-                &cancel,
-            )
-            .await?;
+            let completion = ProviderCompletion::from_output(
+                full_output,
+                input.structured_output_contract.as_ref(),
+                thread_id,
+            );
+            send_provider_event(&event_tx, ProviderEvent::Completed(completion), &cancel).await?;
             return Ok(());
         }
 

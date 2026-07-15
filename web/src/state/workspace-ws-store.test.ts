@@ -286,6 +286,73 @@ describe("workspace ws store base state", () => {
     ).toBe(true);
   });
 
+  it.each(["story", "design", "work_item"] as const)(
+    "rebuilds %s review diagnostics from hydrated node detail",
+    (workspaceType) => {
+      const store = useWorkspaceStore.getState();
+      const diagnostic = {
+        code: "invalid_json",
+        message: "Reviewer 输出不是合法 JSON",
+        repair_attempted: true,
+        repair_succeeded: false,
+        raw_output_preview: "未校验内容",
+      };
+      useWorkspaceStore.setState({
+        sessionId: `workspace_session_${workspaceType}`,
+        workspaceType,
+        timelineNodes: [
+          {
+            node_id: `node-review-${workspaceType}`,
+            node_type: "reviewer_run",
+            agent: "codex",
+            stage: "cross_review",
+            round: 1,
+            status: "completed",
+            title: "Review Round 1",
+            summary: "需要人工检查",
+            started_at: "2026-05-20T00:00:00Z",
+            completed_at: "2026-05-20T00:01:00Z",
+            duration_ms: 60_000,
+            artifact_ref: null,
+            provider_config_snapshot: {
+              author: "claude_code",
+              reviewer: "codex",
+              review_rounds: 1,
+            },
+          },
+        ],
+      });
+
+      store.setNodeDetail(
+        makeNodeDetail({
+          node_id: `node-review-${workspaceType}`,
+          node_type: "reviewer_run",
+          verdict: {
+            verdict: "needs_human",
+            comments: "可信 Reviewer comments",
+            summary: "需要人工检查",
+            findings: [],
+            review_gate: "user_triage_required",
+            structured_output_diagnostic: diagnostic,
+          },
+        }),
+      );
+
+      expect(
+        useWorkspaceStore
+          .getState()
+          .chatEntries.find((entry) => entry.type === "review_verdict")?.metadata,
+      ).toMatchObject({
+        verdict: "needs_human",
+        comments: "可信 Reviewer comments",
+        summary: "需要人工检查",
+        findings: [],
+        review_gate: "user_triage_required",
+        structured_output_diagnostic: diagnostic,
+      });
+    },
+  );
+
   it("rebuilds user triage gate prompts with review metadata from hydrated node detail", () => {
     const store = useWorkspaceStore.getState();
     useWorkspaceStore.setState({

@@ -54,6 +54,21 @@ describe("ChatInputBar", () => {
     expect(screen.getByRole("button", { name: "中止" })).toBeInTheDocument();
   });
 
+  it("hides start generation while an interrupted run is recoverable", () => {
+    render(
+      <ChatInputBar
+        stage="prepare_context"
+        hideStartGeneration={true}
+        onSendContextNote={vi.fn()}
+        onStartGeneration={vi.fn()}
+        onSendHumanDecision={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "开始生成" })).not.toBeInTheDocument();
+  });
+
   it("shows author confirmation actions", () => {
     const onAuthorDecision = vi.fn();
 

@@ -122,6 +122,12 @@ impl WorkspaceEngine {
         let current_plan = lifecycle
             .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
             .map_err(|e| format!("load plan failed: {e}"))?;
+        if current_plan.work_item_ids.is_empty() {
+            return Err(
+                "cannot confirm WorkItemPlan without compiled WorkItem records; run Final Compile successfully first"
+                    .to_string(),
+            );
+        }
         let plan = match current_plan.status {
             crate::product::models::IssueWorkItemPlanStatus::Draft => {
                 lifecycle
@@ -134,12 +140,6 @@ impl WorkspaceEngine {
                 return Err("cannot confirm a change_requested WorkItemPlan".to_string());
             }
         };
-        if plan.work_item_ids.is_empty() {
-            return Err(
-                "cannot confirm WorkItemPlan without compiled WorkItem records; run Final Compile successfully first"
-                    .to_string(),
-            );
-        }
 
         let _created_sessions = lifecycle
             .ensure_work_item_sessions_for_plan(

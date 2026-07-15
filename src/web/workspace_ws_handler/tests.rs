@@ -8,6 +8,9 @@ use crate::web::workspace_ws_types::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "tests/interrupted_run_recovery.rs"]
+mod interrupted_run_recovery;
+
 fn provider_config() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {
         author: ProviderName::ClaudeCode,
@@ -590,10 +593,12 @@ impl StreamingProviderAdapter for PromptRecordingProvider {
                 ## 待确认项\n无。\n\n\
                 ## 非功能需求\n无。\n";
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output.to_string(),
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output.to_string(),
+                        None,
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {

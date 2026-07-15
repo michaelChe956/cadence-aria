@@ -40,6 +40,7 @@ export type {
   NodeDetailSummary,
   PermissionRequest,
   ProtocolErrorState,
+  RecoverableInterruptedRun,
   ProviderConfigSnapshot,
   ProviderStatus,
   ReviewDecisionRequired,
@@ -103,6 +104,7 @@ const initialState: WorkspaceWsState = {
   pendingDecision: null,
   error: null,
   activeRunId: null,
+  recoverableInterruptedRun: null,
   protocolError: null,
   providerLocked: false,
   providerSnapshot: null,
@@ -184,6 +186,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         pendingReviewerSummary: null,
         error: null,
         activeRunId: state.active_run_id ?? null,
+        recoverableInterruptedRun: state.recoverable_interrupted_run ?? null,
       };
       return {
         ...nextState,

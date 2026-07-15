@@ -1,9 +1,11 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
-    CodingGateAction, CodingGateActionType, FindingSeverity, ReviewFinding, ReviewVerdict,
+    CodeReviewReport, CodingAgentRole, CodingAttemptScope, CodingAttemptStatus,
+    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, ReviewFinding, ReviewVerdict,
 };
+use crate::product::coding_work_item_context::select_work_item_markdown;
 use crate::product::lifecycle_store::{
     CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
@@ -22,9 +24,11 @@ use tempfile::TempDir;
 use super::{
     CodeReviewFlowDecision, CodingExecutionAttempt, CodingWsInMessage, CodingWsOutMessage,
     ProviderConfigSnapshot, build_coding_session_state, code_review_flow_decision,
-    coding_execution_context, is_coding_ws_message_allowed, select_work_item_markdown,
-    should_resume_runner_after_gate_response,
+    coding_execution_context, is_coding_ws_message_allowed,
+    should_emit_coding_runner_protocol_error, should_resume_runner_after_gate_response,
 };
+
+mod failed_review_recovery;
 
 #[test]
 fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
@@ -418,6 +422,50 @@ fn coding_session_state_keeps_final_confirm_blocked_gate_for_current_stage() {
 }
 
 #[test]
+fn coding_session_state_does_not_reactivate_historical_blocked_node() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+    let coding_store = CodingAttemptStore::new(app_paths);
+    coding_store
+        .save_coding_attempt(&attempt)
+        .expect("save coding attempt");
+    coding_store
+        .save_timeline_node(CodingTimelineNode {
+            id: "coding_node_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::CodeReview,
+            title: "代码审查".to_string(),
+            status: CodingTimelineNodeStatus::Blocked,
+            agent_role: Some(CodingAgentRole::Reviewer),
+            summary: Some("code review 被阻塞".to_string()),
+            started_at: "2026-07-13T00:00:00Z".to_string(),
+            completed_at: Some("2026-07-13T00:01:00Z".to_string()),
+            artifact_refs: Vec::new(),
+        })
+        .expect("save blocked node");
+    coding_store
+        .save_timeline_node(CodingTimelineNode {
+            id: "coding_node_0002".to_string(),
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::CodeReview,
+            title: "代码审查".to_string(),
+            status: CodingTimelineNodeStatus::Completed,
+            agent_role: Some(CodingAgentRole::Reviewer),
+            summary: Some("code review 通过".to_string()),
+            started_at: "2026-07-13T00:02:00Z".to_string(),
+            completed_at: Some("2026-07-13T00:03:00Z".to_string()),
+            artifact_refs: Vec::new(),
+        })
+        .expect("save completed retry node");
+
+    let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");
+    let CodingWsOutMessage::CodingSessionState { active_node_id, .. } = state else {
+        panic!("expected coding session state");
+    };
+
+    assert!(active_node_id.is_none());
+}
+
+#[test]
 fn blocked_attempt_allows_gate_response_messages() {
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Blocked,
@@ -492,11 +540,28 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
         "accept_testing_result",
         &attempt
     ));
+    assert!(should_resume_runner_after_gate_response(
+        "retry_coding",
+        &attempt
+    ));
 
     attempt.status = CodingAttemptStatus::Running;
     assert!(!should_resume_runner_after_gate_response(
         "retry_test_plan",
         &attempt
+    ));
+}
+
+#[test]
+fn recoverable_attempt_status_suppresses_coding_start_failed() {
+    assert!(!should_emit_coding_runner_protocol_error(
+        &CodingAttemptStatus::Blocked
+    ));
+    assert!(!should_emit_coding_runner_protocol_error(
+        &CodingAttemptStatus::WaitingForHuman
+    ));
+    assert!(should_emit_coding_runner_protocol_error(
+        &CodingAttemptStatus::Failed
     ));
 }
 

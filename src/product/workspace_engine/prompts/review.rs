@@ -1,4 +1,5 @@
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputContract;
 
 impl WorkspaceEngine {
     pub(crate) fn build_review_input(&self) -> Result<StreamingProviderInput, String> {
@@ -46,6 +47,10 @@ impl WorkspaceEngine {
              如果 markdown 正文内部的代码块未闭合或内容结构不合规，仍可按实际问题要求返修。\n",
         );
         let nonce = structured_output_nonce();
+        let structured_output_contract = StructuredOutputContract {
+            nonce: nonce.clone(),
+            schema_name: "workspace_review".to_string(),
+        };
         prompt.push_str(&reviewer_output_contract(
             &nonce,
             r#"{"verdict":"pass|revise|needs_human","summary":"一句话摘要","findings":[{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前产物中的具体证据","impact":"为什么影响或不影响下一阶段","required_action":"需要作者执行的最小动作"}]}"#,
@@ -68,6 +73,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: Some(structured_output_contract),
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
@@ -113,6 +119,16 @@ impl WorkspaceEngine {
             .reviewer_provider
             .clone()
             .unwrap_or(ProviderName::Codex);
+        let generation_round_id = self
+            .work_item_plan_store()?
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .map(|index| index.current_generation_round_id)
+            .unwrap_or_else(|| "legacy_work_item_plan_candidate".to_string());
 
         let mut prompt = String::new();
         prompt
@@ -220,9 +236,17 @@ impl WorkspaceEngine {
              不要因为 verification_plans 摘要未展开 commands 判定返修；只审核上述五个维度。\n",
         );
         let nonce = structured_output_nonce();
+        let structured_output_contract = StructuredOutputContract {
+            nonce: nonce.clone(),
+            schema_name: "work_item_plan_review".to_string(),
+        };
+        let schema = format!(
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前产物中的具体证据","impact":"为什么影响或不影响下一阶段","required_action":"需要作者执行的最小动作"}}]}}"#,
+            generation_round_id
+        );
         prompt.push_str(&reviewer_output_contract(
             &nonce,
-            r#"{"verdict":"pass|revise|needs_human","summary":"一句话摘要","findings":[{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前产物中的具体证据","impact":"为什么影响或不影响下一阶段","required_action":"需要作者执行的最小动作"}]}"#,
+            &schema,
             "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
              - 只有影响下一阶段可用性的 finding 才能标记为 `blocking`、`must_fix` 或 `strong_recommend_fix`。\n\
              - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`、`minor` 或 `optional`。\n\
@@ -230,7 +254,7 @@ impl WorkspaceEngine {
              - 如果输出 `verdict=revise`，必须给出至少一个结构化 finding；否则系统会进入人工裁决而不是自动返修。\n\
              - 第二轮及后续 review 只复核上一轮强返修项是否关闭；除非 revision 新引入真正阻塞问题，不得重新发散普通建议。\n\
              - `pass`：产物可进入最终人工确认。\n\
-             - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding。\n\
+             - `revise`：仅当存在 blocking/must_fix/strong_recommend_fix finding；语义为重开 Outline 并重新生成拆分。\n\
              - `needs_human`：没有明确可自动返修内容，需要用户做产品/范围判断。\n",
         ));
 
@@ -242,6 +266,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: Some(structured_output_contract),
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
@@ -262,18 +287,13 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         let generation_round_id = self
-            .work_item_plan_store()
-            .ok()
-            .and_then(|store| {
-                store
-                    .load_active_index(
-                        &self.session.project_id,
-                        &self.session.issue_id,
-                        &self.session.entity_id,
-                    )
-                    .ok()
-                    .flatten()
-            })
+            .work_item_plan_store()?
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
             .map(|index| index.current_generation_round_id)
             .unwrap_or_else(|| "generation_round_unknown".to_string());
 
@@ -394,8 +414,12 @@ impl WorkspaceEngine {
              如果问题会影响拆分边界，返回 `revise`；如果需要用户做产品/范围判断，返回 `needs_human`。\n",
         );
         let nonce = structured_output_nonce();
+        let structured_output_contract = StructuredOutputContract {
+            nonce: nonce.clone(),
+            schema_name: "work_item_plan_outline_review".to_string(),
+        };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","affects_items":[{{"target_outline_id":"outline id"}}],"findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"Outline 中的具体证据","impact":"为什么影响或不影响 Draft 生成","required_action":"需要 Outline author 执行的最小动作"}}]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","target_outline_id":"outline id","message":"问题描述","evidence":"Outline 中的具体证据","impact":"为什么影响或不影响 Draft 生成","required_action":"需要 Outline author 执行的最小动作"}}]}}"#,
             generation_round_id
         );
         prompt.push_str(&reviewer_output_contract(
@@ -405,7 +429,9 @@ impl WorkspaceEngine {
              - `pass`：Outline 可进入生成模式选择。\n\
              - `revise`：Outline 需要返修，且必须给出至少一个 blocking/must_fix/strong_recommend_fix finding。\n\
              - `needs_human`：需要用户做产品/范围判断。\n\
-             - `affects_items.target_outline_id` 只能引用当前 Outline 中存在的 outline_id。\n",
+             - 每条 finding 如果针对具体 outline，必须填写 `target_outline_id`，且只能引用当前 Outline 中存在的 outline_id。\n\
+             - 如果 finding 针对整个 Outline 方案而不是某个具体 outline，可以省略 `target_outline_id`。\n\
+             - 系统会从 findings[].target_outline_id 推导受影响 outline，不要额外输出 affects_items。\n",
         ));
 
         Ok(StreamingProviderInput {
@@ -416,6 +442,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: Some(structured_output_contract),
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
@@ -445,6 +472,10 @@ impl WorkspaceEngine {
             .clone()
             .unwrap_or(ProviderName::Codex);
         let nonce = structured_output_nonce();
+        let structured_output_contract = StructuredOutputContract {
+            nonce: nonce.clone(),
+            schema_name: "work_item_plan_batch_review".to_string(),
+        };
         let mut prompt = String::new();
         prompt
             .push_str("请作为 reviewer 审核 WorkItemPlan 自动模式生成的整组 Work Item Draft。\n\n");
@@ -479,6 +510,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: Some(structured_output_contract),
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
@@ -569,6 +601,10 @@ impl WorkspaceEngine {
         }
 
         let nonce = structured_output_nonce();
+        let structured_output_contract = StructuredOutputContract {
+            nonce: nonce.clone(),
+            schema_name: "work_item_plan_item_review".to_string(),
+        };
         let schema = format!(
             r#"{{"verdict":"pass|revise|needs_human|plan_reopen_required","review_scope":"item","target_outline_id":"{}","generation_round_id":"{}","draft_id":"{}","summary":"一句话摘要","affects_items":[{{"target_outline_id":"{}"}}],"findings":[{{"severity":"blocking|must_fix|strong_recommend_fix|suggestion|minor|optional","message":"问题描述","evidence":"当前 draft 或依赖上下文中的具体证据","impact":"为什么影响或不影响后续生成","required_action":"需要当前 item author 执行的最小动作"}}]}}"#,
             draft_candidate.draft_record.outline_id,
@@ -595,6 +631,7 @@ impl WorkspaceEngine {
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: Some(structured_output_contract),
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })

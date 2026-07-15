@@ -30,6 +30,11 @@ pub(crate) use support::*;
 pub(crate) const CODEX_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const CODEX_DEFAULT_SANDBOX_MODE: &str = "danger-full-access";
 pub(crate) const CODEX_RESUME_STALL_ERROR: &str = "Codex resume stalled before provider progress";
+
+pub(crate) fn is_resume_stall_failure(message: &str) -> bool {
+    message.contains(CODEX_RESUME_STALL_ERROR)
+}
+
 #[cfg(not(test))]
 pub(crate) const CODEX_RESUME_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]

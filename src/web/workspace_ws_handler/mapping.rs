@@ -294,6 +294,7 @@ pub(crate) fn spawn_engine_event_forward_task(
                     findings,
                     review_gate,
                     work_item_plan_review,
+                    structured_output_diagnostic,
                 } => WsOutMessage::ReviewComplete {
                     node_id,
                     round,
@@ -303,6 +304,7 @@ pub(crate) fn spawn_engine_event_forward_task(
                     findings,
                     review_gate,
                     work_item_plan_review,
+                    structured_output_diagnostic,
                 },
                 EngineEvent::ReviewDecisionRequired {
                     node_id,

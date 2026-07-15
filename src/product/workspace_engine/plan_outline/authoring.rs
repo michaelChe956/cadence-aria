@@ -50,7 +50,7 @@ impl WorkspaceEngine {
     pub async fn request_work_item_plan_outline_revision(
         &mut self,
         feedback: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         let active_node_type = self.active_node_type();
         let is_allowed_node = matches!(
             active_node_type,
@@ -65,13 +65,17 @@ impl WorkspaceEngine {
                     .to_string(),
             );
         }
-        self.pending_revision_context = feedback;
-        self.mark_work_item_plan_outline_revising()?;
-        self.complete_active_node(Some("已返回 WorkItemPlan Outline 返修".to_string()))
-            .await;
-        self.transition_stage(WorkspaceStage::Running).await;
-        self.begin_work_item_plan_outline_run().await;
-        Ok(())
+        let policy = if active_node_type == Some(TimelineNodeType::WorkItemPlanOutlineConfirm) {
+            OutlineRevisionPersistencePolicy::AllowMissingInitialRound
+        } else {
+            OutlineRevisionPersistencePolicy::RequireActiveRound
+        };
+        self.prepare_work_item_plan_outline_revision(
+            feedback,
+            WorkItemPlanOutlineRevisionSource::AuthorConfirm,
+            policy,
+        )
+        .await
     }
 
     pub async fn begin_work_item_plan_auto_revision_run(&mut self, round: u32) -> String {

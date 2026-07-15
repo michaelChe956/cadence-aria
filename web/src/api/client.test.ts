@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  ApiRequestError,
   createProductIssue,
   createProject,
   createRepository,
@@ -13,12 +14,14 @@ import {
   deleteCodingAttempt,
   generateDesignSpecs,
   generateStorySpecs,
+  getProviderStatus,
   getIssueLifecycle,
   prepareWorkItemPlan,
   listProductIssues,
   listProjects,
   listRepositories,
   normalizeApiError,
+  recheckProviders,
 } from "./client";
 
 describe("api client", () => {
@@ -35,6 +38,162 @@ describe("api client", () => {
     );
     expect(error.code).toBe("provider_execution_failed");
     expect(error.message).toBe("provider command timed out");
+  });
+
+  it("falls back for non-object error details", async () => {
+    const error = await normalizeApiError(
+      new Response(
+        JSON.stringify({
+          code: "invalid_details",
+          message: "details is not an object",
+          details: "do not coerce this value",
+        }),
+        { status: 500 },
+      ),
+    );
+
+    expect(error.details).toEqual({});
+  });
+
+  it("gets provider status and rechecks with the accepted health envelope", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    const degraded = {
+      schema_version: 1,
+      generation: 7,
+      checked_at: "2026-07-14T00:00:00Z",
+      state_status: "degraded",
+      state_error: "provider health state is degraded",
+      real_workflow_blocked: true,
+      test_provider_enabled: false,
+      providers: [
+        {
+          provider: "claude_code",
+          display_name: "Claude Code",
+          available: false,
+          version: null,
+          reason_code: "command_missing",
+          reason: "not found",
+          checked_at: "2026-07-14T00:00:00Z",
+          install_hint: "Install Claude Code CLI.",
+        },
+        {
+          provider: "codex",
+          display_name: "Codex",
+          available: false,
+          version: null,
+          reason_code: "command_missing",
+          reason: "not found",
+          checked_at: "2026-07-14T00:00:00Z",
+          install_hint: "Install Codex CLI.",
+        },
+      ],
+    } as const;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(JSON.stringify(degraded), { status: 200 });
+      }),
+    );
+
+    await expect(getProviderStatus()).resolves.toEqual(degraded);
+    await expect(recheckProviders()).resolves.toEqual(degraded);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ input: "/api/providers/status" });
+    expect(calls[0].init?.method).toBeUndefined();
+    expect(calls[1]).toMatchObject({ input: "/api/providers/recheck" });
+    expect(calls[1].init?.method).toBe("POST");
+  });
+
+  it("returns the complete repository initialization envelope from HTTP 201", async () => {
+    const response = {
+      repository: {
+        repository_id: "repository_0001",
+        project_id: "project_0001",
+        name: "Aria",
+        path: "/work/aria",
+        repo_hash: "repo-hash",
+        runtime_root: "/work/aria/.aria",
+        default_policy_preset: "balanced",
+        default_provider_mode: "claude_code",
+        created_at: "2026-07-14T00:00:00Z",
+        updated_at: "2026-07-14T00:00:00Z",
+      },
+      initialization: {
+        source: "offline",
+        commands: [
+          { index: 1, command: "/pre-check", status: "completed" },
+          { index: 2, command: "/rule-config", status: "completed" },
+          { index: 3, command: "/mcp-configuration", status: "completed" },
+          {
+            index: 4,
+            command: "/project-rules-examples",
+            status: "completed",
+          },
+        ],
+        warnings: ["cadence_skills_conflict:<path>"],
+        changed_paths: [".claude/rules/project.md"],
+        completed_at: "2026-07-14T00:01:00Z",
+      },
+    } as const;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify(response), { status: 201 }),
+      ),
+    );
+
+    await expect(
+      createRepository("project_0001", {
+        name: "Aria",
+        path: "/work/aria",
+        default_policy_preset: "balanced",
+        default_provider_mode: "claude_code",
+      }),
+    ).resolves.toEqual(response);
+  });
+
+  it("preserves structured repository registration error details", async () => {
+    const details = {
+      stage: "repository_init_command",
+      provider: "claude_code",
+      command: "/rule-config",
+      reason_code: "repository_init_command_failed",
+      stderr_summary: null,
+      changed_paths: [".claude/rules/project.md"],
+      retryable: true,
+      action: "Fix the problem, inspect changed_paths, then retry.",
+    } as const;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            code: "repository_init_command_failed",
+            message: "repository registration failed",
+            details,
+          }),
+          { status: 500 },
+        ),
+      ),
+    );
+
+    try {
+      await createRepository("project_0001", {
+        name: "Aria",
+        path: "/work/aria",
+      });
+      throw new Error("expected createRepository to reject");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiRequestError);
+      expect((error as ApiRequestError).details).toEqual(details);
+      expect((error as ApiRequestError).details.changed_paths).toEqual([
+        ".claude/rules/project.md",
+      ]);
+      expect((error as ApiRequestError).details.retryable).toBe(true);
+      expect((error as ApiRequestError).details.stderr_summary).toBeNull();
+    }
   });
 
   it("lists and creates product projects through the api", async () => {

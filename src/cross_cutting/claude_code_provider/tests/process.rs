@@ -46,7 +46,7 @@ async fn claude_provider_cancel_kills_and_reaps_hanging_process() {
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_)
-            | ProviderEvent::Completed { .. } => {}
+            | ProviderEvent::Completed(_) => {}
         }
     }
 

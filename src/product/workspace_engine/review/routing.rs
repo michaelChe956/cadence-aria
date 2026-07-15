@@ -2,15 +2,18 @@ use super::feedback::format_review_feedback;
 use super::*;
 
 impl WorkspaceEngine {
-    pub(crate) async fn complete_review(&mut self, output: String) {
+    pub(crate) async fn complete_review(
+        &mut self,
+        completion: ProviderCompletion,
+        verdict: ReviewVerdict,
+    ) {
         let node_id = self
             .active_node_id
             .clone()
             .unwrap_or_else(|| "review_unknown".to_string());
         let round = self.active_review_round().unwrap_or(1);
         let active_node_type = self.active_node_type();
-        let verdict = self.parse_review_verdict_for_active_node(&output);
-        self.record_review_message(output);
+        self.record_review_message(completion.readable_output);
         self.latest_review_verdict = Some(verdict.clone());
         let reviewer = self
             .active_node_agent()
@@ -18,14 +21,7 @@ impl WorkspaceEngine {
         let _ = self
             .persist_review_verdict(
                 &node_id,
-                serde_json::json!({
-                    "verdict": verdict.verdict.clone(),
-                    "comments": verdict.comments.clone(),
-                    "summary": verdict.summary.clone(),
-                    "findings": verdict.findings.clone(),
-                    "review_gate": verdict.review_gate.clone(),
-                    "work_item_plan_review": verdict.work_item_plan_review.clone(),
-                }),
+                serde_json::to_value(&verdict).unwrap_or(serde_json::Value::Null),
             )
             .await;
         let _ = self
@@ -44,38 +40,35 @@ impl WorkspaceEngine {
         .await;
         let artifact_verdict = match &verdict.review_gate {
             ReviewGate::RequiresRevision => ReviewVerdictType::Revise,
-            ReviewGate::UserConfirmAllowed => match &verdict.verdict {
-                ReviewVerdictType::Pass => ReviewVerdictType::Pass,
-                ReviewVerdictType::Revise | ReviewVerdictType::NeedsHuman => {
-                    ReviewVerdictType::NeedsHuman
-                }
-            },
-            ReviewGate::UserTriageRequired => ReviewVerdictType::NeedsHuman,
+            ReviewGate::UserConfirmAllowed if verdict.verdict == ReviewVerdictType::Pass => {
+                ReviewVerdictType::Pass
+            }
+            ReviewGate::UserConfirmAllowed | ReviewGate::UserTriageRequired => {
+                ReviewVerdictType::NeedsHuman
+            }
         };
         self.mark_latest_artifact_reviewed(reviewer, Some(artifact_verdict));
 
-        if active_node_type == Some(TimelineNodeType::WorkItemPlanOutlineReview) {
-            self.route_work_item_plan_outline_review(verdict).await;
-            return;
-        }
-
-        if active_node_type == Some(TimelineNodeType::WorkItemDraftReview) {
-            self.route_work_item_draft_review(verdict).await;
-            return;
-        }
-
-        if active_node_type == Some(TimelineNodeType::WorkItemBatchReview) {
-            self.route_work_item_batch_review(verdict).await;
-            return;
-        }
-
-        match &verdict.review_gate {
-            ReviewGate::UserConfirmAllowed | ReviewGate::UserTriageRequired => {
-                self.enter_human_confirm(Some(verdict.summary)).await;
+        match active_node_type {
+            Some(TimelineNodeType::WorkItemPlanOutlineReview) => {
+                self.route_work_item_plan_outline_review(verdict).await;
             }
-            ReviewGate::RequiresRevision => {
-                self.enter_review_decision(round, verdict.summary).await;
+            Some(TimelineNodeType::WorkItemDraftReview) => {
+                self.route_work_item_draft_review(verdict).await;
             }
+            Some(TimelineNodeType::WorkItemBatchReview) => {
+                self.route_work_item_batch_review(verdict).await;
+            }
+            _ => match &verdict.review_gate {
+                ReviewGate::UserConfirmAllowed | ReviewGate::UserTriageRequired => {
+                    self.enter_human_confirm(Some(verdict.summary.clone()))
+                        .await;
+                }
+                ReviewGate::RequiresRevision => {
+                    self.enter_review_decision(round, verdict.summary.clone())
+                        .await;
+                }
+            },
         }
     }
 
@@ -360,84 +353,9 @@ impl WorkspaceEngine {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn parse_review_verdict(output: &str) -> ReviewVerdict {
         Self::parse_review_verdict_for_workspace(output, &WorkspaceType::Story)
-    }
-
-    pub(crate) fn parse_review_verdict_for_active_node(&self, output: &str) -> ReviewVerdict {
-        if self.session.workspace_type == WorkspaceType::WorkItemPlan
-            && self.active_node_type() == Some(TimelineNodeType::WorkItemPlanOutlineReview)
-        {
-            let valid_outline_ids = self.current_work_item_plan_outline_ids();
-            let trimmed = output.trim();
-            let parsed = extract_structured_json(trimmed).and_then(|(comments, json)| {
-                parse_work_item_plan_review_json(
-                    &json,
-                    &comments,
-                    &valid_outline_ids,
-                    WorkItemPlanReviewScope::Outline,
-                )
-                .or_else(|| parse_review_json(&json, &comments))
-            });
-            return parsed.unwrap_or_else(|| ReviewVerdict {
-                verdict: ReviewVerdictType::NeedsHuman,
-                comments: output.to_string(),
-                summary: "需要人工确认".to_string(),
-                findings: Vec::new(),
-                review_gate: ReviewGate::UserTriageRequired,
-                work_item_plan_review: None,
-            });
-        }
-
-        if self.session.workspace_type == WorkspaceType::WorkItemPlan
-            && self.active_node_type() == Some(TimelineNodeType::WorkItemDraftReview)
-        {
-            let valid_outline_ids = self.current_work_item_plan_outline_ids();
-            let trimmed = output.trim();
-            let parsed = extract_structured_json(trimmed).and_then(|(comments, json)| {
-                parse_work_item_plan_review_json(
-                    &json,
-                    &comments,
-                    &valid_outline_ids,
-                    WorkItemPlanReviewScope::Item,
-                )
-                .or_else(|| parse_review_json(&json, &comments))
-            });
-            return parsed.unwrap_or_else(|| ReviewVerdict {
-                verdict: ReviewVerdictType::NeedsHuman,
-                comments: output.to_string(),
-                summary: "需要人工确认".to_string(),
-                findings: Vec::new(),
-                review_gate: ReviewGate::UserTriageRequired,
-                work_item_plan_review: None,
-            });
-        }
-
-        if self.session.workspace_type == WorkspaceType::WorkItemPlan
-            && self.active_node_type() == Some(TimelineNodeType::WorkItemBatchReview)
-        {
-            let valid_outline_ids = self.current_work_item_plan_outline_ids();
-            let trimmed = output.trim();
-            let parsed = extract_structured_json(trimmed).and_then(|(comments, json)| {
-                parse_work_item_plan_review_json(
-                    &json,
-                    &comments,
-                    &valid_outline_ids,
-                    WorkItemPlanReviewScope::Batch,
-                )
-                .or_else(|| parse_review_json(&json, &comments))
-            });
-            return parsed.unwrap_or_else(|| ReviewVerdict {
-                verdict: ReviewVerdictType::NeedsHuman,
-                comments: output.to_string(),
-                summary: "需要人工确认".to_string(),
-                findings: Vec::new(),
-                review_gate: ReviewGate::UserTriageRequired,
-                work_item_plan_review: None,
-            });
-        }
-
-        Self::parse_review_verdict_for_workspace(output, &self.session.workspace_type)
     }
 
     pub(crate) fn parse_review_verdict_for_workspace(
@@ -451,9 +369,8 @@ impl WorkspaceEngine {
                     &json,
                     &comments,
                     &[],
-                    WorkItemPlanReviewScope::Batch,
+                    WorkItemPlanReviewScope::Outline,
                 )
-                .or_else(|| parse_review_json(&json, &comments))
             } else {
                 parse_review_json(&json, &comments)
             }
@@ -466,6 +383,7 @@ impl WorkspaceEngine {
             findings: Vec::new(),
             review_gate: ReviewGate::UserTriageRequired,
             work_item_plan_review: None,
+            structured_output_diagnostic: None,
         })
     }
 }

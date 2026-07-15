@@ -150,7 +150,8 @@ async fn code_review_findings_are_injected_into_next_coding_round() {
     );
     let prompts = provider.coding_prompts();
     assert_eq!(prompts.len(), 2);
-    assert!(prompts[1].contains("本轮修复要求"));
+    assert!(prompts[1].contains("已确认 Work Item"));
+    assert!(prompts[1].contains("上一轮修复要求"));
     assert!(prompts[1].contains("移除 __pycache__ 和 .pyc 文件"));
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")

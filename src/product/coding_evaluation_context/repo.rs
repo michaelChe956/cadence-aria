@@ -10,14 +10,20 @@ use super::sanitize::{push_warning_once, sanitize_diff_text};
 pub(super) fn repo_context(
     attempt: &CodingExecutionAttempt,
     work_item: Option<&LifecycleWorkItemRecord>,
+    diff_base: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> EvaluationRepoContext {
-    let (changed_files, diff_stat, diff_truncated) = attempt
-        .worktree_path
-        .as_ref()
-        .map_or((Vec::new(), String::new(), false), |worktree_path| {
-            diff_context(worktree_path, &attempt.base_branch, warnings)
-        });
+    let (changed_files, diff_stat, diff_truncated) = match (
+        attempt.worktree_path.as_ref(),
+        diff_base.filter(|base| !base.trim().is_empty()),
+    ) {
+        (Some(worktree_path), Some(diff_base)) => diff_context(worktree_path, diff_base, warnings),
+        (Some(_), None) => {
+            push_warning_once(warnings, "diff_base_missing");
+            (Vec::new(), String::new(), false)
+        }
+        (None, _) => (Vec::new(), String::new(), false),
+    };
     EvaluationRepoContext {
         repository_id: work_item.map(|work_item| work_item.repository_id.clone()),
         branch_name: attempt.branch_name.clone(),

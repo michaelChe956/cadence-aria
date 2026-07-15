@@ -136,14 +136,16 @@ fn spec_context(
 pub(super) fn work_item_context(
     work_item: &LifecycleWorkItemRecord,
     version: Option<&ArtifactVersion>,
+    compiled_markdown: Option<&str>,
     session: Option<&WorkspaceSessionRecord>,
     warnings: &mut Vec<String>,
 ) -> EvaluationWorkItemContext {
-    let (raw_markdown_or_sections, truncated) = sanitize_context_text(
-        version
-            .map(|version| version.markdown())
-            .unwrap_or_default(),
-    );
+    let markdown = compiled_markdown
+        .filter(|markdown| !markdown.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| version.map(|version| version.markdown().to_string()))
+        .unwrap_or_default();
+    let (raw_markdown_or_sections, truncated) = sanitize_context_text(&markdown);
     if truncated {
         push_warning_once(warnings, "context_truncated");
     }

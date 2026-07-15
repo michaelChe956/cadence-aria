@@ -6,10 +6,12 @@ use tokio_util::sync::CancellationToken;
 use crate::protocol::contracts::AdapterInput;
 use serde_json::json;
 
+use crate::cross_cutting::structured_output::{StructuredOutputContract, StructuredOutputState};
+
 use super::{
-    ChoiceRequestData, ChoiceRequestSource, FakeStreamingProvider, ProviderCommand, ProviderEvent,
-    ProviderPermissionMode, ProviderSession, ProviderToolCall, ProviderToolResult,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceRequestData, ChoiceRequestSource, FakeStreamingProvider, ProviderCommand,
+    ProviderCompletion, ProviderEvent, ProviderPermissionMode, ProviderSession, ProviderToolCall,
+    ProviderToolResult, StreamingProviderAdapter, StreamingProviderInput,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(1);
@@ -36,6 +38,7 @@ fn make_provider_input(prompt: &str) -> StreamingProviderInput {
         workspace_session_id: None,
         resume_provider_session_id: None,
         permission_mode: ProviderPermissionMode::Auto,
+        structured_output_contract: None,
         env_vars: std::collections::BTreeMap::new(),
         timeout_secs: 60,
     }
@@ -49,6 +52,41 @@ fn prompt_with_word_count(word_count: usize) -> String {
 }
 
 #[test]
+fn provider_completion_parses_requested_structured_output() {
+    let contract = StructuredOutputContract {
+        nonce: "96aca42f".to_string(),
+        schema_name: "workspace_review".to_string(),
+    };
+    let completion = ProviderCompletion::from_output(
+        "可读说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{\"verdict\":\"pass\"}</ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">".to_string(),
+        Some(&contract),
+        Some("provider-session-1".to_string()),
+    );
+
+    assert_eq!(completion.readable_output, "可读说明");
+    assert!(matches!(
+        completion.structured_output,
+        StructuredOutputState::Parsed(_)
+    ));
+    assert_eq!(
+        completion.provider_session_id.as_deref(),
+        Some("provider-session-1")
+    );
+}
+
+#[test]
+fn provider_completion_plain_marks_structured_output_not_requested() {
+    let completion = ProviderCompletion::plain("plain output", None);
+
+    assert_eq!(completion.full_output, "plain output");
+    assert_eq!(completion.readable_output, "plain output");
+    assert_eq!(
+        completion.structured_output,
+        StructuredOutputState::NotRequested
+    );
+}
+
+#[test]
 fn streaming_provider_input_distinguishes_workspace_and_resume_sessions() {
     let input = StreamingProviderInput {
         provider_type: crate::protocol::contracts::ProviderType::Fake,
@@ -58,6 +96,7 @@ fn streaming_provider_input_distinguishes_workspace_and_resume_sessions() {
         workspace_session_id: Some("workspace_session_0001".to_string()),
         resume_provider_session_id: Some("provider_session_0001".to_string()),
         permission_mode: ProviderPermissionMode::Auto,
+        structured_output_contract: None,
         env_vars: std::collections::BTreeMap::new(),
         timeout_secs: 60,
     };
@@ -191,7 +230,8 @@ async fn fake_streaming_provider_session_emits_text_and_completed() {
     while let Some(event) = session.events.recv().await {
         match event {
             ProviderEvent::TextDelta { content } => output.push_str(&content),
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 assert_eq!(full_output, output);
                 break;
             }
@@ -205,6 +245,39 @@ async fn fake_streaming_provider_session_emits_text_and_completed() {
 }
 
 #[tokio::test]
+async fn fake_streaming_provider_parses_requested_structured_output() {
+    let provider = FakeStreamingProvider;
+    let mut input = make_provider_input("请作为 reviewer 审核当前 Workspace 产物。");
+    input.role = crate::protocol::contracts::AdapterRole::Reviewer;
+    input.structured_output_contract = Some(StructuredOutputContract {
+        nonce: "96aca42f".to_string(),
+        schema_name: "workspace_review".to_string(),
+    });
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    let completion = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should emit completion")
+            .expect("provider event channel should stay open")
+        {
+            ProviderEvent::Completed(completion) => break completion,
+            ProviderEvent::TextDelta { .. } => {}
+            other => panic!("unexpected provider event: {other:?}"),
+        }
+    };
+
+    assert!(matches!(
+        completion.structured_output,
+        StructuredOutputState::Parsed(ref value) if value["verdict"] == "pass"
+    ));
+    assert_eq!(completion.readable_output, "审核说明");
+}
+
+#[tokio::test]
 async fn fake_streaming_provider_outputs_work_item_split_sentinel() {
     let provider = FakeStreamingProvider;
     let input = StreamingProviderInput {
@@ -215,6 +288,7 @@ async fn fake_streaming_provider_outputs_work_item_split_sentinel() {
         workspace_session_id: Some("workspace_session_0001".to_string()),
         resume_provider_session_id: None,
         permission_mode: ProviderPermissionMode::Supervised,
+        structured_output_contract: None,
         env_vars: std::collections::BTreeMap::new(),
         timeout_secs: 60,
     };
@@ -228,7 +302,8 @@ async fn fake_streaming_provider_outputs_work_item_split_sentinel() {
     while let Some(event) = session.events.recv().await {
         match event {
             ProviderEvent::TextDelta { content } => streamed.push_str(&content),
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 completed = Some(full_output);
                 break;
             }
@@ -260,7 +335,7 @@ async fn fake_streaming_provider_abort_after_final_text_suppresses_completed() {
         .expect("provider should close after abort")
     {
         assert!(
-            !matches!(event, ProviderEvent::Completed { .. }),
+            !matches!(event, ProviderEvent::Completed(_)),
             "abort after the final text delta should suppress completion"
         );
     }

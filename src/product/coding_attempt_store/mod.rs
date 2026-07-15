@@ -8,6 +8,7 @@ mod gate;
 mod group;
 mod inputs;
 mod paths;
+mod recovery;
 mod report;
 mod role_run;
 mod role_run_event;
@@ -15,6 +16,8 @@ mod timeline;
 mod utils;
 
 pub use inputs::*;
+pub(crate) use recovery::FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE;
+pub use recovery::{FailedCodeReviewRecoveryJournal, FailedCodeReviewRecoveryPhase};
 pub(crate) use utils::*;
 
 #[derive(Debug, Clone)]

@@ -110,9 +110,12 @@ async fn manages_workspace_repositories_and_keeps_issue_on_lifecycle_flow() {
         json!({"name":"Repo A","path":repo_a.path()}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(repository_a["repository_id"], "repository_0001");
-    assert_eq!(repository_a["project_id"], "project_0001");
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        repository_a["repository"]["repository_id"],
+        "repository_0001"
+    );
+    assert_eq!(repository_a["repository"]["project_id"], "project_0001");
 
     let (status, repository_b) = request_json(
         app.clone(),
@@ -121,8 +124,11 @@ async fn manages_workspace_repositories_and_keeps_issue_on_lifecycle_flow() {
         json!({"name":"Repo B","path":repo_b.path()}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(repository_b["repository_id"], "repository_0002");
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        repository_b["repository"]["repository_id"],
+        "repository_0002"
+    );
 
     let (status, repositories) = request_json(
         app.clone(),

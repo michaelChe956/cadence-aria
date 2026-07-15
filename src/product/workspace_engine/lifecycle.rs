@@ -1,5 +1,192 @@
 use super::*;
 
+fn recover_complete_artifact_misclassified_as_text_fallback(
+    checkpoint_store: &CheckpointStore,
+    lifecycle_store: &LifecycleStore,
+    session: &mut WorkspaceSession,
+    timeline_nodes: &mut Vec<TimelineNode>,
+    active_node_id: &mut Option<String>,
+    artifact_versions: &mut Vec<ArtifactVersion>,
+) -> Result<bool, String> {
+    if !matches!(
+        session.workspace_type,
+        WorkspaceType::Story | WorkspaceType::Design
+    ) {
+        return Ok(false);
+    }
+    let Some(source_node_id) = active_node_id.clone() else {
+        return Ok(false);
+    };
+    let Some(source_node_index) = timeline_nodes.iter().position(|node| {
+        node.node_id == source_node_id
+            && matches!(
+                node.node_type,
+                TimelineNodeType::AuthorRun | TimelineNodeType::Revision
+            )
+            && node.status == TimelineNodeStatus::Paused
+            && node
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("等待用户选择"))
+    }) else {
+        return Ok(false);
+    };
+    let Some(assistant_message_index) = session
+        .messages
+        .iter()
+        .rposition(|message| message.role == "assistant")
+    else {
+        return Ok(false);
+    };
+    let full_content = &session.messages[assistant_message_index].content;
+    if detect_author_choice_request(full_content, &session.workspace_type).is_some() {
+        return Ok(false);
+    }
+    let artifact_markdown = extract_artifact_content(full_content);
+    if !content_has_complete_workspace_artifact(&artifact_markdown, &session.workspace_type) {
+        return Ok(false);
+    }
+
+    let payload = ArtifactPayload::Markdown {
+        markdown: artifact_markdown.clone(),
+        diff: None,
+    };
+    let mut recovered_artifact_versions = artifact_versions.clone();
+    let current_version = recovered_artifact_versions
+        .iter()
+        .find(|version| version.is_current && version.markdown() == artifact_markdown);
+    let version = if let Some(current) = current_version {
+        current.version
+    } else {
+        for version in &mut recovered_artifact_versions {
+            version.is_current = false;
+        }
+        let version = recovered_artifact_versions
+            .iter()
+            .map(|version| version.version)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        recovered_artifact_versions.push(ArtifactVersion {
+            version,
+            payload: payload.clone(),
+            generated_by: session.author_provider.clone(),
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            source_node_id: source_node_id.clone(),
+        });
+        version
+    };
+
+    lifecycle_store
+        .ensure_version(AppendSpecVersionInput {
+            project_id: session.project_id.clone(),
+            issue_id: session.issue_id.clone(),
+            entity_id: session.entity_id.clone(),
+            markdown: artifact_markdown.clone(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .map_err(|error| format!("ensure recovered artifact spec version failed: {error}"))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut recovered_timeline_nodes = timeline_nodes.clone();
+    let source_node = &mut recovered_timeline_nodes[source_node_index];
+    source_node.status = TimelineNodeStatus::Completed;
+    source_node.summary = Some("已恢复完整 artifact".to_string());
+    source_node.completed_at = Some(now.clone());
+    source_node.artifact_ref = Some("artifact_current".to_string());
+    let author_confirm_node_id = format!("timeline_node_{:03}", recovered_timeline_nodes.len() + 1);
+    recovered_timeline_nodes.push(TimelineNode {
+        node_id: author_confirm_node_id.clone(),
+        node_type: TimelineNodeType::AuthorConfirm,
+        agent: None,
+        stage: WsWorkspaceStage::AuthorConfirm,
+        round: None,
+        status: TimelineNodeStatus::Active,
+        title: "Author 结果确认".to_string(),
+        summary: Some("已恢复误判为文本选择的完整 artifact".to_string()),
+        started_at: now.clone(),
+        completed_at: None,
+        duration_ms: None,
+        artifact_ref: Some("artifact_current".to_string()),
+        provider_config_snapshot: ProviderConfigSnapshot {
+            author: session.author_provider.clone(),
+            reviewer: session.reviewer_provider.clone(),
+            review_rounds: session.review_rounds,
+        },
+        retry: None,
+    });
+
+    lifecycle_store
+        .save_artifact_versions(&session.session_id, &recovered_artifact_versions)
+        .map_err(|error| format!("save recovered artifact versions failed: {error}"))?;
+    lifecycle_store
+        .update_workspace_session_status(
+            &session.session_id,
+            WorkspaceSessionStatus::WaitingForHuman,
+        )
+        .map_err(|error| format!("save recovered workspace status failed: {error}"))?;
+
+    let artifact_ref = ArtifactRef {
+        artifact_id: format!("artifact_version_{version:03}"),
+        version,
+    };
+    let message_index = u32::try_from(session.messages.len()).map_err(|_| {
+        "workspace message count overflow during text fallback recovery".to_string()
+    })?;
+    let checkpoints = checkpoint_store
+        .list_checkpoints(&session.session_id)
+        .map_err(|error| format!("load checkpoints for text fallback recovery failed: {error}"))?;
+    let checkpoint_id = if let Some(checkpoint) = checkpoints.iter().find(|checkpoint| {
+        checkpoint.message_index == message_index
+            && checkpoint.stage == WorkspaceStage::AuthorConfirm.as_str()
+            && checkpoint
+                .artifact_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.markdown_or_empty() == artifact_markdown)
+    }) {
+        checkpoint.id.clone()
+    } else {
+        checkpoint_store
+            .create_checkpoint(
+                &session.session_id,
+                message_index,
+                Some(&payload),
+                WorkspaceStage::AuthorConfirm.as_str(),
+            )
+            .map_err(|error| format!("save recovered artifact checkpoint failed: {error}"))?
+            .id
+    };
+    match lifecycle_store.load_node_detail(&session.session_id, &source_node_id) {
+        Ok(mut detail) => {
+            detail.status = TimelineNodeStatus::Completed;
+            detail.ended_at = Some(now);
+            detail.artifact_ref = Some(artifact_ref);
+            lifecycle_store
+                .save_node_detail(&session.session_id, &source_node_id, &detail)
+                .map_err(|error| format!("save recovered node detail failed: {error}"))?;
+        }
+        Err(ProductStoreError::NotFound { .. }) => {}
+        Err(error) => return Err(format!("load recovered node detail failed: {error}")),
+    }
+    lifecycle_store
+        .save_timeline_nodes(&session.session_id, &recovered_timeline_nodes)
+        .map_err(|error| format!("commit recovered timeline nodes failed: {error}"))?;
+
+    session.messages[assistant_message_index].checkpoint_id = Some(checkpoint_id);
+    session.artifact = Some(payload);
+    session.stage = WorkspaceStage::AuthorConfirm;
+    *artifact_versions = recovered_artifact_versions;
+    *timeline_nodes = recovered_timeline_nodes;
+    *active_node_id = Some(author_confirm_node_id);
+    Ok(true)
+}
+
 impl WorkspaceEngine {
     pub fn new(
         checkpoint_store: Arc<CheckpointStore>,
@@ -24,6 +211,8 @@ impl WorkspaceEngine {
             work_item_plan_author_retry_count: 0,
             work_item_plan_revision_retry_count: 0,
             work_item_batch_retry_counts: HashMap::new(),
+            outline_revision_recovery_error: None,
+            outline_revision_crash_after: None,
         }
     }
 
@@ -33,6 +222,14 @@ impl WorkspaceEngine {
         event_tx: mpsc::Sender<EngineEvent>,
         mut session: WorkspaceSession,
     ) -> Self {
+        let outline_revision_recovery_error = recover_work_item_plan_outline_revision_transaction(
+            &lifecycle_store,
+            &session.project_id,
+            &session.issue_id,
+            &session.entity_id,
+            &session.session_id,
+        )
+        .err();
         let persisted_timeline_nodes = lifecycle_store
             .load_timeline_nodes_for_issue_session(
                 &session.project_id,
@@ -40,7 +237,7 @@ impl WorkspaceEngine {
                 &session.session_id,
             )
             .unwrap_or_default();
-        let persisted_artifact_versions = lifecycle_store
+        let mut persisted_artifact_versions = lifecycle_store
             .list_artifact_versions_for_issue_session(
                 &session.project_id,
                 &session.issue_id,
@@ -54,7 +251,7 @@ impl WorkspaceEngine {
                 .find(|version| version.is_current)
                 .map(|version| version.payload.clone());
         }
-        let (timeline_nodes, active_node_id) = if persisted_timeline_nodes.is_empty() {
+        let (mut timeline_nodes, mut active_node_id) = if persisted_timeline_nodes.is_empty() {
             initial_timeline(&session)
         } else {
             let active_node_id = active_timeline_node_id(&persisted_timeline_nodes);
@@ -71,6 +268,24 @@ impl WorkspaceEngine {
             }
             (persisted_timeline_nodes, active_node_id)
         };
+        if let Err(error) = recover_complete_artifact_misclassified_as_text_fallback(
+            &checkpoint_store,
+            &lifecycle_store,
+            &mut session,
+            &mut timeline_nodes,
+            &mut active_node_id,
+            &mut persisted_artifact_versions,
+        ) {
+            tracing::warn!(%error, "failed to recover complete artifact from text fallback state");
+        }
+        if let Err(error) = recover_work_item_plan_outline_review_schema_fallback(
+            &lifecycle_store,
+            &mut session,
+            &mut timeline_nodes,
+            &mut active_node_id,
+        ) {
+            tracing::warn!(%error, "failed to recover WorkItemPlan outline review schema fallback");
+        }
         let latest_review_verdict = latest_review_verdict_from_node_details(
             &lifecycle_store,
             &session.project_id,
@@ -78,7 +293,9 @@ impl WorkspaceEngine {
             &session.session_id,
             &timeline_nodes,
         )
-        .or_else(|| latest_review_verdict_from_messages(&session.messages));
+        .or_else(|| {
+            latest_review_verdict_from_messages(&session.messages, &session.workspace_type)
+        });
         let pending_author_choice =
             recover_pending_author_choice(&session, active_node_id.as_deref(), &timeline_nodes);
         Self {
@@ -98,7 +315,13 @@ impl WorkspaceEngine {
             work_item_plan_author_retry_count: 0,
             work_item_plan_revision_retry_count: 0,
             work_item_batch_retry_counts: HashMap::new(),
+            outline_revision_recovery_error,
+            outline_revision_crash_after: None,
         }
+    }
+
+    pub(crate) fn outline_revision_recovery_error(&self) -> Option<&str> {
+        self.outline_revision_recovery_error.as_deref()
     }
 
     pub fn session(&self) -> &WorkspaceSession {

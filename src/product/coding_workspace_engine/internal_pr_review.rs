@@ -78,6 +78,7 @@ impl CodingWorkspaceEngine {
              {}\
              {}\
              {}\
+             {}\
              \n输出要求:\n\
              - 基于所有 completed units 的 handoff 汇总评估整组风险、测试覆盖和剩余问题。\n\
              - 分析影响范围（影响范围/impact_scope）。\n\
@@ -98,6 +99,7 @@ impl CodingWorkspaceEngine {
             evaluation_context_json,
             truncate_prompt_section(&diff, 30_000),
             group_final_review_material_protocol(),
+            reviewer_test_scope_contract(),
             no_default_stack_assumption_contract(),
             retry_diagnostic_section
         ))
@@ -236,6 +238,7 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::InternalReviewer,
                 command_rx,
                 allow_legacy_stream_fallback: true,
+                fresh_retry: None,
                 timeout: None,
                 timeout_reason_code: None,
             })

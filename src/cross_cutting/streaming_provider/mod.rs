@@ -6,6 +6,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::structured_output::{
+    StructuredOutputContract, StructuredOutputState, parse_structured_output,
+};
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 
 pub mod fake;
@@ -44,6 +47,7 @@ pub struct StreamingProviderInput {
     /// Provider 原生 session ID，用于续接 Claude Code / Codex 会话。
     pub resume_provider_session_id: Option<String>,
     pub permission_mode: ProviderPermissionMode,
+    pub structured_output_contract: Option<StructuredOutputContract>,
     pub env_vars: BTreeMap<String, String>,
     pub timeout_secs: u64,
 }
@@ -188,6 +192,43 @@ pub struct ProviderToolResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCompletion {
+    pub full_output: String,
+    pub readable_output: String,
+    pub structured_output: StructuredOutputState,
+    pub provider_session_id: Option<String>,
+}
+
+impl ProviderCompletion {
+    pub fn plain(full_output: impl Into<String>, provider_session_id: Option<String>) -> Self {
+        let full_output = full_output.into();
+        Self {
+            readable_output: full_output.clone(),
+            full_output,
+            structured_output: StructuredOutputState::NotRequested,
+            provider_session_id,
+        }
+    }
+
+    pub fn from_output(
+        full_output: String,
+        contract: Option<&StructuredOutputContract>,
+        provider_session_id: Option<String>,
+    ) -> Self {
+        let Some(contract) = contract else {
+            return Self::plain(full_output, provider_session_id);
+        };
+        let parsed = parse_structured_output(&full_output, contract);
+        Self {
+            full_output,
+            readable_output: parsed.readable_output,
+            structured_output: parsed.state,
+            provider_session_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderEvent {
     TextDelta {
         content: String,
@@ -198,10 +239,7 @@ pub enum ProviderEvent {
     Execution(ProviderExecutionEvent),
     ToolCall(ProviderToolCall),
     ToolResult(ProviderToolResult),
-    Completed {
-        full_output: String,
-        provider_session_id: Option<String>,
-    },
+    Completed(ProviderCompletion),
     Failed {
         message: String,
     },
@@ -278,6 +316,7 @@ pub trait StreamingProviderAdapter: Send + Sync {
             workspace_session_id: None,
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: input.timeout,
         };
@@ -298,9 +337,9 @@ pub trait StreamingProviderAdapter: Send + Sync {
                 };
                 let chunk = match event {
                     ProviderEvent::TextDelta { content } => StreamChunk::Text(content),
-                    ProviderEvent::Completed { full_output, .. } => {
-                        StreamChunk::Done { full_output }
-                    }
+                    ProviderEvent::Completed(completion) => StreamChunk::Done {
+                        full_output: completion.full_output,
+                    },
                     ProviderEvent::Failed { message } => StreamChunk::Error(message),
                     ProviderEvent::ProtocolError { message, .. } => StreamChunk::Error(message),
                     ProviderEvent::PermissionTimeout { permission_id } => {

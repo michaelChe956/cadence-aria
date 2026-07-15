@@ -47,7 +47,7 @@ use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     LifecycleWorkItemRecord, ProviderConversationRef, ProviderConversationRole, ProviderName,
-    WorkItemStatus, WorkspaceType,
+    WorkItemStatus,
 };
 use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
 use crate::product::tester_agent_loop::{
@@ -66,12 +66,14 @@ use crate::web::workspace_ws_types::{
 
 mod code_review;
 mod coding;
+mod failed_review_recovery;
 mod gates;
 mod group;
 mod handoffs;
 mod internal_pr_review;
 mod lifecycle;
 mod prompts;
+mod provider_failure;
 mod provider_stream;
 mod reports;
 mod review_parser;
@@ -153,11 +155,15 @@ pub(crate) fn extract_json_object(output: &str) -> Option<&str> {
 }
 
 #[allow(unused_imports)]
+pub(crate) use failed_review_recovery::{FailedCodeReviewRecovery, recoverable_failed_code_review};
+#[allow(unused_imports)]
 pub(crate) use gates::*;
 #[allow(unused_imports)]
 pub(crate) use group::*;
 #[allow(unused_imports)]
 pub(crate) use prompts::*;
+#[allow(unused_imports)]
+pub(crate) use provider_failure::*;
 #[allow(unused_imports)]
 pub(crate) use reports::*;
 #[allow(unused_imports)]

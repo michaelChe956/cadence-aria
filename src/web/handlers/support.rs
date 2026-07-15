@@ -35,10 +35,13 @@ pub struct EventsQuery {
     pub cursor: Option<u64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderWorkspaceConfig {
     pub(crate) author_provider: ProviderName,
     pub(crate) reviewer_provider: ProviderName,
+    pub(crate) author_status_code: &'static str,
+    pub(crate) reviewer_status_code: &'static str,
     pub(crate) review_rounds: u32,
     pub(crate) superpowers_enabled: bool,
     pub(crate) openspec_enabled: bool,
@@ -220,19 +223,20 @@ pub(crate) fn provider_workspace_config(
         ));
     }
 
+    let author = match author_provider {
+        Some(provider) => resolve_explicit_provider_name(provider, provider_availability)?,
+        None => resolve_default_coding_provider("codex", provider_availability)?,
+    };
+    let reviewer = match reviewer_provider {
+        Some(provider) => resolve_explicit_provider_name(provider, provider_availability)?,
+        None => resolve_default_coding_provider("claude_code", provider_availability)?,
+    };
+
     Ok(ProviderWorkspaceConfig {
-        author_provider: match author_provider {
-            Some(provider) => {
-                resolve_explicit_provider_name(provider, provider_availability)?.provider
-            }
-            None => resolve_default_coding_provider("codex", provider_availability)?.provider,
-        },
-        reviewer_provider: match reviewer_provider {
-            Some(provider) => {
-                resolve_explicit_provider_name(provider, provider_availability)?.provider
-            }
-            None => resolve_default_coding_provider("claude_code", provider_availability)?.provider,
-        },
+        author_provider: author.provider,
+        reviewer_provider: reviewer.provider,
+        author_status_code: author.status_code,
+        reviewer_status_code: reviewer.status_code,
         review_rounds,
         superpowers_enabled: superpowers_enabled.unwrap_or(true),
         openspec_enabled: openspec_enabled.unwrap_or(true),
@@ -402,4 +406,33 @@ pub(crate) fn current_git_branch(path: &StdPath) -> Option<String> {
     }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!branch.is_empty()).then_some(branch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn availability(provider: &ProviderName) -> bool {
+        matches!(provider, ProviderName::ClaudeCode)
+    }
+
+    #[test]
+    fn provider_workspace_config_rejects_explicit_unavailable_provider() {
+        let error = provider_workspace_config(Some("codex"), None, None, None, None, &availability)
+            .expect_err("explicit unavailable provider must fail");
+
+        assert_eq!(error.code, "provider_unavailable");
+        assert_eq!(error.details["provider"], "codex");
+    }
+
+    #[test]
+    fn provider_workspace_config_records_default_fallback_status() {
+        let config = provider_workspace_config(None, None, None, None, None, &availability)
+            .expect("default provider config");
+
+        assert_eq!(config.author_provider, ProviderName::ClaudeCode);
+        assert_eq!(config.author_status_code, "provider_fallback");
+        assert_eq!(config.reviewer_provider, ProviderName::ClaudeCode);
+        assert_eq!(config.reviewer_status_code, "provider_available");
+    }
 }

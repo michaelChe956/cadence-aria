@@ -108,6 +108,7 @@ impl CodingWorkspaceEngine {
                     &attempt,
                     CodingProviderRole::Tester,
                 )?,
+                structured_output_contract: None,
                 env_vars: BTreeMap::new(),
                 timeout_secs: repair_adapter_input.timeout,
             };
@@ -123,6 +124,7 @@ impl CodingWorkspaceEngine {
                     provider_role: CodingProviderRole::Tester,
                     command_rx,
                     allow_legacy_stream_fallback: false,
+                    fresh_retry: None,
                     timeout: None,
                     timeout_reason_code: None,
                 })

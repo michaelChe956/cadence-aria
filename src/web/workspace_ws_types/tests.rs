@@ -13,6 +13,8 @@ use crate::web::workspace_ws_types::{
 };
 
 mod artifact_version_roundtrip;
+mod interrupted_run_recovery;
+mod review_structured_output;
 
 #[test]
 fn permission_messages_use_snake_case_type_tags() {
@@ -166,6 +168,7 @@ fn review_messages_and_session_state_serialize_as_contract() {
         }],
         review_gate: ReviewGate::UserTriageRequired,
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     };
 
     let review_complete = serde_json::to_value(WsOutMessage::ReviewComplete {
@@ -177,6 +180,7 @@ fn review_messages_and_session_state_serialize_as_contract() {
         findings: verdict.findings.clone(),
         review_gate: verdict.review_gate.clone(),
         work_item_plan_review: None,
+        structured_output_diagnostic: None,
     })
     .unwrap();
     assert_eq!(review_complete["type"], "review_complete");
@@ -222,6 +226,7 @@ fn review_messages_and_session_state_serialize_as_contract() {
         timeline_node_details: std::collections::HashMap::new(),
         timeline_node_summaries: std::collections::HashMap::new(),
         active_run_id: None,
+        recoverable_interrupted_run: None,
     })
     .unwrap();
     assert_eq!(state["type"], "session_state");
@@ -255,6 +260,7 @@ fn work_item_plan_review_complete_roundtrips() {
         findings: Vec::new(),
         review_gate: ReviewGate::UserTriageRequired,
         work_item_plan_review: Some(review),
+        structured_output_diagnostic: None,
     })
     .unwrap();
 
@@ -784,6 +790,7 @@ fn session_state_artifact_accepts_markdown_payload() {
         timeline_node_details: std::collections::HashMap::new(),
         timeline_node_summaries: std::collections::HashMap::new(),
         active_run_id: None,
+        recoverable_interrupted_run: None,
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");

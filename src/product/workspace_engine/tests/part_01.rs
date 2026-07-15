@@ -344,10 +344,7 @@ impl StreamingProviderAdapter for ImmediateOutputRecordingProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: None,
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
                 .await;
         });
         Ok(ProviderSession {
@@ -392,10 +389,7 @@ impl StreamingProviderAdapter for SessionRecordingProvider {
                 complete_story_artifact("对 n <= 0 返回 0。", "n <= 0 时返回 0。")
             };
             let _ = event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: output,
-                    provider_session_id: Some("provider-author-session-1".to_string()),
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("provider-author-session-1".to_string()))))
                 .await;
         });
         Ok(ProviderSession {
@@ -667,10 +661,7 @@ async fn structured_choice_response_is_audited_for_reviewer_for_workspace_artifa
                 "{workspace_type:?} should forward choice response to provider"
             );
             provider_event_tx
-                .send(ProviderEvent::Completed {
-                    full_output: artifact,
-                    provider_session_id: Some("provider-author-session-1".to_string()),
-                })
+                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(artifact, Some("provider-author-session-1".to_string()))))
                 .await
                 .expect("send completed");
         };

@@ -64,7 +64,7 @@ async fn claude_provider_continues_same_session_after_ask_user_question_choice()
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_)
-            | ProviderEvent::Completed { .. } => {}
+            | ProviderEvent::Completed(_) => {}
         }
     };
     assert_eq!(choice.id, "ask_req_001");
@@ -161,7 +161,7 @@ done
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_)
-            | ProviderEvent::Completed { .. } => {}
+            | ProviderEvent::Completed(_) => {}
         }
     };
     assert_eq!(choice.id, "ask_req_multi");
@@ -274,7 +274,7 @@ done
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_)
-            | ProviderEvent::Completed { .. } => {}
+            | ProviderEvent::Completed(_) => {}
         }
     };
     assert_eq!(choice.id, "toolu_question");
@@ -296,7 +296,8 @@ done
             .expect("provider should emit completion")
             .expect("provider event channel should stay open")
         {
-            ProviderEvent::Completed { full_output, .. } => {
+            ProviderEvent::Completed(completion) => {
+                let full_output = completion.full_output;
                 assert!(full_output.contains("# Story Spec"));
                 break;
             }
@@ -408,7 +409,7 @@ done
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_)
-            | ProviderEvent::Completed { .. } => {}
+            | ProviderEvent::Completed(_) => {}
         }
     };
     assert_eq!(choice.id, "ask_abort_001");
@@ -435,7 +436,7 @@ done
         };
         match event {
             ProviderEvent::StatusChanged(ProviderStatus::Aborted) => saw_aborted = true,
-            ProviderEvent::Completed { .. } => {
+            ProviderEvent::Completed(_) => {
                 panic!("aborted AskUserQuestion provider should not complete")
             }
             ProviderEvent::Failed { message } => {
@@ -661,7 +662,7 @@ async fn claude_provider_ask_user_question_emits_protocol_error_on_tool_result_e
                 saw_protocol_error = true;
                 break;
             }
-            ProviderEvent::Completed { .. } => {
+            ProviderEvent::Completed(_) => {
                 panic!("provider should not complete after AskUserQuestion tool_result error")
             }
             _ => {}

@@ -357,8 +357,122 @@ fn build_work_item_plan_review_input_includes_trimmed_candidate_fields() {
             .prompt
             .contains("\"verdict\":\"pass|revise|needs_human\"")
     );
+    assert!(input.prompt.contains("\"review_scope\":\"outline\""));
+    assert!(
+        input
+            .prompt
+            .contains("\"generation_round_id\":\"legacy_work_item_plan_candidate\"")
+    );
+    assert!(!input.prompt.contains("revise_batch"));
+    assert!(!input.prompt.contains("plan_reopen_required"));
     assert!(input.prompt.contains("\"summary\""));
     assert!(input.prompt.contains("\"findings\""));
+    assert_review_contract(&input, "work_item_plan_review");
+}
+
+#[test]
+fn build_work_item_plan_review_input_prefers_active_generation_round() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_review_active_round");
+    WorkItemPlanStore::new(lifecycle.app_paths())
+        .save_active_index(&WorkItemPlanDraftActiveIndex {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id,
+            current_generation_round_id: "round_active_0007".to_string(),
+            outline_state: "confirmed".to_string(),
+            active_outline_id: None,
+            outline_to_current_draft_id: BTreeMap::new(),
+            draft_statuses: BTreeMap::new(),
+            batches: Vec::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .expect("save active index");
+
+    let input = engine
+        .build_work_item_plan_review_input()
+        .expect("review input");
+
+    assert!(
+        input
+            .prompt
+            .contains("\"generation_round_id\":\"round_active_0007\"")
+    );
+}
+
+#[test]
+fn build_work_item_plan_review_input_fails_closed_for_corrupt_active_index() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_review_corrupt_active_index");
+    let active_index_path = lifecycle
+        .app_paths()
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("work_item_plan_drafts")
+        .join(&plan_id)
+        .join("active_index.json");
+    std::fs::create_dir_all(active_index_path.parent().expect("active index parent"))
+        .expect("create active index parent");
+    std::fs::write(&active_index_path, "{corrupt active index")
+        .expect("corrupt active index");
+
+    let error = engine
+        .build_work_item_plan_review_input()
+        .expect_err("corrupt active index must fail closed");
+
+    assert!(error.contains("load work item plan active index failed"));
+    assert!(error.contains("product_store_json"));
+}
+
+#[tokio::test]
+async fn build_work_item_plan_outline_review_input_fails_closed_for_corrupt_active_index() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate(
+            "sess_wip_outline_review_corrupt_active_index",
+        );
+    engine.session.artifact = Some(work_item_plan_outline_artifact());
+    engine.begin_work_item_plan_outline_review_run().await;
+
+    let active_index_path = lifecycle
+        .app_paths()
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("work_item_plan_drafts")
+        .join(&plan_id)
+        .join("active_index.json");
+    std::fs::create_dir_all(active_index_path.parent().expect("active index parent"))
+        .expect("create active index parent");
+    std::fs::write(&active_index_path, "{corrupt active index")
+        .expect("corrupt active index");
+
+    let error = engine
+        .build_work_item_plan_review_input()
+        .expect_err("corrupt outline active index must fail closed");
+
+    assert!(error.contains("load work item plan active index failed"));
+    assert!(error.contains("product_store_json"));
+}
+
+#[test]
+fn build_review_input_carries_workspace_review_contract_for_general_artifacts() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+    ] {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session(&format!("sess_review_contract_{workspace_type:?}"));
+        session.workspace_type = workspace_type;
+        session.artifact = Some(artifact_payload("# Artifact\n\n## 内容\n待审核。\n"));
+        let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+        let engine = WorkspaceEngine::new(
+            Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+            event_tx,
+            session,
+        );
+
+        let input = engine.build_review_input().expect("review input");
+
+        assert_review_contract(&input, "workspace_review");
+    }
 }
 
 #[test]
@@ -410,6 +524,16 @@ fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
     }
     assert!(input.prompt.contains("单个 Claude Code 或 Codex coding 会话"));
     assert!(input.prompt.contains("小于 20k"));
+    assert!(input.prompt.contains(
+        "\"generation_round_id\":\"generation_round_unknown\""
+    ));
+    assert!(input.prompt.contains("\"target_outline_id\":\"outline id\""));
+    assert!(input.prompt.contains("从 findings[].target_outline_id 推导"));
+    assert!(
+        !input.prompt.contains("\"affects_items\""),
+        "new outline review schema should not duplicate affected outline references"
+    );
+    assert_review_contract(&input, "work_item_plan_outline_review");
 }
 
 #[tokio::test]
@@ -429,6 +553,7 @@ async fn build_work_item_draft_review_input_includes_boundary_rules() {
         .expect("draft review input");
 
     assert_work_item_plan_boundary_rules(&input.prompt);
+    assert_review_contract(&input, "work_item_plan_item_review");
 }
 
 #[tokio::test]
@@ -443,6 +568,23 @@ async fn build_work_item_batch_review_input_includes_boundary_rules() {
         .expect("batch review input");
 
     assert_work_item_plan_boundary_rules(&input.prompt);
+    assert_review_contract(&input, "work_item_plan_batch_review");
+}
+
+fn assert_review_contract(input: &StreamingProviderInput, expected_schema_name: &str) {
+    let contract = input
+        .structured_output_contract
+        .as_ref()
+        .expect("review input should carry structured output contract");
+    assert_eq!(contract.schema_name, expected_schema_name);
+    assert_eq!(
+        input
+            .prompt
+            .matches(&format!("nonce=\"{}\"", contract.nonce))
+            .count(),
+        2,
+        "review prompt should use the same nonce in both sentinel tags"
+    );
 }
 
 fn assert_work_item_plan_boundary_rules(prompt: &str) {
