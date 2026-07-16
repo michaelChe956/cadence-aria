@@ -48,7 +48,7 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          - 拆分目标是在每个 Work Item 能由单个 Claude Code 或 Codex coding 会话可靠完成的前提下，使 outline 数量最少。\n\
          - 必须按最大内聚任务生成，优先合并目标一致、写入范围相同或重叠、可在同一 session 完成编码与验证的工作；先合并，再证明为什么必须拆。\n\
          - estimated_context_tokens 不超过 40k 属正常范围；40001..=50000 可输出并交由 Reviewer 判断；超过 50k 必须继续拆分。\n\
-         - API、数据层、UI、测试或 TDD 子步骤本身不是独立拆分理由；用户显式拆分选项和必要中断边界除外。\n\
+         - API、数据层、UI、测试或 TDD 子步骤本身不是独立拆分理由；除用户显式拆分选项、必要外部/权限/前序结果中断点外，独立回滚边界、独立验收边界，以及写入范围/依赖交接/验证复杂度超过现有上下文代理指标时，也必须保留拆分。\n\
          - 结论必须能追溯到已提供的 Story/Design/Outline/Draft 证据。\n\n\
          [allowed_outputs]\n\
          {allowed_outputs}\n\n\

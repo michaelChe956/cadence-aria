@@ -140,7 +140,17 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
     assert!(prompt.contains("追踪关系"));
     assert!(prompt.contains("Claude Code"));
     assert!(prompt.contains("Codex"));
-    for required in ["40k", "50k", "最大内聚", "最少拆分", "优先合并"] {
+    for required in [
+        "40k",
+        "50k",
+        "最大内聚",
+        "最少拆分",
+        "优先合并",
+        "必要外部/权限/前序结果中断点",
+        "独立回滚边界",
+        "独立验收边界",
+        "上下文代理指标",
+    ] {
         assert!(
             prompt.contains(required),
             "outline prompt must include `{required}`: {prompt}"
@@ -169,7 +179,17 @@ fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
     assert!(prompt.contains("追踪关系"));
     assert!(prompt.contains("Claude Code"));
     assert!(prompt.contains("Codex"));
-    for required in ["40k", "50k", "最大内聚", "最少拆分", "优先合并"] {
+    for required in [
+        "40k",
+        "50k",
+        "最大内聚",
+        "最少拆分",
+        "优先合并",
+        "必要外部/权限/前序结果中断点",
+        "独立回滚边界",
+        "独立验收边界",
+        "上下文代理指标",
+    ] {
         assert!(
             prompt.contains(required),
             "outline prompt must include `{required}`: {prompt}"
