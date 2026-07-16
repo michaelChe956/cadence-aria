@@ -82,7 +82,7 @@ fn outline_validator_requires_single_session_budget() {
     let mut outline = valid_outline();
     outline.work_item_outlines[0].estimated_context_tokens = None;
     outline.work_item_outlines[0].session_fit = None;
-    outline.work_item_outlines[1].estimated_context_tokens = Some(20_000);
+    outline.work_item_outlines[1].estimated_context_tokens = Some(50_001);
     outline.work_item_outlines[1].session_fit = Some(WorkItemOutlineSessionFit::TooLargeMustSplit);
 
     let report = WorkItemPlanOutlineValidator::validate(&outline);
@@ -91,6 +91,22 @@ fn outline_validator_requires_single_session_budget() {
     assert_has_code(&report, "outline_session_fit_required");
     assert_has_code(&report, "outline_exceeds_single_session_budget");
     assert_has_code(&report, "outline_too_large_must_split");
+}
+
+#[test]
+fn outline_validator_accepts_soft_and_hard_session_budget_boundaries() {
+    for value in [40_000, 40_001, 50_000] {
+        let mut outline = valid_outline();
+        outline.work_item_outlines[0].estimated_context_tokens = Some(value);
+
+        let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+        assert!(
+            !has_code(&report, "outline_exceeds_single_session_budget"),
+            "budget {value} should be accepted, got {:?}",
+            report.findings
+        );
+    }
 }
 
 #[test]

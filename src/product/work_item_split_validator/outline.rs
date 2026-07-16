@@ -1,6 +1,6 @@
 use super::*;
 
-const SINGLE_AGENT_SESSION_CONTEXT_TOKEN_LIMIT: u32 = 20_000;
+const SINGLE_AGENT_SESSION_CONTEXT_TOKEN_HARD_LIMIT: u32 = 50_000;
 
 pub(crate) fn validate_outline_ids(
     outline: &WorkItemPlanOutline,
@@ -63,11 +63,12 @@ pub(crate) fn validate_outline_traceability_and_scopes(
             ));
         }
         match item.estimated_context_tokens {
-            Some(value) if value > 0 && value < SINGLE_AGENT_SESSION_CONTEXT_TOKEN_LIMIT => {}
+            Some(value)
+                if value > 0 && value <= SINGLE_AGENT_SESSION_CONTEXT_TOKEN_HARD_LIMIT => {}
             Some(0) | None => findings.push(error(
                 "outline_budget_required",
                 format!(
-                    "outline {} must include estimated_context_tokens between 1 and 19999",
+                    "outline {} must include estimated_context_tokens between 1 and 50000",
                     item.outline_id
                 ),
                 vec![item.outline_id.clone()],
@@ -75,7 +76,7 @@ pub(crate) fn validate_outline_traceability_and_scopes(
             Some(value) => findings.push(error(
                 "outline_exceeds_single_session_budget",
                 format!(
-                    "outline {} estimated_context_tokens {} exceeds the single-agent session budget of <20000",
+                    "outline {} estimated_context_tokens {} exceeds the single-agent session budget of <=50000",
                     item.outline_id, value
                 ),
                 vec![item.outline_id.clone()],
