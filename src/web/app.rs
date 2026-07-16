@@ -3,6 +3,8 @@ use axum::routing::{delete, get, post};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::product_data_schema::ensure_product_data_schema;
 use crate::web::coding_ws_handler;
 use crate::web::events::EventHub;
 use crate::web::handlers;
@@ -296,6 +298,10 @@ pub async fn serve_web(
     host: String,
     port: Option<u16>,
 ) -> anyhow::Result<()> {
+    let product_paths = ProductAppPaths::new(workspace_root.join(".aria"));
+    ensure_product_data_schema(&product_paths)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
     let addr: SocketAddr = format!("{}:{}", host, port.unwrap_or(0)).parse()?;
     let events = EventHub::new();
     let state = WebAppState::with_events(
