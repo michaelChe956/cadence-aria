@@ -3,6 +3,7 @@ import type {
   CodeReviewReport,
   CodingGateRequired,
   CodingAttempt,
+  CodingAttemptAddress,
   CodingAttemptSnapshotResponse,
   CodingWsInMessage,
   CodingWsOutMessage,
@@ -22,6 +23,20 @@ import type {
 } from "./types";
 
 describe("workspace websocket protocol types", () => {
+  it("describes the full coding attempt address", () => {
+    const address: CodingAttemptAddress = {
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+    };
+
+    expect(address).toEqual({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+    });
+  });
+
   it("accepts protocol v2 inbound messages", () => {
     const note: WsInMessage = { type: "context_note", content: "补充上下文" };
     const start: WsInMessage = {
@@ -84,6 +99,8 @@ describe("workspace websocket protocol types", () => {
 
   it("describes coding attempts returned by lifecycle responses", () => {
     const attempt: CodingAttempt = {
+      project_id: "project_0001",
+      issue_id: "issue_0001",
       attempt_id: "coding_attempt_0001",
       work_item_id: "work_item_0001",
       attempt_scope: "work_item",
@@ -192,6 +209,8 @@ describe("workspace websocket protocol types", () => {
 
   it("describes coding attempt snapshots and websocket messages", () => {
     const attempt: CodingAttempt = {
+      project_id: "project_0001",
+      issue_id: "issue_0001",
       attempt_id: "coding_attempt_0001",
       work_item_id: "work_item_0001",
       attempt_scope: "work_item",
@@ -256,6 +275,8 @@ describe("workspace websocket protocol types", () => {
     };
     const outbound: Extract<CodingWsOutMessage, { type: "coding_session_state" }> = {
       type: "coding_session_state",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
       attempt_id: "coding_attempt_0001",
       attempt_scope: "work_item_group",
       work_item_group_id: "work_item_plan_0001",

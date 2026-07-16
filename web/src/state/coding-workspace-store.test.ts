@@ -161,6 +161,8 @@ function sessionState(
 ): Extract<CodingWsOutMessage, { type: "coding_session_state" }> {
   return {
     type: "coding_session_state",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
     attempt_id: "coding_attempt_0001",
     attempt_scope: "work_item",
     work_item_group_id: null,
@@ -238,6 +240,8 @@ describe("coding workspace store", () => {
     store.setSessionState(sessionState({ code_review_reports: [codeReview()] }));
 
     const state = useCodingWorkspaceStore.getState();
+    expect(state.projectId).toBe("project_0001");
+    expect(state.issueId).toBe("issue_0001");
     expect(state.attemptId).toBe("coding_attempt_0001");
     expect(state.status).toBe("running");
     expect(state.stage).toBe("coding");
@@ -255,6 +259,8 @@ describe("coding workspace store", () => {
 
     store.setSessionState({
       type: "coding_session_state",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
       attempt_id: "coding_attempt_0001",
       attempt_scope: "work_item_group",
       work_item_group_id: "work_item_plan_0001",

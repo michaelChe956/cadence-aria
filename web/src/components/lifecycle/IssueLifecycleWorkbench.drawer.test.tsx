@@ -205,7 +205,11 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     await user.click(screen.getByTestId("drawer-open-coding-workspace"));
 
     await waitFor(() =>
-      expect(onOpenCodingWorkspace).toHaveBeenCalledWith("coding_attempt_0001"),
+      expect(onOpenCodingWorkspace).toHaveBeenCalledWith({
+        projectId: "project_0001",
+        issueId: "issue_0001",
+        attemptId: "coding_attempt_0001",
+      }),
     );
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
@@ -252,7 +256,11 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
 
     await waitFor(() =>
       expect(onOpenCodingWorkspace).toHaveBeenCalledWith(
-        "coding_attempt_active_group_0001",
+        {
+          projectId: "project_0001",
+          issueId: "issue_0001",
+          attemptId: "coding_attempt_active_group_0001",
+        },
       ),
     );
     expect(fetchMock).not.toHaveBeenCalledWith(
@@ -300,7 +308,11 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
 
     await waitFor(() =>
       expect(onOpenCodingWorkspace).toHaveBeenCalledWith(
-        "coding_attempt_completed_group_0001",
+        {
+          projectId: "project_0001",
+          issueId: "issue_0001",
+          attemptId: "coding_attempt_completed_group_0001",
+        },
       ),
     );
     expect(fetchMock).not.toHaveBeenCalledWith(

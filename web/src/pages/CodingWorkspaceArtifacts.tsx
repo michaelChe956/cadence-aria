@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCodingAttemptDiff } from "../api/client";
+import type { CodingAttemptAddress } from "../api/types";
 import { MonacoDiffViewer } from "../components/shared/MonacoDiffViewer";
 import { MonacoViewer } from "../components/shared/MonacoViewer";
 import {
@@ -18,9 +19,11 @@ type CodingDiffState = {
 
 
 export function CodingArtifactTabs({
+  address,
   activeTab,
   className = "",
 }: {
+  address: CodingAttemptAddress;
   activeTab: CodingArtifactTab;
   className?: string;
 }) {
@@ -48,7 +51,7 @@ export function CodingArtifactTabs({
       diff: "",
       error: null,
     });
-    getCodingAttemptDiff(attemptId)
+    getCodingAttemptDiff(address)
       .then((response) => {
         if (cancelled) return;
         setDiffState({
@@ -71,7 +74,7 @@ export function CodingArtifactTabs({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, attemptId]);
+  }, [activeTab, address, attemptId]);
 
   return (
     <aside
@@ -324,4 +327,3 @@ function languageForPath(path: string) {
       return "plaintext";
   }
 }
-

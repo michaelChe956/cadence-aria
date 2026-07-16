@@ -334,6 +334,9 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
     });
 
     expect(MockWebSocket.instances).toHaveLength(2);
+    expect(MockWebSocket.instances[1].url).toBe(
+      "ws://localhost:3000/ws/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001",
+    );
 
     act(() => {
       MockWebSocket.instances[1].open();

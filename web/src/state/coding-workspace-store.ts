@@ -188,6 +188,8 @@ export const useCodingWorkspaceStore = create<
       const selectedNode = snapshot.timeline_nodes.find((node) => node.id === selectedNodeId);
       const nextTab = selectedNode ? stageToArtifactTab(selectedNode.stage) : null;
       return {
+        projectId: snapshot.project_id,
+        issueId: snapshot.issue_id,
         attemptId: snapshot.attempt_id,
         attemptScope: snapshot.attempt_scope,
         workItemGroupId: snapshot.work_item_group_id,

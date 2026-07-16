@@ -1,12 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   abortCodingAttempt,
+  confirmWorkItemExecutionPlan,
   createCodingAttempt,
   createGroupCodingAttempt,
+  deleteCodingAttempt,
   getCodingAttemptArtifact,
   getCodingAttemptDiff,
   getCodingAttemptSnapshot,
+  getLegacyCodingAttemptSnapshot,
+  requestWorkItemExecutionPlanChange,
 } from "./client";
+
+const CODING_ATTEMPT_ADDRESS = {
+  projectId: "project_0001",
+  issueId: "issue_0001",
+  attemptId: "coding_attempt_0001",
+} as const;
 
 describe("coding attempts api client", () => {
   it("calls coding attempt endpoints with encoded ids and expected payloads", async () => {
@@ -20,23 +30,40 @@ describe("coding attempts api client", () => {
     );
 
     await createCodingAttempt("project/with space", "issue/with space", "work item/1");
-    await getCodingAttemptSnapshot("coding attempt/1");
-    await getCodingAttemptDiff("coding attempt/1");
-    await abortCodingAttempt("coding attempt/1");
-    await getCodingAttemptArtifact("coding attempt/1", "unit.stdout.log");
+    const address = {
+      projectId: "project/with space",
+      issueId: "issue/with space",
+      attemptId: "coding attempt/1",
+    };
+    await getCodingAttemptSnapshot(address);
+    await getCodingAttemptDiff(address);
+    await abortCodingAttempt(address);
+    await deleteCodingAttempt(address);
+    await getCodingAttemptArtifact(address, "unit.stdout.log");
+    await confirmWorkItemExecutionPlan(address);
+    await requestWorkItemExecutionPlanChange(address, { note: "补充边界测试" });
+
+    const basePath =
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/coding-attempts/coding%20attempt%2F1";
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-items/work%20item%2F1/coding-attempts",
-      "/api/coding-attempts/coding%20attempt%2F1",
-      "/api/coding-attempts/coding%20attempt%2F1/diff",
-      "/api/coding-attempts/coding%20attempt%2F1/abort",
-      "/api/coding-attempts/coding%20attempt%2F1/artifacts/unit.stdout.log",
+      basePath,
+      `${basePath}/diff`,
+      `${basePath}/abort`,
+      basePath,
+      `${basePath}/artifacts/unit.stdout.log`,
+      `${basePath}/execution-plan/confirm`,
+      `${basePath}/execution-plan/change-request`,
     ]);
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(JSON.stringify({}));
     expect(calls[1].init?.method).toBeUndefined();
     expect(calls[2].init?.method).toBeUndefined();
     expect(calls[3].init?.method).toBe("POST");
+    expect(calls[4].init?.method).toBe("DELETE");
+    expect(calls[6].init?.method).toBe("POST");
+    expect(calls[7].init?.body).toBe(JSON.stringify({ note: "补充边界测试" }));
   });
 
   it("maps coding attempt snapshot and artifact response fields", async () => {
@@ -55,9 +82,12 @@ describe("coding attempts api client", () => {
       }),
     );
 
-    const snapshot = await getCodingAttemptSnapshot("coding_attempt_0001");
-    const diff = await getCodingAttemptDiff("coding_attempt_0001");
-    const artifact = await getCodingAttemptArtifact("coding_attempt_0001", "unit.stdout.log");
+    const snapshot = await getCodingAttemptSnapshot(CODING_ATTEMPT_ADDRESS);
+    const diff = await getCodingAttemptDiff(CODING_ATTEMPT_ADDRESS);
+    const artifact = await getCodingAttemptArtifact(
+      CODING_ATTEMPT_ADDRESS,
+      "unit.stdout.log",
+    );
 
     expect(snapshot.attempt.stage).toBe("prepare_context");
     expect(snapshot.provider_config_snapshot.author).toBe("fake");
@@ -75,6 +105,22 @@ describe("coding attempts api client", () => {
       content_type: "text/plain",
       content: "cargo test ok",
     });
+  });
+
+  it("keeps the legacy snapshot lookup isolated from canonical api calls", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify(codingAttemptSnapshotResponse()), {
+        status: 200,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getLegacyCodingAttemptSnapshot("coding attempt/1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/coding-attempts/coding%20attempt%2F1",
+      expect.any(Object),
+    );
   });
 
   it("passes through normalized api errors from coding attempt endpoints", async () => {
@@ -123,6 +169,8 @@ describe("coding attempts api client", () => {
 
 function codingAttemptResponse() {
   return {
+    project_id: "project_0001",
+    issue_id: "issue_0001",
     attempt_id: "coding_attempt_0001",
     work_item_id: "work_item_0001",
     attempt_no: 1,

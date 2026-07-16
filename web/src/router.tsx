@@ -55,8 +55,11 @@ function WorkbenchRouteComponent() {
       onOpenWorkspace={(sessionId) =>
         void navigate({ to: "/workbench/workspace/$sessionId", params: { sessionId } })
       }
-      onOpenCodingWorkspace={(attemptId) =>
-        void navigate({ to: "/workbench/coding/$attemptId", params: { attemptId } })
+      onOpenCodingWorkspace={({ projectId, issueId, attemptId }) =>
+        void navigate({
+          to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+          params: { projectId, issueId, attemptId },
+        })
       }
     />
   );
@@ -89,11 +92,13 @@ const workspaceRoute = createRoute({
 });
 
 function CodingWorkspaceRouteComponent() {
-  const { attemptId } = useParams({ from: "/workbench/coding/$attemptId" });
+  const { projectId, issueId, attemptId } = useParams({
+    from: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+  });
   const navigate = useNavigate();
   return (
     <CodingWorkspacePage
-      attemptId={attemptId}
+      address={{ projectId, issueId, attemptId }}
       onBack={() => void navigate({ to: "/workbench" })}
     />
   );
@@ -101,7 +106,7 @@ function CodingWorkspaceRouteComponent() {
 
 const codingWorkspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/workbench/coding/$attemptId",
+  path: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
   component: CodingWorkspaceRouteComponent,
 });
 

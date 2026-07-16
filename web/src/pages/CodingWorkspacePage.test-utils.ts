@@ -5,6 +5,12 @@ import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 
 type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
 
+export const CODING_ATTEMPT_ADDRESS = {
+  projectId: "project_0001",
+  issueId: "issue_0001",
+  attemptId: "coding_attempt_0001",
+} as const;
+
 export const DEFAULT_PERMISSION_MODES = {
   coder: "supervised",
   tester: "auto",
@@ -36,6 +42,8 @@ export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
 
 export function readyCodingState() {
   return {
+    projectId: "project_0001",
+    issueId: "issue_0001",
     attemptId: "coding_attempt_0001",
     status: "created" as const,
     stage: "prepare_context" as const,

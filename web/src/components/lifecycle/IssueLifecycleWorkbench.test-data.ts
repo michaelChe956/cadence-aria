@@ -249,6 +249,8 @@ export function initialLifecycleData(
 
 export function codingAttemptRecord(workItemId: string): CodingAttempt {
   return {
+    project_id: "project_0001",
+    issue_id: "issue_0001",
     attempt_id: "coding_attempt_0001",
     work_item_id: workItemId,
     attempt_scope: "work_item",
@@ -272,6 +274,8 @@ export function codingAttemptRecord(workItemId: string): CodingAttempt {
 
 export function codingGroupAttemptRecord(planId: string): CodingAttempt {
   return {
+    project_id: "project_0001",
+    issue_id: "issue_0001",
     attempt_id: "coding_attempt_0001",
     work_item_id: "work_item_backend",
     attempt_scope: "work_item_group",

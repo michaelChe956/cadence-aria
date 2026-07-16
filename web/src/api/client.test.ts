@@ -358,7 +358,11 @@ describe("api client", () => {
       "issue/with space",
       "plan/with space",
     );
-    await deleteCodingAttempt("attempt/with space");
+    await deleteCodingAttempt({
+      projectId: "project/with space",
+      issueId: "issue/with space",
+      attemptId: "attempt/with space",
+    });
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/projects/project%2Fwith%20space",
@@ -368,7 +372,7 @@ describe("api client", () => {
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/design-specs/design%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-items/work%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans/plan%2Fwith%20space",
-      "/api/coding-attempts/attempt%2Fwith%20space",
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/coding-attempts/attempt%2Fwith%20space",
     ]);
     expect(calls.every((call) => call.init?.method === "DELETE")).toBe(true);
   });
@@ -380,7 +384,11 @@ describe("api client", () => {
     );
 
     await expect(
-      deleteCodingAttempt("coding_attempt_0001"),
+      deleteCodingAttempt({
+        projectId: "project_0001",
+        issueId: "issue_0001",
+        attemptId: "coding_attempt_0001",
+      }),
     ).resolves.toBeUndefined();
   });
 });

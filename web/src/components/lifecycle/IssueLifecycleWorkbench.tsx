@@ -22,6 +22,7 @@ import {
   listRepositories,
 } from "../../api/client";
 import type {
+  CodingAttemptAddress,
   IssueLifecycleResponse,
   Project,
   Repository,
@@ -88,7 +89,7 @@ export function IssueLifecycleWorkbench({
   focusEntityKey?: string | null;
   onDrawerFocusChange?: (entityKey: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
-  onOpenCodingWorkspace?: (attemptId: string) => void;
+  onOpenCodingWorkspace?: (address: CodingAttemptAddress) => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
@@ -290,7 +291,11 @@ export function IssueLifecycleWorkbench({
     if (card.kind === "work_item") {
       if (card.raw.latest_attempt) {
         setError(null);
-        onOpenCodingWorkspace(card.raw.latest_attempt.attempt_id);
+        onOpenCodingWorkspace({
+          projectId: selectedProjectId,
+          issueId: card.issueId,
+          attemptId: card.raw.latest_attempt.attempt_id,
+        });
         return;
       }
 
@@ -301,7 +306,11 @@ export function IssueLifecycleWorkbench({
         card.id,
       );
       await refresh(selectedProjectId);
-      onOpenCodingWorkspace(attempt.attempt_id);
+      onOpenCodingWorkspace({
+        projectId: selectedProjectId,
+        issueId: card.issueId,
+        attemptId: attempt.attempt_id,
+      });
       return;
     }
 
@@ -316,7 +325,11 @@ export function IssueLifecycleWorkbench({
 
     if (latestGroupAttempt) {
       setError(null);
-      onOpenCodingWorkspace(latestGroupAttempt.attempt_id);
+      onOpenCodingWorkspace({
+        projectId: selectedProjectId,
+        issueId: card.issueId,
+        attemptId: latestGroupAttempt.attempt_id,
+      });
       return;
     }
 
@@ -327,7 +340,11 @@ export function IssueLifecycleWorkbench({
       card.id,
     );
     await refresh(selectedProjectId);
-    onOpenCodingWorkspace(attempt.attempt_id);
+    onOpenCodingWorkspace({
+      projectId: selectedProjectId,
+      issueId: card.issueId,
+      attemptId: attempt.attempt_id,
+    });
   }
 
   async function handleGenerateNext(card: LifecycleCardData) {

@@ -13,6 +13,7 @@ import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useProviderAvailabilityStore } from "../state/provider-availability-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
+  CODING_ATTEMPT_ADDRESS,
   DEFAULT_PERMISSION_MODES,
   executionPlan,
   installCodingWorkspacePageTestHooks,
@@ -140,7 +141,12 @@ describe("CodingWorkspacePage gate panels", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     const gate = screen.getByTestId("coding-pending-gate");
     expect(gate).toHaveTextContent("Tester 未返回测试计划 JSON");
@@ -181,7 +187,12 @@ describe("CodingWorkspacePage gate panels", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     const gate = screen.getByTestId("coding-pending-gate");
     expect(gate).toHaveTextContent("确认 Tester 测试结果");
@@ -228,7 +239,12 @@ describe("CodingWorkspacePage gate panels", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.getByTestId("coding-pending-gate")).toHaveTextContent("代码审查中断");
     expect(screen.queryByRole("button", { name: "发送上下文" })).not.toBeInTheDocument();
@@ -290,7 +306,12 @@ describe("CodingWorkspacePage gate panels", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.queryByLabelText("补充 Coding 上下文")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "重新启动 Coder" }));
@@ -331,7 +352,12 @@ describe("CodingWorkspacePage gate panels", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     const gate = screen.getByTestId("coding-pending-gate");
     expect(gate).toHaveTextContent("required 测试步骤被阻塞（无法执行）");
@@ -373,7 +399,12 @@ describe("CodingWorkspacePage gate panels", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "Stage Gate 立即开始" }));
 
@@ -421,7 +452,12 @@ describe("CodingWorkspacePage gate panels", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.getByTestId("coding-stage-gate-entry")).toHaveTextContent("Coding Stage Gate");
     expect(screen.getByTestId("coding-stage-gate-entry")).toHaveTextContent("Coder");
@@ -459,7 +495,12 @@ describe("CodingWorkspacePage gate panels", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.queryByTestId("coding-provider-config-panel")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Provider 设置" }));
@@ -514,7 +555,15 @@ describe("CodingWorkspacePage gate panels", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_group_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={{
+          ...CODING_ATTEMPT_ADDRESS,
+          attemptId: "coding_attempt_group_0001",
+        }}
+        onBack={vi.fn()}
+      />,
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "Provider 设置" }));
 
@@ -536,7 +585,12 @@ describe("CodingWorkspacePage gate panels", () => {
       stage: "coding",
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     const input = screen.getByLabelText("补充 Coding 上下文");
     await userEvent.type(input, "请覆盖空输入边界");
@@ -579,7 +633,12 @@ describe("CodingWorkspacePage gate panels", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     const gate = screen.getByTestId("coding-pending-gate");
     expect(gate).toHaveTextContent("Code Review 修复超上限");
@@ -627,7 +686,12 @@ describe("CodingWorkspacePage gate panels", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     await userEvent.click(screen.getByRole("button", { name: "logs" }));
@@ -671,7 +735,12 @@ describe("CodingWorkspacePage gate panels", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
 

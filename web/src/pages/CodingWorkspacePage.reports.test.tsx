@@ -11,6 +11,7 @@ import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
+  CODING_ATTEMPT_ADDRESS,
   DEFAULT_PERMISSION_MODES,
   executionPlan,
   installCodingWorkspacePageTestHooks,
@@ -122,7 +123,12 @@ describe("CodingWorkspacePage reports and history", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.getByTestId("coding-chat-entry-list")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Provider 设置" })).toBeInTheDocument();
@@ -150,7 +156,12 @@ describe("CodingWorkspacePage reports and history", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
 
@@ -192,7 +203,12 @@ describe("CodingWorkspacePage reports and history", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     const gate = screen.getByTestId("coding-pending-gate");
     expect(gate).toHaveTextContent("review_payload_parse_error");
@@ -252,7 +268,12 @@ describe("CodingWorkspacePage reports and history", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
@@ -286,7 +307,12 @@ describe("CodingWorkspacePage reports and history", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
@@ -326,7 +352,12 @@ describe("CodingWorkspacePage reports and history", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
@@ -405,7 +436,12 @@ describe("CodingWorkspacePage reports and history", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "角色运行历史" }));
 

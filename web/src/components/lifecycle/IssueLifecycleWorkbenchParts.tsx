@@ -1,6 +1,7 @@
 import { PanelRightOpen } from "lucide-react";
 import type {
   CodingAttempt,
+  CodingAttemptAddress,
   IssueLifecycleResponse,
   LifecycleWorkItem,
   ProductIssue,
@@ -312,8 +313,14 @@ export function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error ? reason.message : fallback;
 }
 
-export function defaultOpenCodingWorkspace(attemptId: string) {
-  window.location.assign(`/workbench/coding/${encodeURIComponent(attemptId)}`);
+export function defaultOpenCodingWorkspace({
+  projectId,
+  issueId,
+  attemptId,
+}: CodingAttemptAddress) {
+  window.location.assign(
+    `/workbench/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/coding/${encodeURIComponent(attemptId)}`,
+  );
 }
 
 export function normalizeLifecycleResponse(

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import type {
+  CodingAttemptAddress,
   CodingProviderPermissionMode,
   CodingProviderRole,
   CodingProviderSelectRole,
@@ -18,7 +19,10 @@ interface CodingWsServerMessage {
 
 const STREAM_CHUNK_FLUSH_MS = 50;
 
-export function useCodingWorkspaceWs(attemptId: string | null) {
+export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
+  const projectId = address?.projectId ?? null;
+  const issueId = address?.issueId ?? null;
+  const attemptId = address?.attemptId ?? null;
   const wsRef = useRef<WebSocket | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
@@ -158,10 +162,13 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
   }, [sendJson]);
 
   useEffect(() => {
-    if (!attemptId) {
+    if (!projectId || !issueId || !attemptId) {
       useCodingWorkspaceStore.getState().reset();
       return;
     }
+    const scopedProjectId = projectId;
+    const scopedIssueId = issueId;
+    const scopedAttemptId = attemptId;
 
     let disposed = false;
     let reconnectAttempt = 0;
@@ -186,7 +193,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       ws.send(
         JSON.stringify({
           type: "coding_hello",
-          attempt_id: attemptId,
+          attempt_id: scopedAttemptId,
           last_seen_node_id: store.activeNodeId ?? store.timelineNodes.at(-1)?.id ?? null,
         }),
       );
@@ -215,7 +222,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       if (disposed) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(
-        `${protocol}//${window.location.host}/ws/coding-attempts/${attemptId}`,
+        `${protocol}//${window.location.host}/ws/projects/${encodeURIComponent(scopedProjectId)}/issues/${encodeURIComponent(scopedIssueId)}/coding-attempts/${encodeURIComponent(scopedAttemptId)}`,
       );
       wsRef.current = ws;
       useCodingWorkspaceStore
@@ -278,7 +285,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       wsRef.current = null;
       ws?.close(1000);
     };
-  }, [attemptId]);
+  }, [attemptId, issueId, projectId]);
 
   return {
     startCoding,

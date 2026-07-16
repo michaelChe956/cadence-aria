@@ -12,6 +12,7 @@ import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
+  CODING_ATTEMPT_ADDRESS,
   DEFAULT_PERMISSION_MODES,
   executionPlan,
   installCodingWorkspacePageTestHooks,
@@ -77,6 +78,8 @@ describe("CodingWorkspacePage shell and actions", () => {
   ) {
     useCodingWorkspaceStore.getState().setSessionState({
       type: "coding_session_state",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
       attempt_id: "coding_attempt_0001",
       attempt_scope: "work_item",
       work_item_group_id: null,
@@ -189,8 +192,14 @@ describe("CodingWorkspacePage shell and actions", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
+    expect(useCodingWorkspaceWs).toHaveBeenCalledWith(CODING_ATTEMPT_ADDRESS);
     expect(screen.getByText("Coding Attempt #coding_attempt_0001")).toBeInTheDocument();
     expect(screen.getByTestId("coding-timeline")).toHaveTextContent("执行测试");
     expect(screen.getByTestId("chat-entry-list")).toHaveTextContent("cargo test");
@@ -239,7 +248,12 @@ describe("CodingWorkspacePage shell and actions", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     const chatList = screen.getByTestId("chat-entry-list");
     expect(chatList).toHaveTextContent("Tester");
@@ -275,7 +289,12 @@ describe("CodingWorkspacePage shell and actions", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(await screen.findByText("WorkItemGroup")).toBeInTheDocument();
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
@@ -309,12 +328,17 @@ describe("CodingWorkspacePage shell and actions", () => {
       worktreePath: "/tmp/worktree",
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
 
     await waitFor(() => {
-      expect(getCodingAttemptDiff).toHaveBeenCalledWith("coding_attempt_0001");
+      expect(getCodingAttemptDiff).toHaveBeenCalledWith(CODING_ATTEMPT_ADDRESS);
     });
     const viewer = await screen.findByTestId("monaco-diff-viewer");
     expect(viewer).toHaveAttribute("data-language", "python");
@@ -382,7 +406,12 @@ describe("CodingWorkspacePage shell and actions", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
     scrollIntoView.mockClear();
     await userEvent.click(screen.getByRole("button", { name: /测试执行/ }));
 
@@ -398,7 +427,12 @@ describe("CodingWorkspacePage shell and actions", () => {
       stage: "prepare_context",
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "开始 Coding" }));
 
@@ -413,7 +447,12 @@ describe("CodingWorkspacePage shell and actions", () => {
       stage: "review_request",
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "继续 Coding" }));
 
@@ -437,7 +476,15 @@ describe("CodingWorkspacePage shell and actions", () => {
       }),
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0002" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={{
+          ...CODING_ATTEMPT_ADDRESS,
+          attemptId: "coding_attempt_0002",
+        }}
+        onBack={vi.fn()}
+      />,
+    );
 
     expect(screen.getByText("后端 API 已完成")).toBeInTheDocument();
     expect(screen.getByText("abc123")).toBeInTheDocument();
@@ -454,7 +501,9 @@ describe("CodingWorkspacePage shell and actions", () => {
       stage: "coding",
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={onBack} />);
+    render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={onBack} />
+    );
 
     await userEvent.click(
       screen.getByRole("button", { name: "删除 Coding Workspace" }),
@@ -464,7 +513,7 @@ describe("CodingWorkspacePage shell and actions", () => {
       expect.stringContaining("日志、测试输出和 worktree"),
     );
     await waitFor(() =>
-      expect(deleteCodingAttempt).toHaveBeenCalledWith("coding_attempt_0001"),
+      expect(deleteCodingAttempt).toHaveBeenCalledWith(CODING_ATTEMPT_ADDRESS),
     );
     expect(onBack).toHaveBeenCalled();
     confirm.mockRestore();
@@ -478,7 +527,12 @@ describe("CodingWorkspacePage shell and actions", () => {
       stage: "final_confirm",
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "确认完成" }));
     await userEvent.click(screen.getByRole("button", { name: "中止" }));
@@ -516,7 +570,12 @@ describe("CodingWorkspacePage shell and actions", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.getByTestId("coding-pending-gate")).toHaveTextContent("需要人工处理");
     expect(screen.getAllByText("Code Reviewer").length).toBeGreaterThan(0);

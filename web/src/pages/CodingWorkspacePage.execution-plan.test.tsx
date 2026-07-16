@@ -11,6 +11,7 @@ import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
+  CODING_ATTEMPT_ADDRESS,
   DEFAULT_PERMISSION_MODES,
   executionPlan,
   installCodingWorkspacePageTestHooks,
@@ -100,7 +101,12 @@ describe("CodingWorkspacePage execution plan", () => {
       })),
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.getByTestId("coding-chat-entry-list")).toBeInTheDocument();
     expect(screen.queryByTestId("coding-role-run-history")).not.toBeInTheDocument();
@@ -120,7 +126,12 @@ describe("CodingWorkspacePage execution plan", () => {
       workItemExecutionPlan: executionPlan({ status: "draft" }),
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.getByText("执行计划")).toBeInTheDocument();
     expect(screen.getByText("实现后端 API")).toBeInTheDocument();
@@ -141,7 +152,12 @@ describe("CodingWorkspacePage execution plan", () => {
       }),
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.getByRole("button", { name: "确认执行计划" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "请求修改" })).toBeInTheDocument();
@@ -159,11 +175,18 @@ describe("CodingWorkspacePage execution plan", () => {
       workItemExecutionPlan: executionPlan({ status: "draft" }),
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await user.click(screen.getByRole("button", { name: "确认执行计划" }));
 
-    expect(confirmWorkItemExecutionPlan).toHaveBeenCalledWith("coding_attempt_0001");
+    expect(confirmWorkItemExecutionPlan).toHaveBeenCalledWith(
+      CODING_ATTEMPT_ADDRESS,
+    );
     expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe("confirmed");
   });
 
@@ -179,14 +202,22 @@ describe("CodingWorkspacePage execution plan", () => {
       workItemExecutionPlan: executionPlan({ status: "draft" }),
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await user.type(screen.getByLabelText("修改说明"), "需要补充边界条件测试");
     await user.click(screen.getByRole("button", { name: "请求修改" }));
 
-    expect(requestWorkItemExecutionPlanChange).toHaveBeenCalledWith("coding_attempt_0001", {
-      note: "需要补充边界条件测试",
-    });
+    expect(requestWorkItemExecutionPlanChange).toHaveBeenCalledWith(
+      CODING_ATTEMPT_ADDRESS,
+      {
+        note: "需要补充边界条件测试",
+      },
+    );
     expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe(
       "change_requested",
     );
@@ -202,7 +233,12 @@ describe("CodingWorkspacePage execution plan", () => {
       workItemExecutionPlan: executionPlan({ status: "draft" }),
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await user.click(screen.getByRole("button", { name: "确认执行计划" }));
 
@@ -219,7 +255,12 @@ describe("CodingWorkspacePage execution plan", () => {
       workItemExecutionPlan: executionPlan({ status: "draft" }),
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await user.click(screen.getByRole("button", { name: "请求修改" }));
 
@@ -237,7 +278,12 @@ describe("CodingWorkspacePage execution plan", () => {
       workItemExecutionPlan: executionPlan({ status: "draft" }),
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await user.type(screen.getByLabelText("修改说明"), "说明");
     await user.click(screen.getByRole("button", { name: "请求修改" }));

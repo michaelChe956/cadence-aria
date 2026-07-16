@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import type { CodingAttemptAddress } from "./api/types";
 import { IssueLifecycleWorkbench } from "./components/lifecycle/IssueLifecycleWorkbench";
 
 export function AppShell({
@@ -10,7 +11,7 @@ export function AppShell({
   focusEntityKey?: string | null;
   onDrawerFocusChange?: (entityKey: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
-  onOpenCodingWorkspace?: (attemptId: string) => void;
+  onOpenCodingWorkspace?: (address: CodingAttemptAddress) => void;
 }) {
   useEffect(() => {
     const previousScrollRestoration = window.history.scrollRestoration;

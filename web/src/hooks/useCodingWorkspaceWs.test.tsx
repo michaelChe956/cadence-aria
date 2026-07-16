@@ -2,6 +2,7 @@ import { act } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import {
+  CODING_ATTEMPT_ADDRESS,
   MockWebSocket,
   blockedGate,
   codingSessionState,
@@ -20,7 +21,9 @@ describe("useCodingWorkspaceWs inbound events", () => {
       harness.ws.open();
     });
 
-    expect(harness.ws.url).toBe("ws://localhost:3000/ws/coding-attempts/coding_attempt_0001");
+    expect(harness.ws.url).toBe(
+      "ws://localhost:3000/ws/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001",
+    );
     expect(harness.ws.sent).toEqual([
       JSON.stringify({
         type: "coding_hello",
@@ -31,12 +34,26 @@ describe("useCodingWorkspaceWs inbound events", () => {
     expect(useCodingWorkspaceStore.getState().connectionStatus).toBe("connected");
   });
 
+  it("encodes every coding attempt address segment in the websocket url", () => {
+    const harness = renderCodingHook({
+      projectId: "project/with space",
+      issueId: "issue/with space",
+      attemptId: "coding attempt/1",
+    });
+
+    expect(harness.ws.url).toBe(
+      "ws://localhost:3000/ws/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/coding-attempts/coding%20attempt%2F1",
+    );
+  });
+
   it("applies coding session state and timeline updates from websocket messages", () => {
     const harness = renderCodingHook();
 
     act(() => {
       harness.ws.receive({
         type: "coding_session_state",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
         attempt_id: "coding_attempt_0001",
         status: "running",
         stage: "coding",
@@ -103,6 +120,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
 
     const state = useCodingWorkspaceStore.getState();
     expect(state.status).toBe("running");
+    expect(state.projectId).toBe(CODING_ATTEMPT_ADDRESS.projectId);
+    expect(state.issueId).toBe(CODING_ATTEMPT_ADDRESS.issueId);
     expect(state.stage).toBe("coding");
     expect(state.timelineNodes[0]).toMatchObject({
       id: "coding_node_0001",
@@ -195,6 +214,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
     act(() => {
       harness.ws.receive({
         type: "coding_session_state",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
         attempt_id: "coding_attempt_0001",
         status: "running",
         stage: "testing",
@@ -396,6 +417,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
     act(() => {
       harness.ws.receive({
         type: "coding_session_state",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
         attempt_id: "coding_attempt_0001",
         status: "aborted",
         stage: "coding",

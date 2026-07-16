@@ -21,6 +21,12 @@ export type CodingAttemptStatus =
 
 export type CodingAttemptScope = "work_item" | "work_item_group";
 
+export type CodingAttemptAddress = {
+  projectId: string;
+  issueId: string;
+  attemptId: string;
+};
+
 export type CodingExecutionStage =
   | "prepare_context"
   | "worktree_prepare"
@@ -51,6 +57,8 @@ export type CodingExecutionUnit = {
 };
 
 export type CodingAttempt = {
+  project_id: string;
+  issue_id: string;
   attempt_id: string;
   work_item_id: string;
   attempt_scope: CodingAttemptScope;
@@ -495,6 +503,8 @@ export type CodingWsInMessage =
 export type CodingWsOutMessage =
   | ({
       type: "coding_session_state";
+      project_id: string;
+      issue_id: string;
       attempt_id: string;
       attempt_scope: CodingAttemptScope;
       work_item_group_id: string | null;

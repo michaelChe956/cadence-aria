@@ -5,6 +5,7 @@ import {
   requestWorkItemExecutionPlanChange,
 } from "../api/client";
 import type {
+  CodingAttemptAddress,
   CodeReviewReport,
   InternalPrReview,
   ReviewFinding,
@@ -318,12 +319,12 @@ export function LogsPanel() {
 }
 
 export function PrepareExecutionPlanPanel({
-  attemptId,
+  address,
   plan,
   requireConfirm,
   onError,
 }: {
-  attemptId: string;
+  address: CodingAttemptAddress;
   plan: WorkItemExecutionPlan;
   requireConfirm: boolean;
   onError: (error: string | null) => void;
@@ -336,7 +337,7 @@ export function PrepareExecutionPlanPanel({
     setBusy(true);
     onError(null);
     try {
-      const updated = await confirmWorkItemExecutionPlan(attemptId);
+      const updated = await confirmWorkItemExecutionPlan(address);
       useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
     } catch (reason) {
       onError(errorMessage(reason, "确认执行计划失败"));
@@ -354,7 +355,7 @@ export function PrepareExecutionPlanPanel({
     setBusy(true);
     onError(null);
     try {
-      const updated = await requestWorkItemExecutionPlanChange(attemptId, { note });
+      const updated = await requestWorkItemExecutionPlanChange(address, { note });
       useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
       setChangeNote("");
     } catch (reason) {

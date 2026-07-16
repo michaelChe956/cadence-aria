@@ -1,6 +1,7 @@
 import { ArrowLeft, History, Settings2, Trash2, Wifi, WifiOff, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { deleteCodingAttempt } from "../api/client";
+import type { CodingAttemptAddress } from "../api/types";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
 import { CodingProviderConfigPanel } from "../components/coding-workspace/CodingProviderConfigPanel";
 import { RoleRunHistoryPanel } from "../components/coding-workspace/RoleRunHistoryPanel";
@@ -29,13 +30,13 @@ import { PrepareExecutionPlanPanel, StatusBadge } from "./CodingWorkspaceReports
 type CodingWorkspaceDrawer = "providers" | "runs";
 
 export function CodingWorkspacePage({
-  attemptId,
+  address,
   onBack,
 }: {
-  attemptId: string;
+  address: CodingAttemptAddress;
   onBack: () => void;
 }) {
-  const api = useCodingWorkspaceWs(attemptId);
+  const api = useCodingWorkspaceWs(address);
   const store = useCodingWorkspaceStore();
   const connected = store.connectionStatus === "connected";
   const activeTab = store.activeTab;
@@ -59,7 +60,6 @@ export function CodingWorkspacePage({
   });
 
   async function handleDeleteCodingWorkspace() {
-    const targetAttemptId = store.attemptId ?? attemptId;
     const active = ACTIVE_ATTEMPT_STATUSES.has(store.status ?? "created");
     const message = active
       ? "运行中的 Attempt 会被终止并删除。本操作会删除 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。"
@@ -71,7 +71,10 @@ export function CodingWorkspacePage({
     setDeleteBusy(true);
     setDeleteError(null);
     try {
-      await deleteCodingAttempt(targetAttemptId);
+      await deleteCodingAttempt({
+        ...address,
+        attemptId: store.attemptId ?? address.attemptId,
+      });
       onBack();
     } catch (reason) {
       setDeleteError(errorMessage(reason, "删除 Coding Workspace 失败"));
@@ -102,7 +105,7 @@ export function CodingWorkspacePage({
           返回
         </button>
         <div className="min-w-0 flex-1 truncate text-center text-sm font-semibold">
-          Coding Attempt #{store.attemptId ?? attemptId}
+          Coding Attempt #{store.attemptId ?? address.attemptId}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <button
@@ -161,7 +164,11 @@ export function CodingWorkspacePage({
         <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-[var(--aria-panel)]">
           <CodingPanelTabs activePanel={activePanel} onSelectPanel={setActivePanel} />
           {activePanel === "results" ? (
-            <CodingArtifactTabs activeTab={activeTab} className="min-h-0" />
+            <CodingArtifactTabs
+              address={address}
+              activeTab={activeTab}
+              className="min-h-0"
+            />
           ) : (
             <div
               className={[
@@ -173,7 +180,7 @@ export function CodingWorkspacePage({
             >
               {store.stage === "prepare_context" && store.workItemExecutionPlan ? (
                 <PrepareExecutionPlanPanel
-                  attemptId={attemptId}
+                  address={address}
                   plan={store.workItemExecutionPlan}
                   requireConfirm={store.requireExecutionPlanConfirm}
                   onError={setPlanError}
