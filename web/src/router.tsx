@@ -15,6 +15,7 @@ import { AppShell } from "./app-shell";
 import { ProviderAvailabilityGuard } from "./components/providers/ProviderAvailabilityGuard";
 import { ChatWorkspacePage } from "./pages/ChatWorkspacePage";
 import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
+import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedirect";
 
 function RootRouteComponent() {
   return (
@@ -110,11 +111,40 @@ const codingWorkspaceRoute = createRoute({
   component: CodingWorkspaceRouteComponent,
 });
 
+function LegacyCodingWorkspaceRouteComponent() {
+  const { attemptId } = useParams({ from: "/workbench/coding/$attemptId" });
+  const navigate = useNavigate();
+  return (
+    <LegacyCodingWorkspaceRedirect
+      attemptId={attemptId}
+      onResolved={({ projectId, issueId, attemptId: resolvedAttemptId }) =>
+        void navigate({
+          to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+          params: {
+            projectId,
+            issueId,
+            attemptId: resolvedAttemptId,
+          },
+          replace: true,
+        })
+      }
+      onBack={() => void navigate({ to: "/workbench" })}
+    />
+  );
+}
+
+const legacyCodingWorkspaceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workbench/coding/$attemptId",
+  component: LegacyCodingWorkspaceRouteComponent,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   workbenchRoute,
   workspaceRoute,
   codingWorkspaceRoute,
+  legacyCodingWorkspaceRoute,
 ]);
 
 export function createAppRouter(history?: RouterHistory) {
