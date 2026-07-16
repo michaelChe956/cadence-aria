@@ -89,9 +89,11 @@ fn work_item_output_schema_describes_single_task_not_issue_level_split() {
     let schema = output_schema_for(&WorkspaceType::WorkItem);
 
     assert!(schema.contains("实现步骤") || schema.contains("子步骤"));
+    assert!(schema.contains("40k"));
+    assert!(schema.contains("50k"));
     assert!(schema.contains("单个可执行任务"));
-    assert!(schema.contains("20k"));
     assert!(schema.contains("禁止跨任务"));
+    assert!(!schema.contains("20k"));
     assert!(!schema.contains("任务拆分"));
 }
 
@@ -99,10 +101,12 @@ fn work_item_output_schema_describes_single_task_not_issue_level_split() {
 fn work_item_plan_output_schema_requires_single_session_task_sizing() {
     let schema = output_schema_for(&WorkspaceType::WorkItemPlan);
 
-    assert!(schema.contains("任务拆分"));
-    assert!(schema.contains("20k"));
+    for required in ["40k", "50k", "最大内聚", "最少拆分", "优先合并"] {
+        assert!(schema.contains(required), "missing `{required}`: {schema}");
+    }
     assert!(schema.contains("单个 Claude Code 或 Codex 会话"));
     assert!(schema.contains("继续拆分"));
+    assert!(!schema.contains("20k"));
 }
 
 #[test]

@@ -141,11 +141,11 @@ pub(super) fn output_schema_for(workspace_type: &WorkspaceType) -> String {
                 .to_string()
         }
         WorkspaceType::WorkItem => {
-            "Markdown Work Item 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item 一级标题；内容必须描述单个可执行任务，包含目标、范围、实现步骤或子步骤、依赖、验证命令、风险和追踪关系。如果来源 Story/Design 或本轮 author 包含结构化交互形成的用户确认决策，必须在目标、范围或追踪关系中写明对应 author-decision-*，并绑定到来源需求/设计/验收 ID。必须在追踪关系中显式写出 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001，并绑定来源需求/设计 ID。内容规模应控制在约 20k 以内，确保单个会话可完成；禁止跨任务内容、兄弟任务、Issue 级完整计划和其它任务的交叉内容。"
+            "Markdown Work Item 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item 一级标题；内容必须描述单个可执行任务，包含目标、范围、实现步骤或子步骤、依赖、验证命令、风险和追踪关系。如果来源 Story/Design 或本轮 author 包含结构化交互形成的用户确认决策，必须在目标、范围或追踪关系中写明对应 author-decision-*，并绑定到来源需求/设计/验收 ID。必须在追踪关系中显式写出 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001，并绑定来源需求/设计 ID。内容规模不超过 40k 属正常范围，40001..=50000 必须仍能由单个会话完成编码、返修与验证，超过 50k 不得作为单个 Work Item；禁止跨任务内容、兄弟任务、Issue 级完整计划和其它任务的交叉内容。"
                 .to_string()
         }
         WorkspaceType::WorkItemPlan => {
-            "Markdown Work Item Plan 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item Plan 一级标题；内容必须包含计划范围、任务拆分（[TASK-001]）、依赖图、验证计划、执行顺序、风险与追踪关系；每个任务必须显式写出并绑定来源 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001。每个拆分任务必须控制在约 20k 以内，确保单个 Claude Code 或 Codex 会话可完成；如果任务超过该规模，必须继续拆分，不得把过大任务写成单个 [TASK-*]。"
+            "Markdown Work Item Plan 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item Plan 一级标题；内容必须包含计划范围、任务拆分（[TASK-001]）、依赖图、验证计划、执行顺序、风险与追踪关系；每个任务必须显式写出并绑定来源 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001。拆分目标是在单个 Claude Code 或 Codex 会话可完成的前提下最少拆分。每个任务必须最大内聚，优先合并目标一致、范围重叠且可在同一会话闭环的工作；不超过 40k 属正常范围，40001..=50000 需经 Reviewer 判断，超过 50k 必须继续拆分。"
                 .to_string()
         }
     }
