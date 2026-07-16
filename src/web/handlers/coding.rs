@@ -4,8 +4,10 @@ use super::*;
 use crate::product::coding_models::CodingAttemptScope;
 
 mod group;
+mod scope;
 
 pub use group::create_group_coding_attempt;
+use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};
 
 pub async fn create_coding_attempt(
     State(state): State<WebAppState>,
@@ -324,15 +326,18 @@ pub(crate) fn coding_provider_config_snapshot(
     })
 }
 
-pub async fn get_coding_attempt(
+pub(crate) async fn get_coding_attempt(
     State(state): State<WebAppState>,
-    Path(attempt_id): Path<String>,
+    Path(path): Path<CodingAttemptRoutePath>,
 ) -> ApiResult<Json<CodingAttemptSnapshotResponse>> {
     let app_paths = product_app_paths(&state);
     let coding_store = CodingAttemptStore::new(app_paths);
-    let attempt = coding_store
-        .get_attempt_by_id(&attempt_id)
-        .map_err(product_store_api_error)?;
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
     let timeline_nodes = coding_store
         .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -396,15 +401,18 @@ pub async fn get_coding_attempt(
     }))
 }
 
-pub async fn coding_attempt_diff(
+pub(crate) async fn coding_attempt_diff(
     State(state): State<WebAppState>,
-    Path(attempt_id): Path<String>,
+    Path(path): Path<CodingAttemptRoutePath>,
 ) -> ApiResult<Json<CodingAttemptDiffResponse>> {
     let app_paths = product_app_paths(&state);
     let coding_store = CodingAttemptStore::new(app_paths);
-    let attempt = coding_store
-        .get_attempt_by_id(&attempt_id)
-        .map_err(product_store_api_error)?;
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
     let worktree_path = attempt.worktree_path.clone().ok_or_else(|| {
         ApiError::runtime(
             "coding_attempt_worktree_not_ready",
@@ -425,15 +433,18 @@ pub async fn coding_attempt_diff(
     }))
 }
 
-pub async fn abort_coding_attempt(
+pub(crate) async fn abort_coding_attempt(
     State(state): State<WebAppState>,
-    Path(attempt_id): Path<String>,
+    Path(path): Path<CodingAttemptRoutePath>,
 ) -> ApiResult<Json<CodingAttemptDto>> {
     let app_paths = product_app_paths(&state);
     let coding_store = CodingAttemptStore::new(app_paths.clone());
-    let attempt = coding_store
-        .get_attempt_by_id(&attempt_id)
-        .map_err(product_store_api_error)?;
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
     state.coding_runs.abort_attempt(&attempt.id).await;
     let engine = coding_workspace_engine_with_dummy_events(coding_store);
     let aborted = engine
@@ -443,16 +454,19 @@ pub async fn abort_coding_attempt(
     Ok(Json(coding_attempt_dto(&aborted)))
 }
 
-pub async fn delete_coding_attempt(
+pub(crate) async fn delete_coding_attempt(
     State(state): State<WebAppState>,
-    Path(attempt_id): Path<String>,
+    Path(path): Path<CodingAttemptRoutePath>,
 ) -> ApiResult<Response> {
     let app_paths = product_app_paths(&state);
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    let attempt = coding_store
-        .get_attempt_by_id(&attempt_id)
-        .map_err(product_store_api_error)?;
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
     state.coding_runs.abort_attempt(&attempt.id).await;
     let active_work_item_id = attempt
         .current_work_item_id
@@ -489,16 +503,19 @@ pub async fn delete_coding_attempt(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-pub async fn confirm_work_item_execution_plan(
+pub(crate) async fn confirm_work_item_execution_plan(
     State(state): State<WebAppState>,
-    Path(attempt_id): Path<String>,
+    Path(path): Path<CodingAttemptRoutePath>,
 ) -> ApiResult<Json<WorkItemExecutionPlan>> {
     let app_paths = product_app_paths(&state);
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let lifecycle = LifecycleStore::new(app_paths);
-    let attempt = coding_store
-        .get_attempt_by_id(&attempt_id)
-        .map_err(product_store_api_error)?;
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
 
     let plan = coding_store
         .update_work_item_execution_plan_status(
@@ -519,17 +536,20 @@ pub async fn confirm_work_item_execution_plan(
     Ok(Json(plan))
 }
 
-pub async fn request_work_item_execution_plan_change(
+pub(crate) async fn request_work_item_execution_plan_change(
     State(state): State<WebAppState>,
-    Path(attempt_id): Path<String>,
+    Path(path): Path<CodingAttemptRoutePath>,
     Json(payload): Json<RequestExecutionPlanChangeRequest>,
 ) -> ApiResult<Json<WorkItemExecutionPlan>> {
     let app_paths = product_app_paths(&state);
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let lifecycle = LifecycleStore::new(app_paths);
-    let attempt = coding_store
-        .get_attempt_by_id(&attempt_id)
-        .map_err(product_store_api_error)?;
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
 
     let mut plan = coding_store
         .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -562,17 +582,21 @@ pub async fn request_work_item_execution_plan_change(
     Ok(Json(plan))
 }
 
-pub async fn coding_attempt_artifact_content(
+pub(crate) async fn coding_attempt_artifact_content(
     State(state): State<WebAppState>,
-    Path((attempt_id, artifact_id)): Path<(String, String)>,
+    Path(path): Path<CodingAttemptArtifactRoutePath>,
 ) -> ApiResult<Json<ArtifactContentResponse>> {
+    let artifact_id = path.artifact_id;
     validate_relative_id(&artifact_id)
         .map_err(|_| ApiError::validation("invalid_artifact_id", "invalid artifact id"))?;
     let app_paths = product_app_paths(&state);
     let coding_store = CodingAttemptStore::new(app_paths);
-    let attempt = coding_store
-        .get_attempt_by_id(&attempt_id)
-        .map_err(product_store_api_error)?;
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
     let artifact_path = coding_store
         .attempt_test_output_path(
             &attempt.project_id,

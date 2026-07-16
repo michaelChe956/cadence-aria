@@ -82,7 +82,9 @@ mod support;
 mod workspace_session;
 
 #[rustfmt::skip]
-pub use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, create_coding_attempt, create_group_coding_attempt, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
+pub use coding::{create_coding_attempt, create_group_coding_attempt};
+#[rustfmt::skip]
+pub(crate) use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
 pub use health::{health, runtime_info};
 pub use providers::{providers_recheck, providers_status};
 #[rustfmt::skip]

@@ -147,12 +147,12 @@ async fn coding_attempt_snapshot_includes_generated_work_item_execution_plan() {
         json!({}),
     )
     .await;
-    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+    let attempt_id = assert_global_attempt_id(&attempt);
 
     let (status, snapshot) = request_json(
         app,
         Method::GET,
-        "/api/coding-attempts/coding_attempt_0001",
+        &scoped_attempt_uri(&attempt_id, ""),
         json!({}),
     )
     .await;

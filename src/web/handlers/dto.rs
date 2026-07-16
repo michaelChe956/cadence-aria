@@ -2,7 +2,6 @@ use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
 use crate::product::models::WorkspaceSessionSummaryRecord;
 use crate::web::error::sanitize_repository_api_warnings;
-
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
 ) -> IssueWorkItemPlanDetailDto {
@@ -407,6 +406,8 @@ pub(crate) fn lifecycle_work_item_dto(
 pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {
     CodingAttemptDto {
         attempt_id: attempt.id.clone(),
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
         work_item_id: attempt.work_item_id.clone(),
         attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
         work_item_group_id: attempt.work_item_group_id.clone(),

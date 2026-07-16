@@ -16,13 +16,13 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
+    let attempt_id = assert_global_attempt_id(&attempt);
 
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let testing_report = sample_testing_report(attempt_id);
-    let code_review = sample_code_review_report(attempt_id);
-    let review_request = sample_review_request(attempt_id);
-    let internal_review = sample_internal_review(attempt_id, &review_request.id);
+    let testing_report = sample_testing_report(&attempt_id);
+    let code_review = sample_code_review_report(&attempt_id);
+    let review_request = sample_review_request(&attempt_id);
+    let internal_review = sample_internal_review(&attempt_id, &review_request.id);
     store
         .save_testing_report(&testing_report)
         .expect("save testing report");
@@ -36,14 +36,14 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
         .save_internal_pr_review(&internal_review)
         .expect("save internal review");
     store
-        .save_timeline_node(sample_completed_node(attempt_id))
+        .save_timeline_node(sample_completed_node(&attempt_id))
         .expect("save completed node");
     store
-        .save_timeline_node(sample_running_node(attempt_id))
+        .save_timeline_node(sample_running_node(&attempt_id))
         .expect("save running node");
     store
         .create_choice_gate(CreateChoiceGateInput {
-            attempt_id: attempt_id.to_string(),
+            attempt_id: attempt_id.clone(),
             choice_id: "choice_0001".to_string(),
             stage: CodingExecutionStage::Coding,
             node_id: Some("coding_node_0002".to_string()),
@@ -64,13 +64,13 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     let (status, snapshot) = request_json(
         app,
         Method::GET,
-        "/api/coding-attempts/coding_attempt_0001",
+        &scoped_attempt_uri(&attempt_id, ""),
         json!({}),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(snapshot["attempt"]["attempt_id"], "coding_attempt_0001");
+    assert_eq!(snapshot["attempt"]["attempt_id"], attempt_id);
     assert_eq!(snapshot["attempt"]["stage"], "prepare_context");
     assert_eq!(snapshot["active_node_id"], "coding_node_0002");
     assert_eq!(snapshot["timeline_nodes"].as_array().unwrap().len(), 2);
@@ -112,15 +112,15 @@ async fn coding_attempt_snapshot_does_not_reactivate_historical_blocked_node() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
+    let attempt_id = assert_global_attempt_id(&attempt);
 
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let mut blocked_node = sample_running_node(attempt_id);
+    let mut blocked_node = sample_running_node(&attempt_id);
     blocked_node.id = "coding_node_0001".to_string();
     blocked_node.status = CodingTimelineNodeStatus::Blocked;
     blocked_node.summary = Some("code review 被阻塞".to_string());
     blocked_node.completed_at = Some("2026-05-23T00:03:00Z".to_string());
-    let mut completed_retry_node = sample_completed_node(attempt_id);
+    let mut completed_retry_node = sample_completed_node(&attempt_id);
     completed_retry_node.id = "coding_node_0002".to_string();
     completed_retry_node.stage = CodingExecutionStage::CodeReview;
     completed_retry_node.started_at = "2026-05-23T00:04:00Z".to_string();
@@ -135,7 +135,7 @@ async fn coding_attempt_snapshot_does_not_reactivate_historical_blocked_node() {
     let (status, snapshot) = request_json(
         app,
         Method::GET,
-        "/api/coding-attempts/coding_attempt_0001",
+        &scoped_attempt_uri(&attempt_id, ""),
         json!({}),
     )
     .await;
@@ -162,17 +162,17 @@ async fn aborts_coding_attempt_and_allows_next_attempt_for_same_work_item() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(first["attempt_id"], "coding_attempt_0001");
+    let first_attempt_id = assert_global_attempt_id(&first);
 
     let (status, aborted) = request_json(
         app.clone(),
         Method::POST,
-        "/api/coding-attempts/coding_attempt_0001/abort",
+        &scoped_attempt_uri(&first_attempt_id, "/abort"),
         json!({}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(aborted["attempt_id"], "coding_attempt_0001");
+    assert_eq!(aborted["attempt_id"], first_attempt_id);
     assert_eq!(aborted["status"], "aborted");
 
     let (status, second) = request_json(
@@ -183,7 +183,8 @@ async fn aborts_coding_attempt_and_allows_next_attempt_for_same_work_item() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(second["attempt_id"], "coding_attempt_0002");
+    let second_attempt_id = assert_global_attempt_id(&second);
+    assert_ne!(second_attempt_id, first_attempt_id);
     assert_eq!(second["attempt_no"], 2);
 }
 
@@ -204,7 +205,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+    let attempt_id = assert_global_attempt_id(&attempt);
 
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = prepare_attempt_with_worktree(
@@ -212,17 +213,17 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
         repo.path(),
         "project_0001",
         "issue_0001",
-        "coding_attempt_0001",
+        &attempt_id,
     );
     let artifact_dir =
-        store.attempt_test_output_root("project_0001", "issue_0001", "coding_attempt_0001");
+        store.attempt_test_output_root("project_0001", "issue_0001", &attempt_id);
     fs::create_dir_all(&artifact_dir).expect("artifact dir");
     fs::write(artifact_dir.join("unit.stdout.log"), "unit stdout\n").expect("artifact");
     store
-        .save_testing_report(&sample_testing_report("coding_attempt_0001"))
+        .save_testing_report(&sample_testing_report(&attempt_id))
         .expect("save testing report");
     store
-        .save_timeline_node(sample_running_node("coding_attempt_0001"))
+        .save_timeline_node(sample_running_node(&attempt_id))
         .expect("save timeline node");
     let attempt_dir = artifact_dir
         .parent()
@@ -237,7 +238,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
     let (status, _body) = request_json(
         app.clone(),
         Method::DELETE,
-        "/api/coding-attempts/coding_attempt_0001",
+        &scoped_attempt_uri(&attempt_id, ""),
         json!({}),
     )
     .await;
@@ -250,7 +251,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
     let (status, _) = request_json(
         app.clone(),
         Method::GET,
-        "/api/coding-attempts/coding_attempt_0001",
+        &scoped_attempt_uri(&attempt_id, ""),
         json!({}),
     )
     .await;
@@ -276,7 +277,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(second["attempt_id"], "coding_attempt_0002");
+    assert_global_attempt_id(&second);
     assert_eq!(second["attempt_no"], 1);
 }
 
@@ -291,7 +292,7 @@ async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
     bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
 
-    let (status, _) = request_json(
+    let (status, first_created) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
@@ -299,27 +300,28 @@ async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let first_attempt_id = assert_global_attempt_id(&first_created);
     let first = prepare_attempt_with_worktree(
         &store,
         repo.path(),
         "project_0001",
         "issue_0001",
-        "coding_attempt_0001",
+        &first_attempt_id,
     );
     let first_artifact_dir =
-        store.attempt_test_output_root("project_0001", "issue_0001", "coding_attempt_0001");
+        store.attempt_test_output_root("project_0001", "issue_0001", &first_attempt_id);
     fs::create_dir_all(&first_artifact_dir).expect("first artifact dir");
     fs::write(first_artifact_dir.join("unit.stdout.log"), "first\n").expect("first artifact");
     let (status, _) = request_json(
         app.clone(),
         Method::POST,
-        "/api/coding-attempts/coding_attempt_0001/abort",
+        &scoped_attempt_uri(&first_attempt_id, "/abort"),
         json!({}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, _) = request_json(
+    let (status, second_created) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
@@ -327,15 +329,16 @@ async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let second_attempt_id = assert_global_attempt_id(&second_created);
     let second = prepare_attempt_with_worktree(
         &store,
         repo.path(),
         "project_0001",
         "issue_0001",
-        "coding_attempt_0002",
+        &second_attempt_id,
     );
     let second_artifact_dir =
-        store.attempt_test_output_root("project_0001", "issue_0001", "coding_attempt_0002");
+        store.attempt_test_output_root("project_0001", "issue_0001", &second_attempt_id);
     fs::create_dir_all(&second_artifact_dir).expect("second artifact dir");
     fs::write(second_artifact_dir.join("unit.stdout.log"), "second\n").expect("second artifact");
     let first_attempt_dir = first_artifact_dir

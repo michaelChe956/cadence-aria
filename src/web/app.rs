@@ -99,6 +99,30 @@ pub fn build_web_router(state: WebAppState) -> Router {
             post(handlers::create_coding_attempt),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}",
+            get(handlers::get_coding_attempt).delete(handlers::delete_coding_attempt),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/diff",
+            get(handlers::coding_attempt_diff),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/abort",
+            post(handlers::abort_coding_attempt),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/execution-plan/confirm",
+            post(handlers::confirm_work_item_execution_plan),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/execution-plan/change-request",
+            post(handlers::request_work_item_execution_plan_change),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/artifacts/{artifact_id}",
+            get(handlers::coding_attempt_artifact_content),
+        )
+        .route(
             "/api/coding-attempts/{attempt_id}",
             get(handlers::get_coding_attempt).delete(handlers::delete_coding_attempt),
         )

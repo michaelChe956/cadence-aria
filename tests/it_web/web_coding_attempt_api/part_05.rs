@@ -76,6 +76,82 @@ pub(crate) async fn request_json(
     (status, value)
 }
 
+pub(crate) fn assert_global_attempt_id(value: &Value) -> String {
+    let id = value["attempt_id"].as_str().expect("attempt id");
+    let uuid = id.strip_prefix("coding_attempt_").expect("attempt prefix");
+    assert_eq!(uuid.len(), 32);
+    uuid::Uuid::parse_str(uuid).expect("valid attempt UUID");
+    id.to_string()
+}
+
+pub(crate) fn scoped_attempt_uri(attempt_id: &str, suffix: &str) -> String {
+    format!(
+        "/api/projects/project_0001/issues/issue_0001/coding-attempts/{attempt_id}{suffix}"
+    )
+}
+
+pub(crate) fn inject_invalid_group_second_work_item(
+    app_paths: &ProductAppPaths,
+) -> (PathBuf, Vec<u8>, PathBuf, Vec<u8>) {
+    let issue_root = app_paths.issue_lifecycle_root("project_0001", "issue_0001");
+    let second_work_item_path = issue_root.join("work-items/work_item_0002.json");
+    let plan_path = issue_root.join("issue-work-item-plans/work_item_plan_0001.json");
+    let original_work_item = fs::read(&second_work_item_path).expect("second work item");
+    let original_plan = fs::read(&plan_path).expect("work item plan");
+    let mut invalid_work_item: Value =
+        serde_json::from_slice(&original_work_item).expect("parse second work item");
+    invalid_work_item["id"] = json!("../invalid_work_item");
+    fs::write(
+        &second_work_item_path,
+        serde_json::to_vec_pretty(&invalid_work_item).expect("serialize invalid work item"),
+    )
+    .expect("write invalid work item");
+    let mut invalid_plan: Value = serde_json::from_slice(&original_plan).expect("parse plan");
+    invalid_plan["work_item_ids"][1] = json!("../invalid_work_item");
+    fs::write(
+        &plan_path,
+        serde_json::to_vec_pretty(&invalid_plan).expect("serialize invalid plan"),
+    )
+    .expect("write invalid plan");
+    (
+        second_work_item_path,
+        original_work_item,
+        plan_path,
+        original_plan,
+    )
+}
+
+pub(crate) fn restore_group_second_work_item(
+    fixture: (PathBuf, Vec<u8>, PathBuf, Vec<u8>),
+) {
+    let (second_work_item_path, original_work_item, plan_path, original_plan) = fixture;
+    fs::write(second_work_item_path, original_work_item).expect("restore second work item");
+    fs::write(plan_path, original_plan).expect("restore work item plan");
+}
+
+pub(crate) fn assert_group_attempt_creation_rolled_back(app_paths: &ProductAppPaths) {
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    assert!(
+        coding_store
+            .list_attempts_for_work_item("project_0001", "issue_0001", "work_item_0001")
+            .expect("list attempts after failed create")
+            .is_empty()
+    );
+    let issue_root = app_paths.issue_lifecycle_root("project_0001", "issue_0001");
+    assert_eq!(
+        fs::read_dir(issue_root.join("coding-attempts"))
+            .expect("coding attempts root")
+            .count(),
+        0
+    );
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let shared_worktree = lifecycle
+        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .expect("shared worktree")
+        .expect("shared worktree record");
+    assert_eq!(shared_worktree.current_active_work_item_id, None);
+}
+
 pub(crate) fn git_repo() -> tempfile::TempDir {
     let dir = tempdir().expect("repo");
     run_git(dir.path(), &["init"]);

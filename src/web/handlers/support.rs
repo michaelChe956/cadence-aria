@@ -287,6 +287,22 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "gate matches multiple projects",
             json!({}),
         ),
+        ProductStoreError::Ambiguous {
+            kind: "coding_attempt",
+            id,
+        } => ApiError::runtime(
+            "coding_attempt_ambiguous",
+            "coding attempt matches multiple issues",
+            json!({"attempt_id": id}),
+        ),
+        ProductStoreError::IdentityMismatch {
+            kind: "coding_attempt",
+            id,
+        } => ApiError::runtime(
+            "coding_attempt_scope_mismatch",
+            "coding attempt does not belong to the requested project and issue",
+            json!({"attempt_id": id}),
+        ),
         ProductStoreError::PathEscape(_) => {
             ApiError::validation("invalid_project_id", "invalid project id")
         }

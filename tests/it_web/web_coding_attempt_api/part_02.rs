@@ -15,6 +15,7 @@ async fn repeated_group_coding_attempt_create_returns_original_attempt() {
         request_json(app.clone(), Method::POST, path, json!({})).await;
 
     assert_eq!(first_status, StatusCode::OK);
+    let attempt_id = assert_global_attempt_id(&first);
     assert_eq!(second_status, StatusCode::OK);
     assert_eq!(second["attempt_id"], first["attempt_id"]);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
@@ -23,7 +24,7 @@ async fn repeated_group_coding_attempt_create_returns_original_attempt() {
             .list_coding_units(
                 "project_0001",
                 "issue_0001",
-                first["attempt_id"].as_str().expect("attempt id"),
+                &attempt_id,
             )
             .expect("units")
             .len(),
@@ -80,7 +81,7 @@ async fn delete_work_item_plan_cascades_children_sessions_and_attempts() {
         })
         .expect("create work item plan session");
 
-    let (status, _) = request_json(
+    let (status, created) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
@@ -88,15 +89,19 @@ async fn delete_work_item_plan_cascades_children_sessions_and_attempts() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let attempt_id = assert_global_attempt_id(&created);
     let attempt = prepare_attempt_with_worktree(
         &coding_store,
         repo.path(),
         "project_0001",
         "issue_0001",
-        "coding_attempt_0001",
+        &attempt_id,
     );
-    let artifact_dir =
-        coding_store.attempt_test_output_root("project_0001", "issue_0001", "coding_attempt_0001");
+    let artifact_dir = coding_store.attempt_test_output_root(
+        "project_0001",
+        "issue_0001",
+        &attempt_id,
+    );
     fs::create_dir_all(&artifact_dir).expect("artifact dir");
     fs::write(artifact_dir.join("unit.stdout.log"), "unit\n").expect("artifact");
     let attempt_dir = artifact_dir
@@ -181,11 +186,12 @@ async fn reads_test_output_artifact_from_attempt_store() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let attempt_id = assert_global_attempt_id(&attempt);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let artifact_dir = store.attempt_test_output_root(
         "project_0001",
         "issue_0001",
-        attempt["attempt_id"].as_str().expect("attempt id"),
+        &attempt_id,
     );
     fs::create_dir_all(&artifact_dir).expect("artifact dir");
     fs::write(artifact_dir.join("unit.stdout.log"), "unit stdout\n").expect("artifact");
@@ -193,7 +199,7 @@ async fn reads_test_output_artifact_from_attempt_store() {
     let (status, artifact) = request_json(
         app,
         Method::GET,
-        "/api/coding-attempts/coding_attempt_0001/artifacts/unit.stdout.log",
+        &scoped_attempt_uri(&attempt_id, "/artifacts/unit.stdout.log"),
         json!({}),
     )
     .await;
@@ -222,13 +228,14 @@ async fn reads_coding_attempt_diff_from_worktree_against_base_branch() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let attempt_id = assert_global_attempt_id(&created);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = prepare_attempt_with_worktree(
         &store,
         repo.path(),
         "project_0001",
         "issue_0001",
-        "coding_attempt_0001",
+        &attempt_id,
     );
     let worktree_path = attempt.worktree_path.as_ref().expect("worktree path");
     fs::write(
@@ -240,13 +247,13 @@ async fn reads_coding_attempt_diff_from_worktree_against_base_branch() {
     let (status, diff) = request_json(
         app,
         Method::GET,
-        "/api/coding-attempts/coding_attempt_0001/diff",
+        &scoped_attempt_uri(&attempt_id, "/diff"),
         json!({}),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(diff["attempt_id"], "coding_attempt_0001");
+    assert_eq!(diff["attempt_id"], attempt_id);
     assert_eq!(diff["base_branch"], created["base_branch"]);
     assert_eq!(
         diff["worktree_path"],

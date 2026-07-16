@@ -485,6 +485,8 @@ impl Default for WorkItemContextBudgetDto {
 #[serde(rename_all = "snake_case")]
 pub struct CodingAttemptDto {
     pub attempt_id: String,
+    pub project_id: String,
+    pub issue_id: String,
     pub work_item_id: String,
     pub attempt_scope: String,
     pub work_item_group_id: Option<String>,
