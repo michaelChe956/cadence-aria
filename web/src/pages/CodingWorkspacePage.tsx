@@ -53,6 +53,10 @@ export function CodingWorkspacePage({
   const roleRunSummary =
     store.roleRuns.length === 0 ? "暂无运行记录" : `${store.roleRuns.length} 次角色运行`;
   const pendingGate = store.pendingGates.at(-1) ?? null;
+  const storeMatchesAddress =
+    store.projectId === address.projectId &&
+    store.issueId === address.issueId &&
+    store.attemptId === address.attemptId;
 
   useUnloadGuard({
     enabled: store.status === "running",
@@ -60,6 +64,9 @@ export function CodingWorkspacePage({
   });
 
   async function handleDeleteCodingWorkspace() {
+    if (!storeMatchesAddress) {
+      return;
+    }
     const active = ACTIVE_ATTEMPT_STATUSES.has(store.status ?? "created");
     const message = active
       ? "运行中的 Attempt 会被终止并删除。本操作会删除 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。"
@@ -71,10 +78,7 @@ export function CodingWorkspacePage({
     setDeleteBusy(true);
     setDeleteError(null);
     try {
-      await deleteCodingAttempt({
-        ...address,
-        attemptId: store.attemptId ?? address.attemptId,
-      });
+      await deleteCodingAttempt(address);
       onBack();
     } catch (reason) {
       setDeleteError(errorMessage(reason, "删除 Coding Workspace 失败"));
@@ -110,7 +114,7 @@ export function CodingWorkspacePage({
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
-            disabled={deleteBusy}
+            disabled={deleteBusy || !storeMatchesAddress}
             onClick={() => void handleDeleteCodingWorkspace()}
             className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--aria-danger)] bg-white px-2 text-xs font-semibold text-[var(--aria-danger)] hover:bg-red-50 disabled:opacity-50"
           >

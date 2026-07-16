@@ -11,7 +11,7 @@ import { errorMessage } from "./CodingWorkspaceControls";
 import { GitPanel, LogsPanel, ReviewPanel, TestsPanel } from "./CodingWorkspaceReports";
 
 type CodingDiffState = {
-  attemptId: string | null;
+  addressKey: string | null;
   status: "idle" | "loading" | "loaded" | "error";
   diff: string;
   error: string | null;
@@ -27,9 +27,10 @@ export function CodingArtifactTabs({
   activeTab: CodingArtifactTab;
   className?: string;
 }) {
-  const attemptId = useCodingWorkspaceStore((state) => state.attemptId);
+  const { projectId, issueId, attemptId } = address;
+  const addressKey = JSON.stringify([projectId, issueId, attemptId]);
   const [diffState, setDiffState] = useState<CodingDiffState>({
-    attemptId: null,
+    addressKey: null,
     status: "idle",
     diff: "",
     error: null,
@@ -37,25 +38,25 @@ export function CodingArtifactTabs({
   const tabs: CodingArtifactTab[] = ["diff", "tests", "review", "git", "logs"];
 
   useEffect(() => {
-    if (activeTab !== "diff" || !attemptId) {
+    if (activeTab !== "diff") {
       return;
     }
-    if (diffState.attemptId === attemptId && diffState.status === "loaded") {
+    if (diffState.addressKey === addressKey && diffState.status === "loaded") {
       return;
     }
 
     let cancelled = false;
     setDiffState({
-      attemptId,
+      addressKey,
       status: "loading",
       diff: "",
       error: null,
     });
-    getCodingAttemptDiff(address)
+    getCodingAttemptDiff({ projectId, issueId, attemptId })
       .then((response) => {
         if (cancelled) return;
         setDiffState({
-          attemptId,
+          addressKey,
           status: "loaded",
           diff: response.diff,
           error: null,
@@ -64,7 +65,7 @@ export function CodingArtifactTabs({
       .catch((reason) => {
         if (cancelled) return;
         setDiffState({
-          attemptId,
+          addressKey,
           status: "error",
           diff: "",
           error: errorMessage(reason, "加载代码变更失败"),
@@ -74,7 +75,17 @@ export function CodingArtifactTabs({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, address, attemptId]);
+  }, [activeTab, addressKey, attemptId, issueId, projectId]);
+
+  const visibleDiffState =
+    diffState.addressKey === addressKey
+      ? diffState
+      : {
+          addressKey,
+          status: "idle" as const,
+          diff: "",
+          error: null,
+        };
 
   return (
     <aside
@@ -108,7 +119,7 @@ export function CodingArtifactTabs({
         ) : activeTab === "logs" ? (
           <LogsPanel />
         ) : (
-          <DiffPanel diffState={diffState} />
+          <DiffPanel diffState={visibleDiffState} />
         )}
       </div>
     </aside>

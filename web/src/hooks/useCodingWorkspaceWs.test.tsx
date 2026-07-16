@@ -46,6 +46,36 @@ describe("useCodingWorkspaceWs inbound events", () => {
     );
   });
 
+  it("clears the previous attempt state before connecting a new address", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive(codingSessionState());
+    });
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "running",
+    });
+
+    harness.rerenderAddress({
+      projectId: "project_0002",
+      issueId: "issue_0002",
+      attemptId: "coding_attempt_0002",
+    });
+
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: null,
+      issueId: null,
+      attemptId: null,
+      status: null,
+    });
+    expect(harness.latestWs.url).toBe(
+      "ws://localhost:3000/ws/projects/project_0002/issues/issue_0002/coding-attempts/coding_attempt_0002",
+    );
+  });
+
   it("applies coding session state and timeline updates from websocket messages", () => {
     const harness = renderCodingHook();
 

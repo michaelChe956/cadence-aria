@@ -152,20 +152,28 @@ export function renderCodingHook(
 ) {
   let api: CodingWsApi | undefined;
 
-  function Harness() {
-    api = useCodingWorkspaceWs(address);
+  function Harness({ currentAddress }: { currentAddress: CodingAttemptAddress | null }) {
+    api = useCodingWorkspaceWs(currentAddress);
     return null;
   }
 
-  const view = render(<Harness />);
+  const view = render(<Harness currentAddress={address} />);
   return {
     ...view,
+    rerenderAddress(nextAddress: CodingAttemptAddress | null) {
+      view.rerender(<Harness currentAddress={nextAddress} />);
+    },
     get api() {
       if (!api) throw new Error("hook not rendered");
       return api;
     },
     get ws() {
       const ws = MockWebSocket.instances[0];
+      if (!ws) throw new Error("websocket not created");
+      return ws;
+    },
+    get latestWs() {
+      const ws = MockWebSocket.instances.at(-1);
       if (!ws) throw new Error("websocket not created");
       return ws;
     },

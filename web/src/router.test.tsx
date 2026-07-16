@@ -97,6 +97,11 @@ describe("router", () => {
   });
 
   it("passes the complete coding attempt address from route params to the page", async () => {
+    const address = {
+      projectId: "project/with space",
+      issueId: "issue?#with space",
+      attemptId: "coding attempt/%1",
+    };
     const health = {
       ...blockedSnapshot(),
       real_workflow_blocked: false,
@@ -114,15 +119,15 @@ describe("router", () => {
     render(
       <RouterProvider
         router={memoryRouter(
-          "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_0001",
+          `/workbench/projects/${encodeURIComponent(address.projectId)}/issues/${encodeURIComponent(address.issueId)}/coding/${encodeURIComponent(address.attemptId)}`,
         )}
       />,
     );
 
     const page = await screen.findByTestId("coding-workspace-page");
-    expect(page).toHaveAttribute("data-project-id", "project_0001");
-    expect(page).toHaveAttribute("data-issue-id", "issue_0001");
-    expect(page).toHaveAttribute("data-attempt-id", "coding_attempt_0001");
+    expect(page).toHaveAttribute("data-project-id", address.projectId);
+    expect(page).toHaveAttribute("data-issue-id", address.issueId);
+    expect(page).toHaveAttribute("data-attempt-id", address.attemptId);
   });
 
   it("mounts one shared root guard and starts the initial load once", async () => {

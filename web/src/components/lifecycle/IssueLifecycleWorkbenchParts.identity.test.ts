@@ -1,12 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   LifecycleCard,
   LifecycleColumns,
 } from "../../state/lifecycle-workbench-store";
 import {
+  defaultOpenCodingWorkspace,
   findCardInColumns,
   lifecycleCardKey,
 } from "./IssueLifecycleWorkbenchParts";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+it("encodes every default coding workspace path segment", () => {
+  const assign = vi.fn();
+  vi.stubGlobal("window", { location: { assign } });
+
+  defaultOpenCodingWorkspace({
+    projectId: "project/with space",
+    issueId: "issue?#with space",
+    attemptId: "coding attempt/%1",
+  });
+
+  expect(assign).toHaveBeenCalledWith(
+    "/workbench/projects/project%2Fwith%20space/issues/issue%3F%23with%20space/coding/coding%20attempt%2F%251",
+  );
+});
 
 function testCard(
   kind: "story_spec" | "design_spec" | "work_item_group",

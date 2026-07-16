@@ -73,6 +73,12 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 describe("CodingWorkspacePage shell and actions", () => {
   installCodingWorkspacePageTestHooks();
 
+  const OTHER_CODING_ATTEMPT_ADDRESS = {
+    projectId: "project_0002",
+    issueId: "issue_0002",
+    attemptId: "coding_attempt_0002",
+  } as const;
+
   function mockCodingSessionState(
     overrides: Partial<Extract<CodingWsOutMessage, { type: "coding_session_state" }>>,
   ) {
@@ -349,6 +355,78 @@ describe("CodingWorkspacePage shell and actions", () => {
     );
   });
 
+  it("reloads diff by full address and hides the previous scoped result", async () => {
+    mockCodingWs();
+    let resolveSecondDiff:
+      | ((value: Awaited<ReturnType<typeof getCodingAttemptDiff>>) => void)
+      | undefined;
+    const secondDiff = new Promise<
+      Awaited<ReturnType<typeof getCodingAttemptDiff>>
+    >((resolve) => {
+      resolveSecondDiff = resolve;
+    });
+    vi.mocked(getCodingAttemptDiff)
+      .mockResolvedValueOnce({
+        attempt_id: "coding_attempt_0001",
+        base_branch: "main",
+        worktree_path: "/tmp/worktree-a",
+        diff: [
+          "diff --git a/scope.txt b/scope.txt",
+          "--- a/scope.txt",
+          "+++ b/scope.txt",
+          "@@ -1 +1 @@",
+          "-old",
+          "+project-one-result",
+        ].join("\n"),
+      })
+      .mockReturnValueOnce(secondDiff);
+    useCodingWorkspaceStore.setState({
+      projectId: CODING_ATTEMPT_ADDRESS.projectId,
+      issueId: CODING_ATTEMPT_ADDRESS.issueId,
+      attemptId: CODING_ATTEMPT_ADDRESS.attemptId,
+      status: "completed",
+      stage: "final_confirm",
+      activeTab: "diff",
+    });
+
+    const view = render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    expect(await screen.findByText("project-one-result")).toBeInTheDocument();
+
+    view.rerender(
+      <CodingWorkspacePage
+        address={{
+          projectId: "project_0002",
+          issueId: "issue_0002",
+          attemptId: "coding_attempt_0001",
+        }}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(getCodingAttemptDiff).toHaveBeenNthCalledWith(2, {
+        projectId: "project_0002",
+        issueId: "issue_0002",
+        attemptId: "coding_attempt_0001",
+      }),
+    );
+    expect(screen.queryByText("project-one-result")).not.toBeInTheDocument();
+
+    resolveSecondDiff?.({
+      attempt_id: "coding_attempt_0001",
+      base_branch: "main",
+      worktree_path: "/tmp/worktree-b",
+      diff: "",
+    });
+    expect(await screen.findByText("暂无代码变更")).toBeInTheDocument();
+  });
+
   it("scrolls the chat list to the first entry for a selected timeline node", async () => {
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
@@ -496,6 +574,8 @@ describe("CodingWorkspacePage shell and actions", () => {
     vi.mocked(deleteCodingAttempt).mockResolvedValue(undefined);
     const onBack = vi.fn();
     useCodingWorkspaceStore.setState({
+      projectId: CODING_ATTEMPT_ADDRESS.projectId,
+      issueId: CODING_ATTEMPT_ADDRESS.issueId,
       attemptId: "coding_attempt_0001",
       status: "running",
       stage: "coding",
@@ -517,6 +597,32 @@ describe("CodingWorkspacePage shell and actions", () => {
     );
     expect(onBack).toHaveBeenCalled();
     confirm.mockRestore();
+  });
+
+  it("disables deletion while the store belongs to a previous address", async () => {
+    mockCodingWs();
+    vi.mocked(deleteCodingAttempt).mockResolvedValue(undefined);
+    useCodingWorkspaceStore.setState({
+      projectId: CODING_ATTEMPT_ADDRESS.projectId,
+      issueId: CODING_ATTEMPT_ADDRESS.issueId,
+      attemptId: CODING_ATTEMPT_ADDRESS.attemptId,
+      status: "running",
+      stage: "coding",
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={OTHER_CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+
+    const deleteButton = screen.getByRole("button", {
+      name: "删除 Coding Workspace",
+    });
+    expect(deleteButton).toBeDisabled();
+    await userEvent.click(deleteButton);
+    expect(deleteCodingAttempt).not.toHaveBeenCalled();
   });
 
   it("sends final confirm and abort actions", async () => {

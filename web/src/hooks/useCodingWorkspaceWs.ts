@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type {
   CodingAttemptAddress,
   CodingProviderPermissionMode,
@@ -26,6 +26,21 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+
+  useLayoutEffect(() => {
+    const ws = wsRef.current;
+    wsRef.current = null;
+    ws?.close(1000);
+    if (heartbeatTimerRef.current !== null) {
+      window.clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    useCodingWorkspaceStore.getState().reset();
+  }, [attemptId, issueId, projectId]);
 
   const sendJson = useCallback((message: CodingWsInMessage) => {
     const ws = wsRef.current;
@@ -163,7 +178,6 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
 
   useEffect(() => {
     if (!projectId || !issueId || !attemptId) {
-      useCodingWorkspaceStore.getState().reset();
       return;
     }
     const scopedProjectId = projectId;
