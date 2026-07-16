@@ -96,8 +96,9 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
         .expect("create work item plan");
 
     let store = CodingAttemptStore::new(app_paths);
-    let attempt = store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
+    let attempt = create_legacy_group_coding_attempt_fixture(
+        &store,
+        CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
@@ -111,8 +112,8 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create group attempt");
+        },
+    );
     store
         .create_coding_unit(CreateCodingExecutionUnitInput {
             attempt_id: attempt.id.clone(),

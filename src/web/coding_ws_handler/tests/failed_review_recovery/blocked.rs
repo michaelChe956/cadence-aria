@@ -22,7 +22,7 @@ async fn blocked_provider_interrupted_review_retry_enters_the_same_recovery_jour
     let engine =
         CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
     let updated = engine
-        .recover_failed_code_review_for_attempt(&fixture.attempt.id, &gate.gate_id)
+        .recover_failed_code_review_for_attempt(&fixture.attempt, &gate.gate_id)
         .await
         .expect("recover blocked provider interruption");
 
@@ -281,11 +281,11 @@ async fn blocked_provider_interrupted_recovery_prefixes_converge_idempotently() 
         let engine =
             CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
         let first = engine
-            .recover_failed_code_review_for_attempt(&fixture.attempt.id, &recovery.gate_id)
+            .recover_failed_code_review_for_attempt(&fixture.attempt, &recovery.gate_id)
             .await
             .unwrap_or_else(|error| panic!("{prefix:?}: first recovery: {error}"));
         let second = engine
-            .recover_failed_code_review_for_attempt(&fixture.attempt.id, &recovery.gate_id)
+            .recover_failed_code_review_for_attempt(&fixture.attempt, &recovery.gate_id)
             .await
             .unwrap_or_else(|error| panic!("{prefix:?}: second recovery: {error}"));
 

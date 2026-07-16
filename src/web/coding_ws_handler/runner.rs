@@ -129,7 +129,7 @@ fn spawn_coding_runner_reserved_inner(
     });
     record_runner_start_event(probe_events.as_ref(), "task_created");
     if let Err(error) =
-        coding_store.complete_failed_code_review_recovery_journal(&attempt.id, recovery_gate_id)
+        coding_store.complete_failed_code_review_recovery_journal(&attempt, recovery_gate_id)
     {
         state.coding_runs.remove(&attempt.id, registry_run_id);
         drop(start_tx);

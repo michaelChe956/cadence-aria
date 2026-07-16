@@ -13,6 +13,8 @@ use super::{
     CodingMessageAdmission, CodingWsInMessage, CodingWsOutMessage, coding_message_admission,
 };
 
+pub(crate) type CodingAttemptIdentity<'a> = (&'a str, &'a str, &'a str);
+
 pub(crate) enum CodingMessagePreparation {
     Hello,
     Ping,
@@ -45,18 +47,10 @@ pub(crate) async fn prepare_coding_message(
     coding_store: &CodingAttemptStore,
     coding_runs: &CodingRunRegistry,
     event_tx: &mpsc::Sender<CodingWsOutMessage>,
-    attempt_id: &str,
+    identity: CodingAttemptIdentity<'_>,
     inbound: &CodingWsInMessage,
 ) -> Result<CodingMessagePreparation, CodingMessagePreparationError> {
-    prepare_coding_message_inner(
-        coding_store,
-        coding_runs,
-        event_tx,
-        attempt_id,
-        inbound,
-        None,
-    )
-    .await
+    prepare_coding_message_inner(coding_store, coding_runs, event_tx, identity, inbound, None).await
 }
 
 #[cfg(test)]
@@ -64,7 +58,7 @@ pub(crate) async fn prepare_coding_message_with_probe(
     coding_store: &CodingAttemptStore,
     coding_runs: &CodingRunRegistry,
     event_tx: &mpsc::Sender<CodingWsOutMessage>,
-    attempt_id: &str,
+    identity: CodingAttemptIdentity<'_>,
     inbound: &CodingWsInMessage,
     probe: CodingRecoveryPreparationProbe,
 ) -> Result<CodingMessagePreparation, CodingMessagePreparationError> {
@@ -72,7 +66,7 @@ pub(crate) async fn prepare_coding_message_with_probe(
         coding_store,
         coding_runs,
         event_tx,
-        attempt_id,
+        identity,
         inbound,
         Some(probe),
     )
@@ -83,7 +77,7 @@ async fn prepare_coding_message_inner(
     coding_store: &CodingAttemptStore,
     coding_runs: &CodingRunRegistry,
     event_tx: &mpsc::Sender<CodingWsOutMessage>,
-    attempt_id: &str,
+    identity: CodingAttemptIdentity<'_>,
     inbound: &CodingWsInMessage,
     #[cfg(test)] probe: Option<CodingRecoveryPreparationProbe>,
     #[cfg(not(test))] _probe: Option<()>,
@@ -94,10 +88,11 @@ async fn prepare_coding_message_inner(
         _ => {}
     }
 
+    let (project_id, issue_id, attempt_id) = identity;
     let attempt_guard = coding_runs.lock_attempt(attempt_id).await;
     let mutation_lease = coding_runs.lock_attempt_mutation(attempt_id).await;
     let current_attempt = coding_store
-        .get_attempt_by_id(attempt_id)
+        .get_attempt(project_id, issue_id, attempt_id)
         .map_err(|_| CodingMessagePreparationError::AttemptUnavailable)?;
     match coding_message_admission(coding_store, coding_runs, &current_attempt, inbound) {
         CodingMessageAdmission::Rejected => {
@@ -130,7 +125,7 @@ async fn prepare_coding_message_inner(
                 event_tx.clone(),
             );
             let updated = engine
-                .recover_failed_code_review_for_attempt(&current_attempt.id, gate_id)
+                .recover_failed_code_review_for_attempt(&current_attempt, gate_id)
                 .await
                 .map_err(CodingMessagePreparationError::Recovery)?;
             drop(mutation_lease);

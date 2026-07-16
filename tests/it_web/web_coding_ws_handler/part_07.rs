@@ -76,8 +76,9 @@ fn app_with_coding_attempt(
         )
         .expect("confirm work item");
     let store = CodingAttemptStore::new(app_paths.clone());
-    store
-        .create_attempt(CreateCodingAttemptInput {
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -90,8 +91,8 @@ fn app_with_coding_attempt(
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
 
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::Fake, provider);

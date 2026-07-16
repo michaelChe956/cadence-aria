@@ -70,7 +70,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
             &fixture.store,
             &state.coding_runs,
             &ordinary_event_tx,
-            &attempt_id,
+            ("project_0001", "issue_0001", &attempt_id),
             &ordinary_message,
         )
         .await
@@ -101,7 +101,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
                 &recovery_store,
                 &recovery_registry,
                 &event_tx,
-                &recovery_attempt_id,
+                ("project_0001", "issue_0001", &recovery_attempt_id),
                 &retry_message,
             )
             .await

@@ -362,7 +362,7 @@ async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner()
     let engine =
         CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
     let updated = engine
-        .recover_failed_code_review_for_attempt(&fixture.attempt.id, &gate_id)
+        .recover_failed_code_review_for_attempt(&fixture.attempt, &gate_id)
         .await
         .expect("winning socket recovers review");
     let (command_tx, _command_rx) = mpsc::channel(1);
@@ -373,7 +373,7 @@ async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner()
         .expect("activate winning runner");
     fixture
         .store
-        .complete_failed_code_review_recovery_journal(&updated.id, &gate_id)
+        .complete_failed_code_review_recovery_journal(&updated, &gate_id)
         .expect("complete winning recovery journal");
 
     assert_eq!(registry.runner_count(&updated.id), 1);
@@ -434,7 +434,7 @@ async fn two_repeated_review_retry_sockets_converge_to_one_current_run_and_runne
     let engine =
         CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
     let updated = engine
-        .recover_failed_code_review_for_attempt(&repeated.blocked_attempt.id, &gate_id)
+        .recover_failed_code_review_for_attempt(&repeated.blocked_attempt, &gate_id)
         .await
         .expect("winning socket recovers second interrupted review");
     let (command_tx, _command_rx) = mpsc::channel(1);
@@ -445,7 +445,7 @@ async fn two_repeated_review_retry_sockets_converge_to_one_current_run_and_runne
         .expect("activate winning runner");
     let current = fixture
         .store
-        .complete_failed_code_review_recovery_journal(&updated.id, &gate_id)
+        .complete_failed_code_review_recovery_journal(&updated, &gate_id)
         .expect("complete second recovery journal");
 
     assert_eq!(registry.runner_count(&updated.id), 1);
@@ -521,7 +521,7 @@ async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note(
             &winner_store,
             &winner_registry,
             &event_tx,
-            &winner_attempt_id,
+            ("project_0001", "issue_0001", &winner_attempt_id),
             &inbound,
             CodingRecoveryPreparationProbe {
                 reserved_tx,
@@ -590,9 +590,15 @@ async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note(
             let attempt_id = attempt_id.clone();
             tokio::spawn(async move {
                 let (event_tx, _event_rx) = mpsc::channel(8);
-                prepare_coding_message(&store, &registry, &event_tx, &attempt_id, &message)
-                    .await
-                    .expect("competing socket preparation")
+                prepare_coding_message(
+                    &store,
+                    &registry,
+                    &event_tx,
+                    ("project_0001", "issue_0001", &attempt_id),
+                    &message,
+                )
+                .await
+                .expect("competing socket preparation")
             })
         })
         .collect::<Vec<_>>();

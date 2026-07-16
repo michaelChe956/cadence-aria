@@ -10,9 +10,9 @@ use cadence_aria::product::coding_attempt_store::{
 };
 use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
 use cadence_aria::product::coding_models::{
-    CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType, CodingGateKind,
-    CodingGateRequired, CodingProviderPermissionMode, CodingProviderRole,
+    CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionAttempt,
+    CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType,
+    CodingGateKind, CodingGateRequired, CodingProviderPermissionMode, CodingProviderRole,
     CodingRoleProviderConfigSnapshot, CodingRoleRunEventType, CodingRoleRunStatus,
     CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind,
     ReviewRequest, ReviewRequestKind, ReviewVerdict, WorkItemExecutionPlan,
@@ -54,6 +54,39 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn create_legacy_coding_attempt_fixture(
+    store: &CodingAttemptStore,
+    input: CreateCodingAttemptInput,
+) -> CodingExecutionAttempt {
+    let attempt = store.create_attempt(input).expect("create attempt");
+    rewrite_as_legacy_coding_attempt_fixture(store, attempt)
+}
+
+fn create_legacy_group_coding_attempt_fixture(
+    store: &CodingAttemptStore,
+    input: CreateGroupCodingAttemptInput,
+) -> CodingExecutionAttempt {
+    let attempt = store
+        .create_group_attempt(input)
+        .expect("create group attempt");
+    rewrite_as_legacy_coding_attempt_fixture(store, attempt)
+}
+
+fn rewrite_as_legacy_coding_attempt_fixture(
+    store: &CodingAttemptStore,
+    mut attempt: CodingExecutionAttempt,
+) -> CodingExecutionAttempt {
+    let generated_id = attempt.id.clone();
+    store
+        .delete_attempt(&attempt.project_id, &attempt.issue_id, &generated_id)
+        .expect("delete generated attempt fixture");
+    attempt.id = "coding_attempt_0001".to_string();
+    store
+        .save_coding_attempt(&attempt)
+        .expect("save legacy attempt fixture");
+    attempt
+}
 
 #[test]
 fn coding_ws_out_messages_serialize_with_coding_message_type_names() {

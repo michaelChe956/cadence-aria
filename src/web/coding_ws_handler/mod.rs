@@ -10,10 +10,11 @@ mod state;
 mod tests;
 
 pub use protocol::{CodingWsInMessage, CodingWsOutMessage};
-pub use socket::{coding_ws, is_coding_ws_message_allowed};
+pub use socket::{coding_ws, is_coding_ws_message_allowed, scoped_coding_ws};
 
 pub(crate) use context::*;
 pub(crate) use gates::*;
+pub(crate) use protocol::coding_attempt_lookup_protocol_error;
 pub(crate) use runner::*;
 pub(crate) use state::*;
 

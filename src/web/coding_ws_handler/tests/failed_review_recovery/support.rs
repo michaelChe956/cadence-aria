@@ -232,12 +232,12 @@ pub(super) async fn seed_repeated_interrupted_review(
     let engine =
         CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
     let first_running = engine
-        .recover_failed_code_review_for_attempt(&fixture.attempt.id, &first_gate_id)
+        .recover_failed_code_review_for_attempt(&fixture.attempt, &first_gate_id)
         .await
         .expect("first interrupted review recovery");
     let first_journal = fixture
         .store
-        .complete_failed_code_review_recovery_journal(&first_running.id, &first_gate_id)
+        .complete_failed_code_review_recovery_journal(&first_running, &first_gate_id)
         .expect("complete first recovery journal");
     let first_retry_role_run_id = first_journal
         .retry_role_run_id

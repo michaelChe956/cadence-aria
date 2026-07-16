@@ -231,6 +231,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route(
             "/ws/coding-attempts/{attempt_id}",
             get(coding_ws_handler::coding_ws),
+        )
+        .route(
+            "/ws/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}",
+            get(coding_ws_handler::scoped_coding_ws),
         );
 
     let router = if test_controls::test_controls_enabled() {

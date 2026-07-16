@@ -533,7 +533,7 @@ async fn failed_review_recovery_journal_records_activation_before_retry_node_exi
         .expect("activate reserved runner");
     fixture
         .store
-        .complete_failed_code_review_recovery_journal(&updated.id, &gate_id)
+        .complete_failed_code_review_recovery_journal(&updated, &gate_id)
         .expect("complete recovery journal after activation");
 
     let completed = fixture
@@ -576,7 +576,7 @@ async fn completed_journal_keeps_recovery_gate_until_retry_run_binds_a_node() {
         .expect("recover failed review");
     let completed = fixture
         .store
-        .complete_failed_code_review_recovery_journal(&updated.id, &gate_id)
+        .complete_failed_code_review_recovery_journal(&updated, &gate_id)
         .expect("complete recovery journal before runner node");
     let retry_role_run_id = completed
         .retry_role_run_id

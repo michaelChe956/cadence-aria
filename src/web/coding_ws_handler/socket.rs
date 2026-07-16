@@ -14,10 +14,11 @@ use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::WebAppState;
 
 use super::{
-    CodingWsInMessage, CodingWsOutMessage, build_coding_session_state, confirm_open_stage_gate,
-    context_note_chat_entry, provider_selection_targets_current_running_stage,
-    should_resume_runner_after_gate_response, spawn_coding_runner, spawn_coding_runner_reserved,
-    update_provider_permission_mode, update_provider_selection,
+    CodingWsInMessage, CodingWsOutMessage, build_coding_session_state,
+    coding_attempt_lookup_protocol_error, confirm_open_stage_gate, context_note_chat_entry,
+    provider_selection_targets_current_running_stage, should_resume_runner_after_gate_response,
+    spawn_coding_runner, spawn_coding_runner_reserved, update_provider_permission_mode,
+    update_provider_selection,
 };
 
 mod admission;
@@ -40,28 +41,49 @@ pub async fn coding_ws(
     AxumPath(attempt_id): AxumPath<String>,
     State(state): State<WebAppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_coding_socket(socket, attempt_id, state))
+    ws.on_upgrade(move |socket| handle_coding_socket(socket, None, attempt_id, state))
         .into_response()
 }
 
-async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebAppState) {
+pub async fn scoped_coding_ws(
+    ws: WebSocketUpgrade,
+    AxumPath((project_id, issue_id, attempt_id)): AxumPath<(String, String, String)>,
+    State(state): State<WebAppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| {
+        handle_coding_socket(socket, Some((project_id, issue_id)), attempt_id, state)
+    })
+    .into_response()
+}
+
+async fn handle_coding_socket(
+    socket: WebSocket,
+    scope: Option<(String, String)>,
+    attempt_id: String,
+    state: WebAppState,
+) {
     let (mut socket_tx, mut socket_rx) = socket.split();
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
     let coding_store = CodingAttemptStore::new(app_paths);
-    let attempt = match coding_store.get_attempt_by_id(&attempt_id) {
+    let attempt_result = match scope.as_ref() {
+        Some((project_id, issue_id)) => coding_store.get_attempt(project_id, issue_id, &attempt_id),
+        None => coding_store.get_attempt_by_id(&attempt_id),
+    };
+    let attempt = match attempt_result {
         Ok(attempt) => attempt,
         Err(error) => {
+            let (code, message) = coding_attempt_lookup_protocol_error(&error);
             let _ = send_coding_json(
                 &mut socket_tx,
-                &CodingWsOutMessage::CodingProtocolError {
-                    code: "coding_attempt_not_found".to_string(),
-                    message: format!("coding attempt not found: {error}"),
-                },
+                &CodingWsOutMessage::CodingProtocolError { code, message },
             )
             .await;
             return;
         }
     };
+    let attempt_project_id = attempt.project_id.clone();
+    let attempt_issue_id = attempt.issue_id.clone();
+    let attempt_id = attempt.id.clone();
     if let Ok(snapshot) = build_coding_session_state(&coding_store, attempt)
         && !send_coding_json(&mut socket_tx, &snapshot).await
     {
@@ -105,7 +127,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     &coding_store,
                     &state.coding_runs,
                     &event_tx,
-                    &attempt_id,
+                    (&attempt_project_id, &attempt_issue_id, &attempt_id),
                     &inbound,
                 )
                 .await {

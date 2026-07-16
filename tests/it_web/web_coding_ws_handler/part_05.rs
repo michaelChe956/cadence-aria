@@ -38,8 +38,10 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
-    CodingAttemptStore::new(app_paths)
-        .create_attempt(CreateCodingAttemptInput {
+    let store = CodingAttemptStore::new(app_paths);
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -52,8 +54,8 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
 
     let mut registry = ProviderRegistry::new();
     registry.register(
@@ -110,8 +112,10 @@ fn app_with_code_review_rework_attempt(
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
-    CodingAttemptStore::new(app_paths)
-        .create_attempt(CreateCodingAttemptInput {
+    let store = CodingAttemptStore::new(app_paths);
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -124,8 +128,8 @@ fn app_with_code_review_rework_attempt(
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
 
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::Fake, provider);
@@ -170,8 +174,10 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
-    CodingAttemptStore::new(app_paths)
-        .create_attempt(CreateCodingAttemptInput {
+    let store = CodingAttemptStore::new(app_paths);
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -184,8 +190,8 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
 
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::Fake, Arc::new(HangingCodingProvider));
@@ -204,8 +210,9 @@ fn app_with_running_testing_attempt_and_state(
     root_path: &std::path::Path,
 ) -> (axum::Router, WebAppState) {
     let store = CodingAttemptStore::new(ProductAppPaths::new(root_path.join(".aria")));
-    let attempt = store
-        .create_attempt(CreateCodingAttemptInput {
+    let attempt = create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -218,8 +225,8 @@ fn app_with_running_testing_attempt_and_state(
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
     store
         .update_attempt_status(
             "project_0001",
@@ -280,8 +287,9 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
         )
         .expect("coding work item");
     let store = CodingAttemptStore::new(app_paths);
-    let attempt = store
-        .create_attempt(CreateCodingAttemptInput {
+    let attempt = create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -294,8 +302,8 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
     store
         .update_attempt_status(
             "project_0001",

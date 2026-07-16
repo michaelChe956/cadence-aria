@@ -53,7 +53,7 @@ async fn completed_journal_rotates_when_later_review_is_interrupted() {
     let engine =
         CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
     let running = engine
-        .recover_failed_code_review_for_attempt(&fixture.attempt.id, &second_gate_id)
+        .recover_failed_code_review_for_attempt(&fixture.attempt, &second_gate_id)
         .await
         .expect("recover second interrupted review");
     assert_eq!(running.status, CodingAttemptStatus::Running);

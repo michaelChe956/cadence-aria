@@ -356,11 +356,11 @@ impl super::CodingAttemptStore {
 
     pub fn complete_failed_code_review_recovery_journal(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         gate_id: &str,
     ) -> Result<FailedCodeReviewRecoveryJournal, ProductStoreError> {
         validate_relative_id(gate_id)?;
-        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let attempt = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         let Some(mut journal) = self.get_failed_code_review_recovery_journal(
             &attempt.project_id,
             &attempt.issue_id,

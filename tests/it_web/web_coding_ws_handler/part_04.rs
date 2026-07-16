@@ -379,8 +379,9 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
         })
         .expect("create work item");
     let store = CodingAttemptStore::new(app_paths);
-    store
-        .create_attempt(CreateCodingAttemptInput {
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -393,8 +394,8 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
     build_web_router(WebAppState::new(
         root_path.to_path_buf(),
         WebRuntime::new_fake(root_path.to_path_buf()),
@@ -509,8 +510,10 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
     lifecycle
         .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)
         .expect("confirm workspace session");
-    CodingAttemptStore::new(app_paths)
-        .create_attempt(CreateCodingAttemptInput {
+    let store = CodingAttemptStore::new(app_paths);
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -523,8 +526,8 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
     build_web_router(WebAppState::new(
         root_path.to_path_buf(),
         WebRuntime::new_fake(root_path.to_path_buf()),
@@ -578,8 +581,10 @@ fn app_with_full_chain_attempt_and_provider(
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
-    CodingAttemptStore::new(app_paths)
-        .create_attempt(CreateCodingAttemptInput {
+    let store = CodingAttemptStore::new(app_paths);
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -592,8 +597,8 @@ fn app_with_full_chain_attempt_and_provider(
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
 
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::Fake, provider);

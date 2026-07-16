@@ -250,20 +250,19 @@ impl CodingWorkspaceEngine {
         if recoverable.len() != 1 {
             return Err(recovery_state_changed());
         }
-        self.recover_failed_code_review_for_attempt(&recoverable[0].id, gate_id)
+        self.recover_failed_code_review_for_attempt(&recoverable[0], gate_id)
             .await
     }
 
     pub(crate) async fn recover_failed_code_review_for_attempt(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         gate_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         validate_relative_id(gate_id)?;
-        let located = self.store.get_attempt_by_id(attempt_id)?;
         let current =
             self.store
-                .get_attempt(&located.project_id, &located.issue_id, &located.id)?;
+                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         let Some(recovery) = recoverable_failed_code_review(&self.store, &current)? else {
             return Err(recovery_state_changed());
         };

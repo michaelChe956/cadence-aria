@@ -9,6 +9,7 @@ use crate::product::coding_models::{
     CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, ReviewRequest, TestingReport,
     WorkItemExecutionPlan, WorkItemHandoff,
 };
+use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
 use crate::web::types::CodingExecutionUnitDto;
 use crate::web::workspace_ws_types::{
@@ -19,6 +20,8 @@ use crate::web::workspace_ws_types::{
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CodingWsOutMessage {
     CodingSessionState {
+        project_id: String,
+        issue_id: String,
         attempt_id: String,
         attempt_scope: String,
         work_item_group_id: Option<String>,
@@ -32,8 +35,8 @@ pub enum CodingWsOutMessage {
         worktree_path: Option<PathBuf>,
         rework_count: u32,
         max_auto_rework: u32,
-        head_commit: Option<String>,
-        pushed_remote: Option<String>,
+        head_commit: Box<Option<String>>,
+        pushed_remote: Box<Option<String>>,
         role_provider_config_snapshot: Box<CodingRoleProviderConfigSnapshot>,
         provider_config_snapshot: Box<ProviderConfigSnapshot>,
         chat_entries: Box<Vec<CodingChatEntry>>,
@@ -165,4 +168,34 @@ pub enum CodingWsInMessage {
     AbortAttempt,
     RequestManualPause,
     CodingPing,
+}
+
+pub(crate) fn coding_attempt_lookup_protocol_error(error: &ProductStoreError) -> (String, String) {
+    match error {
+        ProductStoreError::NotFound {
+            kind: "coding_attempt",
+            ..
+        } => (
+            "coding_attempt_not_found".to_string(),
+            "coding attempt not found".to_string(),
+        ),
+        ProductStoreError::Ambiguous {
+            kind: "coding_attempt",
+            ..
+        } => (
+            "coding_attempt_ambiguous".to_string(),
+            "coding attempt matches multiple issues; reopen it from Workbench".to_string(),
+        ),
+        ProductStoreError::IdentityMismatch {
+            kind: "coding_attempt",
+            ..
+        } => (
+            "coding_attempt_scope_mismatch".to_string(),
+            "coding attempt does not belong to the requested project and issue".to_string(),
+        ),
+        other => (
+            "product_store_error".to_string(),
+            format!("coding attempt lookup failed: {other}"),
+        ),
+    }
 }

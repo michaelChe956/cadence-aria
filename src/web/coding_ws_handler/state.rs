@@ -99,6 +99,8 @@ pub(crate) fn build_coding_session_state(
     };
 
     Ok(CodingWsOutMessage::CodingSessionState {
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
         attempt_id: attempt.id.clone(),
         attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
         work_item_group_id: attempt.work_item_group_id.clone(),
@@ -112,8 +114,8 @@ pub(crate) fn build_coding_session_state(
         worktree_path: attempt.worktree_path,
         rework_count: attempt.rework_count,
         max_auto_rework: attempt.max_auto_rework,
-        head_commit: attempt.head_commit,
-        pushed_remote: attempt.pushed_remote,
+        head_commit: Box::new(attempt.head_commit),
+        pushed_remote: Box::new(attempt.pushed_remote),
         role_provider_config_snapshot: Box::new(role_provider_config_snapshot),
         provider_config_snapshot: Box::new(attempt.provider_config_snapshot),
         chat_entries: Box::new(chat_entries),
