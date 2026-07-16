@@ -522,8 +522,44 @@ fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
             "outline reviewer prompt must include complete candidate field {field}"
         );
     }
-    assert!(input.prompt.contains("单个 Claude Code 或 Codex coding 会话"));
-    assert!(input.prompt.contains("小于 20k"));
+    for required in [
+        "40k",
+        "50k",
+        "最大内聚",
+        "最少拆分",
+        "不必要拆分",
+        "[outline_unnecessary_split]",
+    ] {
+        assert!(
+            input.prompt.contains(required),
+            "outline reviewer prompt must include `{required}`: {}",
+            input.prompt
+        );
+    }
+    assert!(input.prompt.contains("severity=must_fix"));
+    assert!(input.prompt.contains("target_outline_id"));
+    assert!(!input.prompt.contains("小于 20k"));
+    for required_contract in [
+        "不超过 40k 属正常范围",
+        "40001..=50000",
+        "超过 50k 必须返回 `revise` 并要求拆分",
+        "发现不必要拆分时必须给出 severity=must_fix",
+        "message 必须以 [outline_unnecessary_split] 开头",
+        "target_outline_id 引用其中一个现有 outline",
+        "evidence 列出全部可合并 outline ID",
+        "required_action 明确要求合并",
+    ] {
+        assert!(
+            input.prompt.contains(required_contract),
+            "outline reviewer prompt must preserve contract `{required_contract}`: {}",
+            input.prompt
+        );
+    }
+    assert!(
+        !input.prompt.contains("\"code\""),
+        "outline review schema must reuse ReviewFinding without a code field: {}",
+        input.prompt
+    );
     assert!(input.prompt.contains(
         "\"generation_round_id\":\"generation_round_unknown\""
     ));

@@ -409,7 +409,8 @@ impl WorkspaceEngine {
 
         prompt.push_str(
             "\n\n审核边界说明：请只检查拆分策略、覆盖 Story/Design、outline 粒度、依赖图、写入边界、上下文缺口补齐假设与 handoff 策略。\
-             每个 outline 必须能由单个 Claude Code 或 Codex coding 会话完成，estimated_context_tokens 必须存在且小于 20k，session_fit 必须为 fits_single_agent_session；缺失、超限或明显跨多任务/Issue 级范围时返回 `revise` 并要求继续拆分。\
+             每个 outline 必须能由单个 Claude Code 或 Codex coding 会话可靠完成。estimated_context_tokens 必须存在：不超过 40k 属正常范围，40001..=50000 必须结合目标内聚性、写入范围、编码、测试、返修与验证判断是否能在单 session 闭环，超过 50k 必须返回 `revise` 并要求拆分。\
+             同时按最大内聚、最少拆分原则检查过度拆分：在不违反用户显式拆分选项、50k 上限、必要中断点、独立回滚/验收边界和上下文代理指标时，目标一致且可以在同一 session 闭环的 outline 必须合并；发现不必要拆分时返回 `revise`。\
              不要要求 author 在 Outline 阶段输出完整 Work Item 正文、完整 verification plan、required_gates 或 repository_profile。\
              如果问题会影响拆分边界，返回 `revise`；如果需要用户做产品/范围判断，返回 `needs_human`。\n",
         );
@@ -431,6 +432,7 @@ impl WorkspaceEngine {
              - `needs_human`：需要用户做产品/范围判断。\n\
              - 每条 finding 如果针对具体 outline，必须填写 `target_outline_id`，且只能引用当前 Outline 中存在的 outline_id。\n\
              - 如果 finding 针对整个 Outline 方案而不是某个具体 outline，可以省略 `target_outline_id`。\n\
+             - 发现不必要拆分时必须给出 severity=must_fix 的 finding；message 必须以 [outline_unnecessary_split] 开头，target_outline_id 引用其中一个现有 outline，evidence 列出全部可合并 outline ID，required_action 明确要求合并。\n\
              - 系统会从 findings[].target_outline_id 推导受影响 outline，不要额外输出 affects_items。\n",
         ));
 
