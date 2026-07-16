@@ -42,7 +42,7 @@ impl CodingWorkspaceEngine {
             mut chat_entry_sequence,
         } = phase;
         let execute_raw_ref = self.store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::Testing,
             "execute_test_plan",
             &full_output,
@@ -130,7 +130,7 @@ impl CodingWorkspaceEngine {
                 })
                 .await?;
             let repair_raw_ref = self.store.save_provider_raw_output(
-                &attempt.id,
+                &attempt,
                 CodingExecutionStage::Testing,
                 "execute_test_plan_repair",
                 &repair_output,
@@ -163,7 +163,7 @@ impl CodingWorkspaceEngine {
             report.context_warnings.push(summary);
         }
         bind_testing_report_role_run(&mut report, &role_run);
-        self.store.save_testing_report(&report)?;
+        self.store.save_testing_report(&attempt, &report)?;
         let entry = tester_chat_entry(
             &attempt,
             &node.id,
@@ -238,21 +238,24 @@ impl CodingWorkspaceEngine {
         if report.overall_status == TestingOverallStatus::Blocked
             && testing_report_needs_blocked_gate(&report)
         {
-            let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-                attempt_id: attempt.id.clone(),
-                stage: CodingExecutionStage::Testing,
-                node_id: Some(node.id.clone()),
-                role: Some(CodingProviderRole::Tester),
-                title: "Testing blocked".to_string(),
-                description: "Required testing steps are missing or blocked".to_string(),
-                reason_code: Some(derive_testing_blocked_reason_code(
-                    blocked_reason_code,
-                    &report,
-                )),
-                evidence_refs: vec![format!("{}.json", report.id)],
-                raw_provider_output_ref: Some(report_raw_ref),
-                available_actions: testing_blocked_gate_actions(),
-            })?;
+            let gate = self.store.create_blocked_gate(
+                &attempt,
+                CreateBlockedGateInput {
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::Testing,
+                    node_id: Some(node.id.clone()),
+                    role: Some(CodingProviderRole::Tester),
+                    title: "Testing blocked".to_string(),
+                    description: "Required testing steps are missing or blocked".to_string(),
+                    reason_code: Some(derive_testing_blocked_reason_code(
+                        blocked_reason_code,
+                        &report,
+                    )),
+                    evidence_refs: vec![format!("{}.json", report.id)],
+                    raw_provider_output_ref: Some(report_raw_ref),
+                    available_actions: testing_blocked_gate_actions(),
+                },
+            )?;
             let _ = self
                 .event_tx
                 .send(CodingWsOutMessage::CodingGateRequired { gate })

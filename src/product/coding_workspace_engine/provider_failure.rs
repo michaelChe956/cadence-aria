@@ -46,22 +46,25 @@ impl CodingWorkspaceEngine {
             &attempt.id,
             CodingAttemptStatus::Blocked,
         )?;
-        let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage,
-            node_id: Some(node_id.to_string()),
-            role: Some(role),
-            title,
-            description,
-            reason_code: Some(reason_code.to_string()),
-            evidence_refs,
-            raw_provider_output_ref,
-            available_actions: vec![
-                retry_action,
-                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
-                coding_gate_action_for_id("abort").expect("abort action"),
-            ],
-        })?;
+        let gate = self.store.create_blocked_gate(
+            &updated,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage,
+                node_id: Some(node_id.to_string()),
+                role: Some(role),
+                title,
+                description,
+                reason_code: Some(reason_code.to_string()),
+                evidence_refs,
+                raw_provider_output_ref,
+                available_actions: vec![
+                    retry_action,
+                    coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        )?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingGateRequired { gate })
@@ -149,21 +152,24 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 CodingAttemptStatus::Blocked,
             )?;
-            let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-                attempt_id: attempt.id.clone(),
-                stage: CodingExecutionStage::Coding,
-                node_id: Some(node_id.to_string()),
-                role: Some(CodingProviderRole::Coder),
-                title: "Coder 执行中断".to_string(),
-                description: message.clone(),
-                reason_code: Some("coder_provider_interrupted".to_string()),
-                evidence_refs: Vec::new(),
-                raw_provider_output_ref: None,
-                available_actions: vec![
-                    coding_gate_action_for_id("retry_coding").expect("retry coding action"),
-                    coding_gate_action_for_id("abort").expect("abort action"),
-                ],
-            })?;
+            let gate = self.store.create_blocked_gate(
+                attempt,
+                CreateBlockedGateInput {
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::Coding,
+                    node_id: Some(node_id.to_string()),
+                    role: Some(CodingProviderRole::Coder),
+                    title: "Coder 执行中断".to_string(),
+                    description: message.clone(),
+                    reason_code: Some("coder_provider_interrupted".to_string()),
+                    evidence_refs: Vec::new(),
+                    raw_provider_output_ref: None,
+                    available_actions: vec![
+                        coding_gate_action_for_id("retry_coding").expect("retry coding action"),
+                        coding_gate_action_for_id("abort").expect("abort action"),
+                    ],
+                },
+            )?;
             let _ = self
                 .event_tx
                 .send(CodingWsOutMessage::CodingGateRequired { gate })

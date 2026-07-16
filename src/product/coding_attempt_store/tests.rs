@@ -594,7 +594,7 @@ fn persists_test_plan_raw_output_and_blocked_gate() {
 
     let raw_ref = store
         .save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::Testing,
             "plan_tests",
             "raw test plan output",
@@ -626,7 +626,7 @@ fn persists_test_plan_raw_output_and_blocked_gate() {
         created_at: "2026-06-10T00:00:00Z".to_string(),
         raw_provider_output_ref: Some(raw_ref.clone()),
     };
-    store.save_test_plan(&plan).unwrap();
+    store.save_test_plan(&attempt, &plan).unwrap();
     let plans = store
         .list_test_plans(PROJECT_ID, ISSUE_ID, &attempt.id)
         .unwrap();
@@ -637,22 +637,25 @@ fn persists_test_plan_raw_output_and_blocked_gate() {
     );
 
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Tester),
-            title: "Testing blocked".to_string(),
-            description: "required step missing".to_string(),
-            reason_code: Some("missing_required_steps".to_string()),
-            evidence_refs: vec!["testing_report_0001.json".to_string()],
-            raw_provider_output_ref: Some(raw_ref),
-            available_actions: vec![CodingGateAction {
-                action_id: "retry_test_plan".to_string(),
-                label: "重试测试计划".to_string(),
-                action_type: CodingGateActionType::RetryTestPlan,
-            }],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing blocked".to_string(),
+                description: "required step missing".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec!["testing_report_0001.json".to_string()],
+                raw_provider_output_ref: Some(raw_ref),
+                available_actions: vec![CodingGateAction {
+                    action_id: "retry_test_plan".to_string(),
+                    label: "重试测试计划".to_string(),
+                    action_type: CodingGateActionType::RetryTestPlan,
+                }],
+            },
+        )
         .unwrap();
     let open = store
         .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
@@ -681,44 +684,50 @@ fn persists_test_plan_raw_output_and_blocked_gate() {
 fn blocked_gate_creation_is_idempotent_for_same_node_and_reason() {
     let (_tmp, store, attempt) = setup();
     let first = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Tester),
-            title: "Testing blocked".to_string(),
-            description: "required step missing".to_string(),
-            reason_code: Some("missing_required_steps".to_string()),
-            evidence_refs: vec!["testing_report_0001.json".to_string()],
-            raw_provider_output_ref: None,
-            available_actions: vec![CodingGateAction {
-                action_id: "retry_test_plan".to_string(),
-                label: "重试测试计划".to_string(),
-                action_type: CodingGateActionType::RetryTestPlan,
-            }],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing blocked".to_string(),
+                description: "required step missing".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec!["testing_report_0001.json".to_string()],
+                raw_provider_output_ref: None,
+                available_actions: vec![CodingGateAction {
+                    action_id: "retry_test_plan".to_string(),
+                    label: "重试测试计划".to_string(),
+                    action_type: CodingGateActionType::RetryTestPlan,
+                }],
+            },
+        )
         .unwrap();
 
     let second = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Tester),
-            title: "Testing still blocked".to_string(),
-            description: "required step still missing".to_string(),
-            reason_code: Some("missing_required_steps".to_string()),
-            evidence_refs: vec![
-                "testing_report_0001.json".to_string(),
-                "testing_report_0002.json".to_string(),
-            ],
-            raw_provider_output_ref: None,
-            available_actions: vec![CodingGateAction {
-                action_id: "rerun_missing_steps".to_string(),
-                label: "补跑缺失步骤".to_string(),
-                action_type: CodingGateActionType::RerunMissingSteps,
-            }],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing still blocked".to_string(),
+                description: "required step still missing".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec![
+                    "testing_report_0001.json".to_string(),
+                    "testing_report_0002.json".to_string(),
+                ],
+                raw_provider_output_ref: None,
+                available_actions: vec![CodingGateAction {
+                    action_id: "rerun_missing_steps".to_string(),
+                    label: "补跑缺失步骤".to_string(),
+                    action_type: CodingGateActionType::RerunMissingSteps,
+                }],
+            },
+        )
         .unwrap();
 
     assert_eq!(second.gate_id, first.gate_id);

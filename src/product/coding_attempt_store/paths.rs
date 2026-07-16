@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::product::coding_attempt_store::utils::coding_stage_dir_name;
-use crate::product::coding_models::{CodingExecutionStage, CodingRoleRun};
+use crate::product::coding_models::{CodingExecutionAttempt, CodingExecutionStage, CodingRoleRun};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
 impl super::CodingAttemptStore {
@@ -249,7 +249,7 @@ impl super::CodingAttemptStore {
 
     pub fn save_provider_raw_output(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         stage: CodingExecutionStage,
         purpose: &str,
         output: &str,
@@ -257,7 +257,12 @@ impl super::CodingAttemptStore {
         use std::fs;
 
         validate_relative_id(purpose)?;
-        let attempt = self.find_attempt_by_id(attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &attempt.id,
+            "coding_provider_raw_output",
+            purpose,
+        )?;
         let stage_dir_name = coding_stage_dir_name(&stage);
         let raw_root = self
             .provider_raw_output_root(&attempt.project_id, &attempt.issue_id, &attempt.id)

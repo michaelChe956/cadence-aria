@@ -633,7 +633,7 @@ async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
         )
         .expect("complete unit2");
     store
-        .save_testing_report(&passed_testing_report_for_plan(
+        .save_testing_report(&attempt, &passed_testing_report_for_plan(
             &attempt.id,
             "testing_report_0001",
             "verification_plan_0001",

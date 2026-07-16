@@ -126,21 +126,24 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
         )
         .expect("head commit");
     store
-        .save_review_request(&ReviewRequest {
-            id: "review_request_0001".to_string(),
-            attempt_id: attempt.id.clone(),
-            kind: ReviewRequestKind::GitBranchOnly,
-            remote_kind: RemoteKind::GenericGit,
-            remote: "origin".to_string(),
-            base_branch: attempt.base_branch.clone(),
-            branch_name: attempt.branch_name.clone(),
-            commit_sha: "deadbeef".to_string(),
-            push_status: PushStatus::Pushed,
-            external_url: None,
-            manual_instructions: Vec::new(),
-            created_at: "2026-07-07T00:00:00Z".to_string(),
-            updated_at: "2026-07-07T00:00:00Z".to_string(),
-        })
+        .save_review_request(
+            &attempt,
+            &ReviewRequest {
+                id: "review_request_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                kind: ReviewRequestKind::GitBranchOnly,
+                remote_kind: RemoteKind::GenericGit,
+                remote: "origin".to_string(),
+                base_branch: attempt.base_branch.clone(),
+                branch_name: attempt.branch_name.clone(),
+                commit_sha: "deadbeef".to_string(),
+                push_status: PushStatus::Pushed,
+                external_url: None,
+                manual_instructions: Vec::new(),
+                created_at: "2026-07-07T00:00:00Z".to_string(),
+                updated_at: "2026-07-07T00:00:00Z".to_string(),
+            },
+        )
         .expect("review request");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);

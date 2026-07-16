@@ -7,7 +7,7 @@ fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
         .expect("create attempt");
 
     let gate = store
-        .create_choice_gate(CreateChoiceGateInput {
+        .create_choice_gate(&attempt, CreateChoiceGateInput {
             attempt_id: attempt.id.clone(),
             choice_id: "choice_0001".to_string(),
             stage: CodingExecutionStage::Coding,
@@ -433,7 +433,7 @@ fn role_run_event_large_string_payload_is_moved_to_artifact() {
     assert!(preview.len() <= 16_384);
 
     let artifact = store
-        .read_attempt_artifact_text(&attempt.id, event.artifact_ref.as_deref().expect("ref"))
+        .read_attempt_artifact_text(&attempt, event.artifact_ref.as_deref().expect("ref"))
         .expect("artifact text");
     assert_eq!(artifact, long_prompt);
 }
@@ -503,10 +503,10 @@ fn role_run_event_truncates_each_large_payload_field() {
     assert_ne!(stdout_ref, stderr_ref);
 
     let stdout_artifact = store
-        .read_attempt_artifact_text(&attempt.id, stdout_ref)
+        .read_attempt_artifact_text(&attempt, stdout_ref)
         .expect("stdout artifact text");
     let stderr_artifact = store
-        .read_attempt_artifact_text(&attempt.id, stderr_ref)
+        .read_attempt_artifact_text(&attempt, stderr_ref)
         .expect("stderr artifact text");
     assert_eq!(stdout_artifact, long_stdout);
     assert_eq!(stderr_artifact, long_stderr);

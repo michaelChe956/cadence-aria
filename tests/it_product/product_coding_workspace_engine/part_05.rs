@@ -259,7 +259,7 @@ async fn execute_internal_pr_review_forwards_provider_execution_events() {
         )
         .expect("running");
     store
-        .save_review_request(&sample_review_request(&attempt.id))
+        .save_review_request(&attempt, &sample_review_request(&attempt.id))
         .expect("save review request");
     let provider = EventThenCompletedProvider {
         output: r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#.to_string(),

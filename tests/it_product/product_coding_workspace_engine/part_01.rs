@@ -638,7 +638,7 @@ async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() 
         .expect("running attempt");
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::Coder,
                 provider: ProviderName::Fake,

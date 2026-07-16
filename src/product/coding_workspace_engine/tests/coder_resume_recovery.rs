@@ -183,7 +183,7 @@ async fn coder_resume_stall_does_not_retry_non_codex_provider() {
         .expect("update coder provider");
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::Coder,
                 provider: ProviderName::ClaudeCode,
@@ -355,7 +355,7 @@ fn seed_stale_coder_conversation(
 ) -> CodingExecutionAttempt {
     store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::Coder,
                 provider: ProviderName::Codex,

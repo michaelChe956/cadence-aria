@@ -350,22 +350,25 @@ fn coding_session_state_omits_stale_blocked_gate_for_inactive_stage() {
         .save_coding_attempt(&attempt)
         .expect("save coding attempt");
     coding_store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::FinalConfirm,
-            node_id: None,
-            role: None,
-            title: "Shared worktree has uncommitted changes".to_string(),
-            description: "Issue shared worktree has uncommitted changes".to_string(),
-            reason_code: Some("shared_worktree_dirty_manual_gate".to_string()),
-            evidence_refs: Vec::new(),
-            raw_provider_output_ref: None,
-            available_actions: vec![CodingGateAction {
-                action_id: "manual_continue".to_string(),
-                label: "人工继续".to_string(),
-                action_type: CodingGateActionType::ManualContinue,
-            }],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::FinalConfirm,
+                node_id: None,
+                role: None,
+                title: "Shared worktree has uncommitted changes".to_string(),
+                description: "Issue shared worktree has uncommitted changes".to_string(),
+                reason_code: Some("shared_worktree_dirty_manual_gate".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![CodingGateAction {
+                    action_id: "manual_continue".to_string(),
+                    label: "人工继续".to_string(),
+                    action_type: CodingGateActionType::ManualContinue,
+                }],
+            },
+        )
         .expect("create blocked gate");
 
     let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");
@@ -392,22 +395,25 @@ fn coding_session_state_keeps_final_confirm_blocked_gate_for_current_stage() {
         .save_coding_attempt(&attempt)
         .expect("save coding attempt");
     coding_store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::FinalConfirm,
-            node_id: None,
-            role: None,
-            title: "Shared worktree has uncommitted changes".to_string(),
-            description: "Issue shared worktree has uncommitted changes".to_string(),
-            reason_code: Some("shared_worktree_dirty_manual_gate".to_string()),
-            evidence_refs: Vec::new(),
-            raw_provider_output_ref: None,
-            available_actions: vec![CodingGateAction {
-                action_id: "manual_continue".to_string(),
-                label: "人工继续".to_string(),
-                action_type: CodingGateActionType::ManualContinue,
-            }],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::FinalConfirm,
+                node_id: None,
+                role: None,
+                title: "Shared worktree has uncommitted changes".to_string(),
+                description: "Issue shared worktree has uncommitted changes".to_string(),
+                reason_code: Some("shared_worktree_dirty_manual_gate".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![CodingGateAction {
+                    action_id: "manual_continue".to_string(),
+                    label: "人工继续".to_string(),
+                    action_type: CodingGateActionType::ManualContinue,
+                }],
+            },
+        )
         .expect("create blocked gate");
 
     let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");

@@ -559,27 +559,32 @@ impl super::CodingAttemptStore {
 
     pub fn replace_attempt_provider_conversations(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         provider_conversations: Vec<ProviderConversationRef>,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
-        validate_relative_id(attempt_id)?;
-        let mut attempt = self.find_attempt_by_id(attempt_id)?;
-        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
-        attempt.provider_conversations = provider_conversations;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        self.validate_scoped_attempt_record(attempt, &attempt.id, "coding_attempt", &attempt.id)?;
+        let mut updated = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let path = self.attempt_path(&updated.project_id, &updated.issue_id, &updated.id);
+        updated.provider_conversations = provider_conversations;
+        updated.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &updated)?;
+        Ok(updated)
     }
 
     pub fn read_attempt_artifact_text(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         artifact_ref: &str,
     ) -> Result<String, ProductStoreError> {
         use std::fs;
 
         validate_relative_artifact_ref(artifact_ref)?;
-        let attempt = self.find_attempt_by_id(attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &attempt.id,
+            "coding_attempt_artifact",
+            artifact_ref,
+        )?;
         let path = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join(artifact_ref);

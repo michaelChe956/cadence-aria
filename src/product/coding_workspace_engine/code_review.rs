@@ -119,7 +119,7 @@ impl CodingWorkspaceEngine {
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::CodeReview,
             "code_review",
             &full_output,
@@ -138,7 +138,7 @@ impl CodingWorkspaceEngine {
             Some(raw_provider_output_ref.clone()),
             &role_run,
         )?;
-        self.store.save_code_review_report(&report)?;
+        self.store.save_code_review_report(&attempt, &report)?;
         self.emit_code_review_chat_entry(&attempt, &node.id, &report)
             .await;
         let _ = self

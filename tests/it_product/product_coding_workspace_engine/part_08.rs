@@ -157,7 +157,7 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
         .expect("review request stage");
     let request = sample_review_request(&attempt.id);
     store
-        .save_review_request(&request)
+        .save_review_request(&attempt, &request)
         .expect("save review request");
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -318,7 +318,7 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
         .expect("review request stage");
     let request = sample_review_request(&attempt.id);
     store
-        .save_review_request(&request)
+        .save_review_request(&attempt, &request)
         .expect("save review request");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -422,7 +422,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
         .expect("review request stage");
     let request = sample_review_request(&attempt.id);
     store
-        .save_review_request(&request)
+        .save_review_request(&attempt, &request)
         .expect("save review request");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);

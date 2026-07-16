@@ -276,7 +276,7 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
         )
         .expect("failed review role run");
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
+        .create_blocked_gate(&attempt, CreateBlockedGateInput {
             attempt_id: "coding_attempt_0001".to_string(),
             stage: CodingExecutionStage::CodeReview,
             node_id: Some("coding_node_0009".to_string()),
@@ -320,19 +320,186 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
     )
     .await;
 
-    match recv_json(&mut ws).await {
-        CodingWsOutMessage::CodingSessionState {
-            project_id,
-            issue_id,
-            status,
-            ..
-        } => {
-            assert_eq!(project_id, "project_0001");
-            assert_eq!(issue_id, "issue_0001");
-            assert_eq!(status, CodingAttemptStatus::Running);
+    let mut saw_running_state = false;
+    let mut saw_review_complete = false;
+    let mut saw_review_request = false;
+    for _ in 0..80 {
+        let Ok(message) = timeout(Duration::from_millis(500), recv_json(&mut ws)).await else {
+            continue;
+        };
+        match message {
+            CodingWsOutMessage::CodingSessionState {
+                project_id,
+                issue_id,
+                status,
+                stage,
+                ..
+            } => {
+                assert_eq!(project_id, "project_0001");
+                assert_eq!(issue_id, "issue_0001");
+                saw_running_state |= status == CodingAttemptStatus::Running;
+                saw_review_request |= stage == CodingExecutionStage::ReviewRequest;
+            }
+            CodingWsOutMessage::CodeReviewComplete { .. } => saw_review_complete = true,
+            CodingWsOutMessage::CodingStageChange {
+                stage: CodingExecutionStage::ReviewRequest,
+            } => saw_review_request = true,
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected recovery protocol error {code}: {message}");
+            }
+            _ => {}
         }
-        other => panic!("expected recovered session state, got {other:?}"),
+        if saw_running_state && saw_review_complete && saw_review_request {
+            break;
+        }
     }
+    assert!(saw_running_state, "expected recovered Running session state");
+    assert!(saw_review_complete, "recovery runner did not complete code review");
+    assert!(
+        saw_review_request,
+        "recovery runner did not advance to ReviewRequest"
+    );
+    assert_eq!(
+        store
+            .list_code_review_reports("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("target code review reports")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .list_code_review_reports("project_0001", "issue_0002", "coding_attempt_0001")
+            .expect("other code review reports")
+            .is_empty()
+    );
+    server.abort();
+}
+
+struct ScopedSessionProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ScopedSessionProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if cancel.is_cancelled() {
+                return;
+            }
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                    "scoped coder output",
+                    Some("scoped-coder-session".to_string()),
+                )))
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[tokio::test]
+async fn scoped_start_coding_persists_target_provider_output_and_conversation() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_full_chain_attempt_and_provider(root.path(), Arc::new(ScopedSessionProvider));
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut duplicate = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    duplicate.issue_id = "issue_0002".to_string();
+    store
+        .save_coding_attempt(&duplicate)
+        .expect("duplicate legacy attempt");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+    let url = format!(
+        "ws://{addr}/ws/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001"
+    );
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_coding_gate = false;
+    let mut reached_next_stage_gate = false;
+    for _ in 0..80 {
+        let Ok(message) = timeout(Duration::from_millis(500), recv_json(&mut ws)).await else {
+            continue;
+        };
+        match message {
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate
+                    && gate.stage == Some(CodingExecutionStage::Coding) =>
+            {
+                confirmed_coding_gate = true;
+                send_json(
+                    &mut ws,
+                    &CodingWsInMessage::StageGateConfirm {
+                        stage: CodingExecutionStage::Coding,
+                    },
+                )
+                .await;
+            }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate
+                    && gate.stage == Some(CodingExecutionStage::CodeReview) =>
+            {
+                reached_next_stage_gate = true;
+                break;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected scoped provider persistence error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    assert!(confirmed_coding_gate, "missing scoped Coding stage gate");
+    assert!(
+        reached_next_stage_gate,
+        "runner did not reach the CodeReview stage gate after coder completion"
+    );
+
+    let target = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("target attempt");
+    let other = store
+        .get_attempt("project_0001", "issue_0002", "coding_attempt_0001")
+        .expect("other attempt");
+    assert!(target.provider_conversations.iter().any(|conversation| {
+        conversation.provider_session_id == "scoped-coder-session"
+    }));
+    assert!(other.provider_conversations.is_empty());
+    let coder_run = store
+        .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("target role runs")
+        .into_iter()
+        .find(|run| run.role == CodingProviderRole::Coder)
+        .expect("coder role run");
+    let raw_ref = coder_run
+        .raw_provider_output_refs
+        .first()
+        .expect("coder raw output ref");
+    let target_raw = root
+        .path()
+        .join(".aria/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001")
+        .join(raw_ref);
+    let other_raw = root
+        .path()
+        .join(".aria/projects/project_0001/issues/issue_0002/coding-attempts/coding_attempt_0001")
+        .join(raw_ref);
+    assert_eq!(
+        std::fs::read_to_string(target_raw).expect("target raw output"),
+        "scoped coder output"
+    );
+    assert!(!other_raw.exists());
     server.abort();
 }
 
@@ -396,7 +563,7 @@ async fn scoped_context_note_updates_only_target_issue_for_legacy_duplicate() {
 async fn scoped_start_coding_persists_target_timeline_without_partial_state() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
-    let app = app_with_attempt(root.path());
+    let app = app_with_full_chain_attempt(root.path());
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let mut duplicate = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
@@ -418,9 +585,10 @@ async fn scoped_start_coding_persists_target_timeline_without_partial_state() {
 
     let mut saw_stage_change = false;
     let mut saw_timeline_node = false;
-    for _ in 0..4 {
+    let mut saw_coding_gate = false;
+    for _ in 0..40 {
         let Ok(message) = timeout(Duration::from_millis(500), recv_json(&mut ws)).await else {
-            break;
+            continue;
         };
         match message {
             CodingWsOutMessage::CodingStageChange {
@@ -432,9 +600,18 @@ async fn scoped_start_coding_persists_target_timeline_without_partial_state() {
             {
                 saw_timeline_node = true;
             }
+            CodingWsOutMessage::CodingGateRequired { gate }
+                if gate.kind == CodingGateKind::StageGate
+                    && gate.stage == Some(CodingExecutionStage::Coding) =>
+            {
+                saw_coding_gate = true;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected scoped start protocol error {code}: {message}");
+            }
             _ => {}
         }
-        if saw_stage_change && saw_timeline_node {
+        if saw_stage_change && saw_timeline_node && saw_coding_gate {
             break;
         }
     }
@@ -462,6 +639,7 @@ async fn scoped_start_coding_persists_target_timeline_without_partial_state() {
     );
     assert!(saw_stage_change, "expected scoped stage change");
     assert!(saw_timeline_node, "expected scoped timeline node");
+    assert!(saw_coding_gate, "expected scoped Coding stage gate");
     assert_eq!(target_nodes[0].stage, CodingExecutionStage::WorktreePrepare);
     assert_eq!(other.status, CodingAttemptStatus::Created);
     assert_eq!(other.stage, CodingExecutionStage::PrepareContext);

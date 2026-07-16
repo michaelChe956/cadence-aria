@@ -1,7 +1,8 @@
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
+    ProviderCompletion, ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
@@ -567,9 +568,12 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
     let root = tempdir().expect("root");
     let app = app_with_attempt(root.path());
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
     store
         .create_stage_gate(
-            "coding_attempt_0001",
+            &attempt,
             CodingExecutionStage::Testing,
             CodingProviderRole::Tester,
             "2026-05-28T00:00:05Z".to_string(),

@@ -143,7 +143,7 @@ impl CodingWorkspaceEngine {
             }
         };
         let plan_raw_ref = self.store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::Testing,
             "plan_tests",
             &plan_output,
@@ -162,7 +162,7 @@ impl CodingWorkspaceEngine {
         ) {
             Ok(mut plan) => {
                 bind_test_plan_role_run(&mut plan, &role_run);
-                self.store.save_test_plan(&plan)?;
+                self.store.save_test_plan(&attempt, &plan)?;
                 plan
             }
             Err(first_error) => {
@@ -237,7 +237,7 @@ impl CodingWorkspaceEngine {
                     }
                 };
                 let repair_raw_ref = self.store.save_provider_raw_output(
-                    &attempt.id,
+                    &attempt,
                     CodingExecutionStage::Testing,
                     "plan_tests_repair",
                     &repair_output,
@@ -250,7 +250,7 @@ impl CodingWorkspaceEngine {
                 ) {
                     Ok(mut plan) => {
                         bind_test_plan_role_run(&mut plan, &role_run);
-                        self.store.save_test_plan(&plan)?;
+                        self.store.save_test_plan(&attempt, &plan)?;
                         plan
                     }
                     Err(repair_error) => {

@@ -294,34 +294,37 @@ pub(super) async fn seed_repeated_interrupted_review(
         .expect("block attempt for second interruption");
     let second_gate = fixture
         .store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: blocked_attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            node_id: Some(second_failed_node_id.to_string()),
-            role: Some(CodingProviderRole::CodeReviewer),
-            title: "代码审查中断".to_string(),
-            description: "second review provider interrupted".to_string(),
-            reason_code: Some("code_review_provider_interrupted".to_string()),
-            evidence_refs: Vec::new(),
-            raw_provider_output_ref: None,
-            available_actions: vec![
-                CodingGateAction {
-                    action_id: "retry_review".to_string(),
-                    label: "重试代码审查".to_string(),
-                    action_type: CodingGateActionType::RetryReview,
-                },
-                CodingGateAction {
-                    action_id: "send_to_coder".to_string(),
-                    label: "发送给 Coder".to_string(),
-                    action_type: CodingGateActionType::SendToCoder,
-                },
-                CodingGateAction {
-                    action_id: "abort".to_string(),
-                    label: "终止".to_string(),
-                    action_type: CodingGateActionType::Abort,
-                },
-            ],
-        })
+        .create_blocked_gate(
+            &blocked_attempt,
+            CreateBlockedGateInput {
+                attempt_id: blocked_attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                node_id: Some(second_failed_node_id.to_string()),
+                role: Some(CodingProviderRole::CodeReviewer),
+                title: "代码审查中断".to_string(),
+                description: "second review provider interrupted".to_string(),
+                reason_code: Some("code_review_provider_interrupted".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    CodingGateAction {
+                        action_id: "retry_review".to_string(),
+                        label: "重试代码审查".to_string(),
+                        action_type: CodingGateActionType::RetryReview,
+                    },
+                    CodingGateAction {
+                        action_id: "send_to_coder".to_string(),
+                        label: "发送给 Coder".to_string(),
+                        action_type: CodingGateActionType::SendToCoder,
+                    },
+                    CodingGateAction {
+                        action_id: "abort".to_string(),
+                        label: "终止".to_string(),
+                        action_type: CodingGateActionType::Abort,
+                    },
+                ],
+            },
+        )
         .expect("second provider interrupted gate");
 
     RepeatedInterruptedReview {
@@ -516,61 +519,64 @@ pub(super) fn failed_review_fixture(
     let dirty_gate = (!matches!(case, FixtureCase::MissingDirtyGate)).then(|| {
         let provider_interrupted = matches!(case, FixtureCase::BlockedProviderInterrupted);
         store
-            .create_blocked_gate(CreateBlockedGateInput {
-                attempt_id: attempt.id.clone(),
-                stage: if provider_interrupted {
-                    CodingExecutionStage::CodeReview
-                } else {
-                    CodingExecutionStage::FinalConfirm
-                },
-                node_id: provider_interrupted.then(|| FAILED_NODE_ID.to_string()),
-                role: provider_interrupted.then_some(CodingProviderRole::CodeReviewer),
-                title: if provider_interrupted {
-                    "代码审查中断".to_string()
-                } else {
-                    "Shared worktree has uncommitted changes".to_string()
-                },
-                description: if provider_interrupted {
-                    "review provider interrupted".to_string()
-                } else {
-                    "Issue shared worktree has uncommitted changes".to_string()
-                },
-                reason_code: Some(
-                    if provider_interrupted {
-                        "code_review_provider_interrupted"
+            .create_blocked_gate(
+                &attempt,
+                CreateBlockedGateInput {
+                    attempt_id: attempt.id.clone(),
+                    stage: if provider_interrupted {
+                        CodingExecutionStage::CodeReview
                     } else {
-                        "shared_worktree_dirty_manual_gate"
-                    }
-                    .to_string(),
-                ),
-                evidence_refs: Vec::new(),
-                raw_provider_output_ref: None,
-                available_actions: if provider_interrupted {
-                    vec![
-                        CodingGateAction {
-                            action_id: "retry_review".to_string(),
-                            label: "重试代码审查".to_string(),
-                            action_type: CodingGateActionType::RetryReview,
-                        },
-                        CodingGateAction {
-                            action_id: "send_to_coder".to_string(),
-                            label: "发送给 Coder".to_string(),
-                            action_type: CodingGateActionType::SendToCoder,
-                        },
-                        CodingGateAction {
-                            action_id: "abort".to_string(),
-                            label: "终止".to_string(),
-                            action_type: CodingGateActionType::Abort,
-                        },
-                    ]
-                } else {
-                    vec![CodingGateAction {
-                        action_id: "manual_continue".to_string(),
-                        label: "人工继续".to_string(),
-                        action_type: CodingGateActionType::ManualContinue,
-                    }]
+                        CodingExecutionStage::FinalConfirm
+                    },
+                    node_id: provider_interrupted.then(|| FAILED_NODE_ID.to_string()),
+                    role: provider_interrupted.then_some(CodingProviderRole::CodeReviewer),
+                    title: if provider_interrupted {
+                        "代码审查中断".to_string()
+                    } else {
+                        "Shared worktree has uncommitted changes".to_string()
+                    },
+                    description: if provider_interrupted {
+                        "review provider interrupted".to_string()
+                    } else {
+                        "Issue shared worktree has uncommitted changes".to_string()
+                    },
+                    reason_code: Some(
+                        if provider_interrupted {
+                            "code_review_provider_interrupted"
+                        } else {
+                            "shared_worktree_dirty_manual_gate"
+                        }
+                        .to_string(),
+                    ),
+                    evidence_refs: Vec::new(),
+                    raw_provider_output_ref: None,
+                    available_actions: if provider_interrupted {
+                        vec![
+                            CodingGateAction {
+                                action_id: "retry_review".to_string(),
+                                label: "重试代码审查".to_string(),
+                                action_type: CodingGateActionType::RetryReview,
+                            },
+                            CodingGateAction {
+                                action_id: "send_to_coder".to_string(),
+                                label: "发送给 Coder".to_string(),
+                                action_type: CodingGateActionType::SendToCoder,
+                            },
+                            CodingGateAction {
+                                action_id: "abort".to_string(),
+                                label: "终止".to_string(),
+                                action_type: CodingGateActionType::Abort,
+                            },
+                        ]
+                    } else {
+                        vec![CodingGateAction {
+                            action_id: "manual_continue".to_string(),
+                            label: "人工继续".to_string(),
+                            action_type: CodingGateActionType::ManualContinue,
+                        }]
+                    },
                 },
-            })
+            )
             .expect("review recovery gate")
     });
 

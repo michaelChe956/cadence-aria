@@ -38,7 +38,7 @@ pub(crate) async fn await_stage_gate(
     let mut deadline = Instant::now() + Duration::from_secs(STAGE_GATE_COUNTDOWN_SECONDS);
     let expires_at = stage_gate_expires_at();
     let mut gate = coding_store.create_stage_gate(
-        &current.id,
+        &current,
         stage.clone(),
         role,
         expires_at,

@@ -330,7 +330,7 @@ async fn retry_coding_gate_clears_latest_coder_provider_conversation() {
         .expect("update role provider config");
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![
                 ProviderConversationRef {
                     role: ProviderConversationRole::Coder,
@@ -373,21 +373,24 @@ async fn retry_coding_gate_clears_latest_coder_provider_conversation() {
         )
         .expect("blocked attempt");
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Coding,
-            node_id: Some("coding_node_0002".to_string()),
-            role: Some(CodingProviderRole::Coder),
-            title: "Coder 执行中断".to_string(),
-            description: "provider interrupted".to_string(),
-            reason_code: Some("coder_provider_interrupted".to_string()),
-            evidence_refs: Vec::new(),
-            raw_provider_output_ref: None,
-            available_actions: vec![
-                coding_gate_action_for_id("retry_coding").expect("retry coding action"),
-                coding_gate_action_for_id("abort").expect("abort action"),
-            ],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Coding,
+                node_id: Some("coding_node_0002".to_string()),
+                role: Some(CodingProviderRole::Coder),
+                title: "Coder 执行中断".to_string(),
+                description: "provider interrupted".to_string(),
+                reason_code: Some("coder_provider_interrupted".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    coding_gate_action_for_id("retry_coding").expect("retry coding action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        )
         .expect("coder recovery gate");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);

@@ -116,7 +116,7 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
         }),
     );
 
-    store
+    let attempt = store
         .update_attempt_status(
             "project_0001",
             "issue_0001",
@@ -141,7 +141,7 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
         )
         .expect("block attempt");
     store
-        .save_review_request(&ReviewRequest {
+        .save_review_request(&attempt, &ReviewRequest {
             id: "review_request_0001".to_string(),
             attempt_id: "coding_attempt_0001".to_string(),
             kind: ReviewRequestKind::GitBranchOnly,
@@ -192,8 +192,11 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
             }),
         )
         .expect("append internal reviewer event");
+    let gate_attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("gate attempt");
     store
-        .create_blocked_gate(CreateBlockedGateInput {
+        .create_blocked_gate(&gate_attempt, CreateBlockedGateInput {
             attempt_id: "coding_attempt_0001".to_string(),
             stage: CodingExecutionStage::InternalPrReview,
             node_id: Some("coding_node_0001".to_string()),

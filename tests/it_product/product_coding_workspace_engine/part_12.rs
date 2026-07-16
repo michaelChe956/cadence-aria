@@ -260,7 +260,7 @@ fn completed_group_attempt_with_handoffs() -> (
         )
         .expect("complete last unit");
     store
-        .save_review_request(&sample_review_request(&attempt.id))
+        .save_review_request(&attempt, &sample_review_request(&attempt.id))
         .expect("save review request");
     let attempt = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)

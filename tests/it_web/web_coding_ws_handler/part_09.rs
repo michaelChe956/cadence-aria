@@ -155,9 +155,12 @@ async fn coding_ws_stage_gate_confirm_resolves_persisted_gate() {
     let root = tempdir().expect("root");
     let app = app_with_attempt(root.path());
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
     let gate = store
         .create_stage_gate(
-            "coding_attempt_0001",
+            &attempt,
             CodingExecutionStage::Testing,
             CodingProviderRole::Tester,
             "2026-05-28T00:00:05Z".to_string(),

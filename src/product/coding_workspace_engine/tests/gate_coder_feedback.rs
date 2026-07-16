@@ -45,41 +45,47 @@ async fn code_review_blocked_gate_accepts_manual_feedback_without_findings() {
         )
         .expect("blocked");
     store
-        .save_code_review_report(&CodeReviewReport {
-            id: "code_review_report_0001".to_string(),
-            attempt_id: attempt.id.clone(),
-            round: 1,
-            verdict: ReviewVerdict::Blocked,
-            findings: Vec::new(),
-            tested_evidence_refs: Vec::new(),
-            diff_refs: Vec::new(),
-            summary: "review 输出不是有效 JSON，已阻塞并等待人工确认".to_string(),
-            created_at: "2026-07-07T00:00:00Z".to_string(),
-            raw_provider_output_ref: Some(
-                "provider-raw/code_review/code_review_0001.txt".to_string(),
-            ),
-            role_run_id: None,
-            run_no: Some(1),
-        })
+        .save_code_review_report(
+            &attempt,
+            &CodeReviewReport {
+                id: "code_review_report_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                round: 1,
+                verdict: ReviewVerdict::Blocked,
+                findings: Vec::new(),
+                tested_evidence_refs: Vec::new(),
+                diff_refs: Vec::new(),
+                summary: "review 输出不是有效 JSON，已阻塞并等待人工确认".to_string(),
+                created_at: "2026-07-07T00:00:00Z".to_string(),
+                raw_provider_output_ref: Some(
+                    "provider-raw/code_review/code_review_0001.txt".to_string(),
+                ),
+                role_run_id: None,
+                run_no: Some(1),
+            },
+        )
         .expect("code review report");
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::CodeReviewer),
-            title: "Code review blocked".to_string(),
-            description: "review 输出不是有效 JSON".to_string(),
-            reason_code: Some("code_review_blocked".to_string()),
-            evidence_refs: vec!["code_review_report_0001".to_string()],
-            raw_provider_output_ref: Some(
-                "provider-raw/code_review/code_review_0001.txt".to_string(),
-            ),
-            available_actions: vec![
-                coding_gate_action_for_id("retry_review").expect("retry review action"),
-                coding_gate_action_for_id("abort").expect("abort action"),
-            ],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::CodeReviewer),
+                title: "Code review blocked".to_string(),
+                description: "review 输出不是有效 JSON".to_string(),
+                reason_code: Some("code_review_blocked".to_string()),
+                evidence_refs: vec!["code_review_report_0001".to_string()],
+                raw_provider_output_ref: Some(
+                    "provider-raw/code_review/code_review_0001.txt".to_string(),
+                ),
+                available_actions: vec![
+                    coding_gate_action_for_id("retry_review").expect("retry review action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        )
         .expect("blocked gate");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);

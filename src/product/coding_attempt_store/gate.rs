@@ -7,10 +7,10 @@ use crate::product::coding_attempt_store::{
     CreateBlockedGateInput, CreateChoiceGateInput, CreateQualityBypassAuditInput,
 };
 use crate::product::coding_models::{
-    CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus, CodingExecutionStage,
-    CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
-    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
-    QualityGateBypassAudit,
+    CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus, CodingExecutionAttempt,
+    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingGateKind,
+    CodingGateRequired, CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingStageGateState,
+    CodingStageGateStatus, QualityGateBypassAudit,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -35,13 +35,19 @@ struct BlockedGateRecord {
 impl super::CodingAttemptStore {
     pub fn create_blocked_gate(
         &self,
+        attempt: &CodingExecutionAttempt,
         input: CreateBlockedGateInput,
     ) -> Result<CodingGateRequired, ProductStoreError> {
         validate_relative_id(&input.attempt_id)?;
         if let Some(node_id) = &input.node_id {
             validate_relative_id(node_id)?;
         }
-        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &input.attempt_id,
+            "coding_blocked_gate",
+            &input.attempt_id,
+        )?;
         let gates_root =
             self.blocked_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         if let Some(existing_path) = matching_open_blocked_gate_path(&gates_root, &input)? {
@@ -78,7 +84,7 @@ impl super::CodingAttemptStore {
         };
         let record = BlockedGateRecord {
             gate: gate.clone(),
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             node_id: input.node_id,
             status: BlockedGateStatus::Open,
             created_at: now.clone(),
@@ -154,13 +160,19 @@ impl super::CodingAttemptStore {
 
     pub fn create_choice_gate(
         &self,
+        attempt: &CodingExecutionAttempt,
         input: CreateChoiceGateInput,
     ) -> Result<CodingChoiceGate, ProductStoreError> {
         validate_relative_id(&input.attempt_id)?;
         if let Some(node_id) = &input.node_id {
             validate_relative_id(node_id)?;
         }
-        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &input.attempt_id,
+            "coding_choice_gate",
+            &input.choice_id,
+        )?;
         let gates_root =
             self.choice_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         if let Some(existing_path) = matching_open_choice_gate_path(&gates_root, &input.choice_id)?
@@ -187,7 +199,7 @@ impl super::CodingAttemptStore {
         let gate = CodingChoiceGate {
             gate_id: gate_id.clone(),
             choice_id: input.choice_id,
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             node_id: input.node_id,
             stage: input.stage,
             role: input.role,
@@ -255,17 +267,23 @@ impl super::CodingAttemptStore {
 
     pub fn create_quality_bypass_audit(
         &self,
+        attempt: &CodingExecutionAttempt,
         input: CreateQualityBypassAuditInput,
     ) -> Result<QualityGateBypassAudit, ProductStoreError> {
         validate_relative_id(&input.attempt_id)?;
         validate_relative_id(&input.gate_id)?;
-        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &input.attempt_id,
+            "quality_bypass_audit",
+            &input.gate_id,
+        )?;
         let root =
             self.quality_bypass_audits_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         let id = next_sequential_id("quality_bypass_audit", super::count_json_files(&root)?);
         let audit = QualityGateBypassAudit {
             id: id.clone(),
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             gate_id: input.gate_id,
             stage: input.stage,
             reason_code: input.reason_code,
@@ -288,13 +306,18 @@ impl super::CodingAttemptStore {
 
     pub fn create_stage_gate(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         stage: CodingExecutionStage,
         role: CodingProviderRole,
         expires_at: String,
         provider_snapshot: CodingRoleProviderConfigSnapshot,
     ) -> Result<CodingStageGateState, ProductStoreError> {
-        let attempt = self.find_attempt_by_id(attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &attempt.id,
+            "coding_stage_gate",
+            &attempt.id,
+        )?;
         let gates_root = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("stage-gates");
@@ -303,7 +326,7 @@ impl super::CodingAttemptStore {
         let now = Utc::now().to_rfc3339();
         let gate = CodingStageGateState {
             gate_id: gate_id.clone(),
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             stage,
             role,
             expires_at,

@@ -302,7 +302,7 @@ fn clearing_coder_conversation_preserves_other_roles() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![
                 ProviderConversationRef {
                     role: ProviderConversationRole::Coder,
@@ -499,7 +499,7 @@ async fn reviewer_driven_rework_increments_rework_count_and_resumes_coder() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::Coder,
                 provider: ProviderName::Codex,

@@ -54,7 +54,7 @@ async fn retry_test_plan_supersedes_latest_testing_role_run_and_resumes_testing(
         )
         .expect("blocked run");
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
+        .create_blocked_gate(&attempt, CreateBlockedGateInput {
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::Testing,
             node_id: Some("coding_node_0003".to_string()),
@@ -411,7 +411,7 @@ async fn coding_code_reviewer_run_uses_fresh_provider_session() {
         .expect("create attempt");
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![
                 ProviderConversationRef {
                     role: ProviderConversationRole::Coder,
@@ -497,7 +497,7 @@ async fn coding_internal_reviewer_uses_fresh_provider_session() {
         .expect("create attempt");
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::InternalReviewer,
                 provider: ProviderName::ClaudeCode,
@@ -524,7 +524,7 @@ async fn coding_internal_reviewer_uses_fresh_provider_session() {
         )
         .expect("review request stage");
     store
-        .save_review_request(&sample_review_request(&attempt.id))
+        .save_review_request(&attempt, &sample_review_request(&attempt.id))
         .expect("save review request");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);

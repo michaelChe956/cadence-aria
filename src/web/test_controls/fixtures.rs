@@ -390,7 +390,7 @@ fn create_coding_role_run_fixture(
     store.save_timeline_node(&attempt, testing_node.clone())?;
 
     let tester_raw = store.save_provider_raw_output(
-        &attempt.id,
+        &attempt,
         FixtureStage::Testing,
         "plan_tests",
         "fixture tester raw output",
@@ -463,7 +463,7 @@ fn create_coding_role_run_fixture(
             created_at: now.clone(),
             updated_at: now.clone(),
         };
-        store.save_review_request(&review_request)?;
+        store.save_review_request(&attempt, &review_request)?;
 
         let internal_node = CodingTimelineNode {
             id: "coding_node_0002".to_string(),
@@ -480,7 +480,7 @@ fn create_coding_role_run_fixture(
         store.save_timeline_node(&attempt, internal_node.clone())?;
 
         let internal_raw = store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             FixtureStage::InternalPrReview,
             "internal_pr_review",
             "fixture internal review raw output",
@@ -537,34 +537,37 @@ fn create_coding_role_run_fixture(
             },
         )?;
 
-        store.create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: FixtureStage::InternalPrReview,
-            node_id: Some("coding_node_0002".to_string()),
-            role: Some(CodingProviderRole::InternalReviewer),
-            title: "内部 PR 审查阻塞".to_string(),
-            description: "需要重试内部审查".to_string(),
-            reason_code: Some("internal_review_blocked".to_string()),
-            evidence_refs: Vec::new(),
-            raw_provider_output_ref: None,
-            available_actions: vec![
-                CodingGateAction {
-                    action_id: "retry_internal_review".to_string(),
-                    label: "重试审查".to_string(),
-                    action_type: CodingGateActionType::RetryInternalReview,
-                },
-                CodingGateAction {
-                    action_id: "manual_continue".to_string(),
-                    label: "人工继续".to_string(),
-                    action_type: CodingGateActionType::ManualContinue,
-                },
-                CodingGateAction {
-                    action_id: "abort".to_string(),
-                    label: "终止".to_string(),
-                    action_type: CodingGateActionType::Abort,
-                },
-            ],
-        })?;
+        store.create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: FixtureStage::InternalPrReview,
+                node_id: Some("coding_node_0002".to_string()),
+                role: Some(CodingProviderRole::InternalReviewer),
+                title: "内部 PR 审查阻塞".to_string(),
+                description: "需要重试内部审查".to_string(),
+                reason_code: Some("internal_review_blocked".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    CodingGateAction {
+                        action_id: "retry_internal_review".to_string(),
+                        label: "重试审查".to_string(),
+                        action_type: CodingGateActionType::RetryInternalReview,
+                    },
+                    CodingGateAction {
+                        action_id: "manual_continue".to_string(),
+                        label: "人工继续".to_string(),
+                        action_type: CodingGateActionType::ManualContinue,
+                    },
+                    CodingGateAction {
+                        action_id: "abort".to_string(),
+                        label: "终止".to_string(),
+                        action_type: CodingGateActionType::Abort,
+                    },
+                ],
+            },
+        )?;
     } else {
         let review_node = CodingTimelineNode {
             id: "coding_node_0002".to_string(),
@@ -581,7 +584,7 @@ fn create_coding_role_run_fixture(
         store.save_timeline_node(&attempt, review_node.clone())?;
 
         let review_raw = store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             FixtureStage::CodeReview,
             "code_review",
             "fixture code review raw output",
@@ -638,34 +641,37 @@ fn create_coding_role_run_fixture(
             },
         )?;
 
-        store.create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: FixtureStage::CodeReview,
-            node_id: Some("coding_node_0002".to_string()),
-            role: Some(CodingProviderRole::CodeReviewer),
-            title: "Code review blocked".to_string(),
-            description: "需要提交人工修复意见给 Coder，或重试 Code Reviewer".to_string(),
-            reason_code: Some("code_review_blocked".to_string()),
-            evidence_refs: vec!["code_review_report_0001".to_string()],
-            raw_provider_output_ref: None,
-            available_actions: vec![
-                CodingGateAction {
-                    action_id: "retry_review".to_string(),
-                    label: "重试审查".to_string(),
-                    action_type: CodingGateActionType::RetryReview,
-                },
-                CodingGateAction {
-                    action_id: "send_to_coder".to_string(),
-                    label: "提交给 Coder 修复".to_string(),
-                    action_type: CodingGateActionType::SendToCoder,
-                },
-                CodingGateAction {
-                    action_id: "abort".to_string(),
-                    label: "终止".to_string(),
-                    action_type: CodingGateActionType::Abort,
-                },
-            ],
-        })?;
+        store.create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: FixtureStage::CodeReview,
+                node_id: Some("coding_node_0002".to_string()),
+                role: Some(CodingProviderRole::CodeReviewer),
+                title: "Code review blocked".to_string(),
+                description: "需要提交人工修复意见给 Coder，或重试 Code Reviewer".to_string(),
+                reason_code: Some("code_review_blocked".to_string()),
+                evidence_refs: vec!["code_review_report_0001".to_string()],
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    CodingGateAction {
+                        action_id: "retry_review".to_string(),
+                        label: "重试审查".to_string(),
+                        action_type: CodingGateActionType::RetryReview,
+                    },
+                    CodingGateAction {
+                        action_id: "send_to_coder".to_string(),
+                        label: "提交给 Coder 修复".to_string(),
+                        action_type: CodingGateActionType::SendToCoder,
+                    },
+                    CodingGateAction {
+                        action_id: "abort".to_string(),
+                        label: "终止".to_string(),
+                        action_type: CodingGateActionType::Abort,
+                    },
+                ],
+            },
+        )?;
     }
 
     Ok(json!({

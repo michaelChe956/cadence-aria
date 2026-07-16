@@ -244,7 +244,7 @@ impl CodingWorkspaceEngine {
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::InternalPrReview,
             if is_group_final_review {
                 "group_final_review"
@@ -268,7 +268,7 @@ impl CodingWorkspaceEngine {
             Some(raw_provider_output_ref.clone()),
             &role_run,
         )?;
-        self.store.save_internal_pr_review(&review)?;
+        self.store.save_internal_pr_review(&attempt, &review)?;
         self.emit_internal_pr_review_chat_entry(&attempt, &node.id, &review)
             .await;
         let _ = self
@@ -475,7 +475,7 @@ impl CodingWorkspaceEngine {
             created_at: now.clone(),
             updated_at: now,
         };
-        self.store.save_review_request(&request)?;
+        self.store.save_review_request(&attempt, &request)?;
         self.store.update_attempt_review_request_state(
             &attempt.project_id,
             &attempt.issue_id,

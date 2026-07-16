@@ -34,27 +34,30 @@ impl CodingWorkspaceEngine {
         request: ChoiceRequestData,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let source = request.source.as_str().to_string();
-        self.store.create_choice_gate(CreateChoiceGateInput {
-            attempt_id: attempt.id.clone(),
-            choice_id: request.id.clone(),
-            stage,
-            node_id: Some(node_id.to_string()),
-            role,
-            provider: provider.clone(),
-            source: source.clone(),
-            prompt: request.prompt.clone(),
-            options: request
-                .options
-                .iter()
-                .map(|option| CodingChoiceOption {
-                    id: option.id.clone(),
-                    label: option.label.clone(),
-                    description: option.description.clone(),
-                })
-                .collect(),
-            allow_multiple: request.allow_multiple,
-            allow_free_text: request.allow_free_text,
-        })?;
+        self.store.create_choice_gate(
+            attempt,
+            CreateChoiceGateInput {
+                attempt_id: attempt.id.clone(),
+                choice_id: request.id.clone(),
+                stage,
+                node_id: Some(node_id.to_string()),
+                role,
+                provider: provider.clone(),
+                source: source.clone(),
+                prompt: request.prompt.clone(),
+                options: request
+                    .options
+                    .iter()
+                    .map(|option| CodingChoiceOption {
+                        id: option.id.clone(),
+                        label: option.label.clone(),
+                        description: option.description.clone(),
+                    })
+                    .collect(),
+                allow_multiple: request.allow_multiple,
+                allow_free_text: request.allow_free_text,
+            },
+        )?;
         let current =
             self.store
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
@@ -96,16 +99,15 @@ impl CodingWorkspaceEngine {
 
     pub(crate) async fn ensure_issue_shared_worktree_clean(
         &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         work_item_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let shared = match lifecycle.get_issue_shared_worktree(project_id, issue_id)? {
-            Some(shared) => shared,
-            None => return Ok(()),
-        };
+        let shared =
+            match lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)? {
+                Some(shared) => shared,
+                None => return Ok(()),
+            };
         if shared.current_active_work_item_id.as_deref() != Some(work_item_id) {
             return Ok(());
         }
@@ -115,8 +117,8 @@ impl CodingWorkspaceEngine {
         }
         let status = self._git_service.git_status(&worktree_path).await?;
         if !status.is_empty() {
-            self.store.create_blocked_gate(CreateBlockedGateInput {
-                attempt_id: attempt_id.to_string(),
+            self.store.create_blocked_gate(attempt, CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
                 stage: CodingExecutionStage::FinalConfirm,
                 node_id: None,
                 role: None,
@@ -172,13 +174,8 @@ impl CodingWorkspaceEngine {
             ));
         }
 
-        self.ensure_issue_shared_worktree_clean(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &attempt.work_item_id,
-        )
-        .await?;
+        self.ensure_issue_shared_worktree_clean(attempt, &attempt.work_item_id)
+            .await?;
 
         Ok(CompletionGateReport)
     }
@@ -227,13 +224,8 @@ impl CodingWorkspaceEngine {
             .or_else(|| attempt.current_work_item_id.clone())
             .or_else(|| handoffs.last().map(|(unit, _)| unit.work_item_id.clone()))
             .unwrap_or_else(|| attempt.work_item_id.clone());
-        self.ensure_issue_shared_worktree_clean(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &lock_holder_work_item_id,
-        )
-        .await?;
+        self.ensure_issue_shared_worktree_clean(attempt, &lock_holder_work_item_id)
+            .await?;
 
         Ok(CompletionGateReport)
     }
@@ -378,8 +370,9 @@ impl CodingWorkspaceEngine {
         attempt_id: &str,
         work_item_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        let attempt = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         match self
-            .ensure_issue_shared_worktree_clean(project_id, issue_id, attempt_id, work_item_id)
+            .ensure_issue_shared_worktree_clean(&attempt, work_item_id)
             .await
         {
             Ok(()) => self.release_issue_shared_worktree_lock_if_holder(
@@ -584,15 +577,17 @@ impl CodingWorkspaceEngine {
                     })?;
                 self.store
                     .create_context_note(&current, operator_context.clone())?;
-                self.store
-                    .create_quality_bypass_audit(CreateQualityBypassAuditInput {
+                self.store.create_quality_bypass_audit(
+                    &current,
+                    CreateQualityBypassAuditInput {
                         attempt_id: current.id.clone(),
                         gate_id: gate.gate_id.clone(),
                         stage: gate.stage.clone().unwrap_or_else(|| current.stage.clone()),
                         reason_code: gate.reason_code.clone(),
                         skipped_required_steps: self.latest_missing_required_steps(&current)?,
                         operator_context,
-                    })?;
+                    },
+                )?;
                 if current.status == CodingAttemptStatus::Blocked {
                     self.store.update_attempt_status(
                         project_id,

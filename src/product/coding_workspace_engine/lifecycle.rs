@@ -85,7 +85,7 @@ impl CodingWorkspaceEngine {
         }
 
         self.store
-            .replace_attempt_provider_conversations(&attempt.id, conversations)
+            .replace_attempt_provider_conversations(attempt, conversations)
             .map_err(CodingWorkspaceEngineError::from)?;
         Ok(())
     }
@@ -106,7 +106,7 @@ impl CodingWorkspaceEngine {
             .cloned()
             .collect();
         self.store
-            .replace_attempt_provider_conversations(&attempt.id, conversations)
+            .replace_attempt_provider_conversations(attempt, conversations)
             .map_err(CodingWorkspaceEngineError::from)
     }
 

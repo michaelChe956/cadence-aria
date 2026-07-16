@@ -505,7 +505,7 @@ fn code_reviewer_context_pack_includes_coder_evidence() {
         .expect("create role run");
     let raw_ref = store
         .save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::Coding,
             "coder_output",
             "完整 coder 输出",

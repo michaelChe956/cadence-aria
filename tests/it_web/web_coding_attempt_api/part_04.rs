@@ -27,16 +27,16 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     let review_request = sample_review_request(&attempt_id);
     let internal_review = sample_internal_review(&attempt_id, &review_request.id);
     store
-        .save_testing_report(&testing_report)
+        .save_testing_report(&persisted_attempt, &testing_report)
         .expect("save testing report");
     store
-        .save_code_review_report(&code_review)
+        .save_code_review_report(&persisted_attempt, &code_review)
         .expect("save code review");
     store
-        .save_review_request(&review_request)
+        .save_review_request(&persisted_attempt, &review_request)
         .expect("save review request");
     store
-        .save_internal_pr_review(&internal_review)
+        .save_internal_pr_review(&persisted_attempt, &internal_review)
         .expect("save internal review");
     store
         .save_timeline_node(&persisted_attempt, sample_completed_node(&attempt_id))
@@ -45,7 +45,7 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
         .save_timeline_node(&persisted_attempt, sample_running_node(&attempt_id))
         .expect("save running node");
     store
-        .create_choice_gate(CreateChoiceGateInput {
+        .create_choice_gate(&persisted_attempt, CreateChoiceGateInput {
             attempt_id: attempt_id.clone(),
             choice_id: "choice_0001".to_string(),
             stage: CodingExecutionStage::Coding,
@@ -226,7 +226,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
     fs::create_dir_all(&artifact_dir).expect("artifact dir");
     fs::write(artifact_dir.join("unit.stdout.log"), "unit stdout\n").expect("artifact");
     store
-        .save_testing_report(&sample_testing_report(&attempt_id))
+        .save_testing_report(&attempt, &sample_testing_report(&attempt_id))
         .expect("save testing report");
     store
         .save_timeline_node(&attempt, sample_running_node(&attempt_id))

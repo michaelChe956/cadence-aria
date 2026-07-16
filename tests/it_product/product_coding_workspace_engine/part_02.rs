@@ -17,7 +17,7 @@ async fn coding_tester_does_not_resume_coder_provider_session() {
         .expect("create attempt");
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![
                 ProviderConversationRef {
                     role: ProviderConversationRole::Coder,

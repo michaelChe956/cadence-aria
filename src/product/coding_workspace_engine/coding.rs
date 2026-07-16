@@ -196,7 +196,7 @@ impl CodingWorkspaceEngine {
             }
         };
         let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::Coding,
             "coder_output",
             &full_output,

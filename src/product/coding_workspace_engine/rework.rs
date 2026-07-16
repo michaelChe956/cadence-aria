@@ -19,7 +19,7 @@ impl CodingWorkspaceEngine {
                 coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ];
-            let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+            let gate = self.store.create_blocked_gate(&current, CreateBlockedGateInput {
                 attempt_id: current.id.clone(),
                 stage: CodingExecutionStage::CodeReview,
                 node_id: None,
@@ -202,7 +202,7 @@ impl CodingWorkspaceEngine {
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &updated.id,
+            &updated,
             CodingExecutionStage::Coding,
             "coder_output",
             &full_output,

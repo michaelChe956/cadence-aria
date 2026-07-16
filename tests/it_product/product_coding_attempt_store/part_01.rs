@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
-    CodingAttemptStore, CreateChoiceGateInput, CreateCodingAttemptInput,
+    CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput, CreateCodingAttemptInput,
     CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
+    CreateQualityBypassAuditInput,
 };
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
@@ -13,7 +14,7 @@ use cadence_aria::product::coding_models::{
     CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
     ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport, WorkItemExecutionPlan,
+    TestCommandStatus, TestPlan, TestingOverallStatus, TestingReport, WorkItemExecutionPlan,
     WorkItemHandoff,
 };
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
@@ -275,7 +276,7 @@ fn updates_coding_attempt_provider_conversations() {
     }];
 
     let updated = store
-        .replace_attempt_provider_conversations(&attempt.id, conversations.clone())
+        .replace_attempt_provider_conversations(&attempt, conversations.clone())
         .expect("persist coding provider conversations");
 
     assert_eq!(updated.provider_conversations, conversations);
@@ -300,16 +301,16 @@ fn store_persists_reports_reviews_and_timeline_for_snapshot_recovery() {
     let node = sample_node(&attempt.id);
 
     store
-        .save_testing_report(&testing)
+        .save_testing_report(&attempt, &testing)
         .expect("save testing report");
     store
-        .save_code_review_report(&code_review)
+        .save_code_review_report(&attempt, &code_review)
         .expect("save code review");
     store
-        .save_review_request(&review_request)
+        .save_review_request(&attempt, &review_request)
         .expect("save review request");
     store
-        .save_internal_pr_review(&internal_review)
+        .save_internal_pr_review(&attempt, &internal_review)
         .expect("save internal review");
     store
         .save_timeline_node(&attempt, node.clone())
@@ -737,7 +738,7 @@ fn store_persists_and_resolves_stage_gates_in_attempt_scope() {
     });
     let gate = store
         .create_stage_gate(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::Testing,
             CodingProviderRole::Tester,
             "2026-05-28T00:00:05Z".to_string(),
