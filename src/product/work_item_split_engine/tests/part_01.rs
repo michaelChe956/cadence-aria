@@ -140,7 +140,13 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
     assert!(prompt.contains("追踪关系"));
     assert!(prompt.contains("Claude Code"));
     assert!(prompt.contains("Codex"));
-    assert!(prompt.contains("20k"));
+    for required in ["40k", "50k", "最大内聚", "最少拆分", "优先合并"] {
+        assert!(
+            prompt.contains(required),
+            "outline prompt must include `{required}`: {prompt}"
+        );
+    }
+    assert!(!prompt.contains("1..19999"));
     assert!(prompt.contains("estimated_context_tokens"));
     assert!(prompt.contains("session_fit=\"fits_single_agent_session\""));
 }
@@ -163,7 +169,13 @@ fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
     assert!(prompt.contains("追踪关系"));
     assert!(prompt.contains("Claude Code"));
     assert!(prompt.contains("Codex"));
-    assert!(prompt.contains("20k"));
+    for required in ["40k", "50k", "最大内聚", "最少拆分", "优先合并"] {
+        assert!(
+            prompt.contains(required),
+            "outline prompt must include `{required}`: {prompt}"
+        );
+    }
+    assert!(!prompt.contains("1..19999"));
     assert!(prompt.contains("estimated_context_tokens"));
     assert!(prompt.contains("session_fit=\"fits_single_agent_session\""));
 }
@@ -443,7 +455,7 @@ fn outline_output_schema_makes_outline_and_context_blockers_mutually_exclusive()
         &schema["properties"]["outline"]["properties"]["work_item_outlines"]["items"];
     assert_eq!(
         outline_item["properties"]["estimated_context_tokens"]["maximum"],
-        serde_json::json!(19999)
+        serde_json::json!(50000)
     );
     assert_eq!(
         outline_item["properties"]["session_fit"]["enum"],
@@ -615,6 +627,8 @@ fn single_item_prompt_requires_executable_plan_runtime_contracts() {
     assert!(invocation.prompt.contains("后续 coding agent"));
     assert!(invocation.prompt.contains("estimated_context_tokens"));
     assert!(invocation.prompt.contains("单个 Claude Code/Codex 会话"));
+    assert!(invocation.prompt.contains("50k"));
+    assert!(!invocation.prompt.contains("小于 20k"));
 }
 
 #[test]

@@ -238,7 +238,7 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
               "estimated_context_tokens": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 19999
+                "maximum": 50000
               },
               "session_fit": {
                 "type": "string",
