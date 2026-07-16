@@ -20,7 +20,7 @@ pub async fn create_group_coding_attempt(
     }
 
     let group_lock_key = format!("work_item_group:{project_id}:{issue_id}:{plan_id}");
-    let _group_guard = state.coding_runs.lock_attempt(&group_lock_key).await;
+    let _group_guard = state.coding_runs.lock_named(&group_lock_key).await;
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     if let Some(existing) = coding_store
         .get_attempt_for_work_item_group(&project_id, &issue_id, &plan_id)

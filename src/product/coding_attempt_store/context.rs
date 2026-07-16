@@ -1,23 +1,30 @@
 use chrono::Utc;
 
-use crate::product::coding_models::{CodingChatEntry, CodingContextNote, CodingReworkInstruction};
+use crate::product::coding_models::{
+    CodingChatEntry, CodingContextNote, CodingExecutionAttempt, CodingReworkInstruction,
+};
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
     pub fn create_context_note(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         content: String,
     ) -> Result<CodingContextNote, ProductStoreError> {
-        let attempt = self.find_attempt_by_id(attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &attempt.id,
+            "coding_context_note",
+            &attempt.id,
+        )?;
         let notes_root = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("context-notes");
         let id = next_sequential_id("coding_context_note", super::count_json_files(&notes_root)?);
         let note = CodingContextNote {
             id: id.clone(),
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             content,
             created_at: Utc::now().to_rfc3339(),
             consumed_by_rework_round: None,
@@ -76,9 +83,18 @@ impl super::CodingAttemptStore {
         Ok(())
     }
 
-    pub fn save_chat_entry(&self, entry: &CodingChatEntry) -> Result<(), ProductStoreError> {
+    pub fn save_chat_entry(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        entry: &CodingChatEntry,
+    ) -> Result<(), ProductStoreError> {
         validate_relative_id(&entry.id)?;
-        let attempt = self.find_attempt_by_id(&entry.attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &entry.attempt_id,
+            "coding_chat_entry",
+            &entry.id,
+        )?;
         write_json(
             &self
                 .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -109,10 +125,16 @@ impl super::CodingAttemptStore {
 
     pub fn save_rework_instruction(
         &self,
+        attempt: &CodingExecutionAttempt,
         instruction: &CodingReworkInstruction,
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(&instruction.id)?;
-        let attempt = self.find_attempt_by_id(&instruction.attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &instruction.attempt_id,
+            "coding_rework_instruction",
+            &instruction.id,
+        )?;
         write_json(
             &self
                 .rework_instructions_root(&attempt.project_id, &attempt.issue_id, &attempt.id)

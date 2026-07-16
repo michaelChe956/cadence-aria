@@ -244,9 +244,9 @@ fn app_with_running_testing_attempt_and_state(
         )
         .expect("testing stage");
     store
-        .save_timeline_node(CodingTimelineNode {
+        .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::Testing,
             title: "执行测试".to_string(),
             status: CodingTimelineNodeStatus::Running,
@@ -337,9 +337,9 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
         )
         .expect("set head commit");
     store
-        .save_timeline_node(CodingTimelineNode {
+        .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::FinalConfirm,
             title: "最终确认".to_string(),
             status: CodingTimelineNodeStatus::Running,

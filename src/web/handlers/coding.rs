@@ -2,6 +2,7 @@ use super::dto::*;
 use super::support::*;
 use super::*;
 use crate::product::coding_models::CodingAttemptScope;
+use crate::web::state::CodingAttemptRunKey;
 
 mod group;
 mod scope;
@@ -445,7 +446,10 @@ pub(crate) async fn abort_coding_attempt(
         path.issue_id.as_deref(),
         &path.attempt_id,
     )?;
-    state.coding_runs.abort_attempt(&attempt.id).await;
+    state
+        .coding_runs
+        .abort_attempt(&CodingAttemptRunKey::from_attempt(&attempt))
+        .await;
     let engine = coding_workspace_engine_with_dummy_events(coding_store);
     let aborted = engine
         .handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -467,7 +471,10 @@ pub(crate) async fn delete_coding_attempt(
         path.issue_id.as_deref(),
         &path.attempt_id,
     )?;
-    state.coding_runs.abort_attempt(&attempt.id).await;
+    state
+        .coding_runs
+        .abort_attempt(&CodingAttemptRunKey::from_attempt(&attempt))
+        .await;
     let active_work_item_id = attempt
         .current_work_item_id
         .as_deref()

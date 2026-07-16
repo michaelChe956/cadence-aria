@@ -1,7 +1,7 @@
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_workspace_engine::recoverable_failed_code_review;
-use crate::web::state::CodingRunRegistry;
+use crate::web::state::{CodingAttemptRunKey, CodingRunRegistry};
 
 use super::{CodingWsInMessage, is_coding_ws_message_allowed};
 
@@ -68,7 +68,7 @@ pub(crate) fn coding_message_admission(
     ) {
         return CodingMessageAdmission::Allowed;
     }
-    if coding_runs.has_active_recovery_reservation(&attempt.id) {
+    if coding_runs.has_active_recovery_reservation(&CodingAttemptRunKey::from_attempt(attempt)) {
         return CodingMessageAdmission::Rejected;
     }
     let unfinished_recovery_message_allowed =

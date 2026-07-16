@@ -554,7 +554,7 @@ impl CodingWorkspaceEngine {
                 if let Some(content) = extra_context
                     && !content.trim().is_empty()
                 {
-                    self.store.create_context_note(&current.id, content)?;
+                    self.store.create_context_note(&current, content)?;
                 }
                 let running = if current.status == CodingAttemptStatus::Blocked {
                     self.store.update_attempt_status(
@@ -583,7 +583,7 @@ impl CodingWorkspaceEngine {
                         )
                     })?;
                 self.store
-                    .create_context_note(&current.id, operator_context.clone())?;
+                    .create_context_note(&current, operator_context.clone())?;
                 self.store
                     .create_quality_bypass_audit(CreateQualityBypassAuditInput {
                         attempt_id: current.id.clone(),

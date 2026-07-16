@@ -30,7 +30,7 @@ use cadence_aria::product::models::{
 };
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
-use cadence_aria::web::state::WebAppState;
+use cadence_aria::web::state::{CodingAttemptRunKey, WebAppState};
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -567,14 +567,15 @@ async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let attempt_id = assert_global_attempt_id(&first);
+    let attempt_key = CodingAttemptRunKey::new(
+        "project_0001",
+        "issue_0001",
+        attempt_id.clone(),
+    );
     let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
-    state
-        .coding_runs
-        .insert(attempt_id.clone(), first_runner_tx);
-    state
-        .coding_runs
-        .insert(attempt_id.clone(), second_runner_tx);
+    state.coding_runs.insert(&attempt_key, first_runner_tx);
+    state.coding_runs.insert(&attempt_key, second_runner_tx);
 
     let (status, _body) = request_json(
         app.clone(),
@@ -592,7 +593,7 @@ async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
         second_runner_rx.recv().await.expect("second runner abort"),
         CodingRunnerCommand::AbortAttempt
     );
-    assert_eq!(state.coding_runs.runner_count(&attempt_id), 0);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
 
     let (status, second) = request_json(
         app,
@@ -723,6 +724,11 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
     .await;
     assert_eq!(status, StatusCode::OK);
     let attempt_id = assert_global_attempt_id(&first);
+    let attempt_key = CodingAttemptRunKey::new(
+        "project_0001",
+        "issue_0001",
+        attempt_id.clone(),
+    );
     let coding_store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = prepare_attempt_with_worktree(
         &coding_store,
@@ -751,12 +757,8 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
         .expect("mark attempt failed");
     let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
-    state
-        .coding_runs
-        .insert(attempt_id.clone(), first_runner_tx);
-    state
-        .coding_runs
-        .insert(attempt_id.clone(), second_runner_tx);
+    state.coding_runs.insert(&attempt_key, first_runner_tx);
+    state.coding_runs.insert(&attempt_key, second_runner_tx);
 
     let (status, _body) = request_json(
         app.clone(),
@@ -775,7 +777,7 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
         second_runner_rx.recv().await.expect("second runner abort"),
         CodingRunnerCommand::AbortAttempt
     );
-    assert_eq!(state.coding_runs.runner_count(&attempt_id), 0);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
     assert!(!worktree_path.exists());
     assert!(
         coding_store

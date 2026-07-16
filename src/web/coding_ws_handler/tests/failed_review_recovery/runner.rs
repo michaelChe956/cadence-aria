@@ -19,7 +19,7 @@ use crate::web::coding_ws_handler::{
     spawn_coding_runner_reserved_with_probe,
 };
 use crate::web::runtime::WebRuntime;
-use crate::web::state::{CodingRunRegistry, WebAppState};
+use crate::web::state::{CodingAttemptRunKey, CodingRunRegistry, WebAppState};
 
 use super::support::{FixtureCase, failed_review_fixture, seed_repeated_interrupted_review};
 
@@ -49,9 +49,10 @@ async fn reserved_spawn_creates_task_then_completes_journal_before_provider_entr
         fixture._tmp.path().to_path_buf(),
         WebRuntime::new_fake(fixture._tmp.path().to_path_buf()),
     );
+    let attempt_key = CodingAttemptRunKey::from_attempt(&updated);
     let reservation = state
         .coding_runs
-        .try_reserve_attempt(&updated.id)
+        .try_reserve_attempt(&attempt_key)
         .expect("reserve recovered attempt");
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (provider_entry_tx, provider_entry_rx) = oneshot::channel();
@@ -88,7 +89,7 @@ async fn reserved_spawn_creates_task_then_completes_journal_before_provider_entr
         .expect("recovery journal");
     assert_eq!(journal.phase, FailedCodeReviewRecoveryPhase::Completed);
     drop(continue_tx);
-    wait_for_runner_count(&state.coding_runs, &updated.id, 0).await;
+    wait_for_runner_count(&state.coding_runs, &attempt_key, 0).await;
 }
 
 #[tokio::test]
@@ -115,9 +116,10 @@ async fn journal_completion_failure_stops_task_before_provider_entry_and_cleans_
         fixture._tmp.path().to_path_buf(),
         WebRuntime::new_fake(fixture._tmp.path().to_path_buf()),
     );
+    let attempt_key = CodingAttemptRunKey::from_attempt(&updated);
     let reservation = state
         .coding_runs
-        .try_reserve_attempt(&updated.id)
+        .try_reserve_attempt(&attempt_key)
         .expect("reserve recovered attempt");
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (provider_entry_tx, provider_entry_rx) = oneshot::channel();
@@ -145,7 +147,7 @@ async fn journal_completion_failure_stops_task_before_provider_entry_and_cleans_
         "{error}"
     );
     assert!(provider_entry_rx.await.is_err());
-    wait_for_runner_count(&state.coding_runs, &updated.id, 0).await;
+    wait_for_runner_count(&state.coding_runs, &attempt_key, 0).await;
     assert_eq!(
         *events.lock().expect("runner start events"),
         vec!["task_created"]
@@ -295,11 +297,12 @@ fn blocked_review_retry_reservation_rejects_an_old_runner_before_persistence() {
     ));
 
     let registry = CodingRunRegistry::default();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&fixture.attempt);
     let (old_runner_tx, _old_runner_rx) = mpsc::channel(1);
     let old_runner_id = registry
-        .insert(fixture.attempt.id.clone(), old_runner_tx)
+        .insert(&attempt_key, old_runner_tx)
         .expect("register old runner");
-    assert!(registry.try_reserve_attempt(&fixture.attempt.id).is_none());
+    assert!(registry.try_reserve_attempt(&attempt_key).is_none());
     assert!(
         fixture
             .store
@@ -323,7 +326,7 @@ fn blocked_review_retry_reservation_rejects_an_old_runner_before_persistence() {
             .len(),
         1
     );
-    registry.remove(&fixture.attempt.id, old_runner_id);
+    registry.remove(&attempt_key, old_runner_id);
 }
 
 #[tokio::test]
@@ -344,10 +347,10 @@ async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner()
         .map(|_| {
             let registry = Arc::clone(&registry);
             let barrier = Arc::clone(&barrier);
-            let attempt_id = fixture.attempt.id.clone();
+            let attempt_key = CodingAttemptRunKey::from_attempt(&fixture.attempt);
             thread::spawn(move || {
                 barrier.wait();
-                registry.try_reserve_attempt(&attempt_id)
+                registry.try_reserve_attempt(&attempt_key)
             })
         })
         .collect::<Vec<_>>();
@@ -376,7 +379,8 @@ async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner()
         .complete_failed_code_review_recovery_journal(&updated, &gate_id)
         .expect("complete winning recovery journal");
 
-    assert_eq!(registry.runner_count(&updated.id), 1);
+    let attempt_key = CodingAttemptRunKey::from_attempt(&updated);
+    assert_eq!(registry.runner_count(&attempt_key), 1);
     let runs = fixture
         .store
         .list_role_runs(&updated.project_id, &updated.issue_id, &updated.id)
@@ -388,7 +392,7 @@ async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner()
             .count(),
         1
     );
-    registry.remove(&updated.id, run_id);
+    registry.remove(&attempt_key, run_id);
 }
 
 #[tokio::test]
@@ -416,10 +420,10 @@ async fn two_repeated_review_retry_sockets_converge_to_one_current_run_and_runne
         .map(|_| {
             let registry = Arc::clone(&registry);
             let barrier = Arc::clone(&barrier);
-            let attempt_id = repeated.blocked_attempt.id.clone();
+            let attempt_key = CodingAttemptRunKey::from_attempt(&repeated.blocked_attempt);
             thread::spawn(move || {
                 barrier.wait();
-                registry.try_reserve_attempt(&attempt_id)
+                registry.try_reserve_attempt(&attempt_key)
             })
         })
         .collect::<Vec<_>>();
@@ -448,7 +452,8 @@ async fn two_repeated_review_retry_sockets_converge_to_one_current_run_and_runne
         .complete_failed_code_review_recovery_journal(&updated, &gate_id)
         .expect("complete second recovery journal");
 
-    assert_eq!(registry.runner_count(&updated.id), 1);
+    let attempt_key = CodingAttemptRunKey::from_attempt(&updated);
+    assert_eq!(registry.runner_count(&attempt_key), 1);
     assert_eq!(current.expected_gate_id, gate_id);
     assert_eq!(
         fixture
@@ -480,7 +485,7 @@ async fn two_repeated_review_retry_sockets_converge_to_one_current_run_and_runne
             .count(),
         1
     );
-    registry.remove(&updated.id, run_id);
+    registry.remove(&attempt_key, run_id);
 }
 
 #[tokio::test]
@@ -490,6 +495,7 @@ async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note(
         FixtureCase::BlockedProviderInterrupted,
     );
     let attempt_id = fixture.attempt.id.clone();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&fixture.attempt);
     let gate_id = fixture
         .dirty_gate
         .as_ref()
@@ -563,7 +569,7 @@ async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note(
     });
 
     reserved_rx.await.expect("winner reserved attempt");
-    assert!(registry.has_active_recovery_reservation(&attempt_id));
+    assert!(registry.has_active_recovery_reservation(&attempt_key));
     assert!(
         fixture
             .store
@@ -609,7 +615,7 @@ async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note(
             .iter()
             .all(|competitor| !competitor.is_finished())
     );
-    assert!(registry.has_active_recovery_reservation(&attempt_id));
+    assert!(registry.has_active_recovery_reservation(&attempt_key));
     assert_eq!(
         fixture
             .store
@@ -640,7 +646,7 @@ async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note(
         ));
     }
 
-    assert!(registry.has_active_recovery_reservation(&attempt_id));
+    assert!(registry.has_active_recovery_reservation(&attempt_key));
     let journal = fixture.store.get_failed_code_review_recovery_journal(
         &fixture.attempt.project_id,
         &fixture.attempt.issue_id,
@@ -657,7 +663,7 @@ async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note(
     let (updated, events, provider_entry_rx, runner_continue_tx) =
         winner.await.expect("winning recovery task");
 
-    assert!(!registry.has_active_recovery_reservation(&attempt_id));
+    assert!(!registry.has_active_recovery_reservation(&attempt_key));
     assert_eq!(updated.status, CodingAttemptStatus::Running);
     assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
     assert_eq!(
@@ -694,20 +700,22 @@ async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note(
         vec!["task_created", "journal_completed", "provider_entry"]
     );
     drop(runner_continue_tx);
-    wait_for_runner_count(&registry, &attempt_id, 0).await;
+    wait_for_runner_count(&registry, &attempt_key, 0).await;
 }
 
 #[test]
 fn failed_review_recovery_reservation_is_atomic_and_releasable() {
     let registry = Arc::new(CodingRunRegistry::default());
     let barrier = Arc::new(Barrier::new(3));
+    let attempt_key = CodingAttemptRunKey::new("project_0001", "issue_0001", "coding_attempt_0001");
     let attempts = (0..2)
         .map(|_| {
             let registry = Arc::clone(&registry);
             let barrier = Arc::clone(&barrier);
+            let attempt_key = attempt_key.clone();
             thread::spawn(move || {
                 barrier.wait();
-                registry.try_reserve_attempt("coding_attempt_0001")
+                registry.try_reserve_attempt(&attempt_key)
             })
         })
         .collect::<Vec<_>>();
@@ -724,51 +732,39 @@ fn failed_review_recovery_reservation_is_atomic_and_releasable() {
             .count(),
         1
     );
-    assert!(registry.attempt_is_reserved_or_running("coding_attempt_0001"));
+    assert!(registry.attempt_is_reserved_or_running(&attempt_key));
     drop(reservations);
-    assert!(!registry.attempt_is_reserved_or_running("coding_attempt_0001"));
+    assert!(!registry.attempt_is_reserved_or_running(&attempt_key));
 
     let reservation = registry
-        .try_reserve_attempt("coding_attempt_0001")
+        .try_reserve_attempt(&attempt_key)
         .expect("reservation after release");
     let (ordinary_tx, _ordinary_rx) = mpsc::channel(1);
-    assert!(
-        registry
-            .insert("coding_attempt_0001".to_string(), ordinary_tx)
-            .is_none()
-    );
-    assert_eq!(registry.runner_count("coding_attempt_0001"), 0);
+    assert!(registry.insert(&attempt_key, ordinary_tx).is_none());
+    assert_eq!(registry.runner_count(&attempt_key), 0);
     let (command_tx, _command_rx) = mpsc::channel(1);
     let run_id = reservation
         .activate(command_tx)
         .expect("activate reserved runner");
-    assert_eq!(registry.runner_count("coding_attempt_0001"), 1);
+    assert_eq!(registry.runner_count(&attempt_key), 1);
     let (late_ordinary_tx, _late_ordinary_rx) = mpsc::channel(1);
-    assert!(
-        registry
-            .insert("coding_attempt_0001".to_string(), late_ordinary_tx)
-            .is_none()
-    );
-    assert_eq!(registry.runner_count("coding_attempt_0001"), 1);
-    assert!(
-        registry
-            .try_reserve_attempt("coding_attempt_0001")
-            .is_none()
-    );
-    registry.remove("coding_attempt_0001", run_id);
-    assert!(
-        registry
-            .try_reserve_attempt("coding_attempt_0001")
-            .is_some()
-    );
+    assert!(registry.insert(&attempt_key, late_ordinary_tx).is_none());
+    assert_eq!(registry.runner_count(&attempt_key), 1);
+    assert!(registry.try_reserve_attempt(&attempt_key).is_none());
+    registry.remove(&attempt_key, run_id);
+    assert!(registry.try_reserve_attempt(&attempt_key).is_some());
 }
 
-async fn wait_for_runner_count(registry: &CodingRunRegistry, attempt_id: &str, expected: usize) {
+async fn wait_for_runner_count(
+    registry: &CodingRunRegistry,
+    attempt_key: &CodingAttemptRunKey,
+    expected: usize,
+) {
     for _ in 0..20 {
-        if registry.runner_count(attempt_id) == expected {
+        if registry.runner_count(attempt_key) == expected {
             return;
         }
         tokio::task::yield_now().await;
     }
-    assert_eq!(registry.runner_count(attempt_id), expected);
+    assert_eq!(registry.runner_count(attempt_key), expected);
 }

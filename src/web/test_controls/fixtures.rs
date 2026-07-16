@@ -387,7 +387,7 @@ fn create_coding_role_run_fixture(
         completed_at: Some(now.clone()),
         artifact_refs: Vec::new(),
     };
-    store.save_timeline_node(testing_node.clone())?;
+    store.save_timeline_node(&attempt, testing_node.clone())?;
 
     let tester_raw = store.save_provider_raw_output(
         &attempt.id,
@@ -429,20 +429,23 @@ fn create_coding_role_run_fixture(
         None,
     )?;
 
-    store.save_chat_entry(&CodingChatEntry {
-        id: "coding_node_0001_tester_report".to_string(),
-        attempt_id: attempt.id.clone(),
-        node_id: Some("coding_node_0001".to_string()),
-        role: CodingAgentRole::Tester,
-        entry_type: CodingEntryType::AssistantMessage,
-        content: Some("fixture tester output".to_string()),
-        metadata: Some(json!({
-            "source": "testing_result",
-            "role_run_id": tester_run.id,
-            "run_no": tester_run.run_no,
-        })),
-        created_at: now.clone(),
-    })?;
+    store.save_chat_entry(
+        &attempt,
+        &CodingChatEntry {
+            id: "coding_node_0001_tester_report".to_string(),
+            attempt_id: attempt.id.clone(),
+            node_id: Some("coding_node_0001".to_string()),
+            role: CodingAgentRole::Tester,
+            entry_type: CodingEntryType::AssistantMessage,
+            content: Some("fixture tester output".to_string()),
+            metadata: Some(json!({
+                "source": "testing_result",
+                "role_run_id": tester_run.id,
+                "run_no": tester_run.run_no,
+            })),
+            created_at: now.clone(),
+        },
+    )?;
 
     if blocked_stage_internal {
         let review_request = ReviewRequest {
@@ -474,7 +477,7 @@ fn create_coding_role_run_fixture(
             completed_at: None,
             artifact_refs: Vec::new(),
         };
-        store.save_timeline_node(internal_node.clone())?;
+        store.save_timeline_node(&attempt, internal_node.clone())?;
 
         let internal_raw = store.save_provider_raw_output(
             &attempt.id,
@@ -516,20 +519,23 @@ fn create_coding_role_run_fixture(
             Some("internal_review_blocked".to_string()),
         )?;
 
-        store.save_chat_entry(&CodingChatEntry {
-            id: "coding_node_0002_internal_review".to_string(),
-            attempt_id: attempt.id.clone(),
-            node_id: Some("coding_node_0002".to_string()),
-            role: CodingAgentRole::Reviewer,
-            entry_type: CodingEntryType::AssistantMessage,
-            content: Some("fixture internal review blocked".to_string()),
-            metadata: Some(json!({
-                "source": "internal_pr_review",
-                "role_run_id": internal_run.id,
-                "run_no": internal_run.run_no,
-            })),
-            created_at: now.clone(),
-        })?;
+        store.save_chat_entry(
+            &attempt,
+            &CodingChatEntry {
+                id: "coding_node_0002_internal_review".to_string(),
+                attempt_id: attempt.id.clone(),
+                node_id: Some("coding_node_0002".to_string()),
+                role: CodingAgentRole::Reviewer,
+                entry_type: CodingEntryType::AssistantMessage,
+                content: Some("fixture internal review blocked".to_string()),
+                metadata: Some(json!({
+                    "source": "internal_pr_review",
+                    "role_run_id": internal_run.id,
+                    "run_no": internal_run.run_no,
+                })),
+                created_at: now.clone(),
+            },
+        )?;
 
         store.create_blocked_gate(CreateBlockedGateInput {
             attempt_id: attempt.id.clone(),
@@ -572,7 +578,7 @@ fn create_coding_role_run_fixture(
             completed_at: None,
             artifact_refs: Vec::new(),
         };
-        store.save_timeline_node(review_node.clone())?;
+        store.save_timeline_node(&attempt, review_node.clone())?;
 
         let review_raw = store.save_provider_raw_output(
             &attempt.id,
@@ -614,20 +620,23 @@ fn create_coding_role_run_fixture(
             Some("code_review_blocked".to_string()),
         )?;
 
-        store.save_chat_entry(&CodingChatEntry {
-            id: "coding_node_0002_code_review".to_string(),
-            attempt_id: attempt.id.clone(),
-            node_id: Some("coding_node_0002".to_string()),
-            role: CodingAgentRole::Reviewer,
-            entry_type: CodingEntryType::AssistantMessage,
-            content: Some("fixture code review blocked".to_string()),
-            metadata: Some(json!({
-                "source": "code_review",
-                "role_run_id": review_run.id,
-                "run_no": review_run.run_no,
-            })),
-            created_at: now.clone(),
-        })?;
+        store.save_chat_entry(
+            &attempt,
+            &CodingChatEntry {
+                id: "coding_node_0002_code_review".to_string(),
+                attempt_id: attempt.id.clone(),
+                node_id: Some("coding_node_0002".to_string()),
+                role: CodingAgentRole::Reviewer,
+                entry_type: CodingEntryType::AssistantMessage,
+                content: Some("fixture code review blocked".to_string()),
+                metadata: Some(json!({
+                    "source": "code_review",
+                    "role_run_id": review_run.id,
+                    "run_no": review_run.run_no,
+                })),
+                created_at: now.clone(),
+            },
+        )?;
 
         store.create_blocked_gate(CreateBlockedGateInput {
             attempt_id: attempt.id.clone(),

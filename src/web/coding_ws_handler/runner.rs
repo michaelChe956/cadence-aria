@@ -13,7 +13,7 @@ use crate::product::coding_workspace_engine::{
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::state::{CodingRunReservation, WebAppState};
+use crate::web::state::{CodingAttemptRunKey, CodingRunReservation, WebAppState};
 
 use super::runner_support::{handle_pending_runner_commands, provider_for};
 use super::{
@@ -45,10 +45,10 @@ pub(crate) fn spawn_coding_runner(
     attempt: CodingExecutionAttempt,
 ) -> Option<mpsc::Sender<CodingRunnerCommand>> {
     let (command_tx, command_rx) = mpsc::channel(32);
-    let registry_attempt_id = attempt.id.clone();
+    let registry_attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     let registry_run_id = state
         .coding_runs
-        .insert(registry_attempt_id.clone(), command_tx.clone())?;
+        .insert(&registry_attempt_key, command_tx.clone())?;
     spawn_coding_runner_task(CodingRunnerTask {
         state,
         coding_store,
@@ -131,13 +131,19 @@ fn spawn_coding_runner_reserved_inner(
     if let Err(error) =
         coding_store.complete_failed_code_review_recovery_journal(&attempt, recovery_gate_id)
     {
-        state.coding_runs.remove(&attempt.id, registry_run_id);
+        state.coding_runs.remove(
+            &CodingAttemptRunKey::from_attempt(&attempt),
+            registry_run_id,
+        );
         drop(start_tx);
         return Err(error.into());
     }
     record_runner_start_event(probe_events.as_ref(), "journal_completed");
     if start_tx.send(()).is_err() {
-        state.coding_runs.remove(&attempt.id, registry_run_id);
+        state.coding_runs.remove(
+            &CodingAttemptRunKey::from_attempt(&attempt),
+            registry_run_id,
+        );
         return Err(CodingWorkspaceEngineError::ProviderStream(
             "coding_recovery_runner_start_failed".to_string(),
         ));
@@ -156,20 +162,20 @@ fn spawn_coding_runner_task(task: CodingRunnerTask) {
         start_rx,
         probe,
     } = task;
-    let registry_attempt_id = attempt.id.clone();
+    let registry_attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     let coding_runs = state.coding_runs.clone();
     tokio::spawn(async move {
         if let Some(start_rx) = start_rx
             && start_rx.await.is_err()
         {
-            coding_runs.remove(&registry_attempt_id, registry_run_id);
+            coding_runs.remove(&registry_attempt_key, registry_run_id);
             return;
         }
         if let Some(probe) = probe {
             record_runner_start_event(Some(&probe.events), "provider_entry");
             let _ = probe.provider_entry_tx.send(());
             if probe.continue_rx.await.is_err() {
-                coding_runs.remove(&registry_attempt_id, registry_run_id);
+                coding_runs.remove(&registry_attempt_key, registry_run_id);
                 return;
             }
         }
@@ -220,7 +226,7 @@ fn spawn_coding_runner_task(task: CodingRunnerTask) {
                     .await;
             }
         }
-        coding_runs.remove(&registry_attempt_id, registry_run_id);
+        coding_runs.remove(&registry_attempt_key, registry_run_id);
     });
 }
 

@@ -287,7 +287,7 @@ impl CodingWorkspaceEngine {
                 "raw_provider_output_ref": plan.raw_provider_output_ref.clone()
             })),
         );
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(&attempt, entry).await;
 
         Ok(ProviderTestingPlanOutcome::Completed(
             ProviderTestingPlanPhase {

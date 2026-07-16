@@ -11,7 +11,7 @@ use crate::product::coding_workspace_engine::{
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::coding_ws_handler::CodingWsInMessage;
 use crate::web::coding_ws_handler::socket::failed_code_review_recovery_request;
-use crate::web::state::CodingRunRegistry;
+use crate::web::state::{CodingAttemptRunKey, CodingRunRegistry};
 
 use super::{CodingWsOutMessage, build_coding_session_state};
 
@@ -508,8 +508,9 @@ async fn failed_review_recovery_journal_records_activation_before_retry_node_exi
         .await
         .expect("recover failed review");
     let registry = CodingRunRegistry::default();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&updated);
     let reservation = registry
-        .try_reserve_attempt(&updated.id)
+        .try_reserve_attempt(&attempt_key)
         .expect("reserve recovered attempt");
     let before_activation = fixture
         .store
@@ -554,7 +555,7 @@ async fn failed_review_recovery_journal_records_activation_before_retry_node_exi
         panic!("expected coding session state");
     };
     assert!(pending_gates.iter().any(|gate| gate.gate_id == gate_id));
-    registry.remove(&fixture.attempt.id, run_id);
+    registry.remove(&attempt_key, run_id);
 }
 
 #[tokio::test]

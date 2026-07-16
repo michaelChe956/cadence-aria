@@ -178,7 +178,7 @@ impl CodingWorkspaceEngine {
                 "raw_provider_output_ref": report.raw_provider_output_ref.clone()
             })),
         );
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(&attempt, entry).await;
         self.store.update_role_run_status(
             &attempt.project_id,
             &attempt.issue_id,

@@ -76,18 +76,21 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
         )
         .expect("code review stage");
     store
-        .save_timeline_node(CodingTimelineNode {
-            id: NODE_ID.to_string(),
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            title: "代码审查".to_string(),
-            status: CodingTimelineNodeStatus::Running,
-            agent_role: Some(CodingAgentRole::Reviewer),
-            summary: None,
-            started_at: "2026-07-12T00:00:00Z".to_string(),
-            completed_at: None,
-            artifact_refs: Vec::new(),
-        })
+        .save_timeline_node(
+            &attempt,
+            CodingTimelineNode {
+                id: NODE_ID.to_string(),
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                title: "代码审查".to_string(),
+                status: CodingTimelineNodeStatus::Running,
+                agent_role: Some(CodingAgentRole::Reviewer),
+                summary: None,
+                started_at: "2026-07-12T00:00:00Z".to_string(),
+                completed_at: None,
+                artifact_refs: Vec::new(),
+            },
+        )
         .expect("code review timeline node");
     store
         .create_role_run(

@@ -34,7 +34,7 @@ use cadence_aria::web::coding_ws_handler::{
     CodingWsInMessage, CodingWsOutMessage, is_coding_ws_message_allowed,
 };
 use cadence_aria::web::runtime::WebRuntime;
-use cadence_aria::web::state::WebAppState;
+use cadence_aria::web::state::{CodingAttemptRunKey, WebAppState};
 use cadence_aria::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot,
 };

@@ -314,14 +314,15 @@ async fn coding_ws_abort_attempt_aborts_all_registered_runners() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let (app, state) = app_with_running_testing_attempt_and_state(root.path());
+    let attempt_key = CodingAttemptRunKey::new(
+        "project_0001",
+        "issue_0001",
+        "coding_attempt_0001",
+    );
     let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
-    state
-        .coding_runs
-        .insert("coding_attempt_0001".to_string(), first_runner_tx);
-    state
-        .coding_runs
-        .insert("coding_attempt_0001".to_string(), second_runner_tx);
+    state.coding_runs.insert(&attempt_key, first_runner_tx);
+    state.coding_runs.insert(&attempt_key, second_runner_tx);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -348,7 +349,7 @@ async fn coding_ws_abort_attempt_aborts_all_registered_runners() {
             .expect("second runner abort"),
         CodingRunnerCommand::AbortAttempt
     );
-    assert_eq!(state.coding_runs.runner_count("coding_attempt_0001"), 0);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
 
     ws.close(None).await.expect("close ws");
     server.abort();

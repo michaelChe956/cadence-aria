@@ -311,7 +311,9 @@ fn store_persists_reports_reviews_and_timeline_for_snapshot_recovery() {
     store
         .save_internal_pr_review(&internal_review)
         .expect("save internal review");
-    store.save_timeline_node(node.clone()).expect("save node");
+    store
+        .save_timeline_node(&attempt, node.clone())
+        .expect("save node");
 
     assert_eq!(
         store
@@ -381,7 +383,7 @@ fn store_persists_context_notes_in_attempt_scope() {
         .expect("create attempt");
 
     let note = store
-        .create_context_note(&attempt.id, "请优先使用 unittest".to_string())
+        .create_context_note(&attempt, "请优先使用 unittest".to_string())
         .expect("create context note");
 
     assert_eq!(
@@ -444,10 +446,14 @@ fn store_lists_chat_entries_by_created_at_not_filename() {
     };
 
     store
-        .save_chat_entry(&later_context_note)
+        .save_chat_entry(&attempt, &later_context_note)
         .expect("save later context note");
-    store.save_chat_entry(&latest).expect("save latest");
-    store.save_chat_entry(&earlier).expect("save earlier");
+    store
+        .save_chat_entry(&attempt, &latest)
+        .expect("save latest");
+    store
+        .save_chat_entry(&attempt, &earlier)
+        .expect("save earlier");
 
     let ids = store
         .list_chat_entries("project_0001", "issue_0001", &attempt.id)
@@ -475,10 +481,10 @@ fn store_lists_unconsumed_context_notes_and_marks_rework_round() {
         .expect("create attempt");
 
     let first = store
-        .create_context_note(&attempt.id, "第一次补充".to_string())
+        .create_context_note(&attempt, "第一次补充".to_string())
         .expect("first context note");
     let second = store
-        .create_context_note(&attempt.id, "第二次补充".to_string())
+        .create_context_note(&attempt, "第二次补充".to_string())
         .expect("second context note");
 
     store
@@ -552,7 +558,7 @@ fn saves_reads_and_consumes_latest_coding_rework_instruction() {
     };
 
     store
-        .save_rework_instruction(&first)
+        .save_rework_instruction(&attempt, &first)
         .expect("save first instruction");
     assert_eq!(
         store
@@ -576,7 +582,7 @@ fn saves_reads_and_consumes_latest_coding_rework_instruction() {
         None
     );
     store
-        .save_rework_instruction(&second)
+        .save_rework_instruction(&attempt, &second)
         .expect("save second instruction");
 
     assert_eq!(

@@ -427,7 +427,7 @@ fn group_attempt_waiting_for_final_confirm() -> (
         .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
         .expect("acquire shared worktree lock");
     store
-        .save_timeline_node(CodingTimelineNode {
+        .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::FinalConfirm,

@@ -7,7 +7,9 @@ use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::state::{CodingAttemptMutationLease, CodingRunRegistry, CodingRunReservation};
+use crate::web::state::{
+    CodingAttemptMutationLease, CodingAttemptRunKey, CodingRunRegistry, CodingRunReservation,
+};
 
 use super::{
     CodingMessageAdmission, CodingWsInMessage, CodingWsOutMessage, coding_message_admission,
@@ -89,8 +91,9 @@ async fn prepare_coding_message_inner(
     }
 
     let (project_id, issue_id, attempt_id) = identity;
-    let attempt_guard = coding_runs.lock_attempt(attempt_id).await;
-    let mutation_lease = coding_runs.lock_attempt_mutation(attempt_id).await;
+    let attempt_key = CodingAttemptRunKey::new(project_id, issue_id, attempt_id);
+    let attempt_guard = coding_runs.lock_attempt(&attempt_key).await;
+    let mutation_lease = coding_runs.lock_attempt_mutation(&attempt_key).await;
     let current_attempt = coding_store
         .get_attempt(project_id, issue_id, attempt_id)
         .map_err(|_| CodingMessagePreparationError::AttemptUnavailable)?;
@@ -107,7 +110,7 @@ async fn prepare_coding_message_inner(
             })
         }
         CodingMessageAdmission::FailedReviewRecovery => {
-            let Some(reservation) = coding_runs.try_reserve_attempt(&current_attempt.id) else {
+            let Some(reservation) = coding_runs.try_reserve_attempt(&attempt_key) else {
                 drop(attempt_guard);
                 return Ok(CodingMessagePreparation::RecoveryAlreadyActive);
             };

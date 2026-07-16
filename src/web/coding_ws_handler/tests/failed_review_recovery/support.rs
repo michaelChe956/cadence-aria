@@ -246,18 +246,21 @@ pub(super) async fn seed_repeated_interrupted_review(
     let second_failed_node_id = "coding_node_0010";
     fixture
         .store
-        .save_timeline_node(CodingTimelineNode {
-            id: second_failed_node_id.to_string(),
-            attempt_id: first_running.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            title: "代码审查".to_string(),
-            status: CodingTimelineNodeStatus::Failed,
-            agent_role: Some(CodingAgentRole::Reviewer),
-            summary: Some("second review provider interrupted".to_string()),
-            started_at: "2026-07-12T04:40:00Z".to_string(),
-            completed_at: Some("2026-07-12T04:40:59Z".to_string()),
-            artifact_refs: Vec::new(),
-        })
+        .save_timeline_node(
+            &first_running,
+            CodingTimelineNode {
+                id: second_failed_node_id.to_string(),
+                attempt_id: first_running.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                title: "代码审查".to_string(),
+                status: CodingTimelineNodeStatus::Failed,
+                agent_role: Some(CodingAgentRole::Reviewer),
+                summary: Some("second review provider interrupted".to_string()),
+                started_at: "2026-07-12T04:40:00Z".to_string(),
+                completed_at: Some("2026-07-12T04:40:59Z".to_string()),
+                artifact_refs: Vec::new(),
+            },
+        )
         .expect("second failed review node");
     fixture
         .store
@@ -420,47 +423,56 @@ pub(super) fn failed_review_fixture(
     }
 
     store
-        .save_timeline_node(CodingTimelineNode {
-            id: "coding_node_0008".to_string(),
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            title: "代码审查".to_string(),
-            status: CodingTimelineNodeStatus::Completed,
-            agent_role: Some(CodingAgentRole::Reviewer),
-            summary: Some("older review".to_string()),
-            started_at: "2026-07-12T04:20:00Z".to_string(),
-            completed_at: Some("2026-07-12T04:21:00Z".to_string()),
-            artifact_refs: Vec::new(),
-        })
-        .expect("older review node");
-    store
-        .save_timeline_node(CodingTimelineNode {
-            id: FAILED_NODE_ID.to_string(),
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            title: "代码审查".to_string(),
-            status: CodingTimelineNodeStatus::Failed,
-            agent_role: Some(CodingAgentRole::Reviewer),
-            summary: Some("review interrupted".to_string()),
-            started_at: "2026-07-12T04:30:00Z".to_string(),
-            completed_at: Some("2026-07-12T04:30:59Z".to_string()),
-            artifact_refs: Vec::new(),
-        })
-        .expect("failed review node");
-    if matches!(case, FixtureCase::LatestReviewCompleted) {
-        store
-            .save_timeline_node(CodingTimelineNode {
-                id: "coding_node_0010".to_string(),
+        .save_timeline_node(
+            &attempt,
+            CodingTimelineNode {
+                id: "coding_node_0008".to_string(),
                 attempt_id: attempt.id.clone(),
                 stage: CodingExecutionStage::CodeReview,
                 title: "代码审查".to_string(),
                 status: CodingTimelineNodeStatus::Completed,
                 agent_role: Some(CodingAgentRole::Reviewer),
-                summary: Some("newer review completed".to_string()),
-                started_at: "2026-07-12T04:31:00Z".to_string(),
-                completed_at: Some("2026-07-12T04:32:00Z".to_string()),
+                summary: Some("older review".to_string()),
+                started_at: "2026-07-12T04:20:00Z".to_string(),
+                completed_at: Some("2026-07-12T04:21:00Z".to_string()),
                 artifact_refs: Vec::new(),
-            })
+            },
+        )
+        .expect("older review node");
+    store
+        .save_timeline_node(
+            &attempt,
+            CodingTimelineNode {
+                id: FAILED_NODE_ID.to_string(),
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                title: "代码审查".to_string(),
+                status: CodingTimelineNodeStatus::Failed,
+                agent_role: Some(CodingAgentRole::Reviewer),
+                summary: Some("review interrupted".to_string()),
+                started_at: "2026-07-12T04:30:00Z".to_string(),
+                completed_at: Some("2026-07-12T04:30:59Z".to_string()),
+                artifact_refs: Vec::new(),
+            },
+        )
+        .expect("failed review node");
+    if matches!(case, FixtureCase::LatestReviewCompleted) {
+        store
+            .save_timeline_node(
+                &attempt,
+                CodingTimelineNode {
+                    id: "coding_node_0010".to_string(),
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::CodeReview,
+                    title: "代码审查".to_string(),
+                    status: CodingTimelineNodeStatus::Completed,
+                    agent_role: Some(CodingAgentRole::Reviewer),
+                    summary: Some("newer review completed".to_string()),
+                    started_at: "2026-07-12T04:31:00Z".to_string(),
+                    completed_at: Some("2026-07-12T04:32:00Z".to_string()),
+                    artifact_refs: Vec::new(),
+                },
+            )
             .expect("newer completed review node");
     }
 

@@ -582,7 +582,7 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
         .await
         .expect("first coding run");
     store
-        .save_rework_instruction(&CodingReworkInstruction {
+        .save_rework_instruction(&attempt, &CodingReworkInstruction {
             id: "coding_rework_instruction_0001".to_string(),
             attempt_id: attempt.id.clone(),
             source_stage: CodingExecutionStage::CodeReview,

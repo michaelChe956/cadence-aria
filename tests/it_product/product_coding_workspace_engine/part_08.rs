@@ -524,7 +524,7 @@ async fn handle_final_confirm_completes_waiting_attempt_and_timeline_node() {
         )
         .expect("set head commit");
     store
-        .save_timeline_node(CodingTimelineNode {
+        .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::FinalConfirm,
@@ -599,7 +599,7 @@ async fn handle_abort_marks_attempt_aborted_and_closes_active_timeline_node() {
         )
         .expect("testing stage");
     store
-        .save_timeline_node(CodingTimelineNode {
+        .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::Testing,

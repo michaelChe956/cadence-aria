@@ -532,19 +532,22 @@ fn code_reviewer_context_pack_includes_coder_evidence() {
         )
         .expect("complete role run");
     store
-        .save_chat_entry(&CodingChatEntry {
-            id: "coding_node_0001_coder_output".to_string(),
-            attempt_id: attempt.id.clone(),
-            node_id: Some("coding_node_0001".to_string()),
-            role: CodingAgentRole::Author,
-            entry_type: CodingEntryType::AssistantMessage,
-            content: Some("执行清单\n验证命令输出: all checks passed".to_string()),
-            metadata: Some(serde_json::json!({
-                "role_run_id": role_run.id,
-                "raw_provider_output_ref": raw_ref,
-            })),
-            created_at: "2026-06-10T00:00:01Z".to_string(),
-        })
+        .save_chat_entry(
+            &attempt,
+            &CodingChatEntry {
+                id: "coding_node_0001_coder_output".to_string(),
+                attempt_id: attempt.id.clone(),
+                node_id: Some("coding_node_0001".to_string()),
+                role: CodingAgentRole::Author,
+                entry_type: CodingEntryType::AssistantMessage,
+                content: Some("执行清单\n验证命令输出: all checks passed".to_string()),
+                metadata: Some(serde_json::json!({
+                    "role_run_id": role_run.id,
+                    "raw_provider_output_ref": raw_ref,
+                })),
+                created_at: "2026-06-10T00:00:01Z".to_string(),
+            },
+        )
         .expect("chat entry");
     store
         .save_work_item_handoff(&WorkItemHandoff {

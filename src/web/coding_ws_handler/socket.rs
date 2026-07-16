@@ -11,7 +11,7 @@ use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::state::WebAppState;
+use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
 use super::{
     CodingWsInMessage, CodingWsOutMessage, build_coding_session_state,
@@ -302,7 +302,10 @@ async fn handle_coding_socket(
                             &current_attempt.id,
                         )
                         .unwrap_or_default();
-                    let aborted_runners = state.coding_runs.abort_attempt(&current_attempt.id).await;
+                    let aborted_runners = state
+                        .coding_runs
+                        .abort_attempt(&CodingAttemptRunKey::from_attempt(&current_attempt))
+                        .await;
                     runner_command_tx = None;
                     runner_started = false;
                     if aborted_runners > 0 && !open_gates.is_empty() {
@@ -633,7 +636,7 @@ async fn handle_coding_socket(
                         .await;
                     }
                 } else if let CodingWsInMessage::ContextNote { content } = inbound {
-                    let note = match coding_store.create_context_note(&current_attempt.id, content)
+                    let note = match coding_store.create_context_note(&current_attempt, content)
                     {
                         Ok(note) => note,
                         Err(error) => {
@@ -665,7 +668,7 @@ async fn handle_coding_socket(
                             continue;
                         }
                     };
-                    let _ = coding_store.save_chat_entry(&entry);
+                    let _ = coding_store.save_chat_entry(&current_attempt, &entry);
                     drop(mutation_lease);
                     if !send_coding_json(
                         &mut socket_tx,

@@ -186,15 +186,16 @@ impl CodingWorkspaceEngine {
                 )
             })?;
         self.store
-            .create_context_note(&current.id, operator_context.clone())?;
+            .create_context_note(current, operator_context.clone())?;
 
         let existing = self.store.list_rework_instructions(
             &current.project_id,
             &current.issue_id,
             &current.id,
         )?;
-        self.store
-            .save_rework_instruction(&CodingReworkInstruction {
+        self.store.save_rework_instruction(
+            current,
+            &CodingReworkInstruction {
                 id: next_sequential_id("coding_rework_instruction", existing.len()),
                 attempt_id: current.id.clone(),
                 source_stage: CodingExecutionStage::CodeReview,
@@ -205,7 +206,8 @@ impl CodingWorkspaceEngine {
                 created_at: Utc::now().to_rfc3339(),
                 consumed_by_node_id: None,
                 consumed_at: None,
-            })?;
+            },
+        )?;
 
         let running = self.store.update_attempt_status(
             &current.project_id,

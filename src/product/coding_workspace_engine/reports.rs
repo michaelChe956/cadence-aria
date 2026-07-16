@@ -228,7 +228,7 @@ impl CodingWorkspaceEngine {
             })),
             created_at: Utc::now().to_rfc3339(),
         };
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 
     pub(crate) async fn emit_internal_pr_review_chat_entry(
@@ -255,11 +255,15 @@ impl CodingWorkspaceEngine {
             })),
             created_at: Utc::now().to_rfc3339(),
         };
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 
-    pub(crate) async fn save_and_emit_chat_entry(&self, entry: CodingChatEntry) {
-        let _ = self.store.save_chat_entry(&entry);
+    pub(crate) async fn save_and_emit_chat_entry(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        entry: CodingChatEntry,
+    ) {
+        let _ = self.store.save_chat_entry(attempt, &entry);
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingChatEntryCreated { entry })
@@ -293,6 +297,6 @@ impl CodingWorkspaceEngine {
             None,
             metadata,
         );
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 }

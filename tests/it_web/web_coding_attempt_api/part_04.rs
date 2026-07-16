@@ -19,6 +19,9 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     let attempt_id = assert_global_attempt_id(&attempt);
 
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let persisted_attempt = store
+        .get_attempt("project_0001", "issue_0001", &attempt_id)
+        .expect("persisted attempt");
     let testing_report = sample_testing_report(&attempt_id);
     let code_review = sample_code_review_report(&attempt_id);
     let review_request = sample_review_request(&attempt_id);
@@ -36,10 +39,10 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
         .save_internal_pr_review(&internal_review)
         .expect("save internal review");
     store
-        .save_timeline_node(sample_completed_node(&attempt_id))
+        .save_timeline_node(&persisted_attempt, sample_completed_node(&attempt_id))
         .expect("save completed node");
     store
-        .save_timeline_node(sample_running_node(&attempt_id))
+        .save_timeline_node(&persisted_attempt, sample_running_node(&attempt_id))
         .expect("save running node");
     store
         .create_choice_gate(CreateChoiceGateInput {
@@ -115,6 +118,9 @@ async fn coding_attempt_snapshot_does_not_reactivate_historical_blocked_node() {
     let attempt_id = assert_global_attempt_id(&attempt);
 
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let persisted_attempt = store
+        .get_attempt("project_0001", "issue_0001", &attempt_id)
+        .expect("persisted attempt");
     let mut blocked_node = sample_running_node(&attempt_id);
     blocked_node.id = "coding_node_0001".to_string();
     blocked_node.status = CodingTimelineNodeStatus::Blocked;
@@ -126,10 +132,10 @@ async fn coding_attempt_snapshot_does_not_reactivate_historical_blocked_node() {
     completed_retry_node.started_at = "2026-05-23T00:04:00Z".to_string();
     completed_retry_node.completed_at = Some("2026-05-23T00:05:00Z".to_string());
     store
-        .save_timeline_node(blocked_node)
+        .save_timeline_node(&persisted_attempt, blocked_node)
         .expect("save blocked node");
     store
-        .save_timeline_node(completed_retry_node)
+        .save_timeline_node(&persisted_attempt, completed_retry_node)
         .expect("save completed retry node");
 
     let (status, snapshot) = request_json(
@@ -223,7 +229,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
         .save_testing_report(&sample_testing_report(&attempt_id))
         .expect("save testing report");
     store
-        .save_timeline_node(sample_running_node(&attempt_id))
+        .save_timeline_node(&attempt, sample_running_node(&attempt_id))
         .expect("save timeline node");
     let attempt_dir = artifact_dir
         .parent()

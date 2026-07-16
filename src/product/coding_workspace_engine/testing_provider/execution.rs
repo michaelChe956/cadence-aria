@@ -418,7 +418,7 @@ impl CodingWorkspaceEngine {
                                     "run_no": role_run.run_no
                                 })),
                             );
-                            self.save_and_emit_chat_entry(entry).await;
+                            self.save_and_emit_chat_entry(&attempt, entry).await;
                             self.record_role_run_event(
                                 &attempt,
                                 Some(&role_run),

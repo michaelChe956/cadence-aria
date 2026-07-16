@@ -34,6 +34,23 @@ impl CodingAttemptStore {
         self.paths.clone()
     }
 
+    fn validate_scoped_attempt_record(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        record_attempt_id: &str,
+        kind: &'static str,
+        record_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        if record_attempt_id != attempt.id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind,
+                id: record_id.to_string(),
+            });
+        }
+        self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        Ok(())
+    }
+
     pub(crate) fn find_attempt_by_id(
         &self,
         attempt_id: &str,

@@ -304,7 +304,7 @@ impl CodingWorkspaceEngine {
             })),
             created_at: completed_at,
         };
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 }
 

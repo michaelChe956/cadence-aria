@@ -77,7 +77,7 @@ impl CodingWorkspaceEngine {
             consumed_by_node_id: None,
             consumed_at: None,
         };
-        self.store.save_rework_instruction(&instruction)?;
+        self.store.save_rework_instruction(&current, &instruction)?;
 
         let running = if current.status == CodingAttemptStatus::Running {
             current
@@ -285,7 +285,7 @@ impl CodingWorkspaceEngine {
             && !content.trim().is_empty()
         {
             self.store
-                .create_context_note(&current.id, content.trim().to_string())?;
+                .create_context_note(current, content.trim().to_string())?;
         }
 
         let review_report = self
@@ -328,7 +328,7 @@ impl CodingWorkspaceEngine {
             consumed_by_node_id: None,
             consumed_at: None,
         };
-        self.store.save_rework_instruction(&instruction)?;
+        self.store.save_rework_instruction(current, &instruction)?;
 
         let running = if current.status == CodingAttemptStatus::Running {
             current.clone()
@@ -378,8 +378,7 @@ impl CodingWorkspaceEngine {
                     "coding_gate_extra_context_required".to_string(),
                 )
             })?;
-        self.store
-            .create_context_note(&current.id, operator_context)?;
+        self.store.create_context_note(current, operator_context)?;
 
         let review_report = self
             .store
@@ -418,7 +417,7 @@ impl CodingWorkspaceEngine {
             consumed_by_node_id: None,
             consumed_at: None,
         };
-        self.store.save_rework_instruction(&instruction)?;
+        self.store.save_rework_instruction(current, &instruction)?;
 
         let running = if current.status == CodingAttemptStatus::Running {
             current.clone()

@@ -243,7 +243,7 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
         )
         .expect("blocked");
     store
-        .save_timeline_node(CodingTimelineNode {
+        .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0009".to_string(),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::CodeReview,
@@ -333,5 +333,216 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
         }
         other => panic!("expected recovered session state, got {other:?}"),
     }
+    server.abort();
+}
+
+#[tokio::test]
+async fn scoped_context_note_updates_only_target_issue_for_legacy_duplicate() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut duplicate = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    duplicate.issue_id = "issue_0002".to_string();
+    store
+        .save_coding_attempt(&duplicate)
+        .expect("duplicate legacy attempt");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+    let url = format!(
+        "ws://{addr}/ws/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001"
+    );
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::ContextNote {
+            content: "只写入 issue_0001".to_string(),
+        },
+    )
+    .await;
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingChatEntryCreated { entry } => {
+            assert_eq!(entry.attempt_id, "coding_attempt_0001");
+            assert_eq!(entry.content.as_deref(), Some("只写入 issue_0001"));
+        }
+        other => panic!("expected target issue chat entry, got {other:?}"),
+    }
+    let target_notes = store
+        .list_context_notes("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("target notes");
+    let other_notes = store
+        .list_context_notes("project_0001", "issue_0002", "coding_attempt_0001")
+        .expect("other notes");
+    let target_entries = store
+        .list_chat_entries("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("target entries");
+    let other_entries = store
+        .list_chat_entries("project_0001", "issue_0002", "coding_attempt_0001")
+        .expect("other entries");
+    assert_eq!(target_notes.len(), 1);
+    assert_eq!(target_entries.len(), 1);
+    assert!(other_notes.is_empty());
+    assert!(other_entries.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn scoped_start_coding_persists_target_timeline_without_partial_state() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut duplicate = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    duplicate.issue_id = "issue_0002".to_string();
+    store
+        .save_coding_attempt(&duplicate)
+        .expect("duplicate legacy attempt");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+    let url = format!(
+        "ws://{addr}/ws/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001"
+    );
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut saw_stage_change = false;
+    let mut saw_timeline_node = false;
+    for _ in 0..4 {
+        let Ok(message) = timeout(Duration::from_millis(500), recv_json(&mut ws)).await else {
+            break;
+        };
+        match message {
+            CodingWsOutMessage::CodingStageChange {
+                stage: CodingExecutionStage::WorktreePrepare,
+            } => saw_stage_change = true,
+            CodingWsOutMessage::CodingTimelineNodeCreated { node }
+                if node.stage == CodingExecutionStage::WorktreePrepare
+                    && node.status == CodingTimelineNodeStatus::Running =>
+            {
+                saw_timeline_node = true;
+            }
+            _ => {}
+        }
+        if saw_stage_change && saw_timeline_node {
+            break;
+        }
+    }
+
+    let target = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("target attempt");
+    let other = store
+        .get_attempt("project_0001", "issue_0002", "coding_attempt_0001")
+        .expect("other attempt");
+    let target_nodes = store
+        .get_timeline_nodes("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("target nodes");
+    let other_nodes = store
+        .get_timeline_nodes("project_0001", "issue_0002", "coding_attempt_0001")
+        .expect("other nodes");
+    assert_eq!(
+        (target.status.clone(), target.stage.clone(), target_nodes.len()),
+        (
+            CodingAttemptStatus::Running,
+            CodingExecutionStage::WorktreePrepare,
+            1,
+        ),
+        "target attempt must not persist a stage transition without its timeline node",
+    );
+    assert!(saw_stage_change, "expected scoped stage change");
+    assert!(saw_timeline_node, "expected scoped timeline node");
+    assert_eq!(target_nodes[0].stage, CodingExecutionStage::WorktreePrepare);
+    assert_eq!(other.status, CodingAttemptStatus::Created);
+    assert_eq!(other.stage, CodingExecutionStage::PrepareContext);
+    assert!(other_nodes.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn scoped_abort_notifies_only_target_issue_runner_for_legacy_duplicate() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let _setup = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut duplicate = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    duplicate.issue_id = "issue_0002".to_string();
+    store
+        .save_coding_attempt(&duplicate)
+        .expect("duplicate legacy attempt");
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let first_key = CodingAttemptRunKey::new(
+        "project_0001",
+        "issue_0001",
+        "coding_attempt_0001",
+    );
+    let second_key = CodingAttemptRunKey::new(
+        "project_0001",
+        "issue_0002",
+        "coding_attempt_0001",
+    );
+    let (first_tx, mut first_rx) = mpsc::channel(1);
+    let (second_tx, mut second_rx) = mpsc::channel(1);
+    state
+        .coding_runs
+        .insert(&first_key, first_tx)
+        .expect("first runner");
+    state
+        .coding_runs
+        .insert(&second_key, second_tx)
+        .expect("second runner");
+    let app = build_web_router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+    let url = format!(
+        "ws://{addr}/ws/projects/project_0001/issues/issue_0002/coding-attempts/coding_attempt_0001"
+    );
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    send_json(&mut ws, &CodingWsInMessage::AbortAttempt).await;
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), second_rx.recv())
+            .await
+            .expect("target runner abort timeout")
+            .expect("target runner abort"),
+        CodingRunnerCommand::AbortAttempt,
+    );
+    assert!(first_rx.try_recv().is_err());
+    assert_eq!(state.coding_runs.runner_count(&first_key), 1);
+    assert_eq!(state.coding_runs.runner_count(&second_key), 0);
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let target = store
+                .get_attempt("project_0001", "issue_0002", "coding_attempt_0001")
+                .expect("target attempt");
+            if target.status == CodingAttemptStatus::Aborted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("target attempt abort timeout");
+    let untouched = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("untouched attempt");
+    assert_eq!(untouched.status, CodingAttemptStatus::Created);
     server.abort();
 }
