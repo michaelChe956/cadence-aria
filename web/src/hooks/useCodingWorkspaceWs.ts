@@ -280,6 +280,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
       };
 
       ws.onmessage = (event) => {
+        if (disposed || wsRef.current !== ws) return;
         try {
           handleCodingWsMessage(JSON.parse(event.data) as CodingWsServerMessage, streamBatcher);
         } catch {

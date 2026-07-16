@@ -14,6 +14,12 @@ import {
 describe("useCodingWorkspaceWs inbound events", () => {
   installCodingWorkspaceWsTestHooks();
 
+  const SECOND_CODING_ATTEMPT_ADDRESS = {
+    projectId: "project_0002",
+    issueId: "issue_0002",
+    attemptId: "coding_attempt_0002",
+  } as const;
+
   it("connects to the coding attempt websocket and sends hello on open", () => {
     const harness = renderCodingHook();
 
@@ -74,6 +80,85 @@ describe("useCodingWorkspaceWs inbound events", () => {
     expect(harness.latestWs.url).toBe(
       "ws://localhost:3000/ws/projects/project_0002/issues/issue_0002/coding-attempts/coding_attempt_0002",
     );
+  });
+
+  it("ignores a previous socket session state after switching address", () => {
+    const harness = renderCodingHook();
+    const previousWs = harness.ws;
+
+    harness.rerenderAddress(SECOND_CODING_ATTEMPT_ADDRESS);
+    act(() => {
+      previousWs.receive(codingSessionState());
+    });
+
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: null,
+      issueId: null,
+      attemptId: null,
+      status: null,
+    });
+  });
+
+  it("ignores previous socket timeline messages after the new session loads", () => {
+    const harness = renderCodingHook();
+    const previousWs = harness.ws;
+
+    harness.rerenderAddress(SECOND_CODING_ATTEMPT_ADDRESS);
+    act(() => {
+      harness.latestWs.receive(
+        codingSessionState({
+          project_id: "project_0002",
+          issue_id: "issue_0002",
+          attempt_id: "coding_attempt_0002",
+          timeline_nodes: [],
+        }),
+      );
+      previousWs.receive({
+        type: "coding_timeline_node_created",
+        node: {
+          id: "coding_node_from_previous_socket",
+          attempt_id: "coding_attempt_0001",
+          stage: "coding",
+          title: "旧 Attempt 消息",
+          status: "running",
+          agent_role: "author",
+          summary: null,
+          started_at: "2026-07-16T00:00:00Z",
+          completed_at: null,
+          artifact_refs: [],
+        },
+      });
+    });
+
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: "project_0002",
+      issueId: "issue_0002",
+      attemptId: "coding_attempt_0002",
+      timelineNodes: [],
+    });
+  });
+
+  it("accepts current socket messages after switching address", () => {
+    const harness = renderCodingHook();
+
+    harness.rerenderAddress(SECOND_CODING_ATTEMPT_ADDRESS);
+    act(() => {
+      harness.latestWs.receive(
+        codingSessionState({
+          project_id: "project_0002",
+          issue_id: "issue_0002",
+          attempt_id: "coding_attempt_0002",
+          status: "waiting_for_human",
+        }),
+      );
+    });
+
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: "project_0002",
+      issueId: "issue_0002",
+      attemptId: "coding_attempt_0002",
+      status: "waiting_for_human",
+    });
   });
 
   it("applies coding session state and timeline updates from websocket messages", () => {
