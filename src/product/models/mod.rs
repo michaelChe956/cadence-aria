@@ -1,8 +1,10 @@
 pub mod lifecycle;
 pub mod outline;
+pub mod plan_repair;
 pub mod project;
 pub mod provider;
 pub mod verification;
+pub mod work_item_revision;
 pub mod workspace;
 
 #[cfg(test)]
@@ -10,7 +12,9 @@ pub mod tests;
 
 pub use lifecycle::*;
 pub use outline::*;
+pub use plan_repair::*;
 pub use project::*;
 pub use provider::*;
 pub use verification::*;
+pub use work_item_revision::*;
 pub use workspace::*;
