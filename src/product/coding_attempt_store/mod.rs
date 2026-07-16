@@ -54,9 +54,10 @@ impl CodingAttemptStore {
                     continue;
                 }
                 if found.is_some() {
-                    return Err(ProductStoreError::Io(format!(
-                        "coding_attempt_ambiguous: {attempt_id}"
-                    )));
+                    return Err(ProductStoreError::Ambiguous {
+                        kind: "coding_attempt",
+                        id: attempt_id.to_string(),
+                    });
                 }
                 found = Some(read_json(&path)?);
             }

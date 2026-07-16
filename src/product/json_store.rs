@@ -12,6 +12,10 @@ pub enum ProductStoreError {
     Json(String),
     #[error("product_store_not_found: {kind} {id}")]
     NotFound { kind: &'static str, id: String },
+    #[error("product_store_ambiguous: {kind} {id}")]
+    Ambiguous { kind: &'static str, id: String },
+    #[error("product_store_identity_mismatch: {kind} {id}")]
+    IdentityMismatch { kind: &'static str, id: String },
     #[error("product_store_path_escape: {0}")]
     PathEscape(String),
 }

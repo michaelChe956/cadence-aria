@@ -70,7 +70,7 @@ impl super::CodingAttemptStore {
             )));
         }
 
-        let id = self.allocate_coding_attempt_id(&input.project_id, &input.issue_id)?;
+        let id = self.allocate_coding_attempt_id();
         let attempt_no = self
             .list_attempts_for_work_item(
                 &input.project_id,

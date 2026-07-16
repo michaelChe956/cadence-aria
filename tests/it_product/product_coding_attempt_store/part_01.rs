@@ -20,6 +20,7 @@ use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::{
     ProviderConversationRef, ProviderConversationRole, ProviderName,
 };
+use cadence_aria::product::json_store::ProductStoreError;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
 use tempfile::tempdir;
 
@@ -31,7 +32,7 @@ fn create_attempt_assigns_attempt_number_and_blocks_active_attempts() {
     let first = store
         .create_attempt(create_input("work_item_0001"))
         .expect("create first attempt");
-    assert_eq!(first.id, "coding_attempt_0001");
+    assert_global_coding_attempt_id(&first.id);
     assert_eq!(first.attempt_no, 1);
     assert_eq!(first.status, CodingAttemptStatus::Created);
     assert_eq!(first.stage, CodingExecutionStage::PrepareContext);
@@ -82,8 +83,107 @@ fn create_attempt_assigns_attempt_number_and_blocks_active_attempts() {
     let second = store
         .create_attempt(create_input("work_item_0001"))
         .expect("create second attempt after terminal status");
-    assert_eq!(second.id, "coding_attempt_0002");
+    assert_global_coding_attempt_id(&second.id);
+    assert_ne!(first.id, second.id);
     assert_eq!(second.attempt_no, 2);
+}
+
+#[test]
+fn coding_attempt_ids_are_global_across_issues() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+
+    let first = store
+        .create_attempt(create_input_for(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+        ))
+        .expect("first attempt");
+    let second = store
+        .create_attempt(create_input_for(
+            "project_0001",
+            "issue_0002",
+            "work_item_0001",
+        ))
+        .expect("second attempt");
+
+    assert_global_coding_attempt_id(&first.id);
+    assert_global_coding_attempt_id(&second.id);
+    assert_ne!(first.id, second.id);
+}
+
+#[test]
+fn scoped_lookup_reads_duplicate_legacy_ids_and_global_lookup_is_ambiguous() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let template = store
+        .create_attempt(create_input("template_work_item"))
+        .expect("template attempt");
+
+    let mut first = template.clone();
+    first.id = "coding_attempt_0001".to_string();
+    first.issue_id = "issue_0001".to_string();
+    first.work_item_id = "work_item_issue_1".to_string();
+    store
+        .save_coding_attempt(&first)
+        .expect("save first legacy attempt");
+
+    let mut second = first.clone();
+    second.issue_id = "issue_0002".to_string();
+    second.work_item_id = "work_item_issue_2".to_string();
+    store
+        .save_coding_attempt(&second)
+        .expect("save second legacy attempt");
+
+    assert_eq!(
+        store
+            .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("first scoped attempt")
+            .work_item_id,
+        "work_item_issue_1"
+    );
+    assert_eq!(
+        store
+            .get_attempt("project_0001", "issue_0002", "coding_attempt_0001")
+            .expect("second scoped attempt")
+            .work_item_id,
+        "work_item_issue_2"
+    );
+    assert!(matches!(
+        store.get_attempt_by_id("coding_attempt_0001"),
+        Err(ProductStoreError::Ambiguous {
+            kind: "coding_attempt",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn scoped_lookup_rejects_record_identity_mismatch() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let store = CodingAttemptStore::new(paths);
+    let attempt = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("attempt");
+    let mismatch_path = root.path().join(
+        ".aria/projects/project_0001/issues/issue_0002/coding-attempts/coding_attempt_legacy.json",
+    );
+    std::fs::create_dir_all(mismatch_path.parent().expect("parent")).expect("create parent");
+    std::fs::write(
+        &mismatch_path,
+        serde_json::to_string_pretty(&attempt).expect("serialize attempt"),
+    )
+    .expect("write mismatch");
+
+    assert!(matches!(
+        store.get_attempt("project_0001", "issue_0002", "coding_attempt_legacy"),
+        Err(ProductStoreError::IdentityMismatch {
+            kind: "coding_attempt",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -94,13 +194,7 @@ fn create_attempt_does_not_reuse_id_after_delete() {
     let first = store
         .create_attempt(create_input("work_item_0001"))
         .expect("create first attempt");
-    assert_eq!(first.id, "coding_attempt_0001");
-    std::fs::remove_file(
-        root.path().join(
-            ".aria/projects/project_0001/issues/issue_0001/coding-attempts/.meta/coding-attempt-sequence.json",
-        ),
-    )
-    .expect("remove legacy-missing sequence");
+    assert_global_coding_attempt_id(&first.id);
     store
         .delete_attempt("project_0001", "issue_0001", &first.id)
         .expect("delete first attempt");
@@ -109,7 +203,8 @@ fn create_attempt_does_not_reuse_id_after_delete() {
         .create_attempt(create_input("work_item_0001"))
         .expect("create second attempt");
 
-    assert_eq!(second.id, "coding_attempt_0002");
+    assert_global_coding_attempt_id(&second.id);
+    assert_ne!(first.id, second.id);
     assert_eq!(second.attempt_no, 1);
 }
 
@@ -121,13 +216,7 @@ fn create_group_attempt_does_not_reuse_id_after_delete() {
     let first = store
         .create_group_attempt(group_create_input("work_item_0001"))
         .expect("create first group attempt");
-    assert_eq!(first.id, "coding_attempt_0001");
-    std::fs::remove_file(
-        root.path().join(
-            ".aria/projects/project_0001/issues/issue_0001/coding-attempts/.meta/coding-attempt-sequence.json",
-        ),
-    )
-    .expect("remove legacy-missing sequence");
+    assert_global_coding_attempt_id(&first.id);
     store
         .delete_attempt("project_0001", "issue_0001", &first.id)
         .expect("delete first group attempt");
@@ -136,7 +225,8 @@ fn create_group_attempt_does_not_reuse_id_after_delete() {
         .create_group_attempt(group_create_input("work_item_0001"))
         .expect("create second group attempt");
 
-    assert_eq!(second.id, "coding_attempt_0002");
+    assert_global_coding_attempt_id(&second.id);
+    assert_ne!(first.id, second.id);
     assert_eq!(second.attempt_no, 1);
 }
 

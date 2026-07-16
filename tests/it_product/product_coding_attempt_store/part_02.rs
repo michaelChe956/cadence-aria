@@ -110,12 +110,20 @@ fn status_and_stage_transitions_reject_invalid_backwards_moves() {
 }
 
 fn create_input(work_item_id: &str) -> CreateCodingAttemptInput {
+    create_input_for("project_0001", "issue_0001", work_item_id)
+}
+
+fn create_input_for(
+    project_id: &str,
+    issue_id: &str,
+    work_item_id: &str,
+) -> CreateCodingAttemptInput {
     CreateCodingAttemptInput {
-        project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
+        project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
         work_item_id: work_item_id.to_string(),
         base_branch: "main".to_string(),
-        branch_name: format!("aria/work-items/{work_item_id}/attempt-1"),
+        branch_name: format!("aria/issues/{issue_id}"),
         worktree_path: None,
         provider_config_snapshot: ProviderConfigSnapshot {
             author: ProviderName::Fake,
@@ -124,6 +132,14 @@ fn create_input(work_item_id: &str) -> CreateCodingAttemptInput {
         },
         max_auto_rework: 2,
     }
+}
+
+fn assert_global_coding_attempt_id(id: &str) {
+    let uuid = id
+        .strip_prefix("coding_attempt_")
+        .expect("coding attempt prefix");
+    assert_eq!(uuid.len(), 32);
+    uuid::Uuid::parse_str(uuid).expect("valid UUID coding attempt id");
 }
 
 fn group_create_input(current_work_item_id: &str) -> CreateGroupCodingAttemptInput {
