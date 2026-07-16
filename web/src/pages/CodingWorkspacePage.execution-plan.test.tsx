@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -13,6 +13,7 @@ import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
   CODING_ATTEMPT_ADDRESS,
   DEFAULT_PERMISSION_MODES,
+  deferred,
   executionPlan,
   installCodingWorkspacePageTestHooks,
   mockCodingWs,
@@ -71,6 +72,12 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 describe("CodingWorkspacePage execution plan", () => {
   installCodingWorkspacePageTestHooks();
+
+  const OTHER_SCOPE_SAME_ATTEMPT_ADDRESS = {
+    projectId: "project_0002",
+    issueId: "issue_0002",
+    attemptId: CODING_ATTEMPT_ADDRESS.attemptId,
+  } as const;
 
   it("opens role run history in a drawer instead of constraining the conversation column", async () => {
     mockCodingWs();
@@ -290,5 +297,177 @@ describe("CodingWorkspacePage execution plan", () => {
 
     expect(screen.getByText("change failed")).toBeInTheDocument();
     expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe("draft");
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores a stale execution plan confirm %s after switching the full address",
+    async (outcome) => {
+      const user = userEvent.setup();
+      mockCodingWs();
+      const pending = deferred<Awaited<ReturnType<typeof confirmWorkItemExecutionPlan>>>();
+      vi.mocked(confirmWorkItemExecutionPlan).mockReturnValue(pending.promise);
+      const planA = executionPlan({ status: "draft", goal: "A plan" });
+      const planB = executionPlan({
+        id: "work_item_execution_plan_b",
+        project_id: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.projectId,
+        issue_id: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.issueId,
+        attempt_id: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.attemptId,
+        status: "draft",
+        goal: "B plan",
+      });
+      useCodingWorkspaceStore.setState({
+        ...readyCodingState(),
+        requireExecutionPlanConfirm: true,
+        workItemExecutionPlan: planA,
+      });
+      const view = render(
+        <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "确认执行计划" }));
+      useCodingWorkspaceStore.setState({
+        ...readyCodingState(),
+        projectId: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.projectId,
+        issueId: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.issueId,
+        attemptId: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.attemptId,
+        requireExecutionPlanConfirm: true,
+        workItemExecutionPlan: planB,
+      });
+      view.rerender(
+        <CodingWorkspacePage address={OTHER_SCOPE_SAME_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+      );
+
+      await act(async () => {
+        if (outcome === "resolve") {
+          pending.resolve(executionPlan({ status: "confirmed", goal: "stale A result" }));
+        } else {
+          pending.reject(new Error("stale A confirm error"));
+        }
+        await pending.promise.catch(() => undefined);
+      });
+
+      const state = useCodingWorkspaceStore.getState();
+      expect(state.projectId).toBe(OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.projectId);
+      expect(state.issueId).toBe(OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.issueId);
+      expect(state.workItemExecutionPlan).toEqual(planB);
+      expect(screen.queryByText("stale A result")).not.toBeInTheDocument();
+      expect(screen.queryByText("stale A confirm error")).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores a stale execution plan change %s after switching the full address",
+    async (outcome) => {
+      const user = userEvent.setup();
+      mockCodingWs();
+      const pending = deferred<Awaited<ReturnType<typeof requestWorkItemExecutionPlanChange>>>();
+      vi.mocked(requestWorkItemExecutionPlanChange).mockReturnValue(pending.promise);
+      const planA = executionPlan({ status: "draft", goal: "A plan" });
+      const planB = executionPlan({
+        id: "work_item_execution_plan_b",
+        project_id: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.projectId,
+        issue_id: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.issueId,
+        attempt_id: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.attemptId,
+        status: "draft",
+        goal: "B plan",
+      });
+      useCodingWorkspaceStore.setState({
+        ...readyCodingState(),
+        requireExecutionPlanConfirm: true,
+        workItemExecutionPlan: planA,
+      });
+      const view = render(
+        <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+      );
+
+      await user.type(screen.getByLabelText("修改说明"), "A change");
+      await user.click(screen.getByRole("button", { name: "请求修改" }));
+      useCodingWorkspaceStore.setState({
+        ...readyCodingState(),
+        projectId: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.projectId,
+        issueId: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.issueId,
+        attemptId: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.attemptId,
+        requireExecutionPlanConfirm: true,
+        workItemExecutionPlan: planB,
+      });
+      view.rerender(
+        <CodingWorkspacePage address={OTHER_SCOPE_SAME_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+      );
+
+      await act(async () => {
+        if (outcome === "resolve") {
+          pending.resolve(
+            executionPlan({ status: "change_requested", goal: "stale A result" }),
+          );
+        } else {
+          pending.reject(new Error("stale A change error"));
+        }
+        await pending.promise.catch(() => undefined);
+      });
+
+      const state = useCodingWorkspaceStore.getState();
+      expect(state.projectId).toBe(OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.projectId);
+      expect(state.issueId).toBe(OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.issueId);
+      expect(state.workItemExecutionPlan).toEqual(planB);
+      expect(screen.queryByText("stale A result")).not.toBeInTheDocument();
+      expect(screen.queryByText("stale A change error")).not.toBeInTheDocument();
+    },
+  );
+
+  it("keeps the current address confirm busy when an older confirm settles", async () => {
+    const user = userEvent.setup();
+    mockCodingWs();
+    const pendingA = deferred<Awaited<ReturnType<typeof confirmWorkItemExecutionPlan>>>();
+    const pendingB = deferred<Awaited<ReturnType<typeof confirmWorkItemExecutionPlan>>>();
+    vi.mocked(confirmWorkItemExecutionPlan)
+      .mockReturnValueOnce(pendingA.promise)
+      .mockReturnValueOnce(pendingB.promise);
+    const planB = executionPlan({
+      id: "work_item_execution_plan_b",
+      project_id: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.projectId,
+      issue_id: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.issueId,
+      attempt_id: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.attemptId,
+      status: "draft",
+      goal: "B plan",
+    });
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      requireExecutionPlanConfirm: true,
+      workItemExecutionPlan: executionPlan({ status: "draft", goal: "A plan" }),
+    });
+    const view = render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+    await user.click(screen.getByRole("button", { name: "确认执行计划" }));
+
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      projectId: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.projectId,
+      issueId: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.issueId,
+      attemptId: OTHER_SCOPE_SAME_ATTEMPT_ADDRESS.attemptId,
+      requireExecutionPlanConfirm: true,
+      workItemExecutionPlan: planB,
+    });
+    view.rerender(
+      <CodingWorkspacePage address={OTHER_SCOPE_SAME_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+    const confirmButton = screen.getByRole("button", { name: "确认执行计划" });
+    await waitFor(() => expect(confirmButton).toBeEnabled());
+    await user.click(confirmButton);
+    expect(confirmButton).toBeDisabled();
+
+    await act(async () => {
+      pendingA.resolve(executionPlan({ status: "confirmed", goal: "stale A result" }));
+      await pendingA.promise;
+    });
+    expect(confirmButton).toBeDisabled();
+    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan).toEqual(planB);
+
+    const confirmedPlanB = { ...planB, status: "confirmed" as const };
+    await act(async () => {
+      pendingB.resolve(confirmedPlanB);
+      await pendingB.promise;
+    });
+    expect(useCodingWorkspaceStore.getState().workItemExecutionPlan).toEqual(confirmedPlanB);
   });
 });

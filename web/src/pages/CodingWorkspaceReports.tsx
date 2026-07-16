@@ -1,5 +1,5 @@
 import { Check } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   confirmWorkItemExecutionPlan,
   requestWorkItemExecutionPlanChange,
@@ -331,18 +331,60 @@ export function PrepareExecutionPlanPanel({
 }) {
   const [busy, setBusy] = useState(false);
   const [changeNote, setChangeNote] = useState("");
+  const addressKey = JSON.stringify([address.projectId, address.issueId, address.attemptId]);
+  const addressKeyRef = useRef(addressKey);
+  const requestGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  if (addressKeyRef.current !== addressKey) {
+    addressKeyRef.current = addressKey;
+    requestGenerationRef.current += 1;
+  }
   const showActions = requireConfirm && plan.status !== "confirmed";
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestGenerationRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    setBusy(false);
+    setChangeNote("");
+  }, [addressKey]);
+
+  function isCurrentRequest(requestAddressKey: string, requestGeneration: number) {
+    return (
+      mountedRef.current &&
+      addressKeyRef.current === requestAddressKey &&
+      requestGenerationRef.current === requestGeneration
+    );
+  }
+
   async function handleConfirm() {
+    const requestAddress = { ...address };
+    const requestAddressKey = addressKey;
+    const requestGeneration = requestGenerationRef.current + 1;
+    requestGenerationRef.current = requestGeneration;
     setBusy(true);
     onError(null);
     try {
-      const updated = await confirmWorkItemExecutionPlan(address);
-      useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
+      const updated = await confirmWorkItemExecutionPlan(requestAddress);
+      if (
+        isCurrentRequest(requestAddressKey, requestGeneration) &&
+        codingWorkspaceStoreMatchesAddress(requestAddress)
+      ) {
+        useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
+      }
     } catch (reason) {
-      onError(errorMessage(reason, "确认执行计划失败"));
+      if (isCurrentRequest(requestAddressKey, requestGeneration)) {
+        onError(errorMessage(reason, "确认执行计划失败"));
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentRequest(requestAddressKey, requestGeneration)) {
+        setBusy(false);
+      }
     }
   }
 
@@ -352,16 +394,29 @@ export function PrepareExecutionPlanPanel({
       onError("请填写修改说明");
       return;
     }
+    const requestAddress = { ...address };
+    const requestAddressKey = addressKey;
+    const requestGeneration = requestGenerationRef.current + 1;
+    requestGenerationRef.current = requestGeneration;
     setBusy(true);
     onError(null);
     try {
-      const updated = await requestWorkItemExecutionPlanChange(address, { note });
-      useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
-      setChangeNote("");
+      const updated = await requestWorkItemExecutionPlanChange(requestAddress, { note });
+      if (
+        isCurrentRequest(requestAddressKey, requestGeneration) &&
+        codingWorkspaceStoreMatchesAddress(requestAddress)
+      ) {
+        useCodingWorkspaceStore.setState({ workItemExecutionPlan: updated });
+        setChangeNote("");
+      }
     } catch (reason) {
-      onError(errorMessage(reason, "请求修改执行计划失败"));
+      if (isCurrentRequest(requestAddressKey, requestGeneration)) {
+        onError(errorMessage(reason, "请求修改执行计划失败"));
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentRequest(requestAddressKey, requestGeneration)) {
+        setBusy(false);
+      }
     }
   }
 
@@ -434,6 +489,15 @@ export function PrepareExecutionPlanPanel({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function codingWorkspaceStoreMatchesAddress(address: CodingAttemptAddress) {
+  const state = useCodingWorkspaceStore.getState();
+  return (
+    state.projectId === address.projectId &&
+    state.issueId === address.issueId &&
+    state.attemptId === address.attemptId
   );
 }
 

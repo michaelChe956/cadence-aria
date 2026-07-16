@@ -46,6 +46,14 @@ export function CodingWorkspacePage({
   const [planError, setPlanError] = useState<string | null>(null);
   const [activeDrawer, setActiveDrawer] = useState<CodingWorkspaceDrawer | null>(null);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
+  const addressKey = JSON.stringify([address.projectId, address.issueId, address.attemptId]);
+  const addressKeyRef = useRef(addressKey);
+  const deleteGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  if (addressKeyRef.current !== addressKey) {
+    addressKeyRef.current = addressKey;
+    deleteGenerationRef.current += 1;
+  }
   const pageError = planError ?? deleteError;
   const providerSummary = store.roleProviderConfigSnapshot
     ? `Coder ${store.roleProviderConfigSnapshot.coder} · Reviewer ${store.roleProviderConfigSnapshot.code_reviewer}`
@@ -63,6 +71,28 @@ export function CodingWorkspacePage({
     message: "Coding attempt 运行中。刷新/关闭可能中断当前操作，是否继续？",
   });
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      deleteGenerationRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    setDeleteBusy(false);
+    setDeleteError(null);
+    setPlanError(null);
+  }, [addressKey]);
+
+  function isCurrentDeleteRequest(requestAddressKey: string, requestGeneration: number) {
+    return (
+      mountedRef.current &&
+      addressKeyRef.current === requestAddressKey &&
+      deleteGenerationRef.current === requestGeneration
+    );
+  }
+
   async function handleDeleteCodingWorkspace() {
     if (!storeMatchesAddress) {
       return;
@@ -75,15 +105,25 @@ export function CodingWorkspacePage({
       return;
     }
 
+    const requestAddress = { ...address };
+    const requestAddressKey = addressKey;
+    const requestGeneration = deleteGenerationRef.current + 1;
+    deleteGenerationRef.current = requestGeneration;
     setDeleteBusy(true);
     setDeleteError(null);
     try {
-      await deleteCodingAttempt(address);
-      onBack();
+      await deleteCodingAttempt(requestAddress);
+      if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
+        onBack();
+      }
     } catch (reason) {
-      setDeleteError(errorMessage(reason, "删除 Coding Workspace 失败"));
+      if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
+        setDeleteError(errorMessage(reason, "删除 Coding Workspace 失败"));
+      }
     } finally {
-      setDeleteBusy(false);
+      if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
+        setDeleteBusy(false);
+      }
     }
   }
 

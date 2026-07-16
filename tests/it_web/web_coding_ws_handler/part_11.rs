@@ -77,6 +77,58 @@ async fn legacy_coding_ws_reports_ambiguous_instead_of_not_found() {
 }
 
 #[tokio::test]
+async fn legacy_coding_ws_reports_scope_mismatch_for_unique_corrupt_alias() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0002".to_string(),
+            issue_id: "issue_0002".to_string(),
+            work_item_id: "work_item_0002".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0002".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("real attempt");
+    let corrupt_alias_id = "coding_attempt_corrupt_alias";
+    let corrupt_alias_path = root.path().join(format!(
+        ".aria/projects/project_0001/issues/issue_0001/coding-attempts/{corrupt_alias_id}.json"
+    ));
+    fs::create_dir_all(corrupt_alias_path.parent().expect("parent"))
+        .expect("create alias parent");
+    fs::write(
+        corrupt_alias_path,
+        serde_json::to_vec_pretty(&attempt).expect("serialize attempt"),
+    )
+    .expect("write corrupt alias");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let (mut ws, _) = connect_async(format!("ws://{addr}/ws/coding-attempts/{corrupt_alias_id}"))
+        .await
+        .expect("connect ws");
+
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingProtocolError { code, .. } => {
+            assert_eq!(code, "coding_attempt_scope_mismatch");
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn scoped_coding_ws_reports_not_found_for_missing_attempt() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");

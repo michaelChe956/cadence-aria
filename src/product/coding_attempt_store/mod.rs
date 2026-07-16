@@ -1,6 +1,6 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::CodingExecutionAttempt;
-use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id};
+use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
 mod attempt;
 mod context;
@@ -76,13 +76,14 @@ impl CodingAttemptStore {
                         id: attempt_id.to_string(),
                     });
                 }
-                found = Some(read_json(&path)?);
+                found = Some((project_id.to_string(), issue_id.to_string()));
             }
         }
-        found.ok_or_else(|| ProductStoreError::NotFound {
+        let (project_id, issue_id) = found.ok_or_else(|| ProductStoreError::NotFound {
             kind: "coding_attempt",
             id: attempt_id.to_string(),
-        })
+        })?;
+        self.get_attempt(&project_id, &issue_id, attempt_id)
     }
 }
 

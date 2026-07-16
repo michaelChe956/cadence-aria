@@ -18,6 +18,16 @@ export const DEFAULT_PERMISSION_MODES = {
   internal_reviewer: "supervised",
 } as const;
 
+export function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   const api: CodingWsApi = {
     startCoding: vi.fn(),
