@@ -10,6 +10,7 @@ fn valid_outline_author_output() -> serde_json::Value {
             "work_item_outlines": [
                 {
                     "outline_id": "outline_backend",
+                    "logical_work_item_id": "wi_backend",
                     "title": "后端 API",
                     "kind": "backend",
                     "goal": "实现 API",
@@ -27,6 +28,7 @@ fn valid_outline_author_output() -> serde_json::Value {
                 },
                 {
                     "outline_id": "outline_frontend",
+                    "logical_work_item_id": "wi_frontend",
                     "title": "前端 UI",
                     "kind": "frontend",
                     "goal": "接入 API",
@@ -52,35 +54,12 @@ fn valid_outline_author_output() -> serde_json::Value {
 }
 
 fn valid_work_item_draft_candidate_json(outline_id: &str) -> serde_json::Value {
-    serde_json::json!({
-        "outline_id": outline_id,
-        "title": "后端 API",
-        "kind": "backend",
-        "goal": "实现 API",
-        "implementation_context": "实现 API handler 与 product service。",
-        "exclusive_write_scopes": ["src/product/**"],
-        "forbidden_write_scopes": ["web/**"],
-        "depends_on_outline_ids": [],
-        "required_handoff_from_outline_ids": [],
-        "handoff_summary": "输出 SessionStatusDto",
-        "verification_plan": {
-            "commands": [
-                {
-                    "id": "cmd_backend",
-                    "label": "cargo test",
-                    "command": "cargo test --locked --lib session",
-                    "cwd": "",
-                    "purpose": "验证后端 API",
-                    "required": true,
-                    "timeout_seconds": 120,
-                    "safety": "approved",
-                    "source": "local"
-                }
-            ],
-            "manual_checks": [],
-            "required_gates": ["cmd_backend"]
-        }
-    })
+    let logical_work_item_id = if outline_id == "outline_frontend" {
+        "wi_frontend"
+    } else {
+        "wi_backend"
+    };
+    canonical_author_output(outline_id, logical_work_item_id)["draft"].clone()
 }
 
 fn sample_draft_record(

@@ -14,6 +14,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::web_work_item_generation::{
     app_with_confirmed_story_and_design_and_streaming_outputs, request_json, valid_outline_output,
+    valid_canonical_draft_output,
 };
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

@@ -1,3 +1,118 @@
+pub(crate) fn valid_canonical_draft_output(outline_id: &str, title: &str) -> Value {
+    let (
+        logical_work_item_id,
+        kind,
+        goal,
+        exclusive_scopes,
+        forbidden_scopes,
+        provider_logical_work_item_id,
+        command,
+    ) = match outline_id {
+        "outline_frontend_expiry" => (
+            "wi_frontend_expiry",
+            "frontend",
+            "在前端展示会话过期提示并触发重新登录入口。",
+            vec!["web/src/session/expiry.ts"],
+            vec!["src/product/**"],
+            Some("wi_backend_session"),
+            "pnpm -C web test",
+        ),
+        "outline_integration_session" => (
+            "wi_integration_session",
+            "integration",
+            "覆盖会话过期到前端提示的贯通路径。",
+            vec!["tests/session/expiry.rs"],
+            Vec::new(),
+            Some("wi_frontend_expiry"),
+            "cargo test --locked --test it_web session",
+        ),
+        _ => (
+            "wi_backend_session",
+            "backend",
+            "提供登录会话过期检测与刷新相关 API。",
+            vec!["src/product/session.rs", "src/web/session_handlers.rs"],
+            vec!["web/**"],
+            None,
+            "cargo test --locked --lib session",
+        ),
+    };
+    let input_contracts = provider_logical_work_item_id.map_or_else(
+        || json!([]),
+        |provider| {
+            json!([{
+                "contract_id": format!("contract.{provider}.output"),
+                "provider_logical_work_item_id": provider,
+                "required_capabilities": ["ready"],
+                "compatibility_policy": "require_all"
+            }])
+        },
+    );
+    let output_contract_id = format!("contract.{logical_work_item_id}.output");
+    let task_id = format!("task.{logical_work_item_id}.1");
+    let requirement_id = format!("REQ-{logical_work_item_id}-001");
+    let acceptance_id = format!("AC-{logical_work_item_id}-001");
+    let check_id = format!("check.{logical_work_item_id}.focused");
+    let verification_check = json!({
+        "check_id": check_id,
+        "command": command,
+        "manual_instruction": null,
+        "required": true,
+        "non_zero_test_execution_required": true
+    });
+
+    json!({
+        "draft": {
+            "outline_id": outline_id,
+            "logical_work_item_id": logical_work_item_id,
+            "canonical_contract": {
+                "schema_version": 1,
+                "identity": {
+                    "logical_work_item_id": logical_work_item_id,
+                    "title": title,
+                    "kind": kind
+                },
+                "goal": { "summary": goal },
+                "non_goals": [],
+                "input_contracts": input_contracts,
+                "output_contracts": [{
+                    "contract_id": output_contract_id,
+                    "capabilities": ["ready"]
+                }],
+                "tasks": [{
+                    "task_id": task_id,
+                    "statement": goal,
+                    "requirement_refs": [requirement_id],
+                    "done_when_refs": [acceptance_id]
+                }],
+                "write_policy": {
+                    "exclusive_scopes": exclusive_scopes,
+                    "forbidden_scopes": forbidden_scopes
+                },
+                "acceptance_criteria": [{
+                    "criterion_id": acceptance_id,
+                    "statement": "当前 work item 通过验证",
+                    "required_evidence": ["source_diff", "non_zero_test_execution"]
+                }],
+                "verification_checks": [verification_check],
+                "handoff_contract": {
+                    "required_fields": ["commit_sha", "tests"],
+                    "provided_contract_refs": [output_contract_id],
+                    "reviewer_check_refs": [acceptance_id]
+                },
+                "blocker_rules": [],
+                "design_traceability": [{
+                    "source_type": "design_spec",
+                    "source_id": "design_spec_0001",
+                    "requirement_id": requirement_id
+                }]
+            },
+            "verification_plan": {
+                "checks": [verification_check]
+            }
+        }
+    })
+}
+
 pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_outputs(
     outputs: Vec<Value>,
 ) -> (axum::Router, tempfile::TempDir, Arc<Mutex<Vec<String>>>) {

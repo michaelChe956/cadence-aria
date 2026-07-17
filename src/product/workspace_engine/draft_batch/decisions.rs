@@ -390,17 +390,10 @@ impl WorkspaceEngine {
                     &source_draft_id,
                 )
                 .map_err(|error| format!("load draft for downgrade failed: {error}"))?;
-            let current_outline = outline_candidate
-                .outline
-                .work_item_outlines
-                .iter()
-                .find(|item| item.outline_id == *outline_id)
-                .cloned()
-                .ok_or_else(|| format!("outline `{outline_id}` not found"))?;
             let report = WorkItemDraftLocalValidator::validate(
                 &source.candidate,
                 &accepted_copied_candidates,
-                &current_outline,
+                &outline_candidate.outline,
             );
             let mut copied =
                 copy_draft_for_current_round(&index, &source, &generated_from_node_id, &now);

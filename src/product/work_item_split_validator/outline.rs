@@ -8,9 +8,14 @@ pub(crate) fn validate_outline_ids(
 ) {
     let mut seen = HashSet::new();
     let mut duplicated = HashSet::new();
+    let mut seen_logical_ids = HashSet::new();
+    let mut duplicated_logical_ids = HashSet::new();
     for item in &outline.work_item_outlines {
         if !seen.insert(item.outline_id.as_str()) {
             duplicated.insert(item.outline_id.clone());
+        }
+        if !seen_logical_ids.insert(item.logical_work_item_id.as_str()) {
+            duplicated_logical_ids.insert(item.logical_work_item_id.clone());
         }
     }
 
@@ -19,6 +24,13 @@ pub(crate) fn validate_outline_ids(
             "duplicate_outline_id",
             format!("outline id {outline_id} is duplicated"),
             vec![outline_id],
+        ));
+    }
+    for logical_work_item_id in duplicated_logical_ids {
+        findings.push(error(
+            "duplicate_logical_work_item_identity",
+            format!("logical work item identity {logical_work_item_id} is duplicated"),
+            vec![logical_work_item_id],
         ));
     }
 }

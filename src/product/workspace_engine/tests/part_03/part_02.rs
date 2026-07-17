@@ -598,31 +598,32 @@ fn test_work_item_draft_record(
         attempt_index: 1,
         outline_version_ref: "outline_001".to_string(),
         generation_mode,
-        candidate: WorkItemDraftCandidate {
-            outline_id: outline_id.to_string(),
-            title: format!("{outline_id} draft"),
-            kind: WorkItemKind::Backend,
-            goal: format!("实现 {outline_id}"),
-            implementation_context: format!("实现 src/{outline_id}.rs"),
-            exclusive_write_scopes: vec![format!("src/{outline_id}.rs")],
-            forbidden_write_scopes: vec![],
-            depends_on_outline_ids: vec![],
-            required_handoff_from_outline_ids: vec![],
-            handoff_summary: format!("{outline_id} handoff"),
-            verification_plan: serde_json::json!({
-                "commands": [{
-                    "id": format!("cmd_{outline_id}"),
-                    "label": "cargo test",
-                    "command": format!("cargo test --locked --lib {outline_id}"),
-                    "cwd": "",
-                    "purpose": "unit tests",
-                    "required": true,
-                    "timeout_seconds": 120,
-                    "safety": "approved"
-                }],
-                "manual_checks": [],
-                "required_gates": []
-            }),
+        candidate: {
+            let logical_work_item_id = format!(
+                "wi_{}",
+                outline_id.strip_prefix("outline_").unwrap_or(outline_id)
+            );
+            let mut contract = crate::product::work_item_contract::canonical_contract_fixture(
+                &logical_work_item_id,
+            );
+            contract.identity.title = format!("{outline_id} draft");
+            contract.identity.kind = "backend".to_string();
+            contract.goal.summary = format!("实现 {outline_id}");
+            contract.input_contracts.clear();
+            contract.write_policy.exclusive_scopes = vec![format!("src/{outline_id}.rs")];
+            contract.write_policy.forbidden_scopes.clear();
+            contract.verification_checks[0].check_id = format!("cmd_{outline_id}");
+            contract.verification_checks[0].command =
+                Some(format!("cargo test --locked --lib {outline_id}"));
+            WorkItemDraftCandidate {
+                outline_id: outline_id.to_string(),
+                logical_work_item_id,
+                verification_plan:
+                    crate::product::models::WorkItemDraftVerificationPlan {
+                        checks: contract.verification_checks.clone(),
+                    },
+                canonical_contract_candidate: contract,
+            }
         },
         status,
         active: true,

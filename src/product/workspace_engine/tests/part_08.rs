@@ -614,6 +614,7 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
         strategy_summary: "serial backend split".to_string(),
         work_item_outlines: vec![WorkItemOutline {
             outline_id: outline_id.to_string(),
+            logical_work_item_id: "wi_backend".to_string(),
             title: "Backend".to_string(),
             kind: WorkItemKind::Backend,
             goal: "实现后端能力".to_string(),
@@ -670,22 +671,24 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
             attempt_index: 1,
             outline_version_ref: "outline_artifact_0001".to_string(),
             generation_mode: WorkItemGenerationMode::Serial,
-            candidate: WorkItemDraftCandidate {
-                outline_id: outline_id.to_string(),
-                title: "Backend".to_string(),
-                kind: WorkItemKind::Backend,
-                goal: "实现后端能力".to_string(),
-                implementation_context: "实现 src/backend.rs".to_string(),
-                exclusive_write_scopes: vec!["src/backend.rs".to_string()],
-                forbidden_write_scopes: vec![],
-                depends_on_outline_ids: vec![],
-                required_handoff_from_outline_ids: vec![],
-                handoff_summary: "handoff".to_string(),
-                verification_plan: serde_json::json!({
-                    "commands": [],
-                    "manual_checks": [],
-                    "required_gates": []
-                }),
+            candidate: {
+                let mut contract =
+                    crate::product::work_item_contract::canonical_contract_fixture("wi_backend");
+                contract.identity.title = "Backend".to_string();
+                contract.identity.kind = "backend".to_string();
+                contract.goal.summary = "实现后端能力".to_string();
+                contract.input_contracts.clear();
+                contract.write_policy.exclusive_scopes = vec!["src/backend.rs".to_string()];
+                contract.write_policy.forbidden_scopes.clear();
+                WorkItemDraftCandidate {
+                    outline_id: outline_id.to_string(),
+                    logical_work_item_id: "wi_backend".to_string(),
+                    verification_plan:
+                        crate::product::models::WorkItemDraftVerificationPlan {
+                            checks: contract.verification_checks.clone(),
+                        },
+                    canonical_contract_candidate: contract,
+                }
             },
             status: WorkItemDraftStatus::Draft,
             active: true,

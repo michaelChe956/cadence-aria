@@ -171,6 +171,7 @@ pub(crate) fn valid_outline_output() -> Value {
             "work_item_outlines": [
                 {
                     "outline_id": "outline_backend_session",
+                    "logical_work_item_id": "wi_backend_session",
                     "title": "实现后端登录会话 API",
                     "kind": "backend",
                     "goal": "提供登录会话过期检测与刷新相关 API。",
@@ -188,6 +189,7 @@ pub(crate) fn valid_outline_output() -> Value {
                 },
                 {
                     "outline_id": "outline_frontend_expiry",
+                    "logical_work_item_id": "wi_frontend_expiry",
                     "title": "实现前端会话过期提示",
                     "kind": "frontend",
                     "goal": "在前端展示会话过期提示并触发重新登录入口。",
@@ -205,6 +207,7 @@ pub(crate) fn valid_outline_output() -> Value {
                 },
                 {
                     "outline_id": "outline_integration_session",
+                    "logical_work_item_id": "wi_integration_session",
                     "title": "集成测试：会话过期端到端",
                     "kind": "integration",
                     "goal": "覆盖会话过期到前端提示的贯通路径。",

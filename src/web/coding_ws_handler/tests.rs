@@ -189,23 +189,26 @@ fn coding_execution_context_supplements_source_draft_when_final_compile_context_
             attempt_index: 1,
             outline_version_ref: "outline_version_001".to_string(),
             generation_mode: WorkItemGenerationMode::Serial,
-            candidate: WorkItemDraftCandidate {
-                outline_id: "outline_sparse_backend".to_string(),
-                title: "Draft sparse backend".to_string(),
-                kind: WorkItemKind::Backend,
-                goal: "restore draft context".to_string(),
-                implementation_context: "draft implementation context used only as supplement"
-                    .to_string(),
-                exclusive_write_scopes: vec!["src/web/coding_ws_handler/context.rs".to_string()],
-                forbidden_write_scopes: vec!["forbidden/draft/path".to_string()],
-                depends_on_outline_ids: Vec::new(),
-                required_handoff_from_outline_ids: Vec::new(),
-                handoff_summary: "draft handoff summary used only as supplement".to_string(),
-                verification_plan: serde_json::json!({
-                    "commands": [
-                        { "command": "cargo check --locked", "label": "check" }
-                    ]
-                }),
+            candidate: {
+                let mut contract = crate::product::work_item_contract::canonical_contract_fixture(
+                    "wi_sparse_backend",
+                );
+                contract.identity.title = "Draft sparse backend".to_string();
+                contract.identity.kind = "backend".to_string();
+                contract.goal.summary = "restore draft context".to_string();
+                contract.input_contracts.clear();
+                contract.write_policy.exclusive_scopes =
+                    vec!["src/web/coding_ws_handler/context.rs".to_string()];
+                contract.write_policy.forbidden_scopes = vec!["forbidden/draft/path".to_string()];
+                contract.verification_checks[0].command = Some("cargo check --locked".to_string());
+                WorkItemDraftCandidate {
+                    outline_id: "outline_sparse_backend".to_string(),
+                    logical_work_item_id: "wi_sparse_backend".to_string(),
+                    verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                        checks: contract.verification_checks.clone(),
+                    },
+                    canonical_contract_candidate: contract,
+                }
             },
             status: WorkItemDraftStatus::Accepted,
             active: true,
@@ -231,8 +234,10 @@ fn coding_execution_context_supplements_source_draft_when_final_compile_context_
     assert!(markdown.contains("# Final Compile Work Item"));
     assert!(markdown.contains("Sparse final compile title"));
     assert!(markdown.contains("## Source Draft Supplement"));
-    assert!(markdown.contains("draft implementation context used only as supplement"));
-    assert!(markdown.contains("draft handoff summary used only as supplement"));
+    assert!(markdown.contains("Draft Canonical Contract Candidate JSON"));
+    assert!(markdown.contains("restore draft context"));
+    assert!(markdown.contains("src/web/coding_ws_handler/context.rs"));
+    assert!(!markdown.contains("implementation_context"));
 }
 
 #[test]

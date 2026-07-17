@@ -133,43 +133,21 @@ fn final_compile_draft_supplement(
     let mut markdown = String::new();
     markdown.push_str(&format!("- Draft ID: {}\n", draft.draft_id));
     markdown.push_str(&format!("- Outline ID: {}\n", draft.outline_id));
+    let canonical_contract =
+        serde_json::to_string_pretty(&draft.candidate.canonical_contract_candidate)
+            .map_err(|error| ProductStoreError::Json(error.to_string()))?;
     push_markdown_section(
         &mut markdown,
-        "Draft Implementation Context",
-        Some(&draft.candidate.implementation_context),
+        "Draft Canonical Contract Candidate JSON",
+        Some(&canonical_contract),
     );
+    let verification_plan = serde_json::to_string_pretty(&draft.candidate.verification_plan)
+        .map_err(|error| ProductStoreError::Json(error.to_string()))?;
     push_markdown_section(
         &mut markdown,
-        "Draft Handoff Summary",
-        Some(&draft.candidate.handoff_summary),
+        "Draft Verification Plan JSON",
+        Some(&verification_plan),
     );
-    push_string_list(
-        &mut markdown,
-        "Draft Exclusive Write Scopes",
-        &draft.candidate.exclusive_write_scopes,
-    );
-    push_string_list(
-        &mut markdown,
-        "Draft Forbidden Write Scopes",
-        &draft.candidate.forbidden_write_scopes,
-    );
-    push_string_list(
-        &mut markdown,
-        "Draft Depends On Outline IDs",
-        &draft.candidate.depends_on_outline_ids,
-    );
-    push_string_list(
-        &mut markdown,
-        "Draft Required Handoff From Outline IDs",
-        &draft.candidate.required_handoff_from_outline_ids,
-    );
-    if !draft.candidate.verification_plan.is_null() {
-        push_markdown_section(
-            &mut markdown,
-            "Draft Verification Plan JSON",
-            Some(&draft.candidate.verification_plan.to_string()),
-        );
-    }
 
     Ok((!markdown.trim().is_empty()).then_some(markdown))
 }

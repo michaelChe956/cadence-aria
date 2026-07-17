@@ -40,7 +40,15 @@ fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
         WorkItemGenerationMode::Serial,
         None,
     );
-    draft_b.candidate.depends_on_outline_ids = vec!["outline_a".to_string()];
+    let mut input_a = crate::product::work_item_contract::canonical_contract_fixture("wi_temp")
+        .input_contracts
+        .remove(0);
+    input_a.provider_logical_work_item_id = "wi_a".to_string();
+    draft_b
+        .candidate
+        .canonical_contract_candidate
+        .input_contracts
+        .push(input_a.clone());
     let mut draft_c = test_work_item_draft_record(
         &plan_id,
         "outline_c",
@@ -49,8 +57,21 @@ fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
         WorkItemGenerationMode::Serial,
         None,
     );
-    draft_c.candidate.depends_on_outline_ids =
-        vec!["outline_a".to_string(), "outline_b".to_string()];
+    draft_c
+        .candidate
+        .canonical_contract_candidate
+        .input_contracts
+        .push(input_a);
+    let mut input_b = crate::product::work_item_contract::canonical_contract_fixture("wi_temp")
+        .input_contracts
+        .remove(0);
+    input_b.contract_id = "contract.source.b".to_string();
+    input_b.provider_logical_work_item_id = "wi_b".to_string();
+    draft_c
+        .candidate
+        .canonical_contract_candidate
+        .input_contracts
+        .push(input_b);
 
     let (compiled_plan, work_items, _) = engine
         .project_work_item_plan_drafts_for_compile(
@@ -153,17 +174,8 @@ fn final_compile_projects_source_draft_context_into_work_items() {
     );
     assert_eq!(work_item.source_outline_id.as_deref(), Some("outline_a"));
     assert_eq!(work_item.source_draft_id.as_deref(), Some("draft_a"));
-    assert!(
-        work_item
-            .planned_implementation_context
-            .as_deref()
-            .expect("planned implementation context")
-            .contains("实现 src/outline_a.rs")
-    );
-    assert_eq!(
-        work_item.planned_handoff_summary.as_deref(),
-        Some("outline_a handoff")
-    );
+    assert_eq!(work_item.planned_implementation_context, None);
+    assert_eq!(work_item.planned_handoff_summary, None);
     assert_eq!(work_item.handoff_summary_ref, None);
 }
 
@@ -182,7 +194,7 @@ async fn final_compile_failure_updates_artifact_with_failed_compile_report() {
         WorkItemGenerationMode::Serial,
         None,
     );
-    draft_a.candidate.verification_plan["commands"][0]["command"] = serde_json::json!("rm -rf /");
+    draft_a.candidate.verification_plan.checks[0].command = Some("rm -rf /".to_string());
     let draft_b = test_work_item_draft_record(
         &plan_id,
         "outline_b",

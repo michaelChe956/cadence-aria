@@ -60,6 +60,21 @@ impl WorkspaceEngine {
             .iter()
             .map(|record| (record.outline_id.as_str(), record))
             .collect();
+        let mut logical_to_outline_id = HashMap::new();
+        for record in draft_records {
+            if logical_to_outline_id
+                .insert(
+                    record.candidate.logical_work_item_id.as_str(),
+                    record.outline_id.as_str(),
+                )
+                .is_some()
+            {
+                return Err(format!(
+                    "duplicate logical work item identity `{}` during compile",
+                    record.candidate.logical_work_item_id
+                ));
+            }
+        }
         let mut work_items = Vec::with_capacity(outline_order.len());
         let mut verification_plans = Vec::with_capacity(outline_order.len());
         for (index, outline_id) in outline_order.iter().enumerate() {
@@ -78,11 +93,20 @@ impl WorkspaceEngine {
                     format!("verification plan id for outline `{outline_id}` missing")
                 })?;
             let depends_on = candidate
-                .depends_on_outline_ids
+                .canonical_contract_candidate
+                .input_contracts
                 .iter()
-                .map(|dependency_outline_id| {
+                .map(|input| {
+                    let dependency_outline_id = logical_to_outline_id
+                        .get(input.provider_logical_work_item_id.as_str())
+                        .ok_or_else(|| {
+                            format!(
+                                "provider logical identity `{}` for `{outline_id}` missing",
+                                input.provider_logical_work_item_id
+                            )
+                        })?;
                     outline_to_work_item_id
-                        .get(dependency_outline_id)
+                        .get(*dependency_outline_id)
                         .cloned()
                         .ok_or_else(|| {
                             format!(
@@ -91,20 +115,7 @@ impl WorkspaceEngine {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let required_handoff_from = candidate
-                .required_handoff_from_outline_ids
-                .iter()
-                .map(|dependency_outline_id| {
-                    outline_to_work_item_id
-                        .get(dependency_outline_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            format!(
-                                "handoff outline `{dependency_outline_id}` for `{outline_id}` missing"
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let required_handoff_from = depends_on.clone();
             work_items.push(LifecycleWorkItemRecord {
                 id: work_item_id.clone(),
                 project_id: previous_plan.project_id.clone(),
@@ -112,7 +123,11 @@ impl WorkspaceEngine {
                 repository_id: repository_id.to_string(),
                 story_spec_ids: previous_plan.source_story_spec_ids.clone(),
                 design_spec_ids: previous_plan.source_design_spec_ids.clone(),
-                title: candidate.title.clone(),
+                title: candidate
+                    .canonical_contract_candidate
+                    .identity
+                    .title
+                    .clone(),
                 plan_status: WorkItemPlanStatus::Confirmed,
                 execution_status: crate::product::models::WorkItemStatus::Pending,
                 worktree_path: None,
@@ -120,13 +135,23 @@ impl WorkspaceEngine {
                 source_work_item_plan_id: Some(previous_plan.id.clone()),
                 source_outline_id: Some(record.outline_id.clone()),
                 source_draft_id: Some(record.draft_id.clone()),
-                planned_implementation_context: Some(candidate.implementation_context.clone()),
-                planned_handoff_summary: Some(candidate.handoff_summary.clone()),
-                kind: candidate.kind.clone(),
+                planned_implementation_context: None,
+                planned_handoff_summary: None,
+                kind: crate::product::work_item_split_engine::types::parse_work_item_kind(
+                    &candidate.canonical_contract_candidate.identity.kind,
+                ),
                 sequence_hint: Some((index + 1) as u32),
                 depends_on,
-                exclusive_write_scopes: candidate.exclusive_write_scopes.clone(),
-                forbidden_write_scopes: candidate.forbidden_write_scopes.clone(),
+                exclusive_write_scopes: candidate
+                    .canonical_contract_candidate
+                    .write_policy
+                    .exclusive_scopes
+                    .clone(),
+                forbidden_write_scopes: candidate
+                    .canonical_contract_candidate
+                    .write_policy
+                    .forbidden_scopes
+                    .clone(),
                 context_budget: crate::product::models::WorkItemContextBudget::default(),
                 required_handoff_from,
                 verification_plan_ref: Some(verification_plan_id.clone()),
@@ -148,7 +173,6 @@ impl WorkspaceEngine {
                 previous_plan.issue_id.clone(),
                 work_item_id,
                 now.to_string(),
-                self.session.repository_path.as_deref(),
             ));
         }
         let work_item_ids: Vec<String> = outline_order

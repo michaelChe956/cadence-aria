@@ -117,7 +117,12 @@ pub(crate) fn build_artifact_version_summary(version: &ArtifactVersion) -> Artif
             let preview_text = format!(
                 "{}: {}",
                 draft_candidate.draft_record.outline_id,
-                draft_candidate.draft_record.candidate.title
+                draft_candidate
+                    .draft_record
+                    .candidate
+                    .canonical_contract_candidate
+                    .identity
+                    .title
             );
             (size, preview(&preview_text))
         }

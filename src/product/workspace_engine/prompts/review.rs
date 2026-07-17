@@ -591,13 +591,27 @@ impl WorkspaceEngine {
             prompt.push_str("(none)\n");
         } else {
             for record in &accepted_drafts {
+                let promised_contracts = record
+                    .candidate
+                    .canonical_contract_candidate
+                    .output_contracts
+                    .iter()
+                    .map(|contract| contract.contract_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 prompt.push_str(&format!(
-                    "- outline_id: {}\n  draft_id: {}\n  title: {}\n  handoff_summary: {}\n  exclusive_write_scopes: [{}]\n",
+                    "- outline_id: {}\n  draft_id: {}\n  logical_work_item_id: {}\n  title: {}\n  output_contracts: {}\n  exclusive_write_scopes: [{}]\n",
                     record.outline_id,
                     record.draft_id,
-                    record.candidate.title,
-                    record.candidate.handoff_summary,
-                    record.candidate.exclusive_write_scopes.join(", ")
+                    record.candidate.logical_work_item_id,
+                    record.candidate.canonical_contract_candidate.identity.title,
+                    promised_contracts,
+                    record
+                        .candidate
+                        .canonical_contract_candidate
+                        .write_policy
+                        .exclusive_scopes
+                        .join(", ")
                 ));
             }
         }

@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::product::work_item_contract::{CanonicalWorkItemContract, VerificationCheck};
+
 use super::lifecycle::{IssueWorkItemPlan, WorkItemKind, WorkItemSplitFinding};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +47,7 @@ impl WorkItemPlanOutline {
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemOutline {
     pub outline_id: String,
+    pub logical_work_item_id: String,
     pub title: String,
     pub kind: WorkItemKind,
     pub goal: String,
@@ -79,18 +82,17 @@ pub struct WorkItemOutlineDependencyEdge {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct WorkItemDraftVerificationPlan {
+    pub checks: Vec<VerificationCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct WorkItemDraftCandidate {
     pub outline_id: String,
-    pub title: String,
-    pub kind: WorkItemKind,
-    pub goal: String,
-    pub implementation_context: String,
-    pub exclusive_write_scopes: Vec<String>,
-    pub forbidden_write_scopes: Vec<String>,
-    pub depends_on_outline_ids: Vec<String>,
-    pub required_handoff_from_outline_ids: Vec<String>,
-    pub handoff_summary: String,
-    pub verification_plan: serde_json::Value,
+    pub logical_work_item_id: String,
+    pub canonical_contract_candidate: CanonicalWorkItemContract,
+    pub verification_plan: WorkItemDraftVerificationPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

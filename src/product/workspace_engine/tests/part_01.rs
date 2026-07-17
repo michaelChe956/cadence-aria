@@ -97,6 +97,7 @@ fn test_work_item_plan_outline(
         work_item_outlines: vec![
             WorkItemOutline {
                 outline_id: "outline_a".to_string(),
+                logical_work_item_id: "wi_a".to_string(),
                 title: "A".to_string(),
                 kind: WorkItemKind::Backend,
                 goal: "A".to_string(),
@@ -114,6 +115,7 @@ fn test_work_item_plan_outline(
             },
             WorkItemOutline {
                 outline_id: "outline_b".to_string(),
+                logical_work_item_id: "wi_b".to_string(),
                 title: "B".to_string(),
                 kind: WorkItemKind::Frontend,
                 goal: "B".to_string(),
@@ -131,6 +133,7 @@ fn test_work_item_plan_outline(
             },
             WorkItemOutline {
                 outline_id: "outline_c".to_string(),
+                logical_work_item_id: "wi_c".to_string(),
                 title: "C".to_string(),
                 kind: WorkItemKind::Integration,
                 goal: "C".to_string(),

@@ -52,13 +52,6 @@ impl WorkspaceEngine {
         };
 
         let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
-        let current_outline = outline_candidate
-            .outline
-            .work_item_outlines
-            .iter()
-            .find(|item| item.outline_id == active_outline_id)
-            .cloned()
-            .ok_or_else(|| format!("active outline {active_outline_id} not found"))?;
         let accepted_drafts = self.accepted_work_item_plan_draft_records(&store, &index)?;
         let accepted_candidates: Vec<WorkItemDraftCandidate> = accepted_drafts
             .iter()
@@ -67,7 +60,7 @@ impl WorkspaceEngine {
         let report = WorkItemDraftLocalValidator::validate(
             &candidate,
             &accepted_candidates,
-            &current_outline,
+            &outline_candidate.outline,
         );
         let status = if report.has_errors() {
             WorkItemDraftStatus::ValidationFailed
@@ -182,21 +175,17 @@ impl WorkspaceEngine {
             ));
         }
         let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
-        let current_outline = outline_candidate
-            .outline
-            .work_item_outlines
-            .iter()
-            .find(|item| item.outline_id == active_outline_id)
-            .cloned()
-            .ok_or_else(|| format!("active outline {active_outline_id} not found"))?;
         let batch_id = current_work_item_batch(&index)?.batch_id.clone();
         let batch_drafts = self.batch_work_item_plan_draft_records(&store, &index, &batch_id)?;
         let batch_candidates: Vec<WorkItemDraftCandidate> = batch_drafts
             .iter()
             .map(|record| record.candidate.clone())
             .collect();
-        let report =
-            WorkItemDraftLocalValidator::validate(&candidate, &batch_candidates, &current_outline);
+        let report = WorkItemDraftLocalValidator::validate(
+            &candidate,
+            &batch_candidates,
+            &outline_candidate.outline,
+        );
         if report.has_errors() {
             let retry_count = self
                 .work_item_batch_retry_counts

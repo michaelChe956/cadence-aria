@@ -255,7 +255,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
          不得输出 repository_profile，不得输出 parallel_groups。\n\
          不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
-         work_item_outlines[] 的条目标识字段必须叫 outline_id；依赖只能写在各 item 的 depends_on 数组中。\n\
+         work_item_outlines[] 每项必须同时提供稳定且唯一的 outline_id 与 logical_work_item_id；依赖只能写在各 item 的 depends_on 数组中。\n\
          不要输出 dependency_graph；后端会从 work_item_outlines[].depends_on 自动派生内部 dependency_graph。\n\
          work_item_outlines[] 每项必须包含 estimated_context_tokens(1..=50000) 与 session_fit=\"fits_single_agent_session\"。\n\
          不得修改仓库文件，不得创建计划文档。\n\
@@ -268,7 +268,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          最后必须输出一个 nonce sentinel JSON block。\n\
          后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">...</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\"> block。\n\
          标签内部必须是一个完整 JSON object，不要输出 Markdown code fence。\n\
-         最小正确示例：{{\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"handoff_notes\":\"...\"}},{{\"outline_id\":\"outline_frontend\",\"title\":\"...\",\"kind\":\"frontend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":10000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[\"outline_backend\"],\"verification_intent\":[],\"handoff_notes\":\"...\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
+         最小正确示例：{{\"outline\":{{\"id\":\"outline_artifact_1\",\"project_id\":\"{project_id}\",\"issue_id\":\"{issue_id}\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"strategy_summary\":\"...\",\"work_item_outlines\":[{{\"outline_id\":\"outline_backend\",\"logical_work_item_id\":\"wi_backend\",\"title\":\"...\",\"kind\":\"backend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":12000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[],\"verification_intent\":[],\"handoff_notes\":\"...\"}},{{\"outline_id\":\"outline_frontend\",\"logical_work_item_id\":\"wi_frontend\",\"title\":\"...\",\"kind\":\"frontend\",\"goal\":\"...\",\"scope\":[],\"non_goals\":[],\"estimated_context_tokens\":10000,\"session_fit\":\"fits_single_agent_session\",\"source_story_spec_ids\":[],\"source_design_spec_ids\":[],\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on\":[\"outline_backend\"],\"verification_intent\":[],\"handoff_notes\":\"...\"}}],\"risks\":[],\"handoff_strategy\":\"...\",\"status\":\"draft\"}},\"context_blockers\":[]}}\n\
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         title = issue.title,
@@ -318,7 +318,7 @@ pub(crate) fn build_outline_revision_prompt(
          不得输出 VerificationPlan、verification_plan、verification_plans、work_item_id、work_item_ids。\n\
          不得输出 repository_profile，不得输出 parallel_groups。\n\
          不要输出 implementation plan 或旧版 Work Item 拆分计划字段：work_item_outlines[] 中不要使用 id、layer、summary、key_paths、reuse_modules、test_strategy、acceptance_refs。\n\
-         work_item_outlines[] 的条目标识字段必须叫 outline_id；依赖只能写在各 item 的 depends_on 数组中。\n\
+         work_item_outlines[] 每项必须同时保留稳定且唯一的 outline_id 与 logical_work_item_id；依赖只能写在各 item 的 depends_on 数组中。\n\
          不要输出 dependency_graph；后端会从 work_item_outlines[].depends_on 自动派生内部 dependency_graph。\n\
          work_item_outlines[] 每项必须包含 estimated_context_tokens(1..=50000) 与 session_fit=\"fits_single_agent_session\"。\n\
          不得修改仓库文件，不得创建计划文档。\n\
@@ -526,9 +526,21 @@ pub(crate) fn build_work_item_draft_prompt(
     let previous_summaries = other_previous
         .iter()
         .map(|draft| {
+            let promised_contracts = draft
+                .candidate
+                .canonical_contract_candidate
+                .output_contracts
+                .iter()
+                .map(|contract| contract.contract_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             format!(
-                "- {} / {}: {}",
-                draft.outline_id, draft.draft_id, draft.candidate.handoff_summary
+                "- {} / {} / {}: {}; promised contracts: {}",
+                draft.outline_id,
+                draft.draft_id,
+                draft.candidate.logical_work_item_id,
+                draft.candidate.canonical_contract_candidate.identity.title,
+                promised_contracts
             )
         })
         .collect::<Vec<_>>()
@@ -541,9 +553,79 @@ pub(crate) fn build_work_item_draft_prompt(
         WorkItemGenerationMode::Serial => "serial",
         WorkItemGenerationMode::Batch => "batch",
     };
+    let requirement_id = format!("REQ-{}-001", current_outline.logical_work_item_id);
+    let acceptance_id = format!("AC-{}-001", current_outline.logical_work_item_id);
+    let output_contract_id = format!("contract.{}.output", current_outline.logical_work_item_id);
+    let verification_check = serde_json::json!({
+        "check_id": format!("check.{}.focused", current_outline.logical_work_item_id),
+        "command": "cargo test --locked --lib <filter>",
+        "manual_instruction": null,
+        "required": true,
+        "non_zero_test_execution_required": true
+    });
+    let output_example = serde_json::json!({
+        "draft": {
+            "outline_id": current_outline.outline_id,
+            "logical_work_item_id": current_outline.logical_work_item_id,
+            "canonical_contract": {
+                "schema_version": 1,
+                "identity": {
+                    "logical_work_item_id": current_outline.logical_work_item_id,
+                    "title": current_outline.title,
+                    "kind": work_item_kind_text(&current_outline.kind)
+                },
+                "goal": { "summary": current_outline.goal },
+                "non_goals": current_outline.non_goals,
+                "input_contracts": [],
+                "output_contracts": [{
+                    "contract_id": output_contract_id,
+                    "capabilities": ["stable_output"]
+                }],
+                "tasks": [{
+                    "task_id": format!("task.{}.1", current_outline.logical_work_item_id),
+                    "statement": "Implement the bounded work item",
+                    "requirement_refs": [requirement_id],
+                    "done_when_refs": [acceptance_id]
+                }],
+                "write_policy": {
+                    "exclusive_scopes": current_outline.exclusive_write_scopes,
+                    "forbidden_scopes": current_outline.forbidden_write_scopes
+                },
+                "acceptance_criteria": [{
+                    "criterion_id": acceptance_id,
+                    "statement": "The bounded work item is verified",
+                    "required_evidence": ["source_diff", "non_zero_test_execution"]
+                }],
+                "verification_checks": [verification_check],
+                "handoff_contract": {
+                    "required_fields": ["commit_sha", "tests"],
+                    "provided_contract_refs": [output_contract_id],
+                    "reviewer_check_refs": [acceptance_id]
+                },
+                "blocker_rules": [{
+                    "reason_code": format!("blocker.{}.operational", current_outline.logical_work_item_id),
+                    "route": "operational_gate",
+                    "target_contract_refs": []
+                }],
+                "design_traceability": [{
+                    "source_type": "design_spec",
+                    "source_id": current_outline
+                        .source_design_spec_ids
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "design_spec_required".to_string()),
+                    "requirement_id": requirement_id
+                }]
+            },
+            "verification_plan": {
+                "checks": [verification_check]
+            }
+        }
+    })
+    .to_string();
 
     format!(
-        "你是 Aria 的 Work Item Draft author。请只为当前 WorkItemPlan Outline 中的一个 item 生成 WorkItemDraftCandidate。\n\n\
+        "你是 Aria 的 Work Item Draft author。只输出 Canonical Contract Candidate。\n\n\
          {runtime_contract}\
          [generation_mode]\n{mode}\n\n\
          [confirmed_outline]\n{outline_json}\n\n\
@@ -552,24 +634,25 @@ pub(crate) fn build_work_item_draft_prompt(
          [其他已 accepted draft 摘要]\n{previous_summaries}\n\
          {feedback_section}\
          [hard_rules]\n\
-         - 只能输出一个 WorkItemDraftCandidate，字段必须对应当前 outline_id `{outline_id}`。\n\
+         - 只能输出一个 Canonical Contract Candidate，字段必须对应当前 outline_id `{outline_id}` 与 logical_work_item_id `{logical_work_item_id}`。\n\
          - 不得修改 Outline，不得新增、删除或重命名 outline。\n\
          - 不得输出 work_item_id、draft_id、status、generated_from_node_id、accepted_at、batch_id 等后端状态字段。\n\
-         - verification_plan 必须包含 commands、manual_checks、required_gates 三个字段；没有 manual check 时输出 []。\n\
-         - verification_plan.required_gates 必须是字符串数组，只能写同一 verification_plan 内 command/manual_check 的 id，例如 [\"cmd_unit\"]。\n\
-         - 不要输出 required_gates gate 对象；禁止写 {{\"id\":\"gate_unit\",\"type\":\"command\",\"command_id\":\"cmd_unit\",\"expected\":\"exit 0\"}} 这类对象。\n\
-         - 当前 outline 的 estimated_context_tokens 必须在 1..=50000 且 session_fit 必须为 fits_single_agent_session；implementation_context 只能展开当前已确认 Outline，不得新增兄弟任务或 Issue 级计划。\n\
-         - implementation_context 必须写给后续 coding agent，包含具体模块/文件边界、已有代码入口、TDD 起点、不要触碰的范围、验收命令顺序。\n\
-         - handoff_summary 必须写给依赖它的后续 work item，列出本项完成后必须交付的类型、API、状态、测试 seam、错误码或 UI 契约。\n\
-         - verification_plan.commands 必须优先包含定向快反馈命令，再包含必要的 fmt/clippy/check/test；Rust 命令必须遵守 cadence/project-rules/build-test-commands.md，禁止 -j 1。\n\
-         - 若 Story/Design/Outline 证据不足以指导 coding agent，必须在 implementation_context 中显式写出阻塞点或待确认项，不得编造文件路径。\n\
+         - Provider JSON 必须使用 canonical_contract；后端会明确转换为 canonical_contract_candidate，不得输出后者。\n\
+         - logical_work_item_id 必须与 canonical_contract.identity.logical_work_item_id 完全一致，并使用当前 Outline 项已经分配的稳定 logical identity。\n\
+         - 所有 input contract、output contract、task、acceptance、verification、handoff 和 blocker rule 必须使用 stable ID 或稳定引用。\n\
+         - verification_plan.checks 必须逐项、逐字段、按原顺序复制 canonical_contract.verification_checks；不得额外、缺失或重排。\n\
+         - Rust verification command 必须遵守 cadence/project-rules/build-test-commands.md，定向测试使用 --lib，禁止 -j 1。\n\
+         - 不得输出面向 Coder 的长篇 implementation_context；不要提前生成或渲染 Coder Projection 或 Reviewer Projection。\n\
+         - 不要把 human_summary、why_split 或其他 Human presentation 字段放入 Canonical Contract。\n\
+         - 若 Story/Design/Outline 证据不足，使用 canonical blocker_rules 表达可路由阻塞，不得编造文件路径。\n\
          - 可以先输出简短可读状态；最终 JSON 必须放在最后一个 nonce sentinel block 中，不要输出 Markdown code fence。\n\n\
          [output]\n\
-         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{{\"draft\":{{\"outline_id\":\"{outline_id}\",\"title\":\"...\",\"kind\":\"backend|frontend|integration|e2e|docs|infra|other\",\"goal\":\"...\",\"implementation_context\":\"...\",\"exclusive_write_scopes\":[],\"forbidden_write_scopes\":[],\"depends_on_outline_ids\":[],\"required_handoff_from_outline_ids\":[],\"handoff_summary\":\"...\",\"verification_plan\":{{\"commands\":[{{\"id\":\"cmd_unit\",\"label\":\"unit tests\",\"command\":\"cargo test --locked --lib <filter>\",\"cwd\":\"\",\"purpose\":\"验证当前 work item\",\"required\":true,\"timeout_seconds\":120,\"safety\":\"approved\"}}],\"manual_checks\":[],\"required_gates\":[\"cmd_unit\"]}}}}}}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\n\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{output_example}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\n\
          [output_schema]\n\
          严格按以下 JSON schema 输出。\n\n\
          {schema}",
         outline_id = current_outline.outline_id,
+        logical_work_item_id = current_outline.logical_work_item_id,
         runtime_contract = runtime_contract,
         schema = WORK_ITEM_DRAFT_OUTPUT_SCHEMA,
     )

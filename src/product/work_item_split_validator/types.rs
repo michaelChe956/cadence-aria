@@ -58,10 +58,12 @@ impl WorkItemDraftLocalValidator {
     pub fn validate(
         current: &WorkItemDraftCandidate,
         accepted_dependencies: &[WorkItemDraftCandidate],
-        current_outline: &WorkItemOutline,
+        outline: &WorkItemPlanOutline,
     ) -> WorkItemSplitValidationReport {
         let mut findings = Vec::new();
-        draft::validate_draft_matches_outline(current, current_outline, &mut findings);
+        draft::validate_canonical_contract_candidate(current, &mut findings);
+        draft::validate_draft_identity_and_find_outline(current, outline, &mut findings);
+        draft::validate_draft_provider_logical_ids(current, outline, &mut findings);
         draft::validate_draft_scopes(current, &mut findings);
         draft::validate_draft_verification_plan(current, &mut findings);
         draft::validate_draft_direct_dependency_scopes(
