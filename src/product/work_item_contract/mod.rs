@@ -1,8 +1,12 @@
+mod dependency;
 mod hash;
 mod model;
+mod validation;
 
+pub use dependency::*;
 pub use hash::canonical_contract_hash;
 pub use model::*;
+pub use validation::*;
 
 #[cfg(test)]
 mod tests;

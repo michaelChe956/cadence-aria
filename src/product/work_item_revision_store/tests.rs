@@ -534,7 +534,11 @@ fn work_item_revision_store_persists_scoped_revision_artifacts() {
     let dependency = DependencyGraphRevision {
         id: "dependency_graph_revision_0001".to_string(),
         plan_id: PLAN_ID.to_string(),
-        edges: vec![json!({"from": WORK_ITEM_ID, "to": "logical_work_item_0002"})],
+        edges: vec![crate::product::work_item_contract::DependencyContractEdge {
+            from: WORK_ITEM_ID.to_string(),
+            to: "logical_work_item_0002".to_string(),
+            required_contracts: vec![],
+        }],
         created_at: "2026-07-17T00:00:10Z".to_string(),
     };
     store

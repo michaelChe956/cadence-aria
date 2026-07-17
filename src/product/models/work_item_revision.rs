@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::product::work_item_contract::{CanonicalWorkItemContract, VerificationCheck};
+use crate::product::work_item_contract::{
+    CanonicalWorkItemContract, DependencyContractEdge, VerificationCheck,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkItemPlanLineage {
@@ -179,6 +181,6 @@ pub struct HandoffRevision {
 pub struct DependencyGraphRevision {
     pub id: String,
     pub plan_id: String,
-    pub edges: Vec<serde_json::Value>,
+    pub edges: Vec<DependencyContractEdge>,
     pub created_at: String,
 }

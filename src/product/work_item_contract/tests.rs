@@ -61,7 +61,7 @@ pub(crate) fn canonical_contract_fixture(logical_work_item_id: &str) -> Canonica
         handoff_contract: HandoffContract {
             required_fields: vec!["commit_sha".to_string()],
             provided_contract_refs: vec!["contract.canonical".to_string()],
-            reviewer_check_refs: vec!["check_canonical".to_string()],
+            reviewer_check_refs: vec!["AC-001".to_string()],
         },
         blocker_rules: vec![BlockerRule {
             reason_code: "contract_invalid".to_string(),
@@ -75,6 +75,9 @@ pub(crate) fn canonical_contract_fixture(logical_work_item_id: &str) -> Canonica
         }],
     }
 }
+
+mod dependency;
+mod validation;
 
 fn assert_enum_cases<T>(cases: impl IntoIterator<Item = (T, &'static str)>)
 where

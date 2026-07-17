@@ -355,7 +355,11 @@ fn work_item_revision_models_shared_records_roundtrip() {
     assert_serde_roundtrip(&DependencyGraphRevision {
         id: "dependency_graph_revision_0001".to_string(),
         plan_id: "issue_work_item_plan_0001".to_string(),
-        edges: vec![serde_json::json!({"from": "wi_core", "to": "wi_api"})],
+        edges: vec![crate::product::work_item_contract::DependencyContractEdge {
+            from: "wi_core".to_string(),
+            to: "wi_api".to_string(),
+            required_contracts: vec![],
+        }],
         created_at: "2026-07-17T00:00:00Z".to_string(),
     });
 
