@@ -17,6 +17,8 @@ use crate::product::models::{
 
 use super::WorkItemRevisionStore;
 
+mod concurrency;
+
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
 const PLAN_ID: &str = "work_item_plan_0001";
@@ -205,6 +207,66 @@ fn work_item_revision_store_keeps_duplicate_plan_ids_isolated_by_issue_scope() {
 }
 
 #[test]
+fn work_item_revision_store_scopes_duplicate_logical_and_revision_ids_by_issue() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkItemRevisionStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    let first_plan = plan_lineage();
+    let mut second_plan = first_plan.clone();
+    second_plan.issue_id = "issue_0002".to_string();
+    store.put_plan_lineage(&first_plan).unwrap();
+    store.put_plan_lineage(&second_plan).unwrap();
+
+    let first_logical = logical_work_item();
+    let mut second_logical = first_logical.clone();
+    second_logical.title = "Issue 2 独立 Work Item".to_string();
+    store
+        .put_logical_work_item(&first_plan, &first_logical)
+        .unwrap();
+    store
+        .put_logical_work_item(&second_plan, &second_logical)
+        .unwrap();
+
+    let first_revision = work_item_revision();
+    let mut second_revision = first_revision.clone();
+    second_revision.canonical_contract = json!({"scope": "issue_0002"});
+    second_revision.canonical_contract_hash = "contract_hash_issue_0002".to_string();
+    store
+        .put_work_item_revision(&first_plan, &first_revision)
+        .unwrap();
+    store
+        .put_work_item_revision(&second_plan, &second_revision)
+        .unwrap();
+
+    let first_active = store
+        .set_active_work_item_revision(&first_plan, &first_logical, None, &first_revision.id)
+        .unwrap();
+    let second_active = store
+        .set_active_work_item_revision(&second_plan, &second_logical, None, &second_revision.id)
+        .unwrap();
+
+    assert_eq!(
+        first_active.active_revision_id.as_deref(),
+        Some(first_revision.id.as_str())
+    );
+    assert_eq!(
+        second_active.active_revision_id.as_deref(),
+        Some(second_revision.id.as_str())
+    );
+    assert_eq!(
+        store
+            .get_work_item_revision(&first_plan, WORK_ITEM_ID, &first_revision.id)
+            .unwrap(),
+        first_revision
+    );
+    assert_eq!(
+        store
+            .get_work_item_revision(&second_plan, WORK_ITEM_ID, &second_revision.id)
+            .unwrap(),
+        second_revision
+    );
+}
+
+#[test]
 fn work_item_revision_store_rejects_orphan_revision_without_scoped_lineage() {
     let temp = TempDir::new().unwrap();
     let store = WorkItemRevisionStore::new(ProductAppPaths::new(temp.path().join(".aria")));
@@ -310,12 +372,14 @@ fn work_item_revision_store_allows_only_one_active_amendment_per_plan() {
 fn work_item_revision_store_persists_work_item_revisions_and_mutable_state() {
     let (_temp, store, plan) = test_store_and_plan();
     let logical = logical_work_item();
-    store.put_logical_work_item(&logical).unwrap();
-    store.put_logical_work_item(&logical).unwrap();
+    store.put_logical_work_item(&plan, &logical).unwrap();
+    store.put_logical_work_item(&plan, &logical).unwrap();
 
     let mut changed_logical = logical.clone();
     changed_logical.title = "不允许覆盖".to_string();
-    let error = store.put_logical_work_item(&changed_logical).unwrap_err();
+    let error = store
+        .put_logical_work_item(&plan, &changed_logical)
+        .unwrap_err();
     assert!(matches!(error, ProductStoreError::IdentityMismatch { .. }));
 
     let draft = draft_revision();
@@ -337,14 +401,14 @@ fn work_item_revision_store_persists_work_item_revisions_and_mutable_state() {
     );
 
     let active = store
-        .set_active_work_item_revision(&logical, None, &revision.id)
+        .set_active_work_item_revision(&plan, &logical, None, &revision.id)
         .unwrap();
     assert_eq!(
         active.active_revision_id.as_deref(),
         Some(revision.id.as_str())
     );
     let error = store
-        .set_active_work_item_revision(&logical, None, &revision.id)
+        .set_active_work_item_revision(&plan, &logical, None, &revision.id)
         .unwrap_err();
     assert!(matches!(error, ProductStoreError::IdentityMismatch { .. }));
 
@@ -364,7 +428,7 @@ fn work_item_revision_store_persists_work_item_revisions_and_mutable_state() {
 fn work_item_revision_store_persists_scoped_revision_artifacts() {
     let (_temp, store, plan) = test_store_and_plan();
     let logical = logical_work_item();
-    store.put_logical_work_item(&logical).unwrap();
+    store.put_logical_work_item(&plan, &logical).unwrap();
     let revision = work_item_revision();
     store.put_work_item_revision(&plan, &revision).unwrap();
 
@@ -609,11 +673,54 @@ fn work_item_revision_store_rejects_unknown_or_escaping_scope() {
     let (_temp, store, plan) = test_store_and_plan();
     let mut unknown = logical_work_item();
     unknown.plan_id = "work_item_plan_unknown".to_string();
-    let error = store.put_logical_work_item(&unknown).unwrap_err();
-    assert!(matches!(error, ProductStoreError::NotFound { .. }));
+    let error = store.put_logical_work_item(&plan, &unknown).unwrap_err();
+    assert!(matches!(error, ProductStoreError::IdentityMismatch { .. }));
 
     let error = store
         .get_plan_lineage("..", ISSUE_ID, &plan.id)
         .unwrap_err();
     assert!(matches!(error, ProductStoreError::PathEscape(_)));
+}
+
+#[test]
+fn work_item_revision_store_latest_presentation_compares_rfc3339_instants() {
+    let (_temp, store, plan) = test_store_and_plan();
+    let source_id = "plan_projection_bundle_0001";
+    let presentations = [
+        ("human_presentation_revision_z", "2026-07-17T04:00:00Z"),
+        (
+            "human_presentation_revision_positive",
+            "2026-07-17T08:00:00+05:00",
+        ),
+        (
+            "human_presentation_revision_negative",
+            "2026-07-17T00:30:00-04:00",
+        ),
+    ]
+    .map(|(id, created_at)| HumanPresentationRevision {
+        id: id.to_string(),
+        source_plan_projection_bundle_id: Some(source_id.to_string()),
+        source_work_item_projection_bundle_id: None,
+        supersedes: None,
+        human_summary: id.to_string(),
+        why_split: None,
+        dependency_explanation: vec![],
+        risk_explanation: vec![],
+        source_refs: vec![],
+        normative: false,
+        used_by_provider: false,
+        created_at: created_at.to_string(),
+    });
+    for presentation in &presentations {
+        store
+            .put_human_presentation_revision(&plan, presentation)
+            .unwrap();
+    }
+
+    let latest = store
+        .get_latest_human_presentation_revision(&plan, source_id)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(latest.id, "human_presentation_revision_negative");
 }

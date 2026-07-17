@@ -1,9 +1,7 @@
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::models::{HandoffRevision, WorkItemPlanLineage};
 
-use super::{
-    PlanScope, WorkItemRevisionStore, identity_mismatch, read_required_json, write_immutable,
-};
+use super::{WorkItemRevisionStore, identity_mismatch, read_required_json, write_immutable};
 
 impl WorkItemRevisionStore {
     pub fn put_handoff_revision(
@@ -14,14 +12,7 @@ impl WorkItemRevisionStore {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(&value.id)?;
         validate_relative_id(&value.logical_work_item_id)?;
-        self.get_logical_work_item(
-            &PlanScope {
-                plan_id: plan.id.clone(),
-                project_id: plan.project_id.clone(),
-                issue_id: plan.issue_id.clone(),
-            },
-            &value.logical_work_item_id,
-        )?;
+        self.get_logical_work_item(plan, &value.logical_work_item_id)?;
         write_immutable(
             &self.handoff_revision_path(
                 &plan.project_id,

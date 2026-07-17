@@ -1,8 +1,11 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -20,13 +23,6 @@ mod work_item;
 #[derive(Debug, Clone)]
 pub struct WorkItemRevisionStore {
     paths: ProductAppPaths,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct PlanScope {
-    plan_id: String,
-    project_id: String,
-    issue_id: String,
 }
 
 impl WorkItemRevisionStore {
@@ -49,44 +45,6 @@ impl WorkItemRevisionStore {
             return Err(identity_mismatch("work_item_plan_lineage", &lineage.id));
         }
         Ok(stored)
-    }
-
-    fn scope_for_plan_id(&self, plan_id: &str) -> Result<PlanScope, ProductStoreError> {
-        validate_relative_id(plan_id)?;
-        let mut scopes = Vec::new();
-        for project_path in child_directories(&self.plan_scopes_root(plan_id))? {
-            let Some(path_project_id) = project_path.file_name().and_then(|value| value.to_str())
-            else {
-                continue;
-            };
-            for scope_path in json_file_paths(&project_path)? {
-                let Some(path_issue_id) = scope_path.file_stem().and_then(|value| value.to_str())
-                else {
-                    continue;
-                };
-                let scope: PlanScope = read_json(&scope_path)?;
-                if scope.plan_id != plan_id
-                    || scope.project_id != path_project_id
-                    || scope.issue_id != path_issue_id
-                {
-                    return Err(identity_mismatch("work_item_plan_scope", plan_id));
-                }
-                validate_relative_id(&scope.project_id)?;
-                validate_relative_id(&scope.issue_id)?;
-                scopes.push(scope);
-            }
-        }
-        match scopes.as_slice() {
-            [scope] => Ok(scope.clone()),
-            [] => Err(ProductStoreError::NotFound {
-                kind: "work_item_plan_scope",
-                id: plan_id.to_string(),
-            }),
-            _ => Err(ProductStoreError::Ambiguous {
-                kind: "work_item_plan_scope",
-                id: plan_id.to_string(),
-            }),
-        }
     }
 }
 
@@ -120,15 +78,101 @@ fn write_immutable<T>(
 where
     T: Serialize + DeserializeOwned + PartialEq,
 {
-    if path_exists(path)? {
-        let existing: T = read_json(path)?;
-        if existing == *value {
+    with_exclusive_lock(path, || {
+        if path_exists(path)? {
+            let existing: T = read_json(path)?;
+            if existing == *value {
+                return Ok(());
+            }
+            return Err(identity_mismatch(kind, id));
+        }
+        write_json(path, value)
+    })
+}
+
+fn with_exclusive_lock<T>(
+    target_path: &Path,
+    operation: impl FnOnce() -> Result<T, ProductStoreError>,
+) -> Result<T, ProductStoreError> {
+    let _lock = ExclusiveFileLock::acquire(target_path)?;
+    operation()
+}
+
+struct ExclusiveFileLock {
+    file: File,
+}
+
+impl ExclusiveFileLock {
+    fn acquire(target_path: &Path) -> Result<Self, ProductStoreError> {
+        let lock_path = lock_path_for(target_path);
+        if let Some(parent) = lock_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|error| {
+                ProductStoreError::Io(format!("create {}: {error}", parent.display()))
+            })?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| {
+                ProductStoreError::Io(format!("open lock {}: {error}", lock_path.display()))
+            })?;
+        lock_file_exclusive(&file, &lock_path)?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for ExclusiveFileLock {
+    fn drop(&mut self) {
+        unlock_file(&self.file);
+    }
+}
+
+fn lock_path_for(target_path: &Path) -> PathBuf {
+    let file_name = target_path
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "work-item-revision".into());
+    target_path.with_file_name(format!(".{file_name}.lock"))
+}
+
+#[cfg(unix)]
+fn lock_file_exclusive(file: &File, lock_path: &Path) -> Result<(), ProductStoreError> {
+    loop {
+        // SAFETY: flock only reads the valid file descriptor and does not retain any Rust pointer.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
             return Ok(());
         }
-        return Err(identity_mismatch(kind, id));
+        let error = std::io::Error::last_os_error();
+        if error.kind() != ErrorKind::Interrupted {
+            return Err(ProductStoreError::Io(format!(
+                "lock {}: {error}",
+                lock_path.display()
+            )));
+        }
     }
-    write_json(path, value)
 }
+
+#[cfg(unix)]
+fn unlock_file(file: &File) {
+    // SAFETY: flock only reads the valid file descriptor and does not retain any Rust pointer.
+    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+}
+
+#[cfg(not(unix))]
+fn lock_file_exclusive(_file: &File, lock_path: &Path) -> Result<(), ProductStoreError> {
+    Err(ProductStoreError::Io(format!(
+        "file locking is unsupported on this platform: {}",
+        lock_path.display()
+    )))
+}
+
+#[cfg(not(unix))]
+fn unlock_file(_file: &File) {}
 
 fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
     match fs::metadata(path) {
@@ -161,33 +205,6 @@ fn json_file_paths(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
             })?
             .is_file()
             && entry_path.extension().and_then(|value| value.to_str()) == Some("json")
-        {
-            entries.push(entry_path);
-        }
-    }
-    entries.sort();
-    Ok(entries)
-}
-
-fn child_directories(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
-    if !path_exists(path)? {
-        return Ok(Vec::new());
-    }
-
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(path)
-        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
-    {
-        let entry = entry.map_err(|error| {
-            ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
-        })?;
-        let entry_path = entry.path();
-        if entry
-            .file_type()
-            .map_err(|error| {
-                ProductStoreError::Io(format!("read {} entry type: {error}", entry_path.display()))
-            })?
-            .is_dir()
         {
             entries.push(entry_path);
         }

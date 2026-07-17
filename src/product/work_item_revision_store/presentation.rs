@@ -1,3 +1,7 @@
+use std::cmp::Ordering;
+
+use chrono::{DateTime, FixedOffset};
+
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id};
 use crate::product::models::{HumanPresentationRevision, WorkItemPlanLineage};
 
@@ -34,7 +38,7 @@ impl WorkItemRevisionStore {
     ) -> Result<Option<HumanPresentationRevision>, ProductStoreError> {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(source_projection_bundle_id)?;
-        let mut latest: Option<HumanPresentationRevision> = None;
+        let mut latest: Option<(DateTime<FixedOffset>, HumanPresentationRevision)> = None;
         for path in json_file_paths(&self.human_presentation_revisions_root(
             &plan.project_id,
             &plan.issue_id,
@@ -54,16 +58,28 @@ impl WorkItemRevisionStore {
                 == Some(source_projection_bundle_id)
                 || value.source_work_item_projection_bundle_id.as_deref()
                     == Some(source_projection_bundle_id);
-            if matches_source
-                && latest.as_ref().is_none_or(|current| {
-                    (value.created_at.as_str(), value.id.as_str())
-                        > (current.created_at.as_str(), current.id.as_str())
-                })
-            {
-                latest = Some(value);
+            if matches_source {
+                let created_at =
+                    DateTime::parse_from_rfc3339(&value.created_at).map_err(|error| {
+                        ProductStoreError::Json(format!(
+                            "invalid human presentation created_at for {}: {error}",
+                            value.id
+                        ))
+                    })?;
+                let is_later =
+                    latest.as_ref().is_none_or(|(current_time, current)| {
+                        match created_at.cmp(current_time) {
+                            Ordering::Greater => true,
+                            Ordering::Equal => value.id > current.id,
+                            Ordering::Less => false,
+                        }
+                    });
+                if is_later {
+                    latest = Some((created_at, value));
+                }
             }
         }
-        Ok(latest)
+        Ok(latest.map(|(_, value)| value))
     }
 }
 

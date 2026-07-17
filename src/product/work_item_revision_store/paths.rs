@@ -3,24 +3,6 @@ use std::path::PathBuf;
 use super::WorkItemRevisionStore;
 
 impl WorkItemRevisionStore {
-    pub(super) fn plan_scopes_root(&self, plan_id: &str) -> PathBuf {
-        self.paths
-            .state_root()
-            .join("work-item-plan-scopes")
-            .join(plan_id)
-    }
-
-    pub(super) fn plan_scope_path(
-        &self,
-        plan_id: &str,
-        project_id: &str,
-        issue_id: &str,
-    ) -> PathBuf {
-        self.plan_scopes_root(plan_id)
-            .join(project_id)
-            .join(format!("{issue_id}.json"))
-    }
-
     pub(super) fn plan_root(&self, project_id: &str, issue_id: &str, plan_id: &str) -> PathBuf {
         self.paths
             .issue_root(project_id, issue_id)

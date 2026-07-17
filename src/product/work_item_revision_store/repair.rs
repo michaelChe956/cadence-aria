@@ -7,7 +7,8 @@ use crate::product::models::{
 };
 
 use super::{
-    WorkItemRevisionStore, identity_mismatch, json_file_paths, read_required_json, write_immutable,
+    WorkItemRevisionStore, identity_mismatch, json_file_paths, read_required_json,
+    with_exclusive_lock, write_immutable,
 };
 
 impl WorkItemRevisionStore {
@@ -36,17 +37,19 @@ impl WorkItemRevisionStore {
         request_id: &str,
         status: PlanRepairRequestStatus,
     ) -> Result<PlanRepairRequest, ProductStoreError> {
-        let mut request = self.get_repair_request(plan, request_id)?;
-        if request.status == status {
-            return Ok(request);
-        }
-        request.status = status;
-        request.updated_at = Utc::now().to_rfc3339();
-        write_json(
-            &self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id),
-            &request,
-        )?;
-        Ok(request)
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(request_id)?;
+        let path = self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id);
+        with_exclusive_lock(&path, || {
+            let mut request = self.get_repair_request(plan, request_id)?;
+            if request.status == status {
+                return Ok(request);
+            }
+            request.status = status;
+            request.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &request)?;
+            Ok(request)
+        })
     }
 
     pub fn merge_repair_request_evidence(
@@ -55,22 +58,24 @@ impl WorkItemRevisionStore {
         request_id: &str,
         evidence: Vec<serde_json::Value>,
     ) -> Result<PlanRepairRequest, ProductStoreError> {
-        let mut request = self.get_repair_request(plan, request_id)?;
-        let mut changed = false;
-        for value in evidence {
-            if !request.evidence.contains(&value) {
-                request.evidence.push(value);
-                changed = true;
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(request_id)?;
+        let path = self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id);
+        with_exclusive_lock(&path, || {
+            let mut request = self.get_repair_request(plan, request_id)?;
+            let mut changed = false;
+            for value in evidence {
+                if !request.evidence.contains(&value) {
+                    request.evidence.push(value);
+                    changed = true;
+                }
             }
-        }
-        if changed {
-            request.updated_at = Utc::now().to_rfc3339();
-            write_json(
-                &self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id),
-                &request,
-            )?;
-        }
-        Ok(request)
+            if changed {
+                request.updated_at = Utc::now().to_rfc3339();
+                write_json(&path, &request)?;
+            }
+            Ok(request)
+        })
     }
 
     pub fn list_open_repair_requests(

@@ -7,26 +7,27 @@ use crate::product::models::{
 };
 
 use super::{
-    PlanScope, WorkItemRevisionStore, identity_mismatch, path_exists, read_required_json,
+    WorkItemRevisionStore, identity_mismatch, path_exists, read_required_json, with_exclusive_lock,
     write_immutable,
 };
 
 impl WorkItemRevisionStore {
-    pub fn put_logical_work_item(&self, value: &LogicalWorkItem) -> Result<(), ProductStoreError> {
+    pub fn put_logical_work_item(
+        &self,
+        plan: &WorkItemPlanLineage,
+        value: &LogicalWorkItem,
+    ) -> Result<(), ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
         validate_relative_id(&value.id)?;
         validate_relative_id(&value.plan_id)?;
+        if value.plan_id != plan.id {
+            return Err(identity_mismatch("logical_work_item", &value.id));
+        }
         if let Some(revision_id) = value.active_revision_id.as_deref() {
             validate_relative_id(revision_id)?;
         }
-        let scope = self.scope_for_plan_id(&value.plan_id)?;
-        self.get_plan_lineage(&scope.project_id, &scope.issue_id, &scope.plan_id)?;
         write_immutable(
-            &self.logical_work_item_path(
-                &scope.project_id,
-                &scope.issue_id,
-                &scope.plan_id,
-                &value.id,
-            ),
+            &self.logical_work_item_path(&plan.project_id, &plan.issue_id, &plan.id, &value.id),
             "logical_work_item",
             &value.id,
             value,
@@ -35,39 +36,45 @@ impl WorkItemRevisionStore {
 
     pub fn set_active_work_item_revision(
         &self,
+        plan: &WorkItemPlanLineage,
         logical_work_item: &LogicalWorkItem,
         expected_revision_id: Option<&str>,
         next_revision_id: &str,
     ) -> Result<LogicalWorkItem, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
         validate_relative_id(next_revision_id)?;
         if let Some(expected_revision_id) = expected_revision_id {
             validate_relative_id(expected_revision_id)?;
         }
-        let scope = self.scope_for_plan_id(&logical_work_item.plan_id)?;
-        let mut stored = self.get_logical_work_item(&scope, &logical_work_item.id)?;
-        if stored.plan_id != logical_work_item.plan_id
-            || stored.id != logical_work_item.id
-            || stored.active_revision_id.as_deref() != expected_revision_id
-        {
+        if logical_work_item.plan_id != plan.id {
             return Err(identity_mismatch(
-                "active_work_item_revision",
+                "logical_work_item",
                 &logical_work_item.id,
             ));
         }
-        let plan = self.get_plan_lineage(&scope.project_id, &scope.issue_id, &scope.plan_id)?;
-        self.get_work_item_revision(&plan, &logical_work_item.id, next_revision_id)?;
-        stored.active_revision_id = Some(next_revision_id.to_string());
-        stored.updated_at = Utc::now().to_rfc3339();
-        write_json(
-            &self.logical_work_item_path(
-                &scope.project_id,
-                &scope.issue_id,
-                &scope.plan_id,
-                &stored.id,
-            ),
-            &stored,
-        )?;
-        Ok(stored)
+        self.get_work_item_revision(plan, &logical_work_item.id, next_revision_id)?;
+        let path = self.logical_work_item_path(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+            &logical_work_item.id,
+        );
+        with_exclusive_lock(&path, || {
+            let mut stored = self.get_logical_work_item(plan, &logical_work_item.id)?;
+            if stored.plan_id != plan.id
+                || stored.id != logical_work_item.id
+                || stored.active_revision_id.as_deref() != expected_revision_id
+            {
+                return Err(identity_mismatch(
+                    "active_work_item_revision",
+                    &logical_work_item.id,
+                ));
+            }
+            stored.active_revision_id = Some(next_revision_id.to_string());
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &stored)?;
+            Ok(stored)
+        })
     }
 
     pub fn put_draft_revision(
@@ -78,14 +85,7 @@ impl WorkItemRevisionStore {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(&value.id)?;
         validate_relative_id(&value.logical_work_item_id)?;
-        self.get_logical_work_item(
-            &PlanScope {
-                plan_id: plan.id.clone(),
-                project_id: plan.project_id.clone(),
-                issue_id: plan.issue_id.clone(),
-            },
-            &value.logical_work_item_id,
-        )?;
+        self.get_logical_work_item(plan, &value.logical_work_item_id)?;
         let revision_path =
             self.draft_revision_path(&plan.project_id, &plan.issue_id, &plan.id, &value.id);
         write_immutable(&revision_path, "work_item_draft_revision", &value.id, value)?;
@@ -154,12 +154,7 @@ impl WorkItemRevisionStore {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(&value.id)?;
         validate_relative_id(&value.logical_work_item_id)?;
-        let scope = PlanScope {
-            plan_id: plan.id.clone(),
-            project_id: plan.project_id.clone(),
-            issue_id: plan.issue_id.clone(),
-        };
-        self.get_logical_work_item(&scope, &value.logical_work_item_id)?;
+        self.get_logical_work_item(plan, &value.logical_work_item_id)?;
         write_immutable(
             &self.work_item_revision_path(
                 &plan.project_id,
@@ -208,12 +203,7 @@ impl WorkItemRevisionStore {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(&value.id)?;
         validate_relative_id(&value.logical_work_item_id)?;
-        let scope = PlanScope {
-            plan_id: plan.id.clone(),
-            project_id: plan.project_id.clone(),
-            issue_id: plan.issue_id.clone(),
-        };
-        self.get_logical_work_item(&scope, &value.logical_work_item_id)?;
+        self.get_logical_work_item(plan, &value.logical_work_item_id)?;
         write_immutable(
             &self.verification_plan_revision_path(
                 &plan.project_id,
@@ -253,21 +243,21 @@ impl WorkItemRevisionStore {
 
     pub(super) fn get_logical_work_item(
         &self,
-        scope: &PlanScope,
+        plan: &WorkItemPlanLineage,
         logical_work_item_id: &str,
     ) -> Result<LogicalWorkItem, ProductStoreError> {
         validate_relative_id(logical_work_item_id)?;
         let value: LogicalWorkItem = read_required_json(
             &self.logical_work_item_path(
-                &scope.project_id,
-                &scope.issue_id,
-                &scope.plan_id,
+                &plan.project_id,
+                &plan.issue_id,
+                &plan.id,
                 logical_work_item_id,
             ),
             "logical_work_item",
             logical_work_item_id,
         )?;
-        if value.id != logical_work_item_id || value.plan_id != scope.plan_id {
+        if value.id != logical_work_item_id || value.plan_id != plan.id {
             return Err(identity_mismatch("logical_work_item", logical_work_item_id));
         }
         Ok(value)
