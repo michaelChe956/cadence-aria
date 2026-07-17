@@ -12,6 +12,7 @@ pub use human::validate_human_presentation_revision;
 pub use model::*;
 pub use plan::PlanProjectionCompiler;
 pub use render::{ProjectionRenderError, ProviderProjectionRenderer, renderer_for};
+pub(crate) use validation::plan_projection_hashes;
 pub use validation::{
     projection_hashes, validate_plan_projection_coverage, validate_projection_coverage,
 };

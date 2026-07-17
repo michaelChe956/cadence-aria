@@ -4,8 +4,11 @@ use crate::product::models::{
     DependencyGraphRevision, PlanProjectionBundle, PlanRevisionReason, WorkItemProjectionBundle,
     WorkItemRevision,
 };
-use crate::product::work_item_contract::CanonicalWorkItemContract;
-use crate::product::work_item_projection::ProjectionValidationReport;
+use crate::product::work_item_contract::{CanonicalWorkItemContract, canonical_contract_hash};
+use crate::product::work_item_projection::{
+    CompiledPlanProjections, CompiledWorkItemProjections, ProjectionValidationReport,
+    plan_projection_hashes, projection_hashes,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::workspace_engine::WorkspaceEngine;
 
@@ -66,6 +69,7 @@ pub(super) fn load_plan_review_context(
     {
         return Err("Plan Review plan projection identity mismatch".to_string());
     }
+    validate_plan_projection_hashes(projection)?;
     let dependency_contract_graph = store
         .get_dependency_graph_revision(&lineage, &projection.dependency_graph_revision_id)
         .map_err(|error| format!("load Dependency Contract Graph failed: {error}"))?;
@@ -147,9 +151,21 @@ fn validate_work_item_projection_bindings(
             .get(revision.work_item_projection_bundle_id.as_str())
             .ok_or_else(|| "Plan Review WorkItem projection bundle missing".to_string())?;
         let logical_id = revision.logical_work_item_id.as_str();
-        if revision.canonical_contract.identity.logical_work_item_id != logical_id
+        let actual_contract_hash = canonical_contract_hash(&revision.canonical_contract)
+            .map_err(|error| format!("hash Canonical Contract Candidate failed: {error}"))?;
+        let projection_hashes = projection_hashes(&CompiledWorkItemProjections {
+            human: bundle.human_projection.clone(),
+            coder: bundle.coder_projection.clone(),
+            reviewer: bundle.reviewer_projection.clone(),
+        })
+        .map_err(|error| format!("hash WorkItem projection failed: {error}"))?;
+        if revision.canonical_contract_hash != actual_contract_hash
+            || revision.canonical_contract.identity.logical_work_item_id != logical_id
             || bundle.work_item_revision_id != revision.id
             || bundle.canonical_contract_hash != revision.canonical_contract_hash
+            || bundle.human_projection_hash != projection_hashes.human
+            || bundle.coder_projection_hash != projection_hashes.coder
+            || bundle.reviewer_projection_hash != projection_hashes.reviewer
             || bundle.human_projection.logical_work_item_id != logical_id
             || bundle.coder_projection.work_item_revision_id != revision.id
             || bundle.reviewer_projection.work_item_revision_id != revision.id
@@ -158,6 +174,22 @@ fn validate_work_item_projection_bindings(
                 "Plan Review WorkItem projection binding mismatch for `{logical_id}`"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_plan_projection_hashes(projection: &PlanProjectionBundle) -> Result<(), String> {
+    let hashes = plan_projection_hashes(&CompiledPlanProjections {
+        human: projection.human_group_projection.clone(),
+        coder: projection.coder_group_context.clone(),
+        reviewer: projection.reviewer_group_matrix.clone(),
+    })
+    .map_err(|error| format!("hash Plan projection failed: {error}"))?;
+    if projection.human_group_projection_hash != hashes.human
+        || projection.coder_group_context_hash != hashes.coder
+        || projection.reviewer_group_matrix_hash != hashes.reviewer
+    {
+        return Err("Plan Review plan projection payload hash mismatch".to_string());
     }
     Ok(())
 }

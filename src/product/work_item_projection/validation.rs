@@ -330,6 +330,16 @@ pub fn projection_hashes(
     })
 }
 
+pub(crate) fn plan_projection_hashes(
+    compiled: &CompiledPlanProjections,
+) -> Result<ProjectionHashes, ProjectionCompileError> {
+    Ok(ProjectionHashes {
+        human: projection_hash(&compiled.human)?,
+        coder: projection_hash(&compiled.coder)?,
+        reviewer: projection_hash(&compiled.reviewer)?,
+    })
+}
+
 fn validate_revision_binding(
     expected_work_item_revision_id: &str,
     compiled: &CompiledWorkItemProjections,

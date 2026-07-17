@@ -1,8 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
-use sha2::{Digest, Sha256};
-
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::models::{
     DependencyGraphRevision, LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason,
@@ -18,7 +15,8 @@ use crate::product::work_item_projection::{
     CompiledPlanProjections, CompiledWorkItemProjections, PlanProjectionCompileInput,
     PlanProjectionCompiler, PlanProjectionValidationInput, ProjectionCompileError,
     ProjectionValidationFinding, ProjectionValidationReport, WorkItemProjectionCompiler,
-    projection_hashes, validate_plan_projection_coverage, validate_projection_coverage,
+    plan_projection_hashes, projection_hashes, validate_plan_projection_coverage,
+    validate_projection_coverage,
 };
 use crate::product::work_item_revision_store::{
     InitialPlanPublicationArtifacts, InitialPlanPublicationJournal, InitialPlanPublicationPhase,
@@ -191,14 +189,15 @@ pub fn compile_plan_projection_bundle(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let hashes = plan_projection_hashes(&compiled)?;
     Ok(PlanProjectionBundle {
         id: plan_projection_bundle_id.to_string(),
         plan_revision_id: plan_revision_id.to_string(),
         dependency_graph_revision_id: dependency_graph_revision_id.to_string(),
         work_item_projection_bundle_refs,
-        human_group_projection_hash: projection_hash(&compiled.human)?,
-        coder_group_context_hash: projection_hash(&compiled.coder)?,
-        reviewer_group_matrix_hash: projection_hash(&compiled.reviewer)?,
+        human_group_projection_hash: hashes.human,
+        coder_group_context_hash: hashes.coder,
+        reviewer_group_matrix_hash: hashes.reviewer,
         human_group_projection: compiled.human,
         coder_group_context: compiled.coder,
         reviewer_group_matrix: compiled.reviewer,
@@ -546,15 +545,6 @@ impl WorkspaceEngine {
 
         publish_initial_plan_revision(&revision_store, &journal)
     }
-}
-
-fn projection_hash<T: Serialize>(value: &T) -> Result<String, WorkspaceEngineError> {
-    let bytes = serde_json::to_vec(value).map_err(|error| {
-        WorkspaceEngineError::InvalidInitialPlan(format!(
-            "serialize plan projection for hashing failed: {error}"
-        ))
-    })?;
-    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn order_accepted_drafts<'a>(
