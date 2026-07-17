@@ -1,5 +1,7 @@
 import type {
   NodeDetail,
+  PlanProjectionBundle,
+  ProjectionValidationReport,
   StructuredOutputDiagnostic,
   WorkItemBatchStatePayload,
   WorkItemDraftCandidatePayload,
@@ -9,6 +11,8 @@ import type {
   WorkItemPlanCompileReportPayload,
   WorkItemPlanContextBlockerPayload,
   WorkItemPlanOutlineCandidatePayload,
+  WorkItemProjectionBundle,
+  WorkItemRevisionHistoryDto,
   WorkspaceProviderName,
 } from "../api/types";
 import type {
@@ -28,7 +32,19 @@ export type WorkspaceArtifact =
   | { context_blocker: WorkItemPlanContextBlockerPayload }
   | { draft_candidate: WorkItemDraftCandidatePayload }
   | { batch_state: WorkItemBatchStatePayload }
-  | { compile_report: WorkItemPlanCompileReportPayload };
+  | { compile_report: WorkItemPlanCompileReportPayload }
+  | { plan_projection: PlanProjectionBundle }
+  | { work_item_projection: WorkItemProjectionBundle }
+  | { work_item_revision_history: WorkItemRevisionHistoryDto }
+  | { projection_validation: ProjectionValidationReport };
+
+export type WorkItemPlanProjectionArtifacts = {
+  planProjection: PlanProjectionBundle | null;
+  workItemProjections: WorkItemProjectionBundle[];
+  history: WorkItemRevisionHistoryDto | null;
+  validation: ProjectionValidationReport | null;
+  missingWorkItemProjectionRefs: string[];
+};
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -195,7 +211,11 @@ export interface ArtifactVersionSummary {
 }
 
 export interface ArtifactVersion extends ArtifactVersionSummary {
-  markdown: string;
+  markdown?: string;
+  plan_projection?: PlanProjectionBundle;
+  work_item_projection?: WorkItemProjectionBundle;
+  work_item_revision_history?: WorkItemRevisionHistoryDto;
+  projection_validation?: ProjectionValidationReport;
 }
 
 export type TimelineNodeDetail = NodeDetail;
@@ -248,6 +268,7 @@ export interface WorkspaceWsState {
   workItemPlanCandidate: WorkItemPlanCandidateDto | null;
   workItemPlanArtifact: WorkItemPlanArtifactPayload | null;
   workItemPlanArtifactVersions: WorkItemPlanArtifactVersion[];
+  workItemPlanProjectionArtifacts: WorkItemPlanProjectionArtifacts;
   providers: WsProviderConfig | null;
   connectionStatus: WsConnectionStatus;
   streamingContent: string;

@@ -1,16 +1,22 @@
 import type {
+  PlanProjectionBundle,
+  ProjectionValidationReport,
+  WorkItemProjectionBundle,
   WorkItemPlanArtifactPayload,
   WorkItemPlanArtifactVersion,
   WorkItemPlanCandidateDto,
+  WorkItemRevisionHistoryDto,
   WorkspaceProviderName,
 } from "../api/types";
 import type { ChatEntryRole } from "./chat-entries";
 import type {
+  ArtifactVersion,
   ArtifactVersionSummary,
   ExecutionEvent,
   TimelineNode,
   TimelineNodeDetail,
   WorkspaceArtifact,
+  WorkItemPlanProjectionArtifacts,
 } from "./workspace-ws-store-types";
 
 const STAGE_ORDER = [
@@ -146,6 +152,14 @@ export function normalizeWorkspaceArtifact(
       },
     };
   }
+  const projectionArtifact = workItemPlanProjectionArtifactFromRecord(artifact);
+  if (projectionArtifact) {
+    return {
+      artifactMarkdown: null,
+      workItemPlanCandidate: null,
+      workItemPlanArtifact: projectionArtifact,
+    };
+  }
   if (typeof artifact === "object" && "markdown" in artifact) {
     return {
       artifactMarkdown: artifact.markdown,
@@ -154,7 +168,7 @@ export function normalizeWorkspaceArtifact(
     };
   }
   return {
-    artifactMarkdown: artifact,
+    artifactMarkdown: typeof artifact === "string" ? artifact : null,
     workItemPlanCandidate: null,
     workItemPlanArtifact: null,
   };
@@ -162,12 +176,13 @@ export function normalizeWorkspaceArtifact(
 
 export function workItemPlanVersionsFromSession(
   versions: ArtifactVersionSummary[],
+  fullVersions: ArtifactVersion[],
   currentArtifact: WorkItemPlanArtifactPayload | null,
   activeNodeId: string | null,
   authorProvider: WorkspaceProviderName,
   reviewerProvider: WorkspaceProviderName | null,
 ): WorkItemPlanArtifactVersion[] {
-  if (versions.length === 0) {
+  if (versions.length === 0 && fullVersions.length === 0) {
     return currentArtifact
       ? [
           {
@@ -185,19 +200,220 @@ export function workItemPlanVersionsFromSession(
       : [];
   }
 
+  const summariesByVersion = new Map(
+    versions.map((version) => [version.version, version]),
+  );
+  const fullVersionsByVersion = new Map(
+    fullVersions.map((version) => [version.version, version]),
+  );
+  const versionNumbers = Array.from(
+    new Set([...summariesByVersion.keys(), ...fullVersionsByVersion.keys()]),
+  );
   const currentVersion =
     versions.find((version) => version.is_current)?.version ??
-    Math.max(...versions.map((version) => version.version));
+    fullVersions.find((version) => version.is_current)?.version ??
+    Math.max(...versionNumbers);
 
-  return versions
-    .map((version) => ({
-      ...version,
+  const normalizedVersions: WorkItemPlanArtifactVersion[] = [];
+  for (const versionNumber of versionNumbers) {
+    const summary = summariesByVersion.get(versionNumber);
+    const fullVersion = fullVersionsByVersion.get(versionNumber);
+    const metadata = summary ?? fullVersion;
+    if (!metadata) {
+      continue;
+    }
+    normalizedVersions.push({
+      version: metadata.version,
+      generated_by: metadata.generated_by,
+      reviewed_by: metadata.reviewed_by ?? null,
+      review_verdict: metadata.review_verdict ?? null,
+      confirmed_by: metadata.confirmed_by ?? null,
+      is_current: metadata.is_current,
+      created_at: metadata.created_at,
+      source_node_id: metadata.source_node_id,
       artifact:
-        currentArtifact && version.version === currentVersion
+        workItemPlanProjectionArtifactFromRecord(fullVersion) ??
+        (currentArtifact && versionNumber === currentVersion
           ? currentArtifact
-          : null,
-    }))
-    .sort((left, right) => left.version - right.version);
+          : null),
+    });
+  }
+  return normalizedVersions.sort((left, right) => left.version - right.version);
+}
+
+export function workItemPlanProjectionArtifactsFromVersions(
+  versions: WorkItemPlanArtifactVersion[],
+  selectedPlanProjectionId?: string,
+): WorkItemPlanProjectionArtifacts {
+  const orderedVersions = [...versions].sort(
+    (left, right) => left.version - right.version,
+  );
+  const planVersions = orderedVersions.filter(
+    (version) => version.artifact?.type === "plan_projection",
+  );
+  const selectedPlanVersion = selectedPlanProjectionId
+    ? planVersions.find(
+        (version) =>
+          version.artifact?.type === "plan_projection" &&
+          version.artifact.payload.id === selectedPlanProjectionId,
+      )
+    : [...planVersions].sort(
+        (left, right) =>
+          Number(Boolean(right.is_current)) -
+            Number(Boolean(left.is_current)) ||
+          right.version - left.version,
+      )[0];
+  const planProjection =
+    selectedPlanVersion?.artifact?.type === "plan_projection"
+      ? selectedPlanVersion.artifact.payload
+      : null;
+  const sourceNodeId = selectedPlanVersion?.source_node_id ?? null;
+  let history: WorkItemRevisionHistoryDto | null = null;
+  let validation: ProjectionValidationReport | null = null;
+  const workItemProjectionById = new Map<string, WorkItemProjectionBundle>();
+
+  for (const version of orderedVersions) {
+    if (sourceNodeId && version.source_node_id !== sourceNodeId) {
+      continue;
+    }
+    switch (version.artifact?.type) {
+      case "work_item_projection":
+        workItemProjectionById.set(
+          version.artifact.payload.id,
+          version.artifact.payload,
+        );
+        break;
+      case "work_item_revision_history":
+        history = version.artifact.payload;
+        break;
+      case "projection_validation":
+        validation = version.artifact.payload;
+        break;
+      default:
+        break;
+    }
+  }
+
+  const workItemProjections: WorkItemProjectionBundle[] = [];
+  const missingWorkItemProjectionRefs: string[] = [];
+  for (const projectionRef of planProjection?.work_item_projection_bundle_refs ?? []) {
+    const projection = workItemProjectionById.get(projectionRef);
+    if (projection) {
+      workItemProjections.push(projection);
+    } else {
+      missingWorkItemProjectionRefs.push(projectionRef);
+    }
+  }
+
+  return {
+    planProjection,
+    workItemProjections,
+    history,
+    validation,
+    missingWorkItemProjectionRefs,
+  };
+}
+
+export function emptyWorkItemPlanProjectionArtifacts(): WorkItemPlanProjectionArtifacts {
+  return {
+    planProjection: null,
+    workItemProjections: [],
+    history: null,
+    validation: null,
+    missingWorkItemProjectionRefs: [],
+  };
+}
+
+export function upsertArtifactVersionSummary(
+  versions: ArtifactVersionSummary[],
+  version: number,
+  replaceCurrent: boolean,
+  fallback: {
+    author: WorkspaceProviderName;
+    activeNodeId: string;
+    createdAt: string;
+  },
+): ArtifactVersionSummary[] {
+  const existing = versions.find((item) => item.version === version);
+  return [
+    ...versions
+      .filter((item) => item.version !== version)
+      .map((item) => (replaceCurrent ? { ...item, is_current: false } : item)),
+    {
+      version,
+      generated_by: existing?.generated_by ?? fallback.author,
+      reviewed_by: existing?.reviewed_by ?? null,
+      review_verdict: existing?.review_verdict ?? null,
+      confirmed_by: existing?.confirmed_by ?? null,
+      is_current: replaceCurrent ? true : existing?.is_current ?? false,
+      created_at: existing?.created_at ?? fallback.createdAt,
+      source_node_id: existing?.source_node_id ?? fallback.activeNodeId,
+    },
+  ].sort((left, right) => left.version - right.version);
+}
+
+export function upsertWorkItemPlanArtifactVersion(
+  versions: WorkItemPlanArtifactVersion[],
+  artifact: WorkItemPlanArtifactPayload,
+  version: number,
+  replaceCurrent: boolean,
+  fallback: {
+    author: WorkspaceProviderName;
+    reviewer: WorkspaceProviderName | null;
+    activeNodeId: string;
+    createdAt: string;
+  },
+): WorkItemPlanArtifactVersion[] {
+  const existing = versions.find((item) => item.version === version);
+  return [
+    ...versions
+      .filter((item) => item.version !== version)
+      .map((item) => (replaceCurrent ? { ...item, is_current: false } : item)),
+    {
+      version,
+      generated_by: existing?.generated_by ?? fallback.author,
+      reviewed_by: existing?.reviewed_by ?? fallback.reviewer,
+      review_verdict: existing?.review_verdict ?? null,
+      confirmed_by: existing?.confirmed_by ?? null,
+      is_current: replaceCurrent ? true : existing?.is_current ?? false,
+      created_at: existing?.created_at ?? fallback.createdAt,
+      source_node_id: existing?.source_node_id ?? fallback.activeNodeId,
+      artifact,
+    },
+  ].sort((left, right) => left.version - right.version);
+}
+
+export function workItemPlanProjectionArtifactFromRecord(
+  value: unknown,
+): WorkItemPlanArtifactPayload | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  if ("plan_projection" in value) {
+    return {
+      type: "plan_projection",
+      payload: value.plan_projection as PlanProjectionBundle,
+    };
+  }
+  if ("work_item_projection" in value) {
+    return {
+      type: "work_item_projection",
+      payload: value.work_item_projection as WorkItemProjectionBundle,
+    };
+  }
+  if ("work_item_revision_history" in value) {
+    return {
+      type: "work_item_revision_history",
+      payload: value.work_item_revision_history as WorkItemRevisionHistoryDto,
+    };
+  }
+  if ("projection_validation" in value) {
+    return {
+      type: "projection_validation",
+      payload: value.projection_validation as ProjectionValidationReport,
+    };
+  }
+  return null;
 }
 
 export function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: string) {

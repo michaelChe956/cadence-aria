@@ -1,5 +1,7 @@
 import type {
+  PlanProjectionBundle,
   ProviderConfigSnapshot,
+  ProjectionValidationReport,
   WorkspaceProviderName,
   WorkItemBatchStatePayload,
   WorkItemDraftCandidatePayload,
@@ -8,6 +10,8 @@ import type {
   WorkItemPlanCompileReportPayload,
   WorkItemPlanContextBlockerPayload,
   WorkItemPlanOutlineCandidatePayload,
+  WorkItemProjectionBundle,
+  WorkItemRevisionHistoryDto,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
 import {
@@ -478,6 +482,30 @@ function workItemPlanArtifactFromMessage(msg: WsServerMessage): WorkItemPlanArti
     return {
       type: "compile_report",
       payload: msg.compile_report as WorkItemPlanCompileReportPayload,
+    };
+  }
+  if (msg.plan_projection) {
+    return {
+      type: "plan_projection",
+      payload: msg.plan_projection as PlanProjectionBundle,
+    };
+  }
+  if (msg.work_item_projection) {
+    return {
+      type: "work_item_projection",
+      payload: msg.work_item_projection as WorkItemProjectionBundle,
+    };
+  }
+  if (msg.work_item_revision_history) {
+    return {
+      type: "work_item_revision_history",
+      payload: msg.work_item_revision_history as WorkItemRevisionHistoryDto,
+    };
+  }
+  if (msg.projection_validation) {
+    return {
+      type: "projection_validation",
+      payload: msg.projection_validation as ProjectionValidationReport,
     };
   }
   return null;

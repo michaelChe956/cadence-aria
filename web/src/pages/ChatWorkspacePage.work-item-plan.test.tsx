@@ -29,6 +29,7 @@ import {
   workItemDraftPayload,
   workItemPlanCandidate,
   workItemPlanOutlinePayload,
+  workItemProjectionSessionArtifacts,
 } from "./ChatWorkspacePage.test-utils";
 
 vi.mock("../hooks/useWorkspaceWs", () => ({
@@ -474,5 +475,150 @@ describe("ChatWorkspacePage work item plan flow", () => {
       "pause",
     );
     expect(api.sendAuthorDecision).not.toHaveBeenCalled();
+  });
+
+  it("renders restored plan projections from full structured artifact versions", async () => {
+    mockWorkspaceWs();
+    const projectionArtifacts = workItemProjectionSessionArtifacts();
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "workspace_session_0001",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: {
+        plan_projection: projectionArtifacts.planProjection,
+      } as never,
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifact_versions: projectionArtifacts.artifactVersions as never,
+      artifact_version_summaries:
+        projectionArtifacts.artifactVersionSummaries,
+      active_node_id: "node-compile",
+      timeline_nodes: [
+        timelineNode({
+          node_id: "node-compile",
+          node_type: "work_item_plan_compile",
+          stage: "human_confirm",
+          title: "Compile Work Item Plan",
+        }),
+      ],
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.getByText("仓库初始化实时进度")).toBeInTheDocument();
+    expect(
+      screen.getByText("Plan Projection plan-revision-01 已发布。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Human Overview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      screen.queryByTestId("work-item-plan-staged-panel"),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Coder" }));
+    expect(screen.getByText("初始化状态模型并提交契约")).toBeInTheDocument();
+    expect(screen.getAllByText("等待运行时 Envelope（P5）")).toHaveLength(3);
+  });
+
+  it("fails closed when the restored plan references a missing work item projection", async () => {
+    mockWorkspaceWs();
+    const projectionArtifacts = workItemProjectionSessionArtifacts(true);
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "workspace_session_0001",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: {
+        plan_projection: projectionArtifacts.planProjection,
+      } as never,
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifact_versions: projectionArtifacts.artifactVersions as never,
+      artifact_version_summaries:
+        projectionArtifacts.artifactVersionSummaries,
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.getByText("Projection artifacts 不完整")).toBeInTheDocument();
+    expect(screen.getByText("projection-wi-missing")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Human Overview" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps a selected historical draft out of the current projection view", async () => {
+    mockWorkspaceWs();
+    const projectionArtifacts = workItemProjectionSessionArtifacts();
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "workspace_session_0001",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: {
+        plan_projection: projectionArtifacts.planProjection,
+      } as never,
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifact_versions: projectionArtifacts.artifactVersions as never,
+      artifact_version_summaries:
+        projectionArtifacts.artifactVersionSummaries,
+      active_node_id: "node-compile",
+      timeline_nodes: [
+        timelineNode({
+          node_id: "node-draft-history",
+          node_type: "work_item_draft_confirm",
+          stage: "author_confirm",
+          title: "Historical Draft",
+        }),
+        timelineNode({
+          node_id: "node-compile",
+          node_type: "work_item_plan_compile",
+          stage: "human_confirm",
+          title: "Compile Work Item Plan",
+        }),
+      ],
+    });
+    const state = useWorkspaceStore.getState();
+    useWorkspaceStore.setState({
+      selectedNodeId: "node-draft-history",
+      workItemPlanArtifactVersions: [
+        {
+          version: 10,
+          generated_by: "claude_code",
+          reviewed_by: "codex",
+          review_verdict: "pass",
+          confirmed_by: null,
+          is_current: false,
+          created_at: "2026-07-18T09:00:00Z",
+          source_node_id: "node-draft-history",
+          artifact: {
+            type: "draft_candidate",
+            payload: workItemDraftPayload(),
+          },
+        },
+        ...state.workItemPlanArtifactVersions,
+      ],
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+
+    expect(screen.getByRole("button", { name: "Overview" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Human Overview" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Historical Draft")).toBeInTheDocument();
   });
 });

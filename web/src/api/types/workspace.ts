@@ -11,6 +11,8 @@ import type {
   WorkspaceReviewFindingSeverity,
 } from "./common";
 import type {
+  PlanProjectionBundle,
+  ProjectionValidationReport,
   WorkItemBatchStatePayload,
   WorkItemDraftCandidatePayload,
   WorkItemGenerationMode,
@@ -19,6 +21,8 @@ import type {
   WorkItemPlanCompileReportPayload,
   WorkItemPlanContextBlockerPayload,
   WorkItemPlanOutlineCandidatePayload,
+  WorkItemProjectionBundle,
+  WorkItemRevisionHistoryDto,
 } from "./work-item-plan";
 
 export type WorkspaceMessage = {
@@ -62,7 +66,19 @@ export type ArtifactUpdateMessage =
   | { type: "artifact_update"; version: number; context_blocker: WorkItemPlanContextBlockerPayload }
   | { type: "artifact_update"; version: number; draft_candidate: WorkItemDraftCandidatePayload }
   | { type: "artifact_update"; version: number; batch_state: WorkItemBatchStatePayload }
-  | { type: "artifact_update"; version: number; compile_report: WorkItemPlanCompileReportPayload };
+  | { type: "artifact_update"; version: number; compile_report: WorkItemPlanCompileReportPayload }
+  | { type: "artifact_update"; version: number; plan_projection: PlanProjectionBundle }
+  | { type: "artifact_update"; version: number; work_item_projection: WorkItemProjectionBundle }
+  | {
+      type: "artifact_update";
+      version: number;
+      work_item_revision_history: WorkItemRevisionHistoryDto;
+    }
+  | {
+      type: "artifact_update";
+      version: number;
+      projection_validation: ProjectionValidationReport;
+    };
 
 export type RevertWorkItemMessage = {
   type: "revert_work_item";
@@ -316,6 +332,13 @@ export type ArtifactVersion = {
 
 export type ArtifactVersionSummary = Omit<ArtifactVersion, "markdown"> & { markdown?: string };
 
+export type WorkspaceStructuredArtifactVersion = ArtifactVersionSummary & {
+  plan_projection?: PlanProjectionBundle;
+  work_item_projection?: WorkItemProjectionBundle;
+  work_item_revision_history?: WorkItemRevisionHistoryDto;
+  projection_validation?: ProjectionValidationReport;
+};
+
 export type ProviderSnapshot = {
   name: string;
   model: string;
@@ -452,11 +475,20 @@ export type WsOutMessage =
         | string
         | null
         | { markdown: string; diff?: string | null }
-        | { candidate: WorkItemPlanCandidateDto };
+        | { candidate: WorkItemPlanCandidateDto }
+        | { outline_candidate: WorkItemPlanOutlineCandidatePayload }
+        | { context_blocker: WorkItemPlanContextBlockerPayload }
+        | { draft_candidate: WorkItemDraftCandidatePayload }
+        | { batch_state: WorkItemBatchStatePayload }
+        | { compile_report: WorkItemPlanCompileReportPayload }
+        | { plan_projection: PlanProjectionBundle }
+        | { work_item_projection: WorkItemProjectionBundle }
+        | { work_item_revision_history: WorkItemRevisionHistoryDto }
+        | { projection_validation: ProjectionValidationReport };
       providers: WsProviderConfig;
       timeline_nodes: TimelineNode[];
       active_node_id: string | null;
-      artifact_versions: ArtifactVersion[];
+      artifact_versions: WorkspaceStructuredArtifactVersion[];
       artifact_version_summaries?: ArtifactVersionSummary[];
       timeline_node_details: Record<string, NodeDetail>;
       active_run_id: string | null;

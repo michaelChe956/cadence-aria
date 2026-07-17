@@ -12,6 +12,9 @@ import type {
 } from "../../api/types";
 import { normalizeDisplayText } from "../chat-workspace/text-display";
 import { MonacoViewer } from "../shared/MonacoViewer";
+import {
+  projectionArtifactVersionGroup,
+} from "./work-item-plan-projection-artifacts";
 
 export type WorkItemPlanArtifactTab = "overview" | "outline" | "drafts" | "diff" | "review" | "json";
 
@@ -123,7 +126,10 @@ function OverviewTab({ artifact }: { artifact: WorkItemPlanArtifactPayload }) {
   if (artifact.type === "draft_candidate") {
     return <DraftsTab artifact={artifact} />;
   }
-  return <OutlineArtifact artifact={artifact.payload} />;
+  if (artifact.type === "outline_candidate") {
+    return <OutlineArtifact artifact={artifact.payload} />;
+  }
+  return <EmptyTab message="当前 artifact 由 Projection 视图展示。" />;
 }
 
 function DraftsTab({ artifact }: { artifact: WorkItemPlanArtifactPayload }) {
@@ -298,7 +304,12 @@ function versionGroup(artifact: WorkItemPlanArtifactPayload | null) {
     case "context_blocker":
       return { key: "blockers", label: "Blockers" };
     default:
-      return { key: "unknown", label: "Other" };
+      return (
+        projectionArtifactVersionGroup(artifact) ?? {
+          key: "unknown",
+          label: "Other",
+        }
+      );
   }
 }
 
@@ -761,25 +772,6 @@ function KeyValue({ label, value }: { label: string; value: string }) {
 
 function outlineItems(outline: WorkItemPlanOutline) {
   return outline.work_item_outlines ?? outline.work_items ?? [];
-}
-
-export function workItemPlanArtifactLabel(
-  artifact: WorkItemPlanArtifactPayload,
-): string {
-  switch (artifact.type) {
-    case "outline_candidate":
-      return `Outline · ${outlineItems(artifact.payload.outline).length} items`;
-    case "draft_candidate":
-      return `${artifact.payload.draft_record.outline_id} / ${artifact.payload.draft_record.draft_id}`;
-    case "batch_state":
-      return `Batch / ${artifact.payload.batch_id}`;
-    case "compile_report":
-      return `Final Compile / ${artifact.payload.compile_id}`;
-    case "context_blocker":
-      return `Blocker / ${artifact.payload.context_blockers.length}`;
-    default:
-      return "Artifact";
-  }
 }
 
 function commandLabel(command: WorkItemDraftVerificationCommand) {

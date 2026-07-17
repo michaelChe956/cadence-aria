@@ -237,6 +237,192 @@ describe("workspace ws store artifact payloads", () => {
     ]);
   });
 
+  it("assembles projection artifacts from full session versions in plan ref order", () => {
+    const store = useWorkspaceStore.getState();
+    const planProjection = makePlanProjectionBundle(["projection-wi-01"]);
+    const workItemProjection = makeWorkItemProjectionBundle("projection-wi-01");
+    const history = {
+      entries: [
+        {
+          kind: "work_item_revision",
+          id: "revision-wi-01",
+          logical_work_item_id: "WI-01",
+          related_revision_id: null,
+          summary: "发布 Work Item revision",
+          created_at: "2026-07-18T10:00:02Z",
+        },
+      ],
+    };
+    const validation = { findings: [] };
+
+    store.setSessionState({
+      session_id: "session_projection_artifacts",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { plan_projection: planProjection } as never,
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifact_versions: [
+        {
+          ...projectionVersionMeta(20, false),
+          work_item_projection: workItemProjection,
+        },
+        {
+          ...projectionVersionMeta(21, false),
+          projection_validation: validation,
+        },
+        {
+          ...projectionVersionMeta(22, false),
+          work_item_revision_history: history,
+        },
+        {
+          ...projectionVersionMeta(23, true),
+          plan_projection: planProjection,
+        },
+      ] as never,
+      artifact_version_summaries: [
+        projectionVersionMeta(20, false),
+        projectionVersionMeta(21, false),
+        projectionVersionMeta(22, false),
+        projectionVersionMeta(23, true),
+      ],
+    });
+
+    const state = useWorkspaceStore.getState() as never as {
+      workItemPlanProjectionArtifacts: {
+        planProjection: unknown;
+        workItemProjections: unknown[];
+        history: unknown;
+        validation: unknown;
+        missingWorkItemProjectionRefs: string[];
+      };
+      workItemPlanArtifactVersions: Array<{ artifact: { type: string } | null }>;
+    };
+    expect(state.workItemPlanArtifactVersions.map((version) => version.artifact?.type)).toEqual([
+      "work_item_projection",
+      "projection_validation",
+      "work_item_revision_history",
+      "plan_projection",
+    ]);
+    expect(state.workItemPlanProjectionArtifacts).toEqual({
+      planProjection,
+      workItemProjections: [workItemProjection],
+      history,
+      validation,
+      missingWorkItemProjectionRefs: [],
+    });
+  });
+
+  it("fails closed with explicit missing refs when a plan projection bundle is incomplete", () => {
+    const planProjection = makePlanProjectionBundle([
+      "projection-wi-01",
+      "projection-wi-missing",
+    ]);
+
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_projection_artifacts_missing_ref",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { plan_projection: planProjection } as never,
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifact_versions: [
+        {
+          ...projectionVersionMeta(20, false),
+          work_item_projection: makeWorkItemProjectionBundle("projection-wi-01"),
+        },
+        {
+          ...projectionVersionMeta(23, true),
+          plan_projection: planProjection,
+        },
+      ] as never,
+      artifact_version_summaries: [
+        projectionVersionMeta(20, false),
+        projectionVersionMeta(23, true),
+      ],
+    });
+
+    const projectionArtifacts = (
+      useWorkspaceStore.getState() as never as {
+        workItemPlanProjectionArtifacts: {
+          workItemProjections: Array<{ id: string }>;
+          missingWorkItemProjectionRefs: string[];
+        };
+      }
+    ).workItemPlanProjectionArtifacts;
+    expect(projectionArtifacts.workItemProjections.map((bundle) => bundle.id)).toEqual([
+      "projection-wi-01",
+    ]);
+    expect(projectionArtifacts.missingWorkItemProjectionRefs).toEqual([
+      "projection-wi-missing",
+    ]);
+  });
+
+  it("prefers the explicitly current plan projection over a newer historical version", () => {
+    const currentPlan = makePlanProjectionBundle(["projection-wi-current"]);
+    const historicalPlan = {
+      ...makePlanProjectionBundle(["projection-wi-historical"]),
+      id: "projection-plan-historical",
+      plan_revision_id: "plan-revision-historical",
+    };
+    const currentWorkItem = makeWorkItemProjectionBundle("projection-wi-current");
+    const historicalWorkItem = makeWorkItemProjectionBundle(
+      "projection-wi-historical",
+    );
+
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_projection_current_boundary",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { plan_projection: currentPlan } as never,
+      providers: { author: "claude_code", reviewer: "codex" },
+      artifact_versions: [
+        {
+          ...projectionVersionMeta(20, false),
+          source_node_id: "node-current",
+          work_item_projection: currentWorkItem,
+        },
+        {
+          ...projectionVersionMeta(23, true),
+          source_node_id: "node-current",
+          plan_projection: currentPlan,
+        },
+        {
+          ...projectionVersionMeta(30, false),
+          source_node_id: "node-historical",
+          work_item_projection: historicalWorkItem,
+        },
+        {
+          ...projectionVersionMeta(31, false),
+          source_node_id: "node-historical",
+          plan_projection: historicalPlan,
+        },
+      ] as never,
+      artifact_version_summaries: [
+        { ...projectionVersionMeta(20, false), source_node_id: "node-current" },
+        { ...projectionVersionMeta(23, true), source_node_id: "node-current" },
+        {
+          ...projectionVersionMeta(30, false),
+          source_node_id: "node-historical",
+        },
+        {
+          ...projectionVersionMeta(31, false),
+          source_node_id: "node-historical",
+        },
+      ],
+    });
+
+    expect(useWorkspaceStore.getState().workItemPlanProjectionArtifacts).toMatchObject({
+      planProjection: currentPlan,
+      workItemProjections: [currentWorkItem],
+      missingWorkItemProjectionRefs: [],
+    });
+  });
+
   it("rebuilds staged draft artifact updates with business labels", () => {
     const store = useWorkspaceStore.getState();
     const draftCandidate = makeDraftArtifactPayload();
@@ -443,3 +629,107 @@ describe("workspace ws store artifact payloads", () => {
     );
   });
 });
+
+function projectionVersionMeta(version: number, isCurrent: boolean) {
+  return {
+    version,
+    generated_by: "claude_code" as const,
+    reviewed_by: "codex" as const,
+    review_verdict: "pass" as const,
+    confirmed_by: null,
+    is_current: isCurrent,
+    created_at: `2026-07-18T10:00:${String(version).padStart(2, "0")}Z`,
+    source_node_id: "node-compile",
+  };
+}
+
+function makePlanProjectionBundle(workItemRefs: string[]) {
+  return {
+    id: "projection-plan-01",
+    plan_revision_id: "plan-revision-01",
+    dependency_graph_revision_id: "dependency-graph-01",
+    work_item_projection_bundle_refs: workItemRefs,
+    human_group_projection: {
+      plan_id: "plan-01",
+      goal: "仓库初始化实时进度",
+      split_reason: "按契约拆分",
+      work_items: [],
+      contract_flow: [],
+      risks: [],
+      source_refs: ["story:repository-init"],
+      normative: false,
+      used_by_provider: false,
+    },
+    coder_group_context: {
+      plan_id: "plan-01",
+      ordered_logical_work_item_ids: ["WI-01"],
+      dependency_edges: [],
+      group_write_scopes: {},
+    },
+    reviewer_group_matrix: {
+      plan_id: "plan-01",
+      work_items: [],
+      dependency_edges: [],
+      design_traceability_refs: [],
+    },
+    human_group_projection_hash: "human-plan-hash",
+    coder_group_context_hash: "coder-plan-hash",
+    reviewer_group_matrix_hash: "reviewer-plan-hash",
+    compiler_version: "projection-compiler-v1",
+    created_at: "2026-07-18T10:00:00Z",
+  };
+}
+
+function makeWorkItemProjectionBundle(id: string) {
+  return {
+    id,
+    work_item_revision_id: "revision-wi-01",
+    canonical_contract_hash: "canonical-hash",
+    projection_schema_version: 1,
+    compiler_version: "projection-compiler-v1",
+    human_projection: {
+      logical_work_item_id: "WI-01",
+      title: "初始化领域模型",
+      goal: "建立初始化状态模型",
+      non_goals: [],
+      inputs: [],
+      outputs: [],
+      dependencies: [],
+      scope_summary: { owned_scopes: [], forbidden_scopes: [] },
+      completion_summary: [],
+      source_refs: ["story:repository-init"],
+      normative: false,
+      used_by_provider: false,
+    },
+    coder_projection: {
+      work_item_revision_id: "revision-wi-01",
+      objective: "建立初始化状态模型",
+      required_input_contracts: [],
+      task_refs: [],
+      tasks: [],
+      write_policy: { exclusive_scopes: [], forbidden_scopes: [] },
+      acceptance_criteria: [],
+      verification_checks: [],
+      blocker_rules: [],
+      handoff_contract: {
+        required_fields: [],
+        provided_contract_refs: [],
+        reviewer_check_refs: [],
+      },
+    },
+    reviewer_projection: {
+      work_item_revision_id: "revision-wi-01",
+      criterion_refs: [],
+      requirement_matrix: [],
+      scope_policy: { exclusive_scopes: [], forbidden_scopes: [] },
+      input_contract_checks: [],
+      output_contract_checks: [],
+      verification_evidence_rules: [],
+      blocker_routing: [],
+    },
+    human_projection_hash: "human-wi-hash",
+    coder_projection_hash: "coder-wi-hash",
+    reviewer_projection_hash: "reviewer-wi-hash",
+    created_at: "2026-07-18T10:00:01Z",
+  };
+}

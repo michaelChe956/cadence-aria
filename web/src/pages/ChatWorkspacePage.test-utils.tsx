@@ -274,3 +274,142 @@ export function workItemCompileReportPayload(planCommitState: string) {
     validator_findings: [],
   };
 }
+
+export function workItemProjectionSessionArtifacts(missingRef = false) {
+  const workItemProjection = {
+    id: "projection-wi-01",
+    work_item_revision_id: "revision-wi-01",
+    canonical_contract_hash: "canonical-hash",
+    projection_schema_version: 1,
+    compiler_version: "projection-compiler-v1",
+    human_projection: {
+      logical_work_item_id: "WI-01",
+      title: "初始化领域模型",
+      goal: "建立初始化状态模型",
+      non_goals: [],
+      inputs: [],
+      outputs: [],
+      dependencies: [],
+      scope_summary: { owned_scopes: [], forbidden_scopes: [] },
+      completion_summary: [],
+      source_refs: ["story:repository-init"],
+      normative: false,
+      used_by_provider: false,
+    },
+    coder_projection: {
+      work_item_revision_id: "revision-wi-01",
+      objective: "初始化状态模型并提交契约",
+      required_input_contracts: [],
+      task_refs: [],
+      tasks: [],
+      write_policy: { exclusive_scopes: [], forbidden_scopes: [] },
+      acceptance_criteria: [],
+      verification_checks: [],
+      blocker_rules: [],
+      handoff_contract: {
+        required_fields: [],
+        provided_contract_refs: [],
+        reviewer_check_refs: [],
+      },
+    },
+    reviewer_projection: {
+      work_item_revision_id: "revision-wi-01",
+      criterion_refs: [],
+      requirement_matrix: [],
+      scope_policy: { exclusive_scopes: [], forbidden_scopes: [] },
+      input_contract_checks: [],
+      output_contract_checks: [],
+      verification_evidence_rules: [],
+      blocker_routing: [],
+    },
+    human_projection_hash: "human-wi-hash",
+    coder_projection_hash: "coder-wi-hash",
+    reviewer_projection_hash: "reviewer-wi-hash",
+    created_at: "2026-07-18T10:00:01Z",
+  } as const;
+  const planProjection = {
+    id: "projection-plan-01",
+    plan_revision_id: "plan-revision-01",
+    dependency_graph_revision_id: "dependency-graph-01",
+    work_item_projection_bundle_refs: [
+      workItemProjection.id,
+      ...(missingRef ? ["projection-wi-missing"] : []),
+    ],
+    human_group_projection: {
+      plan_id: "plan-01",
+      goal: "仓库初始化实时进度",
+      split_reason: "按契约拆分",
+      work_items: [
+        {
+          logical_work_item_id: "WI-01",
+          title: "初始化领域模型",
+          goal: "建立初始化状态模型",
+          depends_on: [],
+          provides: ["finalization-contract"],
+          scope_summary: { owned_scopes: [], forbidden_scopes: [] },
+        },
+      ],
+      contract_flow: [],
+      risks: [],
+      source_refs: ["story:repository-init"],
+      normative: false,
+      used_by_provider: false,
+    },
+    coder_group_context: {
+      plan_id: "plan-01",
+      ordered_logical_work_item_ids: ["WI-01"],
+      dependency_edges: [],
+      group_write_scopes: {},
+    },
+    reviewer_group_matrix: {
+      plan_id: "plan-01",
+      work_items: [],
+      dependency_edges: [],
+      design_traceability_refs: [],
+    },
+    human_group_projection_hash: "human-plan-hash",
+    coder_group_context_hash: "coder-plan-hash",
+    reviewer_group_matrix_hash: "reviewer-plan-hash",
+    compiler_version: "projection-compiler-v1",
+    created_at: "2026-07-18T10:00:00Z",
+  } as const;
+  const history = {
+    entries: [
+      {
+        kind: "work_item_revision",
+        id: "revision-wi-01",
+        logical_work_item_id: "WI-01",
+        related_revision_id: null,
+        summary: "发布 Work Item revision",
+        created_at: "2026-07-18T10:00:02Z",
+      },
+    ],
+  } as const;
+  const validation = { findings: [] } as const;
+  const metadata = (version: number, isCurrent: boolean) => ({
+    version,
+    generated_by: "claude_code" as const,
+    reviewed_by: "codex" as const,
+    review_verdict: "pass" as const,
+    confirmed_by: null,
+    is_current: isCurrent,
+    created_at: `2026-07-18T10:00:${String(version).padStart(2, "0")}Z`,
+    source_node_id: "node-compile",
+  });
+  return {
+    planProjection,
+    workItemProjection,
+    artifactVersions: [
+      { ...metadata(20, false), work_item_projection: workItemProjection },
+      { ...metadata(21, false), projection_validation: validation },
+      { ...metadata(22, false), work_item_revision_history: history },
+      { ...metadata(23, true), plan_projection: planProjection },
+    ],
+    artifactVersionSummaries: [
+      metadata(20, false),
+      metadata(21, false),
+      metadata(22, false),
+      metadata(23, true),
+    ],
+  };
+}

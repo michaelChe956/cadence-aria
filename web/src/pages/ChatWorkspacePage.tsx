@@ -41,6 +41,7 @@ import type {
 import {
   useWorkspaceStore,
 } from "../state/workspace-ws-store";
+import { workItemPlanProjectionArtifactsFromVersions } from "../state/workspace-ws-store-helpers";
 import { workspaceContentCacheValues } from "../state/workspace-content-cache";
 import {
   ProviderConfigDialogButton,
@@ -124,6 +125,9 @@ export function ChatWorkspacePage({
   const workItemPlanArtifactVersions = useWorkspaceStore(
     (state) => state.workItemPlanArtifactVersions,
   );
+  const workItemPlanProjectionArtifacts = useWorkspaceStore(
+    (state) => state.workItemPlanProjectionArtifacts,
+  );
   const protocolError = useWorkspaceStore((state) => state.protocolError);
   const workspaceError = useWorkspaceStore((state) => state.error);
   const acknowledgedAbortedNodes = useWorkspaceStore(
@@ -171,9 +175,14 @@ export function ChatWorkspacePage({
   const selectedWorkItemPlanArtifactVersion = useMemo(
     () =>
       selectedNodeId
-        ? workItemPlanArtifactVersions.find(
-            (version) => version.source_node_id === selectedNodeId,
-          )
+        ? [...workItemPlanArtifactVersions]
+            .filter((version) => version.source_node_id === selectedNodeId)
+            .sort(
+              (left, right) =>
+                Number(Boolean(right.is_current)) -
+                  Number(Boolean(left.is_current)) ||
+                right.version - left.version,
+            )[0]
         : undefined,
     [selectedNodeId, workItemPlanArtifactVersions],
   );
@@ -200,6 +209,33 @@ export function ChatWorkspacePage({
         ? !manuallySelectedWorkItemPlanArtifactVersion.is_current
         : selectedNodeId !== activeNodeId),
   );
+  const displayedWorkItemPlanArtifactIsStaged =
+    displayedWorkItemPlanArtifact !== null &&
+    ![
+      "plan_projection",
+      "work_item_projection",
+      "work_item_revision_history",
+      "projection_validation",
+    ].includes(displayedWorkItemPlanArtifact.type);
+  const displayedProjectionArtifacts = useMemo(() => {
+    if (displayedWorkItemPlanArtifact?.type !== "plan_projection") {
+      return null;
+    }
+    if (
+      workItemPlanProjectionArtifacts.planProjection?.id ===
+      displayedWorkItemPlanArtifact.payload.id
+    ) {
+      return workItemPlanProjectionArtifacts;
+    }
+    return workItemPlanProjectionArtifactsFromVersions(
+      workItemPlanArtifactVersions,
+      displayedWorkItemPlanArtifact.payload.id,
+    );
+  }, [
+    displayedWorkItemPlanArtifact,
+    workItemPlanArtifactVersions,
+    workItemPlanProjectionArtifacts,
+  ]);
   const abortedByDisconnectNode = latestUnacknowledgedAbortedNode(
     timelineNodes,
     acknowledgedAbortedNodes,
@@ -529,7 +565,8 @@ export function ChatWorkspacePage({
             workspaceType === "work_item_plan" ? (
               displayedWorkItemPlanArtifact ? (
                 <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)]">
-                  {showingHistoricalWorkItemPlanArtifact ? null : (
+                  {showingHistoricalWorkItemPlanArtifact ||
+                  !displayedWorkItemPlanArtifactIsStaged ? null : (
                     <WorkItemPlanStagedPanel
                       activeNodeType={activeNode?.node_type ?? null}
                       artifact={displayedWorkItemPlanArtifact}
@@ -556,6 +593,22 @@ export function ChatWorkspacePage({
                     }
                     activeNodeType={activeNode?.node_type ?? null}
                     readonly={showingHistoricalWorkItemPlanArtifact}
+                    planProjection={
+                      displayedProjectionArtifacts?.planProjection ?? null
+                    }
+                    workItemProjections={
+                      displayedProjectionArtifacts?.workItemProjections ?? []
+                    }
+                    projectionHistory={
+                      displayedProjectionArtifacts?.history ?? null
+                    }
+                    projectionValidation={
+                      displayedProjectionArtifacts?.validation ?? null
+                    }
+                    missingWorkItemProjectionRefs={
+                      displayedProjectionArtifacts?.missingWorkItemProjectionRefs ??
+                      []
+                    }
                     className="min-h-0"
                   />
                 </div>
