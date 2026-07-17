@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -8,8 +7,8 @@ use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::models::{
     DependencyGraphRevision, LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason,
     PlanValidationReportArtifact, VerificationPlanRevision, WorkItemDraftRevision,
-    WorkItemDraftRevisionStatus, WorkItemPlanLineage, WorkItemPlanOutline, WorkItemPlanRevision,
-    WorkItemProjectionBundle, WorkItemRevision,
+    WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction, WorkItemPlanLineage,
+    WorkItemPlanOutline, WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::work_item_contract::{
     ContractValidationReport, DependencyContractGraph, build_dependency_contract_graph,
@@ -21,13 +20,17 @@ use crate::product::work_item_projection::{
     ProjectionValidationFinding, ProjectionValidationReport, WorkItemProjectionCompiler,
     projection_hashes, validate_plan_projection_coverage, validate_projection_coverage,
 };
-use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use crate::product::work_item_revision_store::{
+    InitialPlanPublicationArtifacts, InitialPlanPublicationJournal, InitialPlanPublicationPhase,
+    InitialWorkItemPublicationArtifacts, InitialWorkItemPublicationIds, WorkItemRevisionStore,
+};
 
 use super::WorkspaceEngine;
 
+mod recovery;
+
 const PROJECTION_SCHEMA_VERSION: u32 = 1;
 const PROJECTION_COMPILER_VERSION: &str = "work-item-projection-v1";
-static NEXT_REVISION_ARTIFACT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledWorkItemRevision {
@@ -94,15 +97,17 @@ impl From<ProjectionCompileError> for WorkspaceEngineError {
 pub fn compile_work_item_revision(
     draft: &WorkItemDraftRevision,
     projection_compiler: &WorkItemProjectionCompiler,
+    ids: &InitialWorkItemPublicationIds,
+    created_at: &str,
 ) -> Result<CompiledWorkItemRevision, WorkspaceEngineError> {
-    let work_item_revision_id = next_revision_artifact_id("work_item_revision");
-    let verification_plan_revision_id = next_revision_artifact_id("verification_plan_revision");
-    let projection_bundle_id = next_revision_artifact_id("work_item_projection_bundle");
+    let work_item_revision_id = ids.work_item_revision_id.clone();
+    let verification_plan_revision_id = ids.verification_plan_revision_id.clone();
+    let projection_bundle_id = ids.work_item_projection_bundle_id.clone();
     let canonical_contract = draft.canonical_contract_candidate.clone();
     let canonical_contract_hash = canonical_contract_hash(&canonical_contract)?;
     let compiled = projection_compiler.compile(&canonical_contract, &work_item_revision_id)?;
     let hashes = projection_hashes(&compiled)?;
-    let created_at = chrono::Utc::now().to_rfc3339();
+    let created_at = created_at.to_string();
 
     Ok(CompiledWorkItemRevision {
         draft_revision: draft.clone(),
@@ -143,6 +148,8 @@ pub fn compile_work_item_revision(
 pub fn compile_plan_projection_bundle(
     plan_revision_id: &str,
     dependency_graph_revision_id: &str,
+    plan_projection_bundle_id: &str,
+    created_at: &str,
     input: PlanProjectionCompileInput<'_>,
     projection_compiler: &PlanProjectionCompiler,
     work_items: &[CompiledWorkItemRevision],
@@ -184,10 +191,8 @@ pub fn compile_plan_projection_bundle(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let created_at = chrono::Utc::now().to_rfc3339();
-
     Ok(PlanProjectionBundle {
-        id: next_revision_artifact_id("plan_projection_bundle"),
+        id: plan_projection_bundle_id.to_string(),
         plan_revision_id: plan_revision_id.to_string(),
         dependency_graph_revision_id: dependency_graph_revision_id.to_string(),
         work_item_projection_bundle_refs,
@@ -198,7 +203,7 @@ pub fn compile_plan_projection_bundle(
         coder_group_context: compiled.coder,
         reviewer_group_matrix: compiled.reviewer,
         compiler_version: PROJECTION_COMPILER_VERSION.to_string(),
-        created_at,
+        created_at: created_at.to_string(),
     })
 }
 
@@ -228,95 +233,30 @@ pub fn plan_projection_input<'a>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn publish_initial_plan_revision(
     store: &WorkItemRevisionStore,
-    lineage: &WorkItemPlanLineage,
-    plan_revision: WorkItemPlanRevision,
-    dependency_graph_revision: DependencyGraphRevision,
-    plan_projection_bundle: PlanProjectionBundle,
-    work_items: Vec<CompiledWorkItemRevision>,
-    contract_validation: ContractValidationReport,
-    projection_validation: ProjectionValidationReport,
+    journal: &InitialPlanPublicationJournal,
 ) -> Result<InitialPlanCompileOutcome, WorkspaceEngineError> {
-    validate_initial_publication(
-        lineage,
-        &plan_revision,
-        &dependency_graph_revision,
-        &plan_projection_bundle,
-        &work_items,
-        &contract_validation,
-        &projection_validation,
-    )?;
-    match store.get_plan_lineage(&lineage.project_id, &lineage.issue_id, &lineage.id) {
-        Err(ProductStoreError::NotFound { .. }) => {}
-        Ok(_) => {
-            return Err(WorkspaceEngineError::InvalidInitialPlan(format!(
-                "initial plan lineage `{}` already exists",
-                lineage.id
-            )));
-        }
-        Err(error) => return Err(error.into()),
-    }
-
-    let validation_report = PlanValidationReportArtifact {
-        id: plan_revision.validation_report_ref.clone(),
-        plan_id: lineage.id.clone(),
-        contract_validation: contract_validation.clone(),
-        projection_validation: projection_validation.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-
-    store.put_plan_lineage(lineage)?;
-    let mut logical_work_items = Vec::with_capacity(work_items.len());
-    for item in &work_items {
-        let now = chrono::Utc::now().to_rfc3339();
-        let logical_work_item = LogicalWorkItem {
-            id: item.work_item_revision.logical_work_item_id.clone(),
-            plan_id: lineage.id.clone(),
-            title: item
-                .work_item_revision
-                .canonical_contract
-                .identity
-                .title
-                .clone(),
-            active_revision_id: None,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        store.put_logical_work_item(lineage, &logical_work_item)?;
-        store.put_draft_revision(lineage, &item.draft_revision)?;
-        store.put_verification_plan_revision(lineage, &item.verification_plan_revision)?;
-        store.put_work_item_projection_bundle(lineage, &item.projection_bundle)?;
-        store.put_work_item_revision(lineage, &item.work_item_revision)?;
-        logical_work_items.push(logical_work_item);
-    }
-    store.put_dependency_graph_revision(lineage, &dependency_graph_revision)?;
-    store.put_plan_projection_bundle(lineage, &plan_projection_bundle)?;
-    store.put_plan_validation_report(lineage, &validation_report)?;
-    store.put_plan_revision(lineage, &plan_revision)?;
-
-    for (logical_work_item, item) in logical_work_items.iter().zip(work_items.iter()) {
-        store.update_draft_revision_state(
-            lineage,
-            &item.draft_revision.id,
-            WorkItemDraftRevisionStatus::Compiled,
-        )?;
-        store.set_active_work_item_revision(
-            lineage,
-            logical_work_item,
-            None,
-            &item.work_item_revision.id,
-        )?;
-    }
-    store.set_active_plan_revision(lineage, &plan_revision.id)?;
-
+    let published = store.publish_or_resume_initial_plan_revision(journal)?;
+    let artifacts = published.artifacts;
+    let validation_report = artifacts.validation_report;
+    let contract_validation = validation_report.contract_validation.clone();
+    let projection_validation = validation_report.projection_validation.clone();
     Ok(InitialPlanCompileOutcome {
-        plan_revision,
-        dependency_graph_revision,
+        plan_revision: artifacts.plan_revision,
+        dependency_graph_revision: artifacts.dependency_graph_revision,
         validation_report,
-        plan_projection_bundle,
-        work_items,
+        plan_projection_bundle: artifacts.plan_projection_bundle,
+        work_items: artifacts
+            .work_items
+            .into_iter()
+            .map(|item| CompiledWorkItemRevision {
+                draft_revision: item.draft_revision,
+                work_item_revision: item.work_item_revision,
+                verification_plan_revision: item.verification_plan_revision,
+                projection_bundle: item.projection_bundle,
+            })
+            .collect(),
         contract_validation,
         projection_validation,
     })
@@ -330,7 +270,9 @@ impl WorkspaceEngine {
             .expect("persistent WorkspaceEngine requires lifecycle_store");
         WorkItemRevisionStore::new(lifecycle.app_paths())
     }
+}
 
+impl WorkspaceEngine {
     pub fn compile_initial_plan_revision(
         &mut self,
         accepted_drafts: &[WorkItemDraftRevision],
@@ -353,10 +295,76 @@ impl WorkspaceEngine {
             .map_err(WorkspaceEngineError::InvalidInitialPlan)?
             .outline;
         let ordered_drafts = order_accepted_drafts(&outline, accepted_drafts)?;
+        let active_draft_ids = ordered_drafts
+            .iter()
+            .map(|draft| draft.id.clone())
+            .collect::<Vec<_>>();
+        let plan_store = self
+            .work_item_plan_store()
+            .map_err(WorkspaceEngineError::InvalidInitialPlan)?;
+        let tx = plan_store
+            .list_compile_transactions(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )?
+            .into_iter()
+            .filter(|tx| {
+                matches!(
+                    tx.status,
+                    WorkItemPlanCompileStatus::Committing
+                        | WorkItemPlanCompileStatus::RecoveryRequired
+                ) && tx.active_draft_ids == active_draft_ids
+            })
+            .max_by(|left, right| {
+                (&left.created_at, &left.compile_id).cmp(&(&right.created_at, &right.compile_id))
+            })
+            .ok_or_else(|| {
+                WorkspaceEngineError::InvalidInitialPlan(
+                    "current initial plan compile transaction is missing".to_string(),
+                )
+            })?;
+        if tx.outline_version_ref != outline.id || tx.previous_plan_snapshot != previous_plan {
+            return Err(WorkspaceEngineError::InvalidInitialPlan(
+                "current initial plan compile transaction identity is inconsistent".to_string(),
+            ));
+        }
+        let active_draft_revision_ids = ordered_drafts
+            .iter()
+            .map(|draft| (draft.logical_work_item_id.clone(), draft.id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if active_draft_revision_ids.len() != ordered_drafts.len() {
+            return Err(WorkspaceEngineError::InvalidInitialPlan(
+                "accepted drafts contain duplicate logical work item identities".to_string(),
+            ));
+        }
+        let logical_ids = ordered_drafts
+            .iter()
+            .map(|draft| draft.logical_work_item_id.clone())
+            .collect::<Vec<_>>();
+        let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+        let allocated_ids = revision_store.allocate_initial_plan_publication_ids(
+            &previous_plan.project_id,
+            &previous_plan.issue_id,
+            &previous_plan.id,
+            &tx.compile_id,
+            &logical_ids,
+        )?;
         let projection_compiler = WorkItemProjectionCompiler;
         let work_items = ordered_drafts
             .iter()
-            .map(|draft| compile_work_item_revision(draft, &projection_compiler))
+            .map(|draft| {
+                let ids = allocated_ids
+                    .work_items
+                    .get(&draft.logical_work_item_id)
+                    .ok_or_else(|| {
+                        WorkspaceEngineError::InvalidInitialPlan(format!(
+                            "allocated publication ids missing for `{}`",
+                            draft.logical_work_item_id
+                        ))
+                    })?;
+                compile_work_item_revision(draft, &projection_compiler, ids, &tx.created_at)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let contracts = work_items
             .iter()
@@ -384,8 +392,8 @@ impl WorkspaceEngine {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let plan_revision_id = next_revision_artifact_id("plan_revision");
-        let dependency_graph_revision_id = next_revision_artifact_id("dependency_graph_revision");
+        let plan_revision_id = allocated_ids.plan_revision_id.clone();
+        let dependency_graph_revision_id = allocated_ids.dependency_graph_revision_id.clone();
         let mut projection_outline = outline.clone();
         projection_outline.id = previous_plan.id.clone();
         projection_outline.source_story_spec_ids = previous_plan.source_story_spec_ids.clone();
@@ -393,6 +401,8 @@ impl WorkspaceEngine {
         let plan_projection_bundle = compile_plan_projection_bundle(
             &plan_revision_id,
             &dependency_graph_revision_id,
+            &allocated_ids.plan_projection_bundle_id,
+            &tx.created_at,
             plan_projection_input(
                 &projection_outline,
                 &dependency_graph,
@@ -448,7 +458,7 @@ impl WorkspaceEngine {
             ));
         }
 
-        let now = chrono::Utc::now().to_rfc3339();
+        let publication_created_at = tx.created_at.clone();
         let lineage = WorkItemPlanLineage {
             id: previous_plan.id.clone(),
             project_id: previous_plan.project_id.clone(),
@@ -457,47 +467,82 @@ impl WorkspaceEngine {
             design_spec_refs: previous_plan.source_design_spec_ids.clone(),
             active_revision_id: None,
             active_amendment_id: None,
-            created_at: now.clone(),
-            updated_at: now.clone(),
+            created_at: publication_created_at.clone(),
+            updated_at: publication_created_at.clone(),
         };
         let dependency_graph_revision = DependencyGraphRevision {
             id: dependency_graph_revision_id.clone(),
             plan_id: previous_plan.id.clone(),
             edges: dependency_graph.edges.clone(),
-            created_at: now.clone(),
+            created_at: publication_created_at.clone(),
         };
         let plan_revision = WorkItemPlanRevision {
             id: plan_revision_id,
-            plan_id: previous_plan.id,
+            plan_id: previous_plan.id.clone(),
             revision_no: 1,
             supersedes: None,
             reason: PlanRevisionReason::InitialCompile,
             work_item_bindings: expected_revision_ids,
             dependency_graph_revision_id,
-            validation_report_ref: next_revision_artifact_id("plan_validation_report"),
+            validation_report_ref: allocated_ids.validation_report_id.clone(),
             plan_projection_bundle_id: plan_projection_bundle.id.clone(),
-            created_at: now,
+            created_at: publication_created_at.clone(),
         };
-
-        publish_initial_plan_revision(
-            &WorkItemRevisionStore::new(lifecycle.app_paths()),
+        let validation_report = PlanValidationReportArtifact {
+            id: allocated_ids.validation_report_id.clone(),
+            plan_id: previous_plan.id.clone(),
+            contract_validation: contract_validation.clone(),
+            projection_validation: projection_validation.clone(),
+            created_at: publication_created_at.clone(),
+        };
+        validate_initial_publication(
             &lineage,
-            plan_revision,
-            dependency_graph_revision,
-            plan_projection_bundle,
-            work_items,
-            contract_validation,
-            projection_validation,
-        )
-    }
-}
+            &plan_revision,
+            &dependency_graph_revision,
+            &plan_projection_bundle,
+            &work_items,
+            &contract_validation,
+            &projection_validation,
+        )?;
+        let publication_work_items = work_items
+            .iter()
+            .map(|item| InitialWorkItemPublicationArtifacts {
+                logical_work_item: LogicalWorkItem {
+                    id: item.work_item_revision.logical_work_item_id.clone(),
+                    plan_id: previous_plan.id.clone(),
+                    title: item
+                        .work_item_revision
+                        .canonical_contract
+                        .identity
+                        .title
+                        .clone(),
+                    active_revision_id: None,
+                    created_at: publication_created_at.clone(),
+                    updated_at: publication_created_at.clone(),
+                },
+                draft_revision: item.draft_revision.clone(),
+                work_item_revision: item.work_item_revision.clone(),
+                verification_plan_revision: item.verification_plan_revision.clone(),
+                projection_bundle: item.projection_bundle.clone(),
+            })
+            .collect();
+        let journal = revision_store.build_initial_plan_publication_journal(
+            &tx.compile_id,
+            &tx.outline_version_ref,
+            active_draft_revision_ids,
+            &publication_created_at,
+            InitialPlanPublicationArtifacts {
+                lineage,
+                plan_revision,
+                dependency_graph_revision,
+                validation_report,
+                plan_projection_bundle,
+                work_items: publication_work_items,
+            },
+        )?;
 
-fn next_revision_artifact_id(prefix: &str) -> String {
-    let sequence = NEXT_REVISION_ARTIFACT_ID.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "{prefix}_{}_{sequence:06}",
-        chrono::Utc::now().format("%Y%m%d%H%M%S%3f")
-    )
+        publish_initial_plan_revision(&revision_store, &journal)
+    }
 }
 
 fn projection_hash<T: Serialize>(value: &T) -> Result<String, WorkspaceEngineError> {

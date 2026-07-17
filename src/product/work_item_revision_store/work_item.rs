@@ -77,10 +77,54 @@ impl WorkItemRevisionStore {
         })
     }
 
+    pub(super) fn set_initial_active_work_item_revision(
+        &self,
+        plan: &WorkItemPlanLineage,
+        logical_work_item: &LogicalWorkItem,
+        next_revision_id: &str,
+        updated_at: &str,
+    ) -> Result<LogicalWorkItem, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(next_revision_id)?;
+        self.get_work_item_revision(plan, &logical_work_item.id, next_revision_id)?;
+        let path = self.logical_work_item_path(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+            &logical_work_item.id,
+        );
+        with_exclusive_lock(&path, || {
+            let mut stored = self.get_logical_work_item(plan, &logical_work_item.id)?;
+            match stored.active_revision_id.as_deref() {
+                Some(active) if active == next_revision_id => return Ok(stored),
+                Some(_) => {
+                    return Err(identity_mismatch(
+                        "active_work_item_revision",
+                        &logical_work_item.id,
+                    ));
+                }
+                None => {}
+            }
+            stored.active_revision_id = Some(next_revision_id.to_string());
+            stored.updated_at = updated_at.to_string();
+            write_json(&path, &stored)?;
+            Ok(stored)
+        })
+    }
+
     pub fn put_draft_revision(
         &self,
         plan: &WorkItemPlanLineage,
         value: &WorkItemDraftRevision,
+    ) -> Result<(), ProductStoreError> {
+        self.put_draft_revision_at(plan, value, &Utc::now().to_rfc3339())
+    }
+
+    pub(super) fn put_draft_revision_at(
+        &self,
+        plan: &WorkItemPlanLineage,
+        value: &WorkItemDraftRevision,
+        state_updated_at: &str,
     ) -> Result<(), ProductStoreError> {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(&value.id)?;
@@ -109,10 +153,37 @@ impl WorkItemRevisionStore {
                 &WorkItemDraftRevisionState {
                     draft_revision_id: value.id.clone(),
                     status: WorkItemDraftRevisionStatus::Drafting,
-                    updated_at: Utc::now().to_rfc3339(),
+                    updated_at: state_updated_at.to_string(),
                 },
             )
         })
+    }
+
+    pub fn get_draft_revision(
+        &self,
+        plan: &WorkItemPlanLineage,
+        draft_revision_id: &str,
+    ) -> Result<WorkItemDraftRevision, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(draft_revision_id)?;
+        let value: WorkItemDraftRevision = read_required_json(
+            &self.draft_revision_path(
+                &plan.project_id,
+                &plan.issue_id,
+                &plan.id,
+                draft_revision_id,
+            ),
+            "work_item_draft_revision",
+            draft_revision_id,
+        )?;
+        if value.id != draft_revision_id {
+            return Err(identity_mismatch(
+                "work_item_draft_revision",
+                draft_revision_id,
+            ));
+        }
+        validate_relative_id(&value.logical_work_item_id)?;
+        Ok(value)
     }
 
     pub fn update_draft_revision_state(
@@ -120,6 +191,21 @@ impl WorkItemRevisionStore {
         plan: &WorkItemPlanLineage,
         draft_revision_id: &str,
         status: WorkItemDraftRevisionStatus,
+    ) -> Result<WorkItemDraftRevisionState, ProductStoreError> {
+        self.update_draft_revision_state_at(
+            plan,
+            draft_revision_id,
+            status,
+            &Utc::now().to_rfc3339(),
+        )
+    }
+
+    pub(super) fn update_draft_revision_state_at(
+        &self,
+        plan: &WorkItemPlanLineage,
+        draft_revision_id: &str,
+        status: WorkItemDraftRevisionStatus,
+        updated_at: &str,
     ) -> Result<WorkItemDraftRevisionState, ProductStoreError> {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(draft_revision_id)?;
@@ -160,7 +246,7 @@ impl WorkItemRevisionStore {
             let state = WorkItemDraftRevisionState {
                 draft_revision_id: draft_revision_id.to_string(),
                 status,
-                updated_at: Utc::now().to_rfc3339(),
+                updated_at: updated_at.to_string(),
             };
             write_json(&state_path, &state)?;
             Ok(state)
@@ -262,7 +348,7 @@ impl WorkItemRevisionStore {
         Ok(value)
     }
 
-    pub(super) fn get_logical_work_item(
+    pub fn get_logical_work_item(
         &self,
         plan: &WorkItemPlanLineage,
         logical_work_item_id: &str,

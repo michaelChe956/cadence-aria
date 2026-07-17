@@ -108,6 +108,39 @@ impl WorkItemRevisionStore {
         })
     }
 
+    pub(super) fn set_initial_active_plan_revision(
+        &self,
+        lineage: &WorkItemPlanLineage,
+        revision_id: &str,
+        updated_at: &str,
+    ) -> Result<WorkItemPlanLineage, ProductStoreError> {
+        validate_relative_id(revision_id)?;
+        self.get_plan_revision(
+            &lineage.project_id,
+            &lineage.issue_id,
+            &lineage.id,
+            revision_id,
+        )?;
+        let path = self.plan_lineage_path(&lineage.project_id, &lineage.issue_id, &lineage.id);
+        with_exclusive_lock(&path, || {
+            let mut stored = self.ensure_plan_scope(lineage)?;
+            match stored.active_revision_id.as_deref() {
+                Some(active) if active == revision_id => return Ok(stored),
+                Some(_) => {
+                    return Err(identity_mismatch(
+                        "active_work_item_plan_revision",
+                        &lineage.id,
+                    ));
+                }
+                None => {}
+            }
+            stored.active_revision_id = Some(revision_id.to_string());
+            stored.updated_at = updated_at.to_string();
+            write_json(&path, &stored)?;
+            Ok(stored)
+        })
+    }
+
     pub fn compare_and_set_active_plan_revision(
         &self,
         lineage: &WorkItemPlanLineage,

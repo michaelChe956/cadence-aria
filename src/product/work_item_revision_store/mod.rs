@@ -20,12 +20,21 @@ use crate::product::models::WorkItemPlanLineage;
 
 mod dependency;
 mod handoff;
+mod initial_publication;
 mod paths;
 mod plan;
 mod presentation;
 mod projection;
 mod repair;
 mod work_item;
+
+#[cfg(test)]
+pub(crate) use initial_publication::InitialPlanPublicationCheckpoint;
+pub use initial_publication::{
+    InitialPlanPublicationArtifacts, InitialPlanPublicationIds, InitialPlanPublicationJournal,
+    InitialPlanPublicationPhase, InitialWorkItemPublicationArtifacts,
+    InitialWorkItemPublicationIds,
+};
 
 #[derive(Debug, Clone)]
 pub struct WorkItemRevisionStore {

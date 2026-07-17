@@ -20,6 +20,20 @@ impl WorkItemRevisionStore {
             .join("lineage.json")
     }
 
+    pub(super) fn initial_plan_publication_journal_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        compile_id: &str,
+    ) -> PathBuf {
+        self.paths
+            .issue_root(project_id, issue_id)
+            .join("work-item-revision-publications")
+            .join(plan_id)
+            .join(format!("{compile_id}.json"))
+    }
+
     pub(super) fn plan_revision_path(
         &self,
         project_id: &str,

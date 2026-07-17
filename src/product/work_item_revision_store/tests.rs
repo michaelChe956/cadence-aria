@@ -17,6 +17,7 @@ use crate::product::work_item_contract::canonical_contract_fixture;
 use super::WorkItemRevisionStore;
 
 mod concurrency;
+mod initial_publication;
 mod projection_artifacts;
 mod publication;
 
