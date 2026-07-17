@@ -143,6 +143,9 @@ impl WorkItemRevisionStore {
         lineage: &WorkItemPlanLineage,
         amendment_id: &str,
     ) -> Result<WorkItemPlanLineage, ProductStoreError> {
+        validate_relative_id(&lineage.project_id)?;
+        validate_relative_id(&lineage.issue_id)?;
+        validate_relative_id(&lineage.id)?;
         validate_relative_id(amendment_id)?;
         let path = self.plan_lineage_path(&lineage.project_id, &lineage.issue_id, &lineage.id);
         with_exclusive_lock(&path, || {
@@ -166,6 +169,9 @@ impl WorkItemRevisionStore {
         lineage: &WorkItemPlanLineage,
         amendment_id: &str,
     ) -> Result<WorkItemPlanLineage, ProductStoreError> {
+        validate_relative_id(&lineage.project_id)?;
+        validate_relative_id(&lineage.issue_id)?;
+        validate_relative_id(&lineage.id)?;
         validate_relative_id(amendment_id)?;
         let path = self.plan_lineage_path(&lineage.project_id, &lineage.issue_id, &lineage.id);
         with_exclusive_lock(&path, || {

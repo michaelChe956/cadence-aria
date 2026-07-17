@@ -682,6 +682,48 @@ fn work_item_revision_store_rejects_unknown_or_escaping_scope() {
     assert!(matches!(error, ProductStoreError::PathEscape(_)));
 }
 
+fn assert_amendment_operation_rejects_escaping_scope_without_side_effects(acquire: bool) {
+    for scope in ["project", "issue", "plan"] {
+        let temp = TempDir::new().unwrap();
+        let aria_root = temp.path().join(".aria");
+        let store = WorkItemRevisionStore::new(ProductAppPaths::new(&aria_root));
+        let mut plan = plan_lineage();
+        match scope {
+            "project" => plan.project_id = "../escaped-project".to_string(),
+            "issue" => plan.issue_id = "../escaped-issue".to_string(),
+            "plan" => plan.id = "../escaped-plan".to_string(),
+            _ => unreachable!(),
+        }
+        let target_path = store.plan_lineage_path(&plan.project_id, &plan.issue_id, &plan.id);
+        let lock_path = super::lock_path_for(&target_path);
+
+        let error = if acquire {
+            store
+                .acquire_active_amendment(&plan, "amendment_0001")
+                .unwrap_err()
+        } else {
+            store
+                .release_active_amendment(&plan, "amendment_0001")
+                .unwrap_err()
+        };
+
+        assert!(matches!(error, ProductStoreError::PathEscape(_)));
+        assert!(!aria_root.exists(), "invalid {scope} created .aria");
+        assert!(!target_path.parent().unwrap().exists());
+        assert!(!lock_path.exists());
+    }
+}
+
+#[test]
+fn work_item_revision_store_acquire_amendment_validates_scope_before_lock_path() {
+    assert_amendment_operation_rejects_escaping_scope_without_side_effects(true);
+}
+
+#[test]
+fn work_item_revision_store_release_amendment_validates_scope_before_lock_path() {
+    assert_amendment_operation_rejects_escaping_scope_without_side_effects(false);
+}
+
 #[test]
 fn work_item_revision_store_latest_presentation_compares_rfc3339_instants() {
     let (_temp, store, plan) = test_store_and_plan();

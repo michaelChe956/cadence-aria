@@ -92,7 +92,18 @@ impl WorkItemRevisionStore {
 
         let state_path =
             self.draft_revision_state_path(&plan.project_id, &plan.issue_id, &plan.id, &value.id);
-        if !path_exists(&state_path)? {
+        with_exclusive_lock(&state_path, || {
+            if path_exists(&state_path)? {
+                let state: WorkItemDraftRevisionState =
+                    read_required_json(&state_path, "work_item_draft_revision_state", &value.id)?;
+                if state.draft_revision_id != value.id {
+                    return Err(identity_mismatch(
+                        "work_item_draft_revision_state",
+                        &value.id,
+                    ));
+                }
+                return Ok(());
+            }
             write_json(
                 &state_path,
                 &WorkItemDraftRevisionState {
@@ -100,9 +111,8 @@ impl WorkItemRevisionStore {
                     status: WorkItemDraftRevisionStatus::Drafting,
                     updated_at: Utc::now().to_rfc3339(),
                 },
-            )?;
-        }
-        Ok(())
+            )
+        })
     }
 
     pub fn update_draft_revision_state(
@@ -113,37 +123,48 @@ impl WorkItemRevisionStore {
     ) -> Result<WorkItemDraftRevisionState, ProductStoreError> {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(draft_revision_id)?;
-        let draft: WorkItemDraftRevision = read_required_json(
-            &self.draft_revision_path(
-                &plan.project_id,
-                &plan.issue_id,
-                &plan.id,
-                draft_revision_id,
-            ),
-            "work_item_draft_revision",
+        let draft_path = self.draft_revision_path(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
             draft_revision_id,
-        )?;
-        if draft.id != draft_revision_id {
-            return Err(identity_mismatch(
-                "work_item_draft_revision",
-                draft_revision_id,
-            ));
-        }
-        let state = WorkItemDraftRevisionState {
-            draft_revision_id: draft_revision_id.to_string(),
-            status,
-            updated_at: Utc::now().to_rfc3339(),
-        };
-        write_json(
-            &self.draft_revision_state_path(
-                &plan.project_id,
-                &plan.issue_id,
-                &plan.id,
-                draft_revision_id,
-            ),
-            &state,
-        )?;
-        Ok(state)
+        );
+        let state_path = self.draft_revision_state_path(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+            draft_revision_id,
+        );
+        with_exclusive_lock(&state_path, || {
+            let draft: WorkItemDraftRevision =
+                read_required_json(&draft_path, "work_item_draft_revision", draft_revision_id)?;
+            if draft.id != draft_revision_id {
+                return Err(identity_mismatch(
+                    "work_item_draft_revision",
+                    draft_revision_id,
+                ));
+            }
+            if path_exists(&state_path)? {
+                let current: WorkItemDraftRevisionState = read_required_json(
+                    &state_path,
+                    "work_item_draft_revision_state",
+                    draft_revision_id,
+                )?;
+                if current.draft_revision_id != draft_revision_id {
+                    return Err(identity_mismatch(
+                        "work_item_draft_revision_state",
+                        draft_revision_id,
+                    ));
+                }
+            }
+            let state = WorkItemDraftRevisionState {
+                draft_revision_id: draft_revision_id.to_string(),
+                status,
+                updated_at: Utc::now().to_rfc3339(),
+            };
+            write_json(&state_path, &state)?;
+            Ok(state)
+        })
     }
 
     pub fn put_work_item_revision(
