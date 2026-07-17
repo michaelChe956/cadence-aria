@@ -2,8 +2,8 @@ use chrono::Utc;
 
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanRepairRequest,
-    PlanRepairRequestStatus, WorkItemPlanLineage,
+    PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
+    PlanRepairRequest, PlanRepairRequestStatus, WorkItemPlanLineage,
 };
 
 use super::{
@@ -173,6 +173,90 @@ impl WorkItemRevisionStore {
         )
     }
 
+    pub fn advance_plan_amendment_publication(
+        &self,
+        plan: &WorkItemPlanLineage,
+        amendment_id: &str,
+        next: PlanAmendmentPublicationPhase,
+    ) -> Result<PlanAmendmentPublicationJournal, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(amendment_id)?;
+        let path = self.amendment_publication_journal_path(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+            amendment_id,
+        );
+        with_exclusive_lock(&path, || {
+            let mut journal = self.get_plan_amendment_publication_journal(plan, amendment_id)?;
+            if journal.phase == next {
+                return Ok(journal);
+            }
+            if journal.phase == PlanAmendmentPublicationPhase::PlanPublished
+                || next.order() <= journal.phase.order()
+            {
+                return Err(ProductStoreError::Io(format!(
+                    "amendment_phase_regression: {:?} -> {:?}",
+                    journal.phase, next
+                )));
+            }
+            journal.phase = next;
+            journal.error = None;
+            journal.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &journal)?;
+            Ok(journal)
+        })
+    }
+
+    pub fn mark_plan_amendment_publication_failed(
+        &self,
+        plan: &WorkItemPlanLineage,
+        amendment_id: &str,
+        error: String,
+    ) -> Result<PlanAmendmentPublicationJournal, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(amendment_id)?;
+        let path = self.amendment_publication_journal_path(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+            amendment_id,
+        );
+        with_exclusive_lock(&path, || {
+            let mut journal = self.get_plan_amendment_publication_journal(plan, amendment_id)?;
+            journal.error = Some(error);
+            journal.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &journal)?;
+            Ok(journal)
+        })
+    }
+
+    fn get_plan_amendment_publication_journal(
+        &self,
+        plan: &WorkItemPlanLineage,
+        amendment_id: &str,
+    ) -> Result<PlanAmendmentPublicationJournal, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(amendment_id)?;
+        let value: PlanAmendmentPublicationJournal = read_required_json(
+            &self.amendment_publication_journal_path(
+                &plan.project_id,
+                &plan.issue_id,
+                &plan.id,
+                amendment_id,
+            ),
+            "plan_amendment_publication_journal",
+            amendment_id,
+        )?;
+        if value.id != amendment_id || value.plan_id != plan.id {
+            return Err(identity_mismatch(
+                "plan_amendment_publication_journal",
+                amendment_id,
+            ));
+        }
+        Ok(value)
+    }
+
     fn get_repair_request(
         &self,
         plan: &WorkItemPlanLineage,
@@ -189,6 +273,15 @@ impl WorkItemRevisionStore {
             return Err(identity_mismatch("plan_repair_request", request_id));
         }
         Ok(value)
+    }
+}
+
+impl PlanAmendmentPublicationPhase {
+    fn order(&self) -> u8 {
+        match self {
+            Self::Prepared => 0,
+            Self::PlanPublished => 1,
+        }
     }
 }
 

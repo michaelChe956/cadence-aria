@@ -18,6 +18,7 @@ use crate::product::models::{
 use super::WorkItemRevisionStore;
 
 mod concurrency;
+mod publication;
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
