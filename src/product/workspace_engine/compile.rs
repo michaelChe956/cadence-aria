@@ -416,14 +416,39 @@ impl WorkspaceEngine {
                 match revision_store.get_plan_lineage(&tx.project_id, &tx.issue_id, &tx.plan_id) {
                     Ok(lineage) if lineage.active_revision_id.is_some() => {
                         return Err(
-                            "abort_and_rollback is not allowed when an active PlanRevision exists"
+                            "abort_and_rollback is not allowed when an active PlanRevision exists; use Continue or HumanTriage"
                                 .to_string(),
                         );
                     }
-                    Ok(_) | Err(ProductStoreError::NotFound { .. }) => {}
+                    Ok(_) => {
+                        return Err(
+                            "abort_and_rollback is not allowed when an inactive v2 Plan lineage exists; use Continue or HumanTriage"
+                                .to_string(),
+                        );
+                    }
+                    Err(ProductStoreError::NotFound { .. }) => {}
                     Err(error) => {
                         return Err(format!(
-                            "check active PlanRevision during compile recovery failed: {error}"
+                            "check v2 Plan lineage during compile recovery failed: {error}"
+                        ));
+                    }
+                }
+                match revision_store.get_initial_plan_publication_journal(
+                    &tx.project_id,
+                    &tx.issue_id,
+                    &tx.plan_id,
+                    &tx.compile_id,
+                ) {
+                    Ok(journal) => {
+                        return Err(format!(
+                            "abort_and_rollback is not allowed when an initial Plan publication journal exists in phase {:?}; use Continue or HumanTriage",
+                            journal.phase
+                        ));
+                    }
+                    Err(ProductStoreError::NotFound { .. }) => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "check initial Plan publication journal during compile recovery failed: {error}"
                         ));
                     }
                 }

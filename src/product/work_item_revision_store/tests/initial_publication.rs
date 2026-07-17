@@ -4,7 +4,8 @@ use crate::product::models::{
     VerificationPlanRevision, WorkItemPlanRevision, WorkItemProjectionBundle,
 };
 use crate::product::work_item_contract::{
-    ContractValidationReport, build_dependency_contract_graph, canonical_contract_hash,
+    ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
+    build_dependency_contract_graph, canonical_contract_hash,
 };
 use crate::product::work_item_projection::{
     PlanProjectionCompileInput, PlanProjectionCompiler, ProjectionValidationReport,
@@ -14,6 +15,7 @@ use crate::product::work_item_revision_store::{
     InitialPlanPublicationArtifacts, InitialPlanPublicationCheckpoint, InitialPlanPublicationPhase,
     InitialWorkItemPublicationArtifacts,
 };
+use sha2::Digest;
 
 #[test]
 fn initial_plan_publication_store_allocates_ids_deterministically_without_live_writes() {
@@ -142,6 +144,115 @@ fn initial_plan_publication_rejects_projection_failure_before_journal_or_live_fa
         store.get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID),
         Err(ProductStoreError::NotFound { .. })
     ));
+}
+
+#[test]
+fn initial_plan_publication_rejects_contract_failure_before_journal_or_live_facts() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths);
+    let valid = initial_publication_journal(&store);
+    let mut artifacts = valid.artifacts;
+    artifacts
+        .validation_report
+        .contract_validation
+        .findings
+        .push(contract_validation_error());
+
+    let error = store
+        .build_initial_plan_publication_journal(
+            "compile_0001",
+            "outline_0001",
+            BTreeMap::from([(WORK_ITEM_ID.to_string(), "draft_revision_0001".to_string())]),
+            "2026-07-17T00:00:20Z",
+            artifacts,
+        )
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("initial_contract_validation_failed")
+    );
+    assert!(matches!(
+        store.get_initial_plan_publication_journal(PROJECT_ID, ISSUE_ID, PLAN_ID, "compile_0001",),
+        Err(ProductStoreError::NotFound { .. })
+    ));
+    assert!(matches!(
+        store.get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID),
+        Err(ProductStoreError::NotFound { .. })
+    ));
+}
+
+#[test]
+fn initial_plan_publication_boundary_rejects_invalid_validation_reports_without_writes() {
+    for invalid_report in ["contract", "projection"] {
+        let temp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let store = WorkItemRevisionStore::new(paths);
+        let mut journal = initial_publication_journal(&store);
+        let expected_error = match invalid_report {
+            "contract" => {
+                journal
+                    .artifacts
+                    .validation_report
+                    .contract_validation
+                    .findings
+                    .push(contract_validation_error());
+                "initial_contract_validation_failed"
+            }
+            "projection" => {
+                journal
+                    .artifacts
+                    .validation_report
+                    .projection_validation
+                    .findings
+                    .push(
+                        crate::product::work_item_projection::ProjectionValidationFinding {
+                            code: "projection_binding_mismatch".to_string(),
+                            projection: "coder".to_string(),
+                            contract_ref: None,
+                            message: "projection does not match publication".to_string(),
+                        },
+                    );
+                "initial_projection_validation_failed"
+            }
+            _ => unreachable!(),
+        };
+        journal.artifact_fingerprint = hex::encode(sha2::Sha256::digest(
+            serde_json::to_vec(&journal.artifacts).unwrap(),
+        ));
+
+        let error = store
+            .publish_or_resume_initial_plan_revision(&journal)
+            .unwrap_err();
+
+        assert!(error.to_string().contains(expected_error));
+        assert!(matches!(
+            store.get_initial_plan_publication_journal(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "compile_0001",
+            ),
+            Err(ProductStoreError::NotFound { .. })
+        ));
+        assert!(matches!(
+            store.get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID),
+            Err(ProductStoreError::NotFound { .. })
+        ));
+    }
+}
+
+fn contract_validation_error() -> ContractValidationFinding {
+    ContractValidationFinding {
+        code: "invalid_contract".to_string(),
+        severity: ContractFindingSeverity::Error,
+        logical_work_item_id: Some(WORK_ITEM_ID.to_string()),
+        contract_ref: None,
+        capability_ref: None,
+        message: "contract validation failed".to_string(),
+    }
 }
 
 fn initial_publication_journal(

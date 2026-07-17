@@ -186,11 +186,7 @@ impl WorkItemRevisionStore {
     ) -> Result<InitialPlanPublicationJournal, ProductStoreError> {
         validate_relative_id(compile_id)?;
         validate_relative_id(outline_version_ref)?;
-        if !artifacts.validation_report.projection_validation.is_valid() {
-            return Err(ProductStoreError::Io(
-                "initial_projection_validation_failed".to_string(),
-            ));
-        }
+        validate_initial_validation_report(&artifacts.validation_report)?;
         let logical_ids = artifacts
             .work_items
             .iter()
@@ -613,6 +609,7 @@ fn validate_initial_publication_journal(
     ] {
         validate_relative_id(value)?;
     }
+    validate_initial_validation_report(&journal.artifacts.validation_report)?;
     if journal.artifacts.lineage.project_id != journal.project_id
         || journal.artifacts.lineage.issue_id != journal.issue_id
         || journal.artifacts.lineage.id != journal.plan_id
@@ -699,6 +696,22 @@ fn validate_initial_publication_journal(
                 &journal.compile_id,
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_initial_validation_report(
+    report: &PlanValidationReportArtifact,
+) -> Result<(), ProductStoreError> {
+    if !report.contract_validation.is_valid() {
+        return Err(ProductStoreError::Io(
+            "initial_contract_validation_failed".to_string(),
+        ));
+    }
+    if !report.projection_validation.is_valid() {
+        return Err(ProductStoreError::Io(
+            "initial_projection_validation_failed".to_string(),
+        ));
     }
     Ok(())
 }

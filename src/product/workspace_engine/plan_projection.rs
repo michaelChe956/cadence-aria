@@ -302,7 +302,7 @@ impl WorkspaceEngine {
         let plan_store = self
             .work_item_plan_store()
             .map_err(WorkspaceEngineError::InvalidInitialPlan)?;
-        let tx = plan_store
+        let matching_transactions = plan_store
             .list_compile_transactions(
                 &self.session.project_id,
                 &self.session.issue_id,
@@ -314,21 +314,24 @@ impl WorkspaceEngine {
                     tx.status,
                     WorkItemPlanCompileStatus::Committing
                         | WorkItemPlanCompileStatus::RecoveryRequired
-                ) && tx.active_draft_ids == active_draft_ids
+                ) && tx.outline_version_ref == outline.id
+                    && tx.previous_plan_snapshot == previous_plan
+                    && same_unique_ids(&tx.active_draft_ids, &active_draft_ids)
             })
-            .max_by(|left, right| {
-                (&left.created_at, &left.compile_id).cmp(&(&right.created_at, &right.compile_id))
-            })
-            .ok_or_else(|| {
-                WorkspaceEngineError::InvalidInitialPlan(
+            .collect::<Vec<_>>();
+        let tx = match matching_transactions.as_slice() {
+            [tx] => tx.clone(),
+            [] => {
+                return Err(WorkspaceEngineError::InvalidInitialPlan(
                     "current initial plan compile transaction is missing".to_string(),
-                )
-            })?;
-        if tx.outline_version_ref != outline.id || tx.previous_plan_snapshot != previous_plan {
-            return Err(WorkspaceEngineError::InvalidInitialPlan(
-                "current initial plan compile transaction identity is inconsistent".to_string(),
-            ));
-        }
+                ));
+            }
+            _ => {
+                return Err(WorkspaceEngineError::InvalidInitialPlan(
+                    "current initial plan compile transaction is ambiguous".to_string(),
+                ));
+            }
+        };
         let active_draft_revision_ids = ordered_drafts
             .iter()
             .map(|draft| (draft.logical_work_item_id.clone(), draft.id.clone()))
@@ -588,6 +591,16 @@ fn order_accepted_drafts<'a>(
         ));
     }
     Ok(ordered)
+}
+
+fn same_unique_ids(left: &[String], right: &[String]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let expected_len = left.len();
+    let left = left.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let right = right.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    left.len() == expected_len && right.len() == expected_len && left == right
 }
 
 fn normalized_projection_report(
