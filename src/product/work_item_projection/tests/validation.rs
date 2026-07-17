@@ -17,7 +17,9 @@ fn work_item_projection_validation_accepts_complete_compilation() {
         .compile(&contract, "work_item_revision_0001")
         .unwrap();
 
-    assert!(validate_projection_coverage(&contract, &compiled).is_valid());
+    assert!(
+        validate_projection_coverage(&contract, "work_item_revision_0001", &compiled).is_valid()
+    );
 }
 
 #[test]
@@ -231,8 +233,8 @@ fn work_item_projection_validation_findings_are_deterministic_and_deduplicated()
         .criterion_refs
         .extend(["AC-INVENTED".to_string(), "AC-INVENTED".to_string()]);
 
-    let first = validate_projection_coverage(&contract, &compiled);
-    let second = validate_projection_coverage(&contract, &compiled);
+    let first = validate_projection_coverage(&contract, "work_item_revision_0001", &compiled);
+    let second = validate_projection_coverage(&contract, "work_item_revision_0001", &compiled);
     let invented = first
         .findings
         .iter()
@@ -244,6 +246,23 @@ fn work_item_projection_validation_findings_are_deterministic_and_deduplicated()
 
     assert_eq!(first, second);
     assert_eq!(invented, 1);
+}
+
+#[test]
+fn work_item_projection_validation_rejects_same_wrong_revision_in_both_roles() {
+    let contract = contract_fixture();
+    let mut compiled = compiled_fixture();
+    compiled.coder.work_item_revision_id = "work_item_revision_wrong".to_string();
+    compiled.reviewer.work_item_revision_id = "work_item_revision_wrong".to_string();
+
+    let report = validate_projection_coverage(&contract, "work_item_revision_0001", &compiled);
+    for projection in ["coder", "reviewer"] {
+        assert!(report.findings.iter().any(|finding| {
+            finding.code == "projection_revision_binding_mismatch"
+                && finding.projection == projection
+                && finding.contract_ref.as_deref() == Some("work_item_revision_0001")
+        }));
+    }
 }
 
 #[test]
@@ -295,6 +314,7 @@ fn work_item_projection_strong_bundles_and_validation_artifact_roundtrip() {
             source_refs: &["design_0001".to_string()],
             dependency_graph: &graph,
             work_item_projections: &work_items,
+            expected_work_item_revision_ids: &super::expected_plan_revision_ids(),
         })
         .unwrap();
     let plan_bundle = PlanProjectionBundle {
@@ -349,6 +369,22 @@ fn work_item_projection_strong_bundles_reject_legacy_untyped_json() {
         "created_at": "2026-07-17T00:00:00Z"
     });
     assert!(serde_json::from_value::<PlanValidationReportArtifact>(legacy_artifact).is_err());
+
+    let legacy_plan = serde_json::json!({
+        "id": "plan_bundle_0001",
+        "plan_revision_id": "plan_revision_0001",
+        "dependency_graph_revision_id": "graph_revision_0001",
+        "work_item_projection_bundle_refs": ["work_item_bundle_0001"],
+        "human_group_projection": {"title": "human"},
+        "coder_group_context": {"title": "coder"},
+        "reviewer_group_matrix": {"title": "reviewer"},
+        "human_group_projection_hash": "human",
+        "coder_group_context_hash": "coder",
+        "reviewer_group_matrix_hash": "reviewer",
+        "compiler_version": "v1",
+        "created_at": "2026-07-17T00:00:00Z"
+    });
+    assert!(serde_json::from_value::<PlanProjectionBundle>(legacy_plan).is_err());
 }
 
 fn assert_mutation_code(
@@ -359,7 +395,7 @@ fn assert_mutation_code(
 ) {
     let mut changed = baseline.clone();
     mutate(&mut changed);
-    let report = validate_projection_coverage(contract, &changed);
+    let report = validate_projection_coverage(contract, "work_item_revision_0001", &changed);
     assert!(
         report.findings.iter().any(|finding| finding.code == code),
         "missing finding {code}: {:?}",

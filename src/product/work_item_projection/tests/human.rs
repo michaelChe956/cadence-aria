@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use super::{compiled_fixture, compiled_plan_fixture, contract_fixture};
+use super::{
+    compiled_fixture, compiled_plan_fixture, contract_fixture, expected_plan_revision_ids,
+};
 use crate::product::models::HumanPresentationRevision;
 use crate::product::work_item_projection::{
     HumanPresentationBase, PlanProjectionCompileInput, PlanProjectionCompiler,
@@ -87,10 +89,14 @@ fn work_item_projection_human_is_informative_and_uses_only_explicit_source_refs(
 fn work_item_projection_human_presentation_does_not_change_provider_hashes() {
     let compiled = compiled_fixture();
     let before = projection_hashes(&compiled).unwrap();
-    let presentation = work_item_presentation(&compiled.human.logical_work_item_id, vec![]);
+    let bundle_id = "work_item_projection_bundle_0001";
+    let presentation = work_item_presentation(bundle_id, vec![]);
 
     validate_human_presentation_revision(
-        HumanPresentationBase::WorkItem(&compiled.human),
+        HumanPresentationBase::WorkItem {
+            projection_bundle_id: bundle_id,
+            projection: &compiled.human,
+        },
         &presentation,
     )
     .unwrap();
@@ -103,14 +109,15 @@ fn work_item_projection_human_presentation_does_not_change_provider_hashes() {
 #[test]
 fn work_item_projection_human_presentation_validates_flags_bindings_and_source_refs() {
     let compiled = compiled_fixture();
+    let bundle_id = "work_item_projection_bundle_0001";
     let known_ref = compiled.human.source_refs[0].clone();
-    let valid = work_item_presentation(
-        &compiled.human.logical_work_item_id,
-        vec![known_ref.clone()],
-    );
+    let valid = work_item_presentation(bundle_id, vec![known_ref.clone()]);
     assert!(
         validate_human_presentation_revision(
-            HumanPresentationBase::WorkItem(&compiled.human),
+            HumanPresentationBase::WorkItem {
+                projection_bundle_id: bundle_id,
+                projection: &compiled.human,
+            },
             &valid,
         )
         .is_ok()
@@ -118,30 +125,36 @@ fn work_item_projection_human_presentation_validates_flags_bindings_and_source_r
 
     let mut invalid = valid.clone();
     invalid.normative = true;
-    assert_invalid_presentation(&compiled.human, &invalid);
+    assert_invalid_presentation(bundle_id, &compiled.human, &invalid);
     invalid = valid.clone();
     invalid.used_by_provider = true;
-    assert_invalid_presentation(&compiled.human, &invalid);
+    assert_invalid_presentation(bundle_id, &compiled.human, &invalid);
     invalid = valid.clone();
     invalid.source_plan_projection_bundle_id = Some("plan_0001".to_string());
-    assert_invalid_presentation(&compiled.human, &invalid);
+    assert_invalid_presentation(bundle_id, &compiled.human, &invalid);
     invalid = valid.clone();
     invalid.source_work_item_projection_bundle_id = None;
-    assert_invalid_presentation(&compiled.human, &invalid);
+    assert_invalid_presentation(bundle_id, &compiled.human, &invalid);
     invalid = valid.clone();
-    invalid.source_work_item_projection_bundle_id = Some("wrong_base".to_string());
-    assert_invalid_presentation(&compiled.human, &invalid);
+    invalid.source_work_item_projection_bundle_id =
+        Some("work_item_projection_bundle_0002".to_string());
+    assert_invalid_presentation(bundle_id, &compiled.human, &invalid);
+    invalid = valid.clone();
+    invalid.source_work_item_projection_bundle_id =
+        Some(compiled.human.logical_work_item_id.clone());
+    assert_invalid_presentation(bundle_id, &compiled.human, &invalid);
     invalid = valid.clone();
     invalid.source_refs.push(known_ref);
-    assert_invalid_presentation(&compiled.human, &invalid);
+    assert_invalid_presentation(bundle_id, &compiled.human, &invalid);
     invalid = valid;
     invalid.source_refs.push("invented_ref".to_string());
-    assert_invalid_presentation(&compiled.human, &invalid);
+    assert_invalid_presentation(bundle_id, &compiled.human, &invalid);
 }
 
 #[test]
 fn work_item_projection_plan_human_presentation_requires_matching_plan_binding() {
     let (graph, work_items) = compiled_plan_fixture();
+    let expected_revision_ids = expected_plan_revision_ids();
     let plan = PlanProjectionCompiler
         .compile(PlanProjectionCompileInput {
             plan_id: "plan_0001",
@@ -150,11 +163,13 @@ fn work_item_projection_plan_human_presentation_requires_matching_plan_binding()
             source_refs: &["design_0001".to_string()],
             dependency_graph: &graph,
             work_item_projections: &work_items,
+            expected_work_item_revision_ids: &expected_revision_ids,
         })
         .unwrap();
+    let bundle_id = "plan_projection_bundle_0001";
     let revision = HumanPresentationRevision {
         id: "presentation_0001".to_string(),
-        source_plan_projection_bundle_id: Some(plan.human.plan_id.clone()),
+        source_plan_projection_bundle_id: Some(bundle_id.to_string()),
         source_work_item_projection_bundle_id: None,
         supersedes: None,
         human_summary: "Plan summary".to_string(),
@@ -168,19 +183,33 @@ fn work_item_projection_plan_human_presentation_requires_matching_plan_binding()
     };
 
     assert!(
-        validate_human_presentation_revision(HumanPresentationBase::Plan(&plan.human), &revision,)
-            .is_ok()
+        validate_human_presentation_revision(
+            HumanPresentationBase::Plan {
+                projection_bundle_id: bundle_id,
+                projection: &plan.human,
+            },
+            &revision,
+        )
+        .is_ok()
     );
+
+    let mut invalid = revision.clone();
+    invalid.source_plan_projection_bundle_id = Some("plan_projection_bundle_0002".to_string());
+    assert_plan_presentation_invalid(bundle_id, &plan.human, &invalid);
+
+    invalid = revision;
+    invalid.source_plan_projection_bundle_id = Some(plan.human.plan_id.clone());
+    assert_plan_presentation_invalid(bundle_id, &plan.human, &invalid);
 }
 
 fn work_item_presentation(
-    logical_work_item_id: &str,
+    projection_bundle_id: &str,
     source_refs: Vec<String>,
 ) -> HumanPresentationRevision {
     HumanPresentationRevision {
         id: "presentation_0001".to_string(),
         source_plan_projection_bundle_id: None,
-        source_work_item_projection_bundle_id: Some(logical_work_item_id.to_string()),
+        source_work_item_projection_bundle_id: Some(projection_bundle_id.to_string()),
         supersedes: None,
         human_summary: "Readable summary".to_string(),
         why_split: None,
@@ -194,11 +223,35 @@ fn work_item_presentation(
 }
 
 fn assert_invalid_presentation(
+    projection_bundle_id: &str,
     base: &crate::product::work_item_projection::HumanWorkItemProjection,
     revision: &HumanPresentationRevision,
 ) {
     assert!(matches!(
-        validate_human_presentation_revision(HumanPresentationBase::WorkItem(base), revision),
+        validate_human_presentation_revision(
+            HumanPresentationBase::WorkItem {
+                projection_bundle_id,
+                projection: base,
+            },
+            revision,
+        ),
+        Err(ProjectionCompileError::InvalidHumanPresentation(_))
+    ));
+}
+
+fn assert_plan_presentation_invalid(
+    projection_bundle_id: &str,
+    base: &crate::product::work_item_projection::HumanGroupProjection,
+    revision: &HumanPresentationRevision,
+) {
+    assert!(matches!(
+        validate_human_presentation_revision(
+            HumanPresentationBase::Plan {
+                projection_bundle_id,
+                projection: base,
+            },
+            revision,
+        ),
         Err(ProjectionCompileError::InvalidHumanPresentation(_))
     ));
 }

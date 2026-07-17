@@ -6,25 +6,18 @@ use tempfile::TempDir;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::{ProductStoreError, write_json};
 use crate::product::models::{
-    AmendmentResumeMode, AmendmentResumeTarget, DependencyGraphRevision, HandoffRevision,
-    HumanPresentationRevision, LogicalWorkItem, PlanAmendmentManifest,
-    PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase, PlanDefectClass,
-    PlanProjectionBundle, PlanRepairRequest, PlanRepairRequestStatus, PlanRevisionReason,
-    PlanValidationReportArtifact, RepairTarget, RepairTargetKind, VerificationPlanRevision,
-    WorkItemDraftRevision, WorkItemDraftRevisionStatus, WorkItemPlanLineage, WorkItemPlanRevision,
-    WorkItemProjectionBundle, WorkItemRevision, WorkItemRevisionReplacement,
+    AmendmentResumeMode, AmendmentResumeTarget, HumanPresentationRevision, LogicalWorkItem,
+    PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
+    PlanDefectClass, PlanRepairRequest, PlanRepairRequestStatus, PlanRevisionReason, RepairTarget,
+    RepairTargetKind, VerificationPlanRevision, WorkItemDraftRevision, WorkItemDraftRevisionStatus,
+    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemRevision, WorkItemRevisionReplacement,
 };
-use crate::product::work_item_contract::{
-    ContractValidationReport, build_dependency_contract_graph, canonical_contract_fixture,
-};
-use crate::product::work_item_projection::{
-    PlanProjectionCompileInput, PlanProjectionCompiler, ProjectionValidationReport,
-    WorkItemProjectionCompiler, projection_hashes,
-};
+use crate::product::work_item_contract::canonical_contract_fixture;
 
 use super::WorkItemRevisionStore;
 
 mod concurrency;
+mod projection_artifacts;
 mod publication;
 
 const PROJECT_ID: &str = "project_0001";
@@ -429,175 +422,6 @@ fn work_item_revision_store_persists_work_item_revisions_and_mutable_state() {
             .get_verification_plan_revision(&plan, &verification.id)
             .unwrap(),
         verification
-    );
-}
-
-#[test]
-fn work_item_revision_store_persists_scoped_revision_artifacts() {
-    let (_temp, store, plan) = test_store_and_plan();
-    let logical = logical_work_item();
-    store.put_logical_work_item(&plan, &logical).unwrap();
-    let revision = work_item_revision();
-    store.put_work_item_revision(&plan, &revision).unwrap();
-    let compiled_work_item = WorkItemProjectionCompiler
-        .compile(&revision.canonical_contract, &revision.id)
-        .unwrap();
-    let work_item_hashes = projection_hashes(&compiled_work_item).unwrap();
-    let validation = PlanValidationReportArtifact {
-        id: "plan_validation_report_0001".to_string(),
-        plan_id: PLAN_ID.to_string(),
-        contract_validation: ContractValidationReport { findings: vec![] },
-        projection_validation: ProjectionValidationReport { findings: vec![] },
-        created_at: "2026-07-17T00:00:05Z".to_string(),
-    };
-    store
-        .put_plan_validation_report(&plan, &validation)
-        .unwrap();
-    assert_eq!(
-        store
-            .get_plan_validation_report(&plan, &validation.id)
-            .unwrap(),
-        validation
-    );
-    let work_item_projection = WorkItemProjectionBundle {
-        id: "work_item_projection_bundle_0001".to_string(),
-        work_item_revision_id: revision.id.clone(),
-        canonical_contract_hash: revision.canonical_contract_hash.clone(),
-        projection_schema_version: 1,
-        compiler_version: "compiler-v1".to_string(),
-        human_projection: compiled_work_item.human.clone(),
-        coder_projection: compiled_work_item.coder.clone(),
-        reviewer_projection: compiled_work_item.reviewer.clone(),
-        human_projection_hash: work_item_hashes.human,
-        coder_projection_hash: work_item_hashes.coder,
-        reviewer_projection_hash: work_item_hashes.reviewer,
-        created_at: "2026-07-17T00:00:06Z".to_string(),
-    };
-    store
-        .put_work_item_projection_bundle(&plan, &work_item_projection)
-        .unwrap();
-    assert_eq!(
-        store
-            .get_work_item_projection_bundle(&plan, &work_item_projection.id)
-            .unwrap(),
-        work_item_projection
-    );
-    let mut plan_contract = revision.canonical_contract.clone();
-    plan_contract.input_contracts.clear();
-    plan_contract
-        .handoff_contract
-        .provided_contract_refs
-        .clear();
-    let graph = build_dependency_contract_graph(&[plan_contract]).unwrap();
-    let work_items = BTreeMap::from([(WORK_ITEM_ID.to_string(), compiled_work_item)]);
-    let compiled_plan = PlanProjectionCompiler
-        .compile(PlanProjectionCompileInput {
-            plan_id: PLAN_ID,
-            goal: "Persist scoped projection artifacts",
-            split_reason: "Single work item",
-            source_refs: &["design_spec_0001".to_string()],
-            dependency_graph: &graph,
-            work_item_projections: &work_items,
-        })
-        .unwrap();
-    let plan_projection = PlanProjectionBundle {
-        id: "plan_projection_bundle_0001".to_string(),
-        plan_revision_id: "plan_revision_0001".to_string(),
-        dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
-        work_item_projection_bundle_refs: vec![work_item_projection.id.clone()],
-        human_group_projection: compiled_plan.human,
-        coder_group_context: compiled_plan.coder,
-        reviewer_group_matrix: compiled_plan.reviewer,
-        human_group_projection_hash: "human_group_hash".to_string(),
-        coder_group_context_hash: "coder_group_hash".to_string(),
-        reviewer_group_matrix_hash: "reviewer_group_hash".to_string(),
-        compiler_version: "compiler-v1".to_string(),
-        created_at: "2026-07-17T00:00:07Z".to_string(),
-    };
-    store
-        .put_plan_projection_bundle(&plan, &plan_projection)
-        .unwrap();
-    assert_eq!(
-        store
-            .get_plan_projection_bundle(&plan, &plan_projection.id)
-            .unwrap(),
-        plan_projection
-    );
-
-    let first_presentation = HumanPresentationRevision {
-        id: "human_presentation_revision_0001".to_string(),
-        source_plan_projection_bundle_id: Some(plan_projection.id.clone()),
-        source_work_item_projection_bundle_id: None,
-        supersedes: None,
-        human_summary: "first".to_string(),
-        why_split: None,
-        dependency_explanation: vec![],
-        risk_explanation: vec![],
-        source_refs: vec![],
-        normative: false,
-        used_by_provider: false,
-        created_at: "2026-07-17T00:00:08Z".to_string(),
-    };
-    let mut latest_presentation = first_presentation.clone();
-    latest_presentation.id = "human_presentation_revision_0002".to_string();
-    latest_presentation.supersedes = Some(first_presentation.id.clone());
-    latest_presentation.human_summary = "latest".to_string();
-    latest_presentation.created_at = "2026-07-17T00:00:09Z".to_string();
-    store
-        .put_human_presentation_revision(&plan, &latest_presentation)
-        .unwrap();
-    store
-        .put_human_presentation_revision(&plan, &first_presentation)
-        .unwrap();
-    assert_eq!(
-        store
-            .get_latest_human_presentation_revision(&plan, &plan_projection.id)
-            .unwrap(),
-        Some(latest_presentation)
-    );
-
-    let dependency = DependencyGraphRevision {
-        id: "dependency_graph_revision_0001".to_string(),
-        plan_id: PLAN_ID.to_string(),
-        edges: vec![crate::product::work_item_contract::DependencyContractEdge {
-            from: WORK_ITEM_ID.to_string(),
-            to: "logical_work_item_0002".to_string(),
-            required_contracts: vec![],
-        }],
-        created_at: "2026-07-17T00:00:10Z".to_string(),
-    };
-    store
-        .put_dependency_graph_revision(&plan, &dependency)
-        .unwrap();
-    assert_eq!(
-        store
-            .get_dependency_graph_revision(&plan, &dependency.id)
-            .unwrap(),
-        dependency
-    );
-
-    let handoff = HandoffRevision {
-        id: "handoff_revision_0001".to_string(),
-        logical_work_item_id: WORK_ITEM_ID.to_string(),
-        work_item_revision_id: revision.id,
-        coding_unit_run_id: "coding_unit_run_0001".to_string(),
-        provided_contracts: vec!["contract_0001".to_string()],
-        provided_capabilities: BTreeMap::from([(
-            "capability_0001".to_string(),
-            vec!["contract_0001".to_string()],
-        )]),
-        contract_hash: "contract_hash_0001".to_string(),
-        commit_sha: "0123456789abcdef".to_string(),
-        tests: vec!["cargo test --locked".to_string()],
-        artifacts: vec!["artifact_0001".to_string()],
-        created_at: "2026-07-17T00:00:11Z".to_string(),
-    };
-    store.put_handoff_revision(&plan, &handoff).unwrap();
-    assert_eq!(
-        store
-            .get_handoff_revision(&plan, WORK_ITEM_ID, &handoff.id)
-            .unwrap(),
-        handoff
     );
 }
 

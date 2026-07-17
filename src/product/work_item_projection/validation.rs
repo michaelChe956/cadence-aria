@@ -3,21 +3,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::product::work_item_contract::{CanonicalWorkItemContract, DependencyContractGraph};
+use crate::product::work_item_contract::{
+    CanonicalWorkItemContract, ContractFindingSeverity, DependencyContractGraph,
+    validate_dependency_contract_graph,
+};
 
 use super::{
-    CompiledPlanProjections, CompiledWorkItemProjections, ProjectionCompileError, ProjectionHashes,
-    ProjectionValidationFinding, ProjectionValidationReport, compile_coder_projection,
-    compile_human_projection, compile_reviewer_projection, contract_flow, design_traceability_refs,
-    human_work_items, reviewer_work_items, risks_from_flow, stable_topological_order,
+    CompiledPlanProjections, CompiledWorkItemProjections, PlanProjectionValidationInput,
+    ProjectionCompileError, ProjectionHashes, ProjectionValidationFinding,
+    ProjectionValidationReport, compile_coder_projection, compile_human_projection,
+    compile_reviewer_projection, contract_flow, design_traceability_refs, human_work_items,
+    reviewer_work_items, risks_from_flow, stable_topological_order,
 };
 
 pub fn validate_projection_coverage(
     contract: &CanonicalWorkItemContract,
+    expected_work_item_revision_id: &str,
     compiled: &CompiledWorkItemProjections,
 ) -> ProjectionValidationReport {
     let mut findings = Vec::new();
-    validate_revision_binding(compiled, &mut findings);
+    validate_revision_binding(expected_work_item_revision_id, compiled, &mut findings);
     validate_human(contract, compiled, &mut findings);
     validate_coder(contract, compiled, &mut findings);
     validate_reviewer(contract, compiled, &mut findings);
@@ -25,40 +30,57 @@ pub fn validate_projection_coverage(
 }
 
 pub fn validate_plan_projection_coverage(
-    graph: &DependencyContractGraph,
-    compiled: &CompiledPlanProjections,
-    work_items: &BTreeMap<String, CompiledWorkItemProjections>,
+    input: PlanProjectionValidationInput<'_>,
 ) -> ProjectionValidationReport {
-    let mut findings = Vec::new();
-    let ordered_ids = match stable_topological_order(graph, work_items) {
-        Ok(ids) => Some(ids),
-        Err(ProjectionCompileError::Validation(report)) => {
-            findings.extend(report.findings);
-            None
+    let graph = input.dependency_graph;
+    let compiled = input.compiled;
+    let work_items = input.work_item_projections;
+    let mut findings =
+        validate_plan_compile_context(graph, input.expected_work_item_revision_ids, work_items)
+            .findings;
+    let graph_ids = graph.contracts.keys().cloned().collect::<BTreeSet<_>>();
+    let work_item_ids = work_items.keys().cloned().collect::<BTreeSet<_>>();
+    let ordered_ids = if graph_ids == work_item_ids {
+        match stable_topological_order(graph, work_items) {
+            Ok(ids) => Some(ids),
+            Err(ProjectionCompileError::Validation(report)) => {
+                findings.extend(report.findings);
+                None
+            }
+            Err(error) => {
+                push(
+                    &mut findings,
+                    "plan_projection_work_item_mismatch",
+                    "plan",
+                    None,
+                    error.to_string(),
+                );
+                None
+            }
         }
-        Err(error) => {
-            push(
-                &mut findings,
-                "plan_projection_work_item_mismatch",
-                "plan",
-                None,
-                error.to_string(),
-            );
-            None
-        }
+    } else {
+        None
     };
 
-    if compiled.human.plan_id != compiled.coder.plan_id
-        || compiled.human.plan_id != compiled.reviewer.plan_id
-    {
-        push(
-            &mut findings,
-            "plan_projection_work_item_mismatch",
-            "plan",
-            None,
-            "role projections bind different plan IDs",
-        );
+    for (projection, actual_plan_id) in [
+        ("plan.human", compiled.human.plan_id.as_str()),
+        ("plan.coder", compiled.coder.plan_id.as_str()),
+        ("plan.reviewer", compiled.reviewer.plan_id.as_str()),
+    ] {
+        if actual_plan_id != input.expected_plan_id {
+            push(
+                &mut findings,
+                "plan_projection_plan_binding_mismatch",
+                projection,
+                Some(input.expected_plan_id.to_string()),
+                format!(
+                    "{projection} binds plan {actual_plan_id}, expected {}",
+                    input.expected_plan_id
+                ),
+            );
+        }
     }
+    validate_plan_source_refs(input.expected_source_refs, compiled, &mut findings);
     if compiled.human.normative || compiled.human.used_by_provider {
         push(
             &mut findings,
@@ -145,6 +167,155 @@ pub fn validate_plan_projection_coverage(
     finalized_report(findings)
 }
 
+pub(crate) fn validate_plan_compile_context(
+    graph: &DependencyContractGraph,
+    expected_work_item_revision_ids: &BTreeMap<String, String>,
+    work_items: &BTreeMap<String, CompiledWorkItemProjections>,
+) -> ProjectionValidationReport {
+    let mut findings = dependency_graph_projection_findings(graph);
+    let graph_ids = graph.contracts.keys().cloned().collect::<BTreeSet<_>>();
+    report_key_set_mismatch(
+        &graph_ids,
+        &work_items.keys().cloned().collect(),
+        "plan_projection_work_item_mismatch",
+        "plan.work_items",
+        &mut findings,
+    );
+    report_key_set_mismatch(
+        &graph_ids,
+        &expected_work_item_revision_ids.keys().cloned().collect(),
+        "plan_projection_revision_binding_keys_mismatch",
+        "plan.revision_bindings",
+        &mut findings,
+    );
+
+    for logical_id in &graph_ids {
+        let (Some(contract), Some(expected_revision_id), Some(compiled)) = (
+            graph.contracts.get(logical_id),
+            expected_work_item_revision_ids.get(logical_id),
+            work_items.get(logical_id),
+        ) else {
+            continue;
+        };
+        findings.extend(
+            validate_projection_coverage(contract, expected_revision_id, compiled).findings,
+        );
+    }
+    finalized_report(findings)
+}
+
+pub(crate) fn normalized_source_refs(source_refs: &[String]) -> Vec<String> {
+    source_refs
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn dependency_graph_projection_findings(
+    graph: &DependencyContractGraph,
+) -> Vec<ProjectionValidationFinding> {
+    validate_dependency_contract_graph(graph)
+        .findings
+        .into_iter()
+        .filter(|finding| finding.severity == ContractFindingSeverity::Error)
+        .map(|finding| ProjectionValidationFinding {
+            code: finding.code,
+            projection: "plan.dependency_graph".to_string(),
+            contract_ref: finding.contract_ref,
+            message: format!(
+                "logical_work_item_id={:?}; capability_ref={:?}; {}",
+                finding.logical_work_item_id, finding.capability_ref, finding.message
+            ),
+        })
+        .collect()
+}
+
+fn report_key_set_mismatch(
+    expected: &BTreeSet<String>,
+    actual: &BTreeSet<String>,
+    code: &str,
+    projection: &str,
+    findings: &mut Vec<ProjectionValidationFinding>,
+) {
+    for missing in expected.difference(actual) {
+        push(
+            findings,
+            code,
+            projection,
+            Some(missing.clone()),
+            format!("{projection} is missing key {missing}"),
+        );
+    }
+    for extra in actual.difference(expected) {
+        push(
+            findings,
+            code,
+            projection,
+            Some(extra.clone()),
+            format!("{projection} contains unknown key {extra}"),
+        );
+    }
+}
+
+fn validate_plan_source_refs(
+    expected_source_refs: &[String],
+    compiled: &CompiledPlanProjections,
+    findings: &mut Vec<ProjectionValidationFinding>,
+) {
+    let expected = normalized_source_refs(expected_source_refs);
+    let expected_set = expected.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let actual_set = compiled
+        .human
+        .source_refs
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for source_ref in &compiled.human.source_refs {
+        *counts.entry(source_ref).or_default() += 1;
+    }
+    for (source_ref, count) in counts {
+        if count > 1 {
+            push(
+                findings,
+                "plan_projection_source_ref_duplicate",
+                "plan.human",
+                Some(source_ref.to_string()),
+                format!("plan human source_ref {source_ref} is duplicated"),
+            );
+        }
+    }
+    for missing in expected_set.difference(&actual_set) {
+        push(
+            findings,
+            "plan_projection_source_ref_missing",
+            "plan.human",
+            Some((*missing).to_string()),
+            format!("plan human projection is missing expected source_ref {missing}"),
+        );
+    }
+    for invented in actual_set.difference(&expected_set) {
+        push(
+            findings,
+            "plan_projection_source_ref_invented",
+            "plan.human",
+            Some((*invented).to_string()),
+            format!("plan human projection contains invented source_ref {invented}"),
+        );
+    }
+    if expected_set == actual_set && compiled.human.source_refs != expected {
+        push(
+            findings,
+            "plan_projection_source_ref_order_mismatch",
+            "plan.human",
+            None,
+            "plan human source_refs are not in normalized deterministic order",
+        );
+    }
+}
+
 pub fn projection_hashes(
     compiled: &CompiledWorkItemProjections,
 ) -> Result<ProjectionHashes, ProjectionCompileError> {
@@ -156,20 +327,25 @@ pub fn projection_hashes(
 }
 
 fn validate_revision_binding(
+    expected_work_item_revision_id: &str,
     compiled: &CompiledWorkItemProjections,
     findings: &mut Vec<ProjectionValidationFinding>,
 ) {
-    if compiled.coder.work_item_revision_id.is_empty()
-        || compiled.reviewer.work_item_revision_id.is_empty()
-        || compiled.coder.work_item_revision_id != compiled.reviewer.work_item_revision_id
-    {
-        push(
-            findings,
-            "projection_revision_binding_mismatch",
-            "work_item",
-            None,
-            "coder and reviewer projections must bind the same non-empty revision ID",
-        );
+    for (projection, actual_revision_id) in [
+        ("coder", compiled.coder.work_item_revision_id.as_str()),
+        ("reviewer", compiled.reviewer.work_item_revision_id.as_str()),
+    ] {
+        if actual_revision_id != expected_work_item_revision_id {
+            push(
+                findings,
+                "projection_revision_binding_mismatch",
+                projection,
+                Some(expected_work_item_revision_id.to_string()),
+                format!(
+                    "{projection} binds revision {actual_revision_id}, expected {expected_work_item_revision_id}"
+                ),
+            );
+        }
     }
 }
 
@@ -201,7 +377,7 @@ fn validate_human(
             findings,
             "projection_contract_mismatch",
             "human",
-            None,
+            Some(contract.identity.logical_work_item_id.clone()),
             "human projection content differs from the canonical contract",
         );
     }
@@ -301,7 +477,7 @@ fn validate_reviewer(
             findings,
             "projection_contract_mismatch",
             "reviewer.scope",
-            None,
+            Some(contract.identity.logical_work_item_id.clone()),
             "reviewer scope differs from the canonical write policy",
         );
     }

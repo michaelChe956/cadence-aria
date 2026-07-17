@@ -287,6 +287,10 @@ fn work_item_revision_models_shared_records_roundtrip() {
             source_refs: &["story_spec_0001".to_string()],
             dependency_graph: &graph,
             work_item_projections: &work_items,
+            expected_work_item_revision_ids: &BTreeMap::from([(
+                "wi_core".to_string(),
+                "work_item_revision_0001".to_string(),
+            )]),
         })
         .unwrap();
     assert_serde_roundtrip(&WorkItemPlanLineage {

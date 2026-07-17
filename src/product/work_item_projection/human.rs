@@ -109,16 +109,18 @@ pub fn validate_human_presentation_revision(
         return invalid("human presentation revision must not be used by providers");
     }
 
-    let (expected_plan_id, expected_work_item_id, allowed_source_refs) = match base {
-        HumanPresentationBase::Plan(base) => (Some(base.plan_id.as_str()), None, &base.source_refs),
-        HumanPresentationBase::WorkItem(base) => (
-            None,
-            Some(base.logical_work_item_id.as_str()),
-            &base.source_refs,
-        ),
+    let (expected_plan_bundle_id, expected_work_item_bundle_id, allowed_source_refs) = match base {
+        HumanPresentationBase::Plan {
+            projection_bundle_id,
+            projection,
+        } => (Some(projection_bundle_id), None, &projection.source_refs),
+        HumanPresentationBase::WorkItem {
+            projection_bundle_id,
+            projection,
+        } => (None, Some(projection_bundle_id), &projection.source_refs),
     };
-    if revision.source_plan_projection_bundle_id.as_deref() != expected_plan_id
-        || revision.source_work_item_projection_bundle_id.as_deref() != expected_work_item_id
+    if revision.source_plan_projection_bundle_id.as_deref() != expected_plan_bundle_id
+        || revision.source_work_item_projection_bundle_id.as_deref() != expected_work_item_bundle_id
     {
         return invalid("human presentation revision must bind exactly its base projection");
     }

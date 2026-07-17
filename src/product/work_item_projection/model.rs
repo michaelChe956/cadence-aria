@@ -150,6 +150,16 @@ pub struct PlanProjectionCompileInput<'a> {
     pub source_refs: &'a [String],
     pub dependency_graph: &'a DependencyContractGraph,
     pub work_item_projections: &'a BTreeMap<String, CompiledWorkItemProjections>,
+    pub expected_work_item_revision_ids: &'a BTreeMap<String, String>,
+}
+
+pub struct PlanProjectionValidationInput<'a> {
+    pub expected_plan_id: &'a str,
+    pub expected_source_refs: &'a [String],
+    pub expected_work_item_revision_ids: &'a BTreeMap<String, String>,
+    pub dependency_graph: &'a DependencyContractGraph,
+    pub compiled: &'a CompiledPlanProjections,
+    pub work_item_projections: &'a BTreeMap<String, CompiledWorkItemProjections>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +213,12 @@ impl std::fmt::Display for ProjectionCompileError {
 impl std::error::Error for ProjectionCompileError {}
 
 pub enum HumanPresentationBase<'a> {
-    Plan(&'a HumanGroupProjection),
-    WorkItem(&'a HumanWorkItemProjection),
+    Plan {
+        projection_bundle_id: &'a str,
+        projection: &'a HumanGroupProjection,
+    },
+    WorkItem {
+        projection_bundle_id: &'a str,
+        projection: &'a HumanWorkItemProjection,
+    },
 }

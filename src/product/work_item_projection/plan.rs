@@ -1,12 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::product::work_item_contract::{DependencyContractGraph, DesignTraceabilityRef};
+use crate::product::work_item_contract::{
+    ContractCompatibilityPolicy, DependencyContractGraph, DesignTraceabilityRef,
+};
 
+use super::validation::{normalized_source_refs, validate_plan_compile_context};
 use super::{
     CoderGroupContext, CompiledPlanProjections, CompiledWorkItemProjections, HumanContractFlowEdge,
     HumanGroupProjection, HumanGroupWorkItemSummary, PlanProjectionCompileInput,
-    ProjectionCompileError, ProjectionValidationFinding, ProjectionValidationReport,
-    ReviewerGroupMatrix, ReviewerGroupMatrixEntry, validate_plan_projection_coverage,
+    PlanProjectionValidationInput, ProjectionCompileError, ProjectionValidationFinding,
+    ProjectionValidationReport, ReviewerGroupMatrix, ReviewerGroupMatrixEntry,
+    validate_plan_projection_coverage,
 };
 
 #[derive(Debug, Default)]
@@ -17,6 +21,14 @@ impl PlanProjectionCompiler {
         &self,
         input: PlanProjectionCompileInput<'_>,
     ) -> Result<CompiledPlanProjections, ProjectionCompileError> {
+        let context_validation = validate_plan_compile_context(
+            input.dependency_graph,
+            input.expected_work_item_revision_ids,
+            input.work_item_projections,
+        );
+        if !context_validation.is_valid() {
+            return Err(ProjectionCompileError::Validation(context_validation));
+        }
         let ordered_ids =
             stable_topological_order(input.dependency_graph, input.work_item_projections)?;
         let contract_flow = contract_flow(input.dependency_graph);
@@ -33,13 +45,7 @@ impl PlanProjectionCompiler {
                 ),
                 contract_flow,
                 risks,
-                source_refs: input
-                    .source_refs
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
+                source_refs: normalized_source_refs(input.source_refs),
                 normative: false,
                 used_by_provider: false,
             },
@@ -68,11 +74,14 @@ impl PlanProjectionCompiler {
             },
         };
 
-        let validation = validate_plan_projection_coverage(
-            input.dependency_graph,
-            &compiled,
-            input.work_item_projections,
-        );
+        let validation = validate_plan_projection_coverage(PlanProjectionValidationInput {
+            expected_plan_id: input.plan_id,
+            expected_source_refs: input.source_refs,
+            expected_work_item_revision_ids: input.expected_work_item_revision_ids,
+            dependency_graph: input.dependency_graph,
+            compiled: &compiled,
+            work_item_projections: input.work_item_projections,
+        });
         if validation.is_valid() {
             Ok(compiled)
         } else {
@@ -165,10 +174,21 @@ pub(crate) fn contract_flow(graph: &DependencyContractGraph) -> Vec<HumanContrac
                     .iter()
                     .cloned()
                     .collect::<BTreeSet<_>>();
-                let missing_capabilities = required_capabilities
-                    .difference(&provided_capabilities)
-                    .cloned()
-                    .collect();
+                let missing_capabilities = match required.compatibility_policy {
+                    ContractCompatibilityPolicy::RequireAll => required_capabilities
+                        .difference(&provided_capabilities)
+                        .cloned()
+                        .collect(),
+                    ContractCompatibilityPolicy::RequireAny
+                        if required_capabilities.is_empty()
+                            || !required_capabilities.is_disjoint(&provided_capabilities) =>
+                    {
+                        Vec::new()
+                    }
+                    ContractCompatibilityPolicy::RequireAny => {
+                        required_capabilities.iter().cloned().collect()
+                    }
+                };
                 HumanContractFlowEdge {
                     from: edge.from.clone(),
                     to: edge.to.clone(),

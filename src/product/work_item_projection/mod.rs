@@ -38,7 +38,7 @@ impl WorkItemProjectionCompiler {
             coder: compile_coder_projection(contract, work_item_revision_id),
             reviewer: compile_reviewer_projection(contract, work_item_revision_id),
         };
-        let validation = validate_projection_coverage(contract, &compiled);
+        let validation = validate_projection_coverage(contract, work_item_revision_id, &compiled);
         if validation.is_valid() {
             Ok(compiled)
         } else {

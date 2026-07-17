@@ -78,3 +78,20 @@ pub(super) fn compiled_plan_fixture() -> (
 
     (graph, projections)
 }
+
+pub(super) fn expected_plan_revision_ids() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "wi_consumer".to_string(),
+            "revision_wi_consumer".to_string(),
+        ),
+        (
+            "wi_independent".to_string(),
+            "revision_wi_independent".to_string(),
+        ),
+        (
+            "wi_provider".to_string(),
+            "revision_wi_provider".to_string(),
+        ),
+    ])
+}
