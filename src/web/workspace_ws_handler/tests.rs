@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[path = "tests/interrupted_run_recovery.rs"]
 mod interrupted_run_recovery;
+#[path = "tests/projection_artifact_batch.rs"]
+mod projection_artifact_batch;
 
 fn provider_config() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {

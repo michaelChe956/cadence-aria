@@ -1,4 +1,9 @@
 use super::*;
+use crate::web::workspace_ws_types::ArtifactPayload;
+
+pub(crate) fn ws_artifact_update(version: u32, payload: ArtifactPayload) -> WsOutMessage {
+    WsOutMessage::ArtifactUpdate { version, payload }
+}
 
 pub(crate) fn map_revision_path(
     path: RevisionPath,
@@ -195,6 +200,27 @@ pub(crate) fn spawn_engine_event_forward_task(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = engine_rx.recv().await {
+            let event = match event {
+                EngineEvent::ArtifactBatchUpdate { updates } => {
+                    let mut connected = true;
+                    for update in updates {
+                        if !send_json_outbound(
+                            &outbound_tx,
+                            &ws_artifact_update(update.version, update.payload),
+                        )
+                        .await
+                        {
+                            connected = false;
+                            break;
+                        }
+                    }
+                    if !connected {
+                        break;
+                    }
+                    continue;
+                }
+                event => event,
+            };
             let ws_msg = match event {
                 EngineEvent::StreamChunk {
                     role,
@@ -216,7 +242,10 @@ pub(crate) fn spawn_engine_event_forward_task(
                 },
                 EngineEvent::StageChange { stage } => WsOutMessage::StageChange { stage },
                 EngineEvent::ArtifactUpdate { version, payload } => {
-                    WsOutMessage::ArtifactUpdate { version, payload }
+                    ws_artifact_update(version, payload)
+                }
+                EngineEvent::ArtifactBatchUpdate { .. } => {
+                    unreachable!("artifact batches are expanded before single-event mapping")
                 }
                 EngineEvent::PermissionRequest {
                     id,

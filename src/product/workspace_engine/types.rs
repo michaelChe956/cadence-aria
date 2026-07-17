@@ -132,6 +132,12 @@ impl WorkspaceSession {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactUpdateEvent {
+    pub version: u32,
+    pub payload: ArtifactPayload,
+}
+
 pub enum EngineEvent {
     StreamChunk {
         role: String,
@@ -149,6 +155,9 @@ pub enum EngineEvent {
     ArtifactUpdate {
         version: u32,
         payload: ArtifactPayload,
+    },
+    ArtifactBatchUpdate {
+        updates: Vec<ArtifactUpdateEvent>,
     },
     PermissionRequest {
         id: String,

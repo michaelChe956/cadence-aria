@@ -1,5 +1,8 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
+use crate::product::models::PlanProjectionBundle;
+
+use super::review_context::load_plan_review_context;
 
 impl WorkspaceEngine {
     pub(crate) fn build_review_input(&self) -> Result<StreamingProviderInput, String> {
@@ -95,6 +98,12 @@ impl WorkspaceEngine {
             self.session.artifact.as_ref()
         {
             return self.build_work_item_plan_outline_review_input(outline_candidate);
+        }
+
+        if let Some(ArtifactPayload::WorkItemPlanProjection { projection }) =
+            self.session.artifact.as_ref()
+        {
+            return self.build_projection_plan_review_input(projection);
         }
 
         let lifecycle = self
@@ -267,6 +276,99 @@ impl WorkspaceEngine {
             resume_provider_session_id: None,
             permission_mode: ProviderPermissionMode::Supervised,
             structured_output_contract: Some(structured_output_contract),
+            env_vars: BTreeMap::new(),
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        })
+    }
+
+    fn build_projection_plan_review_input(
+        &self,
+        projection: &PlanProjectionBundle,
+    ) -> Result<StreamingProviderInput, String> {
+        let context = load_plan_review_context(self, projection)?;
+        let mut prompt = String::from(
+            "请作为 Plan Reviewer 审核当前 Canonical Contract 与 Projection 候选。\n\n## Plan Review Context\n",
+        );
+        append_review_context_section(
+            &mut prompt,
+            "Story / Design Traceability",
+            &context.story_design_traceability,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "Canonical Contract Candidates",
+            &context.canonical_contract_candidates,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "Dependency Contract Graph",
+            &context.dependency_contract_graph,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "PlanProjectionBundle Candidate",
+            &context.plan_projection_bundle_candidate,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "WorkItemProjectionBundle Candidates",
+            &context.work_item_projection_bundle_candidates,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "Projection Validation Report",
+            &context.projection_validation_report,
+        )?;
+        append_review_context_section(&mut prompt, "Contract Delta", &context.contract_delta)?;
+        append_review_context_section(&mut prompt, "Impact Analysis", &context.impact_analysis)?;
+        append_review_context_section(&mut prompt, "Repair Evidence", &context.repair_evidence)?;
+        prompt.push_str(
+            "\n审核边界：只审核 Plan Review Context 中的权威契约、依赖图、三 Projection 覆盖与影响范围；不得要求编码执行期差异或复用 Code Reviewer 执行证据。\n",
+        );
+        let generation_round_id = self
+            .work_item_plan_store()?
+            .load_active_index(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load work item plan active index failed: {error}"))?
+            .map(|index| index.current_generation_round_id)
+            .unwrap_or_else(|| projection.plan_revision_id.clone());
+        let nonce = structured_output_nonce();
+        let contract = StructuredOutputContract {
+            nonce: nonce.clone(),
+            schema_name: "work_item_plan_review".to_string(),
+        };
+        let schema = format!(
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[]}}"#,
+            generation_round_id
+        );
+        prompt.push_str(&reviewer_output_contract(
+            &nonce,
+            &schema,
+            "\n只能在契约、依赖或 Projection 覆盖影响发布时返回 revise；需要产品判断时返回 needs_human。",
+        ));
+        let working_dir = self
+            .session
+            .repository_path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| std::env::current_dir().map_err(|error| error.to_string()))?;
+        let provider = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        Ok(StreamingProviderInput {
+            provider_type: provider_type_for_name(&provider),
+            role: AdapterRole::Reviewer,
+            prompt,
+            working_dir,
+            workspace_session_id: Some(self.session.session_id.clone()),
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: Some(contract),
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
@@ -652,4 +754,18 @@ impl WorkspaceEngine {
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
     }
+}
+
+fn append_review_context_section(
+    prompt: &mut String,
+    title: &str,
+    value: &impl serde::Serialize,
+) -> Result<(), String> {
+    prompt.push_str(&format!("\n### {title}\n"));
+    prompt.push_str(
+        &serde_json::to_string_pretty(value)
+            .map_err(|error| format!("serialize Plan Review Context `{title}` failed: {error}"))?,
+    );
+    prompt.push('\n');
+    Ok(())
 }

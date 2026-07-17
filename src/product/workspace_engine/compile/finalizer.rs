@@ -1,4 +1,7 @@
 use super::*;
+use crate::web::workspace_ws_types::{
+    WorkItemHistoryEntryDto, WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
+};
 
 impl WorkspaceEngine {
     pub(super) fn resume_initial_plan_compile_transaction(
@@ -220,7 +223,10 @@ impl WorkspaceEngine {
             child_session_ids: tx.child_session_ids.clone(),
             validator_findings: work_item_split_findings_to_dto(&tx.validator_findings),
         };
-        self.persist_compile_report(lifecycle, compile_report, &tx.created_at)
+        let compile_report_update = self
+            .persist_compile_report(compile_report, &tx.created_at)
+            .await?;
+        self.persist_initial_projection_artifacts(lifecycle, outcome, compile_report_update)
             .await?;
         tx.step_cursor = "compile_report_persisted".to_string();
         tx.updated_at = tx.created_at.clone();
@@ -246,10 +252,9 @@ impl WorkspaceEngine {
 
     async fn persist_compile_report(
         &mut self,
-        lifecycle: &LifecycleStore,
         compile_report: WorkItemPlanCompileReportPayload,
         created_at: &str,
-    ) -> Result<(), String> {
+    ) -> Result<ArtifactUpdateEvent, String> {
         let payload = ArtifactPayload::WorkItemPlanCompileReport {
             compile_report: Box::new(compile_report.clone()),
         };
@@ -280,16 +285,233 @@ impl WorkspaceEngine {
                 ));
             }
             self.artifact_versions[index].created_at = created_at.to_string();
-            self.session.artifact = Some(payload);
+            self.session.artifact = Some(payload.clone());
+            Ok(ArtifactUpdateEvent {
+                version: self.artifact_versions[index].version,
+                payload,
+            })
         } else {
-            self.update_artifact(payload).await;
+            let update = self.append_artifact_version_without_event(payload).await;
             let version = self.artifact_versions.last_mut().ok_or_else(|| {
                 "compile report artifact version missing after update".to_string()
             })?;
             version.created_at = created_at.to_string();
+            Ok(update)
         }
+    }
+
+    async fn persist_initial_projection_artifacts(
+        &mut self,
+        lifecycle: &LifecycleStore,
+        outcome: &InitialPlanCompileOutcome,
+        compile_report_update: ArtifactUpdateEvent,
+    ) -> Result<(), String> {
+        let mut updates = vec![compile_report_update];
+        for item in &outcome.work_items {
+            updates.push(
+                self.ensure_initial_projection_artifact(ArtifactPayload::WorkItemProjection {
+                    projection: Box::new(item.projection_bundle.clone()),
+                })
+                .await?,
+            );
+        }
+        updates.push(
+            self.ensure_initial_projection_artifact(ArtifactPayload::ProjectionValidation {
+                report: Box::new(outcome.projection_validation.clone()),
+            })
+            .await?,
+        );
+        updates.push(
+            self.ensure_initial_projection_artifact(ArtifactPayload::WorkItemRevisionHistory {
+                history: Box::new(self.initial_revision_history(outcome)),
+            })
+            .await?,
+        );
+        let plan_payload = ArtifactPayload::WorkItemPlanProjection {
+            projection: Box::new(outcome.plan_projection_bundle.clone()),
+        };
+        let plan_update = if let Some(index) = self
+            .artifact_versions
+            .iter()
+            .position(|version| version.payload == plan_payload)
+        {
+            for version in &mut self.artifact_versions {
+                version.is_current = false;
+            }
+            self.artifact_versions[index].is_current = true;
+            self.session.artifact = Some(plan_payload.clone());
+            ArtifactUpdateEvent {
+                version: self.artifact_versions[index].version,
+                payload: plan_payload,
+            }
+        } else {
+            self.ensure_projection_identity_is_immutable(&plan_payload)?;
+            self.append_artifact_version_without_event(plan_payload)
+                .await
+        };
+        updates.push(plan_update);
         lifecycle
             .save_artifact_versions(&self.session.session_id, &self.artifact_versions)
-            .map_err(|error| format!("persist compile report artifact failed: {error}"))
+            .map_err(|error| format!("persist initial projection artifacts failed: {error}"))?;
+        let _ = self
+            .event_tx
+            .send(EngineEvent::ArtifactBatchUpdate { updates })
+            .await;
+        Ok(())
+    }
+
+    async fn ensure_initial_projection_artifact(
+        &mut self,
+        payload: ArtifactPayload,
+    ) -> Result<ArtifactUpdateEvent, String> {
+        if let Some(version) = self
+            .artifact_versions
+            .iter()
+            .find(|version| version.payload == payload)
+        {
+            return Ok(ArtifactUpdateEvent {
+                version: version.version,
+                payload,
+            });
+        }
+        self.ensure_projection_identity_is_immutable(&payload)?;
+        Ok(self.append_artifact_version_without_event(payload).await)
+    }
+
+    async fn append_artifact_version_without_event(
+        &mut self,
+        payload: ArtifactPayload,
+    ) -> ArtifactUpdateEvent {
+        self.session.artifact = Some(payload.clone());
+        for version in &mut self.artifact_versions {
+            version.is_current = false;
+        }
+        let version = self.artifact_versions.len() as u32 + 1;
+        let source_node_id = self
+            .active_node_id
+            .clone()
+            .unwrap_or_else(|| "timeline_node_unknown".to_string());
+        self.artifact_versions.push(ArtifactVersion {
+            version,
+            payload: payload.clone(),
+            generated_by: self.session.author_provider.clone(),
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            source_node_id: source_node_id.clone(),
+        });
+        let _ = self
+            .persist_artifact_ref(
+                &source_node_id,
+                ArtifactRef {
+                    artifact_id: format!("artifact_version_{version:03}"),
+                    version,
+                },
+            )
+            .await;
+        ArtifactUpdateEvent { version, payload }
+    }
+
+    fn ensure_projection_identity_is_immutable(
+        &self,
+        payload: &ArtifactPayload,
+    ) -> Result<(), String> {
+        for version in &self.artifact_versions {
+            let identity_conflict = match (&version.payload, payload) {
+                (
+                    ArtifactPayload::WorkItemPlanProjection {
+                        projection: existing,
+                    },
+                    ArtifactPayload::WorkItemPlanProjection { projection: next },
+                ) => existing.id == next.id && existing != next,
+                (
+                    ArtifactPayload::WorkItemProjection {
+                        projection: existing,
+                    },
+                    ArtifactPayload::WorkItemProjection { projection: next },
+                ) => existing.id == next.id && existing != next,
+                _ => false,
+            };
+            if identity_conflict {
+                return Err("projection artifact identity mismatch".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn initial_revision_history(
+        &self,
+        outcome: &InitialPlanCompileOutcome,
+    ) -> WorkItemRevisionHistoryDto {
+        let mut entries = Vec::new();
+        for item in &outcome.work_items {
+            entries.push(WorkItemHistoryEntryDto {
+                kind: WorkItemHistoryEntryKind::DraftRevision,
+                id: item.draft_revision.id.clone(),
+                logical_work_item_id: item.draft_revision.logical_work_item_id.clone(),
+                related_revision_id: Some(item.work_item_revision.id.clone()),
+                summary: format!("Draft revision {}", item.draft_revision.revision_no),
+                created_at: item.draft_revision.created_at.clone(),
+            });
+            entries.push(WorkItemHistoryEntryDto {
+                kind: WorkItemHistoryEntryKind::WorkItemRevision,
+                id: item.work_item_revision.id.clone(),
+                logical_work_item_id: item.work_item_revision.logical_work_item_id.clone(),
+                related_revision_id: Some(item.work_item_revision.source_draft_revision_id.clone()),
+                summary: format!(
+                    "Compiled WorkItem revision from {}",
+                    item.work_item_revision.source_draft_revision_id
+                ),
+                created_at: item.work_item_revision.created_at.clone(),
+            });
+        }
+        for node in self.timeline_nodes.iter().filter(|node| {
+            matches!(
+                node.node_type,
+                TimelineNodeType::WorkItemPlanOutlineReview
+                    | TimelineNodeType::WorkItemDraftReview
+                    | TimelineNodeType::WorkItemBatchReview
+            )
+        }) {
+            let logical_work_item_id = self.artifact_versions.iter().find_map(|version| {
+                if version.source_node_id != node.node_id {
+                    return None;
+                }
+                match &version.payload {
+                    ArtifactPayload::WorkItemDraftCandidate { draft_candidate } => Some(
+                        draft_candidate
+                            .draft_record
+                            .candidate
+                            .logical_work_item_id
+                            .clone(),
+                    ),
+                    _ => None,
+                }
+            });
+            let Some(logical_work_item_id) = logical_work_item_id else {
+                continue;
+            };
+            let related_revision_id = outcome
+                .work_items
+                .iter()
+                .find(|item| item.work_item_revision.logical_work_item_id == logical_work_item_id)
+                .map(|item| item.work_item_revision.id.clone());
+            entries.push(WorkItemHistoryEntryDto {
+                kind: WorkItemHistoryEntryKind::PlanReview,
+                id: node.node_id.clone(),
+                logical_work_item_id,
+                related_revision_id,
+                summary: node.summary.clone().unwrap_or_else(|| node.title.clone()),
+                created_at: node.started_at.clone(),
+            });
+        }
+        entries.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        WorkItemRevisionHistoryDto { entries }
     }
 }

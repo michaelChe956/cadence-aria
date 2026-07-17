@@ -146,6 +146,24 @@ pub(crate) fn build_artifact_version_summary(version: &ArtifactVersion) -> Artif
             );
             (size, preview(&preview_text))
         }
+        ArtifactPayload::WorkItemPlanProjection { projection } => {
+            let size = serde_json::to_string(projection).map_or(0, |s| s.len());
+            (size, preview(&projection.id))
+        }
+        ArtifactPayload::WorkItemProjection { projection } => {
+            let size = serde_json::to_string(projection).map_or(0, |s| s.len());
+            (size, preview(&projection.id))
+        }
+        ArtifactPayload::WorkItemRevisionHistory { history } => {
+            let size = serde_json::to_string(history).map_or(0, |s| s.len());
+            let preview_text = format!("{} history entries", history.entries.len());
+            (size, preview(&preview_text))
+        }
+        ArtifactPayload::ProjectionValidation { report } => {
+            let size = serde_json::to_string(report).map_or(0, |s| s.len());
+            let preview_text = format!("{} projection findings", report.findings.len());
+            (size, preview(&preview_text))
+        }
     };
     ArtifactVersionSummary {
         version: version.version,
@@ -388,6 +406,23 @@ impl WorkspaceEngine {
             .iter()
             .map(build_artifact_version_summary)
             .collect();
+        let artifact_versions = if self.session.workspace_type == WorkspaceType::WorkItemPlan {
+            self.artifact_versions
+                .iter()
+                .filter(|version| {
+                    matches!(
+                        version.payload,
+                        ArtifactPayload::WorkItemPlanProjection { .. }
+                            | ArtifactPayload::WorkItemProjection { .. }
+                            | ArtifactPayload::WorkItemRevisionHistory { .. }
+                            | ArtifactPayload::ProjectionValidation { .. }
+                    )
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         WsOutMessage::SessionState {
             session_id: self.session.session_id.clone(),
@@ -404,7 +439,7 @@ impl WorkspaceEngine {
             },
             timeline_nodes: self.timeline_nodes.clone(),
             active_node_id: self.active_node_id.clone(),
-            artifact_versions: Vec::new(),
+            artifact_versions,
             artifact_version_summaries,
             timeline_node_details,
             timeline_node_summaries,

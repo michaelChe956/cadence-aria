@@ -369,10 +369,17 @@ async fn compile_recovery_resumes_after_committed_marker() {
         .list_artifact_versions(&session_id)
         .expect("list compile artifact versions");
     assert!(artifact_versions.iter().any(|version| {
+        matches!(
+            &version.payload,
+            ArtifactPayload::WorkItemPlanCompileReport { .. }
+        )
+    }));
+    assert!(artifact_versions.iter().any(|version| {
         version.is_current
             && matches!(
                 &version.payload,
-                ArtifactPayload::WorkItemPlanCompileReport { .. }
+                ArtifactPayload::WorkItemPlanProjection { projection }
+                    if projection.id == plan_projection.id
             )
     }));
 

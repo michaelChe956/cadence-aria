@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::product::models::{
-    WorkItemBatchStatus, WorkItemDraftRecord, WorkItemPlanCommitState, WorkItemPlanCompileStatus,
-    WorkItemPlanOutline,
+    PlanProjectionBundle, WorkItemBatchStatus, WorkItemDraftRecord, WorkItemPlanCommitState,
+    WorkItemPlanCompileStatus, WorkItemPlanOutline, WorkItemProjectionBundle,
 };
+use crate::product::work_item_projection::ProjectionValidationReport;
 
 use super::plan_candidate::{ValidatorFindingDto, WorkItemPlanCandidateDto};
 
@@ -38,6 +39,22 @@ pub enum ArtifactPayload {
     WorkItemPlanCompileReport {
         compile_report: Box<WorkItemPlanCompileReportPayload>,
     },
+    WorkItemPlanProjection {
+        #[serde(rename = "plan_projection")]
+        projection: Box<PlanProjectionBundleDto>,
+    },
+    WorkItemProjection {
+        #[serde(rename = "work_item_projection")]
+        projection: Box<WorkItemProjectionBundleDto>,
+    },
+    WorkItemRevisionHistory {
+        #[serde(rename = "work_item_revision_history")]
+        history: Box<WorkItemRevisionHistoryDto>,
+    },
+    ProjectionValidation {
+        #[serde(rename = "projection_validation")]
+        report: Box<ProjectionValidationReportDto>,
+    },
 }
 
 impl ArtifactPayload {
@@ -50,6 +67,10 @@ impl ArtifactPayload {
             Self::WorkItemDraftCandidate { .. } => None,
             Self::WorkItemBatchState { .. } => None,
             Self::WorkItemPlanCompileReport { .. } => None,
+            Self::WorkItemPlanProjection { .. } => None,
+            Self::WorkItemProjection { .. } => None,
+            Self::WorkItemRevisionHistory { .. } => None,
+            Self::ProjectionValidation { .. } => None,
         }
     }
 
@@ -66,8 +87,42 @@ impl ArtifactPayload {
             Self::WorkItemDraftCandidate { .. } => None,
             Self::WorkItemBatchState { .. } => None,
             Self::WorkItemPlanCompileReport { .. } => None,
+            Self::WorkItemPlanProjection { .. } => None,
+            Self::WorkItemProjection { .. } => None,
+            Self::WorkItemRevisionHistory { .. } => None,
+            Self::ProjectionValidation { .. } => None,
         }
     }
+}
+
+pub type PlanProjectionBundleDto = PlanProjectionBundle;
+pub type WorkItemProjectionBundleDto = WorkItemProjectionBundle;
+pub type ProjectionValidationReportDto = ProjectionValidationReport;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemHistoryEntryKind {
+    DraftRevision,
+    WorkItemRevision,
+    PlanReview,
+    ContractDelta,
+    UnitRun,
+    HandoffRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkItemHistoryEntryDto {
+    pub kind: WorkItemHistoryEntryKind,
+    pub id: String,
+    pub logical_work_item_id: String,
+    pub related_revision_id: Option<String>,
+    pub summary: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkItemRevisionHistoryDto {
+    pub entries: Vec<WorkItemHistoryEntryDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -100,10 +100,10 @@ pub use plan_projection::{
     publish_initial_plan_revision,
 };
 pub use types::{
-    AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome,
-    SessionMessage, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,
-    WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome, WorkspaceConfirmOutcome,
-    WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    ArtifactUpdateEvent, AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError,
+    ReviewDecisionOutcome, SessionMessage, WorkItemBatchDecisionOutcome,
+    WorkItemDraftDecisionOutcome, WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome,
+    WorkspaceConfirmOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
 };
 
 pub(crate) use artifact_constraints::*;

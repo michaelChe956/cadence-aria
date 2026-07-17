@@ -334,8 +334,14 @@ async fn work_item_plan_batch_optional_choice_can_skip_and_compile() {
     assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
     assert!(matches!(
         engine.session().artifact,
-        Some(ArtifactPayload::WorkItemPlanCompileReport { .. })
+        Some(ArtifactPayload::WorkItemPlanProjection { .. })
     ));
+    assert!(engine.artifact_versions.iter().any(|version| {
+        matches!(
+            version.payload,
+            ArtifactPayload::WorkItemPlanCompileReport { .. }
+        )
+    }));
     assert!(
         engine
             .timeline_nodes
