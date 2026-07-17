@@ -57,6 +57,23 @@ export function failHumanPresentationSave(
   };
 }
 
+export function failPendingHumanPresentationSaves(
+  prev: WorkspaceWsState,
+  message: string,
+) {
+  let changed = false;
+  const humanPresentationSaveStates = Object.fromEntries(
+    Object.entries(prev.humanPresentationSaveStates).map(([bundleId, state]) => {
+      if (!state.saving) {
+        return [bundleId, state];
+      }
+      changed = true;
+      return [bundleId, { saving: false, error: message }];
+    }),
+  );
+  return changed ? { humanPresentationSaveStates } : {};
+}
+
 export function humanPresentationSourceBundleId(
   revision: HumanPresentationRevision,
 ) {

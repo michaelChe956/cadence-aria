@@ -36,6 +36,7 @@ const STALE_SOCKET_CLOSE_CODE = 4000;
 const SERVER_SILENCE_CHECK_INTERVAL_MS = 15_000;
 const CONNECT_TIMEOUT_MS = 5_000;
 const STREAM_FLUSH_INTERVAL_MS = 80;
+const DISCONNECTED_PRESENTATION_SAVE_ERROR = "连接已断开，请重连后重试";
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -64,6 +65,12 @@ export function useWorkspaceWs(sessionId: string | null) {
     clearStreamFlushTimeouts();
     useWorkspaceStore.getState().clearAllStreamBuffers();
   }, [clearStreamFlushTimeouts]);
+
+  const failPendingPresentationSaves = useCallback(() => {
+    useWorkspaceStore
+      .getState()
+      .failPendingHumanPresentationSaves(DISCONNECTED_PRESENTATION_SAVE_ERROR);
+  }, []);
 
   const scheduleFlush = useCallback((nodeId: string) => {
     if (streamFlushTimeoutsRef.current[nodeId]) {
@@ -98,6 +105,7 @@ export function useWorkspaceWs(sessionId: string | null) {
       if (wsRef.current !== ws) return;
       wsRef.current = null;
       setCloseCode(1006);
+      failPendingPresentationSaves();
       const store = useWorkspaceStore.getState();
       store.setConnectionStatus("disconnected");
       store.setError("WebSocket 连接超时");
@@ -125,6 +133,7 @@ export function useWorkspaceWs(sessionId: string | null) {
       if (wsRef.current !== ws) return;
       clearConnectTimeout();
       clearPendingStreams();
+      failPendingPresentationSaves();
       wsRef.current = null;
       setCloseCode(event.code);
       useWorkspaceStore.getState().setConnectionStatus("disconnected");
@@ -134,6 +143,7 @@ export function useWorkspaceWs(sessionId: string | null) {
       if (wsRef.current !== ws) return;
       clearConnectTimeout();
       clearPendingStreams();
+      failPendingPresentationSaves();
       const store = useWorkspaceStore.getState();
       wsRef.current = null;
       setCloseCode(1006);
@@ -150,7 +160,12 @@ export function useWorkspaceWs(sessionId: string | null) {
         // ignore malformed messages
       }
     };
-  }, [clearConnectTimeout, clearPendingStreams, sessionId]);
+  }, [
+    clearConnectTimeout,
+    clearPendingStreams,
+    failPendingPresentationSaves,
+    sessionId,
+  ]);
 
   const {
     isReconnecting,

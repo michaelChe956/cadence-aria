@@ -348,6 +348,7 @@ export interface WorkspaceWsActions {
   beginHumanPresentationSave: (sourceProjectionBundleId: string) => void;
   completeHumanPresentationSave: (revision: HumanPresentationRevision) => void;
   failHumanPresentationSave: (sourceProjectionBundleId: string, message: string) => void;
+  failPendingHumanPresentationSaves: (message: string) => void;
   addTimelineNode: (node: TimelineNode) => void;
   updateTimelineNode: (
     nodeId: string,

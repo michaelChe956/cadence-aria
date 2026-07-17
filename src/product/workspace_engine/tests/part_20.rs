@@ -1,4 +1,6 @@
 use crate::product::models::HumanPresentationRevision;
+#[cfg(unix)]
+use std::sync::Barrier;
 
 #[test]
 fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
@@ -291,4 +293,249 @@ async fn work_item_human_presentation_revision_recovers_latest_overlay_in_sessio
         panic!("expected session state");
     };
     assert_eq!(human_presentation_revisions, vec![saved]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn work_item_human_presentation_concurrent_stores_commit_exactly_one_revision() {
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let outcome = engine.run_work_item_plan_compile().await.unwrap();
+    let paths = lifecycle.app_paths();
+    let plan = engine
+        .revision_store()
+        .get_plan_lineage("project_0001", "issue_0001", &plan_id)
+        .unwrap();
+    let source_bundle_id = outcome.plan_projection_bundle.id.clone();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let results = std::thread::scope(|scope| {
+        let handles = ["first", "second"].map(|summary| {
+            let store = crate::product::work_item_revision_store::WorkItemRevisionStore::new(
+                paths.clone(),
+            );
+            let plan = plan.clone();
+            let source_bundle_id = source_bundle_id.clone();
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                save_human_presentation_revision(
+                    &store,
+                    &plan,
+                    HumanPresentationRevision {
+                        id: String::new(),
+                        source_plan_projection_bundle_id: Some(source_bundle_id),
+                        source_work_item_projection_bundle_id: None,
+                        supersedes: None,
+                        human_summary: summary.to_string(),
+                        why_split: None,
+                        dependency_explanation: vec![],
+                        risk_explanation: vec![],
+                        source_refs: vec![],
+                        normative: false,
+                        used_by_provider: false,
+                        created_at: "2026-07-18T12:00:00Z".to_string(),
+                    },
+                )
+            })
+        });
+        handles.map(|handle| handle.join().unwrap())
+    });
+
+    let successes = results
+        .iter()
+        .filter_map(|result| result.as_ref().ok())
+        .collect::<Vec<_>>();
+    let conflicts = results
+        .iter()
+        .filter_map(|result| result.as_ref().err())
+        .collect::<Vec<_>>();
+    assert_eq!(successes.len(), 1);
+    assert_eq!(conflicts.len(), 1);
+    assert!(conflicts[0].to_string().contains("supersedes"));
+
+    let revision_root = paths
+        .issue_root("project_0001", "issue_0001")
+        .join("work-item-revisions")
+        .join(&plan_id)
+        .join("human-presentation-revisions");
+    let persisted_revision_files = std::fs::read_dir(&revision_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    assert_eq!(persisted_revision_files.len(), 1);
+
+    let verification_store =
+        crate::product::work_item_revision_store::WorkItemRevisionStore::new(paths);
+    let latest = verification_store
+        .get_latest_human_presentation_revision(&plan, &source_bundle_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest, *successes[0]);
+    assert_eq!(latest.id, "human_presentation_revision_0001");
+    assert_eq!(
+        persisted_revision_files[0]
+            .path()
+            .file_stem()
+            .and_then(|value| value.to_str()),
+        Some(latest.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn work_item_human_presentation_persistent_restart_recovers_each_latest_overlay() {
+    let (tmp, lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let outcome = engine.run_work_item_plan_compile().await.unwrap();
+
+    let plan_first = save_presentation_command(
+        &engine,
+        outcome.plan_projection_bundle.id.clone(),
+        HumanPresentationScope::Plan,
+        None,
+        "plan first",
+    );
+    let plan_latest = save_presentation_command(
+        &engine,
+        outcome.plan_projection_bundle.id.clone(),
+        HumanPresentationScope::Plan,
+        Some(plan_first.id.clone()),
+        "plan latest",
+    );
+
+    let mut expected = std::collections::BTreeMap::from([(
+        outcome.plan_projection_bundle.id.clone(),
+        plan_latest,
+    )]);
+    for (index, item) in outcome.work_items.iter().take(2).enumerate() {
+        let first = save_presentation_command(
+            &engine,
+            item.projection_bundle.id.clone(),
+            HumanPresentationScope::WorkItem,
+            None,
+            &format!("work item {index} first"),
+        );
+        let latest = save_presentation_command(
+            &engine,
+            item.projection_bundle.id.clone(),
+            HumanPresentationScope::WorkItem,
+            Some(first.id),
+            &format!("work item {index} latest"),
+        );
+        expected.insert(item.projection_bundle.id.clone(), latest);
+    }
+    assert_eq!(expected.len(), 3);
+
+    let session_record = lifecycle
+        .get_workspace_session(&engine.session.session_id)
+        .unwrap();
+    drop(engine);
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let recovered = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(tmp.path().to_path_buf())),
+        lifecycle.clone(),
+        event_tx,
+        WorkspaceSession::from_record(session_record),
+    );
+    let WsOutMessage::SessionState {
+        human_presentation_revisions,
+        ..
+    } = recovered.build_session_state()
+    else {
+        panic!("expected session state");
+    };
+    let recovered = human_presentation_revisions
+        .into_iter()
+        .map(|revision| {
+            let source = revision
+                .source_plan_projection_bundle_id
+                .clone()
+                .or(revision.source_work_item_projection_bundle_id.clone())
+                .unwrap();
+            (source, revision)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(recovered, expected);
+
+    for (workspace_type, entity_id) in [
+        (WorkspaceType::Story, "story_spec_0001"),
+        (WorkspaceType::Design, "design_spec_0001"),
+        (WorkspaceType::WorkItem, "work_item_0001"),
+    ] {
+        assert_non_plan_restart_has_no_human_presentations(
+            tmp.path(),
+            &lifecycle,
+            workspace_type,
+            entity_id,
+        );
+    }
+}
+
+fn save_presentation_command(
+    engine: &WorkspaceEngine,
+    source_projection_bundle_id: String,
+    scope: HumanPresentationScope,
+    supersedes: Option<String>,
+    human_summary: &str,
+) -> HumanPresentationRevision {
+    engine
+        .save_human_presentation_revision_command(SaveHumanPresentationRevision {
+            source_projection_bundle_id,
+            scope,
+            supersedes,
+            human_summary: human_summary.to_string(),
+            why_split: None,
+            dependency_explanation: vec![],
+            risk_explanation: vec![],
+            source_refs: vec![],
+        })
+        .unwrap()
+}
+
+fn assert_non_plan_restart_has_no_human_presentations(
+    checkpoint_root: &std::path::Path,
+    lifecycle: &LifecycleStore,
+    workspace_type: WorkspaceType,
+    entity_id: &str,
+) {
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: entity_id.to_string(),
+            workspace_type,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .unwrap();
+    let session_id = session_record.id.clone();
+    let (initial_tx, _initial_rx) = mpsc::channel(8);
+    let initial = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(checkpoint_root.to_path_buf())),
+        lifecycle.clone(),
+        initial_tx,
+        WorkspaceSession::from_record(session_record),
+    );
+    drop(initial);
+
+    let persisted = lifecycle.get_workspace_session(&session_id).unwrap();
+    let (restart_tx, _restart_rx) = mpsc::channel(8);
+    let restarted = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(checkpoint_root.to_path_buf())),
+        lifecycle.clone(),
+        restart_tx,
+        WorkspaceSession::from_record(persisted),
+    );
+    let WsOutMessage::SessionState {
+        human_presentation_revisions,
+        ..
+    } = restarted.build_session_state()
+    else {
+        panic!("expected session state");
+    };
+    assert!(human_presentation_revisions.is_empty());
 }

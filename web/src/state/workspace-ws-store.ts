@@ -11,6 +11,7 @@ import {
   beginHumanPresentationSave,
   completeHumanPresentationSave,
   failHumanPresentationSave,
+  failPendingHumanPresentationSaves,
   humanPresentationRevisionsFromSession,
 } from "./workspace-ws-store-presentations";
 import {
@@ -507,7 +508,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     set((prev) => completeHumanPresentationSave(prev, revision)),
   failHumanPresentationSave: (sourceProjectionBundleId, message) =>
     set((prev) => failHumanPresentationSave(prev, sourceProjectionBundleId, message)),
-
+  failPendingHumanPresentationSaves: (message) =>
+    set((prev) => failPendingHumanPresentationSaves(prev, message)),
   addTimelineNode: (node) =>
     set((prev) => {
       const retrySourceNodeId = node.retry?.retry_of_node_id ?? null;
