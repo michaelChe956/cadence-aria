@@ -3,7 +3,7 @@ use chrono::Utc;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
-    PlanRepairRequest, PlanRepairRequestStatus, WorkItemPlanLineage,
+    PlanDefectEvidence, PlanRepairRequest, PlanRepairRequestStatus, WorkItemPlanLineage,
 };
 
 use super::{
@@ -56,7 +56,7 @@ impl WorkItemRevisionStore {
         &self,
         plan: &WorkItemPlanLineage,
         request_id: &str,
-        evidence: Vec<serde_json::Value>,
+        evidence: Vec<PlanDefectEvidence>,
     ) -> Result<PlanRepairRequest, ProductStoreError> {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(request_id)?;

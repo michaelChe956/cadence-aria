@@ -17,6 +17,7 @@ pub mod issue_store;
 pub mod json_store;
 pub mod lifecycle_store;
 pub mod models;
+pub mod plan_repair;
 pub mod product_data_schema;
 pub mod project_store;
 pub mod provider_workspace_runner;

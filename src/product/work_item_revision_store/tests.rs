@@ -8,9 +8,10 @@ use crate::product::json_store::{ProductStoreError, write_json};
 use crate::product::models::{
     AmendmentResumeMode, AmendmentResumeTarget, HumanPresentationRevision, LogicalWorkItem,
     PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
-    PlanDefectClass, PlanRepairRequest, PlanRepairRequestStatus, PlanRevisionReason, RepairTarget,
-    RepairTargetKind, VerificationPlanRevision, WorkItemDraftRevision, WorkItemDraftRevisionStatus,
-    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemRevision, WorkItemRevisionReplacement,
+    PlanDefectClass, PlanDefectEvidence, PlanRepairRequest, PlanRepairRequestStatus,
+    PlanRevisionReason, RepairTarget, RepairTargetKind, VerificationPlanRevision,
+    WorkItemDraftRevision, WorkItemDraftRevisionStatus, WorkItemPlanLineage, WorkItemPlanRevision,
+    WorkItemRevision, WorkItemRevisionReplacement,
 };
 use crate::product::work_item_contract::canonical_contract_fixture;
 
@@ -132,7 +133,11 @@ fn repair_request(id: &str) -> PlanRepairRequest {
         },
         contract_refs: vec!["contract_0001".to_string()],
         capability_refs: vec!["capability_0001".to_string()],
-        evidence: vec![json!({"kind": "review", "id": "finding_0001"})],
+        evidence: vec![PlanDefectEvidence {
+            kind: "review_finding".to_string(),
+            source_ref: "review_0001#finding_0001".to_string(),
+            message: "contract mismatch".to_string(),
+        }],
         fingerprint: format!("fingerprint_{id}"),
         status: PlanRepairRequestStatus::Open,
         created_at: "2026-07-17T00:00:04Z".to_string(),
@@ -438,24 +443,79 @@ fn work_item_revision_store_updates_repair_request_state_and_evidence() {
         .unwrap();
     assert_eq!(updated.status, PlanRepairRequestStatus::InProgress);
 
-    let extra = json!({"kind": "test", "id": "test_0001"});
+    let extra = PlanDefectEvidence {
+        kind: "test_failure".to_string(),
+        source_ref: "test_0001".to_string(),
+        message: "test failed".to_string(),
+    };
     let merged = store
         .merge_repair_request_evidence(&plan, &request.id, vec![extra.clone(), extra.clone()])
         .unwrap();
     assert_eq!(
-        merged
-            .evidence
-            .iter()
-            .filter(|value| **value == extra)
-            .count(),
-        1
+        merged.evidence,
+        vec![request.evidence[0].clone(), extra.clone()]
     );
+    assert_eq!(merged.base_plan_revision_id, request.base_plan_revision_id);
+    assert_eq!(merged.defect_class, request.defect_class);
+    assert_eq!(merged.reason_code, request.reason_code);
+    assert_eq!(merged.repair_target, request.repair_target);
+    assert_eq!(merged.contract_refs, request.contract_refs);
+    assert_eq!(merged.capability_refs, request.capability_refs);
+    assert_eq!(merged.fingerprint, request.fingerprint);
+
+    let replayed = store
+        .merge_repair_request_evidence(&plan, &request.id, vec![request.evidence[0].clone(), extra])
+        .unwrap();
+    assert_eq!(replayed.evidence, merged.evidence);
     assert_eq!(store.list_open_repair_requests(&plan).unwrap().len(), 1);
 
     store
         .update_repair_request_status(&plan, &request.id, PlanRepairRequestStatus::Applied)
         .unwrap();
     assert!(store.list_open_repair_requests(&plan).unwrap().is_empty());
+}
+
+#[test]
+fn plan_repair_evidence_merge_is_scoped_to_full_plan_lineage() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkItemRevisionStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    let first_plan = plan_lineage();
+    let mut second_plan = plan_lineage();
+    second_plan.issue_id = "issue_0002".to_string();
+    store.put_plan_lineage(&first_plan).unwrap();
+    store.put_plan_lineage(&second_plan).unwrap();
+
+    let first_request = repair_request("plan_repair_request_shared");
+    let mut second_request = first_request.clone();
+    second_request.evidence[0].source_ref = "review_0002#finding_0001".to_string();
+    second_request.fingerprint = "fingerprint_second_issue".to_string();
+    store
+        .put_repair_request(&first_plan, &first_request)
+        .unwrap();
+    store
+        .put_repair_request(&second_plan, &second_request)
+        .unwrap();
+
+    let extra = PlanDefectEvidence {
+        kind: "test_failure".to_string(),
+        source_ref: "test_0001".to_string(),
+        message: "test failed".to_string(),
+    };
+    store
+        .merge_repair_request_evidence(&first_plan, &first_request.id, vec![extra.clone()])
+        .unwrap();
+
+    let first_stored = store
+        .list_open_repair_requests(&first_plan)
+        .unwrap()
+        .remove(0);
+    let second_stored = store
+        .list_open_repair_requests(&second_plan)
+        .unwrap()
+        .remove(0);
+    assert!(first_stored.evidence.contains(&extra));
+    assert!(!second_stored.evidence.contains(&extra));
+    assert_eq!(second_stored, second_request);
 }
 
 #[test]

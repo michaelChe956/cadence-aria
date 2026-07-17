@@ -36,10 +36,19 @@ pub enum RepairTargetKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepairTarget {
     pub kind: RepairTargetKind,
     pub logical_work_item_ids: Vec<String>,
     pub work_item_revision_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDefectEvidence {
+    pub kind: String,
+    pub source_ref: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +64,7 @@ pub enum PlanRepairRequestStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanRepairRequest {
     pub id: String,
     pub plan_id: String,
@@ -69,7 +79,7 @@ pub struct PlanRepairRequest {
     pub repair_target: RepairTarget,
     pub contract_refs: Vec<String>,
     pub capability_refs: Vec<String>,
-    pub evidence: Vec<serde_json::Value>,
+    pub evidence: Vec<PlanDefectEvidence>,
     pub fingerprint: String,
     pub status: PlanRepairRequestStatus,
     pub created_at: String,

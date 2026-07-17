@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::product::json_store::{read_json, write_json};
-use crate::product::models::WorkItemDraftRevisionState;
+use crate::product::models::{PlanDefectEvidence, WorkItemDraftRevisionState};
 
 use super::super::{ExclusiveFileLock, register_lock_attempt_hook};
 use super::*;
@@ -203,7 +203,11 @@ fn work_item_revision_store_repair_updates_wait_for_request_lock() {
     let store = WorkItemRevisionStore::new(paths.clone());
     let plan = plan_lineage();
     let request = repair_request("plan_repair_request_0001");
-    let extra = json!({"kind": "concurrent", "id": "evidence_0001"});
+    let extra = PlanDefectEvidence {
+        kind: "concurrent".to_string(),
+        source_ref: "evidence_0001".to_string(),
+        message: "concurrent evidence".to_string(),
+    };
     store.put_plan_lineage(&plan).unwrap();
     store.put_repair_request(&plan, &request).unwrap();
 
@@ -244,6 +248,67 @@ fn work_item_revision_store_repair_updates_wait_for_request_lock() {
     let stored = store.list_open_repair_requests(&plan).unwrap().remove(0);
     assert_eq!(stored.status, PlanRepairRequestStatus::InProgress);
     assert!(stored.evidence.contains(&extra));
+}
+
+#[test]
+fn plan_repair_concurrent_evidence_merges_preserve_unique_evidence() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths.clone());
+    let plan = plan_lineage();
+    let request = repair_request("plan_repair_request_0001");
+    let first = PlanDefectEvidence {
+        kind: "concurrent".to_string(),
+        source_ref: "evidence_0001".to_string(),
+        message: "first concurrent evidence".to_string(),
+    };
+    let second = PlanDefectEvidence {
+        kind: "concurrent".to_string(),
+        source_ref: "evidence_0002".to_string(),
+        message: "second concurrent evidence".to_string(),
+    };
+    store.put_plan_lineage(&plan).unwrap();
+    store.put_repair_request(&plan, &request).unwrap();
+
+    let target_path =
+        store.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, &request.id);
+    let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
+    let (result_sender, result_receiver) = mpsc::channel();
+    for evidence in [first.clone(), second.clone(), first.clone()] {
+        let store = WorkItemRevisionStore::new(paths.clone());
+        let plan = plan.clone();
+        let request_id = request.id.clone();
+        spawn_operation(result_sender.clone(), move || {
+            store.merge_repair_request_evidence(&plan, &request_id, vec![evidence])
+        });
+    }
+    drop(result_sender);
+
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 3);
+    drop(guard);
+    for result in receive_results(&result_receiver, 3) {
+        result.unwrap();
+    }
+
+    let stored = store.list_open_repair_requests(&plan).unwrap().remove(0);
+    assert_eq!(
+        stored
+            .evidence
+            .iter()
+            .filter(|value| **value == first)
+            .count(),
+        1
+    );
+    assert_eq!(
+        stored
+            .evidence
+            .iter()
+            .filter(|value| **value == second)
+            .count(),
+        1
+    );
+    assert_eq!(stored.fingerprint, request.fingerprint);
 }
 
 #[test]
