@@ -16,6 +16,12 @@ pub enum ContractDeltaKind {
     TopologyChange,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ContractCapabilityAssociation {
+    pub contract_id: String,
+    pub capability: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractDelta {
     pub logical_work_item_id: String,
@@ -27,6 +33,8 @@ pub struct ContractDelta {
     pub added_capabilities: Vec<String>,
     pub removed_capabilities: Vec<String>,
     pub changed_capabilities: Vec<String>,
+    pub added_capability_associations: Vec<ContractCapabilityAssociation>,
+    pub removed_capability_associations: Vec<ContractCapabilityAssociation>,
     pub acceptance_changed: bool,
     pub verification_changed: bool,
     pub write_policy_changed: bool,
@@ -50,6 +58,8 @@ pub fn compute_contract_delta(
         .keys()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let previous_associations = capability_associations(&previous_outputs);
+    let next_associations = capability_associations(&next_outputs);
 
     let added_contracts =
         set_difference(&next_outputs.contract_ids, &previous_outputs.contract_ids);
@@ -57,6 +67,14 @@ pub fn compute_contract_delta(
         set_difference(&previous_outputs.contract_ids, &next_outputs.contract_ids);
     let added_capabilities = set_difference(&next_capabilities, &previous_capabilities);
     let removed_capabilities = set_difference(&previous_capabilities, &next_capabilities);
+    let added_capability_associations = next_associations
+        .difference(&previous_associations)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed_capability_associations = previous_associations
+        .difference(&next_associations)
+        .cloned()
+        .collect::<Vec<_>>();
     let changed_capabilities = previous_capabilities
         .intersection(&next_capabilities)
         .filter(|capability| {
@@ -78,10 +96,13 @@ pub fn compute_contract_delta(
         ContractDeltaKind::TopologyChange
     } else if !removed_contracts.is_empty()
         || !removed_capabilities.is_empty()
-        || !changed_capabilities.is_empty()
+        || !removed_capability_associations.is_empty()
     {
         ContractDeltaKind::BreakingContractChange
-    } else if !added_contracts.is_empty() || !added_capabilities.is_empty() {
+    } else if !added_contracts.is_empty()
+        || !added_capabilities.is_empty()
+        || !added_capability_associations.is_empty()
+    {
         ContractDeltaKind::CompatibleContractExtension
     } else if guidance_changed {
         ContractDeltaKind::ImplementationGuidance
@@ -99,10 +120,27 @@ pub fn compute_contract_delta(
         added_capabilities,
         removed_capabilities,
         changed_capabilities,
+        added_capability_associations,
+        removed_capability_associations,
         acceptance_changed,
         verification_changed,
         write_policy_changed,
     }
+}
+
+fn capability_associations(outputs: &NormalizedOutputs) -> BTreeSet<ContractCapabilityAssociation> {
+    outputs
+        .capability_owners
+        .iter()
+        .flat_map(|(capability, contract_ids)| {
+            contract_ids
+                .iter()
+                .map(|contract_id| ContractCapabilityAssociation {
+                    contract_id: contract_id.clone(),
+                    capability: capability.clone(),
+                })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

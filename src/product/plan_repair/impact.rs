@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::product::work_item_contract::{
-    DependencyContractEdge, DependencyContractGraph, RequiredDependencyContract,
+    CanonicalWorkItemContract, ContractCompatibilityPolicy, DependencyContractEdge,
+    DependencyContractGraph, RequiredDependencyContract,
 };
 
 use super::{ContractDelta, ContractDeltaKind, PlanRepairError};
@@ -73,6 +74,10 @@ impl ContractImpactAnalyzer {
         let mut direct_revalidation = BTreeSet::new();
         let mut direct_stale = BTreeSet::new();
         let mut explanation_paths = Vec::new();
+        let provider = graph
+            .contracts
+            .get(&delta.logical_work_item_id)
+            .expect("delta source existence was checked above");
         for edge in graph
             .edges
             .iter()
@@ -81,7 +86,7 @@ impl ContractImpactAnalyzer {
             let matching_contracts = edge
                 .required_contracts
                 .iter()
-                .filter(|required| required_contract_matches(required, delta))
+                .filter(|required| required_contract_is_impacted(required, delta, provider))
                 .collect::<Vec<_>>();
             if matching_contracts.is_empty() {
                 continue;
@@ -130,31 +135,119 @@ impl ContractImpactAnalyzer {
     }
 }
 
-fn required_contract_matches(required: &RequiredDependencyContract, delta: &ContractDelta) -> bool {
+fn required_contract_is_impacted(
+    required: &RequiredDependencyContract,
+    delta: &ContractDelta,
+    next_provider: &CanonicalWorkItemContract,
+) -> bool {
     let required_capabilities = required
         .required_capabilities
         .iter()
-        .map(String::as_str)
+        .cloned()
         .collect::<BTreeSet<_>>();
+    let next_provided = provided_capabilities(next_provider, &required.contract_id);
     match delta.kind {
         ContractDeltaKind::BreakingContractChange => {
-            delta.removed_contracts.contains(&required.contract_id)
-                || delta
-                    .removed_capabilities
-                    .iter()
-                    .chain(&delta.changed_capabilities)
-                    .any(|capability| required_capabilities.contains(capability.as_str()))
+            if delta.removed_contracts.contains(&required.contract_id) {
+                return true;
+            }
+            let relevant_loss = delta
+                .removed_capability_associations
+                .iter()
+                .any(|association| {
+                    association.contract_id == required.contract_id
+                        && required_capabilities.contains(&association.capability)
+                });
+            relevant_loss && !compatibility_policy_is_satisfied(required, next_provided.as_ref())
         }
         ContractDeltaKind::CompatibleContractExtension => {
-            delta.added_contracts.contains(&required.contract_id)
-                || delta
-                    .added_capabilities
-                    .iter()
-                    .any(|capability| required_capabilities.contains(capability.as_str()))
+            let contract_added =
+                delta.added_contracts.contains(&required.contract_id) && next_provided.is_some();
+            let newly_available = delta
+                .added_capability_associations
+                .iter()
+                .filter(|association| {
+                    association.contract_id == required.contract_id
+                        && required_capabilities.contains(&association.capability)
+                        && next_provided
+                            .as_ref()
+                            .is_some_and(|provided| provided.contains(&association.capability))
+                })
+                .map(|association| association.capability.clone())
+                .collect::<BTreeSet<_>>();
+
+            match required.compatibility_policy {
+                ContractCompatibilityPolicy::RequireAll => {
+                    contract_added || !newly_available.is_empty()
+                }
+                ContractCompatibilityPolicy::RequireAny => {
+                    if required_capabilities.is_empty() {
+                        return contract_added;
+                    }
+                    let next_available = next_provided
+                        .as_ref()
+                        .map(|provided| {
+                            required_capabilities
+                                .intersection(provided)
+                                .cloned()
+                                .collect::<BTreeSet<_>>()
+                        })
+                        .unwrap_or_default();
+                    let previous_available = if contract_added {
+                        BTreeSet::new()
+                    } else {
+                        next_available
+                            .difference(&newly_available)
+                            .cloned()
+                            .collect()
+                    };
+                    previous_available.is_empty() && !next_available.is_empty()
+                }
+            }
         }
         ContractDeltaKind::InformativeOnly
         | ContractDeltaKind::ImplementationGuidance
         | ContractDeltaKind::TopologyChange => false,
+    }
+}
+
+fn provided_capabilities(
+    provider: &CanonicalWorkItemContract,
+    contract_id: &str,
+) -> Option<BTreeSet<String>> {
+    let matching_outputs = provider
+        .output_contracts
+        .iter()
+        .filter(|output| output.contract_id == contract_id)
+        .collect::<Vec<_>>();
+    if matching_outputs.is_empty() {
+        return None;
+    }
+    Some(
+        matching_outputs
+            .into_iter()
+            .flat_map(|output| output.capabilities.iter().cloned())
+            .collect(),
+    )
+}
+
+fn compatibility_policy_is_satisfied(
+    required: &RequiredDependencyContract,
+    provided: Option<&BTreeSet<String>>,
+) -> bool {
+    let Some(provided) = provided else {
+        return false;
+    };
+    let required_capabilities = required
+        .required_capabilities
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    match required.compatibility_policy {
+        ContractCompatibilityPolicy::RequireAll => required_capabilities.is_subset(provided),
+        ContractCompatibilityPolicy::RequireAny => {
+            required_capabilities.is_empty() || !required_capabilities.is_disjoint(provided)
+        }
     }
 }
 

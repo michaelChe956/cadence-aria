@@ -7,12 +7,14 @@ use crate::product::work_item_contract::{
 };
 
 use super::{
-    ContractDelta, ContractDeltaKind, ContractImpactAnalyzer, NormalizedPlanDefectRoute,
-    PlanDefectClass, PlanDefectConfidence, PlanDefectEvidence, PlanDefectFinding, PlanDefectRoute,
-    PlanDefectSeverity, PlanExecutionState, PlanRepairError, PlanRepairRequest, RepairTarget,
-    RepairTargetKind, UnitExecutionSnapshot, compute_contract_delta, default_route,
-    normalize_blocker_route, plan_defect_fingerprint,
+    ContractCapabilityAssociation, ContractDelta, ContractDeltaKind, ContractImpactAnalyzer,
+    NormalizedPlanDefectRoute, PlanDefectClass, PlanDefectConfidence, PlanDefectEvidence,
+    PlanDefectFinding, PlanDefectRoute, PlanDefectSeverity, PlanExecutionState, PlanRepairError,
+    PlanRepairRequest, RepairTarget, RepairTargetKind, UnitExecutionSnapshot,
+    compute_contract_delta, default_route, normalize_blocker_route, plan_defect_fingerprint,
 };
+
+mod review;
 
 fn repair_request_json() -> serde_json::Value {
     json!({
@@ -494,10 +496,19 @@ fn required_edge(
 }
 
 fn dependency_graph_fixture() -> DependencyContractGraph {
-    let contracts = ["WI-01", "WI-02", "WI-03", "WI-04", "WI-05"]
-        .into_iter()
-        .map(|id| (id.to_string(), dependency_contract_fixture(id)))
-        .collect();
+    let mut contracts: std::collections::BTreeMap<_, _> =
+        ["WI-01", "WI-02", "WI-03", "WI-04", "WI-05"]
+            .into_iter()
+            .map(|id| (id.to_string(), dependency_contract_fixture(id)))
+            .collect();
+    contracts.insert(
+        "WI-01".to_string(),
+        provider_contract_fixture(&[
+            "workflow_explicit_completion",
+            "finalization_failure",
+            "failure_message",
+        ]),
+    );
     DependencyContractGraph {
         contracts,
         edges: vec![
@@ -553,6 +564,8 @@ fn delta_fixture(kind: ContractDeltaKind) -> ContractDelta {
         added_capabilities: Vec::new(),
         removed_capabilities: Vec::new(),
         changed_capabilities: Vec::new(),
+        added_capability_associations: Vec::new(),
+        removed_capability_associations: Vec::new(),
         acceptance_changed: false,
         verification_changed: false,
         write_policy_changed: false,
@@ -630,25 +643,17 @@ fn contract_delta_normalizes_inputs_before_detecting_topology_change() {
 }
 
 #[test]
-fn contract_delta_distinguishes_guidance_from_identical_contracts() {
-    let previous = provider_contract_fixture(&["stable"]);
-    let identical = previous.clone();
-    let mut guidance = previous.clone();
-    guidance.acceptance_criteria[0].statement = "Updated normative criterion".to_string();
-
-    let no_op = compute_contract_delta("revision_1", &previous, "revision_2", &identical);
-    let changed = compute_contract_delta("revision_1", &previous, "revision_2", &guidance);
-
-    assert_eq!(no_op.kind, ContractDeltaKind::InformativeOnly);
-    assert_eq!(changed.kind, ContractDeltaKind::ImplementationGuidance);
-    assert!(changed.acceptance_changed);
-}
-
-#[test]
 fn contract_impact_marks_only_started_consumers_of_removed_capability_stale() {
-    let graph = dependency_graph_fixture();
+    let mut graph = dependency_graph_fixture();
+    graph.contracts.get_mut("WI-01").unwrap().output_contracts[0]
+        .capabilities
+        .retain(|capability| capability != "finalization_failure");
     let mut delta = delta_fixture(ContractDeltaKind::BreakingContractChange);
     delta.removed_capabilities = vec!["finalization_failure".to_string()];
+    delta.removed_capability_associations = vec![ContractCapabilityAssociation {
+        contract_id: "contract_x".to_string(),
+        capability: "finalization_failure".to_string(),
+    }];
 
     let report = ContractImpactAnalyzer
         .analyze_static(&graph, &delta, &execution_state_fixture(&["WI-02"]))
@@ -661,13 +666,33 @@ fn contract_impact_marks_only_started_consumers_of_removed_capability_stale() {
     assert_eq!(report.explanation_paths.len(), 2);
     assert_eq!(report.explanation_paths[0].from, "WI-01");
     assert_eq!(report.explanation_paths[0].to, "WI-02");
+    assert_eq!(report.explanation_paths[0].contract_id, "contract_x");
+    assert_eq!(
+        report.explanation_paths[0].capability_refs,
+        vec![
+            "failure_message",
+            "finalization_failure",
+            "workflow_explicit_completion"
+        ]
+    );
     assert_eq!(report.explanation_paths[1].from, "WI-02");
     assert_eq!(report.explanation_paths[1].to, "WI-03");
+    assert_eq!(report.explanation_paths[1].contract_id, "contract_y");
+    assert_eq!(
+        report.explanation_paths[1].capability_refs,
+        vec!["registration_ready"]
+    );
 }
 
 #[test]
 fn contract_impact_revalidates_unstarted_breaking_consumers() {
-    let graph = dependency_graph_fixture();
+    let mut graph = dependency_graph_fixture();
+    graph
+        .contracts
+        .get_mut("WI-01")
+        .unwrap()
+        .output_contracts
+        .clear();
     let mut delta = delta_fixture(ContractDeltaKind::BreakingContractChange);
     delta.removed_contracts = vec!["contract_x".to_string()];
 
@@ -688,6 +713,16 @@ fn contract_impact_revalidates_only_consumers_requiring_added_capabilities() {
     delta.added_capabilities = vec![
         "failure_message".to_string(),
         "finalization_failure".to_string(),
+    ];
+    delta.added_capability_associations = vec![
+        ContractCapabilityAssociation {
+            contract_id: "contract_x".to_string(),
+            capability: "failure_message".to_string(),
+        },
+        ContractCapabilityAssociation {
+            contract_id: "contract_x".to_string(),
+            capability: "finalization_failure".to_string(),
+        },
     ];
 
     let report = ContractImpactAnalyzer
