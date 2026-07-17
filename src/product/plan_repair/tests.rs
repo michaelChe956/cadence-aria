@@ -1,12 +1,17 @@
 use serde_json::json;
 
-use crate::product::work_item_contract::BlockerRoute;
+use crate::product::work_item_contract::{
+    BlockerRoute, CanonicalWorkItemContract, ContractCompatibilityPolicy, DependencyContractEdge,
+    DependencyContractGraph, PromisedOutputContract, RequiredDependencyContract,
+    RequiredInputContract, canonical_contract_fixture,
+};
 
 use super::{
-    NormalizedPlanDefectRoute, PlanDefectClass, PlanDefectConfidence, PlanDefectEvidence,
-    PlanDefectFinding, PlanDefectRoute, PlanDefectSeverity, PlanRepairError, PlanRepairRequest,
-    RepairTarget, RepairTargetKind, default_route, normalize_blocker_route,
-    plan_defect_fingerprint,
+    ContractDelta, ContractDeltaKind, ContractImpactAnalyzer, NormalizedPlanDefectRoute,
+    PlanDefectClass, PlanDefectConfidence, PlanDefectEvidence, PlanDefectFinding, PlanDefectRoute,
+    PlanDefectSeverity, PlanExecutionState, PlanRepairError, PlanRepairRequest, RepairTarget,
+    RepairTargetKind, UnitExecutionSnapshot, compute_contract_delta, default_route,
+    normalize_blocker_route, plan_defect_fingerprint,
 };
 
 fn repair_request_json() -> serde_json::Value {
@@ -444,4 +449,313 @@ fn plan_repair_fingerprint_ignores_non_identity_evidence() {
         plan_defect_fingerprint("plan_revision_0001", &left),
         plan_defect_fingerprint("plan_revision_0001", &right)
     );
+}
+
+fn provider_contract_fixture(capabilities: &[&str]) -> CanonicalWorkItemContract {
+    let mut provider = canonical_contract_fixture("WI-01");
+    provider.input_contracts.clear();
+    provider.output_contracts = vec![PromisedOutputContract {
+        contract_id: "contract_x".to_string(),
+        capabilities: capabilities
+            .iter()
+            .map(|capability| (*capability).to_string())
+            .collect(),
+    }];
+    provider.handoff_contract.provided_contract_refs = vec!["contract_x".to_string()];
+    provider
+}
+
+fn dependency_contract_fixture(logical_work_item_id: &str) -> CanonicalWorkItemContract {
+    let mut contract = canonical_contract_fixture(logical_work_item_id);
+    contract.input_contracts.clear();
+    contract.output_contracts.clear();
+    contract.handoff_contract.provided_contract_refs.clear();
+    contract
+}
+
+fn required_edge(
+    from: &str,
+    to: &str,
+    contract_id: &str,
+    capabilities: &[&str],
+) -> DependencyContractEdge {
+    DependencyContractEdge {
+        from: from.to_string(),
+        to: to.to_string(),
+        required_contracts: vec![RequiredDependencyContract {
+            contract_id: contract_id.to_string(),
+            required_capabilities: capabilities
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect(),
+            compatibility_policy: ContractCompatibilityPolicy::RequireAll,
+        }],
+    }
+}
+
+fn dependency_graph_fixture() -> DependencyContractGraph {
+    let contracts = ["WI-01", "WI-02", "WI-03", "WI-04", "WI-05"]
+        .into_iter()
+        .map(|id| (id.to_string(), dependency_contract_fixture(id)))
+        .collect();
+    DependencyContractGraph {
+        contracts,
+        edges: vec![
+            required_edge(
+                "WI-01",
+                "WI-02",
+                "contract_x",
+                &[
+                    "workflow_explicit_completion",
+                    "finalization_failure",
+                    "failure_message",
+                ],
+            ),
+            required_edge(
+                "WI-01",
+                "WI-05",
+                "contract_x",
+                &["workflow_explicit_completion"],
+            ),
+            required_edge("WI-02", "WI-03", "contract_y", &["registration_ready"]),
+        ],
+    }
+}
+
+fn execution_state_fixture(started_consumers: &[&str]) -> PlanExecutionState {
+    PlanExecutionState {
+        units: started_consumers
+            .iter()
+            .map(|logical_work_item_id| {
+                (
+                    (*logical_work_item_id).to_string(),
+                    UnitExecutionSnapshot {
+                        logical_work_item_id: (*logical_work_item_id).to_string(),
+                        work_item_revision_id: format!("revision_{logical_work_item_id}"),
+                        completed_handoff_revision_id: None,
+                        has_started: true,
+                        has_completed: false,
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn delta_fixture(kind: ContractDeltaKind) -> ContractDelta {
+    ContractDelta {
+        logical_work_item_id: "WI-01".to_string(),
+        previous_revision_id: "work_item_revision_0001".to_string(),
+        next_revision_id: "work_item_revision_0002".to_string(),
+        kind,
+        added_contracts: Vec::new(),
+        removed_contracts: Vec::new(),
+        added_capabilities: Vec::new(),
+        removed_capabilities: Vec::new(),
+        changed_capabilities: Vec::new(),
+        acceptance_changed: false,
+        verification_changed: false,
+        write_policy_changed: false,
+    }
+}
+
+#[test]
+fn contract_delta_classifies_added_finalization_capabilities_as_compatible_extension() {
+    let previous = provider_contract_fixture(&["workflow_explicit_completion"]);
+    let next = provider_contract_fixture(&[
+        "finalization_failure",
+        "workflow_explicit_completion",
+        "failure_message",
+        "failure_message",
+    ]);
+
+    let delta = compute_contract_delta(
+        "work_item_revision_0001",
+        &previous,
+        "work_item_revision_0002",
+        &next,
+    );
+
+    assert_eq!(delta.kind, ContractDeltaKind::CompatibleContractExtension);
+    assert_eq!(delta.logical_work_item_id, "WI-01");
+    assert_eq!(
+        delta.added_capabilities,
+        vec!["failure_message", "finalization_failure"]
+    );
+    assert!(delta.changed_capabilities.is_empty());
+}
+
+#[test]
+fn contract_delta_classifies_removed_and_moved_capabilities_as_breaking() {
+    let mut previous = provider_contract_fixture(&["stable", "moved", "removed"]);
+    previous.output_contracts.push(PromisedOutputContract {
+        contract_id: "contract_y".to_string(),
+        capabilities: Vec::new(),
+    });
+    let mut next = provider_contract_fixture(&["stable"]);
+    next.output_contracts.push(PromisedOutputContract {
+        contract_id: "contract_y".to_string(),
+        capabilities: vec!["moved".to_string()],
+    });
+
+    let delta = compute_contract_delta("revision_1", &previous, "revision_2", &next);
+
+    assert_eq!(delta.kind, ContractDeltaKind::BreakingContractChange);
+    assert_eq!(delta.removed_capabilities, vec!["removed"]);
+    assert_eq!(delta.changed_capabilities, vec!["moved"]);
+}
+
+#[test]
+fn contract_delta_normalizes_inputs_before_detecting_topology_change() {
+    let mut previous = provider_contract_fixture(&["stable"]);
+    previous.input_contracts = vec![RequiredInputContract {
+        contract_id: "contract_input".to_string(),
+        provider_logical_work_item_id: "WI-00".to_string(),
+        required_capabilities: vec!["b".to_string(), "a".to_string(), "a".to_string()],
+        compatibility_policy: ContractCompatibilityPolicy::RequireAll,
+    }];
+    let mut reordered = previous.clone();
+    reordered.input_contracts[0].required_capabilities = vec!["a".to_string(), "b".to_string()];
+
+    assert_eq!(
+        compute_contract_delta("revision_1", &previous, "revision_2", &reordered).kind,
+        ContractDeltaKind::InformativeOnly
+    );
+
+    reordered.input_contracts[0].compatibility_policy = ContractCompatibilityPolicy::RequireAny;
+    assert_eq!(
+        compute_contract_delta("revision_1", &previous, "revision_2", &reordered).kind,
+        ContractDeltaKind::TopologyChange
+    );
+}
+
+#[test]
+fn contract_delta_distinguishes_guidance_from_identical_contracts() {
+    let previous = provider_contract_fixture(&["stable"]);
+    let identical = previous.clone();
+    let mut guidance = previous.clone();
+    guidance.acceptance_criteria[0].statement = "Updated normative criterion".to_string();
+
+    let no_op = compute_contract_delta("revision_1", &previous, "revision_2", &identical);
+    let changed = compute_contract_delta("revision_1", &previous, "revision_2", &guidance);
+
+    assert_eq!(no_op.kind, ContractDeltaKind::InformativeOnly);
+    assert_eq!(changed.kind, ContractDeltaKind::ImplementationGuidance);
+    assert!(changed.acceptance_changed);
+}
+
+#[test]
+fn contract_impact_marks_only_started_consumers_of_removed_capability_stale() {
+    let graph = dependency_graph_fixture();
+    let mut delta = delta_fixture(ContractDeltaKind::BreakingContractChange);
+    delta.removed_capabilities = vec!["finalization_failure".to_string()];
+
+    let report = ContractImpactAnalyzer
+        .analyze_static(&graph, &delta, &execution_state_fixture(&["WI-02"]))
+        .unwrap();
+
+    assert_eq!(report.direct_stale, vec!["WI-02"]);
+    assert!(report.direct_revalidation.is_empty());
+    assert_eq!(report.conditional_downstream, vec!["WI-03"]);
+    assert_eq!(report.unaffected, vec!["WI-04", "WI-05"]);
+    assert_eq!(report.explanation_paths.len(), 2);
+    assert_eq!(report.explanation_paths[0].from, "WI-01");
+    assert_eq!(report.explanation_paths[0].to, "WI-02");
+    assert_eq!(report.explanation_paths[1].from, "WI-02");
+    assert_eq!(report.explanation_paths[1].to, "WI-03");
+}
+
+#[test]
+fn contract_impact_revalidates_unstarted_breaking_consumers() {
+    let graph = dependency_graph_fixture();
+    let mut delta = delta_fixture(ContractDeltaKind::BreakingContractChange);
+    delta.removed_contracts = vec!["contract_x".to_string()];
+
+    let report = ContractImpactAnalyzer
+        .analyze_static(&graph, &delta, &execution_state_fixture(&[]))
+        .unwrap();
+
+    assert!(report.direct_stale.is_empty());
+    assert_eq!(report.direct_revalidation, vec!["WI-02", "WI-05"]);
+    assert_eq!(report.conditional_downstream, vec!["WI-03"]);
+    assert_eq!(report.unaffected, vec!["WI-04"]);
+}
+
+#[test]
+fn contract_impact_revalidates_only_consumers_requiring_added_capabilities() {
+    let graph = dependency_graph_fixture();
+    let mut delta = delta_fixture(ContractDeltaKind::CompatibleContractExtension);
+    delta.added_capabilities = vec![
+        "failure_message".to_string(),
+        "finalization_failure".to_string(),
+    ];
+
+    let report = ContractImpactAnalyzer
+        .analyze_static(
+            &graph,
+            &delta,
+            &execution_state_fixture(&["WI-02", "WI-05"]),
+        )
+        .unwrap();
+
+    assert_eq!(report.direct_revalidation, vec!["WI-02"]);
+    assert!(report.direct_stale.is_empty());
+    assert_eq!(report.conditional_downstream, vec!["WI-03"]);
+    assert_eq!(report.unaffected, vec!["WI-04", "WI-05"]);
+}
+
+#[test]
+fn contract_impact_guidance_and_informative_deltas_leave_consumers_unaffected() {
+    let graph = dependency_graph_fixture();
+    for kind in [
+        ContractDeltaKind::ImplementationGuidance,
+        ContractDeltaKind::InformativeOnly,
+    ] {
+        let report = ContractImpactAnalyzer
+            .analyze_static(
+                &graph,
+                &delta_fixture(kind),
+                &execution_state_fixture(&["WI-02"]),
+            )
+            .unwrap();
+
+        assert_eq!(report.unaffected, vec!["WI-02", "WI-03", "WI-04", "WI-05"]);
+        assert!(report.direct_revalidation.is_empty());
+        assert!(report.direct_stale.is_empty());
+        assert!(report.conditional_downstream.is_empty());
+        assert!(report.explanation_paths.is_empty());
+    }
+}
+
+#[test]
+fn contract_impact_topology_change_defers_all_impact_to_subgraph_replanner() {
+    let report = ContractImpactAnalyzer
+        .analyze_static(
+            &dependency_graph_fixture(),
+            &delta_fixture(ContractDeltaKind::TopologyChange),
+            &execution_state_fixture(&["WI-02"]),
+        )
+        .unwrap();
+
+    assert!(report.unaffected.is_empty());
+    assert!(report.direct_revalidation.is_empty());
+    assert!(report.direct_stale.is_empty());
+    assert!(report.conditional_downstream.is_empty());
+    assert!(report.explanation_paths.is_empty());
+}
+
+#[test]
+fn contract_impact_rejects_delta_source_missing_from_graph() {
+    let mut delta = delta_fixture(ContractDeltaKind::BreakingContractChange);
+    delta.logical_work_item_id = "WI-missing".to_string();
+
+    let error = ContractImpactAnalyzer
+        .analyze_static(
+            &dependency_graph_fixture(),
+            &delta,
+            &execution_state_fixture(&[]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, PlanRepairError::InvalidFinding(_)));
 }
