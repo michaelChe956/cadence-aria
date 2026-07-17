@@ -432,6 +432,42 @@ pub(crate) async fn handle_workspace_inbound_message(
                 }
             }
         }
+        WsInMessage::SaveHumanPresentationRevision {
+            source_projection_bundle_id,
+            scope,
+            supersedes,
+            human_summary,
+            why_split,
+            dependency_explanation,
+            risk_explanation,
+            source_refs,
+        } => {
+            let source_projection_bundle_id_for_error = source_projection_bundle_id.clone();
+            let result = {
+                let engine = engine.lock().await;
+                engine.save_human_presentation_revision_command(SaveHumanPresentationRevision {
+                    source_projection_bundle_id,
+                    scope: match scope {
+                        HumanPresentationScopeDto::Plan => HumanPresentationScope::Plan,
+                        HumanPresentationScopeDto::WorkItem => HumanPresentationScope::WorkItem,
+                    },
+                    supersedes,
+                    human_summary,
+                    why_split,
+                    dependency_explanation,
+                    risk_explanation,
+                    source_refs,
+                })
+            };
+            let message = match result {
+                Ok(revision) => WsOutMessage::HumanPresentationRevisionSaved { revision },
+                Err(error) => WsOutMessage::HumanPresentationRevisionSaveFailed {
+                    source_projection_bundle_id: source_projection_bundle_id_for_error,
+                    message: error.to_string(),
+                },
+            };
+            let _ = send_json_outbound(&outbound_tx, &message).await;
+        }
         WsInMessage::Abort => {
             if abort_active_run(&current_run, &workspace_runs, &session_id).await {
                 let _ = send_json_outbound(

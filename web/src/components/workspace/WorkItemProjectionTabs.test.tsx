@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   PlanProjectionBundle,
   WorkItemProjectionBundle,
@@ -71,6 +71,39 @@ describe("WorkItemProjectionTabs", () => {
     expect(screen.getByText("draft-revision-001")).toBeInTheDocument();
     expect(screen.getByText("plan-review-001")).toBeInTheDocument();
     expect(screen.getByText("contract-delta-001")).toBeInTheDocument();
+  });
+
+  it("shows current plan and work item editors but hides them for historical projections", () => {
+    const onSavePresentation = vi.fn();
+    const { rerender } = render(
+      <WorkItemProjectionTabs
+        planProjection={planProjectionFixture()}
+        workItemProjections={[workItemProjectionFixture()]}
+        history={historyFixture()}
+        validation={{ findings: [] }}
+        presentations={{}}
+        presentationSaveStates={{}}
+        editable
+        onSavePresentation={onSavePresentation}
+      />,
+    );
+
+    expect(screen.getAllByRole("form", { name: "编辑人工说明" })).toHaveLength(2);
+
+    rerender(
+      <WorkItemProjectionTabs
+        planProjection={planProjectionFixture()}
+        workItemProjections={[workItemProjectionFixture()]}
+        history={historyFixture()}
+        validation={{ findings: [] }}
+        presentations={{}}
+        presentationSaveStates={{}}
+        editable={false}
+        onSavePresentation={onSavePresentation}
+      />,
+    );
+
+    expect(screen.queryByRole("form", { name: "编辑人工说明" })).not.toBeInTheDocument();
   });
 });
 

@@ -1,4 +1,5 @@
 import type {
+  HumanPresentationRevision,
   PlanProjectionBundle,
   ProviderConfigSnapshot,
   ProjectionValidationReport,
@@ -342,6 +343,15 @@ const store = useWorkspaceStore.getState();
         round: msg.round as number,
         options: msg.options as string[],
       });
+      break;
+    case "human_presentation_revision_saved":
+      store.completeHumanPresentationSave(msg.revision as HumanPresentationRevision);
+      break;
+    case "human_presentation_revision_save_failed":
+      store.failHumanPresentationSave(
+        msg.source_projection_bundle_id as string,
+        msg.message as string,
+      );
       break;
     case "error":
       store.setError(msg.message as string);

@@ -20,7 +20,12 @@ pub(crate) fn choice_id_unmatched_error(id: &str) -> WsOutMessage {
 }
 
 pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool {
-    if matches!(msg, WsInMessage::Hello { .. } | WsInMessage::Ping) {
+    if matches!(
+        msg,
+        WsInMessage::Hello { .. }
+            | WsInMessage::Ping
+            | WsInMessage::SaveHumanPresentationRevision { .. }
+    ) {
         return true;
     }
 
@@ -85,6 +90,7 @@ pub(crate) fn requires_stage_validation(msg: &WsInMessage) -> bool {
             | WsInMessage::UserMessage { .. }
             | WsInMessage::Rollback { .. }
             | WsInMessage::Hello { .. }
+            | WsInMessage::SaveHumanPresentationRevision { .. }
             | WsInMessage::Ping
     )
 }
@@ -112,6 +118,7 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::WorkItemPlanCompileRecoveryAction { .. } => {
             "work_item_plan_compile_recovery_action"
         }
+        WsInMessage::SaveHumanPresentationRevision { .. } => "save_human_presentation_revision",
         WsInMessage::HumanConfirm { .. } => "human_confirm",
         WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::Abort => "abort",

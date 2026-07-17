@@ -1,13 +1,16 @@
 import { useRef, useState } from "react";
 import type {
   CoderWorkItemProjection,
+  HumanPresentationRevision,
   PlanProjectionBundle,
   ProjectionValidationReport,
   ReviewerWorkItemProjection,
+  SaveHumanPresentationRevisionMessage,
   WorkItemProjectionBundle,
   WorkItemProjectionTab,
   WorkItemRevisionHistoryDto,
 } from "../../api/types";
+import type { HumanPresentationSaveState } from "../../state/workspace-ws-store-types";
 import { WorkItemContractFlow } from "./WorkItemContractFlow";
 import { WorkItemPlanOverview } from "./WorkItemPlanOverview";
 
@@ -24,11 +27,19 @@ export function WorkItemProjectionTabs({
   workItemProjections,
   history,
   validation,
+  presentations = {},
+  presentationSaveStates = {},
+  editable = false,
+  onSavePresentation = () => undefined,
 }: {
   planProjection: PlanProjectionBundle;
   workItemProjections: WorkItemProjectionBundle[];
   history: WorkItemRevisionHistoryDto | null;
   validation: ProjectionValidationReport | null;
+  presentations?: Record<string, HumanPresentationRevision>;
+  presentationSaveStates?: Record<string, HumanPresentationSaveState>;
+  editable?: boolean;
+  onSavePresentation?: (message: SaveHumanPresentationRevisionMessage) => void;
 }) {
   const [activeTab, setActiveTab] = useState<WorkItemProjectionTab>("overview");
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -101,7 +112,13 @@ export function WorkItemProjectionTabs({
         {activeTab === "overview" ? (
           <WorkItemPlanOverview
             projection={planProjection.human_group_projection}
-            presentation={null}
+            presentation={presentations[planProjection.id] ?? null}
+            planProjectionBundleId={planProjection.id}
+            workItemProjections={workItemProjections}
+            presentations={presentations}
+            presentationSaveStates={presentationSaveStates}
+            editable={editable}
+            onSavePresentation={onSavePresentation}
           />
         ) : null}
         {activeTab === "contract" ? (

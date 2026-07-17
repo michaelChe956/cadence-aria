@@ -226,6 +226,7 @@ fn review_messages_and_session_state_serialize_as_contract() {
         timeline_node_details: std::collections::HashMap::new(),
         timeline_node_summaries: std::collections::HashMap::new(),
         active_run_id: None,
+        human_presentation_revisions: Vec::new(),
         recoverable_interrupted_run: None,
     })
     .unwrap();
@@ -790,6 +791,7 @@ fn session_state_artifact_accepts_markdown_payload() {
         timeline_node_details: std::collections::HashMap::new(),
         timeline_node_summaries: std::collections::HashMap::new(),
         active_run_id: None,
+        human_presentation_revisions: Vec::new(),
         recoverable_interrupted_run: None,
     };
     let json = serde_json::to_value(state).unwrap();

@@ -6,6 +6,13 @@ import {
   setWorkspaceContentCacheEntry,
 } from "./workspace-content-cache";
 import { refreshPreparedContextAuthorGuidance } from "./workspace-ws-store-guidance";
+import { setProviderSelection } from "./workspace-ws-store-providers";
+import {
+  beginHumanPresentationSave,
+  completeHumanPresentationSave,
+  failHumanPresentationSave,
+  humanPresentationRevisionsFromSession,
+} from "./workspace-ws-store-presentations";
 import {
   buildChatEntries,
   chatEntryId,
@@ -83,6 +90,8 @@ const initialState: WorkspaceWsState = {
   workItemPlanArtifact: null,
   workItemPlanArtifactVersions: [],
   workItemPlanProjectionArtifacts: emptyWorkItemPlanProjectionArtifacts(),
+  humanPresentationRevisions: {},
+  humanPresentationSaveStates: {},
   providers: null,
   connectionStatus: "disconnected",
   streamingContent: "",
@@ -143,6 +152,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         state.messages,
         state.providers.author,
       );
+      const humanPresentationRevisions = humanPresentationRevisionsFromSession(
+        state.human_presentation_revisions,
+      );
 
       const nextState: WorkspaceWsState = {
         ...prev,
@@ -163,6 +175,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
           workItemPlanProjectionArtifactsFromVersions(
             workItemPlanArtifactVersions,
           ),
+        humanPresentationRevisions,
+        humanPresentationSaveStates: {},
         providers: state.providers,
         streamingContent: "",
         streamBuffers: {},
@@ -487,6 +501,13 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
+  beginHumanPresentationSave: (sourceProjectionBundleId) =>
+    set((prev) => beginHumanPresentationSave(prev, sourceProjectionBundleId)),
+  completeHumanPresentationSave: (revision) =>
+    set((prev) => completeHumanPresentationSave(prev, revision)),
+  failHumanPresentationSave: (sourceProjectionBundleId, message) =>
+    set((prev) => failHumanPresentationSave(prev, sourceProjectionBundleId, message)),
+
   addTimelineNode: (node) =>
     set((prev) => {
       const retrySourceNodeId = node.retry?.retry_of_node_id ?? null;
@@ -770,29 +791,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     }),
 
   setProviderSelection: (role, provider) =>
-    set((prev) => {
-      const current = prev.providers ?? { author: "claude_code", reviewer: "codex" };
-      const providers =
-        role === "author"
-          ? { ...current, author: provider }
-          : { ...current, reviewer: provider };
-      const messages =
-        role === "author"
-          ? refreshPreparedContextAuthorGuidance(prev.messages, provider)
-          : prev.messages;
-      const shouldRebuildChatEntries = messages !== prev.messages;
-      const nextState = { ...prev, providers, messages };
-      return {
-        providers,
-        messages,
-        chatEntries: shouldRebuildChatEntries
-          ? buildChatEntries(nextState)
-          : prev.chatEntries,
-      };
-    }),
-
+    set((prev) => setProviderSelection(prev, role, provider)),
   setAcknowledgedAbortedNodes: (nodeIds) =>
     set({ acknowledgedAbortedNodes: Array.from(new Set(nodeIds)) }),
-
   reset: () => set(initialState),
 }));

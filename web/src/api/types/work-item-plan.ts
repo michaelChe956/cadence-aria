@@ -596,6 +596,20 @@ export type HumanPresentationRevision = {
   created_at: string;
 };
 
+export type HumanPresentationScope = "plan" | "work_item";
+
+export type SaveHumanPresentationRevisionMessage = {
+  type: "save_human_presentation_revision";
+  source_projection_bundle_id: string;
+  scope: HumanPresentationScope;
+  supersedes: string | null;
+  human_summary: string;
+  why_split: string | null;
+  dependency_explanation: string[];
+  risk_explanation: string[];
+  source_refs: string[];
+};
+
 export type IssueWorkItemPlanDependencyEdgeDto = {
   from_work_item_id: string;
   to_work_item_id: string;

@@ -4,6 +4,7 @@ import type {
   HumanConfirmDecision,
   ProviderConfigSnapshot,
   RevisionPath,
+  SaveHumanPresentationRevisionMessage,
   WorkspaceProviderName,
   WorkItemBatchDecision,
   WorkItemDraftDecision,
@@ -409,6 +410,22 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  const sendHumanPresentationRevision = useCallback(
+    (message: SaveHumanPresentationRevisionMessage) => {
+      const store = useWorkspaceStore.getState();
+      store.beginHumanPresentationSave(message.source_projection_bundle_id);
+      const sent = sendJson(message);
+      if (!sent) {
+        store.failHumanPresentationSave(
+          message.source_projection_bundle_id,
+          "WebSocket 未连接，请重连后重试",
+        );
+      }
+      return sent;
+    },
+    [sendJson],
+  );
+
   const sendMessage = useCallback(
     (content: string) => {
       console.warn("sendMessage is deprecated, use sendContextNote or sendStartGeneration");
@@ -534,6 +551,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendWorkItemDraftDecision,
     sendWorkItemBatchDecision,
     sendWorkItemPlanCompileRecoveryAction,
+    sendHumanPresentationRevision,
     sendHumanConfirm,
     sendHello,
     sendPing,

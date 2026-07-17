@@ -32,10 +32,11 @@ pub(crate) use crate::product::work_item_split_engine::{
     parse_work_item_draft_output, parse_work_item_plan_outline_output,
 };
 pub(crate) use crate::product::workspace_engine::{
-    AuthorDecisionOutcome, EngineEvent, InterruptedRunRecoveryOutcome, PendingAuthorChoiceError,
-    ReviewDecisionOutcome, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,
-    WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome, WorkspaceEngine,
-    WorkspaceSession, WorkspaceStage, build_work_item_plan_revision_input,
+    AuthorDecisionOutcome, EngineEvent, HumanPresentationScope, InterruptedRunRecoveryOutcome,
+    PendingAuthorChoiceError, ReviewDecisionOutcome, SaveHumanPresentationRevision,
+    WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome, WorkItemPlanAuthorOutcome,
+    WorkItemPlanCompileRecoveryOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    build_work_item_plan_revision_input,
 };
 pub(crate) use crate::product::workspace_repository::workspace_repository_for_session;
 pub(crate) use crate::web::state::{WebAppState, WorkspaceActiveRun, WorkspaceRunRegistry};
@@ -43,9 +44,9 @@ pub(crate) use crate::web::test_controls::WorkspaceSocketControl;
 pub(crate) use crate::web::types::GenerateWorkItemsRequest;
 pub(crate) use crate::web::workspace_context::ensure_workspace_context_message;
 pub(crate) use crate::web::workspace_ws_types::{
-    ChoiceOption, ChoiceQuestion, HumanConfirmDecision, RevisionPath, TimelineNodeRetryError,
-    WorkItemGenerationModeDto, WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
-    WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
+    ChoiceOption, ChoiceQuestion, HumanConfirmDecision, HumanPresentationScopeDto, RevisionPath,
+    TimelineNodeRetryError, WorkItemGenerationModeDto, WsExecutionEvent, WsExecutionEventKind,
+    WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel, WsProviderStatus,
 };
 
 mod decisions;

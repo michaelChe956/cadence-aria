@@ -8,6 +8,8 @@ use crate::web::workspace_ws_types::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "tests/human_presentation.rs"]
+mod human_presentation;
 #[path = "tests/interrupted_run_recovery.rs"]
 mod interrupted_run_recovery;
 #[path = "tests/projection_artifact_batch.rs"]

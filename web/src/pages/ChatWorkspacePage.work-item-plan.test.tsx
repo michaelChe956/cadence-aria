@@ -478,7 +478,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
   });
 
   it("renders restored plan projections from full structured artifact versions", async () => {
-    mockWorkspaceWs();
+    const api = mockWorkspaceWs();
     const projectionArtifacts = workItemProjectionSessionArtifacts();
     useWorkspaceStore.getState().setSessionState({
       session_id: "workspace_session_0001",
@@ -520,6 +520,18 @@ describe("ChatWorkspacePage work item plan flow", () => {
     expect(
       screen.queryByTestId("work-item-plan-staged-panel"),
     ).not.toBeInTheDocument();
+    expect(screen.getAllByRole("form", { name: "编辑人工说明" })).toHaveLength(2);
+    await userEvent.clear(screen.getAllByLabelText("拆分说明")[0]);
+    await userEvent.type(screen.getAllByLabelText("拆分说明")[0], "更容易理解的拆分");
+    await userEvent.click(screen.getAllByRole("button", { name: "保存说明" })[0]);
+    expect(api.sendHumanPresentationRevision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "save_human_presentation_revision",
+        source_projection_bundle_id: projectionArtifacts.planProjection.id,
+        scope: "plan",
+        human_summary: "更容易理解的拆分",
+      }),
+    );
 
     await userEvent.click(screen.getByRole("tab", { name: "Coder" }));
     expect(screen.getByText("初始化状态模型并提交契约")).toBeInTheDocument();
@@ -620,5 +632,6 @@ describe("ChatWorkspacePage work item plan flow", () => {
       screen.queryByRole("tab", { name: "Human Overview" }),
     ).not.toBeInTheDocument();
     expect(screen.getByText("Historical Draft")).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "编辑人工说明" })).not.toBeInTheDocument();
   });
 });

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::product::models::{NodeDetail, WorkspaceType};
+use crate::product::models::{HumanPresentationRevision, NodeDetail, WorkspaceType};
 
 use super::artifact::ArtifactPayload;
 use super::artifact_version::{ArtifactVersion, ArtifactVersionSummary};
@@ -103,6 +103,13 @@ pub enum WsOutMessage {
         round: u32,
         options: Vec<String>,
     },
+    HumanPresentationRevisionSaved {
+        revision: HumanPresentationRevision,
+    },
+    HumanPresentationRevisionSaveFailed {
+        source_projection_bundle_id: String,
+        message: String,
+    },
     SessionState {
         session_id: String,
         workspace_type: WorkspaceType,
@@ -120,6 +127,7 @@ pub enum WsOutMessage {
         timeline_node_details: HashMap<String, NodeDetail>,
         timeline_node_summaries: HashMap<String, NodeDetailSummary>,
         active_run_id: Option<String>,
+        human_presentation_revisions: Vec<HumanPresentationRevision>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recoverable_interrupted_run: Option<RecoverableInterruptedRun>,
     },

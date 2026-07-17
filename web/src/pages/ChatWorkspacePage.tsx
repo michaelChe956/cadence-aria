@@ -83,6 +83,7 @@ export function ChatWorkspacePage({
     sendWorkItemDraftDecision,
     sendWorkItemBatchDecision,
     sendWorkItemPlanCompileRecoveryAction,
+    sendHumanPresentationRevision,
     sendHumanConfirm,
     abort,
     selectProvider,
@@ -127,6 +128,12 @@ export function ChatWorkspacePage({
   );
   const workItemPlanProjectionArtifacts = useWorkspaceStore(
     (state) => state.workItemPlanProjectionArtifacts,
+  );
+  const humanPresentationRevisions = useWorkspaceStore(
+    (state) => state.humanPresentationRevisions,
+  );
+  const humanPresentationSaveStates = useWorkspaceStore(
+    (state) => state.humanPresentationSaveStates,
   );
   const protocolError = useWorkspaceStore((state) => state.protocolError);
   const workspaceError = useWorkspaceStore((state) => state.error);
@@ -609,6 +616,9 @@ export function ChatWorkspacePage({
                       displayedProjectionArtifacts?.missingWorkItemProjectionRefs ??
                       []
                     }
+                    humanPresentationRevisions={humanPresentationRevisions}
+                    humanPresentationSaveStates={humanPresentationSaveStates}
+                    onSaveHumanPresentation={sendHumanPresentationRevision}
                     className="min-h-0"
                   />
                 </div>

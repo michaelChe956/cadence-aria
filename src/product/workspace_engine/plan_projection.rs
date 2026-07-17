@@ -56,6 +56,7 @@ pub enum WorkspaceEngineError {
     WorkItemPlanValidation(ContractValidationReport),
     ProjectionValidation(ProjectionValidationReport),
     InvalidInitialPlan(String),
+    InvalidHumanPresentationTarget,
 }
 
 impl std::fmt::Display for WorkspaceEngineError {
@@ -74,6 +75,8 @@ impl std::fmt::Display for WorkspaceEngineError {
                 report.findings.len()
             ),
             Self::InvalidInitialPlan(message) => formatter.write_str(message),
+            Self::InvalidHumanPresentationTarget => formatter
+                .write_str("human presentation target must resolve exactly one projection bundle"),
         }
     }
 }

@@ -1,4 +1,5 @@
 import type {
+  HumanPresentationRevision,
   NodeDetail,
   PlanProjectionBundle,
   ProjectionValidationReport,
@@ -44,6 +45,11 @@ export type WorkItemPlanProjectionArtifacts = {
   history: WorkItemRevisionHistoryDto | null;
   validation: ProjectionValidationReport | null;
   missingWorkItemProjectionRefs: string[];
+};
+
+export type HumanPresentationSaveState = {
+  saving: boolean;
+  error: string | null;
 };
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
@@ -269,6 +275,8 @@ export interface WorkspaceWsState {
   workItemPlanArtifact: WorkItemPlanArtifactPayload | null;
   workItemPlanArtifactVersions: WorkItemPlanArtifactVersion[];
   workItemPlanProjectionArtifacts: WorkItemPlanProjectionArtifacts;
+  humanPresentationRevisions: Record<string, HumanPresentationRevision>;
+  humanPresentationSaveStates: Record<string, HumanPresentationSaveState>;
   providers: WsProviderConfig | null;
   connectionStatus: WsConnectionStatus;
   streamingContent: string;
@@ -318,6 +326,7 @@ export interface WorkspaceWsActions {
     timeline_node_details?: Record<string, TimelineNodeDetail>;
     timeline_node_summaries?: Record<string, NodeDetailSummary>;
     active_run_id?: string | null;
+    human_presentation_revisions?: HumanPresentationRevision[];
     recoverable_interrupted_run?: RecoverableInterruptedRun | null;
   }) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
@@ -336,6 +345,9 @@ export interface WorkspaceWsActions {
   setArtifact: (markdown: string, version?: number) => void;
   setWorkItemPlanCandidate: (candidate: WorkItemPlanCandidateDto | null) => void;
   setWorkItemPlanArtifact: (artifact: WorkItemPlanArtifactPayload | null, version?: number) => void;
+  beginHumanPresentationSave: (sourceProjectionBundleId: string) => void;
+  completeHumanPresentationSave: (revision: HumanPresentationRevision) => void;
+  failHumanPresentationSave: (sourceProjectionBundleId: string, message: string) => void;
   addTimelineNode: (node: TimelineNode) => void;
   updateTimelineNode: (
     nodeId: string,

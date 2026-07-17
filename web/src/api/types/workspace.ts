@@ -11,6 +11,7 @@ import type {
   WorkspaceReviewFindingSeverity,
 } from "./common";
 import type {
+  HumanPresentationRevision,
   PlanProjectionBundle,
   ProjectionValidationReport,
   WorkItemBatchStatePayload,
@@ -23,6 +24,7 @@ import type {
   WorkItemPlanOutlineCandidatePayload,
   WorkItemProjectionBundle,
   WorkItemRevisionHistoryDto,
+  SaveHumanPresentationRevisionMessage,
 } from "./work-item-plan";
 
 export type WorkspaceMessage = {
@@ -148,6 +150,7 @@ export type WsInMessage =
       action: WorkItemPlanCompileRecoveryAction;
       reason?: string | null;
     }
+  | SaveHumanPresentationRevisionMessage
   | { type: "human_confirm"; decision: HumanConfirmDecision; payload?: unknown }
   | { type: "abort" }
   | { type: "hello"; session_id: string; last_seen_node_id?: string | null }
@@ -462,6 +465,12 @@ export type WsOutMessage =
       structured_output_diagnostic?: StructuredOutputDiagnostic | null;
     }
   | { type: "review_decision_required"; node_id: string; round: number; options: string[] }
+  | { type: "human_presentation_revision_saved"; revision: HumanPresentationRevision }
+  | {
+      type: "human_presentation_revision_save_failed";
+      source_projection_bundle_id: string;
+      message: string;
+    }
   | {
       type: "session_state";
       session_id: string;
@@ -492,6 +501,7 @@ export type WsOutMessage =
       artifact_version_summaries?: ArtifactVersionSummary[];
       timeline_node_details: Record<string, NodeDetail>;
       active_run_id: string | null;
+      human_presentation_revisions: HumanPresentationRevision[];
       recoverable_interrupted_run?: RecoverableInterruptedRun | null;
     }
   | { type: "error"; message: string }

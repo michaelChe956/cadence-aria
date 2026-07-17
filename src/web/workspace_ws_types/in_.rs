@@ -78,6 +78,16 @@ pub enum WsInMessage {
         action: WorkItemPlanCompileRecoveryActionDto,
         reason: Option<String>,
     },
+    SaveHumanPresentationRevision {
+        source_projection_bundle_id: String,
+        scope: HumanPresentationScopeDto,
+        supersedes: Option<String>,
+        human_summary: String,
+        why_split: Option<String>,
+        dependency_explanation: Vec<String>,
+        risk_explanation: Vec<String>,
+        source_refs: Vec<String>,
+    },
     HumanConfirm {
         decision: HumanConfirmDecision,
         payload: Option<serde_json::Value>,
@@ -144,4 +154,11 @@ pub enum WorkItemPlanCompileRecoveryActionDto {
     Continue,
     AbortAndRollback,
     HumanTriage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanPresentationScopeDto {
+    Plan,
+    WorkItem,
 }

@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import type {
+  HumanPresentationRevision,
   PlanProjectionBundle,
   ProjectionValidationReport,
+  SaveHumanPresentationRevisionMessage,
   WorkItemPlanArtifactPayload,
   WorkItemPlanArtifactVersion,
   WorkItemProjectionBundle,
   WorkItemRevisionHistoryDto,
 } from "../../api/types";
+import type { HumanPresentationSaveState } from "../../state/workspace-ws-store-types";
 import {
   WorkItemPlanArtifactTabContent,
   groupWorkItemPlanArtifactVersions,
@@ -27,6 +30,9 @@ export interface WorkItemPlanArtifactPanelProps {
   projectionHistory?: WorkItemRevisionHistoryDto | null;
   projectionValidation?: ProjectionValidationReport | null;
   missingWorkItemProjectionRefs?: string[];
+  humanPresentationRevisions?: Record<string, HumanPresentationRevision>;
+  humanPresentationSaveStates?: Record<string, HumanPresentationSaveState>;
+  onSaveHumanPresentation?: (message: SaveHumanPresentationRevisionMessage) => void;
   className?: string;
 }
 
@@ -41,6 +47,9 @@ export function WorkItemPlanArtifactPanel({
   projectionHistory = null,
   projectionValidation = null,
   missingWorkItemProjectionRefs = [],
+  humanPresentationRevisions = {},
+  humanPresentationSaveStates = {},
+  onSaveHumanPresentation = () => undefined,
   className = "",
 }: WorkItemPlanArtifactPanelProps) {
   const [activeTab, setActiveTab] = useState<WorkItemPlanArtifactTab>(() =>
@@ -113,6 +122,10 @@ export function WorkItemPlanArtifactPanel({
             workItemProjections={workItemProjections}
             history={projectionHistory}
             validation={projectionValidation}
+            presentations={humanPresentationRevisions}
+            presentationSaveStates={humanPresentationSaveStates}
+            editable={!readonly}
+            onSavePresentation={onSaveHumanPresentation}
           />
         )
       ) : (

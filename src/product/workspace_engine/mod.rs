@@ -77,6 +77,7 @@ mod compile_parse;
 mod controls;
 mod decisions;
 mod draft_batch;
+mod human_presentation;
 mod interrupted_run_recovery;
 mod lifecycle;
 mod lifecycle_recovery;
@@ -93,6 +94,9 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use human_presentation::{
+    HumanPresentationScope, SaveHumanPresentationRevision, save_human_presentation_revision,
+};
 pub use interrupted_run_recovery::{InterruptedRunRecoveryError, InterruptedRunRecoveryOutcome};
 pub use plan_projection::{
     CompiledWorkItemRevision, InitialPlanCompileOutcome, WorkspaceEngineError,
