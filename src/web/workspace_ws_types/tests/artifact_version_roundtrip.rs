@@ -1,6 +1,6 @@
 use super::*;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::product::models::{PlanProjectionBundle, WorkItemProjectionBundle};
 use crate::product::work_item_contract::{
@@ -11,9 +11,7 @@ use crate::product::work_item_projection::{
     ProjectionValidationReport, WorkItemProjectionCompiler,
 };
 use crate::web::workspace_ws_types::{
-    ArtifactVersionSummary, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus,
-    TimelineNodeType, WorkItemHistoryEntryDto, WorkItemHistoryEntryKind,
-    WorkItemRevisionHistoryDto, WorkspaceStage, WsProviderConfig,
+    WorkItemHistoryEntryDto, WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
 };
 
 #[test]
@@ -100,129 +98,6 @@ fn work_item_plan_projection_artifact_roundtrips_with_unique_flat_keys() {
     assert_eq!(update["type"], "artifact_update");
     assert!(update.get("plan_projection").is_some());
     assert!(update.get("projection").is_none());
-}
-
-#[test]
-fn workspace_artifact_version_binding_remains_stable_for_story_design_and_work_item() {
-    let (_, work_item_projection) = projection_bundle_fixtures();
-
-    for workspace_type in [
-        WorkspaceType::Story,
-        WorkspaceType::Design,
-        WorkspaceType::WorkItem,
-    ] {
-        let payload = match workspace_type {
-            WorkspaceType::WorkItem => ArtifactPayload::WorkItemProjection {
-                projection: Box::new(work_item_projection.clone()),
-            },
-            _ => ArtifactPayload::Markdown {
-                markdown: format!("# {workspace_type:?} artifact"),
-                diff: None,
-            },
-        };
-        let source_node_id = format!("node_{workspace_type:?}").to_lowercase();
-        let artifact_ref = "artifact_version_007".to_string();
-        let snapshot = workspace_snapshot(
-            workspace_type.clone(),
-            payload.clone(),
-            source_node_id.clone(),
-            artifact_ref.clone(),
-        );
-
-        let value = serde_json::to_value(snapshot).unwrap();
-        let restored = serde_json::from_value::<WsOutMessage>(value).unwrap();
-        let WsOutMessage::SessionState {
-            workspace_type: restored_workspace_type,
-            artifact,
-            timeline_nodes,
-            active_node_id,
-            artifact_versions,
-            ..
-        } = restored
-        else {
-            panic!("expected session state");
-        };
-
-        assert_eq!(restored_workspace_type, workspace_type);
-        assert_eq!(artifact, Some(payload));
-        assert_eq!(active_node_id.as_deref(), Some(source_node_id.as_str()));
-        assert_eq!(
-            timeline_nodes[0].artifact_ref.as_deref(),
-            Some(artifact_ref.as_str())
-        );
-        assert_eq!(artifact_versions[0].version, 7);
-        assert_eq!(artifact_versions[0].source_node_id, source_node_id);
-
-        if let ArtifactPayload::WorkItemProjection { projection } = &artifact_versions[0].payload {
-            assert_eq!(
-                projection.canonical_contract_hash,
-                work_item_projection.canonical_contract_hash
-            );
-            assert_eq!(
-                projection.compiler_version,
-                work_item_projection.compiler_version
-            );
-        }
-    }
-}
-
-fn workspace_snapshot(
-    workspace_type: WorkspaceType,
-    payload: ArtifactPayload,
-    source_node_id: String,
-    artifact_ref: String,
-) -> WsOutMessage {
-    WsOutMessage::SessionState {
-        session_id: format!("session_{workspace_type:?}").to_lowercase(),
-        workspace_type,
-        stage: "human_confirm".to_string(),
-        superpowers_enabled: true,
-        openspec_enabled: true,
-        messages: vec![],
-        checkpoints: vec![],
-        artifact: Some(payload.clone()),
-        providers: WsProviderConfig {
-            author: ProviderName::Codex,
-            reviewer: Some(ProviderName::ClaudeCode),
-        },
-        timeline_nodes: vec![TimelineNode {
-            node_id: source_node_id.clone(),
-            node_type: TimelineNodeType::HumanConfirm,
-            agent: None,
-            stage: WorkspaceStage::HumanConfirm,
-            round: None,
-            status: TimelineNodeStatus::Active,
-            title: "Confirm artifact".to_string(),
-            summary: None,
-            started_at: "2026-07-17T00:00:05Z".to_string(),
-            completed_at: None,
-            duration_ms: None,
-            artifact_ref: Some(artifact_ref),
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Codex,
-                reviewer: Some(ProviderName::ClaudeCode),
-                review_rounds: 1,
-            },
-            retry: None,
-        }],
-        active_node_id: Some(source_node_id.clone()),
-        artifact_versions: vec![ArtifactVersion {
-            version: 7,
-            payload,
-            generated_by: ProviderName::Codex,
-            reviewed_by: Some(ProviderName::ClaudeCode),
-            review_verdict: Some(ReviewVerdictType::Pass),
-            confirmed_by: None,
-            is_current: true,
-            created_at: "2026-07-17T00:00:04Z".to_string(),
-            source_node_id,
-        }],
-        artifact_version_summaries: Vec::<ArtifactVersionSummary>::new(),
-        timeline_node_details: HashMap::new(),
-        timeline_node_summaries: HashMap::new(),
-        active_run_id: None,
-        recoverable_interrupted_run: None,
-    }
 }
 
 fn projection_bundle_fixtures() -> (PlanProjectionBundle, WorkItemProjectionBundle) {

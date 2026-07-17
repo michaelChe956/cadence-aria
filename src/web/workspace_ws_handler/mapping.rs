@@ -201,7 +201,8 @@ pub(crate) fn spawn_engine_event_forward_task(
     tokio::spawn(async move {
         while let Some(event) = engine_rx.recv().await {
             let event = match event {
-                EngineEvent::ArtifactBatchUpdate { updates } => {
+                EngineEvent::ArtifactBatchUpdate { mut updates } => {
+                    updates.sort_by_key(|update| update.version);
                     let mut connected = true;
                     for update in updates {
                         if !send_json_outbound(

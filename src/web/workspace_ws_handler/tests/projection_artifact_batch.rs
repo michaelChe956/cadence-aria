@@ -47,9 +47,9 @@ fn work_item_plan_projection_artifact_event_maps_to_structured_ws_update() {
 }
 
 #[tokio::test]
-async fn work_item_plan_projection_artifact_batch_expands_in_version_order() {
+async fn work_item_plan_projection_artifact_batch_sorts_and_expands_in_version_order() {
     let (plan_projection, work_item_projection) = projection_bundle_fixtures();
-    let updates = vec![
+    let mut updates = vec![
         ArtifactUpdateEvent {
             version: 1,
             payload: ArtifactPayload::WorkItemPlanCompileReport {
@@ -90,6 +90,7 @@ async fn work_item_plan_projection_artifact_batch_expands_in_version_order() {
             },
         },
     ];
+    updates.rotate_right(2);
     let (engine_tx, engine_rx) = mpsc::channel(1);
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
     let forward = spawn_engine_event_forward_task(
