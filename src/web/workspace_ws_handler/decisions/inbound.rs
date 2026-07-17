@@ -709,6 +709,26 @@ pub(crate) async fn handle_workspace_inbound_message(
             )
             .await;
         }
+        WsInMessage::ConfirmPlanAmendment { amendment_id } => {
+            handle_plan_amendment_confirmation_from_handler(
+                engine.clone(),
+                outbound_tx.clone(),
+                amendment_id,
+            )
+            .await;
+        }
+        WsInMessage::CancelPlanAmendment {
+            amendment_id,
+            reason,
+        } => {
+            handle_plan_amendment_cancel_from_handler(
+                engine.clone(),
+                outbound_tx.clone(),
+                amendment_id,
+                reason,
+            )
+            .await;
+        }
         WsInMessage::RevertWorkItem {
             work_item_id,
             feedback,

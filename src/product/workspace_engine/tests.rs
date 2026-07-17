@@ -18,3 +18,4 @@ include!("tests/part_17.rs");
 include!("tests/part_18.rs");
 include!("tests/part_19.rs");
 include!("tests/part_20.rs");
+include!("tests/part_21.rs");

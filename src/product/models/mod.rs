@@ -6,6 +6,7 @@ pub mod provider;
 pub mod verification;
 pub mod work_item_revision;
 pub mod workspace;
+pub mod workspace_link;
 
 #[cfg(test)]
 pub mod tests;
@@ -18,3 +19,4 @@ pub use provider::*;
 pub use verification::*;
 pub use work_item_revision::*;
 pub use workspace::*;
+pub use workspace_link::*;

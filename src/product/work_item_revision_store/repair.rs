@@ -52,6 +52,35 @@ impl WorkItemRevisionStore {
         })
     }
 
+    pub fn assign_repair_request_amendment(
+        &self,
+        plan: &WorkItemPlanLineage,
+        request_id: &str,
+        amendment_id: &str,
+    ) -> Result<PlanRepairRequest, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(request_id)?;
+        validate_relative_id(amendment_id)?;
+        let path = self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id);
+        with_exclusive_lock(&path, || {
+            let mut request = self.get_repair_request(plan, request_id)?;
+            match request.amendment_id.as_deref() {
+                Some(existing) if existing == amendment_id => return Ok(request),
+                Some(_) => {
+                    return Err(identity_mismatch(
+                        "plan_repair_request_amendment",
+                        request_id,
+                    ));
+                }
+                None => {}
+            }
+            request.amendment_id = Some(amendment_id.to_string());
+            request.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &request)?;
+            Ok(request)
+        })
+    }
+
     pub fn merge_repair_request_evidence(
         &self,
         plan: &WorkItemPlanLineage,
@@ -231,7 +260,7 @@ impl WorkItemRevisionStore {
         })
     }
 
-    fn get_plan_amendment_publication_journal(
+    pub fn get_plan_amendment_publication_journal(
         &self,
         plan: &WorkItemPlanLineage,
         amendment_id: &str,
@@ -257,7 +286,50 @@ impl WorkItemRevisionStore {
         Ok(value)
     }
 
-    fn get_repair_request(
+    pub fn find_plan_amendment_publication_journal(
+        &self,
+        plan: &WorkItemPlanLineage,
+        amendment_id: &str,
+    ) -> Result<Option<PlanAmendmentPublicationJournal>, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(amendment_id)?;
+        let mut matched = None;
+        for path in json_file_paths(&self.amendment_publication_journals_root(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+        ))? {
+            let value: PlanAmendmentPublicationJournal = read_json(&path)?;
+            let file_id = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    ProductStoreError::Io(format!(
+                        "invalid amendment publication journal path: {}",
+                        path.display()
+                    ))
+                })?;
+            if value.id != file_id || value.plan_id != plan.id {
+                return Err(identity_mismatch(
+                    "plan_amendment_publication_journal",
+                    file_id,
+                ));
+            }
+            if value.amendment_id != amendment_id {
+                continue;
+            }
+            if matched.is_some() {
+                return Err(ProductStoreError::Ambiguous {
+                    kind: "plan_amendment_publication_journal",
+                    id: amendment_id.to_string(),
+                });
+            }
+            matched = Some(value);
+        }
+        Ok(matched)
+    }
+
+    pub fn get_repair_request(
         &self,
         plan: &WorkItemPlanLineage,
         request_id: &str,

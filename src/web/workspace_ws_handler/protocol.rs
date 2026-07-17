@@ -73,6 +73,8 @@ pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceSta
         WorkspaceStage::HumanConfirm => matches!(
             msg,
             WsInMessage::HumanConfirm { .. }
+                | WsInMessage::ConfirmPlanAmendment { .. }
+                | WsInMessage::CancelPlanAmendment { .. }
                 | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
                 | WsInMessage::RequestRevision { .. }
                 | WsInMessage::Confirm
@@ -120,6 +122,8 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         }
         WsInMessage::SaveHumanPresentationRevision { .. } => "save_human_presentation_revision",
         WsInMessage::HumanConfirm { .. } => "human_confirm",
+        WsInMessage::ConfirmPlanAmendment { .. } => "confirm_plan_amendment",
+        WsInMessage::CancelPlanAmendment { .. } => "cancel_plan_amendment",
         WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::Abort => "abort",
         WsInMessage::Ping => "ping",

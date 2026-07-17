@@ -228,6 +228,7 @@ fn review_messages_and_session_state_serialize_as_contract() {
         active_run_id: None,
         human_presentation_revisions: Vec::new(),
         recoverable_interrupted_run: None,
+        plan_repair: None,
     })
     .unwrap();
     assert_eq!(state["type"], "session_state");
@@ -600,8 +601,6 @@ fn work_item_plan_candidate_dto_roundtrips_through_serde() {
     let json = serde_json::to_value(&dto).unwrap();
     let back: WorkItemPlanCandidateDto = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(back, dto);
-
-    // 显式断言 plan 文档约定的字段路径
     assert_eq!(json["plan"]["id"], "issue_work_item_plan_0001");
     assert_eq!(json["plan"]["status"], "draft");
     assert_eq!(json["work_items"][0]["id"], "wi_001");
@@ -793,6 +792,7 @@ fn session_state_artifact_accepts_markdown_payload() {
         active_run_id: None,
         human_presentation_revisions: Vec::new(),
         recoverable_interrupted_run: None,
+        plan_repair: None,
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");

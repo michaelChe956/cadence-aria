@@ -213,6 +213,7 @@ impl WorkspaceEngine {
             work_item_batch_retry_counts: HashMap::new(),
             outline_revision_recovery_error: None,
             outline_revision_crash_after: None,
+            plan_repair_snapshot: None,
         }
     }
 
@@ -298,6 +299,31 @@ impl WorkspaceEngine {
         });
         let pending_author_choice =
             recover_pending_author_choice(&session, active_node_id.as_deref(), &timeline_nodes);
+        let mut plan_repair_snapshot = lifecycle_store
+            .load_plan_repair_session_state(
+                &session.project_id,
+                &session.issue_id,
+                &session.session_id,
+            )
+            .unwrap_or_default();
+        if let Some(snapshot) = plan_repair_snapshot.as_mut() {
+            snapshot.timeline_nodes = timeline_nodes.clone();
+            session.stage = match snapshot.stage {
+                PlanRepairSessionStage::AwaitingConfirmation
+                | PlanRepairSessionStage::Published
+                | PlanRepairSessionStage::AmendmentConflict
+                | PlanRepairSessionStage::AmendmentApplyFailed => WorkspaceStage::HumanConfirm,
+                PlanRepairSessionStage::Completed | PlanRepairSessionStage::Failed => {
+                    WorkspaceStage::Completed
+                }
+                PlanRepairSessionStage::Triaging
+                | PlanRepairSessionStage::AuthoringRevision
+                | PlanRepairSessionStage::ValidatingContract
+                | PlanRepairSessionStage::GeneratingProjections
+                | PlanRepairSessionStage::PlanReview
+                | PlanRepairSessionStage::ApplyingAmendment => WorkspaceStage::Running,
+            };
+        }
         Self {
             checkpoint_store,
             lifecycle_store: Some(lifecycle_store),
@@ -317,6 +343,7 @@ impl WorkspaceEngine {
             work_item_batch_retry_counts: HashMap::new(),
             outline_revision_recovery_error,
             outline_revision_crash_after: None,
+            plan_repair_snapshot,
         }
     }
 

@@ -223,6 +223,44 @@ fn human_confirm_messages_are_only_valid_in_human_confirm() {
 }
 
 #[test]
+fn plan_repair_ws_commands_are_only_valid_in_human_confirm() {
+    let confirm = WsInMessage::ConfirmPlanAmendment {
+        amendment_id: "plan_amendment_0001".to_string(),
+    };
+    let cancel = WsInMessage::CancelPlanAmendment {
+        amendment_id: "plan_amendment_0001".to_string(),
+        reason: Some("用户取消".to_string()),
+    };
+
+    assert_eq!(message_type(&confirm), "confirm_plan_amendment");
+    assert_eq!(message_type(&cancel), "cancel_plan_amendment");
+    assert!(is_message_valid_for_stage(
+        &confirm,
+        &WorkspaceStage::HumanConfirm
+    ));
+    assert!(is_message_valid_for_stage(
+        &cancel,
+        &WorkspaceStage::HumanConfirm
+    ));
+    assert!(!is_message_valid_for_stage(
+        &confirm,
+        &WorkspaceStage::Running
+    ));
+    assert!(!is_message_valid_for_stage(
+        &cancel,
+        &WorkspaceStage::Completed
+    ));
+    assert_eq!(
+        serde_json::from_value::<WsInMessage>(serde_json::to_value(&confirm).unwrap()).unwrap(),
+        confirm
+    );
+    assert_eq!(
+        serde_json::from_value::<WsInMessage>(serde_json::to_value(&cancel).unwrap()).unwrap(),
+        cancel
+    );
+}
+
+#[test]
 fn completed_stage_rejects_business_messages() {
     assert!(!is_message_valid_for_stage(
         &WsInMessage::Abort,

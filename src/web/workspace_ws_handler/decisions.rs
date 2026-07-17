@@ -1,5 +1,56 @@
 use super::*;
 
+pub(crate) async fn handle_plan_amendment_confirmation_from_handler(
+    engine: Arc<Mutex<WorkspaceEngine>>,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    amendment_id: String,
+) {
+    let result = {
+        let mut engine = engine.lock().await;
+        engine.confirm_plan_amendment(&amendment_id).await
+    };
+    match result {
+        Ok(_) => {
+            let state = engine.lock().await.build_session_state();
+            let _ = send_json_outbound(&outbound_tx, &state).await;
+        }
+        Err(error) => {
+            let message = WsOutMessage::ProtocolError {
+                code: "PLAN_AMENDMENT_CONFIRMATION_FAILED".to_string(),
+                message: format!("{error:?}"),
+                context: Some(serde_json::json!({ "amendment_id": amendment_id })),
+            };
+            let _ = send_json_outbound(&outbound_tx, &message).await;
+        }
+    }
+}
+
+pub(crate) async fn handle_plan_amendment_cancel_from_handler(
+    engine: Arc<Mutex<WorkspaceEngine>>,
+    outbound_tx: mpsc::Sender<OutboundControl>,
+    amendment_id: String,
+    reason: Option<String>,
+) {
+    let result = {
+        let mut engine = engine.lock().await;
+        engine.cancel_plan_amendment(&amendment_id, reason).await
+    };
+    match result {
+        Ok(()) => {
+            let state = engine.lock().await.build_session_state();
+            let _ = send_json_outbound(&outbound_tx, &state).await;
+        }
+        Err(error) => {
+            let message = WsOutMessage::ProtocolError {
+                code: "PLAN_AMENDMENT_CANCEL_FAILED".to_string(),
+                message: format!("{error:?}"),
+                context: Some(serde_json::json!({ "amendment_id": amendment_id })),
+            };
+            let _ = send_json_outbound(&outbound_tx, &message).await;
+        }
+    }
+}
+
 pub(crate) async fn handle_review_decision_from_handler(
     run_context: ProviderRunContext,
     outbound_tx: mpsc::Sender<OutboundControl>,

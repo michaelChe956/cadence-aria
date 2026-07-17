@@ -26,7 +26,8 @@ use crate::product::lifecycle_store::{
 use crate::product::models::{
     AgentRole, ArtifactRef, DesignContextCapabilities, IssueWorkItemDependencyEdge,
     IssueWorkItemPlan, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
-    OutlineContextBlockerResolution, OutlineContextIndex, PermissionEvent, ProviderConversationRef,
+    OutlineContextBlockerResolution, OutlineContextIndex, PermissionEvent,
+    PlanRepairSessionSnapshotDto, PlanRepairSessionStage, ProviderConversationRef,
     ProviderConversationRole, ProviderName, ProviderSnapshot, RepositoryProfileConfidence,
     VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
     VerificationFallbackPolicy, VerificationManualCheck, VerificationPlan, VerificationScope,
@@ -85,6 +86,7 @@ mod mappings;
 mod parsers;
 mod plan_outline;
 mod plan_projection;
+mod plan_repair;
 mod prompts;
 mod provider_drive;
 mod review;

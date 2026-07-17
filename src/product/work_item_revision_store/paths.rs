@@ -241,8 +241,17 @@ impl WorkItemRevisionStore {
         plan_id: &str,
         journal_id: &str,
     ) -> PathBuf {
+        self.amendment_publication_journals_root(project_id, issue_id, plan_id)
+            .join(format!("{journal_id}.json"))
+    }
+
+    pub(super) fn amendment_publication_journals_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> PathBuf {
         self.plan_root(project_id, issue_id, plan_id)
             .join("amendment-publication-journals")
-            .join(format!("{journal_id}.json"))
     }
 }

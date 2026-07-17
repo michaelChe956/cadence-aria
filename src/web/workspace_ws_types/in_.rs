@@ -92,6 +92,13 @@ pub enum WsInMessage {
         decision: HumanConfirmDecision,
         payload: Option<serde_json::Value>,
     },
+    ConfirmPlanAmendment {
+        amendment_id: String,
+    },
+    CancelPlanAmendment {
+        amendment_id: String,
+        reason: Option<String>,
+    },
     RevertWorkItem {
         work_item_id: String,
         feedback: Option<String>,

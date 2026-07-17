@@ -126,6 +126,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         active_run_id: None,
         human_presentation_revisions: vec![],
         recoverable_interrupted_run: None,
+        plan_repair: None,
     };
 
     let value = serde_json::to_value(&state).expect("serialize SessionState");

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::product::models::{HumanPresentationRevision, NodeDetail, WorkspaceType};
+use crate::product::models::{
+    HumanPresentationRevision, NodeDetail, PlanRepairSessionSnapshotDto, WorkspaceType,
+};
 
 use super::artifact::ArtifactPayload;
 use super::artifact_version::{ArtifactVersion, ArtifactVersionSummary};
@@ -130,6 +132,8 @@ pub enum WsOutMessage {
         human_presentation_revisions: Vec<HumanPresentationRevision>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recoverable_interrupted_run: Option<RecoverableInterruptedRun>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_repair: Option<Box<PlanRepairSessionSnapshotDto>>,
     },
     Error {
         message: String,
