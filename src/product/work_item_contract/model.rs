@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CanonicalWorkItemContract {
     pub schema_version: u32,
     pub identity: WorkItemContractIdentity,
@@ -18,6 +19,7 @@ pub struct CanonicalWorkItemContract {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkItemContractIdentity {
     pub logical_work_item_id: String,
     pub title: String,
@@ -25,6 +27,7 @@ pub struct WorkItemContractIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequiredInputContract {
     pub contract_id: String,
     pub provider_logical_work_item_id: String,
@@ -33,12 +36,14 @@ pub struct RequiredInputContract {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PromisedOutputContract {
     pub contract_id: String,
     pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkItemTask {
     pub task_id: String,
     pub statement: String,
@@ -47,6 +52,7 @@ pub struct WorkItemTask {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AcceptanceCriterion {
     pub criterion_id: String,
     pub statement: String,
@@ -54,6 +60,7 @@ pub struct AcceptanceCriterion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerificationCheck {
     pub check_id: String,
     pub command: Option<String>,
@@ -63,6 +70,7 @@ pub struct VerificationCheck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlockerRule {
     pub reason_code: String,
     pub route: BlockerRoute,
@@ -70,17 +78,20 @@ pub struct BlockerRule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkItemGoal {
     pub summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkItemWritePolicy {
     pub exclusive_scopes: Vec<String>,
     pub forbidden_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandoffContract {
     pub required_fields: Vec<String>,
     pub provided_contract_refs: Vec<String>,
@@ -88,6 +99,7 @@ pub struct HandoffContract {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesignTraceabilityRef {
     pub source_type: String,
     pub source_id: String,

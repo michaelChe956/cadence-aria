@@ -43,7 +43,7 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          [superpowers_contract]\n\
          - 必须遵守 using-superpowers 的先读规则与 writing-plans 的计划结构要求。\n\
          - 生成的是计划和任务拆分，不执行代码修改。\n\
-         - 每个 draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、验证命令、依赖输入、交接输出和风险。\n\
+         - 每个 outline/draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、结构化验证方案、依赖输入、交接输出和风险；其中 draft 只有存在目标仓库可信证据时才可给出 command，证据不足必须进入 manual/repair/blocker，不得臆造命令。\n\
          - 每个 outline 必须拆到单个 Claude Code/Codex 会话可完成，并遵循最少拆分。\n\
          - 拆分目标是在每个 Work Item 能由单个 Claude Code 或 Codex coding 会话可靠完成的前提下，使 outline 数量最少。\n\
          - 必须按最大内聚任务生成，优先合并目标一致、写入范围相同或重叠、可在同一 session 完成编码与验证的工作；先合并，再证明为什么必须拆。\n\

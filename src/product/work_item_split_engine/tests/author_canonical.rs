@@ -54,6 +54,75 @@ fn work_item_plan_author_canonical_bare_and_envelope_remain_closed() {
 }
 
 #[test]
+fn work_item_plan_author_canonical_rejects_unknown_nested_fields_for_bare_and_envelope() {
+    let envelope = canonical_author_output("outline_core", "wi_core");
+    let base_candidate = envelope["draft"].clone();
+    let mut cases = Vec::new();
+
+    let mut candidate = base_candidate.clone();
+    candidate["verification_plan"]["unexpected_execution_view_field"] =
+        serde_json::json!(true);
+    cases.push(("verification_plan top-level", candidate));
+
+    let mut candidate = base_candidate.clone();
+    candidate["canonical_contract"]["human_summary"] =
+        serde_json::json!("presentation must stay outside Canonical");
+    cases.push(("canonical_contract human field", candidate));
+
+    let mut candidate = base_candidate;
+    candidate["canonical_contract"]["tasks"][0]["unexpected_task_field"] =
+        serde_json::json!(true);
+    cases.push(("canonical_contract deep task object", candidate));
+
+    let mut accepted = Vec::new();
+    for (case, bare) in cases {
+        for (form, output) in [
+            ("bare", bare.clone()),
+            ("envelope", serde_json::json!({ "draft": bare })),
+        ] {
+            match parse_work_item_draft_output(output) {
+                Ok(_) => accepted.push(format!("{case} / {form}")),
+                Err(error) => assert_eq!(error.code, "work_item_draft_parse_error"),
+            }
+        }
+    }
+
+    assert!(
+        accepted.is_empty(),
+        "nested unknown fields were accepted: {}",
+        accepted.join(", ")
+    );
+}
+
+#[test]
+fn work_item_plan_author_canonical_legitimate_nested_structures_roundtrip() {
+    let candidate = parse_work_item_draft_output(canonical_author_output(
+        "outline_core",
+        "wi_core",
+    ))
+    .expect("canonical draft output");
+
+    let contract_json = serde_json::to_value(&candidate.canonical_contract_candidate)
+        .expect("serialize canonical contract");
+    let contract_roundtrip = serde_json::from_value::<
+        crate::product::work_item_contract::CanonicalWorkItemContract,
+    >(contract_json)
+    .expect("deserialize canonical contract");
+    assert_eq!(
+        contract_roundtrip,
+        candidate.canonical_contract_candidate
+    );
+
+    let execution_view_json =
+        serde_json::to_value(&candidate.verification_plan).expect("serialize execution view");
+    let execution_view_roundtrip = serde_json::from_value::<
+        crate::product::models::WorkItemDraftVerificationPlan,
+    >(execution_view_json)
+    .expect("deserialize execution view");
+    assert_eq!(execution_view_roundtrip, candidate.verification_plan);
+}
+
+#[test]
 fn work_item_plan_author_canonical_accepts_structured_json_object_only() {
     let raw_json = canonical_author_output("outline_core", "wi_core").to_string();
     let structured: serde_json::Value = serde_json::from_str(&raw_json).expect("raw json");
@@ -329,6 +398,12 @@ fn work_item_plan_author_canonical_prompt_is_provider_neutral_about_verification
         assert!(invocation.prompt.contains("目标仓库的可信证据"));
         assert!(invocation.prompt.contains("不得根据 WorkItemKind 推导"));
         assert!(invocation.prompt.contains("manual/repair/blocker"));
+        assert!(
+            !invocation
+                .prompt
+                .contains("每个 draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、验证命令")
+        );
+        assert!(invocation.prompt.contains("结构化验证方案"));
         assert!(
             invocation
                 .prompt
