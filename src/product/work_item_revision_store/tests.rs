@@ -432,7 +432,7 @@ fn work_item_revision_store_persists_work_item_revisions_and_mutable_state() {
 }
 
 #[test]
-fn work_item_revision_store_updates_repair_request_state_and_evidence() {
+fn plan_repair_store_updates_request_status_and_merges_evidence() {
     let (_temp, store, plan) = test_store_and_plan();
     let request = repair_request("plan_repair_request_0001");
     store.put_repair_request(&plan, &request).unwrap();

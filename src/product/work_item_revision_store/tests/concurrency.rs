@@ -197,7 +197,7 @@ fn work_item_revision_store_amendment_release_waits_for_lineage_lock() {
 }
 
 #[test]
-fn work_item_revision_store_repair_updates_wait_for_request_lock() {
+fn plan_repair_store_status_and_evidence_updates_wait_for_request_lock() {
     let temp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));
     let store = WorkItemRevisionStore::new(paths.clone());

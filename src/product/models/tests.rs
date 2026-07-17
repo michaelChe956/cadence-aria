@@ -395,37 +395,6 @@ fn work_item_revision_models_shared_records_roundtrip() {
         created_at: "2026-07-17T00:00:00Z".to_string(),
     });
 
-    let repair_target = RepairTarget {
-        kind: RepairTargetKind::CurrentWorkItem,
-        logical_work_item_ids: vec!["wi_core".to_string()],
-        work_item_revision_ids: vec!["work_item_revision_0001".to_string()],
-    };
-    assert_serde_roundtrip(&repair_target);
-    assert_serde_roundtrip(&PlanRepairRequest {
-        id: "plan_repair_request_0001".to_string(),
-        plan_id: "issue_work_item_plan_0001".to_string(),
-        base_plan_revision_id: "plan_revision_0001".to_string(),
-        trigger_attempt_id: "attempt_0001".to_string(),
-        trigger_unit_run_id: "coding_unit_run_0001".to_string(),
-        trigger_review_id: Some("review_0001".to_string()),
-        trigger_finding_id: "finding_0001".to_string(),
-        amendment_id: None,
-        defect_class: PlanDefectClass::CurrentWorkItemInvalid,
-        reason_code: "contract_mismatch".to_string(),
-        repair_target,
-        contract_refs: vec!["contract.core".to_string()],
-        capability_refs: vec!["compile".to_string()],
-        evidence: vec![PlanDefectEvidence {
-            kind: "test_failure".to_string(),
-            source_ref: "test_0001".to_string(),
-            message: "failed".to_string(),
-        }],
-        fingerprint: "sha256:fingerprint".to_string(),
-        status: PlanRepairRequestStatus::Open,
-        created_at: "2026-07-17T00:00:00Z".to_string(),
-        updated_at: "2026-07-17T00:01:00Z".to_string(),
-    });
-
     let replacement = WorkItemRevisionReplacement {
         previous_revision_id: "work_item_revision_0001".to_string(),
         next_revision_id: "work_item_revision_0002".to_string(),
@@ -462,6 +431,40 @@ fn work_item_revision_models_shared_records_roundtrip() {
         amendment_id: "plan_amendment_0001".to_string(),
         phase: PlanAmendmentPublicationPhase::Prepared,
         error: None,
+        created_at: "2026-07-17T00:00:00Z".to_string(),
+        updated_at: "2026-07-17T00:01:00Z".to_string(),
+    });
+}
+
+#[test]
+fn plan_repair_models_request_and_target_roundtrip_with_typed_evidence() {
+    let repair_target = RepairTarget {
+        kind: RepairTargetKind::CurrentWorkItem,
+        logical_work_item_ids: vec!["wi_core".to_string()],
+        work_item_revision_ids: vec!["work_item_revision_0001".to_string()],
+    };
+    assert_serde_roundtrip(&repair_target);
+    assert_serde_roundtrip(&PlanRepairRequest {
+        id: "plan_repair_request_0001".to_string(),
+        plan_id: "issue_work_item_plan_0001".to_string(),
+        base_plan_revision_id: "plan_revision_0001".to_string(),
+        trigger_attempt_id: "attempt_0001".to_string(),
+        trigger_unit_run_id: "coding_unit_run_0001".to_string(),
+        trigger_review_id: Some("review_0001".to_string()),
+        trigger_finding_id: "finding_0001".to_string(),
+        amendment_id: None,
+        defect_class: PlanDefectClass::CurrentWorkItemInvalid,
+        reason_code: "contract_mismatch".to_string(),
+        repair_target,
+        contract_refs: vec!["contract.core".to_string()],
+        capability_refs: vec!["compile".to_string()],
+        evidence: vec![PlanDefectEvidence {
+            kind: "test_failure".to_string(),
+            source_ref: "test_0001".to_string(),
+            message: "failed".to_string(),
+        }],
+        fingerprint: "sha256:fingerprint".to_string(),
+        status: PlanRepairRequestStatus::Open,
         created_at: "2026-07-17T00:00:00Z".to_string(),
         updated_at: "2026-07-17T00:01:00Z".to_string(),
     });
