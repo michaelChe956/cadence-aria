@@ -63,7 +63,7 @@ fn work_item_projection_plan_rejects_canonical_projection_drift() {
     assert_compile_finding(
         compile_plan(&graph, &changed),
         "projection_contract_mismatch",
-        "human",
+        "plan.work_items.wi_consumer.human",
         Some("wi_consumer"),
     );
 
@@ -77,7 +77,7 @@ fn work_item_projection_plan_rejects_canonical_projection_drift() {
     assert_compile_finding(
         compile_plan(&graph, &changed),
         "projection_missing_contract_ref",
-        "coder.inputs",
+        "plan.work_items.wi_consumer.coder.inputs",
         Some("contract.shared"),
     );
 
@@ -91,7 +91,7 @@ fn work_item_projection_plan_rejects_canonical_projection_drift() {
     assert_compile_finding(
         compile_plan(&graph, &changed),
         "projection_missing_contract_ref",
-        "reviewer.outputs",
+        "plan.work_items.wi_consumer.reviewer.outputs",
         Some("contract.consumer"),
     );
 
@@ -106,7 +106,7 @@ fn work_item_projection_plan_rejects_canonical_projection_drift() {
     assert_compile_finding(
         compile_plan(&graph, &changed),
         "projection_contract_mismatch",
-        "reviewer.scope",
+        "plan.work_items.wi_consumer.reviewer.scope",
         Some("wi_consumer"),
     );
 
@@ -120,7 +120,7 @@ fn work_item_projection_plan_rejects_canonical_projection_drift() {
     assert_compile_finding(
         compile_plan(&graph, &changed),
         "projection_missing_contract_ref",
-        "coder.acceptance_criteria",
+        "plan.work_items.wi_consumer.coder.acceptance_criteria",
         Some("AC-001"),
     );
 }
@@ -341,7 +341,10 @@ fn work_item_projection_plan_validation_rejects_all_role_wrong_revision_bindings
     changed.reviewer.work_item_revision_id = "revision_wrong".to_string();
 
     let report = validate_plan(&graph, &baseline, &work_items);
-    for projection in ["coder", "reviewer"] {
+    for projection in [
+        "plan.work_items.wi_consumer.coder",
+        "plan.work_items.wi_consumer.reviewer",
+    ] {
         assert_finding(
             &report,
             "projection_revision_binding_mismatch",
@@ -349,6 +352,81 @@ fn work_item_projection_plan_validation_rejects_all_role_wrong_revision_bindings
             Some("revision_wi_consumer"),
         );
     }
+}
+
+#[test]
+fn work_item_projection_plan_rejects_empty_expected_revision_bindings() {
+    let (graph, baseline) = compiled_plan_fixture();
+
+    for revision_id in ["", "  \t"] {
+        let mut work_items = baseline.clone();
+        let projection = work_items.get_mut("wi_consumer").unwrap();
+        projection.coder.work_item_revision_id = revision_id.to_string();
+        projection.reviewer.work_item_revision_id = revision_id.to_string();
+        let mut expected_revision_ids = expected_plan_revision_ids();
+        expected_revision_ids.insert("wi_consumer".to_string(), revision_id.to_string());
+
+        let Err(ProjectionCompileError::Validation(report)) =
+            compile_plan_with(&graph, &work_items, &expected_revision_ids)
+        else {
+            panic!("expected empty plan revision binding validation failure");
+        };
+        for projection in [
+            "plan.work_items.wi_consumer.work_item.revision_binding",
+            "plan.work_items.wi_consumer.coder",
+            "plan.work_items.wi_consumer.reviewer",
+        ] {
+            assert_finding(
+                &report,
+                "projection_revision_binding_invalid",
+                projection,
+                None,
+            );
+        }
+    }
+}
+
+#[test]
+fn work_item_projection_plan_preserves_logical_context_for_identical_local_findings() {
+    let (graph, mut work_items) = compiled_plan_fixture();
+    let baseline = compile_plan(&graph, &work_items).unwrap();
+    for logical_id in ["wi_consumer", "wi_provider"] {
+        work_items
+            .get_mut(logical_id)
+            .unwrap()
+            .coder
+            .acceptance_criteria
+            .clear();
+    }
+
+    let report = validate_plan(&graph, &baseline, &work_items);
+    for logical_id in ["wi_consumer", "wi_provider"] {
+        assert_finding(
+            &report,
+            "projection_missing_contract_ref",
+            &format!("plan.work_items.{logical_id}.coder.acceptance_criteria"),
+            Some("AC-001"),
+        );
+    }
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter(|finding| {
+                finding.code == "projection_missing_contract_ref"
+                    && finding.contract_ref.as_deref() == Some("AC-001")
+                    && finding.projection.ends_with(".coder.acceptance_criteria")
+            })
+            .count(),
+        2
+    );
+
+    assert_compile_finding(
+        compile_plan(&graph, &work_items),
+        "projection_missing_contract_ref",
+        "plan.work_items.wi_consumer.coder.acceptance_criteria",
+        Some("AC-001"),
+    );
 }
 
 #[test]

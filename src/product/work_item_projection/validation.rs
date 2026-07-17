@@ -197,9 +197,13 @@ pub(crate) fn validate_plan_compile_context(
         ) else {
             continue;
         };
-        findings.extend(
-            validate_projection_coverage(contract, expected_revision_id, compiled).findings,
-        );
+        for mut finding in
+            validate_projection_coverage(contract, expected_revision_id, compiled).findings
+        {
+            finding.projection = format!("plan.work_items.{logical_id}.{}", finding.projection);
+            finding.message = format!("logical_work_item_id={logical_id}; {}", finding.message);
+            findings.push(finding);
+        }
     }
     finalized_report(findings)
 }
@@ -331,11 +335,30 @@ fn validate_revision_binding(
     compiled: &CompiledWorkItemProjections,
     findings: &mut Vec<ProjectionValidationFinding>,
 ) {
+    let expected_is_empty = expected_work_item_revision_id.trim().is_empty();
+    if expected_is_empty {
+        push(
+            findings,
+            "projection_revision_binding_invalid",
+            "work_item.revision_binding",
+            None,
+            "expected work item revision ID must not be empty or blank",
+        );
+    }
     for (projection, actual_revision_id) in [
         ("coder", compiled.coder.work_item_revision_id.as_str()),
         ("reviewer", compiled.reviewer.work_item_revision_id.as_str()),
     ] {
-        if actual_revision_id != expected_work_item_revision_id {
+        if actual_revision_id.trim().is_empty() {
+            push(
+                findings,
+                "projection_revision_binding_invalid",
+                projection,
+                None,
+                format!("{projection} work item revision ID must not be empty or blank"),
+            );
+        }
+        if !expected_is_empty && actual_revision_id != expected_work_item_revision_id {
             push(
                 findings,
                 "projection_revision_binding_mismatch",
