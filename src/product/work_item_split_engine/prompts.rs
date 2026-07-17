@@ -556,13 +556,6 @@ pub(crate) fn build_work_item_draft_prompt(
     let requirement_id = format!("REQ-{}-001", current_outline.logical_work_item_id);
     let acceptance_id = format!("AC-{}-001", current_outline.logical_work_item_id);
     let output_contract_id = format!("contract.{}.output", current_outline.logical_work_item_id);
-    let verification_check = serde_json::json!({
-        "check_id": format!("check.{}.focused", current_outline.logical_work_item_id),
-        "command": "cargo test --locked --lib <filter>",
-        "manual_instruction": null,
-        "required": true,
-        "non_zero_test_execution_required": true
-    });
     let output_example = serde_json::json!({
         "draft": {
             "outline_id": current_outline.outline_id,
@@ -594,16 +587,16 @@ pub(crate) fn build_work_item_draft_prompt(
                 "acceptance_criteria": [{
                     "criterion_id": acceptance_id,
                     "statement": "The bounded work item is verified",
-                    "required_evidence": ["source_diff", "non_zero_test_execution"]
+                    "required_evidence": ["source_diff"]
                 }],
-                "verification_checks": [verification_check],
+                "verification_checks": [],
                 "handoff_contract": {
                     "required_fields": ["commit_sha", "tests"],
                     "provided_contract_refs": [output_contract_id],
                     "reviewer_check_refs": [acceptance_id]
                 },
                 "blocker_rules": [{
-                    "reason_code": format!("blocker.{}.operational", current_outline.logical_work_item_id),
+                    "reason_code": format!("blocker.{}.verification_evidence_missing", current_outline.logical_work_item_id),
                     "route": "operational_gate",
                     "target_contract_refs": []
                 }],
@@ -618,7 +611,7 @@ pub(crate) fn build_work_item_draft_prompt(
                 }]
             },
             "verification_plan": {
-                "checks": [verification_check]
+                "checks": []
             }
         }
     })
@@ -639,9 +632,12 @@ pub(crate) fn build_work_item_draft_prompt(
          - 不得输出 work_item_id、draft_id、status、generated_from_node_id、accepted_at、batch_id 等后端状态字段。\n\
          - Provider JSON 必须使用 canonical_contract；后端会明确转换为 canonical_contract_candidate，不得输出后者。\n\
          - logical_work_item_id 必须与 canonical_contract.identity.logical_work_item_id 完全一致，并使用当前 Outline 项已经分配的稳定 logical identity。\n\
-         - 所有 input contract、output contract、task、acceptance、verification、handoff 和 blocker rule 必须使用 stable ID 或稳定引用。\n\
+         - input_contracts 与 output_contracts 必须使用非空且唯一的 contract_id；input contract 还必须使用非空 provider_logical_work_item_id。\n\
+         - Task、Acceptance Criterion、Verification Check 与 Blocker Rule 必须分别使用非空且唯一的 task_id、criterion_id、check_id 与 reason_code。\n\
+         - handoff_contract 是 Canonical singleton，不新增 handoff ID；稳定语义由非空且不重复的 required_fields、provided_contract_refs 与 reviewer_check_refs 表达。\n\
          - verification_plan.checks 必须逐项、逐字段、按原顺序复制 canonical_contract.verification_checks；不得额外、缺失或重排。\n\
-         - Rust verification command 必须遵守 cadence/project-rules/build-test-commands.md，定向测试使用 --lib，禁止 -j 1。\n\
+         - verification command 必须来自目标仓库的可信证据，不得根据 WorkItemKind 推导目标项目命令。\n\
+         - 若可信证据不足以生成 verification command，必须进入 manual/repair/blocker 路由，不得使用 Aria 当前仓库命令兜底。\n\
          - 不得输出面向 Coder 的长篇 implementation_context；不要提前生成或渲染 Coder Projection 或 Reviewer Projection。\n\
          - 不要把 human_summary、why_split 或其他 Human presentation 字段放入 Canonical Contract。\n\
          - 若 Story/Design/Outline 证据不足，使用 canonical blocker_rules 表达可路由阻塞，不得编造文件路径。\n\

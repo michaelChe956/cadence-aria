@@ -15,23 +15,42 @@ fn canonical_author_output(outline_id: &str, logical_work_item_id: &str) -> serd
 }
 
 #[test]
-fn work_item_plan_author_canonical_parses_canonical_contract_candidate() {
-    let candidate = parse_work_item_draft_output(canonical_author_output("outline_core", "wi_core"))
-        .expect("canonical draft output");
+fn work_item_plan_author_canonical_parses_bare_and_enveloped_candidates() {
+    let envelope = canonical_author_output("outline_core", "wi_core");
+    let bare = envelope["draft"].clone();
 
-    assert_eq!(candidate.outline_id, "outline_core");
-    assert_eq!(candidate.logical_work_item_id, "wi_core");
-    assert_eq!(
-        candidate
-            .canonical_contract_candidate
-            .identity
-            .logical_work_item_id,
-        "wi_core"
-    );
-    assert_eq!(
-        candidate.verification_plan.checks,
-        candidate.canonical_contract_candidate.verification_checks
-    );
+    for output in [bare, envelope] {
+        let candidate = parse_work_item_draft_output(output).expect("canonical draft output");
+
+        assert_eq!(candidate.outline_id, "outline_core");
+        assert_eq!(candidate.logical_work_item_id, "wi_core");
+        assert_eq!(
+            candidate
+                .canonical_contract_candidate
+                .identity
+                .logical_work_item_id,
+            "wi_core"
+        );
+        assert_eq!(
+            candidate.verification_plan.checks,
+            candidate.canonical_contract_candidate.verification_checks
+        );
+    }
+}
+
+#[test]
+fn work_item_plan_author_canonical_bare_and_envelope_remain_closed() {
+    let mut envelope = canonical_author_output("outline_core", "wi_core");
+    envelope["unexpected_envelope_field"] = serde_json::json!(true);
+    let envelope_error =
+        parse_work_item_draft_output(envelope).expect_err("envelope must stay closed");
+    assert_eq!(envelope_error.code, "work_item_draft_parse_error");
+
+    let envelope = canonical_author_output("outline_core", "wi_core");
+    let mut bare = envelope["draft"].clone();
+    bare["unexpected_candidate_field"] = serde_json::json!(true);
+    let bare_error = parse_work_item_draft_output(bare).expect_err("bare candidate must stay closed");
+    assert_eq!(bare_error.code, "work_item_draft_parse_error");
 }
 
 #[test]
@@ -54,23 +73,28 @@ fn work_item_plan_author_canonical_accepts_structured_json_object_only() {
 
 #[test]
 fn work_item_plan_author_canonical_rejects_legacy_implementation_context() {
-    let mut output = canonical_author_output("outline_core", "wi_core");
-    output["draft"]["implementation_context"] =
+    let mut envelope = canonical_author_output("outline_core", "wi_core");
+    envelope["draft"]["implementation_context"] =
         serde_json::json!("legacy coder-facing narrative");
+    let bare = envelope["draft"].clone();
 
-    let error = parse_work_item_draft_output(output).expect_err("legacy field must be rejected");
-
-    assert_eq!(error.code, "work_item_draft_forbidden_field");
+    for output in [bare, envelope] {
+        let error =
+            parse_work_item_draft_output(output).expect_err("legacy field must be rejected");
+        assert_eq!(error.code, "work_item_draft_forbidden_field");
+    }
 }
 
 #[test]
 fn work_item_plan_author_canonical_rejects_logical_identity_mismatch() {
-    let mut output = canonical_author_output("outline_core", "wi_core");
-    output["draft"]["logical_work_item_id"] = serde_json::json!("wi_other");
+    let mut envelope = canonical_author_output("outline_core", "wi_core");
+    envelope["draft"]["logical_work_item_id"] = serde_json::json!("wi_other");
+    let bare = envelope["draft"].clone();
 
-    let error = parse_work_item_draft_output(output).expect_err("identity mismatch");
-
-    assert_eq!(error.code, "work_item_draft_identity_mismatch");
+    for output in [bare, envelope] {
+        let error = parse_work_item_draft_output(output).expect_err("identity mismatch");
+        assert_eq!(error.code, "work_item_draft_identity_mismatch");
+    }
 }
 
 #[test]
@@ -178,6 +202,56 @@ fn work_item_plan_author_canonical_schema_is_required_and_closed() {
 }
 
 #[test]
+fn work_item_plan_author_canonical_schema_enforces_stable_identity_constraints() {
+    let schema: serde_json::Value = serde_json::from_str(
+        crate::product::work_item_split_engine::schema::WORK_ITEM_DRAFT_OUTPUT_SCHEMA,
+    )
+    .expect("draft schema json");
+    let draft = &schema["properties"]["draft"];
+    let contract = &draft["properties"]["canonical_contract"];
+    let properties = &contract["properties"];
+
+    for id_schema in [
+        &draft["properties"]["logical_work_item_id"],
+        &properties["identity"]["properties"]["logical_work_item_id"],
+        &properties["input_contracts"]["items"]["properties"]["contract_id"],
+        &properties["input_contracts"]["items"]["properties"]
+            ["provider_logical_work_item_id"],
+        &properties["output_contracts"]["items"]["properties"]["contract_id"],
+        &properties["tasks"]["items"]["properties"]["task_id"],
+        &properties["acceptance_criteria"]["items"]["properties"]["criterion_id"],
+        &properties["verification_checks"]["items"]["properties"]["check_id"],
+        &properties["blocker_rules"]["items"]["properties"]["reason_code"],
+        &draft["properties"]["verification_plan"]["properties"]["checks"]["items"]
+            ["properties"]["check_id"],
+    ] {
+        assert_eq!(id_schema["minLength"], 1, "missing minLength: {id_schema}");
+    }
+
+    for collection in [
+        &properties["input_contracts"],
+        &properties["output_contracts"],
+        &properties["tasks"],
+        &properties["acceptance_criteria"],
+        &properties["verification_checks"],
+        &properties["blocker_rules"],
+        &draft["properties"]["verification_plan"]["properties"]["checks"],
+    ] {
+        assert_eq!(collection["uniqueItems"], true, "missing uniqueItems: {collection}");
+    }
+
+    let handoff = &properties["handoff_contract"]["properties"];
+    for reference_list in [
+        &handoff["required_fields"],
+        &handoff["provided_contract_refs"],
+        &handoff["reviewer_check_refs"],
+    ] {
+        assert_eq!(reference_list["uniqueItems"], true);
+        assert_eq!(reference_list["items"]["minLength"], 1);
+    }
+}
+
+#[test]
 fn work_item_plan_author_canonical_prompt_requests_contract_candidate_only() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
@@ -195,21 +269,23 @@ fn work_item_plan_author_canonical_prompt_requests_contract_candidate_only() {
     assert!(invocation.prompt.contains("只输出 Canonical Contract Candidate"));
     assert!(invocation.prompt.contains("canonical_contract"));
     assert!(invocation.prompt.contains("logical_work_item_id"));
-    for stable_id in [
-        "input contract",
-        "output contract",
-        "task",
-        "acceptance",
-        "verification",
-        "handoff",
-        "blocker rule",
+    for stable_identity_field in [
+        "contract_id",
+        "task_id",
+        "criterion_id",
+        "check_id",
+        "reason_code",
     ] {
         assert!(
-            invocation.prompt.contains(stable_id),
-            "prompt must require stable ID for {stable_id}: {}",
+            invocation.prompt.contains(stable_identity_field),
+            "prompt must require stable identity field {stable_identity_field}: {}",
             invocation.prompt
         );
     }
+    assert!(invocation.prompt.contains("handoff_contract 是 Canonical singleton"));
+    assert!(invocation.prompt.contains("required_fields"));
+    assert!(invocation.prompt.contains("provided_contract_refs"));
+    assert!(invocation.prompt.contains("reviewer_check_refs"));
     assert!(
         invocation
             .prompt
@@ -221,6 +297,44 @@ fn work_item_plan_author_canonical_prompt_requests_contract_candidate_only() {
             .prompt
             .contains("不要提前生成或渲染 Coder Projection 或 Reviewer Projection")
     );
+}
+
+#[test]
+fn work_item_plan_author_canonical_prompt_is_provider_neutral_about_verification_commands() {
+    let mut outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    for item in &mut outline.work_item_outlines {
+        item.verification_intent.clear();
+    }
+
+    for outline_id in ["outline_backend", "outline_frontend"] {
+        let invocation = build_work_item_draft_invocation(
+            &outline,
+            outline_id,
+            WorkItemGenerationMode::Serial,
+            &[],
+            None,
+        )
+        .expect("draft invocation");
+
+        for fixed_command in ["cargo test", "pnpm", "mvn", "gradle"] {
+            assert!(
+                !invocation.prompt.contains(fixed_command),
+                "prompt must not prescribe {fixed_command} for {outline_id}: {}",
+                invocation.prompt
+            );
+        }
+        assert!(invocation.prompt.contains("目标仓库的可信证据"));
+        assert!(invocation.prompt.contains("不得根据 WorkItemKind 推导"));
+        assert!(invocation.prompt.contains("manual/repair/blocker"));
+        assert!(
+            invocation
+                .prompt
+                .contains("verification_plan.checks 必须逐项、逐字段、按原顺序复制")
+        );
+    }
 }
 
 fn assert_required_closed_array_items(schema: &serde_json::Value) {

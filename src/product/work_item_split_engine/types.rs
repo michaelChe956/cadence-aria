@@ -47,6 +47,22 @@ pub(crate) struct ProviderWorkItemDraftOutput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ProviderWorkItemDraftInput {
+    Envelope(ProviderWorkItemDraftOutput),
+    Bare(ProviderWorkItemDraftCandidate),
+}
+
+impl ProviderWorkItemDraftInput {
+    pub(crate) fn into_candidate(self) -> ProviderWorkItemDraftCandidate {
+        match self {
+            Self::Envelope(output) => output.draft,
+            Self::Bare(candidate) => candidate,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProviderWorkItemDraftCandidate {
     pub(crate) outline_id: String,

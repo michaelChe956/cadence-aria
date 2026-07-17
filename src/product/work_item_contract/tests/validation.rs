@@ -100,6 +100,109 @@ fn canonical_work_item_validation_rejects_duplicate_verification_check_ids() {
 }
 
 #[test]
+fn canonical_work_item_validation_enforces_stable_non_blank_identity_fields() {
+    let mut cases = Vec::new();
+
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.identity.logical_work_item_id = "  ".to_string();
+    cases.push(("blank_logical_work_item_id", contract));
+
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.input_contracts[0].contract_id = "  ".to_string();
+    cases.push(("blank_input_contract_id", contract));
+
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.input_contracts[0].provider_logical_work_item_id = "  ".to_string();
+    cases.push(("blank_provider_logical_work_item_id", contract));
+
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.output_contracts[0].contract_id = "  ".to_string();
+    cases.push(("blank_output_contract_id", contract));
+
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.tasks[0].task_id = "  ".to_string();
+    cases.push(("blank_task_id", contract));
+
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.acceptance_criteria[0].criterion_id = "  ".to_string();
+    cases.push(("blank_acceptance_criterion_id", contract));
+
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.verification_checks[0].check_id = "  ".to_string();
+    cases.push(("blank_verification_check_id", contract));
+
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.blocker_rules[0].reason_code = "  ".to_string();
+    cases.push(("blank_blocker_reason_code", contract));
+
+    for (expected_code, contract) in cases {
+        finding(&validate_canonical_contract(&contract), expected_code);
+    }
+}
+
+#[test]
+fn canonical_work_item_validation_enforces_stable_unique_contract_and_blocker_identities() {
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract
+        .input_contracts
+        .push(contract.input_contracts[0].clone());
+    contract
+        .output_contracts
+        .push(contract.output_contracts[0].clone());
+    contract
+        .blocker_rules
+        .push(contract.blocker_rules[0].clone());
+
+    let report = validate_canonical_contract(&contract);
+    let duplicate_contract_refs = report
+        .findings
+        .iter()
+        .filter(|finding| finding.code == "duplicate_contract_id")
+        .filter_map(|finding| finding.contract_ref.as_deref())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        duplicate_contract_refs,
+        vec!["contract.canonical", "contract.source"]
+    );
+    assert_eq!(
+        finding(&report, "duplicate_blocker_reason_code")
+            .contract_ref
+            .as_deref(),
+        Some("contract_invalid")
+    );
+}
+
+#[test]
+fn canonical_work_item_validation_enforces_stable_non_blank_unique_handoff_references() {
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.handoff_contract.required_fields = vec![
+        "  ".to_string(),
+        "commit_sha".to_string(),
+        "commit_sha".to_string(),
+    ];
+    contract.handoff_contract.provided_contract_refs = vec![
+        "  ".to_string(),
+        "contract.canonical".to_string(),
+        "contract.canonical".to_string(),
+    ];
+    contract.handoff_contract.reviewer_check_refs =
+        vec!["  ".to_string(), "AC-001".to_string(), "AC-001".to_string()];
+
+    let report = validate_canonical_contract(&contract);
+    for code in [
+        "blank_handoff_required_field",
+        "duplicate_handoff_required_field",
+        "blank_handoff_provided_contract_ref",
+        "duplicate_handoff_provided_contract_ref",
+        "blank_handoff_reviewer_check_ref",
+        "duplicate_handoff_reviewer_check_ref",
+    ] {
+        finding(&report, code);
+    }
+}
+
+#[test]
 fn canonical_work_item_validation_rejects_unknown_done_when_refs() {
     let mut contract = canonical_contract_fixture("WI-01");
     contract.tasks[0].done_when_refs = vec!["AC-404".to_string()];

@@ -117,7 +117,7 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
       "type": "object",
       "properties": {
         "outline_id": { "type": "string" },
-        "logical_work_item_id": { "type": "string" },
+        "logical_work_item_id": { "type": "string", "minLength": 1 },
         "canonical_contract": {
           "type": "object",
           "properties": {
@@ -125,7 +125,7 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
             "identity": {
               "type": "object",
               "properties": {
-                "logical_work_item_id": { "type": "string" },
+                "logical_work_item_id": { "type": "string", "minLength": 1 },
                 "title": { "type": "string" },
                 "kind": {
                   "type": "string",
@@ -152,8 +152,8 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
               "items": {
                 "type": "object",
                 "properties": {
-                  "contract_id": { "type": "string" },
-                  "provider_logical_work_item_id": { "type": "string" },
+                  "contract_id": { "type": "string", "minLength": 1 },
+                  "provider_logical_work_item_id": { "type": "string", "minLength": 1 },
                   "required_capabilities": {
                     "type": "array",
                     "items": { "type": "string" }
@@ -170,14 +170,15 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                   "compatibility_policy"
                 ],
                 "additionalProperties": false
-              }
+              },
+              "uniqueItems": true
             },
             "output_contracts": {
               "type": "array",
               "items": {
                 "type": "object",
                 "properties": {
-                  "contract_id": { "type": "string" },
+                  "contract_id": { "type": "string", "minLength": 1 },
                   "capabilities": {
                     "type": "array",
                     "items": { "type": "string" }
@@ -185,14 +186,15 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                 },
                 "required": ["contract_id", "capabilities"],
                 "additionalProperties": false
-              }
+              },
+              "uniqueItems": true
             },
             "tasks": {
               "type": "array",
               "items": {
                 "type": "object",
                 "properties": {
-                  "task_id": { "type": "string" },
+                  "task_id": { "type": "string", "minLength": 1 },
                   "statement": { "type": "string" },
                   "requirement_refs": {
                     "type": "array",
@@ -205,7 +207,8 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                 },
                 "required": ["task_id", "statement", "requirement_refs", "done_when_refs"],
                 "additionalProperties": false
-              }
+              },
+              "uniqueItems": true
             },
             "write_policy": {
               "type": "object",
@@ -227,7 +230,7 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
               "items": {
                 "type": "object",
                 "properties": {
-                  "criterion_id": { "type": "string" },
+                  "criterion_id": { "type": "string", "minLength": 1 },
                   "statement": { "type": "string" },
                   "required_evidence": {
                     "type": "array",
@@ -244,14 +247,15 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                 },
                 "required": ["criterion_id", "statement", "required_evidence"],
                 "additionalProperties": false
-              }
+              },
+              "uniqueItems": true
             },
             "verification_checks": {
               "type": "array",
               "items": {
                 "type": "object",
                 "properties": {
-                  "check_id": { "type": "string" },
+                  "check_id": { "type": "string", "minLength": 1 },
                   "command": { "type": ["string", "null"] },
                   "manual_instruction": { "type": ["string", "null"] },
                   "required": { "type": "boolean" },
@@ -265,22 +269,26 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                   "non_zero_test_execution_required"
                 ],
                 "additionalProperties": false
-              }
+              },
+              "uniqueItems": true
             },
             "handoff_contract": {
               "type": "object",
               "properties": {
                 "required_fields": {
                   "type": "array",
-                  "items": { "type": "string" }
+                  "items": { "type": "string", "minLength": 1 },
+                  "uniqueItems": true
                 },
                 "provided_contract_refs": {
                   "type": "array",
-                  "items": { "type": "string" }
+                  "items": { "type": "string", "minLength": 1 },
+                  "uniqueItems": true
                 },
                 "reviewer_check_refs": {
                   "type": "array",
-                  "items": { "type": "string" }
+                  "items": { "type": "string", "minLength": 1 },
+                  "uniqueItems": true
                 }
               },
               "required": ["required_fields", "provided_contract_refs", "reviewer_check_refs"],
@@ -291,7 +299,7 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
               "items": {
                 "type": "object",
                 "properties": {
-                  "reason_code": { "type": "string" },
+                  "reason_code": { "type": "string", "minLength": 1 },
                   "route": {
                     "type": "string",
                     "enum": [
@@ -312,7 +320,8 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                 },
                 "required": ["reason_code", "route", "target_contract_refs"],
                 "additionalProperties": false
-              }
+              },
+              "uniqueItems": true
             },
             "design_traceability": {
               "type": "array",
@@ -353,7 +362,7 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
               "items": {
                 "type": "object",
                 "properties": {
-                  "check_id": { "type": "string" },
+                  "check_id": { "type": "string", "minLength": 1 },
                   "command": { "type": ["string", "null"] },
                   "manual_instruction": { "type": ["string", "null"] },
                   "required": { "type": "boolean" },
@@ -367,7 +376,8 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                   "non_zero_test_execution_required"
                 ],
                 "additionalProperties": false
-              }
+              },
+              "uniqueItems": true
             }
           },
           "required": ["checks"],

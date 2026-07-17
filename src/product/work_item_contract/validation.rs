@@ -39,10 +39,177 @@ pub fn validate_canonical_contract(
     let logical_work_item_id = &contract.identity.logical_work_item_id;
     let mut findings = Vec::new();
 
+    report_blank_ids(
+        std::iter::once(logical_work_item_id.as_str()),
+        "blank_logical_work_item_id",
+        "logical work item id",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract
+            .input_contracts
+            .iter()
+            .map(|input| input.contract_id.as_str()),
+        "blank_input_contract_id",
+        "input contract id",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract
+            .input_contracts
+            .iter()
+            .map(|input| input.provider_logical_work_item_id.as_str()),
+        "blank_provider_logical_work_item_id",
+        "provider logical work item id",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract
+            .output_contracts
+            .iter()
+            .map(|output| output.contract_id.as_str()),
+        "blank_output_contract_id",
+        "output contract id",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract.tasks.iter().map(|task| task.task_id.as_str()),
+        "blank_task_id",
+        "task id",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract
+            .acceptance_criteria
+            .iter()
+            .map(|criterion| criterion.criterion_id.as_str()),
+        "blank_acceptance_criterion_id",
+        "acceptance criterion id",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract
+            .verification_checks
+            .iter()
+            .map(|check| check.check_id.as_str()),
+        "blank_verification_check_id",
+        "verification check id",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract
+            .blocker_rules
+            .iter()
+            .map(|blocker| blocker.reason_code.as_str()),
+        "blank_blocker_reason_code",
+        "blocker reason code",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract
+            .handoff_contract
+            .required_fields
+            .iter()
+            .map(String::as_str),
+        "blank_handoff_required_field",
+        "handoff required field",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract
+            .handoff_contract
+            .provided_contract_refs
+            .iter()
+            .map(String::as_str),
+        "blank_handoff_provided_contract_ref",
+        "handoff provided contract ref",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_blank_ids(
+        contract
+            .handoff_contract
+            .reviewer_check_refs
+            .iter()
+            .map(String::as_str),
+        "blank_handoff_reviewer_check_ref",
+        "handoff reviewer check ref",
+        logical_work_item_id,
+        &mut findings,
+    );
+
+    report_duplicate_ids(
+        contract
+            .input_contracts
+            .iter()
+            .map(|input| input.contract_id.as_str())
+            .chain(
+                contract
+                    .output_contracts
+                    .iter()
+                    .map(|output| output.contract_id.as_str()),
+            ),
+        "duplicate_contract_id",
+        "contract",
+        logical_work_item_id,
+        &mut findings,
+    );
     report_duplicate_ids(
         contract.tasks.iter().map(|task| task.task_id.as_str()),
         "duplicate_task_id",
         "task",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_duplicate_ids(
+        contract
+            .blocker_rules
+            .iter()
+            .map(|blocker| blocker.reason_code.as_str()),
+        "duplicate_blocker_reason_code",
+        "blocker reason code",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_duplicate_ids(
+        contract
+            .handoff_contract
+            .required_fields
+            .iter()
+            .map(String::as_str),
+        "duplicate_handoff_required_field",
+        "handoff required field",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_duplicate_ids(
+        contract
+            .handoff_contract
+            .provided_contract_refs
+            .iter()
+            .map(String::as_str),
+        "duplicate_handoff_provided_contract_ref",
+        "handoff provided contract ref",
+        logical_work_item_id,
+        &mut findings,
+    );
+    report_duplicate_ids(
+        contract
+            .handoff_contract
+            .reviewer_check_refs
+            .iter()
+            .map(String::as_str),
+        "duplicate_handoff_reviewer_check_ref",
+        "handoff reviewer check ref",
         logical_work_item_id,
         &mut findings,
     );
@@ -283,6 +450,26 @@ fn report_duplicate_ids<'a>(
                 Some(id),
                 None,
                 format!("duplicate {label} id {id}"),
+            ));
+        }
+    }
+}
+
+fn report_blank_ids<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+    code: &str,
+    label: &str,
+    logical_work_item_id: &str,
+    findings: &mut Vec<ContractValidationFinding>,
+) {
+    for id in ids {
+        if id.trim().is_empty() {
+            findings.push(error_finding(
+                code,
+                logical_work_item_id,
+                Some(id),
+                None,
+                format!("{label} must not be blank"),
             ));
         }
     }

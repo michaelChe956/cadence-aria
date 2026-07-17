@@ -16,7 +16,7 @@ use crate::web::types::GenerateWorkItemsRequest;
 use super::WorkItemSplitEngine;
 use super::prompts::build_work_item_draft_prompt;
 use super::types::{
-    ProviderOutput, ProviderWorkItemDraftOutput, WorkItemDraftInvocation,
+    ProviderOutput, ProviderWorkItemDraftInput, WorkItemDraftInvocation,
     WorkItemSplitProviderOutput, parse_confidence, parse_fallback_policy, parse_safety,
     parse_verification_scope, parse_work_item_kind, product_store_api_error,
 };
@@ -204,14 +204,14 @@ pub fn parse_work_item_draft_output(value: serde_json::Value) -> ApiResult<WorkI
         ));
     }
 
-    let output: ProviderWorkItemDraftOutput = serde_json::from_value(value).map_err(|error| {
+    let output: ProviderWorkItemDraftInput = serde_json::from_value(value).map_err(|error| {
         ApiError::runtime(
             "work_item_draft_parse_error",
             format!("failed to parse WorkItemDraftCandidate output: {error}"),
             json!({}),
         )
     })?;
-    let candidate: WorkItemDraftCandidate = output.draft.into();
+    let candidate: WorkItemDraftCandidate = output.into_candidate().into();
     let contract_logical_work_item_id = &candidate
         .canonical_contract_candidate
         .identity
