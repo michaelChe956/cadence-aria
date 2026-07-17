@@ -8,8 +8,9 @@ use cadence_aria::product::models::{
     WorkItemPlanCommitState, WorkItemPlanCompileStatus, WorkspaceType,
 };
 use cadence_aria::product::work_item_plan_store::WorkItemPlanStore;
+use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::web::workspace_ws_types::{
-    ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
+    ArtifactPayload, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
     WorkspaceStage as WsWorkspaceStage,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -157,7 +158,7 @@ async fn prepare_plan_accept_outline_and_select_batch(
 }
 
 #[tokio::test]
-async fn batch_accept_all_runs_final_compile_and_materializes_entities() {
+async fn batch_accept_all_runs_final_compile_and_publishes_revision_entities() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
@@ -222,10 +223,10 @@ async fn batch_accept_all_runs_final_compile_and_materializes_entities() {
         "accept_all should enter work_item_plan_compile, got {messages:?}"
     );
 
-    let work_items = lifecycle
+    let legacy_work_items = lifecycle
         .list_work_items("project_0001", "issue_0001")
         .expect("list work items after compile");
-    let verification_plans = lifecycle
+    let legacy_verification_plans = lifecycle
         .list_verification_plans("project_0001", "issue_0001")
         .expect("list verification plans after compile");
     let plan = lifecycle
@@ -239,13 +240,82 @@ async fn batch_accept_all_runs_final_compile_and_materializes_entities() {
         .filter(|session| session.workspace_type == WorkspaceType::WorkItem)
         .collect();
 
-    assert_eq!(work_items.len(), 3);
-    assert_eq!(verification_plans.len(), 3);
+    assert!(legacy_work_items.is_empty());
+    assert!(legacy_verification_plans.is_empty());
     assert_eq!(work_item_sessions.len(), 3);
     assert_eq!(plan.status, IssueWorkItemPlanStatus::Confirmed);
     assert_eq!(plan.work_item_ids.len(), 3);
     assert_eq!(plan.verification_plan_ids.len(), 3);
     assert_eq!(plan.dependency_graph.len(), 2);
+    let revision_store = WorkItemRevisionStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let lineage = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", &plan_id)
+        .expect("load active plan lineage");
+    let active_revision_id = lineage
+        .active_revision_id
+        .as_deref()
+        .expect("active plan revision id");
+    let plan_revision = revision_store
+        .get_plan_revision(
+            "project_0001",
+            "issue_0001",
+            &plan_id,
+            active_revision_id,
+        )
+        .expect("load active plan revision");
+    assert_eq!(plan_revision.revision_no, 1);
+    assert_eq!(plan_revision.work_item_bindings.len(), 3);
+    assert_eq!(
+        revision_store
+            .get_dependency_graph_revision(&lineage, &plan_revision.dependency_graph_revision_id)
+            .expect("load dependency graph revision")
+            .edges
+            .len(),
+        2
+    );
+    revision_store
+        .get_plan_validation_report(&lineage, &plan_revision.validation_report_ref)
+        .expect("load plan validation report");
+    let plan_projection = revision_store
+        .get_plan_projection_bundle(&lineage, &plan_revision.plan_projection_bundle_id)
+        .expect("load plan projection bundle");
+    assert_eq!(
+        plan.work_item_ids,
+        plan_projection
+            .coder_group_context
+            .ordered_logical_work_item_ids
+    );
+    for logical_id in &plan.work_item_ids {
+        let revision_id = plan_revision
+            .work_item_bindings
+            .get(logical_id)
+            .expect("stable work item binding");
+        let work_item_revision = revision_store
+            .get_work_item_revision(&lineage, logical_id, revision_id)
+            .expect("load work item revision");
+        revision_store
+            .get_verification_plan_revision(
+                &lineage,
+                &work_item_revision.verification_plan_revision_id,
+            )
+            .expect("load verification plan revision");
+        revision_store
+            .get_work_item_projection_bundle(
+                &lineage,
+                &work_item_revision.work_item_projection_bundle_id,
+            )
+            .expect("load work item projection bundle");
+    }
+    assert_eq!(
+        work_item_sessions
+            .iter()
+            .map(|session| session.entity_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        plan.work_item_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+    );
 
     let store = WorkItemPlanStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let index = store
@@ -266,6 +336,8 @@ async fn batch_accept_all_runs_final_compile_and_materializes_entities() {
             .expect("compile tx json");
     assert_eq!(compile_tx["status"], "committed");
     assert_eq!(compile_tx["plan_commit_state"], "committed");
+    assert_eq!(compile_tx["created_work_item_ids"], json!([]));
+    assert_eq!(compile_tx["created_verification_plan_ids"], json!([]));
     assert_eq!(compile_tx["previous_plan_snapshot"]["status"], "draft");
     assert_eq!(
         compile_tx["active_draft_ids"]

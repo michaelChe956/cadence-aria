@@ -502,10 +502,10 @@ fn compile_plan_with(
         plan_id: PLAN_ID,
         goal: "Compile the plan",
         split_reason: "Explicit dependency boundary",
-        source_refs: &["design_0001".to_string(), "story_0001".to_string()],
+        source_refs: vec!["design_0001".to_string(), "story_0001".to_string()],
         dependency_graph: graph,
         work_item_projections: work_items,
-        expected_work_item_revision_ids: expected_revision_ids,
+        expected_work_item_revision_ids: expected_revision_ids.clone(),
     })
 }
 

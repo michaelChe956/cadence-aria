@@ -180,8 +180,8 @@ fn final_compile_projects_source_draft_context_into_work_items() {
 }
 
 #[tokio::test]
-async fn final_compile_failure_updates_artifact_with_failed_compile_report() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+async fn work_item_plan_compile_failure_updates_artifact_with_failed_compile_report() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_failed_compile_artifact");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     let store = engine.work_item_plan_store().expect("work item plan store");
@@ -262,6 +262,13 @@ async fn final_compile_failure_updates_artifact_with_failed_compile_report() {
         .validator_findings
         .iter()
         .any(|finding| finding.code == "verification_command_unsafe"));
+    let revision_store = crate::product::work_item_revision_store::WorkItemRevisionStore::new(
+        lifecycle.app_paths(),
+    );
+    assert!(matches!(
+        revision_store.get_plan_lineage("project_0001", "issue_0001", &plan_id),
+        Err(ProductStoreError::NotFound { .. })
+    ));
 }
 
 #[tokio::test]

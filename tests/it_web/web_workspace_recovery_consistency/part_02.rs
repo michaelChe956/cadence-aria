@@ -155,10 +155,13 @@ fn valid_frontend_draft_output() -> Value {
 }
 
 fn valid_integration_draft_output() -> Value {
-    valid_canonical_draft_output(
+    let mut output = valid_canonical_draft_output(
         "outline_integration_session",
         "集成测试：会话过期端到端",
-    )
+    );
+    output["draft"]["canonical_contract"]["handoff_contract"]["provided_contract_refs"] =
+        json!([]);
+    output
 }
 
 #[tokio::test]

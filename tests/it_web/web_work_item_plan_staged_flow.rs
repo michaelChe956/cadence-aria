@@ -3,6 +3,7 @@ use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::models::{IssueWorkItemPlanStatus, WorkspaceType};
 use cadence_aria::product::work_item_plan_store::WorkItemPlanStore;
+use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -224,10 +225,10 @@ async fn work_item_plan_serial_flow_outline_to_compile() {
         "serial flow should create work_item_plan_compile node, got {messages:?}"
     );
 
-    let work_items = lifecycle
+    let legacy_work_items = lifecycle
         .list_work_items("project_0001", "issue_0001")
         .expect("list compiled work items");
-    let verification_plans = lifecycle
+    let legacy_verification_plans = lifecycle
         .list_verification_plans("project_0001", "issue_0001")
         .expect("list compiled verification plans");
     let plan = lifecycle
@@ -239,10 +240,13 @@ async fn work_item_plan_serial_flow_outline_to_compile() {
         .into_iter()
         .filter(|session| session.workspace_type == WorkspaceType::WorkItem)
         .collect::<Vec<_>>();
-    assert_eq!(work_items.len(), 3);
-    assert_eq!(verification_plans.len(), 3);
+    assert!(legacy_work_items.is_empty());
+    assert!(legacy_verification_plans.is_empty());
     assert_eq!(child_sessions.len(), 3);
     assert_eq!(plan.status, IssueWorkItemPlanStatus::Confirmed);
+    assert_eq!(plan.work_item_ids.len(), 3);
+    assert_eq!(plan.verification_plan_ids.len(), 3);
+    assert_initial_plan_revision_published(&paths, &plan_id, 3);
 
     ws.send(Message::Text(
         json!({ "type": "human_confirm", "decision": "confirm" })
@@ -369,13 +373,15 @@ async fn work_item_plan_batch_flow_with_validation_failed_then_rewrite() {
         .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
         .expect("get compiled plan");
     assert_eq!(plan.status, IssueWorkItemPlanStatus::Confirmed);
-    assert_eq!(
+    assert!(
         lifecycle
             .list_work_items("project_0001", "issue_0001")
-            .expect("list work items")
-            .len(),
-        3
+            .expect("list legacy work items")
+            .is_empty()
     );
+    assert_eq!(plan.work_item_ids.len(), 3);
+    assert_eq!(plan.verification_plan_ids.len(), 3);
+    assert_initial_plan_revision_published(&paths, &plan_id, 3);
     let index = WorkItemPlanStore::new(paths)
         .load_active_index("project_0001", "issue_0001", &plan_id)
         .expect("load active index")
@@ -500,7 +506,57 @@ fn valid_frontend_draft_output() -> Value {
 }
 
 fn valid_integration_draft_output() -> Value {
-    valid_canonical_draft_output("outline_integration_session", "集成测试：会话过期端到端")
+    let mut output =
+        valid_canonical_draft_output("outline_integration_session", "集成测试：会话过期端到端");
+    output["draft"]["canonical_contract"]["handoff_contract"]["provided_contract_refs"] = json!([]);
+    output
+}
+
+fn assert_initial_plan_revision_published(
+    paths: &ProductAppPaths,
+    plan_id: &str,
+    expected_work_item_count: usize,
+) {
+    let revision_store = WorkItemRevisionStore::new(paths.clone());
+    let lineage = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", plan_id)
+        .expect("load active plan lineage");
+    let active_revision_id = lineage
+        .active_revision_id
+        .as_deref()
+        .expect("active plan revision id");
+    let revision = revision_store
+        .get_plan_revision("project_0001", "issue_0001", plan_id, active_revision_id)
+        .expect("load active plan revision");
+    assert_eq!(revision.work_item_bindings.len(), expected_work_item_count);
+    let plan_projection = revision_store
+        .get_plan_projection_bundle(&lineage, &revision.plan_projection_bundle_id)
+        .expect("load active plan projection");
+    assert_eq!(
+        plan_projection
+            .coder_group_context
+            .ordered_logical_work_item_ids
+            .len(),
+        expected_work_item_count
+    );
+    for (logical_work_item_id, revision_id) in &revision.work_item_bindings {
+        let work_item_revision = revision_store
+            .get_work_item_revision(&lineage, logical_work_item_id, revision_id)
+            .expect("load active work item revision");
+        revision_store
+            .get_verification_plan_revision(
+                &lineage,
+                &work_item_revision.verification_plan_revision_id,
+            )
+            .expect("load active verification plan revision");
+        let projection = revision_store
+            .get_work_item_projection_bundle(
+                &lineage,
+                &work_item_revision.work_item_projection_bundle_id,
+            )
+            .expect("load active work item projection");
+        assert_eq!(projection.work_item_revision_id, work_item_revision.id);
+    }
 }
 
 fn invalid_draft_output_missing_scope(outline_id: &str) -> Value {

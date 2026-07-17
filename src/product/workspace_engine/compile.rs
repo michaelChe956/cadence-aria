@@ -27,12 +27,8 @@ impl WorkspaceEngine {
         .await;
 
         match self.run_work_item_plan_compile().await {
-            Ok(report) => {
-                let work_item_count = report.work_item_ids.len();
-                self.update_artifact(ArtifactPayload::WorkItemPlanCompileReport {
-                    compile_report: Box::new(report),
-                })
-                .await;
+            Ok(outcome) => {
+                let work_item_count = outcome.work_items.len();
                 self.complete_active_node(Some(format!(
                     "Final Compile 完成，已创建 {work_item_count} 个 Work Item"
                 )))
@@ -119,7 +115,7 @@ impl WorkspaceEngine {
 
     pub(crate) async fn run_work_item_plan_compile(
         &mut self,
-    ) -> Result<WorkItemPlanCompileReportPayload, String> {
+    ) -> Result<InitialPlanCompileOutcome, String> {
         let lifecycle = self
             .lifecycle_store
             .clone()
@@ -257,68 +253,47 @@ impl WorkspaceEngine {
             .put_compile_transaction(&tx)
             .map_err(|error| format!("save committing compile transaction failed: {error}"))?;
 
-        for (work_item, verification_plan) in work_items.iter().zip(verification_plans.iter()) {
-            if !tx.created_work_item_ids.contains(&work_item.id) {
-                lifecycle
-                    .create_work_item(CreateWorkItemInput {
-                        id: Some(work_item.id.clone()),
-                        project_id: work_item.project_id.clone(),
-                        issue_id: work_item.issue_id.clone(),
-                        repository_id: work_item.repository_id.clone(),
-                        story_spec_ids: work_item.story_spec_ids.clone(),
-                        design_spec_ids: work_item.design_spec_ids.clone(),
-                        title: work_item.title.clone(),
-                        work_item_set_id: work_item.work_item_set_id.clone(),
-                        source_work_item_plan_id: work_item.source_work_item_plan_id.clone(),
-                        source_outline_id: work_item.source_outline_id.clone(),
-                        source_draft_id: work_item.source_draft_id.clone(),
-                        planned_implementation_context: work_item
-                            .planned_implementation_context
-                            .clone(),
-                        planned_handoff_summary: work_item.planned_handoff_summary.clone(),
-                        kind: work_item.kind.clone(),
-                        sequence_hint: work_item.sequence_hint,
-                        depends_on: work_item.depends_on.clone(),
-                        exclusive_write_scopes: work_item.exclusive_write_scopes.clone(),
-                        forbidden_write_scopes: work_item.forbidden_write_scopes.clone(),
-                        context_budget: work_item.context_budget.clone(),
-                        required_handoff_from: work_item.required_handoff_from.clone(),
-                        verification_plan_ref: work_item.verification_plan_ref.clone(),
-                        require_execution_plan_confirm: work_item.require_execution_plan_confirm,
-                        plan_status: WorkItemPlanStatus::Confirmed,
-                    })
-                    .map_err(|error| format!("create work item failed: {error}"))?;
-                tx.created_work_item_ids.push(work_item.id.clone());
-            }
-            if !tx
-                .created_verification_plan_ids
-                .contains(&verification_plan.id)
-            {
-                lifecycle
-                    .create_verification_plan(CreateVerificationPlanInput {
-                        id: Some(verification_plan.id.clone()),
-                        project_id: verification_plan.project_id.clone(),
-                        issue_id: verification_plan.issue_id.clone(),
-                        work_item_id: verification_plan.work_item_id.clone(),
-                        repository_profile_ref: verification_plan.repository_profile_ref.clone(),
-                        provider_run_ref: verification_plan.provider_run_ref.clone(),
-                        scope: verification_plan.scope.clone(),
-                        commands: verification_plan.commands.clone(),
-                        manual_checks: verification_plan.manual_checks.clone(),
-                        required_gates: verification_plan.required_gates.clone(),
-                        risk_notes: verification_plan.risk_notes.clone(),
-                        confidence: verification_plan.confidence.clone(),
-                        fallback_policy: verification_plan.fallback_policy.clone(),
-                    })
-                    .map_err(|error| format!("create verification plan failed: {error}"))?;
-                tx.created_verification_plan_ids
-                    .push(verification_plan.id.clone());
-            }
+        let accepted_drafts = draft_records
+            .iter()
+            .map(work_item_draft_revision_from_record)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let outcome = self
+            .compile_initial_plan_revision(&accepted_drafts)
+            .map_err(|error| error.to_string())?;
+        let compiled_by_logical_id = outcome
+            .work_items
+            .iter()
+            .map(|item| (item.work_item_revision.logical_work_item_id.as_str(), item))
+            .collect::<BTreeMap<_, _>>();
+        tx.outline_to_work_item_id = draft_records
+            .iter()
+            .map(|draft| {
+                (
+                    draft.outline_id.clone(),
+                    draft.candidate.logical_work_item_id.clone(),
+                )
+            })
+            .collect();
+        tx.outline_to_verification_plan_id = draft_records
+            .iter()
+            .map(|draft| {
+                let compiled = compiled_by_logical_id
+                    .get(draft.candidate.logical_work_item_id.as_str())
+                    .expect("compiled outcome must contain every accepted draft");
+                (
+                    draft.outline_id.clone(),
+                    compiled.verification_plan_revision.id.clone(),
+                )
+            })
+            .collect();
+
+        for compiled in &outcome.work_items {
             let child_session = lifecycle
                 .create_workspace_session(CreateWorkspaceSessionInput {
                     project_id: project_id.clone(),
                     issue_id: issue_id.clone(),
-                    entity_id: work_item.id.clone(),
+                    entity_id: compiled.work_item_revision.logical_work_item_id.clone(),
                     workspace_type: WorkspaceType::WorkItem,
                     author_provider: self.session.author_provider.clone(),
                     reviewer_provider: self
@@ -352,10 +327,33 @@ impl WorkspaceEngine {
                 &issue_id,
                 &plan_id,
                 IssueWorkItemPlanUpdate {
-                    work_item_ids: compiled_plan.work_item_ids.clone(),
-                    verification_plan_ids: compiled_plan.verification_plan_ids.clone(),
-                    repository_profile_ref: None,
-                    dependency_graph: compiled_plan.dependency_graph.clone(),
+                    work_item_ids: outcome
+                        .plan_projection_bundle
+                        .coder_group_context
+                        .ordered_logical_work_item_ids
+                        .clone(),
+                    verification_plan_ids: outcome
+                        .plan_projection_bundle
+                        .coder_group_context
+                        .ordered_logical_work_item_ids
+                        .iter()
+                        .map(|logical_id| {
+                            compiled_by_logical_id[logical_id.as_str()]
+                                .verification_plan_revision
+                                .id
+                                .clone()
+                        })
+                        .collect(),
+                    repository_profile_ref: previous_plan.repository_profile_ref.clone(),
+                    dependency_graph: outcome
+                        .dependency_graph_revision
+                        .edges
+                        .iter()
+                        .map(|edge| IssueWorkItemDependencyEdge {
+                            from_work_item_id: edge.from.clone(),
+                            to_work_item_id: edge.to.clone(),
+                        })
+                        .collect(),
                     created_from_provider_run: compiled_plan.created_from_provider_run.clone(),
                     validator_findings: compiled_plan.validator_findings.clone(),
                 },
@@ -369,16 +367,37 @@ impl WorkspaceEngine {
             .put_compile_transaction(&tx)
             .map_err(|error| format!("save committed compile transaction failed: {error}"))?;
 
-        Ok(WorkItemPlanCompileReportPayload {
+        let compile_report = WorkItemPlanCompileReportPayload {
             compile_id,
             generation_round_id: index.current_generation_round_id,
             status: WorkItemPlanCompileStatus::Committed,
             plan_commit_state: WorkItemPlanCommitState::Committed,
-            work_item_ids: compiled_plan.work_item_ids,
-            verification_plan_ids: compiled_plan.verification_plan_ids,
+            work_item_ids: outcome
+                .plan_projection_bundle
+                .coder_group_context
+                .ordered_logical_work_item_ids
+                .clone(),
+            verification_plan_ids: outcome
+                .plan_projection_bundle
+                .coder_group_context
+                .ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| {
+                    compiled_by_logical_id[logical_id.as_str()]
+                        .verification_plan_revision
+                        .id
+                        .clone()
+                })
+                .collect(),
             child_session_ids: tx.child_session_ids,
             validator_findings: work_item_split_findings_to_dto(&tx.validator_findings),
+        };
+        self.update_artifact(ArtifactPayload::WorkItemPlanCompileReport {
+            compile_report: Box::new(compile_report),
         })
+        .await;
+
+        Ok(outcome)
     }
 
     pub async fn handle_work_item_plan_compile_recovery_action(
@@ -409,6 +428,21 @@ impl WorkspaceEngine {
                         "abort_and_rollback is not allowed when plan_commit_state=committed"
                             .to_string(),
                     );
+                }
+                let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+                match revision_store.get_plan_lineage(&tx.project_id, &tx.issue_id, &tx.plan_id) {
+                    Ok(lineage) if lineage.active_revision_id.is_some() => {
+                        return Err(
+                            "abort_and_rollback is not allowed when an active PlanRevision exists"
+                                .to_string(),
+                        );
+                    }
+                    Ok(_) | Err(ProductStoreError::NotFound { .. }) => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "check active PlanRevision during compile recovery failed: {error}"
+                        ));
+                    }
                 }
 
                 for verification_plan_id in tx.created_verification_plan_ids.clone() {
@@ -525,6 +559,95 @@ impl WorkspaceEngine {
         lifecycle: &LifecycleStore,
         tx: &WorkItemPlanCompileTransaction,
     ) -> Result<(), String> {
+        if tx.created_work_item_ids.is_empty() && tx.created_verification_plan_ids.is_empty() {
+            let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+            let lineage = revision_store
+                .get_plan_lineage(&tx.project_id, &tx.issue_id, &tx.plan_id)
+                .map_err(|error| {
+                    format!("load active plan lineage during compile recovery failed: {error}")
+                })?;
+            let active_revision_id = lineage.active_revision_id.as_deref().ok_or_else(|| {
+                "active plan revision missing during compile recovery".to_string()
+            })?;
+            let plan_revision = revision_store
+                .get_plan_revision(
+                    &tx.project_id,
+                    &tx.issue_id,
+                    &tx.plan_id,
+                    active_revision_id,
+                )
+                .map_err(|error| {
+                    format!("load active plan revision during compile recovery failed: {error}")
+                })?;
+            let plan_projection = revision_store
+                .get_plan_projection_bundle(&lineage, &plan_revision.plan_projection_bundle_id)
+                .map_err(|error| {
+                    format!("load plan projection during compile recovery failed: {error}")
+                })?;
+            let dependency_graph = revision_store
+                .get_dependency_graph_revision(
+                    &lineage,
+                    &plan_revision.dependency_graph_revision_id,
+                )
+                .map_err(|error| {
+                    format!("load dependency graph during compile recovery failed: {error}")
+                })?;
+            let work_item_ids = plan_projection
+                .coder_group_context
+                .ordered_logical_work_item_ids;
+            let verification_plan_ids = work_item_ids
+                .iter()
+                .map(|logical_id| {
+                    let revision_id = plan_revision
+                        .work_item_bindings
+                        .get(logical_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "plan revision binding missing for `{logical_id}` during compile recovery"
+                            )
+                        })?;
+                    revision_store
+                        .get_work_item_revision(&lineage, logical_id, revision_id)
+                        .map(|revision| revision.verification_plan_revision_id)
+                        .map_err(|error| {
+                            format!(
+                                "load work item revision `{logical_id}` during compile recovery failed: {error}"
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            lifecycle
+                .commit_issue_work_item_plan(
+                    &tx.project_id,
+                    &tx.issue_id,
+                    &tx.plan_id,
+                    IssueWorkItemPlanUpdate {
+                        work_item_ids,
+                        verification_plan_ids,
+                        repository_profile_ref: tx
+                            .previous_plan_snapshot
+                            .repository_profile_ref
+                            .clone(),
+                        dependency_graph: dependency_graph
+                            .edges
+                            .into_iter()
+                            .map(|edge| IssueWorkItemDependencyEdge {
+                                from_work_item_id: edge.from,
+                                to_work_item_id: edge.to,
+                            })
+                            .collect(),
+                        created_from_provider_run: tx
+                            .previous_plan_snapshot
+                            .created_from_provider_run
+                            .clone(),
+                        validator_findings: tx.validator_findings.clone(),
+                    },
+                )
+                .map_err(|error| format!("commit recovered WorkItemPlan failed: {error}"))?;
+            return Ok(());
+        }
+
         let work_items = lifecycle
             .list_work_items(&tx.project_id, &tx.issue_id)
             .map_err(|error| format!("list work items during compile recovery failed: {error}"))?;

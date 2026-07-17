@@ -610,6 +610,7 @@ fn test_work_item_draft_record(
             contract.identity.kind = "backend".to_string();
             contract.goal.summary = format!("实现 {outline_id}");
             contract.input_contracts.clear();
+            contract.handoff_contract.provided_contract_refs.clear();
             contract.write_policy.exclusive_scopes = vec![format!("src/{outline_id}.rs")];
             contract.write_policy.forbidden_scopes.clear();
             contract.verification_checks[0].check_id = format!("cmd_{outline_id}");

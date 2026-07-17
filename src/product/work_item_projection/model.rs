@@ -147,10 +147,10 @@ pub struct PlanProjectionCompileInput<'a> {
     pub plan_id: &'a str,
     pub goal: &'a str,
     pub split_reason: &'a str,
-    pub source_refs: &'a [String],
+    pub source_refs: Vec<String>,
     pub dependency_graph: &'a DependencyContractGraph,
     pub work_item_projections: &'a BTreeMap<String, CompiledWorkItemProjections>,
-    pub expected_work_item_revision_ids: &'a BTreeMap<String, String>,
+    pub expected_work_item_revision_ids: BTreeMap<String, String>,
 }
 
 pub struct PlanProjectionValidationInput<'a> {

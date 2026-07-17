@@ -284,10 +284,10 @@ fn work_item_revision_models_shared_records_roundtrip() {
             plan_id: "issue_work_item_plan_0001",
             goal: "Compile core",
             split_reason: "Single contract boundary",
-            source_refs: &["story_spec_0001".to_string()],
+            source_refs: vec!["story_spec_0001".to_string()],
             dependency_graph: &graph,
             work_item_projections: &work_items,
-            expected_work_item_revision_ids: &BTreeMap::from([(
+            expected_work_item_revision_ids: BTreeMap::from([(
                 "wi_core".to_string(),
                 "work_item_revision_0001".to_string(),
             )]),

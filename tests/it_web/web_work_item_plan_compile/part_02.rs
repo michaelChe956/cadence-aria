@@ -308,6 +308,7 @@ async fn compile_recovery_resumes_after_committed_marker() {
 
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
     let store = WorkItemPlanStore::new(app_paths);
     let mut tx = store
         .list_compile_transactions("project_0001", "issue_0001", &plan_id)
@@ -315,10 +316,65 @@ async fn compile_recovery_resumes_after_committed_marker() {
         .into_iter()
         .next()
         .expect("compile tx");
-    let created_work_item_ids = tx.created_work_item_ids.clone();
-    let created_verification_plan_ids = tx.created_verification_plan_ids.clone();
-    assert_eq!(created_work_item_ids.len(), 3);
-    assert_eq!(created_verification_plan_ids.len(), 3);
+    assert!(tx.created_work_item_ids.is_empty());
+    assert!(tx.created_verification_plan_ids.is_empty());
+    assert_eq!(tx.child_session_ids.len(), 3);
+    let lineage = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", &plan_id)
+        .expect("load active plan lineage");
+    let active_revision_id = lineage
+        .active_revision_id
+        .as_deref()
+        .expect("active plan revision id");
+    let plan_revision = revision_store
+        .get_plan_revision(
+            "project_0001",
+            "issue_0001",
+            &plan_id,
+            active_revision_id,
+        )
+        .expect("load active plan revision");
+    assert_eq!(plan_revision.work_item_bindings.len(), 3);
+    revision_store
+        .get_plan_validation_report(&lineage, &plan_revision.validation_report_ref)
+        .expect("load plan validation report");
+    let plan_projection = revision_store
+        .get_plan_projection_bundle(&lineage, &plan_revision.plan_projection_bundle_id)
+        .expect("load plan projection bundle");
+    let expected_work_item_ids = plan_projection
+        .coder_group_context
+        .ordered_logical_work_item_ids
+        .clone();
+    let expected_verification_plan_ids = expected_work_item_ids
+        .iter()
+        .map(|logical_id| {
+            let revision_id = plan_revision
+                .work_item_bindings
+                .get(logical_id)
+                .expect("stable logical binding");
+            let work_item_revision = revision_store
+                .get_work_item_revision(&lineage, logical_id, revision_id)
+                .expect("load work item revision");
+            let projection = revision_store
+                .get_work_item_projection_bundle(
+                    &lineage,
+                    &work_item_revision.work_item_projection_bundle_id,
+                )
+                .expect("load work item projection bundle");
+            assert_eq!(projection.work_item_revision_id, work_item_revision.id);
+            work_item_revision.verification_plan_revision_id
+        })
+        .collect::<Vec<_>>();
+    let artifact_versions = lifecycle
+        .list_artifact_versions(&session_id)
+        .expect("list compile artifact versions");
+    assert!(artifact_versions.iter().any(|version| {
+        version.is_current
+            && matches!(
+                &version.payload,
+                ArtifactPayload::WorkItemPlanCompileReport { .. }
+            )
+    }));
 
     lifecycle
         .restore_issue_work_item_plan_snapshot(
@@ -401,8 +457,20 @@ async fn compile_recovery_resumes_after_committed_marker() {
         .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
         .expect("load plan after recovery continue");
     assert_eq!(plan.status, IssueWorkItemPlanStatus::Confirmed);
-    assert_eq!(plan.work_item_ids, created_work_item_ids);
-    assert_eq!(plan.verification_plan_ids, created_verification_plan_ids);
+    assert_eq!(plan.work_item_ids, expected_work_item_ids);
+    assert_eq!(
+        plan.verification_plan_ids,
+        expected_verification_plan_ids
+    );
+    assert_eq!(
+        lifecycle
+            .list_workspace_sessions("project_0001", "issue_0001")
+            .expect("list child sessions after recovery")
+            .into_iter()
+            .filter(|session| session.workspace_type == WorkspaceType::WorkItem)
+            .count(),
+        3
+    );
 
     let tx = store
         .get_compile_transaction("project_0001", "issue_0001", &plan_id, &tx.compile_id)
@@ -414,7 +482,7 @@ async fn compile_recovery_resumes_after_committed_marker() {
 }
 
 #[tokio::test]
-async fn recovery_abort_and_rollback_before_plan_commit_restores_previous_snapshot() {
+async fn recovery_abort_is_rejected_when_active_plan_revision_exists_with_stale_marker() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
@@ -455,6 +523,7 @@ async fn recovery_abort_and_rollback_before_plan_commit_restores_previous_snapsh
 
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
     let store = WorkItemPlanStore::new(app_paths);
     let mut tx = store
         .list_compile_transactions("project_0001", "issue_0001", &plan_id)
@@ -462,13 +531,22 @@ async fn recovery_abort_and_rollback_before_plan_commit_restores_previous_snapsh
         .into_iter()
         .next()
         .expect("compile tx");
-    assert_eq!(
-        lifecycle
-            .list_work_items("project_0001", "issue_0001")
-            .expect("list work items before rollback")
-            .len(),
-        3
-    );
+    let lineage = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", &plan_id)
+        .expect("load active plan lineage before stale-marker recovery");
+    let active_revision_id = lineage
+        .active_revision_id
+        .clone()
+        .expect("active plan revision before stale-marker recovery");
+    let plan_revision = revision_store
+        .get_plan_revision(
+            "project_0001",
+            "issue_0001",
+            &plan_id,
+            &active_revision_id,
+        )
+        .expect("load active plan revision before stale-marker recovery");
+    assert_eq!(plan_revision.work_item_bindings.len(), 3);
 
     tx.status = WorkItemPlanCompileStatus::RecoveryRequired;
     tx.plan_commit_state = WorkItemPlanCommitState::NotStarted;
@@ -525,55 +603,55 @@ async fn recovery_abort_and_rollback_before_plan_commit_restores_previous_snapsh
     .await
     .expect("send recovery rollback");
     let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
-        messages
-            .iter()
-            .any(|message| message["type"] == "stage_change" && message["stage"] == "human_confirm")
+        messages.iter().any(|message| {
+            message["type"] == "protocol_error"
+                && message["code"] == "INVALID_COMPILE_RECOVERY_ACTION"
+        })
     })
     .await;
     assert!(
         messages.iter().any(|message| {
-            message["type"] == "timeline_node_updated"
-                && message["node_id"] == "timeline_node_compile_recovery"
+            message["type"] == "protocol_error"
+                && message["code"] == "INVALID_COMPILE_RECOVERY_ACTION"
+                && message["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("active PlanRevision"))
         }),
-        "rollback should complete recovery node, got {messages:?}"
+        "active PlanRevision must reject stale-marker rollback, got {messages:?}"
     );
 
     let plan = lifecycle
         .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
-        .expect("load plan after rollback");
-    assert_eq!(plan.status, IssueWorkItemPlanStatus::Draft);
-    assert!(plan.work_item_ids.is_empty());
-    assert!(plan.verification_plan_ids.is_empty());
-    assert!(
-        lifecycle
-            .list_work_items("project_0001", "issue_0001")
-            .expect("list work items after rollback")
-            .is_empty()
-    );
-    assert!(
-        lifecycle
-            .list_verification_plans("project_0001", "issue_0001")
-            .expect("list verification plans after rollback")
-            .is_empty()
-    );
-    assert!(
+        .expect("load plan after rejected stale-marker rollback");
+    assert_eq!(plan.status, IssueWorkItemPlanStatus::Confirmed);
+    assert_eq!(plan.work_item_ids.len(), 3);
+    assert_eq!(plan.verification_plan_ids.len(), 3);
+    assert_eq!(
         lifecycle
             .list_workspace_sessions("project_0001", "issue_0001")
-            .expect("list workspace sessions after rollback")
+            .expect("list workspace sessions after rejected rollback")
             .into_iter()
             .filter(|session| session.workspace_type == WorkspaceType::WorkItem)
-            .collect::<Vec<_>>()
-            .is_empty()
+            .count(),
+        3
+    );
+    assert_eq!(
+        revision_store
+            .get_plan_lineage("project_0001", "issue_0001", &plan_id)
+            .expect("reload active plan lineage")
+            .active_revision_id
+            .as_deref(),
+        Some(active_revision_id.as_str())
     );
 
     let tx = store
         .get_compile_transaction("project_0001", "issue_0001", &plan_id, &tx.compile_id)
-        .expect("load rolled back tx");
-    assert_eq!(tx.status, WorkItemPlanCompileStatus::Failed);
-    assert_eq!(tx.step_cursor, "rolled_back");
+        .expect("load rejected stale-marker tx");
+    assert_eq!(tx.status, WorkItemPlanCompileStatus::RecoveryRequired);
+    assert_eq!(tx.step_cursor, "committing");
     assert!(tx.created_work_item_ids.is_empty());
     assert!(tx.created_verification_plan_ids.is_empty());
-    assert!(tx.child_session_ids.is_empty());
+    assert_eq!(tx.child_session_ids.len(), 3);
 
     ws.close(None).await.ok();
 }
@@ -603,8 +681,11 @@ fn valid_frontend_draft_output() -> Value {
 }
 
 fn valid_integration_draft_output() -> Value {
-    valid_canonical_draft_output(
+    let mut output = valid_canonical_draft_output(
         "outline_integration_session",
         "集成测试：会话过期端到端",
-    )
+    );
+    output["draft"]["canonical_contract"]["handoff_contract"]["provided_contract_refs"] =
+        json!([]);
+    output
 }

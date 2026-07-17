@@ -1,5 +1,34 @@
 use super::*;
-use crate::product::models::WorkItemDraftVerificationPlan;
+use crate::product::models::{
+    PlanRevisionReason, WorkItemDraftRevision, WorkItemDraftVerificationPlan,
+};
+
+pub(crate) fn work_item_draft_revision_from_record(
+    record: &WorkItemDraftRecord,
+) -> Result<WorkItemDraftRevision, WorkspaceEngineError> {
+    if record.candidate.logical_work_item_id
+        != record
+            .candidate
+            .canonical_contract_candidate
+            .identity
+            .logical_work_item_id
+    {
+        return Err(WorkspaceEngineError::InvalidInitialPlan(format!(
+            "draft `{}` logical identity does not match canonical contract",
+            record.draft_id
+        )));
+    }
+    Ok(WorkItemDraftRevision {
+        id: record.draft_id.clone(),
+        logical_work_item_id: record.candidate.logical_work_item_id.clone(),
+        revision_no: record.attempt_index,
+        supersedes: record.copied_from_draft_id.clone(),
+        revision_reason: PlanRevisionReason::InitialCompile,
+        canonical_contract_candidate: record.candidate.canonical_contract_candidate.clone(),
+        trigger_repair_request_id: None,
+        created_at: record.created_at.clone(),
+    })
+}
 
 pub(crate) fn parse_compile_verification_plan(
     value: &WorkItemDraftVerificationPlan,

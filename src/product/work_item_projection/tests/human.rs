@@ -160,10 +160,10 @@ fn work_item_projection_plan_human_presentation_requires_matching_plan_binding()
             plan_id: "plan_0001",
             goal: "Compile the plan",
             split_reason: "Explicit dependency boundary",
-            source_refs: &["design_0001".to_string()],
+            source_refs: vec!["design_0001".to_string()],
             dependency_graph: &graph,
             work_item_projections: &work_items,
-            expected_work_item_revision_ids: &expected_revision_ids,
+            expected_work_item_revision_ids: expected_revision_ids,
         })
         .unwrap();
     let bundle_id = "plan_projection_bundle_0001";

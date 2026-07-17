@@ -84,10 +84,10 @@ fn work_item_revision_store_persists_scoped_revision_artifacts() {
             plan_id: PLAN_ID,
             goal: "Persist scoped projection artifacts",
             split_reason: "Single work item",
-            source_refs: &["design_spec_0001".to_string()],
+            source_refs: vec!["design_spec_0001".to_string()],
             dependency_graph: &graph,
             work_item_projections: &work_items,
-            expected_work_item_revision_ids: &expected_revision_ids,
+            expected_work_item_revision_ids: expected_revision_ids,
         })
         .unwrap();
     let plan_projection = PlanProjectionBundle {

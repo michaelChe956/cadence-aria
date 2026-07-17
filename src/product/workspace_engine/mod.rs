@@ -21,8 +21,7 @@ use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{
-    AppendSpecVersionInput, CreateVerificationPlanInput, CreateWorkItemInput,
-    CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
+    AppendSpecVersionInput, CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
 };
 use crate::product::models::{
     AgentRole, ArtifactRef, DesignContextCapabilities, IssueWorkItemDependencyEdge,
@@ -42,6 +41,7 @@ use crate::product::work_item_plan_store::{
     WorkItemPlanStore, copy_draft_for_current_round, mark_draft_active,
     mark_draft_record_superseded, next_batch_id, next_draft_id, next_generation_round_id,
 };
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_split_engine::{
     OutlineAuthorOutput, RedoSpec, WorkItemPlanContextBlocker, WorkItemSplitProviderOutput,
     build_work_item_draft_invocation,
@@ -83,6 +83,7 @@ mod lifecycle_recovery;
 mod mappings;
 mod parsers;
 mod plan_outline;
+mod plan_projection;
 mod prompts;
 mod provider_drive;
 mod review;
@@ -93,6 +94,11 @@ mod types;
 mod tests;
 
 pub use interrupted_run_recovery::{InterruptedRunRecoveryError, InterruptedRunRecoveryOutcome};
+pub use plan_projection::{
+    CompiledWorkItemRevision, InitialPlanCompileOutcome, WorkspaceEngineError,
+    compile_plan_projection_bundle, compile_work_item_revision, plan_projection_input,
+    publish_initial_plan_revision,
+};
 pub use types::{
     AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome,
     SessionMessage, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,

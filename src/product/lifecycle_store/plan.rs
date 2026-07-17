@@ -315,6 +315,8 @@ impl LifecycleStore {
         plan_id: &str,
         update: IssueWorkItemPlanUpdate,
     ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        validate_relative_ids(&update.work_item_ids)?;
+        validate_relative_ids(&update.verification_plan_ids)?;
         let mut plan = self.update_issue_work_item_plan(project_id, issue_id, plan_id, update)?;
         plan.status = IssueWorkItemPlanStatus::Confirmed;
         plan.updated_at = Utc::now().to_rfc3339();

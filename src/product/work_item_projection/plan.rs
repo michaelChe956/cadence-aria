@@ -23,7 +23,7 @@ impl PlanProjectionCompiler {
     ) -> Result<CompiledPlanProjections, ProjectionCompileError> {
         let context_validation = validate_plan_compile_context(
             input.dependency_graph,
-            input.expected_work_item_revision_ids,
+            &input.expected_work_item_revision_ids,
             input.work_item_projections,
         );
         if !context_validation.is_valid() {
@@ -45,7 +45,7 @@ impl PlanProjectionCompiler {
                 ),
                 contract_flow,
                 risks,
-                source_refs: normalized_source_refs(input.source_refs),
+                source_refs: normalized_source_refs(&input.source_refs),
                 normative: false,
                 used_by_provider: false,
             },
@@ -76,8 +76,8 @@ impl PlanProjectionCompiler {
 
         let validation = validate_plan_projection_coverage(PlanProjectionValidationInput {
             expected_plan_id: input.plan_id,
-            expected_source_refs: input.source_refs,
-            expected_work_item_revision_ids: input.expected_work_item_revision_ids,
+            expected_source_refs: &input.source_refs,
+            expected_work_item_revision_ids: &input.expected_work_item_revision_ids,
             dependency_graph: input.dependency_graph,
             compiled: &compiled,
             work_item_projections: input.work_item_projections,
