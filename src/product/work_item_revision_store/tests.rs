@@ -14,7 +14,13 @@ use crate::product::models::{
     WorkItemDraftRevision, WorkItemDraftRevisionStatus, WorkItemPlanLineage, WorkItemPlanRevision,
     WorkItemProjectionBundle, WorkItemRevision, WorkItemRevisionReplacement,
 };
-use crate::product::work_item_contract::canonical_contract_fixture;
+use crate::product::work_item_contract::{
+    ContractValidationReport, build_dependency_contract_graph, canonical_contract_fixture,
+};
+use crate::product::work_item_projection::{
+    PlanProjectionCompileInput, PlanProjectionCompiler, ProjectionValidationReport,
+    WorkItemProjectionCompiler, projection_hashes,
+};
 
 use super::WorkItemRevisionStore;
 
@@ -433,12 +439,15 @@ fn work_item_revision_store_persists_scoped_revision_artifacts() {
     store.put_logical_work_item(&plan, &logical).unwrap();
     let revision = work_item_revision();
     store.put_work_item_revision(&plan, &revision).unwrap();
-
+    let compiled_work_item = WorkItemProjectionCompiler
+        .compile(&revision.canonical_contract, &revision.id)
+        .unwrap();
+    let work_item_hashes = projection_hashes(&compiled_work_item).unwrap();
     let validation = PlanValidationReportArtifact {
         id: "plan_validation_report_0001".to_string(),
         plan_id: PLAN_ID.to_string(),
-        contract_validation: json!({"valid": true}),
-        projection_validation: json!({"valid": true}),
+        contract_validation: ContractValidationReport { findings: vec![] },
+        projection_validation: ProjectionValidationReport { findings: vec![] },
         created_at: "2026-07-17T00:00:05Z".to_string(),
     };
     store
@@ -450,19 +459,18 @@ fn work_item_revision_store_persists_scoped_revision_artifacts() {
             .unwrap(),
         validation
     );
-
     let work_item_projection = WorkItemProjectionBundle {
         id: "work_item_projection_bundle_0001".to_string(),
         work_item_revision_id: revision.id.clone(),
         canonical_contract_hash: revision.canonical_contract_hash.clone(),
         projection_schema_version: 1,
         compiler_version: "compiler-v1".to_string(),
-        human_projection: json!({"title": "human"}),
-        coder_projection: json!({"title": "coder"}),
-        reviewer_projection: json!({"title": "reviewer"}),
-        human_projection_hash: "human_hash".to_string(),
-        coder_projection_hash: "coder_hash".to_string(),
-        reviewer_projection_hash: "reviewer_hash".to_string(),
+        human_projection: compiled_work_item.human.clone(),
+        coder_projection: compiled_work_item.coder.clone(),
+        reviewer_projection: compiled_work_item.reviewer.clone(),
+        human_projection_hash: work_item_hashes.human,
+        coder_projection_hash: work_item_hashes.coder,
+        reviewer_projection_hash: work_item_hashes.reviewer,
         created_at: "2026-07-17T00:00:06Z".to_string(),
     };
     store
@@ -474,15 +482,32 @@ fn work_item_revision_store_persists_scoped_revision_artifacts() {
             .unwrap(),
         work_item_projection
     );
-
+    let mut plan_contract = revision.canonical_contract.clone();
+    plan_contract.input_contracts.clear();
+    plan_contract
+        .handoff_contract
+        .provided_contract_refs
+        .clear();
+    let graph = build_dependency_contract_graph(&[plan_contract]).unwrap();
+    let work_items = BTreeMap::from([(WORK_ITEM_ID.to_string(), compiled_work_item)]);
+    let compiled_plan = PlanProjectionCompiler
+        .compile(PlanProjectionCompileInput {
+            plan_id: PLAN_ID,
+            goal: "Persist scoped projection artifacts",
+            split_reason: "Single work item",
+            source_refs: &["design_spec_0001".to_string()],
+            dependency_graph: &graph,
+            work_item_projections: &work_items,
+        })
+        .unwrap();
     let plan_projection = PlanProjectionBundle {
         id: "plan_projection_bundle_0001".to_string(),
         plan_revision_id: "plan_revision_0001".to_string(),
         dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
         work_item_projection_bundle_refs: vec![work_item_projection.id.clone()],
-        human_group_projection: json!({"title": "human group"}),
-        coder_group_context: json!({"title": "coder group"}),
-        reviewer_group_matrix: json!({"title": "reviewer group"}),
+        human_group_projection: compiled_plan.human,
+        coder_group_context: compiled_plan.coder,
+        reviewer_group_matrix: compiled_plan.reviewer,
         human_group_projection_hash: "human_group_hash".to_string(),
         coder_group_context_hash: "coder_group_hash".to_string(),
         reviewer_group_matrix_hash: "reviewer_group_hash".to_string(),

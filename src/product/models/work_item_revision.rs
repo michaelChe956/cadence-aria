@@ -3,7 +3,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::product::work_item_contract::{
-    CanonicalWorkItemContract, DependencyContractEdge, VerificationCheck,
+    CanonicalWorkItemContract, ContractValidationReport, DependencyContractEdge, VerificationCheck,
+};
+use crate::product::work_item_projection::{
+    CoderGroupContext, CoderWorkItemProjection, HumanGroupProjection, HumanWorkItemProjection,
+    ProjectionValidationReport, ReviewerGroupMatrix, ReviewerWorkItemProjection,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,8 +113,8 @@ pub struct VerificationPlanRevision {
 pub struct PlanValidationReportArtifact {
     pub id: String,
     pub plan_id: String,
-    pub contract_validation: serde_json::Value,
-    pub projection_validation: serde_json::Value,
+    pub contract_validation: ContractValidationReport,
+    pub projection_validation: ProjectionValidationReport,
     pub created_at: String,
 }
 
@@ -121,9 +125,9 @@ pub struct WorkItemProjectionBundle {
     pub canonical_contract_hash: String,
     pub projection_schema_version: u32,
     pub compiler_version: String,
-    pub human_projection: serde_json::Value,
-    pub coder_projection: serde_json::Value,
-    pub reviewer_projection: serde_json::Value,
+    pub human_projection: HumanWorkItemProjection,
+    pub coder_projection: CoderWorkItemProjection,
+    pub reviewer_projection: ReviewerWorkItemProjection,
     pub human_projection_hash: String,
     pub coder_projection_hash: String,
     pub reviewer_projection_hash: String,
@@ -136,9 +140,9 @@ pub struct PlanProjectionBundle {
     pub plan_revision_id: String,
     pub dependency_graph_revision_id: String,
     pub work_item_projection_bundle_refs: Vec<String>,
-    pub human_group_projection: serde_json::Value,
-    pub coder_group_context: serde_json::Value,
-    pub reviewer_group_matrix: serde_json::Value,
+    pub human_group_projection: HumanGroupProjection,
+    pub coder_group_context: CoderGroupContext,
+    pub reviewer_group_matrix: ReviewerGroupMatrix,
     pub human_group_projection_hash: String,
     pub coder_group_context_hash: String,
     pub reviewer_group_matrix_hash: String,

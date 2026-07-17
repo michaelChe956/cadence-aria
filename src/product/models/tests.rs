@@ -13,7 +13,13 @@ use crate::product::models::{
     WorkItemDraftRevisionState, WorkItemDraftRevisionStatus, WorkItemPlanLineage,
     WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision, WorkItemRevisionReplacement,
 };
-use crate::product::work_item_contract::canonical_contract_fixture;
+use crate::product::work_item_contract::{
+    ContractValidationReport, build_dependency_contract_graph, canonical_contract_fixture,
+};
+use crate::product::work_item_projection::{
+    PlanProjectionCompileInput, PlanProjectionCompiler, ProjectionValidationReport,
+    WorkItemProjectionCompiler, projection_hashes,
+};
 use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
 fn assert_serde_roundtrip<T>(value: &T)
@@ -261,6 +267,28 @@ fn work_item_revision_models_enums_use_snake_case() {
 
 #[test]
 fn work_item_revision_models_shared_records_roundtrip() {
+    let mut projection_contract = canonical_contract_fixture("wi_core");
+    projection_contract.input_contracts.clear();
+    projection_contract
+        .handoff_contract
+        .provided_contract_refs
+        .clear();
+    let work_item_projection = WorkItemProjectionCompiler
+        .compile(&projection_contract, "work_item_revision_0001")
+        .unwrap();
+    let work_item_hashes = projection_hashes(&work_item_projection).unwrap();
+    let graph = build_dependency_contract_graph(&[projection_contract]).unwrap();
+    let work_items = BTreeMap::from([("wi_core".to_string(), work_item_projection.clone())]);
+    let plan_projection = PlanProjectionCompiler
+        .compile(PlanProjectionCompileInput {
+            plan_id: "issue_work_item_plan_0001",
+            goal: "Compile core",
+            split_reason: "Single contract boundary",
+            source_refs: &["story_spec_0001".to_string()],
+            dependency_graph: &graph,
+            work_item_projections: &work_items,
+        })
+        .unwrap();
     assert_serde_roundtrip(&WorkItemPlanLineage {
         id: "issue_work_item_plan_0001".to_string(),
         project_id: "project_0001".to_string(),
@@ -290,8 +318,8 @@ fn work_item_revision_models_shared_records_roundtrip() {
     assert_serde_roundtrip(&PlanValidationReportArtifact {
         id: "validation_report_0001".to_string(),
         plan_id: "issue_work_item_plan_0001".to_string(),
-        contract_validation: serde_json::json!({"valid": true}),
-        projection_validation: serde_json::json!({"valid": true}),
+        contract_validation: ContractValidationReport { findings: vec![] },
+        projection_validation: ProjectionValidationReport { findings: vec![] },
         created_at: "2026-07-17T00:00:00Z".to_string(),
     });
     assert_serde_roundtrip(&WorkItemProjectionBundle {
@@ -300,12 +328,12 @@ fn work_item_revision_models_shared_records_roundtrip() {
         canonical_contract_hash: "sha256:contract".to_string(),
         projection_schema_version: 1,
         compiler_version: "compiler-v1".to_string(),
-        human_projection: serde_json::json!({"summary": "Compile core"}),
-        coder_projection: serde_json::json!({"files": ["src/lib.rs"]}),
-        reviewer_projection: serde_json::json!({"checks": ["cargo test"]}),
-        human_projection_hash: "sha256:human".to_string(),
-        coder_projection_hash: "sha256:coder".to_string(),
-        reviewer_projection_hash: "sha256:reviewer".to_string(),
+        human_projection: work_item_projection.human,
+        coder_projection: work_item_projection.coder,
+        reviewer_projection: work_item_projection.reviewer,
+        human_projection_hash: work_item_hashes.human,
+        coder_projection_hash: work_item_hashes.coder,
+        reviewer_projection_hash: work_item_hashes.reviewer,
         created_at: "2026-07-17T00:00:00Z".to_string(),
     });
     assert_serde_roundtrip(&PlanProjectionBundle {
@@ -313,9 +341,9 @@ fn work_item_revision_models_shared_records_roundtrip() {
         plan_revision_id: "plan_revision_0001".to_string(),
         dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
         work_item_projection_bundle_refs: vec!["work_item_projection_bundle_0001".to_string()],
-        human_group_projection: serde_json::json!({"groups": []}),
-        coder_group_context: serde_json::json!({"context": []}),
-        reviewer_group_matrix: serde_json::json!({"matrix": []}),
+        human_group_projection: plan_projection.human,
+        coder_group_context: plan_projection.coder,
+        reviewer_group_matrix: plan_projection.reviewer,
         human_group_projection_hash: "sha256:human-group".to_string(),
         coder_group_context_hash: "sha256:coder-group".to_string(),
         reviewer_group_matrix_hash: "sha256:reviewer-group".to_string(),
@@ -333,7 +361,7 @@ fn work_item_revision_models_shared_records_roundtrip() {
         risk_explanation: vec!["Schema drift".to_string()],
         source_refs: vec!["story_spec_0001".to_string()],
         normative: false,
-        used_by_provider: true,
+        used_by_provider: false,
         created_at: "2026-07-17T00:00:00Z".to_string(),
     });
     assert_serde_roundtrip(&HandoffRevision {
