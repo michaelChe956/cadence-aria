@@ -2,6 +2,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock, mpsc};
+
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
@@ -121,6 +128,8 @@ impl ExclusiveFileLock {
             .map_err(|error| {
                 ProductStoreError::Io(format!("open lock {}: {error}", lock_path.display()))
             })?;
+        #[cfg(test)]
+        notify_lock_attempt(&lock_path);
         lock_file_exclusive(&file, &lock_path)?;
         Ok(Self { file })
     }
@@ -129,6 +138,94 @@ impl ExclusiveFileLock {
 impl Drop for ExclusiveFileLock {
     fn drop(&mut self) {
         unlock_file(&self.file);
+    }
+}
+
+#[cfg(test)]
+struct LockAttemptHookEntry {
+    registration_id: u64,
+    sender: mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+struct LockAttemptHookGuard {
+    lock_path: PathBuf,
+    registration_id: u64,
+}
+
+#[cfg(test)]
+static LOCK_ATTEMPT_HOOKS: OnceLock<Mutex<HashMap<PathBuf, LockAttemptHookEntry>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+static NEXT_LOCK_ATTEMPT_HOOK_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+fn lock_attempt_hooks() -> &'static Mutex<HashMap<PathBuf, LockAttemptHookEntry>> {
+    LOCK_ATTEMPT_HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn register_lock_attempt_hook(target_path: &Path) -> (LockAttemptHookGuard, mpsc::Receiver<()>) {
+    let lock_path = fs::canonicalize(lock_path_for(target_path))
+        .expect("held test lock path should be canonicalizable");
+    let registration_id = NEXT_LOCK_ATTEMPT_HOOK_ID.fetch_add(1, Ordering::Relaxed);
+    let (sender, receiver) = mpsc::channel();
+    let mut hooks = lock_attempt_hooks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if hooks.contains_key(&lock_path) {
+        drop(hooks);
+        panic!(
+            "lock attempt hook already registered for {}",
+            lock_path.display()
+        );
+    }
+    hooks.insert(
+        lock_path.clone(),
+        LockAttemptHookEntry {
+            registration_id,
+            sender,
+        },
+    );
+    drop(hooks);
+    (
+        LockAttemptHookGuard {
+            lock_path,
+            registration_id,
+        },
+        receiver,
+    )
+}
+
+#[cfg(test)]
+fn notify_lock_attempt(lock_path: &Path) {
+    let Ok(lock_path) = fs::canonicalize(lock_path) else {
+        return;
+    };
+    let sender = {
+        let hooks = lock_attempt_hooks()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        hooks.get(&lock_path).map(|entry| entry.sender.clone())
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(());
+    }
+}
+
+#[cfg(test)]
+impl Drop for LockAttemptHookGuard {
+    fn drop(&mut self) {
+        let mut hooks = lock_attempt_hooks()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if hooks
+            .get(&self.lock_path)
+            .is_some_and(|entry| entry.registration_id == self.registration_id)
+        {
+            hooks.remove(&self.lock_path);
+        }
     }
 }
 

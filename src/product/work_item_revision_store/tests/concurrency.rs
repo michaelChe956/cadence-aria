@@ -5,33 +5,32 @@ use std::time::Duration;
 use crate::product::json_store::{read_json, write_json};
 use crate::product::models::WorkItemDraftRevisionState;
 
-use super::super::ExclusiveFileLock;
+use super::super::{ExclusiveFileLock, register_lock_attempt_hook};
 use super::*;
 
 const LOCKED_TIMEOUT: Duration = Duration::from_millis(200);
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn spawn_operation<T, F>(started_sender: Sender<()>, result_sender: Sender<T>, operation: F)
+fn spawn_operation<T, F>(result_sender: Sender<T>, operation: F)
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
     let _ = thread::spawn(move || {
-        let _ = started_sender.send(());
         let result = operation();
         let _ = result_sender.send(result);
     });
 }
 
-fn assert_operations_blocked<T>(
-    started_receiver: &Receiver<()>,
+fn assert_workers_waiting_on_lock<T>(
+    lock_attempt_receiver: &Receiver<()>,
     result_receiver: &Receiver<T>,
     operation_count: usize,
 ) {
     for _ in 0..operation_count {
-        started_receiver
+        lock_attempt_receiver
             .recv_timeout(COMPLETION_TIMEOUT)
-            .expect("operation thread did not start");
+            .expect("worker did not reach the registered target lock");
     }
     assert!(matches!(
         result_receiver.recv_timeout(LOCKED_TIMEOUT),
@@ -77,13 +76,13 @@ fn work_item_revision_store_plan_compare_and_set_waits_for_lineage_lock() {
 
     let target_path = store.plan_lineage_path(&plan.project_id, &plan.issue_id, &plan.id);
     let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
-    let (started_sender, started_receiver) = mpsc::channel();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
     let (result_sender, result_receiver) = mpsc::channel();
     for next_revision_id in [second.id.clone(), third.id.clone()] {
         let store = WorkItemRevisionStore::new(paths.clone());
         let plan = plan.clone();
         let expected_revision_id = first.id.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store.compare_and_set_active_plan_revision(
                 &plan,
                 &expected_revision_id,
@@ -91,10 +90,9 @@ fn work_item_revision_store_plan_compare_and_set_waits_for_lineage_lock() {
             )
         });
     }
-    drop(started_sender);
     drop(result_sender);
 
-    assert_operations_blocked(&started_receiver, &result_receiver, 2);
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 2);
     drop(guard);
 
     let results = receive_results(&result_receiver, 2);
@@ -120,20 +118,19 @@ fn work_item_revision_store_work_item_compare_and_set_waits_for_logical_item_loc
     let target_path =
         store.logical_work_item_path(&plan.project_id, &plan.issue_id, &plan.id, &logical.id);
     let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
-    let (started_sender, started_receiver) = mpsc::channel();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
     let (result_sender, result_receiver) = mpsc::channel();
     for next_revision_id in [first.id.clone(), second.id.clone()] {
         let store = WorkItemRevisionStore::new(paths.clone());
         let plan = plan.clone();
         let logical = logical.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store.set_active_work_item_revision(&plan, &logical, None, &next_revision_id)
         });
     }
-    drop(started_sender);
     drop(result_sender);
 
-    assert_operations_blocked(&started_receiver, &result_receiver, 2);
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 2);
     drop(guard);
 
     let results = receive_results(&result_receiver, 2);
@@ -150,19 +147,18 @@ fn work_item_revision_store_amendment_acquire_waits_for_lineage_lock() {
 
     let target_path = store.plan_lineage_path(&plan.project_id, &plan.issue_id, &plan.id);
     let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
-    let (started_sender, started_receiver) = mpsc::channel();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
     let (result_sender, result_receiver) = mpsc::channel();
     for amendment_id in ["amendment_0001", "amendment_0002"] {
         let store = WorkItemRevisionStore::new(paths.clone());
         let plan = plan.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store.acquire_active_amendment(&plan, amendment_id)
         });
     }
-    drop(started_sender);
     drop(result_sender);
 
-    assert_operations_blocked(&started_receiver, &result_receiver, 2);
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 2);
     drop(guard);
 
     let results = receive_results(&result_receiver, 2);
@@ -182,19 +178,18 @@ fn work_item_revision_store_amendment_release_waits_for_lineage_lock() {
 
     let target_path = store.plan_lineage_path(&plan.project_id, &plan.issue_id, &plan.id);
     let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
-    let (started_sender, started_receiver) = mpsc::channel();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
     let (result_sender, result_receiver) = mpsc::channel();
     for _ in 0..2 {
         let store = WorkItemRevisionStore::new(paths.clone());
         let plan = plan.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store.release_active_amendment(&plan, "amendment_0001")
         });
     }
-    drop(started_sender);
     drop(result_sender);
 
-    assert_operations_blocked(&started_receiver, &result_receiver, 2);
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 2);
     drop(guard);
 
     let results = receive_results(&result_receiver, 2);
@@ -215,13 +210,13 @@ fn work_item_revision_store_repair_updates_wait_for_request_lock() {
     let target_path =
         store.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, &request.id);
     let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
-    let (started_sender, started_receiver) = mpsc::channel();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
     let (result_sender, result_receiver) = mpsc::channel();
     {
         let store = WorkItemRevisionStore::new(paths.clone());
         let plan = plan.clone();
         let request_id = request.id.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store.update_repair_request_status(
                 &plan,
                 &request_id,
@@ -234,14 +229,13 @@ fn work_item_revision_store_repair_updates_wait_for_request_lock() {
         let plan = plan.clone();
         let request_id = request.id.clone();
         let extra = extra.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store.merge_repair_request_evidence(&plan, &request_id, vec![extra])
         });
     }
-    drop(started_sender);
     drop(result_sender);
 
-    assert_operations_blocked(&started_receiver, &result_receiver, 2);
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 2);
     drop(guard);
 
     for result in receive_results(&result_receiver, 2) {
@@ -267,19 +261,18 @@ fn work_item_revision_store_immutable_conflict_waits_for_artifact_lock() {
     let target_path =
         store.plan_revision_path(&plan.project_id, &plan.issue_id, &plan.id, &first.id);
     let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
-    let (started_sender, started_receiver) = mpsc::channel();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
     let (result_sender, result_receiver) = mpsc::channel();
     for revision in [first, second] {
         let store = WorkItemRevisionStore::new(paths.clone());
         let plan = plan.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store.put_plan_revision(&plan, &revision).map(|()| revision)
         });
     }
-    drop(started_sender);
     drop(result_sender);
 
-    assert_operations_blocked(&started_receiver, &result_receiver, 2);
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 2);
     drop(guard);
 
     let results = receive_results(&result_receiver, 2);
@@ -306,20 +299,19 @@ fn work_item_revision_store_immutable_replay_waits_for_artifact_lock() {
     let target_path =
         store.plan_revision_path(&plan.project_id, &plan.issue_id, &plan.id, &revision.id);
     let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
-    let (started_sender, started_receiver) = mpsc::channel();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
     let (result_sender, result_receiver) = mpsc::channel();
     for _ in 0..2 {
         let store = WorkItemRevisionStore::new(paths.clone());
         let plan = plan.clone();
         let revision = revision.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store.put_plan_revision(&plan, &revision)
         });
     }
-    drop(started_sender);
     drop(result_sender);
 
-    assert_operations_blocked(&started_receiver, &result_receiver, 2);
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 2);
     drop(guard);
 
     for result in receive_results(&result_receiver, 2) {
@@ -347,13 +339,13 @@ fn work_item_revision_store_draft_state_init_and_update_share_state_lock() {
         store.draft_revision_state_path(&plan.project_id, &plan.issue_id, &plan.id, &draft.id);
     assert!(!state_path.exists());
     let guard = ExclusiveFileLock::acquire(&state_path).unwrap();
-    let (started_sender, started_receiver) = mpsc::channel();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&state_path);
     let (result_sender, result_receiver) = mpsc::channel();
     {
         let store = WorkItemRevisionStore::new(paths.clone());
         let plan = plan.clone();
         let draft = draft.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store.put_draft_revision(&plan, &draft)
         });
     }
@@ -361,7 +353,7 @@ fn work_item_revision_store_draft_state_init_and_update_share_state_lock() {
         let store = WorkItemRevisionStore::new(paths);
         let plan = plan.clone();
         let draft_id = draft.id.clone();
-        spawn_operation(started_sender.clone(), result_sender.clone(), move || {
+        spawn_operation(result_sender.clone(), move || {
             store
                 .update_draft_revision_state(
                     &plan,
@@ -371,10 +363,9 @@ fn work_item_revision_store_draft_state_init_and_update_share_state_lock() {
                 .map(|_| ())
         });
     }
-    drop(started_sender);
     drop(result_sender);
 
-    assert_operations_blocked(&started_receiver, &result_receiver, 2);
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 2);
     drop(guard);
 
     for result in receive_results(&result_receiver, 2) {
