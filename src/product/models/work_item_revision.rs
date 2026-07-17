@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::product::work_item_contract::{CanonicalWorkItemContract, VerificationCheck};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkItemPlanLineage {
     pub id: String,
@@ -57,7 +59,7 @@ pub struct WorkItemDraftRevision {
     pub revision_no: u32,
     pub supersedes: Option<String>,
     pub revision_reason: PlanRevisionReason,
-    pub canonical_contract_candidate: serde_json::Value,
+    pub canonical_contract_candidate: CanonicalWorkItemContract,
     pub trigger_repair_request_id: Option<String>,
     pub created_at: String,
 }
@@ -85,7 +87,7 @@ pub struct WorkItemRevision {
     pub id: String,
     pub logical_work_item_id: String,
     pub source_draft_revision_id: String,
-    pub canonical_contract: serde_json::Value,
+    pub canonical_contract: CanonicalWorkItemContract,
     pub canonical_contract_hash: String,
     pub work_item_projection_bundle_id: String,
     pub verification_plan_revision_id: String,
@@ -97,7 +99,7 @@ pub struct VerificationPlanRevision {
     pub id: String,
     pub logical_work_item_id: String,
     pub source_draft_revision_id: String,
-    pub verification_checks: serde_json::Value,
+    pub verification_checks: Vec<VerificationCheck>,
     pub created_at: String,
 }
 

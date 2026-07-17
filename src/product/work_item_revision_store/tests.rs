@@ -14,6 +14,7 @@ use crate::product::models::{
     WorkItemDraftRevision, WorkItemDraftRevisionStatus, WorkItemPlanLineage, WorkItemPlanRevision,
     WorkItemProjectionBundle, WorkItemRevision, WorkItemRevisionReplacement,
 };
+use crate::product::work_item_contract::canonical_contract_fixture;
 
 use super::WorkItemRevisionStore;
 
@@ -83,7 +84,7 @@ fn draft_revision() -> WorkItemDraftRevision {
         revision_no: 1,
         supersedes: None,
         revision_reason: PlanRevisionReason::InitialCompile,
-        canonical_contract_candidate: json!({"summary": "draft"}),
+        canonical_contract_candidate: canonical_contract_fixture(WORK_ITEM_ID),
         trigger_repair_request_id: None,
         created_at: "2026-07-17T00:00:01Z".to_string(),
     }
@@ -94,7 +95,7 @@ fn work_item_revision() -> WorkItemRevision {
         id: "work_item_revision_0001".to_string(),
         logical_work_item_id: WORK_ITEM_ID.to_string(),
         source_draft_revision_id: "work_item_draft_revision_0001".to_string(),
-        canonical_contract: json!({"summary": "compiled"}),
+        canonical_contract: canonical_contract_fixture(WORK_ITEM_ID),
         canonical_contract_hash: "contract_hash_0001".to_string(),
         work_item_projection_bundle_id: "work_item_projection_bundle_0001".to_string(),
         verification_plan_revision_id: "verification_plan_revision_0001".to_string(),
@@ -107,7 +108,7 @@ fn verification_plan_revision() -> VerificationPlanRevision {
         id: "verification_plan_revision_0001".to_string(),
         logical_work_item_id: WORK_ITEM_ID.to_string(),
         source_draft_revision_id: "work_item_draft_revision_0001".to_string(),
-        verification_checks: json!([{"command": "cargo test --locked"}]),
+        verification_checks: canonical_contract_fixture(WORK_ITEM_ID).verification_checks,
         created_at: "2026-07-17T00:00:03Z".to_string(),
     }
 }
@@ -229,7 +230,7 @@ fn work_item_revision_store_scopes_duplicate_logical_and_revision_ids_by_issue()
 
     let first_revision = work_item_revision();
     let mut second_revision = first_revision.clone();
-    second_revision.canonical_contract = json!({"scope": "issue_0002"});
+    second_revision.canonical_contract.identity.title = "Issue 2 contract".to_string();
     second_revision.canonical_contract_hash = "contract_hash_issue_0002".to_string();
     store
         .put_work_item_revision(&first_plan, &first_revision)

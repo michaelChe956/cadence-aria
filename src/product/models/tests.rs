@@ -13,6 +13,7 @@ use crate::product::models::{
     WorkItemDraftRevisionState, WorkItemDraftRevisionStatus, WorkItemPlanLineage,
     WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision, WorkItemRevisionReplacement,
 };
+use crate::product::work_item_contract::canonical_contract_fixture;
 use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
 fn assert_serde_roundtrip<T>(value: &T)
@@ -121,13 +122,14 @@ fn work_item_revision_models_plan_revision_roundtrip_without_legacy_fields() {
 
 #[test]
 fn work_item_revision_models_keep_draft_state_separate_from_revision_content() {
+    let contract = canonical_contract_fixture("wi_core");
     let draft = WorkItemDraftRevision {
         id: "draft_revision_0001".to_string(),
         logical_work_item_id: "wi_core".to_string(),
         revision_no: 1,
         supersedes: None,
         revision_reason: PlanRevisionReason::InitialCompile,
-        canonical_contract_candidate: serde_json::json!({"objective": "compile"}),
+        canonical_contract_candidate: contract.clone(),
         trigger_repair_request_id: None,
         created_at: "2026-07-17T00:00:00Z".to_string(),
     };
@@ -140,7 +142,7 @@ fn work_item_revision_models_keep_draft_state_separate_from_revision_content() {
         id: "work_item_revision_0001".to_string(),
         logical_work_item_id: "wi_core".to_string(),
         source_draft_revision_id: draft.id.clone(),
-        canonical_contract: serde_json::json!({"objective": "compile"}),
+        canonical_contract: contract,
         canonical_contract_hash: "sha256:contract".to_string(),
         work_item_projection_bundle_id: "work_item_projection_bundle_0001".to_string(),
         verification_plan_revision_id: "verification_plan_revision_0001".to_string(),
@@ -282,7 +284,7 @@ fn work_item_revision_models_shared_records_roundtrip() {
         id: "verification_plan_revision_0001".to_string(),
         logical_work_item_id: "wi_core".to_string(),
         source_draft_revision_id: "draft_revision_0001".to_string(),
-        verification_checks: serde_json::json!([{"kind": "cargo_test"}]),
+        verification_checks: canonical_contract_fixture("wi_core").verification_checks,
         created_at: "2026-07-17T00:00:00Z".to_string(),
     });
     assert_serde_roundtrip(&PlanValidationReportArtifact {
@@ -462,16 +464,17 @@ fn work_item_revision_models_reject_missing_required_fields() {
         assert_missing_field_rejected::<WorkItemDraftRevisionState>(&draft_state, field);
     }
 
-    let work_item_revision = serde_json::json!({
-        "id": "work_item_revision_0001",
-        "logical_work_item_id": "wi_core",
-        "source_draft_revision_id": "draft_revision_0001",
-        "canonical_contract": {"objective": "compile"},
-        "canonical_contract_hash": "sha256:contract",
-        "work_item_projection_bundle_id": "work_item_projection_bundle_0001",
-        "verification_plan_revision_id": "verification_plan_revision_0001",
-        "created_at": "2026-07-17T00:00:00Z"
-    });
+    let work_item_revision = serde_json::to_value(WorkItemRevision {
+        id: "work_item_revision_0001".to_string(),
+        logical_work_item_id: "wi_core".to_string(),
+        source_draft_revision_id: "draft_revision_0001".to_string(),
+        canonical_contract: canonical_contract_fixture("wi_core"),
+        canonical_contract_hash: "sha256:contract".to_string(),
+        work_item_projection_bundle_id: "work_item_projection_bundle_0001".to_string(),
+        verification_plan_revision_id: "verification_plan_revision_0001".to_string(),
+        created_at: "2026-07-17T00:00:00Z".to_string(),
+    })
+    .unwrap();
     for field in [
         "id",
         "logical_work_item_id",
