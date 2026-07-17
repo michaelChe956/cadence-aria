@@ -360,11 +360,18 @@ fn canonical_work_item_dependency_validation_reports_duplicate_edge() {
 
     let report = validate_dependency_contract_graph(&graph);
 
-    assert!(report.findings.iter().any(|finding| {
-        finding.code == "duplicate_dependency_contract_edge"
-            && finding.logical_work_item_id.as_deref() == Some("WI-02")
-            && finding.message.contains("WI-01")
-    }));
+    let duplicate_findings = report
+        .findings
+        .iter()
+        .filter(|finding| finding.code == "duplicate_dependency_contract_edge")
+        .collect::<Vec<_>>();
+
+    assert_eq!(duplicate_findings.len(), 1);
+    assert_eq!(
+        duplicate_findings[0].logical_work_item_id.as_deref(),
+        Some("WI-02")
+    );
+    assert!(duplicate_findings[0].message.contains("WI-01"));
 }
 
 #[test]
@@ -377,15 +384,28 @@ fn canonical_work_item_dependency_validation_reports_duplicate_required_contract
     consumer
         .input_contracts
         .push(consumer.input_contracts[0].clone());
+    consumer
+        .input_contracts
+        .push(consumer.input_contracts[0].clone());
     let graph = build_dependency_contract_graph(&[provider, consumer]).unwrap();
 
     let report = validate_dependency_contract_graph(&graph);
 
-    assert!(report.findings.iter().any(|finding| {
-        finding.code == "duplicate_dependency_contract_edge"
-            && finding.logical_work_item_id.as_deref() == Some("WI-02")
-            && finding.contract_ref.as_deref() == Some("contract.workflow")
-    }));
+    let duplicate_findings = report
+        .findings
+        .iter()
+        .filter(|finding| finding.code == "duplicate_dependency_contract_edge")
+        .collect::<Vec<_>>();
+
+    assert_eq!(duplicate_findings.len(), 1);
+    assert_eq!(
+        duplicate_findings[0].logical_work_item_id.as_deref(),
+        Some("WI-02")
+    );
+    assert_eq!(
+        duplicate_findings[0].contract_ref.as_deref(),
+        Some("contract.workflow")
+    );
 }
 
 #[test]
@@ -425,6 +445,90 @@ fn canonical_work_item_dependency_validation_orders_findings_deterministically()
 
     assert_eq!(first, second);
     assert!(codes.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(
+        first
+            .findings
+            .iter()
+            .filter(|finding| finding.code == "duplicate_dependency_contract_edge")
+            .count(),
+        1
+    );
+    assert_eq!(
+        first
+            .findings
+            .iter()
+            .filter(|finding| finding.code == "unknown_provider_logical_work_item")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn canonical_work_item_dependency_validation_deduplicates_missing_contract_findings() {
+    let mut provider = provider_contract_fixture(&["workflow_explicit_completion"]);
+    provider.output_contracts[0].contract_id = "contract.other".to_string();
+    provider.handoff_contract.provided_contract_refs.clear();
+    let mut consumer = consumer_contract_fixture(
+        &["workflow_explicit_completion"],
+        ContractCompatibilityPolicy::RequireAll,
+    );
+    consumer
+        .input_contracts
+        .push(consumer.input_contracts[0].clone());
+    let graph = build_dependency_contract_graph(&[provider, consumer]).unwrap();
+
+    let report = validate_dependency_contract_graph(&graph);
+
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter(|finding| finding.code == "duplicate_dependency_contract_edge")
+            .count(),
+        1
+    );
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter(|finding| finding.code == "required_contract_missing")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn canonical_work_item_dependency_validation_deduplicates_missing_capability_findings() {
+    let provider = provider_contract_fixture(&["workflow_explicit_completion"]);
+    let mut consumer = consumer_contract_fixture(
+        &["finalization_failure"],
+        ContractCompatibilityPolicy::RequireAll,
+    );
+    consumer
+        .input_contracts
+        .push(consumer.input_contracts[0].clone());
+    let graph = build_dependency_contract_graph(&[provider, consumer]).unwrap();
+
+    let report = validate_dependency_contract_graph(&graph);
+
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter(|finding| finding.code == "duplicate_dependency_contract_edge")
+            .count(),
+        1
+    );
+    let capability_findings = report
+        .findings
+        .iter()
+        .filter(|finding| finding.code == "required_capability_missing")
+        .collect::<Vec<_>>();
+    assert_eq!(capability_findings.len(), 1);
+    assert_eq!(
+        capability_findings[0].capability_ref.as_deref(),
+        Some("finalization_failure")
+    );
 }
 
 #[test]

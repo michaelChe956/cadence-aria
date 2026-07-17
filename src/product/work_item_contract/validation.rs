@@ -2,7 +2,7 @@ use std::{cmp::Ordering, collections::BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::CanonicalWorkItemContract;
+use super::{BlockerRoute, CanonicalWorkItemContract};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractValidationReport {
@@ -204,7 +204,14 @@ pub fn validate_canonical_contract(
         )
         .collect::<BTreeSet<_>>();
     for blocker in &contract.blocker_rules {
-        if blocker.target_contract_refs.is_empty() {
+        if blocker.target_contract_refs.is_empty()
+            && matches!(
+                blocker.route,
+                BlockerRoute::PlanRepairCurrent
+                    | BlockerRoute::PlanRepairUpstream
+                    | BlockerRoute::SubgraphReplan
+            )
+        {
             findings.push(error_finding(
                 "stage_blocker_without_target_contract",
                 logical_work_item_id,
@@ -239,6 +246,7 @@ pub(crate) fn sorted_report(
     mut findings: Vec<ContractValidationFinding>,
 ) -> ContractValidationReport {
     findings.sort_by(compare_findings);
+    findings.dedup();
     ContractValidationReport { findings }
 }
 

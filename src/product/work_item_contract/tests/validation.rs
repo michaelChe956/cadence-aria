@@ -1,6 +1,6 @@
 use super::canonical_contract_fixture;
 use crate::product::work_item_contract::{
-    ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
+    BlockerRoute, ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
     validate_canonical_contract,
 };
 
@@ -236,6 +236,91 @@ fn canonical_work_item_validation_rejects_blocker_with_unknown_target_contract()
 
     assert_eq!(finding.logical_work_item_id.as_deref(), Some("WI-01"));
     assert_eq!(finding.contract_ref.as_deref(), Some("contract.unknown"));
+}
+
+#[test]
+fn canonical_work_item_validation_requires_empty_target_only_for_plan_repair_routes() {
+    let cases = [
+        (BlockerRoute::CoderRework, false),
+        (BlockerRoute::VerificationRetry, false),
+        (BlockerRoute::PlanRepairCurrent, true),
+        (BlockerRoute::PlanRepairUpstream, true),
+        (BlockerRoute::SubgraphReplan, true),
+        (BlockerRoute::StoryAmendment, false),
+        (BlockerRoute::DesignAmendment, false),
+        (BlockerRoute::OperationalGate, false),
+    ];
+
+    for (route, requires_target) in cases {
+        let mut contract = canonical_contract_fixture("WI-01");
+        contract.blocker_rules[0].route = route.clone();
+        contract.blocker_rules[0].target_contract_refs.clear();
+
+        let count = validate_canonical_contract(&contract)
+            .findings
+            .iter()
+            .filter(|finding| finding.code == "stage_blocker_without_target_contract")
+            .count();
+
+        assert_eq!(
+            count,
+            usize::from(requires_target),
+            "unexpected empty-target result for {route:?}"
+        );
+    }
+}
+
+#[test]
+fn canonical_work_item_validation_rejects_invalid_explicit_target_for_every_blocker_route() {
+    let routes = [
+        BlockerRoute::CoderRework,
+        BlockerRoute::VerificationRetry,
+        BlockerRoute::PlanRepairCurrent,
+        BlockerRoute::PlanRepairUpstream,
+        BlockerRoute::SubgraphReplan,
+        BlockerRoute::StoryAmendment,
+        BlockerRoute::DesignAmendment,
+        BlockerRoute::OperationalGate,
+    ];
+
+    for route in routes {
+        let mut contract = canonical_contract_fixture("WI-01");
+        contract.blocker_rules[0].route = route.clone();
+        contract.blocker_rules[0].target_contract_refs = vec!["contract.unknown".to_string()];
+
+        let findings = validate_canonical_contract(&contract)
+            .findings
+            .into_iter()
+            .filter(|finding| finding.code == "stage_blocker_without_target_contract")
+            .collect::<Vec<_>>();
+
+        assert_eq!(findings.len(), 1, "invalid target ignored for {route:?}");
+        assert_eq!(
+            findings[0].contract_ref.as_deref(),
+            Some("contract.unknown")
+        );
+    }
+}
+
+#[test]
+fn canonical_work_item_validation_accepts_valid_target_for_plan_repair_routes() {
+    for route in [
+        BlockerRoute::PlanRepairCurrent,
+        BlockerRoute::PlanRepairUpstream,
+        BlockerRoute::SubgraphReplan,
+    ] {
+        let mut contract = canonical_contract_fixture("WI-01");
+        contract.blocker_rules[0].route = route.clone();
+        contract.blocker_rules[0].target_contract_refs = vec!["contract.canonical".to_string()];
+
+        assert!(
+            validate_canonical_contract(&contract)
+                .findings
+                .iter()
+                .all(|finding| finding.code != "stage_blocker_without_target_contract"),
+            "valid target rejected for {route:?}"
+        );
+    }
 }
 
 #[test]
