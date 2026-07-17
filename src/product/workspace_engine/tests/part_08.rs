@@ -1,3 +1,43 @@
+#[test]
+fn provider_projection_renderer_review_prompt_integration_preserves_contract_matrix() {
+    use crate::product::models::ProviderName;
+    use crate::product::work_item_contract::canonical_contract_fixture;
+    use crate::product::work_item_projection::{
+        ReviewerExecutionEnvelope, WorkItemProjectionCompiler, renderer_for,
+    };
+
+    let contract = canonical_contract_fixture("wi_review_prompt_integration");
+    let projections = WorkItemProjectionCompiler
+        .compile(&contract, "work_item_revision_review_integration")
+        .unwrap();
+    let envelope = ReviewerExecutionEnvelope {
+        unit_run_id: "unit_run_review_integration".to_string(),
+        diff_ref: "diff_review_integration".to_string(),
+        test_evidence_refs: vec!["test_evidence_review_integration".to_string()],
+        handoff_revision_ids: vec!["handoff_review_integration".to_string()],
+        contract_delta_refs: vec!["contract_delta_review_integration".to_string()],
+        completion_commit: "4444444444444444444444444444444444444444".to_string(),
+    };
+
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
+    ] {
+        let rendered = renderer_for(&provider)
+            .render_reviewer(&projections.reviewer, &envelope)
+            .unwrap();
+
+        assert!(rendered.text.contains("work_item_revision_review_integration"));
+        assert!(rendered.text.contains("AC-001"));
+        assert!(rendered.text.contains("REQ-CANONICAL-001"));
+        assert!(rendered.text.contains("contract.source"));
+        assert!(rendered.text.contains("contract.canonical"));
+        assert!(rendered.text.contains("diff_review_integration"));
+        assert_eq!(rendered.content_hash.len(), 64);
+    }
+}
+
 #[tokio::test]
 async fn handle_user_message_provider_error_returns_to_prepare_context() {
     let (_tmp, store) = setup();

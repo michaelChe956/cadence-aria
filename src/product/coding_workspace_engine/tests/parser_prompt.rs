@@ -14,6 +14,52 @@ use std::process::Command as StdCommand;
 mod review_parser;
 
 #[test]
+fn provider_projection_renderer_coding_prompt_integration_preserves_normative_context() {
+    use crate::product::models::ProviderName;
+    use crate::product::work_item_contract::canonical_contract_fixture;
+    use crate::product::work_item_projection::{
+        CoderExecutionEnvelope, WorkItemProjectionCompiler, renderer_for,
+    };
+
+    let contract = canonical_contract_fixture("wi_coding_prompt_integration");
+    let projections = WorkItemProjectionCompiler
+        .compile(&contract, "work_item_revision_prompt_integration")
+        .unwrap();
+    let envelope = CoderExecutionEnvelope {
+        repository_state_ref: "repository_state_prompt_integration".to_string(),
+        resolved_handoff_revision_ids: vec!["handoff_prompt_integration".to_string()],
+        unit_run_id: "unit_run_prompt_integration".to_string(),
+        previous_actionable_review: None,
+        start_commit: Some("3333333333333333333333333333333333333333".to_string()),
+    };
+
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
+    ] {
+        let rendered = renderer_for(&provider)
+            .render_coder(&projections.coder, &envelope)
+            .unwrap();
+
+        assert!(
+            rendered
+                .text
+                .contains("work_item_revision_prompt_integration")
+        );
+        assert!(rendered.text.contains("task_1"));
+        assert!(rendered.text.contains("AC-001"));
+        assert!(
+            rendered
+                .text
+                .contains("repository_state_prompt_integration")
+        );
+        assert!(rendered.text.contains("handoff_prompt_integration"));
+        assert_eq!(rendered.content_hash.len(), 64);
+    }
+}
+
+#[test]
 fn derive_reason_code_prefers_explicit() {
     let report = blocked_report_with(Vec::new(), vec!["S018".to_string()]);
     let reason = derive_testing_blocked_reason_code(
