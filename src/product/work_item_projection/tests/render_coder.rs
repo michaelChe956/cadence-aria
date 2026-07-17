@@ -1,9 +1,10 @@
 use super::{
-    coder_execution_envelope_fixture, compiled_fixture, large_contract_fixture,
-    ordered_section_bodies,
+    coder_execution_envelope_fixture, compiled_fixture, exact_json_sections, large_contract_fixture,
 };
 use crate::product::models::ProviderName;
-use crate::product::work_item_projection::{WorkItemProjectionCompiler, renderer_for};
+use crate::product::work_item_projection::{
+    CoderExecutionEnvelope, CoderWorkItemProjection, WorkItemProjectionCompiler, renderer_for,
+};
 
 const CODER_SECTION_TITLES: &[&str] = &[
     "Work Item Identity/Revision",
@@ -19,6 +20,106 @@ const CODER_SECTION_TITLES: &[&str] = &[
     "Previous Review",
 ];
 
+fn expected_coder_sections(
+    projection: &CoderWorkItemProjection,
+    envelope: &CoderExecutionEnvelope,
+) -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        (
+            "Work Item Identity/Revision",
+            serde_json::json!({
+                "work_item_revision_id": &projection.work_item_revision_id,
+            }),
+        ),
+        (
+            "Objective",
+            serde_json::json!({
+                "objective": &projection.objective,
+            }),
+        ),
+        (
+            "Resolved Inputs",
+            serde_json::json!({
+                "required_input_contracts": &projection.required_input_contracts,
+            }),
+        ),
+        (
+            "Implementation Tasks",
+            serde_json::json!({
+                "task_refs": &projection.task_refs,
+                "tasks": &projection.tasks,
+            }),
+        ),
+        (
+            "Write Policy",
+            serde_json::json!({
+                "write_policy": &projection.write_policy,
+            }),
+        ),
+        (
+            "Acceptance Criteria",
+            serde_json::json!({
+                "acceptance_criteria": &projection.acceptance_criteria,
+            }),
+        ),
+        (
+            "Verification Checks",
+            serde_json::json!({
+                "verification_checks": &projection.verification_checks,
+            }),
+        ),
+        (
+            "Blocker Routing",
+            serde_json::json!({
+                "blocker_rules": &projection.blocker_rules,
+            }),
+        ),
+        (
+            "Handoff Requirements",
+            serde_json::json!({
+                "handoff_contract": &projection.handoff_contract,
+            }),
+        ),
+        (
+            "Execution Envelope",
+            serde_json::json!({
+                "repository_state_ref": &envelope.repository_state_ref,
+                "resolved_handoff_revision_ids": &envelope.resolved_handoff_revision_ids,
+                "unit_run_id": &envelope.unit_run_id,
+                "start_commit": &envelope.start_commit,
+            }),
+        ),
+        (
+            "Previous Review",
+            serde_json::json!({
+                "previous_actionable_review": &envelope.previous_actionable_review,
+            }),
+        ),
+    ]
+}
+
+fn assert_coder_section_oracle(
+    text: &str,
+    projection: &CoderWorkItemProjection,
+    envelope: &CoderExecutionEnvelope,
+) -> Vec<(String, String)> {
+    let actual = exact_json_sections(text, CODER_SECTION_TITLES);
+    let expected = expected_coder_sections(projection, envelope);
+    assert_eq!(actual.len(), expected.len());
+
+    for ((actual_title, _, actual_value), (expected_title, expected_value)) in
+        actual.iter().zip(&expected)
+    {
+        assert_eq!(actual_title, expected_title);
+        assert_eq!(actual_value, expected_value, "section {actual_title}");
+    }
+
+    actual
+        .into_iter()
+        .map(|(title, body, _)| (title, body))
+        .collect()
+}
+
 #[test]
 fn provider_projection_renderer_coder_golden_sections_are_semantically_equal_across_providers() {
     let compiled = compiled_fixture();
@@ -33,47 +134,7 @@ fn provider_projection_renderer_coder_golden_sections_are_semantically_equal_acr
         let rendered = renderer_for(&provider)
             .render_coder(&compiled.coder, &envelope)
             .unwrap();
-        let sections = ordered_section_bodies(&rendered.text);
-        let titles = sections
-            .iter()
-            .map(|(title, _)| title.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(titles, CODER_SECTION_TITLES, "{provider:?}");
-        assert_eq!(
-            sections[0].1,
-            "{\n  \"work_item_revision_id\": \"work_item_revision_0001\"\n}"
-        );
-        assert_eq!(
-            sections[1].1,
-            "{\n  \"objective\": \"Provide the canonical work item contract\"\n}"
-        );
-        assert_eq!(
-            sections[10].1,
-            "{\n  \"previous_actionable_review\": \"Address finding review_finding_0001\"\n}"
-        );
-
-        for expected_ref in [
-            "work_item_revision_0001",
-            "contract.source",
-            "wi_upstream",
-            "task_1",
-            "REQ-CANONICAL-001",
-            "AC-001",
-            "check_canonical",
-            "contract_invalid",
-            "contract.canonical",
-            "repository_state_0001",
-            "handoff_revision_0001",
-            "handoff_revision_0002",
-            "unit_run_0001",
-            "1111111111111111111111111111111111111111",
-        ] {
-            assert!(
-                rendered.text.contains(expected_ref),
-                "{provider:?} lost {expected_ref}"
-            );
-        }
+        let sections = assert_coder_section_oracle(&rendered.text, &compiled.coder, &envelope);
 
         if let Some(expected) = &baseline {
             assert_eq!(
@@ -101,9 +162,11 @@ fn provider_projection_renderer_coder_large_fixture_never_truncates_ids_or_secti
         let rendered = renderer_for(&provider)
             .render_coder(&compiled.coder, &coder_execution_envelope_fixture())
             .unwrap();
-        for title in CODER_SECTION_TITLES {
-            assert!(rendered.text.contains(title), "{provider:?} lost {title}");
-        }
+        assert_coder_section_oracle(
+            &rendered.text,
+            &compiled.coder,
+            &coder_execution_envelope_fixture(),
+        );
         for task in &contract.tasks {
             assert!(rendered.text.contains(&task.task_id), "{provider:?}");
         }
@@ -143,31 +206,16 @@ fn provider_projection_renderer_coder_empty_lists_keep_explicit_sections() {
     projection.handoff_contract.provided_contract_refs.clear();
     projection.handoff_contract.reviewer_check_refs.clear();
 
-    let rendered = renderer_for(&ProviderName::Fake)
-        .render_coder(&projection, &coder_execution_envelope_fixture())
-        .unwrap();
-    let sections = ordered_section_bodies(&rendered.text);
-
-    assert_eq!(
-        sections
-            .iter()
-            .map(|(title, _)| title.as_str())
-            .collect::<Vec<_>>(),
-        CODER_SECTION_TITLES
-    );
-    for title in [
-        "Resolved Inputs",
-        "Implementation Tasks",
-        "Acceptance Criteria",
-        "Verification Checks",
-        "Blocker Routing",
+    let envelope = coder_execution_envelope_fixture();
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
     ] {
-        let body = &sections
-            .iter()
-            .find(|(actual, _)| actual == title)
-            .unwrap()
-            .1;
-        assert!(body.contains("[]"), "{title} should render an explicit []");
+        let rendered = renderer_for(&provider)
+            .render_coder(&projection, &envelope)
+            .unwrap();
+        assert_coder_section_oracle(&rendered.text, &projection, &envelope);
     }
 }
 
@@ -178,24 +226,15 @@ fn provider_projection_renderer_coder_empty_execution_envelope_fields_remain_exp
     envelope.previous_actionable_review = None;
     envelope.start_commit = None;
 
-    let rendered = renderer_for(&ProviderName::Fake)
-        .render_coder(&compiled_fixture().coder, &envelope)
-        .unwrap();
-    let sections = ordered_section_bodies(&rendered.text);
-    let execution_envelope = &sections
-        .iter()
-        .find(|(title, _)| title == "Execution Envelope")
-        .unwrap()
-        .1;
-    let previous_review = &sections
-        .iter()
-        .find(|(title, _)| title == "Previous Review")
-        .unwrap()
-        .1;
-
-    assert!(execution_envelope.contains("\"repository_state_ref\""));
-    assert!(execution_envelope.contains("\"resolved_handoff_revision_ids\": []"));
-    assert!(execution_envelope.contains("\"unit_run_id\""));
-    assert!(execution_envelope.contains("\"start_commit\": null"));
-    assert!(previous_review.contains("\"previous_actionable_review\": null"));
+    let projection = compiled_fixture().coder;
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
+    ] {
+        let rendered = renderer_for(&provider)
+            .render_coder(&projection, &envelope)
+            .unwrap();
+        assert_coder_section_oracle(&rendered.text, &projection, &envelope);
+    }
 }

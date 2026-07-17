@@ -15,7 +15,7 @@ const PROFILE: ProviderRenderProfile = ProviderRenderProfile {
 };
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ClaudeCodeProjectionRenderer;
+pub(super) struct ClaudeCodeProjectionRenderer;
 
 impl ProviderProjectionRenderer for ClaudeCodeProjectionRenderer {
     fn render_coder(

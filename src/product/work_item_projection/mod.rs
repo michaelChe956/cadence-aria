@@ -3,7 +3,7 @@ mod execution_context;
 mod human;
 mod model;
 mod plan;
-pub mod render;
+mod render;
 mod reviewer;
 mod validation;
 

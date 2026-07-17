@@ -14,12 +14,12 @@ use super::{
     ReviewerExecutionEnvelope, ReviewerWorkItemProjection,
 };
 
-pub use claude_code::ClaudeCodeProjectionRenderer;
-pub use codex::CodexProjectionRenderer;
-pub use fake::FakeProjectionRenderer;
+use claude_code::ClaudeCodeProjectionRenderer;
+use codex::CodexProjectionRenderer;
+use fake::FakeProjectionRenderer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectionRenderRole {
+enum ProjectionRenderRole {
     Coder,
     Reviewer,
 }
@@ -34,7 +34,7 @@ impl ProjectionRenderRole {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ProjectionSectionId {
+enum ProjectionSectionId {
     WorkItemIdentityRevision,
     Objective,
     ResolvedInputs,
@@ -80,14 +80,14 @@ const REVIEWER_MANDATORY_SECTIONS: &[ProjectionSectionId] = &[
 ];
 
 impl ProjectionSectionId {
-    pub fn mandatory_for(role: ProjectionRenderRole) -> &'static [Self] {
+    fn mandatory_for(role: ProjectionRenderRole) -> &'static [Self] {
         match role {
             ProjectionRenderRole::Coder => CODER_MANDATORY_SECTIONS,
             ProjectionRenderRole::Reviewer => REVIEWER_MANDATORY_SECTIONS,
         }
     }
 
-    pub fn title(self) -> &'static str {
+    fn title(self) -> &'static str {
         match self {
             Self::WorkItemIdentityRevision => "Work Item Identity/Revision",
             Self::Objective => "Objective",
@@ -111,14 +111,14 @@ impl ProjectionSectionId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectionSection {
-    pub id: ProjectionSectionId,
-    pub title: String,
-    pub body: String,
+struct ProjectionSection {
+    id: ProjectionSectionId,
+    title: String,
+    body: String,
 }
 
 impl ProjectionSection {
-    pub fn new(id: ProjectionSectionId, title: impl Into<String>, body: impl Into<String>) -> Self {
+    fn new(id: ProjectionSectionId, title: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             id,
             title: title.into(),
@@ -164,6 +164,15 @@ pub trait ProviderProjectionRenderer: Send + Sync {
     ) -> Result<RenderedExecutionContext, ProjectionRenderError>;
 }
 
+/// 内部 typed section 机制不属于 crate 公共 API。
+///
+/// ```compile_fail
+/// use cadence_aria::product::work_item_projection::render::ProjectionSectionId;
+///
+/// fn main() {
+///     let _ = ProjectionSectionId::Objective;
+/// }
+/// ```
 pub fn renderer_for(provider: &ProviderName) -> Box<dyn ProviderProjectionRenderer> {
     match provider {
         ProviderName::Codex => Box::new(CodexProjectionRenderer),
@@ -172,7 +181,7 @@ pub fn renderer_for(provider: &ProviderName) -> Box<dyn ProviderProjectionRender
     }
 }
 
-pub fn validate_mandatory_sections(
+fn validate_mandatory_sections(
     role: ProjectionRenderRole,
     sections: &[ProjectionSection],
 ) -> Result<(), ProjectionRenderError> {
@@ -192,14 +201,14 @@ pub fn validate_mandatory_sections(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct ProviderRenderProfile {
-    pub provider_label: &'static str,
-    pub renderer_version: &'static str,
-    pub permission_and_tool_hint: &'static str,
-    pub structured_output_wrapper: &'static str,
+struct ProviderRenderProfile {
+    provider_label: &'static str,
+    renderer_version: &'static str,
+    permission_and_tool_hint: &'static str,
+    structured_output_wrapper: &'static str,
 }
 
-pub(super) fn render_coder_with_profile(
+fn render_coder_with_profile(
     profile: ProviderRenderProfile,
     projection: &CoderWorkItemProjection,
     envelope: &CoderExecutionEnvelope,
@@ -208,7 +217,7 @@ pub(super) fn render_coder_with_profile(
     render(profile, ProjectionRenderRole::Coder, sections)
 }
 
-pub(super) fn render_reviewer_with_profile(
+fn render_reviewer_with_profile(
     profile: ProviderRenderProfile,
     projection: &ReviewerWorkItemProjection,
     envelope: &ReviewerExecutionEnvelope,
@@ -479,4 +488,32 @@ fn render(
         renderer_version: profile.renderer_version.to_string(),
         content_hash,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_projection_renderer_mandatory_section_failure_uses_core_render_path() {
+        let sections = ProjectionSectionId::mandatory_for(ProjectionRenderRole::Coder)
+            .iter()
+            .copied()
+            .filter(|section_id| *section_id != ProjectionSectionId::WritePolicy)
+            .map(|section_id| ProjectionSection::typed(section_id, "{}".to_string()))
+            .collect::<Vec<_>>();
+        let profile = ProviderRenderProfile {
+            provider_label: "Test",
+            renderer_version: "test-renderer-v1",
+            permission_and_tool_hint: "test permissions",
+            structured_output_wrapper: "test output",
+        };
+
+        let error = render(profile, ProjectionRenderRole::Coder, sections).unwrap_err();
+
+        assert_eq!(
+            error,
+            ProjectionRenderError::MandatorySectionMissing("Write Policy".to_string())
+        );
+    }
 }

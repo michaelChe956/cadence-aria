@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::product::work_item_contract::{
     AcceptanceCriterion, BlockerRoute, BlockerRule, CanonicalWorkItemContract,
@@ -143,6 +143,34 @@ pub(super) fn ordered_section_bodies(text: &str) -> Vec<(String, String)> {
     }
 
     sections
+}
+
+pub(super) fn exact_json_sections(
+    text: &str,
+    expected_titles: &[&str],
+) -> Vec<(String, String, serde_json::Value)> {
+    let expected_unique = expected_titles.iter().copied().collect::<BTreeSet<_>>();
+    assert_eq!(
+        expected_unique.len(),
+        expected_titles.len(),
+        "section oracle titles must be unique"
+    );
+
+    let sections = ordered_section_bodies(text);
+    assert_eq!(sections.len(), expected_titles.len(), "section count drift");
+
+    let mut seen = BTreeSet::new();
+    sections
+        .into_iter()
+        .zip(expected_titles)
+        .map(|((title, body), expected_title)| {
+            assert_eq!(&title, expected_title, "section order/title drift");
+            assert!(seen.insert(title.clone()), "duplicate section {title}");
+            let value = serde_json::from_str(&body)
+                .unwrap_or_else(|error| panic!("section {title} is not valid JSON: {error}"));
+            (title, body, value)
+        })
+        .collect()
 }
 
 pub(super) fn compiled_plan_fixture() -> (

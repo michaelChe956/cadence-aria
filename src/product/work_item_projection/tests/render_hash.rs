@@ -6,12 +6,8 @@ use super::{
     coder_execution_envelope_fixture, compiled_fixture, reviewer_execution_envelope_fixture,
 };
 use crate::product::models::ProviderName;
-use crate::product::work_item_projection::render::{
-    ProjectionRenderRole, ProjectionSection, ProjectionSectionId, validate_mandatory_sections,
-};
 use crate::product::work_item_projection::{
-    CoderExecutionEnvelope, ProjectionRenderError, RenderedExecutionContext,
-    ReviewerExecutionEnvelope, renderer_for,
+    CoderExecutionEnvelope, RenderedExecutionContext, ReviewerExecutionEnvelope, renderer_for,
 };
 
 #[test]
@@ -108,23 +104,6 @@ fn provider_projection_renderer_versions_and_wrappers_are_provider_specific_and_
         assert!(coder.text.contains("Structured Output"));
         assert!(reviewer.text.contains("Structured Output"));
     }
-}
-
-#[test]
-fn provider_projection_renderer_mandatory_section_failure_uses_typed_section_ids() {
-    let sections = ProjectionSectionId::mandatory_for(ProjectionRenderRole::Coder)
-        .iter()
-        .copied()
-        .filter(|section_id| *section_id != ProjectionSectionId::WritePolicy)
-        .map(|section_id| ProjectionSection::new(section_id, "typed title", "typed body"))
-        .collect::<Vec<_>>();
-
-    let error = validate_mandatory_sections(ProjectionRenderRole::Coder, &sections).unwrap_err();
-
-    assert_eq!(
-        error,
-        ProjectionRenderError::MandatorySectionMissing("Write Policy".to_string())
-    );
 }
 
 #[test]

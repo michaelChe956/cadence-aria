@@ -1,9 +1,11 @@
 use super::{
-    compiled_fixture, large_contract_fixture, ordered_section_bodies,
+    compiled_fixture, exact_json_sections, large_contract_fixture,
     reviewer_execution_envelope_fixture,
 };
 use crate::product::models::ProviderName;
-use crate::product::work_item_projection::{WorkItemProjectionCompiler, renderer_for};
+use crate::product::work_item_projection::{
+    ReviewerExecutionEnvelope, ReviewerWorkItemProjection, WorkItemProjectionCompiler, renderer_for,
+};
 
 const REVIEWER_SECTION_TITLES: &[&str] = &[
     "Work Item Identity/Revision",
@@ -15,6 +17,83 @@ const REVIEWER_SECTION_TITLES: &[&str] = &[
     "Blocker Routing",
     "Review Execution Evidence",
 ];
+
+fn expected_reviewer_sections(
+    projection: &ReviewerWorkItemProjection,
+    envelope: &ReviewerExecutionEnvelope,
+) -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        (
+            "Work Item Identity/Revision",
+            serde_json::json!({
+                "work_item_revision_id": &projection.work_item_revision_id,
+            }),
+        ),
+        (
+            "Acceptance Criteria / Requirement Matrix",
+            serde_json::json!({
+                "criterion_refs": &projection.criterion_refs,
+                "requirement_matrix": &projection.requirement_matrix,
+            }),
+        ),
+        (
+            "Scope Policy",
+            serde_json::json!({
+                "scope_policy": &projection.scope_policy,
+            }),
+        ),
+        (
+            "Input Contract Checks",
+            serde_json::json!({
+                "input_contract_checks": &projection.input_contract_checks,
+            }),
+        ),
+        (
+            "Output Contract Checks",
+            serde_json::json!({
+                "output_contract_checks": &projection.output_contract_checks,
+            }),
+        ),
+        (
+            "Verification Evidence Rules",
+            serde_json::json!({
+                "verification_evidence_rules": &projection.verification_evidence_rules,
+            }),
+        ),
+        (
+            "Blocker Routing",
+            serde_json::json!({
+                "blocker_routing": &projection.blocker_routing,
+            }),
+        ),
+        (
+            "Review Execution Evidence",
+            serde_json::to_value(envelope).unwrap(),
+        ),
+    ]
+}
+
+fn assert_reviewer_section_oracle(
+    text: &str,
+    projection: &ReviewerWorkItemProjection,
+    envelope: &ReviewerExecutionEnvelope,
+) -> Vec<(String, String)> {
+    let actual = exact_json_sections(text, REVIEWER_SECTION_TITLES);
+    let expected = expected_reviewer_sections(projection, envelope);
+    assert_eq!(actual.len(), expected.len());
+
+    for ((actual_title, _, actual_value), (expected_title, expected_value)) in
+        actual.iter().zip(&expected)
+    {
+        assert_eq!(actual_title, expected_title);
+        assert_eq!(actual_value, expected_value, "section {actual_title}");
+    }
+
+    actual
+        .into_iter()
+        .map(|(title, body, _)| (title, body))
+        .collect()
+}
 
 #[test]
 fn provider_projection_renderer_reviewer_golden_sections_are_semantically_equal_across_providers() {
@@ -30,44 +109,8 @@ fn provider_projection_renderer_reviewer_golden_sections_are_semantically_equal_
         let rendered = renderer_for(&provider)
             .render_reviewer(&compiled.reviewer, &envelope)
             .unwrap();
-        let sections = ordered_section_bodies(&rendered.text);
-        assert_eq!(
-            sections
-                .iter()
-                .map(|(title, _)| title.as_str())
-                .collect::<Vec<_>>(),
-            REVIEWER_SECTION_TITLES,
-            "{provider:?}"
-        );
-        assert_eq!(
-            sections[0].1,
-            "{\n  \"work_item_revision_id\": \"work_item_revision_0001\"\n}"
-        );
-        assert_eq!(
-            sections[7].1,
-            "{\n  \"unit_run_id\": \"unit_run_0001\",\n  \"diff_ref\": \"diff_ref_0001\",\n  \"test_evidence_refs\": [\n    \"test_evidence_0001\",\n    \"test_evidence_0002\"\n  ],\n  \"handoff_revision_ids\": [\n    \"handoff_revision_0001\"\n  ],\n  \"contract_delta_refs\": [\n    \"contract_delta_0001\"\n  ],\n  \"completion_commit\": \"2222222222222222222222222222222222222222\"\n}"
-        );
-
-        for expected_ref in [
-            "work_item_revision_0001",
-            "AC-001",
-            "REQ-CANONICAL-001",
-            "contract.source",
-            "contract.canonical",
-            "check_canonical",
-            "contract_invalid",
-            "unit_run_0001",
-            "diff_ref_0001",
-            "test_evidence_0001",
-            "handoff_revision_0001",
-            "contract_delta_0001",
-            "2222222222222222222222222222222222222222",
-        ] {
-            assert!(
-                rendered.text.contains(expected_ref),
-                "{provider:?} lost {expected_ref}"
-            );
-        }
+        let sections =
+            assert_reviewer_section_oracle(&rendered.text, &compiled.reviewer, &envelope);
 
         if let Some(expected) = &baseline {
             assert_eq!(
@@ -95,9 +138,11 @@ fn provider_projection_renderer_reviewer_large_fixture_never_truncates_ids_or_se
         let rendered = renderer_for(&provider)
             .render_reviewer(&compiled.reviewer, &reviewer_execution_envelope_fixture())
             .unwrap();
-        for title in REVIEWER_SECTION_TITLES {
-            assert!(rendered.text.contains(title), "{provider:?} lost {title}");
-        }
+        assert_reviewer_section_oracle(
+            &rendered.text,
+            &compiled.reviewer,
+            &reviewer_execution_envelope_fixture(),
+        );
         for criterion in &contract.acceptance_criteria {
             assert!(
                 rendered.text.contains(&criterion.criterion_id),
@@ -131,31 +176,16 @@ fn provider_projection_renderer_reviewer_empty_lists_keep_explicit_sections() {
     projection.verification_evidence_rules.clear();
     projection.blocker_routing.clear();
 
-    let rendered = renderer_for(&ProviderName::Fake)
-        .render_reviewer(&projection, &reviewer_execution_envelope_fixture())
-        .unwrap();
-    let sections = ordered_section_bodies(&rendered.text);
-
-    assert_eq!(
-        sections
-            .iter()
-            .map(|(title, _)| title.as_str())
-            .collect::<Vec<_>>(),
-        REVIEWER_SECTION_TITLES
-    );
-    for title in [
-        "Acceptance Criteria / Requirement Matrix",
-        "Input Contract Checks",
-        "Output Contract Checks",
-        "Verification Evidence Rules",
-        "Blocker Routing",
+    let envelope = reviewer_execution_envelope_fixture();
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
     ] {
-        let body = &sections
-            .iter()
-            .find(|(actual, _)| actual == title)
-            .unwrap()
-            .1;
-        assert!(body.contains("[]"), "{title} should render an explicit []");
+        let rendered = renderer_for(&provider)
+            .render_reviewer(&projection, &envelope)
+            .unwrap();
+        assert_reviewer_section_oracle(&rendered.text, &projection, &envelope);
     }
 }
 
@@ -166,24 +196,15 @@ fn provider_projection_renderer_reviewer_empty_execution_envelope_lists_remain_e
     envelope.handoff_revision_ids.clear();
     envelope.contract_delta_refs.clear();
 
-    let rendered = renderer_for(&ProviderName::Fake)
-        .render_reviewer(&compiled_fixture().reviewer, &envelope)
-        .unwrap();
-    let sections = ordered_section_bodies(&rendered.text);
-    let review_evidence = &sections
-        .iter()
-        .find(|(title, _)| title == "Review Execution Evidence")
-        .unwrap()
-        .1;
-
-    for field in ["\"unit_run_id\"", "\"diff_ref\"", "\"completion_commit\""] {
-        assert!(review_evidence.contains(field), "missing {field}");
-    }
-    for field in [
-        "\"test_evidence_refs\": []",
-        "\"handoff_revision_ids\": []",
-        "\"contract_delta_refs\": []",
+    let projection = compiled_fixture().reviewer;
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
     ] {
-        assert!(review_evidence.contains(field), "missing explicit {field}");
+        let rendered = renderer_for(&provider)
+            .render_reviewer(&projection, &envelope)
+            .unwrap();
+        assert_reviewer_section_oracle(&rendered.text, &projection, &envelope);
     }
 }
