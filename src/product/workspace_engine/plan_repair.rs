@@ -1,10 +1,10 @@
 use chrono::Utc;
 
 use crate::product::models::{
-    PlanAmendmentManifest, PlanAmendmentPublicationPhase, PlanProjectionBundle, PlanRepairRequest,
-    PlanRepairRequestStatus, PlanRepairSessionSnapshotDto, PlanRepairSessionStage,
-    WorkspaceReturnContext, WorkspaceSessionLink, WorkspaceSessionLinkTrigger,
-    WorkspaceSessionRelation,
+    PlanAmendmentManifest, PlanAmendmentPublicationPhase, PlanRepairAwaitingConfirmationPackage,
+    PlanRepairRequest, PlanRepairRequestStatus, PlanRepairSessionSnapshotDto,
+    PlanRepairSessionStage, WorkspaceReturnContext, WorkspaceSessionLink,
+    WorkspaceSessionLinkTrigger, WorkspaceSessionRelation,
 };
 use crate::product::plan_repair::PlanRepairError;
 
@@ -72,7 +72,7 @@ impl WorkspaceEngine {
                     .ok_or_else(|| PlanRepairError::ActiveAmendmentExists {
                         amendment_id: active_amendment_id.to_string(),
                     })?;
-                return linked_child_session(
+                let (link, child) = linked_child_session(
                     lifecycle,
                     &self.session.project_id,
                     &self.session.issue_id,
@@ -80,19 +80,34 @@ impl WorkspaceEngine {
                 )
                 .ok_or_else(|| PlanRepairError::ActiveAmendmentExists {
                     amendment_id: active_amendment_id.to_string(),
-                });
+                })?;
+                return reconcile_plan_repair_child(
+                    lifecycle,
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    active_request,
+                    link,
+                    child,
+                );
             }
         }
 
         if let Some(existing) = selected.as_ref()
-            && let Some(child) = linked_child_session(
+            && let Some((link, child)) = linked_child_session(
                 lifecycle,
                 &self.session.project_id,
                 &self.session.issue_id,
                 existing,
             )
         {
-            return Ok(child);
+            return reconcile_plan_repair_child(
+                lifecycle,
+                &self.session.project_id,
+                &self.session.issue_id,
+                existing,
+                link,
+                child,
+            );
         }
 
         let mut selected = selected.unwrap_or(request);
@@ -154,9 +169,6 @@ impl WorkspaceEngine {
                 child_session_id,
             )
             .map_err(PlanRepairError::Store)?;
-        let child = lifecycle
-            .update_workspace_session_status(&child.id, WorkspaceSessionStatus::Running)
-            .map_err(PlanRepairError::Store)?;
         let link = WorkspaceSessionLink {
             id: link_id_for(&amendment_id),
             relation: WorkspaceSessionRelation::PlanRepair,
@@ -167,6 +179,10 @@ impl WorkspaceEngine {
                 unit_run_id: selected.trigger_unit_run_id.clone(),
                 review_id: selected.trigger_review_id.clone(),
                 finding_id: selected.trigger_finding_id.clone(),
+                repair_request_id: selected.id.clone(),
+                amendment_id: amendment_id.clone(),
+                fingerprint: selected.fingerprint.clone(),
+                base_plan_revision_id: selected.base_plan_revision_id.clone(),
             },
             return_context: WorkspaceReturnContext {
                 original_attempt_id: selected.trigger_attempt_id.clone(),
@@ -182,37 +198,14 @@ impl WorkspaceEngine {
         lifecycle
             .put_session_link(&self.session.project_id, &self.session.issue_id, &link)
             .map_err(PlanRepairError::Store)?;
-        if lifecycle
-            .load_plan_repair_session_state(
-                &self.session.project_id,
-                &self.session.issue_id,
-                &child.id,
-            )
-            .map_err(PlanRepairError::Store)?
-            .is_none()
-        {
-            let timeline_nodes = initial_plan_repair_timeline(&child);
-            lifecycle
-                .save_timeline_nodes(&child.id, &timeline_nodes)
-                .map_err(PlanRepairError::Store)?;
-            lifecycle
-                .save_plan_repair_session_state(
-                    &self.session.project_id,
-                    &self.session.issue_id,
-                    &child.id,
-                    &PlanRepairSessionSnapshotDto {
-                        request: selected,
-                        link,
-                        stage: PlanRepairSessionStage::AuthoringRevision,
-                        projection: None,
-                        amendment: None,
-                        timeline_nodes,
-                        error: None,
-                    },
-                )
-                .map_err(PlanRepairError::Store)?;
-        }
-        Ok(child)
+        reconcile_plan_repair_child(
+            lifecycle,
+            &self.session.project_id,
+            &self.session.issue_id,
+            &selected,
+            link,
+            child,
+        )
     }
 
     pub fn plan_repair_session_state(&self) -> Option<&PlanRepairSessionSnapshotDto> {
@@ -221,70 +214,10 @@ impl WorkspaceEngine {
 
     pub async fn enter_plan_repair_awaiting_confirmation(
         &mut self,
-        projection: Option<PlanProjectionBundle>,
-        amendment: PlanAmendmentManifest,
+        package: PlanRepairAwaitingConfirmationPackage,
     ) -> Result<(), PlanRepairError> {
-        let mut snapshot = self.require_plan_repair_snapshot()?.clone();
-        if snapshot.stage == PlanRepairSessionStage::AwaitingConfirmation
-            && snapshot.amendment.as_ref() == Some(&amendment)
-        {
-            return Ok(());
-        }
-        if snapshot.request.amendment_id.as_deref() != Some(amendment.id.as_str())
-            || amendment.repair_request_id != snapshot.request.id
-        {
-            return Err(PlanRepairError::AmendmentConflict {
-                expected: snapshot.request.amendment_id.clone().unwrap_or_default(),
-                actual: amendment.id,
-            });
-        }
-        if let Some(node_id) = self.active_node_id.clone() {
-            self.update_timeline_node(
-                &node_id,
-                TimelineNodeStatus::Completed,
-                Some("Work Item 修订已生成".to_string()),
-            )
-            .await;
-        }
-        self.append_completed_timeline_event(
-            TimelineNodeType::PlanRepairContractValidation,
-            WorkspaceStage::Running,
-            "Contract Validation".to_string(),
-            Some("Contract 校验通过".to_string()),
-            TimelineNodeStatus::Completed,
-            false,
-        )
-        .await;
-        self.append_completed_timeline_event(
-            TimelineNodeType::PlanRepairProjectionGeneration,
-            WorkspaceStage::Running,
-            "Projection Generation".to_string(),
-            Some("三投影已生成".to_string()),
-            TimelineNodeStatus::Completed,
-            false,
-        )
-        .await;
-        self.append_completed_timeline_event(
-            TimelineNodeType::PlanRepairPlanReview,
-            WorkspaceStage::Running,
-            "Plan Review".to_string(),
-            Some("Plan Review 已通过".to_string()),
-            TimelineNodeStatus::Completed,
-            false,
-        )
-        .await;
-        self.transition_stage(WorkspaceStage::HumanConfirm).await;
-        self.create_timeline_node(TimelineNodeDraft {
-            node_type: TimelineNodeType::PlanAmendmentConfirmation,
-            agent: None,
-            stage: WorkspaceStage::HumanConfirm,
-            round: None,
-            title: "确认 Plan Amendment".to_string(),
-            summary: Some("等待一次最终确认".to_string()),
-            status: TimelineNodeStatus::Active,
-        })
-        .await;
-
+        self.recover_pending_plan_repair_transition()?;
+        let snapshot = self.require_plan_repair_snapshot()?.clone();
         let lifecycle = self.persistent_lifecycle()?;
         let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
         let plan = revision_store
@@ -294,31 +227,29 @@ impl WorkspaceEngine {
                 &snapshot.request.plan_id,
             )
             .map_err(PlanRepairError::Store)?;
-        snapshot.request = revision_store
-            .update_repair_request_status(
-                &plan,
-                &snapshot.request.id,
-                PlanRepairRequestStatus::AwaitingConfirmation,
-            )
-            .map_err(PlanRepairError::Store)?;
-        snapshot.stage = PlanRepairSessionStage::AwaitingConfirmation;
-        snapshot.projection = projection;
-        snapshot.amendment = Some(amendment);
-        snapshot.error = None;
-        self.plan_repair_snapshot = Some(snapshot);
-        lifecycle
-            .update_workspace_session_status(
-                &self.session.session_id,
-                WorkspaceSessionStatus::WaitingForHuman,
-            )
-            .map_err(PlanRepairError::Store)?;
-        self.persist_plan_repair_snapshot()
+        validate_awaiting_confirmation_package(&snapshot, &plan, &package)?;
+        if snapshot.stage == PlanRepairSessionStage::AwaitingConfirmation {
+            if snapshot.projection.as_ref() == Some(&package.projection)
+                && snapshot.amendment.as_ref() == Some(&package.amendment)
+                && snapshot.validation.as_ref() == Some(&package.validation)
+                && snapshot.impact.as_ref() == Some(&package.impact)
+                && snapshot.plan_review.as_ref() == Some(&package.plan_review)
+            {
+                return Ok(());
+            }
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "awaiting-confirmation package conflicts with persisted repair state".to_string(),
+            ));
+        }
+        let journal = awaiting_confirmation_transition(self, snapshot, package);
+        self.commit_plan_repair_transition(journal)
     }
 
     pub async fn confirm_plan_amendment(
         &mut self,
         amendment_id: &str,
     ) -> Result<PlanAmendmentManifest, PlanRepairError> {
+        self.recover_pending_plan_repair_transition()?;
         let snapshot = self.require_plan_repair_snapshot()?.clone();
         if snapshot.stage != PlanRepairSessionStage::AwaitingConfirmation {
             return Err(PlanRepairError::ConfirmationRequired);
@@ -340,14 +271,8 @@ impl WorkspaceEngine {
             .cloned()
             .ok_or(PlanRepairError::ConfirmationRequired)?;
         if confirmation.status != TimelineNodeStatus::Completed {
-            self.update_timeline_node(
-                &confirmation.node_id,
-                TimelineNodeStatus::Completed,
-                Some("用户已确认 Plan Amendment".to_string()),
-            )
-            .await;
-            self.active_node_id = None;
-            self.persist_plan_repair_snapshot()?;
+            let journal = confirmation_transition(self, snapshot);
+            self.commit_plan_repair_transition(journal)?;
         }
         Ok(amendment)
     }
@@ -357,6 +282,7 @@ impl WorkspaceEngine {
         amendment_id: &str,
         reason: Option<String>,
     ) -> Result<(), PlanRepairError> {
+        self.recover_pending_plan_repair_transition()?;
         let original_snapshot = self.require_plan_repair_snapshot()?.clone();
         let amendment = original_snapshot
             .amendment
@@ -367,6 +293,9 @@ impl WorkspaceEngine {
                 expected: amendment.id.clone(),
                 actual: amendment_id.to_string(),
             });
+        }
+        if original_snapshot.request.status == PlanRepairRequestStatus::Cancelled {
+            return Ok(());
         }
         if matches!(
             original_snapshot.stage,
@@ -398,96 +327,13 @@ impl WorkspaceEngine {
             Err(error) => return Err(PlanRepairError::Store(error)),
         }
 
-        let original_timeline = self.timeline_nodes.clone();
-        let original_active_node_id = self.active_node_id.clone();
-        let original_stage = self.session.stage.clone();
-        if let Some(node_id) = self.active_node_id.clone() {
-            self.update_timeline_node(
-                &node_id,
-                TimelineNodeStatus::Skipped,
-                Some("Plan Amendment 已取消".to_string()),
-            )
-            .await;
-        }
         let cancel_summary = reason
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .map(|value| format!("用户取消：{value}"))
             .unwrap_or_else(|| "用户取消 Plan Amendment".to_string());
-        self.append_completed_timeline_event(
-            TimelineNodeType::PlanAmendmentCancelled,
-            WorkspaceStage::Completed,
-            "Plan Amendment 已取消".to_string(),
-            Some(cancel_summary.clone()),
-            TimelineNodeStatus::Completed,
-            false,
-        )
-        .await;
-
-        let cancelled_request = match revision_store.update_repair_request_status(
-            &plan,
-            &original_snapshot.request.id,
-            PlanRepairRequestStatus::Cancelled,
-        ) {
-            Ok(request) => request,
-            Err(error) => {
-                self.restore_plan_repair_cancel_state(
-                    &original_snapshot,
-                    original_timeline,
-                    original_active_node_id,
-                    original_stage,
-                );
-                return Err(PlanRepairError::Store(error));
-            }
-        };
-        let mut cancelled_snapshot = original_snapshot.clone();
-        cancelled_snapshot.request = cancelled_request;
-        cancelled_snapshot.stage = PlanRepairSessionStage::Failed;
-        cancelled_snapshot.error = Some(cancel_summary);
-        self.session.stage = WorkspaceStage::Completed;
-        self.active_node_id = None;
-        self.plan_repair_snapshot = Some(cancelled_snapshot);
-        if let Err(error) = self.persist_plan_repair_snapshot().and_then(|_| {
-            lifecycle
-                .update_workspace_session_status(
-                    &self.session.session_id,
-                    WorkspaceSessionStatus::Terminated,
-                )
-                .map(|_| ())
-                .map_err(PlanRepairError::Store)
-        }) {
-            let _ = revision_store.update_repair_request_status(
-                &plan,
-                &original_snapshot.request.id,
-                original_snapshot.request.status.clone(),
-            );
-            self.restore_plan_repair_cancel_state(
-                &original_snapshot,
-                original_timeline,
-                original_active_node_id,
-                original_stage,
-            );
-            return Err(error);
-        }
-        if let Err(error) = revision_store.release_active_amendment(&plan, amendment_id) {
-            let _ = lifecycle.update_workspace_session_status(
-                &self.session.session_id,
-                WorkspaceSessionStatus::WaitingForHuman,
-            );
-            let _ = revision_store.update_repair_request_status(
-                &plan,
-                &original_snapshot.request.id,
-                original_snapshot.request.status.clone(),
-            );
-            self.restore_plan_repair_cancel_state(
-                &original_snapshot,
-                original_timeline,
-                original_active_node_id,
-                original_stage,
-            );
-            return Err(PlanRepairError::Store(error));
-        }
-        Ok(())
+        let journal = cancellation_transition(self, original_snapshot, cancel_summary);
+        self.commit_plan_repair_transition(journal)
     }
 
     fn require_plan_repair_snapshot(
@@ -507,51 +353,10 @@ impl WorkspaceEngine {
             ))
         })
     }
-
-    fn persist_plan_repair_snapshot(&mut self) -> Result<(), PlanRepairError> {
-        let lifecycle = self.persistent_lifecycle()?;
-        let snapshot = self.plan_repair_snapshot.as_mut().ok_or_else(|| {
-            PlanRepairError::InvalidRepairTarget(
-                "workspace session is not a plan repair child".to_string(),
-            )
-        })?;
-        snapshot.timeline_nodes = self.timeline_nodes.clone();
-        lifecycle
-            .save_plan_repair_session_state(
-                &self.session.project_id,
-                &self.session.issue_id,
-                &self.session.session_id,
-                snapshot,
-            )
-            .map_err(PlanRepairError::Store)
-    }
-
-    fn restore_plan_repair_cancel_state(
-        &mut self,
-        snapshot: &PlanRepairSessionSnapshotDto,
-        timeline_nodes: Vec<TimelineNode>,
-        active_node_id: Option<String>,
-        stage: WorkspaceStage,
-    ) {
-        self.timeline_nodes = timeline_nodes;
-        self.active_node_id = active_node_id;
-        self.session.stage = stage;
-        self.plan_repair_snapshot = Some(snapshot.clone());
-        if let Some(lifecycle) = self.lifecycle_store.as_ref() {
-            let _ = lifecycle.save_timeline_nodes(&self.session.session_id, &self.timeline_nodes);
-            let _ = lifecycle.save_plan_repair_session_state(
-                &self.session.project_id,
-                &self.session.issue_id,
-                &self.session.session_id,
-                snapshot,
-            );
-        }
-    }
 }
 
 fn amendment_id_for(fingerprint: &str) -> String {
-    let suffix = fingerprint.chars().take(24).collect::<String>();
-    format!("plan_amendment_{suffix}")
+    format!("plan_amendment_{fingerprint}")
 }
 
 fn child_session_id_for(amendment_id: &str) -> String {
@@ -569,29 +374,6 @@ fn plan_published_conflict() -> PlanRepairError {
     }
 }
 
-fn initial_plan_repair_timeline(session: &WorkspaceSessionRecord) -> Vec<TimelineNode> {
-    vec![TimelineNode {
-        node_id: "timeline_node_001".to_string(),
-        node_type: TimelineNodeType::PlanRepairAuthoringRevision,
-        agent: Some(session.author_provider.clone()),
-        stage: WsWorkspaceStage::Running,
-        round: None,
-        status: TimelineNodeStatus::Active,
-        title: "生成 Work Item 修订".to_string(),
-        summary: Some("基于 Plan Defect 生成修订".to_string()),
-        started_at: Utc::now().to_rfc3339(),
-        completed_at: None,
-        duration_ms: None,
-        artifact_ref: None,
-        provider_config_snapshot: ProviderConfigSnapshot {
-            author: session.author_provider.clone(),
-            reviewer: Some(session.reviewer_provider.clone()),
-            review_rounds: session.review_rounds,
-        },
-        retry: None,
-    }]
-}
-
 fn request_plan_id(request: &PlanRepairRequest) -> String {
     request.plan_id.clone()
 }
@@ -601,7 +383,7 @@ fn linked_child_session(
     project_id: &str,
     issue_id: &str,
     request: &PlanRepairRequest,
-) -> Option<WorkspaceSessionRecord> {
+) -> Option<(WorkspaceSessionLink, WorkspaceSessionRecord)> {
     lifecycle
         .list_session_links(project_id, issue_id)
         .ok()?
@@ -610,7 +392,19 @@ fn linked_child_session(
             link.relation == WorkspaceSessionRelation::PlanRepair
                 && link.trigger.attempt_id == request.trigger_attempt_id
                 && link.trigger.unit_run_id == request.trigger_unit_run_id
+                && link.trigger.review_id == request.trigger_review_id
                 && link.trigger.finding_id == request.trigger_finding_id
+                && link.trigger.repair_request_id == request.id
+                && request.amendment_id.as_deref() == Some(link.trigger.amendment_id.as_str())
+                && link.trigger.fingerprint == request.fingerprint
+                && link.trigger.base_plan_revision_id == request.base_plan_revision_id
+                && link.child_session_id == child_session_id_for(&link.trigger.amendment_id)
+                && link.id == link_id_for(&link.trigger.amendment_id)
         })
-        .and_then(|link| lifecycle.get_workspace_session(&link.child_session_id).ok())
+        .and_then(|link| {
+            lifecycle
+                .get_workspace_session(&link.child_session_id)
+                .ok()
+                .map(|session| (link, session))
+        })
 }

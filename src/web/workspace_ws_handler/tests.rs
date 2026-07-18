@@ -250,6 +250,7 @@ fn plan_repair_ws_commands_are_only_valid_in_human_confirm() {
         &cancel,
         &WorkspaceStage::Completed
     ));
+    assert!(!requires_stage_validation(&cancel));
     assert_eq!(
         serde_json::from_value::<WsInMessage>(serde_json::to_value(&confirm).unwrap()).unwrap(),
         confirm

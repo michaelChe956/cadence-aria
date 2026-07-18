@@ -268,7 +268,7 @@ async fn plan_repair_child_session_recovers_lock_before_request_write() {
         "plan_repair_request_0001",
         "fingerprint_lock_recovery",
     );
-    let amendment_id = "plan_amendment_fingerprint_lock_recover";
+    let amendment_id = "plan_amendment_fingerprint_lock_recovery";
     let plan = revision_store
         .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
         .unwrap();
@@ -353,10 +353,10 @@ async fn plan_repair_refresh_restores_awaiting_confirmation_state() {
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
     child_engine
-        .enter_plan_repair_awaiting_confirmation(
-            None,
-            plan_repair_manifest(&request.id, &amendment_id),
-        )
+        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+            &request.id,
+            &amendment_id,
+        ))
         .await
         .unwrap();
 
@@ -406,10 +406,10 @@ async fn plan_repair_confirmation_is_recorded_exactly_once() {
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
     child_engine
-        .enter_plan_repair_awaiting_confirmation(
-            None,
-            plan_repair_manifest(&request.id, &amendment_id),
-        )
+        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+            &request.id,
+            &amendment_id,
+        ))
         .await
         .unwrap();
 
@@ -452,10 +452,10 @@ async fn plan_repair_cancel_keeps_request_timeline_and_lock_consistent() {
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
     child_engine
-        .enter_plan_repair_awaiting_confirmation(
-            None,
-            plan_repair_manifest(&request.id, &amendment_id),
-        )
+        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+            &request.id,
+            &amendment_id,
+        ))
         .await
         .unwrap();
 
@@ -507,10 +507,10 @@ async fn plan_repair_cancel_fails_closed_after_plan_published() {
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
     child_engine
-        .enter_plan_repair_awaiting_confirmation(
-            None,
-            plan_repair_manifest(&request.id, &amendment_id),
-        )
+        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+            &request.id,
+            &amendment_id,
+        ))
         .await
         .unwrap();
     revision_store

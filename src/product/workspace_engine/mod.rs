@@ -87,6 +87,9 @@ mod parsers;
 mod plan_outline;
 mod plan_projection;
 mod plan_repair;
+mod plan_repair_recovery;
+mod plan_repair_transaction;
+mod plan_repair_validation;
 mod prompts;
 mod provider_drive;
 mod review;
@@ -120,15 +123,19 @@ pub(crate) use lifecycle_recovery::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;
 pub(crate) use plan_outline::*;
+pub(crate) use plan_repair_recovery::*;
+pub(crate) use plan_repair_transaction::*;
+pub(crate) use plan_repair_validation::*;
 pub(crate) use prompts::*;
 #[cfg(test)]
 pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, OutlineRevisionCrashPoint,
-    OutlineRevisionPersistencePolicy, PendingAuthorChoice, ProviderSessionDriveInput,
-    ReviewProviderRunResult, RevisionResumeFallbackContext, StructuredOutputDisplayFilter,
-    TimelineNodeDraft, WorkItemPlanCompileProjectionContext, WorkItemPlanOutlineRevisionSource,
+    OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanRepairCrashPoint,
+    ProviderSessionDriveInput, ReviewProviderRunResult, RevisionResumeFallbackContext,
+    StructuredOutputDisplayFilter, TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
+    WorkItemPlanOutlineRevisionSource,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;

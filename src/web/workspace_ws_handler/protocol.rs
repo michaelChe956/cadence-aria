@@ -93,6 +93,7 @@ pub(crate) fn requires_stage_validation(msg: &WsInMessage) -> bool {
             | WsInMessage::Rollback { .. }
             | WsInMessage::Hello { .. }
             | WsInMessage::SaveHumanPresentationRevision { .. }
+            | WsInMessage::CancelPlanAmendment { .. }
             | WsInMessage::Ping
     )
 }

@@ -263,6 +263,15 @@ pub(crate) enum OutlineRevisionCrashPoint {
     Committed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanRepairCrashPoint {
+    TimelinePersisted,
+    SnapshotPersisted,
+    SessionPersisted,
+    RequestPersisted,
+    LockReleased,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceConfirmOutcome {
     WorkItemPlan {
@@ -338,6 +347,7 @@ pub struct WorkspaceEngine {
     pub(crate) work_item_batch_retry_counts: HashMap<String, u32>,
     pub(crate) outline_revision_recovery_error: Option<String>,
     pub(crate) outline_revision_crash_after: Option<OutlineRevisionCrashPoint>,
+    pub(crate) plan_repair_crash_after: Option<PlanRepairCrashPoint>,
     pub(crate) plan_repair_snapshot: Option<PlanRepairSessionSnapshotDto>,
 }
 

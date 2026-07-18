@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+use crate::product::plan_repair::ContractImpactReport;
 use crate::web::workspace_ws_types::TimelineNode;
+use crate::web::workspace_ws_types::WorkItemPlanReviewComplete;
 
-use super::{PlanAmendmentManifest, PlanProjectionBundle, PlanRepairRequest};
+use super::{
+    PlanAmendmentManifest, PlanProjectionBundle, PlanRepairRequest, PlanValidationReportArtifact,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSessionLink {
@@ -21,6 +25,14 @@ pub struct WorkspaceSessionLinkTrigger {
     pub unit_run_id: String,
     pub review_id: Option<String>,
     pub finding_id: String,
+    #[serde(default)]
+    pub repair_request_id: String,
+    #[serde(default)]
+    pub amendment_id: String,
+    #[serde(default)]
+    pub fingerprint: String,
+    #[serde(default)]
+    pub base_plan_revision_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,12 +69,27 @@ pub enum PlanRepairSessionStage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRepairAwaitingConfirmationPackage {
+    pub projection: PlanProjectionBundle,
+    pub amendment: PlanAmendmentManifest,
+    pub validation: PlanValidationReportArtifact,
+    pub impact: ContractImpactReport,
+    pub plan_review: WorkItemPlanReviewComplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanRepairSessionSnapshotDto {
     pub request: PlanRepairRequest,
     pub link: WorkspaceSessionLink,
     pub stage: PlanRepairSessionStage,
     pub projection: Option<PlanProjectionBundle>,
     pub amendment: Option<PlanAmendmentManifest>,
+    #[serde(default)]
+    pub validation: Option<PlanValidationReportArtifact>,
+    #[serde(default)]
+    pub impact: Option<ContractImpactReport>,
+    #[serde(default)]
+    pub plan_review: Option<WorkItemPlanReviewComplete>,
     pub timeline_nodes: Vec<TimelineNode>,
     pub error: Option<String>,
 }
