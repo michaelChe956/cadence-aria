@@ -294,6 +294,8 @@ mod plan_defect_entrypoints;
 mod provider_driven;
 mod provider_execution_context;
 mod provider_failure_recovery;
+mod provider_rework_context;
+mod tester_repair_plan_defect;
 
 #[tokio::test]
 async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node() {

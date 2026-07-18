@@ -47,11 +47,19 @@ impl CodingWorkspaceEngine {
             "execute_test_plan",
             &full_output,
         )?;
-        let execution_payload = parse_test_execution_payload_from_provider_output(&full_output)?;
+        let (execution_payload, mut plan_defect_payload_invalid) =
+            match parse_test_execution_payload_from_provider_output(&full_output) {
+                Ok(payload) => (payload, false),
+                Err(_) => (ProviderTestExecutionPayload::default(), true),
+            };
         let mut plan_defect_report = ExecutionPlanDefectReport {
             source: PlanDefectSource::Tester,
-            findings: execution_payload.plan_defect_findings,
+            findings: Vec::new(),
         };
+        merge_test_execution_plan_defect_findings(
+            &mut plan_defect_report.findings,
+            execution_payload.plan_defect_findings,
+        )?;
         for provider_step_result in execution_payload.step_results {
             if !step_results
                 .iter()
@@ -140,11 +148,18 @@ impl CodingWorkspaceEngine {
                 "execute_test_plan_repair",
                 &repair_output,
             )?;
-            let repair_payload = parse_test_execution_payload_from_provider_output(&repair_output)?;
-            plan_defect_report = ExecutionPlanDefectReport {
-                source: PlanDefectSource::Tester,
-                findings: repair_payload.plan_defect_findings,
-            };
+            let repair_payload =
+                match parse_test_execution_payload_from_provider_output(&repair_output) {
+                    Ok(payload) => payload,
+                    Err(_) => {
+                        plan_defect_payload_invalid = true;
+                        ProviderTestExecutionPayload::default()
+                    }
+                };
+            merge_test_execution_plan_defect_findings(
+                &mut plan_defect_report.findings,
+                repair_payload.plan_defect_findings,
+            )?;
             report_raw_ref = repair_raw_ref;
             for provider_step_result in repair_payload.step_results {
                 if !step_results
@@ -171,16 +186,23 @@ impl CodingWorkspaceEngine {
             report.context_warnings.push(summary);
         }
         report.plan_defect_findings = plan_defect_report.findings.clone();
-        let plan_defect_route = if plan_defect_report.findings.is_empty() {
+        let plan_defect_decision = if plan_defect_payload_invalid {
+            Some(CodeReviewFlowDecision::StopForHumanTriage)
+        } else if plan_defect_report.findings.is_empty() {
             None
         } else {
             let projection = self.reviewer_projection_for_attempt(&attempt)?;
-            Some(
-                execution_plan_defect_flow_decision(&plan_defect_report, &projection)
-                    .label()
-                    .to_string(),
-            )
+            Some(execution_plan_defect_flow_decision(
+                &plan_defect_report,
+                &projection,
+            ))
         };
+        if plan_defect_decision.is_some() {
+            report.overall_status = TestingOverallStatus::Blocked;
+        }
+        let plan_defect_route = plan_defect_decision
+            .map(CodeReviewFlowDecision::label)
+            .map(str::to_string);
         bind_testing_report_role_run(&mut report, &role_run);
         self.store.save_testing_report(&attempt, &report)?;
         let entry = tester_chat_entry(
@@ -239,7 +261,8 @@ impl CodingWorkspaceEngine {
         if matches!(
             report.overall_status,
             TestingOverallStatus::Failed | TestingOverallStatus::Blocked
-        ) && testing_report_needs_blocked_gate(&report)
+        ) && plan_defect_route.is_none()
+            && testing_report_needs_blocked_gate(&report)
         {
             self.store.update_attempt_status(
                 &attempt.project_id,
@@ -256,6 +279,7 @@ impl CodingWorkspaceEngine {
             .await?;
         }
         if report.overall_status == TestingOverallStatus::Blocked
+            && plan_defect_route.is_none()
             && testing_report_needs_blocked_gate(&report)
         {
             let gate = self.store.create_blocked_gate(

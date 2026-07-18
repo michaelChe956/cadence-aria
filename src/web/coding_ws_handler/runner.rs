@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, ReviewVerdict,
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
 };
 pub(crate) use crate::product::coding_workspace_engine::{
     CodeReviewFlowDecision, code_review_flow_decision, internal_review_flow_decision,
@@ -266,6 +266,36 @@ pub(crate) fn should_emit_coding_runner_protocol_error(status: &CodingAttemptSta
     )
 }
 
+async fn handle_internal_review_flow_decision(
+    coding_store: &CodingAttemptStore,
+    engine: &CodingWorkspaceEngine,
+    event_tx: &mpsc::Sender<CodingWsOutMessage>,
+    current: &CodingExecutionAttempt,
+    internal_review: &crate::product::coding_models::InternalPrReview,
+) -> Result<(), CodingWorkspaceEngineError> {
+    let reviewer_projection =
+        engine.reviewer_projection_for_internal_review(current, internal_review)?;
+    let current = match internal_review_flow_decision(internal_review, &reviewer_projection) {
+        CodeReviewFlowDecision::ContinueAfterApprove => {
+            if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
+                engine
+                    .complete_group_attempt_after_final_review(current)
+                    .await?
+            } else {
+                engine.complete_attempt_after_final_rework(current).await?
+            }
+        }
+        CodeReviewFlowDecision::RunCoderFix
+        | CodeReviewFlowDecision::RetryVerification
+        | CodeReviewFlowDecision::StartPlanRepair
+        | CodeReviewFlowDecision::StartStoryAmendment
+        | CodeReviewFlowDecision::StartDesignAmendment
+        | CodeReviewFlowDecision::OpenOperationalGate
+        | CodeReviewFlowDecision::StopForHumanTriage => current.clone(),
+    };
+    emit_current_session_state(event_tx, coding_store, &current).await
+}
+
 pub(crate) async fn execute_start_coding_flow(
     state: &WebAppState,
     coding_store: &CodingAttemptStore,
@@ -341,14 +371,15 @@ pub(crate) async fn execute_start_coding_flow(
                 .coder;
             let author_provider =
                 provider_for(state, &author_provider_name, "coding author provider")?;
-            current = engine
-                .execute_coding_with_commands(
+            let coding_outcome = engine
+                .execute_coding_with_commands_outcome(
                     &current,
                     author_provider.as_ref(),
                     &execution_context,
                     &mut command_rx,
                 )
                 .await?;
+            current = coding_outcome.attempt;
             if handle_pending_runner_commands(
                 &mut command_rx,
                 coding_store,
@@ -359,6 +390,12 @@ pub(crate) async fn execute_start_coding_flow(
             .await?
             {
                 return Ok(());
+            }
+            if coding_outcome
+                .plan_defect_decision
+                .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
+            {
+                return emit_current_session_state(event_tx, coding_store, &current).await;
             }
         }
 
@@ -408,31 +445,14 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            let internal_reviewer_projection =
-                engine.reviewer_projection_for_internal_review(&current, &internal_review)?;
-            match internal_review_flow_decision(&internal_review, &internal_reviewer_projection) {
-                CodeReviewFlowDecision::ContinueAfterApprove => {
-                    current = if current.scope
-                        == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
-                    {
-                        engine
-                            .complete_group_attempt_after_final_review(&current)
-                            .await?
-                    } else {
-                        engine.complete_attempt_after_final_rework(&current).await?
-                    };
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
-                CodeReviewFlowDecision::RunCoderFix
-                | CodeReviewFlowDecision::RetryVerification
-                | CodeReviewFlowDecision::StartPlanRepair
-                | CodeReviewFlowDecision::StartStoryAmendment
-                | CodeReviewFlowDecision::StartDesignAmendment
-                | CodeReviewFlowDecision::OpenOperationalGate
-                | CodeReviewFlowDecision::StopForHumanTriage => {
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
-            }
+            return handle_internal_review_flow_decision(
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+                &internal_review,
+            )
+            .await;
         }
 
         if current.stage.order() <= CodingExecutionStage::CodeReview.order() {
@@ -653,17 +673,14 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            match internal_review.verdict {
-                ReviewVerdict::Approve => {
-                    current = engine
-                        .complete_group_attempt_after_final_review(&current)
-                        .await?;
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
-                ReviewVerdict::RequestChanges | ReviewVerdict::Blocked => {
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
-            }
+            return handle_internal_review_flow_decision(
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+                &internal_review,
+            )
+            .await;
         }
     }
 }

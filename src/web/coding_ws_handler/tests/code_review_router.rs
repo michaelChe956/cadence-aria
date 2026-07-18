@@ -52,6 +52,41 @@ fn coding_plan_repair_router_preserves_implementation_and_approve_behavior() {
     );
 }
 
+#[test]
+fn coding_plan_repair_router_rejects_polluted_implementation_findings() {
+    let projection = reviewer_projection_fixture();
+    let mut with_plan_target = implementation_finding();
+    with_plan_target.repair_target = Some(crate::product::models::RepairTarget {
+        kind: crate::product::models::RepairTargetKind::CurrentWorkItem,
+        logical_work_item_ids: vec!["work_item_0001".to_string()],
+        work_item_revision_ids: vec!["work_item_revision_0001".to_string()],
+    });
+    let mut with_wrong_route = implementation_finding();
+    with_wrong_route.recommended_route = crate::product::models::PlanDefectRoute::PlanRepair;
+    let mut with_typed_evidence = implementation_finding();
+    with_typed_evidence.plan_defect_evidence = vec![crate::product::models::PlanDefectEvidence {
+        kind: "projection".to_string(),
+        source_ref: "work_item_revision_0001".to_string(),
+        message: "typed plan evidence must not be attached to implementation defects".to_string(),
+    }];
+    with_typed_evidence.confidence = Some(PlanDefectConfidence::High);
+
+    for (case, finding) in [
+        ("plan target", with_plan_target),
+        ("wrong route", with_wrong_route),
+        ("typed evidence and confidence", with_typed_evidence),
+    ] {
+        assert_eq!(
+            code_review_flow_decision(
+                &code_review_report_with(ReviewVerdict::RequestChanges, vec![finding]),
+                &projection,
+            ),
+            CodeReviewFlowDecision::StopForHumanTriage,
+            "{case} must fail closed",
+        );
+    }
+}
+
 fn upstream_plan_defect_finding() -> ReviewFinding {
     ReviewFinding {
         severity: FindingSeverity::Error,

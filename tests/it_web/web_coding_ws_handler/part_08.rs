@@ -1,6 +1,31 @@
 fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
+    app_with_group_full_chain_attempt_fixture(
+        root_path,
+        Arc::new(FullChainStreamingProvider),
+        true,
+    )
+}
+
+fn app_with_group_full_chain_attempt_and_provider(
+    root_path: &Path,
+    provider: Arc<dyn StreamingProviderAdapter>,
+) -> axum::Router {
+    app_with_group_full_chain_attempt_fixture(root_path, provider, false)
+}
+
+fn app_with_group_full_chain_attempt_fixture(
+    root_path: &Path,
+    provider: Arc<dyn StreamingProviderAdapter>,
+    use_existing_worktree: bool,
+) -> axum::Router {
     let repo = root_path.join("repo");
+    let remote = root_path.join("remote.git");
     init_cargo_repo(&repo);
+    run_git(root_path, &["init", "--bare", remote.to_str().unwrap()]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
 
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
     let repository = RepositoryStore::new(app_paths.clone())
@@ -105,7 +130,7 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
             current_work_item_id: "work_item_0001".to_string(),
             base_branch: "HEAD".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: Some(repo),
+            worktree_path: use_existing_worktree.then_some(repo),
             provider_config_snapshot: ProviderConfigSnapshot {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
@@ -143,12 +168,290 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
         .expect("create coding unit 2");
 
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, Arc::new(FullChainStreamingProvider));
+    registry.register(ProviderName::Fake, provider);
     build_web_router(WebAppState::with_provider_registry(
         root_path.to_path_buf(),
         WebRuntime::new_fake(root_path.to_path_buf()),
         registry,
     ))
+}
+
+struct GroupFinalReviewPlanDefectProvider {
+    block_first_final_review: bool,
+    final_review_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl GroupFinalReviewPlanDefectProvider {
+    fn normal() -> Self {
+        Self {
+            block_first_final_review: false,
+            final_review_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn recovery() -> Self {
+        Self {
+            block_first_final_review: true,
+            final_review_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for GroupFinalReviewPlanDefectProvider {
+    fn supports_provider_driven_testing(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
+    }
+
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        let (tx, rx) = mpsc::channel(8);
+        let full_output = match input.role {
+            AdapterRole::Executor => {
+                let worktree = input
+                    .worktree_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .expect("worktree path");
+                fs::write(worktree.join("src/lib.rs"), CLIMB_STAIRS_LIB).map_err(|error| {
+                    ProviderAdapterError::incompatible_output(error.to_string(), "", "")
+                })?;
+                "implemented climb_stairs".to_string()
+            }
+            AdapterRole::Reviewer
+                if input.output_schema == "coding_workspace_internal_pr_review_json" =>
+            {
+                let call = self
+                    .final_review_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.block_first_final_review && call == 0 {
+                    serde_json::json!({
+                        "verdict": "blocked",
+                        "summary": "retry group final review",
+                        "findings": [],
+                        "impact_scope": ["work_item_0002"],
+                        "pr_description": "retry required",
+                        "commit_message_suggestion": "fix: retry review"
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                    "verdict": "approve",
+                    "summary": "group review found a plan defect",
+                    "findings": [{
+                        "source_stage": "group_final_review",
+                        "severity": "error",
+                        "defect_class": "current_work_item_invalid",
+                        "reason_code": "current_work_item_contract_invalid",
+                        "message": "the final unit contract is invalid",
+                        "contract_refs": [],
+                        "capability_refs": [],
+                        "repair_target": {
+                            "kind": "current_work_item",
+                            "logical_work_item_ids": ["work_item_0002"],
+                            "work_item_revision_ids": ["work_item_revision_0002"]
+                        },
+                        "recommended_route": "plan_repair",
+                        "confidence": "high",
+                        "evidence": []
+                    }],
+                    "impact_scope": ["work_item_0002"],
+                    "pr_description": "plan repair required",
+                    "commit_message_suggestion": "fix: repair plan"
+                    })
+                    .to_string()
+                }
+            }
+            AdapterRole::Reviewer => {
+                r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string()
+            }
+            _ => "ok".to_string(),
+        };
+        tx.try_send(StreamChunk::Done { full_output })
+            .expect("send done");
+        Ok(rx)
+    }
+}
+
+fn materialize_completed_unit_run_for_logical(
+    store: &CodingAttemptStore,
+    logical_work_item_id: &str,
+) -> cadence_aria::product::coding_models::CodingUnitRun {
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("units");
+    let unit = units
+        .iter()
+        .find(|unit| unit.logical_work_item_id == logical_work_item_id)
+        .expect("unit");
+    let runs = store
+        .list_coding_unit_runs(&attempt, &unit.id)
+        .expect("unit runs");
+    if let Some(run) = runs.iter().find(|run| {
+        run.status == cadence_aria::product::coding_models::CodingUnitRunStatus::Completed
+    }) {
+        return run.clone();
+    }
+    let mut run = runs.last().expect("materialized unit run").clone();
+    run.id = format!("coding_unit_run_completed_{}", logical_work_item_id);
+    run.execution_no += 1;
+    run.status = cadence_aria::product::coding_models::CodingUnitRunStatus::Completed;
+    run.completion_commit = attempt.head_commit.clone();
+    run.created_at = "2026-07-19T00:00:00Z".to_string();
+    run.updated_at = run.created_at.clone();
+    store
+        .create_coding_unit_run(&attempt, &run)
+        .expect("completed unit run");
+    run
+}
+
+fn bind_completed_first_unit_handoff_revision(store: &CodingAttemptStore) {
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("units");
+    let first = units
+        .iter()
+        .find(|unit| unit.logical_work_item_id == "work_item_0001")
+        .expect("first unit");
+    let run = materialize_completed_unit_run_for_logical(store, "work_item_0001");
+    let revision_store = WorkItemRevisionStore::new(store.paths());
+    let lineage = revision_store
+        .get_plan_lineage(&attempt.project_id, &attempt.issue_id, "work_item_plan_0001")
+        .expect("lineage");
+    let revision = revision_store
+        .get_work_item_revision(
+            &lineage,
+            &first.logical_work_item_id,
+            &first.work_item_revision_id,
+        )
+        .expect("first revision");
+    let handoff = cadence_aria::product::models::HandoffRevision {
+        id: "handoff_revision_0001".to_string(),
+        logical_work_item_id: first.logical_work_item_id.clone(),
+        work_item_revision_id: first.work_item_revision_id.clone(),
+        coding_unit_run_id: run.id,
+        provided_contracts: Vec::new(),
+        provided_capabilities: std::collections::BTreeMap::new(),
+        contract_hash: revision.canonical_contract_hash,
+        commit_sha: run.completion_commit.unwrap_or_else(|| "HEAD".to_string()),
+        tests: Vec::new(),
+        artifacts: Vec::new(),
+        created_at: "2026-07-19T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_handoff_revision(&lineage, &handoff)
+        .expect("handoff revision");
+    store
+        .update_coding_unit_latest_handoff_revision_id(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &first.id,
+            Some(handoff.id),
+        )
+        .expect("handoff binding");
+}
+
+#[tokio::test]
+async fn coding_plan_repair_group_final_review_normal_path_does_not_complete_approve_with_plan_finding()
+{
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_group_full_chain_attempt_and_provider(
+        root.path(),
+        Arc::new(GroupFinalReviewPlanDefectProvider::normal()),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_gates = HashSet::new();
+    let mut saw_group_final_review = false;
+    let mut bound_first_handoff = false;
+    for _ in 0..520 {
+        match timeout(Duration::from_secs(2), recv_json(&mut ws)).await {
+            Ok(CodingWsOutMessage::CodingGateRequired { gate }) => {
+                if gate.kind == CodingGateKind::StageGate
+                    && let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    if stage == CodingExecutionStage::InternalPrReview {
+                        materialize_completed_unit_run_for_logical(&store, "work_item_0002");
+                    }
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            Ok(CodingWsOutMessage::CodingSessionState {
+                current_work_item_id,
+                ..
+            }) if current_work_item_id.as_deref() == Some("work_item_0002")
+                && !bound_first_handoff =>
+            {
+                bind_completed_first_unit_handoff_revision(&store);
+                bound_first_handoff = true;
+            }
+            Ok(CodingWsOutMessage::InternalPrReviewComplete { review }) => {
+                assert_eq!(review.verdict, ReviewVerdict::Approve);
+                assert_eq!(review.findings.len(), 1);
+                saw_group_final_review = true;
+                break;
+            }
+            Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            Ok(_) => {}
+            Err(_) => {
+                let attempt = store
+                    .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+                    .expect("attempt after timeout");
+                let gates = store
+                    .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
+                    .expect("blocked gates");
+                let requests = store
+                    .list_review_requests("project_0001", "issue_0001", "coding_attempt_0001")
+                    .expect("review requests");
+                panic!(
+                    "timed out before GroupFinalReview: status={:?} stage={:?} current={:?} gates={gates:?} requests={requests:?}",
+                    attempt.status, attempt.stage, attempt.current_work_item_id,
+                );
+            }
+        }
+    }
+    assert!(saw_group_final_review, "expected GroupFinalReview output");
+    tokio::task::yield_now().await;
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_ne!(attempt.status, CodingAttemptStatus::Completed);
+    assert_eq!(attempt.stage, CodingExecutionStage::InternalPrReview);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
 }
 
 #[tokio::test]

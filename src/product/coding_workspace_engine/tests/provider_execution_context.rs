@@ -20,7 +20,7 @@ impl CapturingProjectionProvider {
         }
     }
 
-    fn input(&self) -> StreamingProviderInput {
+    pub(super) fn input(&self) -> StreamingProviderInput {
         self.inputs.lock().unwrap()[0].clone()
     }
 }

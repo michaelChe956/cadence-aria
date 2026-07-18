@@ -351,7 +351,6 @@ async fn testing_without_provider_driven_capability_creates_tester_blocked_gate(
     }];
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-
     let report = engine
         .execute_testing_with_provider(
             &attempt,
@@ -388,7 +387,7 @@ async fn testing_without_provider_driven_capability_creates_tester_blocked_gate(
 }
 
 #[tokio::test]
-async fn real_provider_driven_testing_accepts_final_step_results_without_tool_calls() {
+async fn coding_plan_repair_tester_plan_finding_blocks_provider_driven_testing() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -404,7 +403,7 @@ async fn real_provider_driven_testing_accepts_final_step_results_without_tool_ca
         .await
         .expect("provider-driven testing");
 
-    assert_eq!(report.overall_status, TestingOverallStatus::Passed);
+    assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
     assert!(report.plan_id.is_some());
     assert_eq!(report.steps.len(), 1);
     assert_eq!(report.plan_defect_findings.len(), 1);
@@ -427,7 +426,11 @@ async fn real_provider_driven_testing_accepts_final_step_results_without_tool_ca
     );
     assert!(report.commands.is_empty());
     assert!(report.raw_provider_output_ref.is_some());
-
+    let updated = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt");
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::Testing);
     let chat_entries = store
         .list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("chat entries");
@@ -758,7 +761,9 @@ async fn blocked_code_review_without_structured_findings_accepts_manual_feedback
     drop(root);
 }
 
-fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeReviewReport {
+pub(super) fn review_report_requesting_changes(
+    attempt: &CodingExecutionAttempt,
+) -> CodeReviewReport {
     CodeReviewReport {
         id: "code_review_report_0001".to_string(),
         attempt_id: attempt.id.clone(),

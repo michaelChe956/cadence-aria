@@ -153,10 +153,10 @@ pub(crate) fn review_findings_flow_decision(
     {
         return CodeReviewFlowDecision::RetryVerification;
     }
-    if findings.iter().any(|finding| {
-        finding.defect_class != PlanDefectClass::ImplementationDefect
-            && validate_plan_defect_finding(finding, reviewer_projection).is_err()
-    }) {
+    if findings
+        .iter()
+        .any(|finding| validate_plan_defect_finding(finding, reviewer_projection).is_err())
+    {
         return CodeReviewFlowDecision::StopForHumanTriage;
     }
     match verdict {
@@ -180,6 +180,7 @@ pub(crate) fn validate_plan_defect_finding(
             && finding.capability_refs.is_empty()
             && finding.repair_target.is_none()
             && finding.confidence.is_none()
+            && finding.plan_defect_evidence.is_empty()
         {
             return Ok(());
         }
@@ -524,8 +525,7 @@ impl CodingWorkspaceEngine {
                     created_at: now.clone(),
                     updated_at: now,
                 };
-                self.store.create_coding_unit_run(attempt, &run)?;
-                run
+                self.store.load_or_create_coding_unit_run(attempt, &run)?
             }
             Err(error) => return Err(error.into()),
         };

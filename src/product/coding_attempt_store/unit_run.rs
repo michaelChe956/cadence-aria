@@ -50,6 +50,52 @@ impl super::CodingAttemptStore {
         })
     }
 
+    pub fn load_or_create_coding_unit_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        requested: &CodingUnitRun,
+    ) -> Result<CodingUnitRun, ProductStoreError> {
+        self.validate_attempt_lineage(attempt)?;
+        validate_unit_run(requested)?;
+        let unit = self.authoritative_unit(attempt, &requested.unit_id)?;
+        if requested.work_item_revision_id != unit.work_item_revision_id {
+            return Err(identity_mismatch("coding_unit_run", &requested.id));
+        }
+        let lock_target = self
+            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("unit-runs-index.json");
+        with_exclusive_lock(&lock_target, || {
+            let runs = self.list_coding_unit_runs(attempt, &requested.unit_id)?;
+            if let Some(existing) = runs
+                .into_iter()
+                .find(|run| run.execution_no == requested.execution_no)
+            {
+                if same_materialization_identity(&existing, requested) {
+                    return Ok(existing);
+                }
+                return Err(identity_mismatch("coding_unit_run", &requested.id));
+            }
+            if self.find_unit_run_by_id(attempt, &requested.id)?.is_some() {
+                return Err(identity_mismatch("coding_unit_run", &requested.id));
+            }
+            let now = Utc::now().to_rfc3339();
+            let mut persisted = requested.clone();
+            persisted.created_at = now.clone();
+            persisted.updated_at = now;
+            write_json(
+                &self.coding_unit_run_path(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &persisted.unit_id,
+                    &persisted.id,
+                ),
+                &persisted,
+            )?;
+            Ok(persisted)
+        })
+    }
+
     pub fn list_coding_unit_runs(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -284,6 +330,21 @@ fn validate_unit_run(run: &CodingUnitRun) -> Result<(), ProductStoreError> {
         return Err(identity_mismatch("coding_unit_run", &run.id));
     }
     Ok(())
+}
+
+fn same_materialization_identity(left: &CodingUnitRun, right: &CodingUnitRun) -> bool {
+    left.unit_id == right.unit_id
+        && left.execution_no == right.execution_no
+        && left.work_item_revision_id == right.work_item_revision_id
+        && left.resolved_handoff_revision_ids == right.resolved_handoff_revision_ids
+        && left.canonical_contract_hash == right.canonical_contract_hash
+        && left.projection_bundle_id == right.projection_bundle_id
+        && left.projection_compiler_version == right.projection_compiler_version
+        && left.coder_provider_renderer_version == right.coder_provider_renderer_version
+        && left.reviewer_provider_renderer_version == right.reviewer_provider_renderer_version
+        && left.coder_projection_hash == right.coder_projection_hash
+        && left.reviewer_projection_hash == right.reviewer_projection_hash
+        && left.start_commit == right.start_commit
 }
 
 fn identity_mismatch(kind: &'static str, id: &str) -> ProductStoreError {

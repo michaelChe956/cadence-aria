@@ -10,3 +10,5 @@ include!("web_coding_ws_handler/part_09.rs");
 include!("web_coding_ws_handler/part_10.rs");
 include!("web_coding_ws_handler/part_11.rs");
 include!("web_coding_ws_handler/part_12.rs");
+include!("web_coding_ws_handler/part_13.rs");
+include!("web_coding_ws_handler/part_14.rs");

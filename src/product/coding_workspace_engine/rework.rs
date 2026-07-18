@@ -123,17 +123,21 @@ impl CodingWorkspaceEngine {
             &CodingProviderRole::Coder,
             &coder_provider_name,
         );
-        let full_prompt = build_coding_prompt(&updated, context, Some(&instruction), None);
-        let prompt_mode = if resume_provider_session_id.is_some() {
-            CodingPromptMode::DeltaOnly
-        } else {
+        let rendered_context =
+            self.render_coder_unit_run_context(&updated, &coder_provider_name, None)?;
+        let delta_prompt = build_coding_delta_prompt(&updated, context, Some(&instruction), None);
+        let full_prompt = rendered_context
+            .as_ref()
+            .map(|rendered| format!("{}\n\n{}", rendered.text, delta_prompt))
+            .unwrap_or_else(|| build_coding_prompt(&updated, context, Some(&instruction), None));
+        let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
+        } else {
+            CodingPromptMode::DeltaOnly
         };
         let prompt = match prompt_mode {
             CodingPromptMode::FullConversation => full_prompt.clone(),
-            CodingPromptMode::DeltaOnly => {
-                build_coding_delta_prompt(&updated, context, Some(&instruction), None)
-            }
+            CodingPromptMode::DeltaOnly => delta_prompt,
         };
         let _ = self
             .event_tx

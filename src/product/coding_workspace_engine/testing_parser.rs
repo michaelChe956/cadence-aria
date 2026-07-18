@@ -217,6 +217,33 @@ pub(crate) fn parse_test_execution_payload_from_provider_output(
     Ok(payload)
 }
 
+pub(crate) fn merge_test_execution_plan_defect_findings(
+    retained: &mut Vec<crate::product::plan_repair::PlanDefectFinding>,
+    incoming: Vec<crate::product::plan_repair::PlanDefectFinding>,
+) -> Result<(), CodingWorkspaceEngineError> {
+    for finding in incoming {
+        if let Some(index) = retained
+            .iter()
+            .position(|existing| existing.finding_id == finding.finding_id)
+        {
+            let existing_identity =
+                crate::product::plan_repair::plan_defect_fingerprint("", &retained[index]);
+            let incoming_identity =
+                crate::product::plan_repair::plan_defect_fingerprint("", &finding);
+            if existing_identity != incoming_identity {
+                return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "tester_plan_defect_identity_conflict: {}",
+                    finding.finding_id
+                )));
+            }
+            retained[index] = finding;
+        } else {
+            retained.push(finding);
+        }
+    }
+    Ok(())
+}
+
 pub fn testing_report_has_execution_evidence(report: &TestingReport) -> bool {
     (!report.steps.is_empty() && report.plan_id.is_some())
         || !report.commands.is_empty()

@@ -1,5 +1,10 @@
 use super::*;
 
+pub(crate) struct CoderExecutionOutcome {
+    pub(crate) attempt: CodingExecutionAttempt,
+    pub(crate) plan_defect_decision: Option<CodeReviewFlowDecision>,
+}
+
 impl CodingWorkspaceEngine {
     pub async fn execute_coding(
         &self,
@@ -19,6 +24,19 @@ impl CodingWorkspaceEngine {
         context: &CodingExecutionContext,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        Ok(self
+            .execute_coding_with_commands_outcome(attempt, provider, context, command_rx)
+            .await?
+            .attempt)
+    }
+
+    pub(crate) async fn execute_coding_with_commands_outcome(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        context: &CodingExecutionContext,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<CoderExecutionOutcome, CodingWorkspaceEngineError> {
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -207,18 +225,16 @@ impl CodingWorkspaceEngine {
                 return Err(error);
             }
         };
-        let plan_defect_report =
-            parse_execution_plan_defects(PlanDefectSource::Coder, &full_output)?;
-        let plan_defect_route = if plan_defect_report.findings.is_empty() {
-            None
-        } else {
-            let projection = self.reviewer_projection_for_attempt(&attempt)?;
-            Some(
-                execution_plan_defect_flow_decision(&plan_defect_report, &projection)
-                    .label()
-                    .to_string(),
-            )
-        };
+        let plan_defect_decision =
+            match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
+                Ok(report) if report.findings.is_empty() => None,
+                Ok(report) => {
+                    let projection = self.reviewer_projection_for_attempt(&attempt)?;
+                    Some(execution_plan_defect_flow_decision(&report, &projection))
+                }
+                Err(_) => Some(CodeReviewFlowDecision::StopForHumanTriage),
+            };
+        let plan_defect_route = plan_defect_decision.map(CodeReviewFlowDecision::label);
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &attempt,
             CodingExecutionStage::Coding,
@@ -258,10 +274,13 @@ impl CodingWorkspaceEngine {
             full_output: &full_output,
             raw_provider_output_ref: &raw_provider_output_ref,
             source: "coding",
-            plan_defect_route: plan_defect_route.as_deref(),
+            plan_defect_route,
         })
         .await;
-        Ok(attempt)
+        Ok(CoderExecutionOutcome {
+            attempt,
+            plan_defect_decision,
+        })
     }
 
     fn should_resume_coder_session_for_role_run(

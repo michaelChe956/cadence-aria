@@ -32,8 +32,8 @@ use cadence_aria::product::models::{
 };
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use cadence_aria::product::work_item_contract::{
-    CanonicalWorkItemContract, HandoffContract, WorkItemContractIdentity, WorkItemGoal,
-    WorkItemWritePolicy, canonical_contract_hash,
+    BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract,
+    WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
 };
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::product::work_item_projection::{
@@ -159,7 +159,11 @@ fn seed_authoritative_group_plan_fixture(
                 provided_contract_refs: Vec::new(),
                 reviewer_check_refs: Vec::new(),
             },
-            blocker_rules: Vec::new(),
+            blocker_rules: vec![BlockerRule {
+                reason_code: "current_work_item_contract_invalid".to_string(),
+                route: BlockerRoute::PlanRepairCurrent,
+                target_contract_refs: Vec::new(),
+            }],
             design_traceability: Vec::new(),
         };
         let revision = WorkItemRevision {
