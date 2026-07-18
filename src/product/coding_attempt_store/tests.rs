@@ -12,6 +12,7 @@ use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 mod failed_review_recovery;
 mod group_uniqueness;
+mod plan_repair;
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
@@ -269,7 +270,9 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -280,7 +283,9 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -300,7 +305,7 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
         Some("work_item_plan_0001")
     );
     assert_eq!(units.len(), 2);
-    assert_eq!(active.work_item_id, "work_item_0001");
+    assert_eq!(active.logical_work_item_id, "work_item_0001");
 }
 
 #[test]
@@ -326,7 +331,9 @@ fn rejects_creating_second_active_unit_for_same_attempt() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -338,7 +345,9 @@ fn rejects_creating_second_active_unit_for_same_attempt() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec![WORK_ITEM_ID.to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -370,7 +379,9 @@ fn rejects_updating_pending_unit_to_active_when_another_unit_is_active() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -381,7 +392,9 @@ fn rejects_updating_pending_unit_to_active_when_another_unit_is_active() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec![WORK_ITEM_ID.to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -497,7 +510,9 @@ fn clears_current_work_item_when_last_active_unit_completes() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -544,7 +559,9 @@ fn blocked_or_waiting_units_do_not_set_started_at() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Blocked,
         })
@@ -568,7 +585,9 @@ fn blocked_or_waiting_units_do_not_set_started_at() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec![WORK_ITEM_ID.to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })

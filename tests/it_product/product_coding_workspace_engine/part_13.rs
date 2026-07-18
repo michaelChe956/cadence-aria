@@ -77,12 +77,12 @@ fn group_attempt_waiting_for_final_confirm_with_scoped_work_items() -> (
         )
         .expect("save unit1 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             "coding_unit_0001",
-            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0001".to_string()),
         )
         .expect("set unit1 handoff ref");
     store
@@ -123,12 +123,12 @@ fn group_attempt_waiting_for_final_confirm_with_scoped_work_items() -> (
         )
         .expect("save unit2 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             "coding_unit_0002",
-            Some("units/coding_unit_0002/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0002".to_string()),
         )
         .expect("set unit2 handoff ref");
     let attempt = store
@@ -314,12 +314,12 @@ async fn completing_group_units_saves_distinct_handoffs_per_unit() {
     assert_eq!(after_second.stage, CodingExecutionStage::ReviewRequest);
     assert_eq!(unit2_handoff.work_item_id, "work_item_0002");
     assert_eq!(
-        units[0].handoff_ref.as_deref(),
-        Some("units/coding_unit_0001/work-item-handoff.json")
+        units[0].latest_handoff_revision_id.as_deref(),
+        None
     );
     assert_eq!(
-        units[1].handoff_ref.as_deref(),
-        Some("units/coding_unit_0002/work-item-handoff.json")
+        units[1].latest_handoff_revision_id.as_deref(),
+        None
     );
     assert_ne!(unit1_handoff.work_item_id, unit2_handoff.work_item_id);
 }
@@ -396,8 +396,8 @@ async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit(
         "Handoff generated from attempt artifacts"
     );
     assert_eq!(
-        units[0].handoff_ref.as_deref(),
-        Some("units/coding_unit_0001/work-item-handoff.json")
+        units[0].latest_handoff_revision_id.as_deref(),
+        None
     );
     assert_eq!(units[0].status, CodingExecutionUnitStatus::Completed);
     assert_eq!(units[1].status, CodingExecutionUnitStatus::Running);
@@ -613,12 +613,12 @@ async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
     ] {
         save_minimal_unit_handoff(&store, &attempt, unit_id, work_item_id);
         store
-            .update_coding_unit_handoff_ref(
+            .update_coding_unit_latest_handoff_revision_id(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
                 unit_id,
-                Some(format!("units/{unit_id}/work-item-handoff.json")),
+                Some(format!("handoff_revision_{unit_id}")),
             )
             .expect("set handoff ref");
     }

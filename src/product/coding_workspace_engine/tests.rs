@@ -222,7 +222,9 @@ async fn group_unit_completion_commits_changes_and_advances_to_next_unit() {
             project_id: attempt.project_id.clone(),
             issue_id: attempt.issue_id.clone(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 1,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -233,7 +235,9 @@ async fn group_unit_completion_commits_changes_and_advances_to_next_unit() {
             project_id: attempt.project_id.clone(),
             issue_id: attempt.issue_id.clone(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
             order_index: 2,
             status: CodingExecutionUnitStatus::Pending,
         })

@@ -50,6 +50,64 @@ pub async fn create_group_coding_attempt(
         ));
     }
 
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
+    let plan_lineage = revision_store
+        .get_plan_lineage(&project_id, &issue_id, &plan_id)
+        .map_err(|_| {
+            ApiError::validation(
+                "coding_plan_revision_binding_missing",
+                "group coding requires a published plan revision",
+            )
+        })?;
+    let bound_plan_revision_id = plan_lineage.active_revision_id.clone().ok_or_else(|| {
+        ApiError::validation(
+            "coding_plan_revision_binding_missing",
+            "group coding requires an active plan revision",
+        )
+    })?;
+    let plan_revision = revision_store
+        .get_plan_revision(&project_id, &issue_id, &plan_id, &bound_plan_revision_id)
+        .map_err(|_| {
+            ApiError::validation(
+                "coding_plan_revision_binding_missing",
+                "active plan revision could not be loaded",
+            )
+        })?;
+    let dependency_graph = revision_store
+        .get_dependency_graph_revision(&plan_lineage, &plan_revision.dependency_graph_revision_id)
+        .map_err(|_| {
+            ApiError::validation(
+                "coding_plan_revision_binding_missing",
+                "active plan dependency graph could not be loaded",
+            )
+        })?;
+    let mut unit_bindings = Vec::with_capacity(ordered.len());
+    for item in &ordered {
+        let work_item_revision_id = plan_revision
+            .work_item_bindings
+            .get(&item.id)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::validation(
+                    "coding_plan_revision_binding_missing",
+                    "active plan revision does not bind every coding unit",
+                )
+            })?;
+        let mut dependency_logical_work_item_ids = dependency_graph
+            .edges
+            .iter()
+            .filter(|edge| edge.to == item.id)
+            .map(|edge| edge.from.clone())
+            .collect::<Vec<_>>();
+        dependency_logical_work_item_ids.sort();
+        dependency_logical_work_item_ids.dedup();
+        unit_bindings.push((
+            item.id.clone(),
+            work_item_revision_id,
+            dependency_logical_work_item_ids,
+        ));
+    }
+
     let current_work_item = ordered.first().expect("checked non-empty");
     let repository = find_repository(&app_paths, &project_id, &current_work_item.repository_id)?;
     if !is_git_repo(&repository.path) {
@@ -155,13 +213,40 @@ pub async fn create_group_coding_attempt(
         }
     };
 
-    for (index, item) in ordered.iter().enumerate() {
+    if let Err(error) = coding_store.save_plan_binding(
+        &attempt,
+        &CodingAttemptPlanBinding {
+            attempt_id: attempt.id.clone(),
+            plan_id: plan_id.clone(),
+            bound_plan_revision_id,
+            applied_amendment_ids: Vec::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        },
+    ) {
+        rollback_group_attempt_creation(
+            &coding_store,
+            &lifecycle,
+            &project_id,
+            &issue_id,
+            &current_work_item.id,
+            &attempt.id,
+            already_locked_by_current,
+        )
+        .map_err(product_store_api_error)?;
+        return Err(product_store_api_error(error));
+    }
+
+    for (index, (logical_work_item_id, work_item_revision_id, dependencies)) in
+        unit_bindings.into_iter().enumerate()
+    {
         if let Err(error) = coding_store.create_coding_unit(CreateCodingExecutionUnitInput {
             attempt_id: attempt.id.clone(),
             project_id: project_id.clone(),
             issue_id: issue_id.clone(),
             plan_id: plan_id.clone(),
-            work_item_id: item.id.clone(),
+            logical_work_item_id,
+            work_item_revision_id,
+            dependency_logical_work_item_ids: dependencies,
             order_index: index as u32,
             status: if index == 0 {
                 CodingExecutionUnitStatus::Running

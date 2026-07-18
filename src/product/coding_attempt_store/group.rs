@@ -5,9 +5,7 @@ use crate::product::coding_models::{
     CodingExecutionUnit, CodingExecutionUnitStatus, CodingRoleProviderConfigSnapshot,
 };
 use crate::product::id::next_sequential_id;
-use crate::product::json_store::{
-    ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
-};
+use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 use super::{CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput};
 
@@ -129,7 +127,11 @@ impl super::CodingAttemptStore {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.plan_id)?;
-        validate_relative_id(&input.work_item_id)?;
+        validate_relative_id(&input.logical_work_item_id)?;
+        validate_relative_id(&input.work_item_revision_id)?;
+        for dependency_id in &input.dependency_logical_work_item_ids {
+            validate_relative_id(dependency_id)?;
+        }
 
         let attempt = self.get_attempt(&input.project_id, &input.issue_id, &input.attempt_id)?;
         if attempt.scope != CodingAttemptScope::WorkItemGroup {
@@ -170,12 +172,14 @@ impl super::CodingAttemptStore {
             project_id: input.project_id,
             issue_id: input.issue_id,
             plan_id: input.plan_id,
-            work_item_id: input.work_item_id,
+            logical_work_item_id: input.logical_work_item_id,
+            work_item_revision_id: input.work_item_revision_id,
+            dependency_logical_work_item_ids: input.dependency_logical_work_item_ids,
             order_index: input.order_index,
             status: input.status,
             started_at,
             completed_at: None,
-            handoff_ref: None,
+            latest_handoff_revision_id: None,
             completion_commit: None,
             summary: None,
             created_at: now.clone(),
@@ -189,7 +193,7 @@ impl super::CodingAttemptStore {
         if unit.status.is_active() {
             let mut attempt = attempt;
             attempt.active_unit_id = Some(unit.id.clone());
-            attempt.current_work_item_id = Some(unit.work_item_id.clone());
+            attempt.current_work_item_id = Some(unit.logical_work_item_id.clone());
             attempt.updated_at = Utc::now().to_rfc3339();
             self.save_coding_attempt(&attempt)?;
         }
@@ -270,6 +274,7 @@ impl super::CodingAttemptStore {
             status,
             CodingExecutionUnitStatus::Completed
                 | CodingExecutionUnitStatus::Failed
+                | CodingExecutionUnitStatus::Superseded
                 | CodingExecutionUnitStatus::Skipped
         ) {
             unit.completed_at = Some(now.clone());
@@ -283,7 +288,7 @@ impl super::CodingAttemptStore {
         match self.get_active_coding_unit(project_id, issue_id, attempt_id)? {
             Some(active) => {
                 attempt.active_unit_id = Some(active.id.clone());
-                attempt.current_work_item_id = Some(active.work_item_id.clone());
+                attempt.current_work_item_id = Some(active.logical_work_item_id.clone());
             }
             None => {
                 attempt.active_unit_id = None;
@@ -296,24 +301,24 @@ impl super::CodingAttemptStore {
         Ok(unit)
     }
 
-    pub fn update_coding_unit_handoff_ref(
+    pub fn update_coding_unit_latest_handoff_revision_id(
         &self,
         project_id: &str,
         issue_id: &str,
         attempt_id: &str,
         unit_id: &str,
-        handoff_ref: Option<String>,
+        latest_handoff_revision_id: Option<String>,
     ) -> Result<CodingExecutionUnit, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
         validate_relative_id(attempt_id)?;
         validate_relative_id(unit_id)?;
-        if let Some(handoff_ref) = handoff_ref.as_deref() {
-            validate_relative_artifact_ref(handoff_ref)?;
+        if let Some(handoff_revision_id) = latest_handoff_revision_id.as_deref() {
+            validate_relative_id(handoff_revision_id)?;
         }
         let path = self.coding_unit_path(project_id, issue_id, attempt_id, unit_id);
         let mut unit: CodingExecutionUnit = read_json(&path)?;
-        unit.handoff_ref = handoff_ref;
+        unit.latest_handoff_revision_id = latest_handoff_revision_id;
         unit.updated_at = Utc::now().to_rfc3339();
         write_json(&path, &unit)?;
         Ok(unit)

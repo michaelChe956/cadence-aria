@@ -510,11 +510,13 @@ pub struct CodingAttemptDto {
 #[serde(rename_all = "snake_case")]
 pub struct CodingExecutionUnitDto {
     pub unit_id: String,
-    pub work_item_id: String,
+    pub logical_work_item_id: String,
+    pub work_item_revision_id: String,
+    pub dependency_logical_work_item_ids: Vec<String>,
     pub order_index: u32,
     pub status: String,
     pub summary: Option<String>,
-    pub handoff_ref: Option<String>,
+    pub latest_handoff_revision_id: Option<String>,
     pub completion_commit: Option<String>,
 }
 

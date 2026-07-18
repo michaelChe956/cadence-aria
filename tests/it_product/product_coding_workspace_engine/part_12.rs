@@ -33,7 +33,9 @@ fn group_engine_with_two_units() -> (
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -44,7 +46,9 @@ fn group_engine_with_two_units() -> (
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -89,7 +93,9 @@ fn group_engine_with_last_running_unit() -> (
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Completed,
         })
@@ -100,7 +106,9 @@ fn group_engine_with_last_running_unit() -> (
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -205,12 +213,12 @@ fn completed_group_attempt_with_handoffs() -> (
         )
         .expect("save unit1 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             "coding_unit_0001",
-            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0001".to_string()),
         )
         .expect("set unit1 handoff ref");
     store
@@ -241,12 +249,12 @@ fn completed_group_attempt_with_handoffs() -> (
         )
         .expect("save unit2 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             "coding_unit_0002",
-            Some("units/coding_unit_0002/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0002".to_string()),
         )
         .expect("set unit2 handoff ref");
     store
@@ -327,12 +335,12 @@ fn group_attempt_waiting_for_final_confirm() -> (
         )
         .expect("save unit1 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             "coding_unit_0001",
-            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0001".to_string()),
         )
         .expect("set unit1 handoff ref");
     store
@@ -373,12 +381,12 @@ fn group_attempt_waiting_for_final_confirm() -> (
         )
         .expect("save unit2 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             "coding_unit_0002",
-            Some("units/coding_unit_0002/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0002".to_string()),
         )
         .expect("set unit2 handoff ref");
     let attempt = store

@@ -54,7 +54,9 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })

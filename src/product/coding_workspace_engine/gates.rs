@@ -206,7 +206,7 @@ impl CodingWorkspaceEngine {
         for (unit, handoff) in &handoffs {
             let work_item = work_items
                 .iter()
-                .find(|item| item.id == unit.work_item_id)
+                .find(|item| item.id == unit.logical_work_item_id)
                 .ok_or_else(|| {
                     CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone())
                 })?;
@@ -222,7 +222,11 @@ impl CodingWorkspaceEngine {
             .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
             .and_then(|shared| shared.current_active_work_item_id)
             .or_else(|| attempt.current_work_item_id.clone())
-            .or_else(|| handoffs.last().map(|(unit, _)| unit.work_item_id.clone()))
+            .or_else(|| {
+                handoffs
+                    .last()
+                    .map(|(unit, _)| unit.logical_work_item_id.clone())
+            })
             .unwrap_or_else(|| attempt.work_item_id.clone());
         self.ensure_issue_shared_worktree_clean(attempt, &lock_holder_work_item_id)
             .await?;

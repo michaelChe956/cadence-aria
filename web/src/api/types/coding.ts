@@ -15,6 +15,9 @@ export type CodingAttemptStatus =
   | "running"
   | "waiting_for_human"
   | "blocked"
+  | "awaiting_plan_amendment"
+  | "applying_plan_amendment"
+  | "amendment_apply_failed"
   | "completed"
   | "failed"
   | "aborted";
@@ -44,15 +47,22 @@ export type CodingExecutionUnitStatus =
   | "completed"
   | "failed"
   | "blocked"
+  | "blocked_by_plan_defect"
+  | "awaiting_amendment"
+  | "needs_revalidation"
+  | "stale"
+  | "superseded"
   | "skipped";
 
 export type CodingExecutionUnit = {
   unit_id: string;
-  work_item_id: string;
+  logical_work_item_id: string;
+  work_item_revision_id: string;
+  dependency_logical_work_item_ids: string[];
   order_index: number;
   status: CodingExecutionUnitStatus;
   summary: string | null;
-  handoff_ref: string | null;
+  latest_handoff_revision_id: string | null;
   completion_commit: string | null;
 };
 

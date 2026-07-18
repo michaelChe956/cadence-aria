@@ -138,18 +138,22 @@ pub(crate) fn assert_group_attempt_creation_rolled_back(app_paths: &ProductAppPa
             .is_empty()
     );
     let issue_root = app_paths.issue_lifecycle_root("project_0001", "issue_0001");
-    assert_eq!(
-        fs::read_dir(issue_root.join("coding-attempts"))
-            .expect("coding attempts root")
-            .count(),
-        0
-    );
+    let attempts_root = issue_root.join("coding-attempts");
+    if attempts_root.exists() {
+        assert_eq!(
+            fs::read_dir(attempts_root)
+                .expect("coding attempts root")
+                .count(),
+            0
+        );
+    }
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let shared_worktree = lifecycle
         .get_issue_shared_worktree("project_0001", "issue_0001")
-        .expect("shared worktree")
-        .expect("shared worktree record");
-    assert_eq!(shared_worktree.current_active_work_item_id, None);
+        .expect("shared worktree");
+    if let Some(shared_worktree) = shared_worktree {
+        assert_eq!(shared_worktree.current_active_work_item_id, None);
+    }
 }
 
 pub(crate) fn git_repo() -> tempfile::TempDir {

@@ -7,12 +7,15 @@ mod context;
 mod gate;
 mod group;
 mod inputs;
+mod locking;
 mod paths;
+mod plan_binding;
 mod recovery;
 mod report;
 mod role_run;
 mod role_run_event;
 mod timeline;
+mod unit_run;
 mod utils;
 
 pub use inputs::*;
@@ -47,8 +50,32 @@ impl CodingAttemptStore {
                 id: record_id.to_string(),
             });
         }
-        self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        self.validate_attempt_lineage(attempt)?;
         Ok(())
+    }
+
+    pub(crate) fn validate_attempt_lineage(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        validate_relative_id(&attempt.project_id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        validate_relative_id(&attempt.id)?;
+        let stored = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        if stored.id != attempt.id
+            || stored.project_id != attempt.project_id
+            || stored.issue_id != attempt.issue_id
+            || stored.work_item_id != attempt.work_item_id
+            || stored.attempt_no != attempt.attempt_no
+            || stored.scope != attempt.scope
+            || stored.work_item_group_id != attempt.work_item_group_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_attempt",
+                id: attempt.id.clone(),
+            });
+        }
+        Ok(stored)
     }
 
     pub(crate) fn find_attempt_by_id(

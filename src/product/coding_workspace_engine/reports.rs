@@ -87,7 +87,7 @@ impl CodingWorkspaceEngine {
                 format!(
                     "- Unit: {}\n  Work Item: {}\n  Status: {:?}\n  Completion Commit: {}\n  Handoff Summary: {}\n  Tests Run: {}\n  Risk Notes: {}",
                     unit.id,
-                    unit.work_item_id,
+                    unit.logical_work_item_id,
                     unit.status,
                     completion_commit,
                     handoff.summary,

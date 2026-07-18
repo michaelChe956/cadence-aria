@@ -55,7 +55,7 @@ impl CodingWorkspaceEngine {
             let mut updated =
                 self.store
                     .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-            updated.current_work_item_id = Some(next.work_item_id.clone());
+            updated.current_work_item_id = Some(next.logical_work_item_id.clone());
             updated.active_unit_id = Some(next.id.clone());
             updated.stage = CodingExecutionStage::PrepareContext;
             updated.status = CodingAttemptStatus::Running;
@@ -70,7 +70,7 @@ impl CodingWorkspaceEngine {
                     &attempt.project_id,
                     &attempt.issue_id,
                     &current_work_item_id,
-                    &next.work_item_id,
+                    &next.logical_work_item_id,
                 )?;
             }
             return Ok(updated);

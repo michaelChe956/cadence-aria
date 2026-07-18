@@ -608,6 +608,7 @@ fn valid_status_transition(current: &CodingAttemptStatus, next: &CodingAttemptSt
             next,
             CodingAttemptStatus::WaitingForHuman
                 | CodingAttemptStatus::Blocked
+                | CodingAttemptStatus::AwaitingPlanAmendment
                 | CodingAttemptStatus::Completed
                 | CodingAttemptStatus::Failed
                 | CodingAttemptStatus::Aborted
@@ -626,6 +627,20 @@ fn valid_status_transition(current: &CodingAttemptStatus, next: &CodingAttemptSt
                 CodingAttemptStatus::Running | CodingAttemptStatus::Aborted
             )
         }
+        CodingAttemptStatus::AwaitingPlanAmendment => matches!(
+            next,
+            CodingAttemptStatus::ApplyingPlanAmendment | CodingAttemptStatus::Aborted
+        ),
+        CodingAttemptStatus::ApplyingPlanAmendment => matches!(
+            next,
+            CodingAttemptStatus::Running
+                | CodingAttemptStatus::AmendmentApplyFailed
+                | CodingAttemptStatus::Aborted
+        ),
+        CodingAttemptStatus::AmendmentApplyFailed => matches!(
+            next,
+            CodingAttemptStatus::ApplyingPlanAmendment | CodingAttemptStatus::Aborted
+        ),
         CodingAttemptStatus::Completed
         | CodingAttemptStatus::Failed
         | CodingAttemptStatus::Aborted => false,

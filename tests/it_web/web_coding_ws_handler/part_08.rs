@@ -120,7 +120,9 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -131,7 +133,9 @@ fn app_with_group_full_chain_attempt(root_path: &Path) -> axum::Router {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -331,12 +335,12 @@ async fn coding_ws_group_session_state_hides_completed_unit_handoff_from_active_
         )
         .expect("save unit1 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             "project_0001",
             "issue_0001",
             "coding_attempt_0001",
             "coding_unit_0001",
-            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0001".to_string()),
         )
         .expect("update unit1 handoff ref");
     store
@@ -378,8 +382,8 @@ async fn coding_ws_group_session_state_hides_completed_unit_handoff_from_active_
     assert_eq!(state["current_work_item_id"], "work_item_0002");
     assert!(state["work_item_handoff"].is_null());
     assert_eq!(
-        state["units"][0]["handoff_ref"],
-        "units/coding_unit_0001/work-item-handoff.json"
+        state["units"][0]["latest_handoff_revision_id"],
+        "handoff_revision_0001"
     );
 
     ws.close(None).await.expect("close ws");

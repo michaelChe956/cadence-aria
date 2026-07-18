@@ -40,6 +40,9 @@ pub enum CodingAttemptStatus {
     Running,
     WaitingForHuman,
     Blocked,
+    AwaitingPlanAmendment,
+    ApplyingPlanAmendment,
+    AmendmentApplyFailed,
     Completed,
     Failed,
     Aborted,
@@ -49,7 +52,13 @@ impl CodingAttemptStatus {
     pub fn is_active(&self) -> bool {
         matches!(
             self,
-            Self::Created | Self::Running | Self::WaitingForHuman | Self::Blocked
+            Self::Created
+                | Self::Running
+                | Self::WaitingForHuman
+                | Self::Blocked
+                | Self::AwaitingPlanAmendment
+                | Self::ApplyingPlanAmendment
+                | Self::AmendmentApplyFailed
         )
     }
 }

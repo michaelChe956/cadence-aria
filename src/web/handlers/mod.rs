@@ -24,9 +24,9 @@ use crate::product::coding_attempt_store::{
     CreateGroupCodingAttemptInput,
 };
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus,
-    WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
+    CodingAttemptPlanBinding, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
+    CodingExecutionStage, CodingExecutionUnitStatus, CodingTimelineNode, CodingTimelineNodeStatus,
+    PushStatus, WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
 };
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::gate_store::GateStore;
@@ -55,6 +55,7 @@ use crate::product::provider_workspace_runner::{
 };
 use crate::product::repository_store::RepositoryStore;
 use crate::product::runtime_binding_store::RuntimeBindingStore;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;

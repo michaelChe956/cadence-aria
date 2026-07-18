@@ -393,7 +393,9 @@ pub(super) fn failed_review_fixture(
                 project_id: attempt.project_id.clone(),
                 issue_id: attempt.issue_id.clone(),
                 plan_id: "work_item_plan_0001".to_string(),
-                work_item_id: attempt.work_item_id.clone(),
+                logical_work_item_id: attempt.work_item_id.clone(),
+                work_item_revision_id: "work_item_revision_0001".to_string(),
+                dependency_logical_work_item_ids: Vec::new(),
                 order_index: 0,
                 status: unit_status,
             })

@@ -217,7 +217,6 @@ impl CodingWorkspaceEngine {
                     attempt.id.clone(),
                 ));
             };
-            let handoff_ref = format!("units/{}/work-item-handoff.json", active.id);
             if self
                 .store
                 .get_coding_unit_handoff(
@@ -228,15 +227,6 @@ impl CodingWorkspaceEngine {
                 )?
                 .is_some()
             {
-                if active.handoff_ref.as_deref() != Some(handoff_ref.as_str()) {
-                    self.store.update_coding_unit_handoff_ref(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        &active.id,
-                        Some(handoff_ref),
-                    )?;
-                }
                 return Ok(());
             }
 
@@ -248,14 +238,6 @@ impl CodingWorkspaceEngine {
                 &active.id,
                 &handoff,
             )?;
-            self.store.update_coding_unit_handoff_ref(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &active.id,
-                Some(handoff_ref.clone()),
-            )?;
-
             let lifecycle = LifecycleStore::new(self.store.paths());
             let current_work_item_id = self.active_work_item_id_for_attempt(attempt);
             if lifecycle
@@ -267,7 +249,7 @@ impl CodingWorkspaceEngine {
                     &attempt.project_id,
                     &attempt.issue_id,
                     current_work_item_id,
-                    Some(handoff_ref),
+                    Some(format!("units/{}/work-item-handoff.json", active.id)),
                     handoff.commit_sha.clone(),
                 )?;
             }
@@ -637,7 +619,7 @@ impl CodingWorkspaceEngine {
             self._git_service
                 .git_commit(
                     worktree_path,
-                    &format!("feat: complete {}", active.work_item_id),
+                    &format!("feat: complete {}", active.logical_work_item_id),
                 )
                 .await?
                 .commit_sha
@@ -679,17 +661,17 @@ impl CodingWorkspaceEngine {
         for unit in completed_units.into_iter().filter(|unit| {
             unit.status == crate::product::coding_models::CodingExecutionUnitStatus::Completed
         }) {
-            if existing_work_item_ids.contains(&unit.work_item_id) {
+            if existing_work_item_ids.contains(&unit.logical_work_item_id) {
                 lifecycle.update_work_item_execution_status(
                     &attempt.project_id,
                     &attempt.issue_id,
-                    &unit.work_item_id,
+                    &unit.logical_work_item_id,
                     WorkItemStatus::Completed,
                 )?;
                 self.mark_issue_shared_worktree_completed_if_present(
                     &attempt.project_id,
                     &attempt.issue_id,
-                    &unit.work_item_id,
+                    &unit.logical_work_item_id,
                 )?;
             }
         }

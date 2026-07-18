@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -11,6 +12,8 @@ use cadence_aria::product::coding_attempt_store::{
     CreateGroupCodingAttemptInput,
 };
 use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
+use cadence_aria::product::work_item_contract::DependencyContractEdge;
+use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChoiceOption, CodingExecutionAttempt,
     CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole, CodingTimelineNode,
@@ -23,10 +26,11 @@ use cadence_aria::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore,
 };
 use cadence_aria::product::models::{
-    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName, RepositoryProfileConfidence,
-    VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
-    VerificationFallbackPolicy, VerificationScope, WorkItemKind, WorkItemPlanStatus,
-    WorkItemStatus, WorkspaceSessionStatus, WorkspaceType,
+    DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, PlanRevisionReason,
+    ProviderName, RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
+    VerificationCommandSource, VerificationFallbackPolicy, VerificationScope, WorkItemKind,
+    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus, WorkItemStatus,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
@@ -36,7 +40,6 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
-
 #[tokio::test]
 async fn creates_coding_attempt_for_confirmed_work_item_and_surfaces_latest_attempt() {
     let root = tempdir().expect("root");
@@ -121,7 +124,6 @@ async fn creates_coding_attempt_with_confirmed_work_item_workspace_providers() {
         Some(ProviderName::ClaudeCode)
     );
 }
-
 #[tokio::test]
 async fn creates_coding_attempt_falls_back_from_unavailable_default_codex_to_claude_code() {
     let root = tempdir().expect("root");
@@ -162,7 +164,6 @@ async fn creates_coding_attempt_falls_back_from_unavailable_default_codex_to_cla
         Some(ProviderName::ClaudeCode)
     );
 }
-
 #[tokio::test]
 async fn rejects_coding_attempt_when_work_item_plan_is_not_confirmed() {
     let root = tempdir().expect("root");
@@ -184,7 +185,6 @@ async fn rejects_coding_attempt_when_work_item_plan_is_not_confirmed() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "work_item_plan_not_confirmed");
 }
-
 #[tokio::test]
 async fn rejects_coding_attempt_when_dependency_work_item_is_not_completed() {
     let root = tempdir().expect("root");
@@ -210,7 +210,6 @@ async fn rejects_coding_attempt_when_dependency_work_item_is_not_completed() {
         json!(["work_item_0001"])
     );
 }
-
 #[tokio::test]
 async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
     let root = tempdir().expect("root");
@@ -242,7 +241,6 @@ async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "issue_worktree_active");
 }
-
 #[tokio::test]
 async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     let root = tempdir().expect("root");
@@ -269,7 +267,6 @@ async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     assert_eq!(body["active_unit_id"], "coding_unit_0001");
     assert_eq!(body["branch_name"], "aria/issues/issue_0001");
 }
-
 #[tokio::test]
 async fn returns_group_coding_attempt_snapshot_with_units() {
     let root = tempdir().expect("root");
@@ -307,7 +304,6 @@ async fn returns_group_coding_attempt_snapshot_with_units() {
     assert_eq!(snapshot["units"][0]["status"], "running");
     assert_eq!(snapshot["units"][1]["status"], "pending");
 }
-
 #[tokio::test]
 async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_level_file() {
     let root = tempdir().expect("root");
@@ -341,7 +337,9 @@ async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_l
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -352,7 +350,9 @@ async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_l
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -406,12 +406,12 @@ async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_l
         )
         .expect("save unit1 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             "project_0001",
             "issue_0001",
             &attempt.id,
             "coding_unit_0001",
-            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0001".to_string()),
         )
         .expect("set handoff ref");
 
@@ -503,7 +503,10 @@ async fn group_coding_attempt_retry_is_not_blocked_after_unit_creation_failure()
     )
     .await;
     assert_eq!(first_status, StatusCode::BAD_REQUEST);
-    assert_eq!(first_body["code"], "invalid_project_id");
+    assert_eq!(
+        first_body["code"],
+        "coding_plan_revision_binding_missing"
+    );
 
     assert_group_attempt_creation_rolled_back(&app_paths);
     restore_group_second_work_item(invalid_fixture);

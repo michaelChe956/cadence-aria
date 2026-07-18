@@ -239,11 +239,13 @@ describe("workspace websocket protocol types", () => {
       units: [
         {
           unit_id: "coding_unit_0001",
-          work_item_id: "work_item_0001",
+          logical_work_item_id: "work_item_0001",
+          work_item_revision_id: "work_item_revision_0001",
+          dependency_logical_work_item_ids: [],
           order_index: 0,
           status: "running",
           summary: null,
-          handoff_ref: null,
+          latest_handoff_revision_id: null,
           completion_commit: null,
         },
       ],

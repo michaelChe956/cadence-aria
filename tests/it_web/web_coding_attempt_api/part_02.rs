@@ -295,7 +295,7 @@ async fn bootstrap_confirmed_work_item_with_providers(
 ) {
     bootstrap_story_and_design(app.clone(), repo_path).await;
     let app_paths = ProductAppPaths::new(workspace_root_from_app(app.clone()).await.join(".aria"));
-    let lifecycle = LifecycleStore::new(app_paths);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_verification_plan(CreateVerificationPlanInput {
             id: Some("verification_plan_0001".to_string()),
@@ -362,7 +362,7 @@ async fn bootstrap_confirmed_work_item_with_providers(
 async fn bootstrap_unconfirmed_work_item(app: axum::Router, repo_path: &std::path::Path) {
     bootstrap_story_and_design(app.clone(), repo_path).await;
     let app_paths = ProductAppPaths::new(workspace_root_from_app(app.clone()).await.join(".aria"));
-    let lifecycle = LifecycleStore::new(app_paths);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
             id: Some("work_item_0001".to_string()),
@@ -577,7 +577,7 @@ async fn bootstrap_work_item_plan_group(
 ) {
     bootstrap_story_and_design(app.clone(), repo_path).await;
     let app_paths = ProductAppPaths::new(workspace_root_from_app(app).await.join(".aria"));
-    let lifecycle = LifecycleStore::new(app_paths);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
 
     lifecycle
         .create_verification_plan(CreateVerificationPlanInput {
@@ -698,4 +698,60 @@ async fn bootstrap_work_item_plan_group(
             validator_findings: Vec::new(),
         })
         .expect("create work item plan group");
+
+    seed_group_plan_revision(&app_paths);
+}
+
+fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
+    let store = WorkItemRevisionStore::new(app_paths.clone());
+    let lineage = WorkItemPlanLineage {
+        id: "work_item_plan_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        story_spec_refs: vec!["story_spec_0001".to_string()],
+        design_spec_refs: vec!["design_spec_0001".to_string()],
+        active_revision_id: None,
+        active_amendment_id: None,
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+        updated_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    store.put_plan_lineage(&lineage).expect("plan lineage");
+    let dependency = DependencyGraphRevision {
+        id: "dependency_graph_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        edges: vec![DependencyContractEdge {
+            from: "work_item_0001".to_string(),
+            to: "work_item_0002".to_string(),
+            required_contracts: Vec::new(),
+        }],
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    store
+        .put_dependency_graph_revision(&lineage, &dependency)
+        .expect("dependency graph");
+    let revision = WorkItemPlanRevision {
+        id: "plan_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        revision_no: 1,
+        supersedes: None,
+        reason: PlanRevisionReason::InitialCompile,
+        work_item_bindings: BTreeMap::from([
+            (
+                "work_item_0001".to_string(),
+                "work_item_revision_0001".to_string(),
+            ),
+            (
+                "work_item_0002".to_string(),
+                "work_item_revision_0002".to_string(),
+            ),
+        ]),
+        dependency_graph_revision_id: dependency.id,
+        validation_report_ref: "plan-validation-report.json".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    store.put_plan_revision(&lineage, &revision).expect("plan revision");
+    store
+        .set_active_plan_revision(&lineage, &revision.id)
+        .expect("active plan revision");
 }
