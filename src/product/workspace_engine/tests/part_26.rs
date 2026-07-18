@@ -19,7 +19,12 @@ async fn plan_repair_awaiting_rejects_persisted_validation_from_old_revision() {
     package.validation.plan_revision_id = request.base_plan_revision_id.clone();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
     let before = child_engine.plan_repair_session_state().unwrap().clone();
-    plan_repair_persist_awaiting_provenance(&revision_store, &plan, &package);
+    plan_repair_persist_awaiting_provenance(
+        &revision_store,
+        &plan,
+        &request.id,
+        &mut package,
+    );
 
     let error = child_engine
         .enter_plan_repair_awaiting_confirmation(package)
@@ -50,12 +55,25 @@ async fn plan_repair_awaiting_rejects_persisted_outline_review_for_old_revision(
         .get_repair_request(&plan, "plan_repair_request_0001")
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
-    let package = plan_repair_awaiting_package(&request.id, &amendment_id);
+    let mut package = plan_repair_awaiting_package(&request.id, &amendment_id);
+    revision_store
+        .put_amendment_manifest(&plan, &package.amendment)
+        .unwrap();
     revision_store
         .put_plan_projection_bundle(&plan, &package.projection)
         .unwrap();
     revision_store
         .put_plan_validation_report(&plan, &package.validation)
+        .unwrap();
+    package.package_identity.candidate_package_fingerprint =
+        crate::product::plan_repair::candidate_package_fingerprint(
+            &request,
+            &package.amendment,
+            &package.projection,
+            &[],
+            &package.validation,
+            &package.impact,
+        )
         .unwrap();
     let mut old_attestation = plan_repair_review_attestation(&package);
     old_attestation.reviewed_plan_revision_id = request.base_plan_revision_id.clone();

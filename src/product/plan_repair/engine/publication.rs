@@ -89,6 +89,7 @@ impl PlanRepairEngine {
             .get_plan_repair_review_attestation(&plan, attestation_id)
             .map_err(PlanRepairError::Store)?;
         validate_review_attestation(
+            &request,
             &prepared,
             &confirmation,
             &attestation,
@@ -96,7 +97,8 @@ impl PlanRepairEngine {
             &accepted,
             shrink,
         )?;
-        let final_manifest = final_manifest(&prepared.manifest, &known_units, &accepted);
+        let final_manifest =
+            final_plan_amendment_manifest(&prepared.manifest, &known_units, &accepted);
         if plan.active_revision_id.as_deref() == Some(prepared.next_plan_revision.id.as_str()) {
             let existing = self
                 .store
@@ -125,13 +127,7 @@ impl PlanRepairEngine {
                 request.status,
                 PlanRepairRequestStatus::InProgress | PlanRepairRequestStatus::AwaitingConfirmation
             ) {
-                self.store
-                    .update_repair_request_status(
-                        &plan,
-                        &request.id,
-                        PlanRepairRequestStatus::Published,
-                    )
-                    .map_err(PlanRepairError::Store)?;
+                mark_request_published_after_plan(&self.store, &plan, &request.id, &existing.id)?;
             }
             return Ok(published
                 .snapshot
@@ -170,15 +166,25 @@ impl PlanRepairEngine {
             request.status,
             PlanRepairRequestStatus::InProgress | PlanRepairRequestStatus::AwaitingConfirmation
         ) {
-            self.store
-                .update_repair_request_status(
-                    &plan,
-                    &request.id,
-                    PlanRepairRequestStatus::Published,
-                )
-                .map_err(PlanRepairError::Store)?;
+            mark_request_published_after_plan(&self.store, &plan, &request.id, &journal.id)?;
         }
         Ok(published_manifest)
+    }
+}
+
+fn mark_request_published_after_plan(
+    store: &crate::product::work_item_revision_store::WorkItemRevisionStore,
+    plan: &crate::product::models::WorkItemPlanLineage,
+    request_id: &str,
+    journal_id: &str,
+) -> Result<(), PlanRepairError> {
+    match store.update_repair_request_status(plan, request_id, PlanRepairRequestStatus::Published) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let _ =
+                store.mark_plan_amendment_publication_failed(plan, journal_id, error.to_string());
+            Err(PlanRepairError::Store(error))
+        }
     }
 }
 
@@ -220,6 +226,7 @@ fn validate_publication_identity(
 }
 
 fn validate_review_attestation(
+    request: &crate::product::models::PlanRepairRequest,
     prepared: &PreparedPlanAmendment,
     confirmation: &PlanAmendmentConfirmation,
     attestation: &PlanRepairReviewAttestation,
@@ -227,6 +234,14 @@ fn validate_review_attestation(
     accepted: &BTreeSet<String>,
     shrink: bool,
 ) -> Result<(), PlanRepairError> {
+    let candidate_package_fingerprint = crate::product::plan_repair::candidate_package_fingerprint(
+        request,
+        &prepared.manifest,
+        &prepared.plan_projection_bundle,
+        &prepared.work_item_projection_bundles,
+        &prepared.validation_report,
+        &prepared.impact_report,
+    )?;
     let review = &attestation.review;
     if attestation.request_id != prepared.manifest.repair_request_id
         || attestation.amendment_id != prepared.manifest.id
@@ -234,6 +249,7 @@ fn validate_review_attestation(
         || attestation.base_plan_revision_id != prepared.base_plan_revision_id
         || attestation.reviewed_plan_revision_id != prepared.next_plan_revision.id
         || attestation.plan_projection_bundle_id != prepared.plan_projection_bundle.id
+        || attestation.candidate_package_fingerprint != candidate_package_fingerprint
         || review.generation_round_id != attestation.generation_round_id
         || review.verdict != WorkItemPlanReviewVerdict::Pass
         || review.review_scope != WorkItemPlanReviewScope::Outline
@@ -268,7 +284,7 @@ fn validate_review_attestation(
     Ok(())
 }
 
-fn final_manifest(
+pub(crate) fn final_plan_amendment_manifest(
     prepared: &PlanAmendmentManifest,
     known_units: &BTreeSet<String>,
     accepted: &BTreeSet<String>,
@@ -302,6 +318,7 @@ fn final_manifest(
             .filter(|unit| !revised.contains(*unit))
             .cloned(),
     );
+    revalidation.retain(|unit| !stale.contains(unit));
     let replacements = prepared
         .replacement_units
         .keys()

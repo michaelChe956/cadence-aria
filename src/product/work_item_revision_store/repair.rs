@@ -1,5 +1,14 @@
 use chrono::Utc;
 
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     PlanAmendmentManifest, PlanDefectEvidence, PlanRepairRequest, PlanRepairRequestStatus,
@@ -10,6 +19,25 @@ use super::{
     WorkItemRevisionStore, identity_mismatch, json_file_paths, read_required_json,
     with_exclusive_lock, write_immutable,
 };
+
+#[cfg(test)]
+struct RepairRequestStatusFailpointEntry {
+    registration_id: u64,
+    status: PlanRepairRequestStatus,
+}
+
+#[cfg(test)]
+pub(crate) struct RepairRequestStatusFailpointGuard {
+    request_path: PathBuf,
+    registration_id: u64,
+}
+
+#[cfg(test)]
+static REPAIR_REQUEST_STATUS_FAILPOINTS: OnceLock<
+    Mutex<HashMap<PathBuf, RepairRequestStatusFailpointEntry>>,
+> = OnceLock::new();
+#[cfg(test)]
+static NEXT_REPAIR_REQUEST_STATUS_FAILPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl WorkItemRevisionStore {
     pub fn put_repair_request(
@@ -40,6 +68,8 @@ impl WorkItemRevisionStore {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(request_id)?;
         let path = self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id);
+        #[cfg(test)]
+        maybe_fail_repair_request_status(&path, &status)?;
         with_exclusive_lock(&path, || {
             let mut request = self.get_repair_request(plan, request_id)?;
             if request.status == status {
@@ -291,6 +321,7 @@ impl WorkItemRevisionStore {
         }
         if value.plan_id != plan.id
             || value.review.generation_round_id != value.generation_round_id
+            || value.candidate_package_fingerprint.trim().is_empty()
             || !is_sorted_unique(&value.accepted_impact_scope)
             || value
                 .risk_acceptance_reason
@@ -335,6 +366,7 @@ impl WorkItemRevisionStore {
         if value.id != attestation_id
             || value.plan_id != plan.id
             || value.review.generation_round_id != value.generation_round_id
+            || value.candidate_package_fingerprint.trim().is_empty()
             || !is_sorted_unique(&value.accepted_impact_scope)
             || value
                 .risk_acceptance_reason
@@ -365,6 +397,76 @@ impl WorkItemRevisionStore {
             return Err(identity_mismatch("plan_repair_request", request_id));
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_repair_request_status_failpoint(
+    store: &WorkItemRevisionStore,
+    plan: &WorkItemPlanLineage,
+    request_id: &str,
+    status: PlanRepairRequestStatus,
+) -> RepairRequestStatusFailpointGuard {
+    let request_path =
+        store.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id);
+    let registration_id = NEXT_REPAIR_REQUEST_STATUS_FAILPOINT_ID.fetch_add(1, Ordering::Relaxed);
+    let previous = repair_request_status_failpoints()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            request_path.clone(),
+            RepairRequestStatusFailpointEntry {
+                registration_id,
+                status,
+            },
+        );
+    assert!(
+        previous.is_none(),
+        "repair request status failpoint already registered"
+    );
+    RepairRequestStatusFailpointGuard {
+        request_path,
+        registration_id,
+    }
+}
+
+#[cfg(test)]
+fn repair_request_status_failpoints()
+-> &'static Mutex<HashMap<PathBuf, RepairRequestStatusFailpointEntry>> {
+    REPAIR_REQUEST_STATUS_FAILPOINTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn maybe_fail_repair_request_status(
+    request_path: &Path,
+    status: &PlanRepairRequestStatus,
+) -> Result<(), ProductStoreError> {
+    let failpoints = repair_request_status_failpoints()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if failpoints
+        .get(request_path)
+        .is_some_and(|entry| &entry.status == status)
+    {
+        return Err(ProductStoreError::Io(format!(
+            "repair_request_status_failpoint:{status:?}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+impl Drop for RepairRequestStatusFailpointGuard {
+    fn drop(&mut self) {
+        let mut failpoints = repair_request_status_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if failpoints
+            .get(&self.request_path)
+            .is_some_and(|entry| entry.registration_id == self.registration_id)
+        {
+            failpoints.remove(&self.request_path);
+        }
     }
 }
 

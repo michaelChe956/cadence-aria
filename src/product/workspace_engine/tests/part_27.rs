@@ -21,6 +21,10 @@ fn plan_repair_review_attestation(
             .cloned()
             .collect(),
         risk_acceptance_reason: None,
+        candidate_package_fingerprint: package
+            .package_identity
+            .candidate_package_fingerprint
+            .clone(),
         review: package.plan_review.clone(),
         created_at: "2026-07-18T00:00:02Z".to_string(),
     }
@@ -29,15 +33,31 @@ fn plan_repair_review_attestation(
 fn plan_repair_persist_awaiting_provenance(
     revision_store: &crate::product::work_item_revision_store::WorkItemRevisionStore,
     plan: &crate::product::models::WorkItemPlanLineage,
-    package: &crate::product::models::PlanRepairAwaitingConfirmationPackage,
+    request_id: &str,
+    package: &mut crate::product::models::PlanRepairAwaitingConfirmationPackage,
 ) {
-    let mut persisted_projection = package.projection.clone();
-    persisted_projection.id = package.package_identity.projection_bundle_id.clone();
+    let request = revision_store
+        .get_repair_request(plan, request_id)
+        .unwrap();
+    revision_store
+        .put_amendment_manifest(plan, &package.amendment)
+        .unwrap();
+    let persisted_projection = package.projection.clone();
     let mut persisted_validation = package.validation.clone();
-    persisted_validation.id = package.package_identity.validation_report_id.clone();
     persisted_validation.plan_id = plan.id.clone();
+    let fingerprint = crate::product::plan_repair::candidate_package_fingerprint(
+        &request,
+        &package.amendment,
+        &persisted_projection,
+        &[],
+        &persisted_validation,
+        &package.impact,
+    )
+    .unwrap();
+    package.package_identity.candidate_package_fingerprint = fingerprint.clone();
     let mut persisted_review = plan_repair_review_attestation(package);
     persisted_review.plan_id = plan.id.clone();
+    persisted_review.candidate_package_fingerprint = fingerprint;
     revision_store
         .put_plan_projection_bundle(plan, &persisted_projection)
         .unwrap();
@@ -53,9 +73,20 @@ async fn plan_repair_enter_awaiting(
     engine: &mut WorkspaceEngine,
     revision_store: &crate::product::work_item_revision_store::WorkItemRevisionStore,
     plan: &crate::product::models::WorkItemPlanLineage,
-    package: crate::product::models::PlanRepairAwaitingConfirmationPackage,
+    mut package: crate::product::models::PlanRepairAwaitingConfirmationPackage,
 ) -> Result<(), crate::product::plan_repair::PlanRepairError> {
-    plan_repair_persist_awaiting_provenance(revision_store, plan, &package);
+    let request_id = engine
+        .plan_repair_session_state()
+        .unwrap()
+        .request
+        .id
+        .clone();
+    plan_repair_persist_awaiting_provenance(
+        revision_store,
+        plan,
+        &request_id,
+        &mut package,
+    );
     engine.enter_plan_repair_awaiting_confirmation(package).await
 }
 
@@ -203,6 +234,71 @@ async fn plan_repair_awaiting_idempotent_rejects_authoritative_successor_status(
             status
         );
     }
+}
+
+#[tokio::test]
+async fn plan_repair_enter_awaiting_rejects_authoritative_request_evidence_divergence() {
+    let (tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let child = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_awaiting_request_race_0001",
+            "fingerprint_awaiting_request_race_0001",
+        ))
+        .await
+        .unwrap();
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let request = revision_store
+        .get_repair_request(&plan, "plan_repair_request_awaiting_request_race_0001")
+        .unwrap();
+    let amendment_id = request.amendment_id.clone().unwrap();
+    let mut package = plan_repair_awaiting_package(&request.id, &amendment_id);
+    plan_repair_persist_awaiting_provenance(
+        &revision_store,
+        &plan,
+        &request.id,
+        &mut package,
+    );
+    let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+    let before = child_engine.plan_repair_session_state().unwrap().clone();
+    revision_store
+        .merge_repair_request_evidence(
+            &plan,
+            &request.id,
+            vec![crate::product::models::PlanDefectEvidence {
+                kind: "late_evidence".to_string(),
+                source_ref: "awaiting://late".to_string(),
+                message: "arrived before awaiting transition".to_string(),
+            }],
+        )
+        .unwrap();
+
+    let error = child_engine
+        .enter_plan_repair_awaiting_confirmation(package)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::product::plan_repair::PlanRepairError::InvalidRepairTarget(message)
+            if message.contains("complete authoritative request")
+    ));
+    assert_eq!(child_engine.plan_repair_session_state(), Some(&before));
+    let stored = revision_store
+        .get_repair_request(&plan, &request.id)
+        .unwrap();
+    assert_eq!(
+        stored.status,
+        crate::product::models::PlanRepairRequestStatus::InProgress
+    );
+    assert_eq!(stored.evidence.len(), request.evidence.len() + 1);
+    assert!(
+        stored
+            .evidence
+            .iter()
+            .any(|evidence| evidence.source_ref == "awaiting://late")
+    );
 }
 
 #[tokio::test]

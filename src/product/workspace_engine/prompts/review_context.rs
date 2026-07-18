@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::product::models::{
-    DependencyGraphRevision, PlanProjectionBundle, PlanRepairSessionSnapshotDto,
-    PlanRepairSessionStage, PlanRevisionReason, RepairTargetKind, WorkItemProjectionBundle,
-    WorkItemRevision,
+    DependencyGraphRevision, PlanProjectionBundle, PlanRepairImpactScopeReview,
+    PlanRepairSessionSnapshotDto, PlanRepairSessionStage, PlanRevisionReason, RepairTargetKind,
+    WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::work_item_contract::{CanonicalWorkItemContract, canonical_contract_hash};
 use crate::product::work_item_projection::{
@@ -23,6 +23,22 @@ pub(super) struct PlanReviewContext {
     pub(super) contract_delta: Vec<String>,
     pub(super) impact_analysis: Vec<String>,
     pub(super) repair_evidence: Vec<String>,
+    pub(super) impact_scope_review: Option<PlanRepairImpactScopeReview>,
+    pub(super) candidate_package_fingerprint: Option<String>,
+}
+
+pub(super) fn append_review_context_section(
+    prompt: &mut String,
+    title: &str,
+    value: &impl serde::Serialize,
+) -> Result<(), String> {
+    prompt.push_str(&format!("\n### {title}\n"));
+    prompt.push_str(
+        &serde_json::to_string_pretty(value)
+            .map_err(|error| format!("serialize Plan Review Context `{title}` failed: {error}"))?,
+    );
+    prompt.push('\n');
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -67,7 +83,7 @@ pub(super) fn load_plan_review_context(
             &projection.plan_revision_id,
         )
         .map_err(|error| format!("load Plan Review revision failed: {error}"))?;
-    let (contract_delta, impact_analysis, repair_evidence) = match source {
+    let (contract_delta, impact_analysis, repair_evidence, impact_scope_review) = match source {
         PlanReviewSource::InitialActive => {
             if lineage.active_revision_id.as_deref() != Some(projection.plan_revision_id.as_str()) {
                 return Err("Plan Review active revision binding mismatch".to_string());
@@ -81,10 +97,17 @@ pub(super) fn load_plan_review_context(
                 vec!["initial_plan_publication: no previous contract delta".to_string()],
                 Vec::new(),
                 vec!["initial_plan_publication: no repair evidence".to_string()],
+                None,
             )
         }
         PlanReviewSource::PlanRepairCandidate(snapshot) => {
             let request = &snapshot.request;
+            let authoritative_request =
+                store
+                    .get_repair_request(&lineage, &request.id)
+                    .map_err(|error| {
+                        format!("load authoritative Plan Repair request failed: {error}")
+                    })?;
             let amendment = snapshot
                 .amendment
                 .as_ref()
@@ -98,7 +121,12 @@ pub(super) fn load_plan_review_context(
                 RepairTargetKind::UpstreamWorkItem => PlanRevisionReason::RepairUpstreamContract,
                 RepairTargetKind::Subgraph => PlanRevisionReason::SubgraphReplan,
             };
-            if request.plan_id != lineage.id
+            let persisted_manifest = store
+                .get_amendment_manifest(&lineage, &amendment.id)
+                .map_err(|error| format!("load persisted Plan Repair manifest failed: {error}"))?;
+            if authoritative_request != *request
+                || persisted_manifest != *amendment
+                || request.plan_id != lineage.id
                 || lineage.active_revision_id.as_deref()
                     != Some(request.base_plan_revision_id.as_str())
                 || lineage.active_amendment_id.as_deref() != Some(amendment_id)
@@ -144,7 +172,12 @@ pub(super) fn load_plan_review_context(
                     evidence.kind, evidence.source_ref, evidence.message
                 )
             }));
-            (contract_delta, impact_analysis, repair_evidence)
+            (
+                contract_delta,
+                impact_analysis,
+                repair_evidence,
+                snapshot.impact_scope_review.clone(),
+            )
         }
     };
     let stored_projection = store
@@ -180,7 +213,7 @@ pub(super) fn load_plan_review_context(
     {
         return Err("Plan Repair review validation provenance mismatch".to_string());
     }
-    let projection_validation_report = validation_report.projection_validation;
+    let projection_validation_report = validation_report.projection_validation.clone();
     let work_item_revisions = revision
         .work_item_bindings
         .iter()
@@ -222,6 +255,36 @@ pub(super) fn load_plan_review_context(
         .iter()
         .map(|revision| revision.canonical_contract.clone())
         .collect();
+    let candidate_package_fingerprint = match source {
+        PlanReviewSource::InitialActive => None,
+        PlanReviewSource::PlanRepairCandidate(snapshot) => {
+            let amendment = snapshot
+                .amendment
+                .as_ref()
+                .ok_or_else(|| "Plan Repair review manifest is missing".to_string())?;
+            let impact = snapshot
+                .impact
+                .as_ref()
+                .ok_or_else(|| "Plan Repair review impact analysis is missing".to_string())?;
+            let fingerprint = crate::product::plan_repair::candidate_package_fingerprint(
+                &snapshot.request,
+                amendment,
+                projection,
+                &work_item_projection_bundle_candidates,
+                &validation_report,
+                impact,
+            )
+            .map_err(|error| format!("fingerprint Plan Repair candidate failed: {error:?}"))?;
+            if snapshot
+                .impact_scope_review
+                .as_ref()
+                .is_some_and(|proposal| proposal.candidate_package_fingerprint != fingerprint)
+            {
+                return Err("Plan Repair impact scope review fingerprint mismatch".to_string());
+            }
+            Some(fingerprint)
+        }
+    };
     let work_item_ids = revision
         .work_item_bindings
         .keys()
@@ -243,6 +306,8 @@ pub(super) fn load_plan_review_context(
             impact_analysis
         },
         repair_evidence,
+        impact_scope_review,
+        candidate_package_fingerprint,
     })
 }
 

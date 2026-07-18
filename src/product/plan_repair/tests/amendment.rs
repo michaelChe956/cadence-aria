@@ -26,12 +26,12 @@ use crate::web::workspace_ws_types::{
 
 use super::super::PlanRepairEngine;
 
-struct PlanRepairEngineFixture {
-    _temp: TempDir,
-    store: WorkItemRevisionStore,
-    plan: WorkItemPlanLineage,
-    request: PlanRepairRequest,
-    engine: PlanRepairEngine,
+pub(super) struct PlanRepairEngineFixture {
+    pub(super) _temp: TempDir,
+    pub(super) store: WorkItemRevisionStore,
+    pub(super) plan: WorkItemPlanLineage,
+    pub(super) request: PlanRepairRequest,
+    pub(super) engine: PlanRepairEngine,
 }
 
 #[test]
@@ -54,6 +54,10 @@ fn plan_repair_prepares_upstream_only_amendment_for_compatible_extension() {
         vec!["wi_registration"]
     );
     assert!(prepared.manifest.stale_units.is_empty());
+    assert_eq!(
+        prepared.next_plan_revision.work_item_bindings["wi_registration"],
+        "work_item_revision_wi_registration_0001"
+    );
     assert_eq!(
         prepared.next_plan_revision.work_item_bindings["wi_docs"],
         "work_item_revision_wi_docs_0001"
@@ -375,7 +379,7 @@ fn plan_repair_publish_recovers_each_journal_phase_without_releasing_lock_or_wri
 }
 
 #[test]
-fn plan_repair_publish_expands_revalidation_and_shrink_requires_scope_bound_review() {
+fn plan_repair_publish_expands_revalidation_and_rejects_unreviewed_shrink() {
     let expanded_fixture = plan_repair_engine_fixture();
     let expanded = expanded_fixture
         .engine
@@ -433,36 +437,16 @@ fn plan_repair_publish_expands_revalidation_and_shrink_requires_scope_bound_revi
         error,
         super::super::PlanRepairError::InvalidRepairTarget(_)
     ));
-
-    let mut shrink_review = old_review;
-    shrink_review.id = "plan_repair_review_attestation_plan_amendment_0001_round_0002".to_string();
-    shrink_review.generation_round_id = "round_0002".to_string();
-    shrink_review.review.generation_round_id = "round_0002".to_string();
-    shrink_review.accepted_impact_scope.clear();
-    shrink_review.risk_acceptance_reason = Some("accept delayed registration risk".to_string());
-    shrink_fixture
-        .store
-        .put_plan_repair_review_attestation(&shrink_fixture.plan, &shrink_review)
-        .unwrap();
-    let shrunk_manifest = shrink_fixture
-        .engine
-        .publish_amendment(
-            shrink,
-            confirmation(
-                &shrink_review,
-                &[],
-                Some("accept delayed registration risk"),
-            ),
-        )
-        .unwrap();
-    assert!(shrunk_manifest.revalidation_required_units.is_empty());
-    assert_eq!(
-        shrunk_manifest.unaffected_units,
-        vec!["wi_docs", "wi_ops", "wi_registration"]
+    assert!(
+        shrink_fixture
+            .store
+            .find_plan_amendment_publication_journal(&shrink_fixture.plan, &shrink.manifest.id,)
+            .unwrap()
+            .is_none()
     );
 }
 
-fn plan_repair_engine_fixture() -> PlanRepairEngineFixture {
+pub(super) fn plan_repair_engine_fixture() -> PlanRepairEngineFixture {
     let temp = TempDir::new().unwrap();
     let store = WorkItemRevisionStore::new(ProductAppPaths::new(temp.path().join(".aria")));
     let mut plan = WorkItemPlanLineage {
@@ -668,7 +652,7 @@ fn unrelated_contract(logical_id: &str) -> CanonicalWorkItemContract {
     contract
 }
 
-fn persist_review_attestation(
+pub(super) fn persist_review_attestation(
     fixture: &PlanRepairEngineFixture,
     prepared: &super::super::PreparedPlanAmendment,
 ) -> PlanRepairReviewAttestation {
@@ -683,6 +667,15 @@ fn persist_review_attestation(
         generation_round_id: "round_0001".to_string(),
         accepted_impact_scope: vec!["wi_registration".to_string()],
         risk_acceptance_reason: None,
+        candidate_package_fingerprint: super::super::candidate_package_fingerprint(
+            &fixture.request,
+            &prepared.manifest,
+            &prepared.plan_projection_bundle,
+            &prepared.work_item_projection_bundles,
+            &prepared.validation_report,
+            &prepared.impact_report,
+        )
+        .unwrap(),
         review: WorkItemPlanReviewComplete {
             verdict: WorkItemPlanReviewVerdict::Pass,
             review_scope: WorkItemPlanReviewScope::Outline,
@@ -704,7 +697,7 @@ fn persist_review_attestation(
     attestation
 }
 
-fn confirmation(
+pub(super) fn confirmation(
     attestation: &PlanRepairReviewAttestation,
     accepted_scope: &[&str],
     risk: Option<&str>,
@@ -723,7 +716,7 @@ fn confirmation(
     }
 }
 
-fn assert_no_coding_binding(fixture: &PlanRepairEngineFixture) {
+pub(super) fn assert_no_coding_binding(fixture: &PlanRepairEngineFixture) {
     let bindings =
         RuntimeBindingStore::new(ProductAppPaths::new(fixture._temp.path().join(".aria")))
             .list("project_0001", "issue_0001")

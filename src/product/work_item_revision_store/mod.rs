@@ -42,6 +42,8 @@ pub use initial_publication::{
     InitialWorkItemPublicationIds,
 };
 pub use plan::ActiveAmendmentReleaseOutcome;
+#[cfg(test)]
+pub(crate) use repair::register_repair_request_status_failpoint;
 
 #[derive(Debug, Clone)]
 pub struct WorkItemRevisionStore {

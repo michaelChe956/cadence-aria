@@ -14,6 +14,7 @@ fn plan_repair_awaiting_package(
             review_attestation_id: "plan_repair_review_attestation_0002".to_string(),
             reviewed_plan_revision_id: "plan_revision_0002".to_string(),
             review_generation_round_id: "repair_round_0001".to_string(),
+            candidate_package_fingerprint: "candidate_package_fingerprint_0001".to_string(),
         },
         projection: crate::product::models::PlanProjectionBundle {
             id: "plan_projection_bundle_0002".to_string(),
@@ -315,10 +316,11 @@ async fn plan_repair_awaiting_rejects_inconsistent_package_identity() {
     for (fingerprint, mutate) in cases {
         let error = plan_repair_awaiting_rejection(fingerprint, mutate).await;
         assert!(matches!(
-            error,
+            &error,
             crate::product::plan_repair::PlanRepairError::InvalidRepairTarget(_)
                 | crate::product::plan_repair::PlanRepairError::AmendmentConflict { .. }
-        ));
+                | crate::product::plan_repair::PlanRepairError::Store(_)
+        ), "case {fingerprint}: {error:?}");
     }
 }
 

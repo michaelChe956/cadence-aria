@@ -90,6 +90,7 @@ pub(crate) fn reconcile_plan_repair_child(
         impact: None,
         plan_review: None,
         package_identity: None,
+        impact_scope_review: None,
         timeline_nodes: timeline_nodes.clone(),
         error: None,
     });
@@ -274,6 +275,7 @@ fn failed_recovery_snapshot(
         impact: None,
         plan_review: None,
         package_identity: None,
+        impact_scope_review: None,
         timeline_nodes: Vec::new(),
         error: None,
     });

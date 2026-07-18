@@ -75,7 +75,7 @@ fn work_item_revision_publication_journal_allows_only_forward_idempotent_transit
 }
 
 #[test]
-fn work_item_revision_publication_journal_preparing_phase_is_idempotent_before_artifacts() {
+fn plan_repair_publication_journal_preparing_phase_is_idempotent_before_artifacts() {
     let (_temp, store, plan) = test_store_and_plan();
     let journal = publication_journal(
         "amendment_preparing_0001",

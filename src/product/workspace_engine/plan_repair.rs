@@ -261,6 +261,12 @@ impl WorkspaceEngine {
         let stored_request = revision_store
             .get_repair_request(&plan, &snapshot.request.id)
             .map_err(PlanRepairError::Store)?;
+        if stored_request != snapshot.request {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "awaiting-confirmation entry requires the complete authoritative request"
+                    .to_string(),
+            ));
+        }
         validate_persisted_awaiting_confirmation_package(
             &revision_store,
             &snapshot,
@@ -301,11 +307,15 @@ impl WorkspaceEngine {
                 snapshot.stage
             )));
         }
-        if snapshot.request.status != PlanRepairRequestStatus::InProgress
-            || stored_request.status != PlanRepairRequestStatus::InProgress
-        {
+        let expected_status = if snapshot.impact_scope_review.is_some() {
+            PlanRepairRequestStatus::AwaitingConfirmation
+        } else {
+            PlanRepairRequestStatus::InProgress
+        };
+        if snapshot.request.status != expected_status || stored_request.status != expected_status {
             return Err(PlanRepairError::InvalidRepairTarget(
-                "plan repair request must be in progress before awaiting confirmation".to_string(),
+                "plan repair request status does not match awaiting-confirmation transition"
+                    .to_string(),
             ));
         }
         let journal = awaiting_confirmation_transition(self, snapshot, package);

@@ -33,6 +33,9 @@ use super::{
 
 mod publication;
 
+#[cfg(test)]
+pub(crate) use publication::final_plan_amendment_manifest;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedPlanAmendment {
     pub base_plan_revision_id: String,
@@ -305,7 +308,7 @@ impl PlanRepairEngine {
             .execution_state
             .clone()
             .unwrap_or_else(|| default_execution_state(&base_revision));
-        let impact_report = aggregate_impact(
+        let impact_report = aggregate_plan_repair_impact(
             &dependency_graph,
             &contract_deltas,
             &execution,
@@ -570,7 +573,7 @@ fn default_execution_state(revision: &WorkItemPlanRevision) -> PlanExecutionStat
     }
 }
 
-fn aggregate_impact<'a>(
+pub(crate) fn aggregate_plan_repair_impact<'a>(
     graph: &DependencyContractGraph,
     deltas: &[ContractDelta],
     execution: &PlanExecutionState,
@@ -587,6 +590,7 @@ fn aggregate_impact<'a>(
         conditional.extend(report.conditional_downstream);
         paths.extend(report.explanation_paths);
     }
+    revalidation.retain(|unit| !stale.contains(unit));
     let revised = revised_ids.cloned().collect::<BTreeSet<_>>();
     let unaffected = graph
         .contracts

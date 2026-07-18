@@ -80,6 +80,7 @@ pub struct PlanRepairPackageIdentity {
     pub review_attestation_id: String,
     pub reviewed_plan_revision_id: String,
     pub review_generation_round_id: String,
+    pub candidate_package_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,8 +95,18 @@ pub struct PlanRepairReviewAttestation {
     pub generation_round_id: String,
     pub accepted_impact_scope: Vec<String>,
     pub risk_acceptance_reason: Option<String>,
+    pub candidate_package_fingerprint: String,
     pub review: WorkItemPlanReviewComplete,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRepairImpactScopeReview {
+    pub system_minimum_impact_scope: Vec<String>,
+    pub proposed_accepted_impact_scope: Vec<String>,
+    pub risk_acceptance_reason: String,
+    pub candidate_package_fingerprint: String,
+    pub review_generation_round_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +134,8 @@ pub struct PlanRepairSessionSnapshotDto {
     pub plan_review: Option<WorkItemPlanReviewComplete>,
     #[serde(default)]
     pub package_identity: Option<PlanRepairPackageIdentity>,
+    #[serde(default)]
+    pub impact_scope_review: Option<PlanRepairImpactScopeReview>,
     pub timeline_nodes: Vec<TimelineNode>,
     pub error: Option<String>,
 }

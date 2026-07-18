@@ -102,8 +102,10 @@ pub(crate) fn awaiting_confirmation_transition(
 ) -> PlanRepairTransitionJournal {
     let now = Utc::now().to_rfc3339();
     let (timeline_nodes, active_node_id) = awaiting_confirmation_timeline(engine, &now);
-    snapshot.request.status = PlanRepairRequestStatus::AwaitingConfirmation;
-    snapshot.request.updated_at = now.clone();
+    if snapshot.request.status != PlanRepairRequestStatus::AwaitingConfirmation {
+        snapshot.request.status = PlanRepairRequestStatus::AwaitingConfirmation;
+        snapshot.request.updated_at = now.clone();
+    }
     snapshot.stage = PlanRepairSessionStage::AwaitingConfirmation;
     snapshot.projection = Some(package.projection);
     snapshot.amendment = Some(package.amendment);

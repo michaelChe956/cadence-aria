@@ -1,9 +1,13 @@
 use std::collections::BTreeSet;
 
 use crate::product::models::{
-    PlanRepairAwaitingConfirmationPackage, PlanRepairSessionSnapshotDto, WorkItemPlanLineage,
+    PlanAmendmentManifest, PlanProjectionBundle, PlanRepairAwaitingConfirmationPackage,
+    PlanRepairRequest, PlanRepairSessionSnapshotDto, PlanValidationReportArtifact,
+    WorkItemPlanLineage,
 };
-use crate::product::plan_repair::PlanRepairError;
+use crate::product::plan_repair::{
+    ContractImpactReport, PlanRepairError, candidate_package_fingerprint,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::workspace_ws_types::{
     WorkItemPlanReviewAction, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
@@ -113,15 +117,33 @@ pub(crate) fn validate_persisted_awaiting_confirmation_package(
     let persisted_review = revision_store
         .get_plan_repair_review_attestation(plan, &package.package_identity.review_attestation_id)
         .map_err(PlanRepairError::Store)?;
-    let expected_review_scope = package
-        .amendment
-        .revalidation_required_units
-        .iter()
-        .chain(package.amendment.stale_units.iter())
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let (expected_review_scope, expected_risk) = match &snapshot.impact_scope_review {
+        Some(proposal) => (
+            proposal.proposed_accepted_impact_scope.clone(),
+            Some(proposal.risk_acceptance_reason.as_str()),
+        ),
+        None => (
+            package
+                .amendment
+                .revalidation_required_units
+                .iter()
+                .chain(package.amendment.stale_units.iter())
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            None,
+        ),
+    };
+    let package_fingerprint = persisted_candidate_package_fingerprint(
+        revision_store,
+        plan,
+        &snapshot.request,
+        &package.amendment,
+        &package.projection,
+        &package.validation,
+        &package.impact,
+    )?;
     if persisted_projection != package.projection
         || persisted_validation != package.validation
         || persisted_validation.plan_revision_id != package.amendment.new_plan_revision_id
@@ -134,12 +156,59 @@ pub(crate) fn validate_persisted_awaiting_confirmation_package(
         || persisted_review.plan_projection_bundle_id != package.projection.id
         || persisted_review.generation_round_id != package.plan_review.generation_round_id
         || persisted_review.accepted_impact_scope != expected_review_scope
-        || persisted_review.risk_acceptance_reason.is_some()
+        || persisted_review.risk_acceptance_reason.as_deref() != expected_risk
+        || persisted_review.candidate_package_fingerprint != package_fingerprint
+        || package.package_identity.candidate_package_fingerprint != package_fingerprint
         || persisted_review.review != package.plan_review
     {
         return Err(invalid_package("persisted artifact provenance mismatch"));
     }
     validate_awaiting_confirmation_package(snapshot, plan, package)
+}
+
+pub(crate) fn persisted_candidate_package_fingerprint(
+    revision_store: &WorkItemRevisionStore,
+    plan: &WorkItemPlanLineage,
+    request: &PlanRepairRequest,
+    amendment: &PlanAmendmentManifest,
+    projection: &PlanProjectionBundle,
+    validation: &PlanValidationReportArtifact,
+    impact: &ContractImpactReport,
+) -> Result<String, PlanRepairError> {
+    let persisted_manifest = revision_store
+        .get_amendment_manifest(plan, &amendment.id)
+        .map_err(PlanRepairError::Store)?;
+    let persisted_projection = revision_store
+        .get_plan_projection_bundle(plan, &projection.id)
+        .map_err(PlanRepairError::Store)?;
+    let persisted_validation = revision_store
+        .get_plan_validation_report(plan, &validation.id)
+        .map_err(PlanRepairError::Store)?;
+    if persisted_manifest != *amendment
+        || persisted_projection != *projection
+        || persisted_validation != *validation
+    {
+        return Err(invalid_package(
+            "candidate package differs from persisted typed artifacts",
+        ));
+    }
+    let work_item_projections = projection
+        .work_item_projection_bundle_refs
+        .iter()
+        .map(|bundle_id| {
+            revision_store
+                .get_work_item_projection_bundle(plan, bundle_id)
+                .map_err(PlanRepairError::Store)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    candidate_package_fingerprint(
+        request,
+        amendment,
+        projection,
+        &work_item_projections,
+        validation,
+        impact,
+    )
 }
 
 pub(crate) fn awaiting_confirmation_package_from_snapshot(

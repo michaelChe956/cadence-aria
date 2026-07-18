@@ -2,7 +2,9 @@ use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::models::PlanProjectionBundle;
 
-use super::review_context::{PlanReviewSource, load_plan_review_context};
+use super::review_context::{
+    PlanReviewSource, append_review_context_section, load_plan_review_context,
+};
 
 impl WorkspaceEngine {
     pub(crate) fn build_review_input(&self) -> Result<StreamingProviderInput, String> {
@@ -323,19 +325,51 @@ impl WorkspaceEngine {
         append_review_context_section(&mut prompt, "Contract Delta", &context.contract_delta)?;
         append_review_context_section(&mut prompt, "Impact Analysis", &context.impact_analysis)?;
         append_review_context_section(&mut prompt, "Repair Evidence", &context.repair_evidence)?;
+        if let Some(fingerprint) = &context.candidate_package_fingerprint {
+            append_review_context_section(
+                &mut prompt,
+                "Candidate Package Fingerprint",
+                fingerprint,
+            )?;
+        }
+        if let Some(proposal) = &context.impact_scope_review {
+            append_review_context_section(
+                &mut prompt,
+                "System Minimum Impact Scope",
+                &proposal.system_minimum_impact_scope,
+            )?;
+            append_review_context_section(
+                &mut prompt,
+                "Proposed Accepted Impact Scope",
+                &proposal.proposed_accepted_impact_scope,
+            )?;
+            append_review_context_section(
+                &mut prompt,
+                "Risk Acceptance Reason",
+                &proposal.risk_acceptance_reason,
+            )?;
+            append_review_context_section(
+                &mut prompt,
+                "Candidate Package Fingerprint",
+                &proposal.candidate_package_fingerprint,
+            )?;
+        }
         prompt.push_str(
             "\n审核边界：只审核 Plan Review Context 中的权威契约、依赖图、三 Projection 覆盖与影响范围；不得要求编码执行期差异或复用 Code Reviewer 执行证据。\n",
         );
-        let generation_round_id = self
-            .work_item_plan_store()?
-            .load_active_index(
-                &self.session.project_id,
-                &self.session.issue_id,
-                &self.session.entity_id,
-            )
-            .map_err(|error| format!("load work item plan active index failed: {error}"))?
-            .map(|index| index.current_generation_round_id)
-            .unwrap_or_else(|| projection.plan_revision_id.clone());
+        let generation_round_id = match &context.impact_scope_review {
+            Some(proposal) => proposal.review_generation_round_id.clone(),
+            None => self
+                .work_item_plan_store()?
+                .load_active_index(
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    &self.session.entity_id,
+                )
+                .map_err(|error| format!("load work item plan active index failed: {error}"))?
+                .map(|index| index.current_generation_round_id)
+                .unwrap_or_else(|| projection.plan_revision_id.clone()),
+        };
         let nonce = structured_output_nonce();
         let contract = StructuredOutputContract {
             nonce: nonce.clone(),
@@ -755,18 +789,4 @@ impl WorkspaceEngine {
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
     }
-}
-
-fn append_review_context_section(
-    prompt: &mut String,
-    title: &str,
-    value: &impl serde::Serialize,
-) -> Result<(), String> {
-    prompt.push_str(&format!("\n### {title}\n"));
-    prompt.push_str(
-        &serde_json::to_string_pretty(value)
-            .map_err(|error| format!("serialize Plan Review Context `{title}` failed: {error}"))?,
-    );
-    prompt.push('\n');
-    Ok(())
 }

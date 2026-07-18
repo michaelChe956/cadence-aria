@@ -181,6 +181,7 @@ fn plan_repair_review_attestation_store_is_scoped_immutable_and_idempotent() {
         generation_round_id: "repair_round_0001".to_string(),
         accepted_impact_scope: vec![WORK_ITEM_ID.to_string()],
         risk_acceptance_reason: None,
+        candidate_package_fingerprint: "candidate_package_fingerprint_0001".to_string(),
         review: WorkItemPlanReviewComplete {
             verdict: WorkItemPlanReviewVerdict::Pass,
             review_scope: WorkItemPlanReviewScope::Outline,
@@ -195,6 +196,13 @@ fn plan_repair_review_attestation_store_is_scoped_immutable_and_idempotent() {
         },
         created_at: "2026-07-18T00:00:02Z".to_string(),
     };
+    let mut missing_fingerprint = attestation.clone();
+    missing_fingerprint.id = "plan_repair_review_attestation_missing_fingerprint_0001".to_string();
+    missing_fingerprint.candidate_package_fingerprint.clear();
+    assert!(matches!(
+        store.put_plan_repair_review_attestation(&plan, &missing_fingerprint),
+        Err(crate::product::json_store::ProductStoreError::IdentityMismatch { .. })
+    ));
 
     store
         .put_plan_repair_review_attestation(&plan, &attestation)
