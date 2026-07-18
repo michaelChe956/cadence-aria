@@ -15,7 +15,10 @@ use crate::web::workspace_ws_types::{
     WorkspaceStage as WsWorkspaceStage,
 };
 
-use super::WorkspaceSession;
+use super::{
+    WorkspaceSession, awaiting_confirmation_package_from_snapshot,
+    validate_awaiting_confirmation_package,
+};
 
 pub(crate) fn initial_plan_repair_timeline(session: &WorkspaceSessionRecord) -> Vec<TimelineNode> {
     vec![TimelineNode {
@@ -86,6 +89,7 @@ pub(crate) fn reconcile_plan_repair_child(
         validation: None,
         impact: None,
         plan_review: None,
+        package_identity: None,
         timeline_nodes: timeline_nodes.clone(),
         error: None,
     });
@@ -230,6 +234,15 @@ fn validate_refresh_identity(
     if stored_request != *request {
         return Err("plan repair request identity mismatch".to_string());
     }
+    if snapshot.stage == PlanRepairSessionStage::AwaitingConfirmation {
+        if request.status != PlanRepairRequestStatus::AwaitingConfirmation {
+            return Err("plan repair awaiting request status mismatch".to_string());
+        }
+        let package = awaiting_confirmation_package_from_snapshot(snapshot)
+            .map_err(|error| format!("plan repair awaiting package invalid: {error:?}"))?;
+        validate_awaiting_confirmation_package(snapshot, &plan, &package)
+            .map_err(|error| format!("plan repair awaiting package invalid: {error:?}"))?;
+    }
     Ok(())
 }
 
@@ -243,14 +256,11 @@ fn failed_recovery_snapshot(
 ) -> PlanRepairSessionSnapshotDto {
     let now = Utc::now().to_rfc3339();
     let fallback_link = link.unwrap_or_else(|| fallback_repair_link(session, &now));
-    let request = snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.request.clone())
-        .or_else(|| load_linked_repair_request(lifecycle, session, &fallback_link))
+    let request = load_linked_repair_request(lifecycle, session, &fallback_link)
         .unwrap_or_else(|| fallback_repair_request(session, &fallback_link, &now));
     append_recovery_failure_timeline(session, timeline_nodes, &error, &now);
     let mut failed = snapshot.unwrap_or(PlanRepairSessionSnapshotDto {
-        request,
+        request: request.clone(),
         link: fallback_link,
         stage: PlanRepairSessionStage::Failed,
         projection: None,
@@ -258,9 +268,11 @@ fn failed_recovery_snapshot(
         validation: None,
         impact: None,
         plan_review: None,
+        package_identity: None,
         timeline_nodes: Vec::new(),
         error: None,
     });
+    failed.request = request;
     failed.stage = PlanRepairSessionStage::Failed;
     failed.timeline_nodes = timeline_nodes.clone();
     failed.error = Some(error);
@@ -276,9 +288,37 @@ fn load_linked_repair_request(
     let plan = revision_store
         .get_plan_lineage(&session.project_id, &session.issue_id, &session.entity_id)
         .ok()?;
-    revision_store
+    let request = revision_store
         .get_repair_request(&plan, &link.trigger.repair_request_id)
-        .ok()
+        .ok()?;
+    let amendment_id = request.amendment_id.as_deref()?;
+    let expected_route = format!(
+        "/workbench/projects/{}/issues/{}/coding/{}",
+        session.project_id, session.issue_id, request.trigger_attempt_id
+    );
+    if session.workspace_type != WorkspaceType::WorkItemPlan
+        || request.plan_id != session.entity_id
+        || link.relation != WorkspaceSessionRelation::PlanRepair
+        || link.id != format!("workspace_session_link_{amendment_id}")
+        || link.parent_session_id != request.trigger_attempt_id
+        || link.child_session_id != session.session_id
+        || link.child_session_id != format!("workspace_session_{amendment_id}")
+        || link.trigger.attempt_id != request.trigger_attempt_id
+        || link.trigger.unit_run_id != request.trigger_unit_run_id
+        || link.trigger.review_id != request.trigger_review_id
+        || link.trigger.finding_id != request.trigger_finding_id
+        || link.trigger.repair_request_id != request.id
+        || link.trigger.amendment_id != amendment_id
+        || link.trigger.fingerprint != request.fingerprint
+        || link.trigger.base_plan_revision_id != request.base_plan_revision_id
+        || link.return_context.original_attempt_id != request.trigger_attempt_id
+        || link.return_context.original_unit_run_id != request.trigger_unit_run_id
+        || link.return_context.timeline_anchor_id != request.trigger_finding_id
+        || link.return_context.original_route != expected_route
+    {
+        return None;
+    }
+    Some(request)
 }
 
 fn fallback_repair_link(session: &WorkspaceSession, now: &str) -> WorkspaceSessionLink {

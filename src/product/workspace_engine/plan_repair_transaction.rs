@@ -12,7 +12,9 @@ use crate::product::models::{
     WorkspaceSessionStatus,
 };
 use crate::product::plan_repair::PlanRepairError;
-use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use crate::product::work_item_revision_store::{
+    ActiveAmendmentReleaseOutcome, WorkItemRevisionStore,
+};
 use crate::web::workspace_ws_types::{
     ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
     WorkspaceStage as WsWorkspaceStage,
@@ -108,6 +110,7 @@ pub(crate) fn awaiting_confirmation_transition(
     snapshot.validation = Some(package.validation);
     snapshot.impact = Some(package.impact);
     snapshot.plan_review = Some(package.plan_review);
+    snapshot.package_identity = Some(package.package_identity);
     snapshot.timeline_nodes = timeline_nodes.clone();
     snapshot.error = None;
     transition_journal(
@@ -304,10 +307,7 @@ fn apply_transition_journal(
         &journal.session_id,
     )?;
     let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
-    let plan = revision_store
-        .get_plan_lineage(&journal.project_id, &journal.issue_id, &journal.plan_id)
-        .map_err(PlanRepairError::Store)?;
-    ensure_cancel_not_published(&revision_store, &plan, journal)?;
+    ensure_cancel_not_published(&revision_store, journal)?;
 
     if journal.phase < PlanRepairTransitionPhase::TimelinePersisted {
         lifecycle
@@ -351,7 +351,10 @@ fn apply_transition_journal(
         maybe_simulate_crash(crash_after, PlanRepairCrashPoint::SessionPersisted)?;
     }
     if journal.phase < PlanRepairTransitionPhase::RequestPersisted {
-        ensure_cancel_not_published(&revision_store, &plan, journal)?;
+        ensure_cancel_not_published(&revision_store, journal)?;
+        let plan = revision_store
+            .get_plan_lineage(&journal.project_id, &journal.issue_id, &journal.plan_id)
+            .map_err(PlanRepairError::Store)?;
         let request = revision_store
             .update_repair_request_status(
                 &plan,
@@ -377,17 +380,46 @@ fn apply_transition_journal(
         maybe_simulate_crash(crash_after, PlanRepairCrashPoint::RequestPersisted)?;
     }
     if journal.release_lock && journal.phase < PlanRepairTransitionPhase::LockReleased {
-        ensure_cancel_not_published(&revision_store, &plan, journal)?;
+        ensure_cancel_not_published(&revision_store, journal)?;
         let stored_plan = revision_store
             .get_plan_lineage(&journal.project_id, &journal.issue_id, &journal.plan_id)
             .map_err(PlanRepairError::Store)?;
+        let next_plan_revision_id = journal
+            .target_snapshot
+            .amendment
+            .as_ref()
+            .map(|amendment| amendment.new_plan_revision_id.as_str())
+            .ok_or_else(|| {
+                PlanRepairError::InvalidRepairTarget(
+                    "cancel transition requires an amendment manifest".to_string(),
+                )
+            })?;
         match stored_plan.active_amendment_id.as_deref() {
             Some(active) if active == journal.amendment_id => {
-                revision_store
-                    .release_active_amendment(&stored_plan, &journal.amendment_id)
-                    .map_err(PlanRepairError::Store)?;
+                match revision_store
+                    .compare_and_release_active_amendment(
+                        &stored_plan,
+                        &journal.amendment_id,
+                        &journal.base_plan_revision_id,
+                        next_plan_revision_id,
+                    )
+                    .map_err(PlanRepairError::Store)?
+                {
+                    ActiveAmendmentReleaseOutcome::Released(_) => {}
+                    ActiveAmendmentReleaseOutcome::PlanPublished(_) => {
+                        return fail_cancel_after_publication(
+                            &revision_store,
+                            &stored_plan,
+                            journal,
+                        );
+                    }
+                }
             }
-            None => {}
+            None if stored_plan.active_revision_id.as_deref()
+                == Some(journal.base_plan_revision_id.as_str()) => {}
+            None => {
+                return fail_cancel_after_publication(&revision_store, &stored_plan, journal);
+            }
             Some(_) => {
                 return Err(PlanRepairError::Store(
                     ProductStoreError::IdentityMismatch {
@@ -409,7 +441,6 @@ fn apply_transition_journal(
 
 fn ensure_cancel_not_published(
     revision_store: &WorkItemRevisionStore,
-    plan: &WorkItemPlanLineage,
     journal: &PlanRepairTransitionJournal,
 ) -> Result<(), PlanRepairError> {
     if journal.operation != PlanRepairTransitionOperation::Cancel
@@ -417,17 +448,59 @@ fn ensure_cancel_not_published(
     {
         return Ok(());
     }
-    match revision_store.find_plan_amendment_publication_journal(plan, &journal.amendment_id) {
+    let plan = revision_store
+        .get_plan_lineage(&journal.project_id, &journal.issue_id, &journal.plan_id)
+        .map_err(PlanRepairError::Store)?;
+    let next_plan_revision_id = journal
+        .target_snapshot
+        .amendment
+        .as_ref()
+        .map(|amendment| amendment.new_plan_revision_id.as_str())
+        .ok_or_else(|| {
+            PlanRepairError::InvalidRepairTarget(
+                "cancel transition requires an amendment manifest".to_string(),
+            )
+        })?;
+    if plan.active_revision_id.as_deref() == Some(next_plan_revision_id) {
+        return fail_cancel_after_publication(revision_store, &plan, journal);
+    }
+    match revision_store.find_plan_amendment_publication_journal(&plan, &journal.amendment_id) {
         Ok(Some(publication))
             if publication.phase == PlanAmendmentPublicationPhase::PlanPublished =>
         {
-            Err(PlanRepairError::AmendmentConflict {
-                expected: "before_plan_published".to_string(),
-                actual: "plan_published".to_string(),
-            })
+            fail_cancel_after_publication(revision_store, &plan, journal)
         }
         Ok(_) => Ok(()),
         Err(error) => Err(PlanRepairError::Store(error)),
+    }
+}
+
+fn fail_cancel_after_publication(
+    revision_store: &WorkItemRevisionStore,
+    plan: &WorkItemPlanLineage,
+    journal: &PlanRepairTransitionJournal,
+) -> Result<(), PlanRepairError> {
+    if journal.phase >= PlanRepairTransitionPhase::RequestPersisted {
+        let request = revision_store
+            .get_repair_request(plan, &journal.request_id)
+            .map_err(PlanRepairError::Store)?;
+        if request.status == PlanRepairRequestStatus::Cancelled {
+            revision_store
+                .update_repair_request_status(
+                    plan,
+                    &journal.request_id,
+                    PlanRepairRequestStatus::AwaitingConfirmation,
+                )
+                .map_err(PlanRepairError::Store)?;
+        }
+    }
+    Err(cancel_plan_published_conflict())
+}
+
+fn cancel_plan_published_conflict() -> PlanRepairError {
+    PlanRepairError::AmendmentConflict {
+        expected: "before_plan_published".to_string(),
+        actual: "plan_published".to_string(),
     }
 }
 

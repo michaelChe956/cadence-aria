@@ -197,6 +197,149 @@ fn work_item_revision_store_amendment_release_waits_for_lineage_lock() {
 }
 
 #[test]
+fn plan_repair_conditional_release_reports_published_revision_without_releasing_lock() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths);
+    let plan = plan_lineage();
+    let base_revision = plan_revision("plan_revision_0001", 1);
+    let next_revision = plan_revision("plan_revision_0002", 2);
+    store.put_plan_lineage(&plan).unwrap();
+    store.put_plan_revision(&plan, &base_revision).unwrap();
+    store.put_plan_revision(&plan, &next_revision).unwrap();
+    let plan = store
+        .set_active_plan_revision(&plan, &base_revision.id)
+        .unwrap();
+    let plan = store
+        .acquire_active_amendment(&plan, "plan_amendment_0001")
+        .unwrap();
+    store
+        .compare_and_set_active_plan_revision(&plan, &base_revision.id, &next_revision.id)
+        .unwrap();
+
+    let outcome = store
+        .compare_and_release_active_amendment(
+            &plan,
+            "plan_amendment_0001",
+            &base_revision.id,
+            &next_revision.id,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        super::super::ActiveAmendmentReleaseOutcome::PlanPublished(_)
+    ));
+    let stored = store
+        .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
+    assert_eq!(
+        stored.active_revision_id.as_deref(),
+        Some(next_revision.id.as_str())
+    );
+    assert_eq!(
+        stored.active_amendment_id.as_deref(),
+        Some("plan_amendment_0001")
+    );
+}
+
+#[test]
+fn plan_repair_conditional_release_releases_base_before_next_revision_is_persisted() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths);
+    let plan = plan_lineage();
+    let base_revision = plan_revision("plan_revision_0001", 1);
+    store.put_plan_lineage(&plan).unwrap();
+    store.put_plan_revision(&plan, &base_revision).unwrap();
+    let plan = store
+        .set_active_plan_revision(&plan, &base_revision.id)
+        .unwrap();
+    let plan = store
+        .acquire_active_amendment(&plan, "plan_amendment_0001")
+        .unwrap();
+
+    let outcome = store
+        .compare_and_release_active_amendment(
+            &plan,
+            "plan_amendment_0001",
+            &base_revision.id,
+            "plan_revision_0002",
+        )
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        super::super::ActiveAmendmentReleaseOutcome::Released(_)
+    ));
+    assert_eq!(
+        store
+            .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .active_amendment_id,
+        None
+    );
+}
+
+#[test]
+fn plan_repair_conditional_release_rereads_revision_after_waiting_for_lineage_lock() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths.clone());
+    let plan = plan_lineage();
+    let base_revision = plan_revision("plan_revision_0001", 1);
+    let next_revision = plan_revision("plan_revision_0002", 2);
+    store.put_plan_lineage(&plan).unwrap();
+    store.put_plan_revision(&plan, &base_revision).unwrap();
+    store.put_plan_revision(&plan, &next_revision).unwrap();
+    let plan = store
+        .set_active_plan_revision(&plan, &base_revision.id)
+        .unwrap();
+    let plan = store
+        .acquire_active_amendment(&plan, "plan_amendment_0001")
+        .unwrap();
+    let target_path = store.plan_lineage_path(&plan.project_id, &plan.issue_id, &plan.id);
+    let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
+    let (result_sender, result_receiver) = mpsc::channel();
+    let worker_store = WorkItemRevisionStore::new(paths);
+    let worker_plan = plan.clone();
+    let base_id = base_revision.id.clone();
+    let next_id = next_revision.id.clone();
+    spawn_operation(result_sender, move || {
+        worker_store.compare_and_release_active_amendment(
+            &worker_plan,
+            "plan_amendment_0001",
+            &base_id,
+            &next_id,
+        )
+    });
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 1);
+    let mut published = read_json::<WorkItemPlanLineage>(&target_path).unwrap();
+    published.active_revision_id = Some(next_revision.id.clone());
+    write_json(&target_path, &published).unwrap();
+    drop(guard);
+
+    let outcome = receive_results(&result_receiver, 1).pop().unwrap().unwrap();
+
+    assert!(matches!(
+        outcome,
+        super::super::ActiveAmendmentReleaseOutcome::PlanPublished(_)
+    ));
+    let stored = store
+        .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
+    assert_eq!(
+        stored.active_revision_id.as_deref(),
+        Some(next_revision.id.as_str())
+    );
+    assert_eq!(
+        stored.active_amendment_id.as_deref(),
+        Some("plan_amendment_0001")
+    );
+}
+
+#[test]
 fn plan_repair_store_status_and_evidence_updates_wait_for_request_lock() {
     let temp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));

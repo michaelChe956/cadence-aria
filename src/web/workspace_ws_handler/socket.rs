@@ -325,19 +325,28 @@ pub(crate) async fn handle_workspace_socket(
         };
         *last_client_message_at.lock().await = tokio::time::Instant::now();
 
-        let stage_and_type = if requires_stage_validation(&in_msg) {
+        let stage_type_and_cancel_replay = if requires_stage_validation(&in_msg) {
             Some({
                 let engine = engine.lock().await;
+                let completed_cancel_replay = matches!(
+                    &in_msg,
+                    WsInMessage::CancelPlanAmendment { amendment_id, .. }
+                        if engine.current_stage() == WorkspaceStage::Completed
+                            && engine.is_cancelled_plan_amendment_replay(amendment_id)
+                );
                 (
                     engine.current_stage(),
                     engine.session().workspace_type.clone(),
+                    completed_cancel_replay,
                 )
             })
         } else {
             None
         };
-        if let Some((stage, workspace_type)) = stage_and_type.as_ref()
+        if let Some((stage, workspace_type, completed_cancel_replay)) =
+            stage_type_and_cancel_replay.as_ref()
             && !is_message_valid_for_stage(&in_msg, stage)
+            && !completed_cancel_replay
             && !(matches!(in_msg, WsInMessage::RequestRevision { .. })
                 && *stage == WorkspaceStage::AuthorConfirm
                 && *workspace_type == WorkspaceType::WorkItemPlan)

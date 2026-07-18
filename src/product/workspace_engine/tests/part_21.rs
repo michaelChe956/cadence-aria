@@ -170,21 +170,26 @@ async fn plan_repair_child_session_creates_link_without_changing_parent_engine()
 #[tokio::test]
 async fn plan_repair_child_session_reuses_open_fingerprint_and_active_amendment() {
     let (_tmp, lifecycle, revision_store, mut engine) = plan_repair_parent_engine();
+    let first_request = plan_repair_fixture("plan_repair_request_0001", "fingerprint_same");
+    let mut duplicate_request = first_request.clone();
+    duplicate_request.id = "plan_repair_request_0002".to_string();
+    duplicate_request.evidence[0].source_ref =
+        "code_review_0001#finding_duplicate".to_string();
     let first = engine
-        .start_plan_repair(plan_repair_fixture("plan_repair_request_0001", "fingerprint_same"))
+        .start_plan_repair(first_request)
         .await
         .unwrap();
-    let duplicate = engine
-        .start_plan_repair(plan_repair_fixture("plan_repair_request_0002", "fingerprint_same"))
-        .await
-        .unwrap();
-    let conflicting = engine
+    let duplicate = engine.start_plan_repair(duplicate_request).await.unwrap();
+    let conflict_error = engine
         .start_plan_repair(plan_repair_fixture("plan_repair_request_0003", "fingerprint_other"))
         .await
-        .unwrap();
+        .unwrap_err();
 
     assert_eq!(duplicate.id, first.id);
-    assert_eq!(conflicting.id, first.id);
+    assert!(matches!(
+        conflict_error,
+        crate::product::plan_repair::PlanRepairError::InvalidRepairTarget(_)
+    ));
     assert_eq!(
         lifecycle
             .list_workspace_sessions("project_0001", "issue_0001")

@@ -1,12 +1,20 @@
 use chrono::Utc;
 
 use crate::product::json_store::{ProductStoreError, validate_relative_id, write_json};
-use crate::product::models::{WorkItemPlanLineage, WorkItemPlanRevision};
+use crate::product::models::{
+    PlanAmendmentPublicationPhase, WorkItemPlanLineage, WorkItemPlanRevision,
+};
 
 use super::{
     WorkItemRevisionStore, identity_mismatch, read_required_json, with_exclusive_lock,
     write_immutable,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveAmendmentReleaseOutcome {
+    Released(WorkItemPlanLineage),
+    PlanPublished(WorkItemPlanLineage),
+}
 
 impl WorkItemRevisionStore {
     pub fn put_plan_lineage(&self, value: &WorkItemPlanLineage) -> Result<(), ProductStoreError> {
@@ -216,6 +224,52 @@ impl WorkItemRevisionStore {
             stored.updated_at = Utc::now().to_rfc3339();
             write_json(&path, &stored)?;
             Ok(stored)
+        })
+    }
+
+    pub fn compare_and_release_active_amendment(
+        &self,
+        lineage: &WorkItemPlanLineage,
+        amendment_id: &str,
+        base_plan_revision_id: &str,
+        next_plan_revision_id: &str,
+    ) -> Result<ActiveAmendmentReleaseOutcome, ProductStoreError> {
+        validate_relative_id(&lineage.project_id)?;
+        validate_relative_id(&lineage.issue_id)?;
+        validate_relative_id(&lineage.id)?;
+        validate_relative_id(amendment_id)?;
+        validate_relative_id(base_plan_revision_id)?;
+        validate_relative_id(next_plan_revision_id)?;
+        let path = self.plan_lineage_path(&lineage.project_id, &lineage.issue_id, &lineage.id);
+        with_exclusive_lock(&path, || {
+            let mut stored = self.ensure_plan_scope(lineage)?;
+            match stored.active_revision_id.as_deref() {
+                Some(active) if active == next_plan_revision_id => {
+                    return Ok(ActiveAmendmentReleaseOutcome::PlanPublished(stored));
+                }
+                Some(active) if active == base_plan_revision_id => {}
+                _ => {
+                    return Err(identity_mismatch(
+                        "active_work_item_plan_revision",
+                        &lineage.id,
+                    ));
+                }
+            }
+            if stored.active_amendment_id.as_deref() != Some(amendment_id) {
+                return Err(identity_mismatch("active_plan_amendment", &lineage.id));
+            }
+            if self
+                .find_plan_amendment_publication_journal(&stored, amendment_id)?
+                .is_some_and(|journal| {
+                    journal.phase == PlanAmendmentPublicationPhase::PlanPublished
+                })
+            {
+                return Ok(ActiveAmendmentReleaseOutcome::PlanPublished(stored));
+            }
+            stored.active_amendment_id = None;
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &stored)?;
+            Ok(ActiveAmendmentReleaseOutcome::Released(stored))
         })
     }
 }

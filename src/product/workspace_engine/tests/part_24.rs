@@ -1,5 +1,11 @@
 fn plan_repair_assert_failed_recovery(engine: &WorkspaceEngine, expected_error: &str) {
     assert_eq!(engine.current_stage(), WorkspaceStage::Completed);
+    if let Some(amendment_id) = engine
+        .plan_repair_session_state()
+        .and_then(|snapshot| snapshot.request.amendment_id.as_deref())
+    {
+        assert!(!engine.is_cancelled_plan_amendment_replay(amendment_id));
+    }
     match engine.build_session_state() {
         WsOutMessage::SessionState {
             plan_repair: Some(snapshot),
@@ -128,6 +134,8 @@ async fn plan_repair_cancelled_replay_is_idempotent_without_state_writes() {
         .cancel_plan_amendment(&amendment_id, Some("first cancel".to_string()))
         .await
         .unwrap();
+    assert!(child_engine.is_cancelled_plan_amendment_replay(&amendment_id));
+    assert!(!child_engine.is_cancelled_plan_amendment_replay("plan_amendment_wrong"));
     let before = child_engine.plan_repair_session_state().unwrap().clone();
 
     child_engine

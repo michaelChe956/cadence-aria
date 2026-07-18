@@ -35,6 +35,7 @@ pub use initial_publication::{
     InitialPlanPublicationPhase, InitialWorkItemPublicationArtifacts,
     InitialWorkItemPublicationIds,
 };
+pub use plan::ActiveAmendmentReleaseOutcome;
 
 #[derive(Debug, Clone)]
 pub struct WorkItemRevisionStore {

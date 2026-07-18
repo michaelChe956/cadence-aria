@@ -69,7 +69,21 @@ pub enum PlanRepairSessionStage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRepairPackageIdentity {
+    pub request_id: String,
+    pub amendment_id: String,
+    pub plan_id: String,
+    pub base_plan_revision_id: String,
+    pub next_plan_revision_id: String,
+    pub projection_bundle_id: String,
+    pub validation_report_id: String,
+    pub reviewed_plan_revision_id: String,
+    pub review_generation_round_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanRepairAwaitingConfirmationPackage {
+    pub package_identity: PlanRepairPackageIdentity,
     pub projection: PlanProjectionBundle,
     pub amendment: PlanAmendmentManifest,
     pub validation: PlanValidationReportArtifact,
@@ -90,6 +104,8 @@ pub struct PlanRepairSessionSnapshotDto {
     pub impact: Option<ContractImpactReport>,
     #[serde(default)]
     pub plan_review: Option<WorkItemPlanReviewComplete>,
+    #[serde(default)]
+    pub package_identity: Option<PlanRepairPackageIdentity>,
     pub timeline_nodes: Vec<TimelineNode>,
     pub error: Option<String>,
 }

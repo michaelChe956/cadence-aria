@@ -3,6 +3,17 @@ fn plan_repair_awaiting_package(
     amendment_id: &str,
 ) -> crate::product::models::PlanRepairAwaitingConfirmationPackage {
     crate::product::models::PlanRepairAwaitingConfirmationPackage {
+        package_identity: crate::product::models::PlanRepairPackageIdentity {
+            request_id: request_id.to_string(),
+            amendment_id: amendment_id.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            base_plan_revision_id: "plan_revision_0001".to_string(),
+            next_plan_revision_id: "plan_revision_0002".to_string(),
+            projection_bundle_id: "plan_projection_bundle_0002".to_string(),
+            validation_report_id: "plan_validation_report_0002".to_string(),
+            reviewed_plan_revision_id: "plan_revision_0002".to_string(),
+            review_generation_round_id: "repair_round_0001".to_string(),
+        },
         projection: crate::product::models::PlanProjectionBundle {
             id: "plan_projection_bundle_0002".to_string(),
             plan_revision_id: "plan_revision_0002".to_string(),
@@ -61,10 +72,10 @@ fn plan_repair_awaiting_package(
         },
         plan_review: crate::web::workspace_ws_types::WorkItemPlanReviewComplete {
             verdict: crate::web::workspace_ws_types::WorkItemPlanReviewVerdict::Pass,
-            review_scope: crate::web::workspace_ws_types::WorkItemPlanReviewScope::Item,
-            target_outline_id: Some("logical_work_item_0001".to_string()),
+            review_scope: crate::web::workspace_ws_types::WorkItemPlanReviewScope::Outline,
+            target_outline_id: None,
             generation_round_id: "repair_round_0001".to_string(),
-            draft_id: Some("draft_revision_0002".to_string()),
+            draft_id: None,
             batch_id: None,
             review_action: crate::web::workspace_ws_types::WorkItemPlanReviewAction::Continue,
             gates: Vec::new(),
@@ -205,6 +216,31 @@ async fn plan_repair_awaiting_requires_passing_continue_review_without_gates() {
 }
 
 #[tokio::test]
+async fn plan_repair_awaiting_requires_outline_review_without_draft_or_batch_binding() {
+    type PackageMutation =
+        fn(&mut crate::product::models::PlanRepairAwaitingConfirmationPackage);
+    let cases: [(&str, PackageMutation); 3] = [
+        ("fingerprint_review_scope", |package| {
+            package.plan_review.review_scope =
+                crate::web::workspace_ws_types::WorkItemPlanReviewScope::Item;
+        }),
+        ("fingerprint_review_draft", |package| {
+            package.plan_review.draft_id = Some("draft_revision_0002".to_string());
+        }),
+        ("fingerprint_review_batch", |package| {
+            package.plan_review.batch_id = Some("batch_revision_0002".to_string());
+        }),
+    ];
+    for (fingerprint, mutate) in cases {
+        let error = plan_repair_awaiting_rejection(fingerprint, mutate).await;
+        assert!(matches!(
+            error,
+            crate::product::plan_repair::PlanRepairError::InvalidRepairTarget(_)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn plan_repair_awaiting_requires_manifest_impact_partition_match() {
     let error = plan_repair_awaiting_rejection("fingerprint_impact_mismatch", |package| {
         package.impact.direct_revalidation.clear();
@@ -225,7 +261,7 @@ async fn plan_repair_awaiting_requires_manifest_impact_partition_match() {
 async fn plan_repair_awaiting_rejects_inconsistent_package_identity() {
     type PackageMutation =
         fn(&mut crate::product::models::PlanRepairAwaitingConfirmationPackage);
-    let cases: [(&str, PackageMutation); 5] = [
+    let cases: [(&str, PackageMutation); 14] = [
         ("fingerprint_previous_revision", |package| {
             package.amendment.previous_plan_revision_id = "plan_revision_wrong".to_string();
         }),
@@ -241,6 +277,37 @@ async fn plan_repair_awaiting_rejects_inconsistent_package_identity() {
         }),
         ("fingerprint_request_identity", |package| {
             package.amendment.repair_request_id = "plan_repair_request_wrong".to_string();
+        }),
+        ("fingerprint_package_request", |package| {
+            package.package_identity.request_id = "plan_repair_request_wrong".to_string();
+        }),
+        ("fingerprint_package_amendment", |package| {
+            package.package_identity.amendment_id = "plan_amendment_wrong".to_string();
+        }),
+        ("fingerprint_package_plan", |package| {
+            package.package_identity.plan_id = "work_item_plan_wrong".to_string();
+        }),
+        ("fingerprint_package_base", |package| {
+            package.package_identity.base_plan_revision_id = "plan_revision_wrong".to_string();
+        }),
+        ("fingerprint_package_next", |package| {
+            package.package_identity.next_plan_revision_id = "plan_revision_wrong".to_string();
+        }),
+        ("fingerprint_package_projection", |package| {
+            package.package_identity.projection_bundle_id =
+                "plan_projection_bundle_wrong".to_string();
+        }),
+        ("fingerprint_package_validation", |package| {
+            package.package_identity.validation_report_id =
+                "plan_validation_report_wrong".to_string();
+        }),
+        ("fingerprint_package_reviewed_revision", |package| {
+            package.package_identity.reviewed_plan_revision_id =
+                "plan_revision_wrong".to_string();
+        }),
+        ("fingerprint_package_review_round", |package| {
+            package.package_identity.review_generation_round_id =
+                "repair_round_wrong".to_string();
         }),
     ];
     for (fingerprint, mutate) in cases {
@@ -315,6 +382,152 @@ async fn plan_repair_awaiting_rejects_stale_base_revision_before_timeline_persis
             .unwrap()
             .timeline_nodes,
         original_timeline
+    );
+}
+
+#[tokio::test]
+async fn plan_repair_awaiting_rejects_terminal_source_stage_without_writes() {
+    let (tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let child = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_0001",
+            "fingerprint_terminal_awaiting_source",
+        ))
+        .await
+        .unwrap();
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let request = revision_store
+        .get_repair_request(&plan, "plan_repair_request_0001")
+        .unwrap();
+    let amendment_id = request.amendment_id.clone().unwrap();
+    let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+    child_engine.plan_repair_snapshot.as_mut().unwrap().stage =
+        crate::product::models::PlanRepairSessionStage::Failed;
+    let before = child_engine.plan_repair_session_state().unwrap().clone();
+
+    let error = child_engine
+        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+            &request.id,
+            &amendment_id,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::product::plan_repair::PlanRepairError::InvalidRepairTarget(_)
+    ));
+    assert_eq!(child_engine.plan_repair_session_state(), Some(&before));
+    assert_eq!(
+        revision_store
+            .get_repair_request(&plan, &request.id)
+            .unwrap()
+            .status,
+        crate::product::models::PlanRepairRequestStatus::InProgress
+    );
+}
+
+#[tokio::test]
+async fn plan_repair_awaiting_rejects_terminal_request_status_without_writes() {
+    for status in [
+        crate::product::models::PlanRepairRequestStatus::Cancelled,
+        crate::product::models::PlanRepairRequestStatus::Failed,
+        crate::product::models::PlanRepairRequestStatus::Published,
+    ] {
+        let (tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+        let child = parent
+            .start_plan_repair(plan_repair_fixture(
+                "plan_repair_request_0001",
+                &format!("fingerprint_terminal_request_{status:?}"),
+            ))
+            .await
+            .unwrap();
+        let plan = revision_store
+            .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+            .unwrap();
+        let request = revision_store
+            .get_repair_request(&plan, "plan_repair_request_0001")
+            .unwrap();
+        let amendment_id = request.amendment_id.clone().unwrap();
+        let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+        revision_store
+            .update_repair_request_status(&plan, &request.id, status.clone())
+            .unwrap();
+        child_engine
+            .plan_repair_snapshot
+            .as_mut()
+            .unwrap()
+            .request
+            .status = status.clone();
+        let before = child_engine.plan_repair_session_state().unwrap().clone();
+
+        let error = child_engine
+            .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+                &request.id,
+                &amendment_id,
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::product::plan_repair::PlanRepairError::InvalidRepairTarget(_)
+        ));
+        assert_eq!(child_engine.plan_repair_session_state(), Some(&before));
+        assert_eq!(
+            revision_store
+                .get_repair_request(&plan, &request.id)
+                .unwrap()
+                .status,
+            status
+        );
+    }
+}
+
+#[tokio::test]
+async fn plan_repair_awaiting_requires_matching_active_amendment_without_writes() {
+    let (tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let child = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_0001",
+            "fingerprint_missing_active_amendment",
+        ))
+        .await
+        .unwrap();
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let request = revision_store
+        .get_repair_request(&plan, "plan_repair_request_0001")
+        .unwrap();
+    let amendment_id = request.amendment_id.clone().unwrap();
+    let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+    revision_store
+        .release_active_amendment(&plan, &amendment_id)
+        .unwrap();
+    let before = child_engine.plan_repair_session_state().unwrap().clone();
+
+    let error = child_engine
+        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+            &request.id,
+            &amendment_id,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::product::plan_repair::PlanRepairError::AmendmentConflict { .. }
+    ));
+    assert_eq!(child_engine.plan_repair_session_state(), Some(&before));
+    assert_eq!(
+        revision_store
+            .get_repair_request(&plan, &request.id)
+            .unwrap()
+            .status,
+        crate::product::models::PlanRepairRequestStatus::InProgress
     );
 }
 
@@ -414,13 +627,14 @@ async fn plan_repair_link_identity_includes_trigger_review() {
         .put_session_link("project_0001", "issue_0001", &foreign_link)
         .unwrap();
 
-    let recovered = parent.start_plan_repair(request).await.unwrap();
+    let error = parent.start_plan_repair(request).await.unwrap_err();
 
-    assert_ne!(recovered.id, foreign_child.id);
-    assert_eq!(
-        recovered.id,
-        format!("workspace_session_{amendment_id}")
-    );
+    assert!(matches!(
+        error,
+        crate::product::plan_repair::PlanRepairError::Store(
+            crate::product::json_store::ProductStoreError::IdentityMismatch { .. }
+        )
+    ));
 }
 
 #[tokio::test]
@@ -488,7 +702,10 @@ async fn plan_repair_existing_child_reconciles_session_link_timeline_snapshot_an
             &plan_repair_link(&stored_request, &amendment_id, &child.id),
         )
         .unwrap();
-    let mut duplicate = plan_repair_fixture("plan_repair_request_0002", fingerprint);
+    let mut duplicate = stored_request.clone();
+    duplicate.id = "plan_repair_request_0002".to_string();
+    duplicate.amendment_id = None;
+    duplicate.status = crate::product::models::PlanRepairRequestStatus::Open;
     duplicate.evidence[0].source_ref = "code_review_0002#finding_new".to_string();
 
     let recovered = parent.start_plan_repair(duplicate).await.unwrap();

@@ -253,3 +253,177 @@ async fn plan_repair_cancel_journal_fails_closed_when_publication_wins_recovery_
         Some(amendment_id.as_str())
     );
 }
+
+#[tokio::test]
+async fn plan_repair_cancel_rejects_active_revision_already_published_without_journal() {
+    let (tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let child = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_0001",
+            "fingerprint_cancel_active_revision_race",
+        ))
+        .await
+        .unwrap();
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let request = revision_store
+        .get_repair_request(&plan, "plan_repair_request_0001")
+        .unwrap();
+    let amendment_id = request.amendment_id.clone().unwrap();
+    let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+    let package = plan_repair_awaiting_package(&request.id, &amendment_id);
+    child_engine
+        .enter_plan_repair_awaiting_confirmation(package.clone())
+        .await
+        .unwrap();
+    revision_store
+        .put_plan_revision(
+            &plan,
+            &crate::product::models::WorkItemPlanRevision {
+                id: package.amendment.new_plan_revision_id.clone(),
+                plan_id: plan.id.clone(),
+                revision_no: 2,
+                supersedes: Some(request.base_plan_revision_id.clone()),
+                reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
+                work_item_bindings: std::collections::BTreeMap::new(),
+                dependency_graph_revision_id: package
+                    .projection
+                    .dependency_graph_revision_id
+                    .clone(),
+                validation_report_ref: package.validation.id.clone(),
+                plan_projection_bundle_id: package.projection.id.clone(),
+                created_at: "2026-07-18T00:00:03Z".to_string(),
+            },
+        )
+        .unwrap();
+    revision_store
+        .compare_and_set_active_plan_revision(
+            &plan,
+            &request.base_plan_revision_id,
+            &package.amendment.new_plan_revision_id,
+        )
+        .unwrap();
+
+    let error = child_engine
+        .cancel_plan_amendment(&amendment_id, Some("publication won".to_string()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::product::plan_repair::PlanRepairError::AmendmentConflict { .. }
+    ));
+    assert_eq!(
+        revision_store
+            .get_repair_request(&plan, &request.id)
+            .unwrap()
+            .status,
+        crate::product::models::PlanRepairRequestStatus::AwaitingConfirmation
+    );
+    assert_eq!(
+        revision_store
+            .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+            .unwrap()
+            .active_amendment_id
+            .as_deref(),
+        Some(amendment_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn plan_repair_cancel_journal_restores_request_when_publication_wins_after_request_persisted()
+{
+    let (tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let child = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_0001",
+            "fingerprint_cancel_request_persisted_race",
+        ))
+        .await
+        .unwrap();
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let request = revision_store
+        .get_repair_request(&plan, "plan_repair_request_0001")
+        .unwrap();
+    let amendment_id = request.amendment_id.clone().unwrap();
+    let package = plan_repair_awaiting_package(&request.id, &amendment_id);
+    revision_store
+        .put_plan_revision(
+            &plan,
+            &crate::product::models::WorkItemPlanRevision {
+                id: package.amendment.new_plan_revision_id.clone(),
+                plan_id: plan.id.clone(),
+                revision_no: 2,
+                supersedes: Some(request.base_plan_revision_id.clone()),
+                reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
+                work_item_bindings: std::collections::BTreeMap::new(),
+                dependency_graph_revision_id: package
+                    .projection
+                    .dependency_graph_revision_id
+                    .clone(),
+                validation_report_ref: package.validation.id.clone(),
+                plan_projection_bundle_id: package.projection.id.clone(),
+                created_at: "2026-07-18T00:00:03Z".to_string(),
+            },
+        )
+        .unwrap();
+    let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
+    child_engine
+        .enter_plan_repair_awaiting_confirmation(package.clone())
+        .await
+        .unwrap();
+    child_engine.plan_repair_crash_after = Some(PlanRepairCrashPoint::RequestPersisted);
+    assert!(
+        child_engine
+            .cancel_plan_amendment(&amendment_id, Some("request persisted race".to_string()))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        revision_store
+            .get_repair_request(&plan, &request.id)
+            .unwrap()
+            .status,
+        crate::product::models::PlanRepairRequestStatus::Cancelled
+    );
+    revision_store
+        .compare_and_set_active_plan_revision(
+            &plan,
+            &request.base_plan_revision_id,
+            &package.amendment.new_plan_revision_id,
+        )
+        .unwrap();
+
+    let restored = plan_repair_restarted_child_engine(
+        &tmp,
+        &lifecycle,
+        lifecycle.get_workspace_session(&child.id).unwrap(),
+    );
+
+    assert_eq!(
+        revision_store
+            .get_repair_request(&plan, &request.id)
+            .unwrap()
+            .status,
+        crate::product::models::PlanRepairRequestStatus::AwaitingConfirmation
+    );
+    assert_eq!(
+        restored
+            .plan_repair_session_state()
+            .unwrap()
+            .request
+            .status,
+        crate::product::models::PlanRepairRequestStatus::AwaitingConfirmation
+    );
+    assert_eq!(
+        revision_store
+            .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+            .unwrap()
+            .active_amendment_id
+            .as_deref(),
+        Some(amendment_id.as_str())
+    );
+}
