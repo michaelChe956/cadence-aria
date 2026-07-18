@@ -716,6 +716,7 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
         updated_at: "2026-07-18T00:00:00Z".to_string(),
     };
     store.put_plan_lineage(&lineage).expect("plan lineage");
+    seed_group_work_item_revisions(&store, &lineage);
     let dependency = DependencyGraphRevision {
         id: "dependency_graph_revision_0001".to_string(),
         plan_id: lineage.id.clone(),

@@ -6,6 +6,7 @@ use crate::product::coding_models::{
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use std::collections::HashSet;
 
 use super::{CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput};
 
@@ -131,6 +132,19 @@ impl super::CodingAttemptStore {
         validate_relative_id(&input.work_item_revision_id)?;
         for dependency_id in &input.dependency_logical_work_item_ids {
             validate_relative_id(dependency_id)?;
+        }
+        let dependencies = input
+            .dependency_logical_work_item_ids
+            .iter()
+            .collect::<HashSet<_>>();
+        if input.logical_work_item_id == input.work_item_revision_id
+            || dependencies.contains(&input.logical_work_item_id)
+            || dependencies.len() != input.dependency_logical_work_item_ids.len()
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_execution_unit_binding",
+                id: input.logical_work_item_id.clone(),
+            });
         }
 
         let attempt = self.get_attempt(&input.project_id, &input.issue_id, &input.attempt_id)?;

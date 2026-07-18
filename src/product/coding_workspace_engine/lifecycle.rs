@@ -117,6 +117,9 @@ impl CodingWorkspaceEngine {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        if current.scope == CodingAttemptScope::WorkItemGroup {
+            self.store.validate_group_attempt_integrity(&current)?;
+        }
         let running = if current.status == CodingAttemptStatus::Running {
             current
         } else {

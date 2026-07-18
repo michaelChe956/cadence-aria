@@ -26,6 +26,9 @@ pub async fn create_group_coding_attempt(
         .get_attempt_for_work_item_group(&project_id, &issue_id, &plan_id)
         .map_err(product_store_api_error)?
     {
+        coding_store
+            .validate_group_attempt_integrity(&existing)
+            .map_err(coding_group_attempt_incomplete_api_error)?;
         return Ok(Json(coding_attempt_dto(&existing)));
     }
 
@@ -50,63 +53,24 @@ pub async fn create_group_coding_attempt(
         ));
     }
 
-    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
-    let plan_lineage = revision_store
-        .get_plan_lineage(&project_id, &issue_id, &plan_id)
-        .map_err(|_| {
-            ApiError::validation(
-                "coding_plan_revision_binding_missing",
-                "group coding requires a published plan revision",
-            )
-        })?;
-    let bound_plan_revision_id = plan_lineage.active_revision_id.clone().ok_or_else(|| {
-        ApiError::validation(
-            "coding_plan_revision_binding_missing",
-            "group coding requires an active plan revision",
-        )
-    })?;
-    let plan_revision = revision_store
-        .get_plan_revision(&project_id, &issue_id, &plan_id, &bound_plan_revision_id)
-        .map_err(|_| {
-            ApiError::validation(
-                "coding_plan_revision_binding_missing",
-                "active plan revision could not be loaded",
-            )
-        })?;
-    let dependency_graph = revision_store
-        .get_dependency_graph_revision(&plan_lineage, &plan_revision.dependency_graph_revision_id)
-        .map_err(|_| {
-            ApiError::validation(
-                "coding_plan_revision_binding_missing",
-                "active plan dependency graph could not be loaded",
-            )
-        })?;
-    let mut unit_bindings = Vec::with_capacity(ordered.len());
-    for item in &ordered {
-        let work_item_revision_id = plan_revision
-            .work_item_bindings
-            .get(&item.id)
-            .cloned()
-            .ok_or_else(|| {
-                ApiError::validation(
-                    "coding_plan_revision_binding_missing",
-                    "active plan revision does not bind every coding unit",
-                )
-            })?;
-        let mut dependency_logical_work_item_ids = dependency_graph
-            .edges
-            .iter()
-            .filter(|edge| edge.to == item.id)
-            .map(|edge| edge.from.clone())
-            .collect::<Vec<_>>();
-        dependency_logical_work_item_ids.sort();
-        dependency_logical_work_item_ids.dedup();
-        unit_bindings.push((
-            item.id.clone(),
-            work_item_revision_id,
-            dependency_logical_work_item_ids,
+    let authoritative = coding_store
+        .resolve_authoritative_group_plan_binding(&project_id, &issue_id, &plan_id)
+        .map_err(coding_plan_revision_binding_api_error)?;
+    if authoritative
+        .units
+        .iter()
+        .map(|unit| unit.logical_work_item_id.as_str())
+        .ne(ordered.iter().map(|item| item.id.as_str()))
+    {
+        return Err(coding_plan_revision_binding_api_error(
+            ProductStoreError::IdentityMismatch {
+                kind: "coding_group_order",
+                id: plan_id.clone(),
+            },
         ));
     }
+    let bound_plan_revision_id = authoritative.plan_revision_id;
+    let unit_bindings = authoritative.units;
 
     let current_work_item = ordered.first().expect("checked non-empty");
     let repository = find_repository(&app_paths, &project_id, &current_work_item.repository_id)?;
@@ -188,6 +152,9 @@ pub async fn create_group_coding_attempt(
             let existing = coding_store
                 .get_attempt(&project_id, &issue_id, existing_id)
                 .map_err(product_store_api_error)?;
+            coding_store
+                .validate_group_attempt_integrity(&existing)
+                .map_err(coding_group_attempt_incomplete_api_error)?;
             return Ok(Json(coding_attempt_dto(&existing)));
         }
         Err(error) => {
@@ -236,17 +203,15 @@ pub async fn create_group_coding_attempt(
         return Err(product_store_api_error(error));
     }
 
-    for (index, (logical_work_item_id, work_item_revision_id, dependencies)) in
-        unit_bindings.into_iter().enumerate()
-    {
+    for (index, unit_binding) in unit_bindings.into_iter().enumerate() {
         if let Err(error) = coding_store.create_coding_unit(CreateCodingExecutionUnitInput {
             attempt_id: attempt.id.clone(),
             project_id: project_id.clone(),
             issue_id: issue_id.clone(),
             plan_id: plan_id.clone(),
-            logical_work_item_id,
-            work_item_revision_id,
-            dependency_logical_work_item_ids: dependencies,
+            logical_work_item_id: unit_binding.logical_work_item_id,
+            work_item_revision_id: unit_binding.work_item_revision_id,
+            dependency_logical_work_item_ids: unit_binding.dependency_logical_work_item_ids,
             order_index: index as u32,
             status: if index == 0 {
                 CodingExecutionUnitStatus::Running
@@ -273,6 +238,20 @@ pub async fn create_group_coding_attempt(
         .map_err(product_store_api_error)?;
 
     Ok(Json(coding_attempt_dto(&persisted_attempt)))
+}
+
+fn coding_plan_revision_binding_api_error(_error: ProductStoreError) -> ApiError {
+    ApiError::validation(
+        "coding_plan_revision_binding_missing",
+        "group coding requires complete authoritative plan revision bindings",
+    )
+}
+
+fn coding_group_attempt_incomplete_api_error(_error: ProductStoreError) -> ApiError {
+    ApiError::validation(
+        "coding_group_attempt_incomplete",
+        "existing group coding attempt is only partially initialized or inconsistent",
+    )
 }
 
 fn rollback_group_attempt_creation(

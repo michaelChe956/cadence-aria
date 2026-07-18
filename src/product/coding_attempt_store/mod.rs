@@ -6,6 +6,7 @@ mod attempt;
 mod context;
 mod gate;
 mod group;
+mod group_validation;
 mod inputs;
 mod locking;
 mod paths;
@@ -18,6 +19,7 @@ mod timeline;
 mod unit_run;
 mod utils;
 
+pub use group_validation::*;
 pub use inputs::*;
 pub(crate) use recovery::FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE;
 pub use recovery::{FailedCodeReviewRecoveryJournal, FailedCodeReviewRecoveryPhase};

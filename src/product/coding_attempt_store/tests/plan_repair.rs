@@ -87,6 +87,47 @@ fn coding_unit_run_record(
 }
 
 #[test]
+fn coding_plan_repair_unit_binding_rejects_alias_and_invalid_dependencies() {
+    let (_tmp, store) = setup_store();
+    let attempt = coding_plan_repair_attempt(&store);
+    let input =
+        |logical_work_item_id: &str, dependencies: Vec<&str>| CreateCodingExecutionUnitInput {
+            attempt_id: attempt.id.clone(),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            plan_id: PLAN_ID.to_string(),
+            logical_work_item_id: logical_work_item_id.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: dependencies
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Pending,
+        };
+
+    for invalid in [
+        input("work_item_revision_0001", Vec::new()),
+        input("wi_core", vec!["wi_core"]),
+        input("wi_core", vec!["wi_upstream", "wi_upstream"]),
+    ] {
+        assert!(matches!(
+            store.create_coding_unit(invalid),
+            Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_execution_unit_binding",
+                ..
+            })
+        ));
+    }
+    assert!(
+        store
+            .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("units")
+            .is_empty()
+    );
+}
+
+#[test]
 fn coding_plan_repair_statuses_expose_only_documented_active_states() {
     for status in [
         CodingAttemptStatus::Created,

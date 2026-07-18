@@ -11,12 +11,12 @@ use cadence_aria::product::coding_attempt_store::{
 };
 use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
 use cadence_aria::product::coding_models::{
-    CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionAttempt,
-    CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType,
-    CodingGateKind, CodingGateRequired, CodingProviderPermissionMode, CodingProviderRole,
-    CodingRoleProviderConfigSnapshot, CodingRoleRunEventType, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind,
-    ReviewRequest, ReviewRequestKind, ReviewVerdict, WorkItemExecutionPlan,
+    CodingAgentRole, CodingAttemptPlanBinding, CodingAttemptStatus, CodingEntryType,
+    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
+    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
+    PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, WorkItemExecutionPlan,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput,
@@ -25,10 +25,16 @@ use cadence_aria::product::lifecycle_store::{
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::WorkItemStatus;
 use cadence_aria::product::models::{
-    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName, WorkItemPlanStatus,
-    WorkspaceSessionStatus, WorkspaceType,
+    DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
+    PlanRevisionReason, ProviderName, WorkItemPlanLineage, WorkItemPlanRevision,
+    WorkItemPlanStatus, WorkItemRevision, WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use cadence_aria::product::work_item_contract::{
+    CanonicalWorkItemContract, HandoffContract, WorkItemContractIdentity, WorkItemGoal,
+    WorkItemWritePolicy, canonical_contract_hash,
+};
+use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::coding_ws_handler::{
@@ -87,6 +93,132 @@ fn rewrite_as_legacy_coding_attempt_fixture(
         .save_coding_attempt(&attempt)
         .expect("save legacy attempt fixture");
     attempt
+}
+
+fn seed_authoritative_group_plan_fixture(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    let revision_store = WorkItemRevisionStore::new(store.paths());
+    let lineage = WorkItemPlanLineage {
+        id: "work_item_plan_0001".to_string(),
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
+        story_spec_refs: Vec::new(),
+        design_spec_refs: Vec::new(),
+        active_revision_id: None,
+        active_amendment_id: None,
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+        updated_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_plan_lineage(&lineage)
+        .expect("plan lineage");
+    let mut bindings = std::collections::BTreeMap::new();
+    for (logical_id, revision_id) in [
+        ("work_item_0001", "work_item_revision_0001"),
+        ("work_item_0002", "work_item_revision_0002"),
+    ] {
+        let logical = LogicalWorkItem {
+            id: logical_id.to_string(),
+            plan_id: lineage.id.clone(),
+            title: logical_id.to_string(),
+            active_revision_id: None,
+            created_at: "2026-07-18T00:00:00Z".to_string(),
+            updated_at: "2026-07-18T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_logical_work_item(&lineage, &logical)
+            .expect("logical work item");
+        let contract = CanonicalWorkItemContract {
+            schema_version: 1,
+            identity: WorkItemContractIdentity {
+                logical_work_item_id: logical.id.clone(),
+                title: logical.title.clone(),
+                kind: "implementation".to_string(),
+            },
+            goal: WorkItemGoal {
+                summary: logical.title.clone(),
+            },
+            non_goals: Vec::new(),
+            input_contracts: Vec::new(),
+            output_contracts: Vec::new(),
+            tasks: Vec::new(),
+            write_policy: WorkItemWritePolicy {
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+            },
+            acceptance_criteria: Vec::new(),
+            verification_checks: Vec::new(),
+            handoff_contract: HandoffContract {
+                required_fields: Vec::new(),
+                provided_contract_refs: Vec::new(),
+                reviewer_check_refs: Vec::new(),
+            },
+            blocker_rules: Vec::new(),
+            design_traceability: Vec::new(),
+        };
+        let revision = WorkItemRevision {
+            id: revision_id.to_string(),
+            logical_work_item_id: logical.id.clone(),
+            source_draft_revision_id: format!("draft_{revision_id}"),
+            canonical_contract_hash: canonical_contract_hash(&contract).expect("contract hash"),
+            canonical_contract: contract,
+            work_item_projection_bundle_id: format!("projection_{revision_id}"),
+            verification_plan_revision_id: format!("verification_{revision_id}"),
+            created_at: "2026-07-18T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_work_item_revision(&lineage, &revision)
+            .expect("work item revision");
+        revision_store
+            .set_active_work_item_revision(&lineage, &logical, None, revision_id)
+            .expect("active work item revision");
+        bindings.insert(logical.id, revision.id);
+    }
+    let graph = DependencyGraphRevision {
+        id: "dependency_graph_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        edges: vec![cadence_aria::product::work_item_contract::DependencyContractEdge {
+            from: "work_item_0001".to_string(),
+            to: "work_item_0002".to_string(),
+            required_contracts: Vec::new(),
+        }],
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_dependency_graph_revision(&lineage, &graph)
+        .expect("dependency graph");
+    let plan_revision = WorkItemPlanRevision {
+        id: "plan_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        revision_no: 1,
+        supersedes: None,
+        reason: PlanRevisionReason::InitialCompile,
+        work_item_bindings: bindings,
+        dependency_graph_revision_id: graph.id,
+        validation_report_ref: "validation_report_0001".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_plan_revision(&lineage, &plan_revision)
+        .expect("plan revision");
+    revision_store
+        .set_active_plan_revision(&lineage, &plan_revision.id)
+        .expect("active plan revision");
+    store
+        .save_plan_binding(
+            attempt,
+            &CodingAttemptPlanBinding {
+                attempt_id: attempt.id.clone(),
+                plan_id: lineage.id,
+                bound_plan_revision_id: plan_revision.id,
+                applied_amendment_ids: Vec::new(),
+                updated_at: "2026-07-18T00:00:00Z".to_string(),
+            },
+        )
+        .expect("attempt plan binding");
 }
 
 #[test]

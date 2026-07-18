@@ -55,8 +55,6 @@ use crate::product::provider_workspace_runner::{
 };
 use crate::product::repository_store::RepositoryStore;
 use crate::product::runtime_binding_store::RuntimeBindingStore;
-use crate::product::work_item_revision_store::WorkItemRevisionStore;
-
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
 use crate::web::issue_registry::{CreateIssueInput, IssueRecord, IssueRegistry, IssueStatus};
