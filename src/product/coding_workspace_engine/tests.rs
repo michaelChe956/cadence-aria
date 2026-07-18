@@ -51,7 +51,11 @@ fn blocked_report_with(missing: Vec<String>, skipped: Vec<String>) -> TestingRep
     }
 }
 
-fn seed_complete_group_attempt(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
+fn seed_group_attempt_fixture(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    initialize_attempt: bool,
+) {
     let lifecycle = LifecycleStore::new(store.paths());
     lifecycle
         .create_work_item(CreateWorkItemInput {
@@ -189,6 +193,9 @@ fn seed_complete_group_attempt(store: &CodingAttemptStore, attempt: &CodingExecu
     revision_store
         .set_active_plan_revision(&lineage, &plan_revision.id)
         .expect("active plan revision");
+    if !initialize_attempt {
+        return;
+    }
     store
         .save_plan_binding(
             attempt,
@@ -246,7 +253,7 @@ async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node(
             max_auto_rework: 2,
         })
         .expect("group attempt");
-    seed_complete_group_attempt(&store, &attempt);
+    seed_group_attempt_fixture(&store, &attempt, true);
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -295,6 +302,7 @@ async fn coding_plan_repair_partial_group_attempt_cannot_start_coding() {
             max_auto_rework: 2,
         })
         .expect("partial group attempt");
+    seed_group_attempt_fixture(&store, &attempt, false);
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -302,6 +310,56 @@ async fn coding_plan_repair_partial_group_attempt_cannot_start_coding() {
         .start_attempt("project_0001", "issue_0001", &attempt.id)
         .await
         .expect_err("partial group attempt must not start");
+
+    assert!(
+        error
+            .to_string()
+            .contains("coding_group_attempt_incomplete")
+    );
+    let persisted = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("persisted attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::Created);
+    assert_eq!(persisted.stage, CodingExecutionStage::PrepareContext);
+}
+
+#[tokio::test]
+async fn coding_plan_repair_group_attempt_missing_active_pointer_cannot_start() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+    seed_group_attempt_fixture(&store, &attempt, true);
+    attempt = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("complete group attempt");
+    attempt.active_unit_id = None;
+    attempt.current_work_item_id = None;
+    store
+        .save_coding_attempt(&attempt)
+        .expect("corrupt attempt pointers");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .start_attempt("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect_err("missing active pointer must fail closed");
 
     assert!(
         error

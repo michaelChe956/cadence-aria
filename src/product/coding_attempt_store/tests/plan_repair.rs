@@ -647,3 +647,117 @@ fn coding_unit_run_concurrent_role_context_binding_does_not_lose_updates() {
         Some("reviewer-context")
     );
 }
+
+#[test]
+fn coding_unit_run_concurrent_identical_create_is_idempotent() {
+    let (_tmp, store) = setup_store();
+    let attempt = coding_plan_repair_attempt(&store);
+    let unit = coding_unit_run_unit(
+        &store,
+        &attempt,
+        "wi_core",
+        "work_item_revision_0001",
+        0,
+        CodingExecutionUnitStatus::Running,
+    );
+    let run = coding_unit_run_record(
+        "coding_unit_run_0001",
+        &unit.id,
+        1,
+        &unit.work_item_revision_id,
+        CodingUnitRunStatus::Pending,
+    );
+    let barrier = Arc::new(Barrier::new(3));
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let store = store.clone();
+        let attempt = attempt.clone();
+        let run = run.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            store.create_coding_unit_run(&attempt, &run)
+        }));
+    }
+    barrier.wait();
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("create thread")
+            .expect("idempotent create");
+    }
+    assert_eq!(
+        store.list_coding_unit_runs(&attempt, &unit.id).unwrap(),
+        vec![run]
+    );
+}
+
+#[test]
+fn coding_unit_run_concurrent_execution_number_conflict_persists_one_run() {
+    let (_tmp, store) = setup_store();
+    let attempt = coding_plan_repair_attempt(&store);
+    let unit = coding_unit_run_unit(
+        &store,
+        &attempt,
+        "wi_core",
+        "work_item_revision_0001",
+        0,
+        CodingExecutionUnitStatus::Running,
+    );
+    let runs = [
+        coding_unit_run_record(
+            "coding_unit_run_0001",
+            &unit.id,
+            1,
+            &unit.work_item_revision_id,
+            CodingUnitRunStatus::Pending,
+        ),
+        coding_unit_run_record(
+            "coding_unit_run_0002",
+            &unit.id,
+            1,
+            &unit.work_item_revision_id,
+            CodingUnitRunStatus::Pending,
+        ),
+    ];
+    let barrier = Arc::new(Barrier::new(3));
+    let handles = runs
+        .iter()
+        .cloned()
+        .map(|run| {
+            let store = store.clone();
+            let attempt = attempt.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.create_coding_unit_run(&attempt, &run)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("create thread"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    Err(ProductStoreError::IdentityMismatch {
+                        kind: "coding_unit_run_execution_no",
+                        ..
+                    })
+                )
+            })
+            .count(),
+        1
+    );
+    let persisted = store.list_coding_unit_runs(&attempt, &unit.id).unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].execution_no, 1);
+}

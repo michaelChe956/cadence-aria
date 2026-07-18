@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingExecutionAttempt, CodingExecutionUnit,
+    CodingAttemptScope, CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnit,
+    CodingExecutionUnitStatus,
 };
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::LifecycleStore;
@@ -179,7 +180,7 @@ impl super::CodingAttemptStore {
         };
         let authoritative = self
             .resolve_authoritative_group_plan_binding(&stored.project_id, &stored.issue_id, plan_id)
-            .map_err(|error| incomplete_group_attempt(&stored.id, &error.to_string()))?;
+            .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?;
         if stored.work_item_id
             != authoritative
                 .units
@@ -194,7 +195,7 @@ impl super::CodingAttemptStore {
         }
         let binding = self
             .get_plan_binding(&stored)
-            .map_err(|error| incomplete_group_attempt(&stored.id, &error.to_string()))?;
+            .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?;
         if binding.plan_id != plan_id
             || binding.bound_plan_revision_id != authoritative.plan_revision_id
         {
@@ -205,7 +206,7 @@ impl super::CodingAttemptStore {
         }
         let units = self
             .list_coding_units(&stored.project_id, &stored.issue_id, &stored.id)
-            .map_err(|error| incomplete_group_attempt(&stored.id, &error.to_string()))?;
+            .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?;
         if units.len() != authoritative.units.len()
             || units
                 .iter()
@@ -220,27 +221,81 @@ impl super::CodingAttemptStore {
                 "coding unit set is incomplete or inconsistent",
             ));
         }
-        if stored
-            .active_unit_id
-            .as_ref()
-            .is_some_and(|active_id| !units.iter().any(|unit| &unit.id == active_id))
-            || stored
-                .current_work_item_id
-                .as_ref()
-                .is_some_and(|current_id| {
-                    !authoritative
-                        .units
-                        .iter()
-                        .any(|unit| &unit.logical_work_item_id == current_id)
-                })
-        {
-            return Err(incomplete_group_attempt(
-                &stored.id,
-                "attempt active unit identity is inconsistent",
-            ));
-        }
+        validate_group_attempt_pointers(&stored, &units)?;
         Ok(authoritative)
     }
+}
+
+pub fn is_group_business_validation_error(error: &ProductStoreError) -> bool {
+    matches!(
+        error,
+        ProductStoreError::NotFound { .. } | ProductStoreError::IdentityMismatch { .. }
+    ) || matches!(
+        error,
+        ProductStoreError::Io(message)
+            if message.starts_with("coding_plan_revision_binding_missing:")
+                || message.starts_with("coding_group_attempt_incomplete:")
+    )
+}
+
+fn map_group_integrity_dependency_error(
+    attempt_id: &str,
+    error: ProductStoreError,
+) -> ProductStoreError {
+    if is_group_business_validation_error(&error) {
+        incomplete_group_attempt(attempt_id, &error.to_string())
+    } else {
+        error
+    }
+}
+
+fn validate_group_attempt_pointers(
+    attempt: &CodingExecutionAttempt,
+    units: &[CodingExecutionUnit],
+) -> Result<(), ProductStoreError> {
+    let active_units = units
+        .iter()
+        .filter(|unit| unit.status.is_active())
+        .collect::<Vec<_>>();
+    match active_units.as_slice() {
+        [active] if attempt.status.is_active() => {
+            if attempt.active_unit_id.as_deref() != Some(active.id.as_str())
+                || attempt.current_work_item_id.as_deref()
+                    != Some(active.logical_work_item_id.as_str())
+            {
+                return Err(incomplete_group_attempt(
+                    &attempt.id,
+                    "active and current pointers do not match the unique active unit",
+                ));
+            }
+        }
+        [] => {
+            let pointers_are_empty =
+                attempt.active_unit_id.is_none() && attempt.current_work_item_id.is_none();
+            let terminal_units = units.iter().all(|unit| {
+                !unit.status.is_active() && unit.status != CodingExecutionUnitStatus::Pending
+            });
+            let final_review_units = units
+                .iter()
+                .all(|unit| unit.status == CodingExecutionUnitStatus::Completed);
+            let no_target_is_allowed = (!attempt.status.is_active() && terminal_units)
+                || (attempt.stage.order() >= CodingExecutionStage::ReviewRequest.order()
+                    && final_review_units);
+            if !pointers_are_empty || !no_target_is_allowed {
+                return Err(incomplete_group_attempt(
+                    &attempt.id,
+                    "attempt has no legal active or resume target",
+                ));
+            }
+        }
+        _ => {
+            return Err(incomplete_group_attempt(
+                &attempt.id,
+                "attempt has multiple active units or a terminal status with an active unit",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn unit_matches_authoritative(
@@ -261,7 +316,10 @@ fn unit_matches_authoritative(
 }
 
 fn invalid_plan_binding(reason: &str) -> ProductStoreError {
-    ProductStoreError::Io(format!("coding_plan_revision_binding_invalid: {reason}"))
+    ProductStoreError::IdentityMismatch {
+        kind: "coding_plan_revision_binding",
+        id: reason.to_string(),
+    }
 }
 
 fn incomplete_group_attempt(attempt_id: &str, reason: &str) -> ProductStoreError {

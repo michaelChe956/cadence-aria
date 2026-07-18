@@ -244,3 +244,107 @@ async fn coding_plan_repair_existing_group_attempt_requires_exact_units() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "coding_group_attempt_incomplete");
 }
+
+#[tokio::test]
+async fn coding_plan_repair_existing_group_attempt_rejects_invalid_active_pointers() {
+    for corruption in ["missing", "pending", "mismatch", "completed", "multiple"] {
+        let root = tempdir().expect("root");
+        let repo = git_repo();
+        let app = build_web_router(WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        ));
+        bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+        let path = "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts";
+        let (first_status, first) = request_json(app.clone(), Method::POST, path, json!({})).await;
+        assert_eq!(first_status, StatusCode::OK);
+        let attempt_id = assert_global_attempt_id(&first);
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = CodingAttemptStore::new(app_paths.clone());
+        let mut attempt = store
+            .get_attempt("project_0001", "issue_0001", &attempt_id)
+            .expect("attempt");
+        match corruption {
+            "missing" => {
+                attempt.active_unit_id = None;
+                attempt.current_work_item_id = None;
+            }
+            "pending" => {
+                attempt.active_unit_id = Some("coding_unit_0002".to_string());
+                attempt.current_work_item_id = Some("work_item_0002".to_string());
+            }
+            "mismatch" => {
+                attempt.active_unit_id = Some("coding_unit_0001".to_string());
+                attempt.current_work_item_id = Some("work_item_0002".to_string());
+            }
+            "completed" => {
+                store
+                    .update_coding_unit_status(
+                        "project_0001",
+                        "issue_0001",
+                        &attempt_id,
+                        "coding_unit_0001",
+                        CodingExecutionUnitStatus::Completed,
+                        None,
+                    )
+                    .expect("complete first unit");
+                attempt = store
+                    .get_attempt("project_0001", "issue_0001", &attempt_id)
+                    .expect("attempt after completion");
+                attempt.active_unit_id = Some("coding_unit_0001".to_string());
+                attempt.current_work_item_id = Some("work_item_0001".to_string());
+            }
+            "multiple" => {
+                let second_unit_path = app_paths
+                    .issue_root("project_0001", "issue_0001")
+                    .join(format!("coding-attempts/{attempt_id}/units/coding_unit_0002.json"));
+                let mut second: Value = serde_json::from_slice(
+                    &fs::read(&second_unit_path).expect("second unit"),
+                )
+                .expect("parse second unit");
+                second["status"] = json!("running");
+                fs::write(
+                    second_unit_path,
+                    serde_json::to_vec_pretty(&second).expect("serialize second unit"),
+                )
+                .expect("write second active unit");
+            }
+            _ => unreachable!(),
+        }
+        store
+            .save_coding_attempt(&attempt)
+            .expect("persist corrupt pointers");
+
+        let (status, body) = request_json(app, Method::POST, path, json!({})).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "corruption={corruption}");
+        assert_eq!(body["code"], "coding_group_attempt_incomplete");
+    }
+}
+
+#[tokio::test]
+async fn coding_plan_repair_corrupt_existing_binding_remains_store_error() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let path = "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts";
+    let (first_status, first) = request_json(app.clone(), Method::POST, path, json!({})).await;
+    assert_eq!(first_status, StatusCode::OK);
+    let attempt_id = assert_global_attempt_id(&first);
+    fs::write(
+        ProductAppPaths::new(root.path().join(".aria"))
+            .issue_root("project_0001", "issue_0001")
+            .join(format!("coding-attempts/{attempt_id}/plan-binding.json")),
+        "{invalid json",
+    )
+    .expect("corrupt plan binding");
+
+    let (status, body) = request_json(app, Method::POST, path, json!({})).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["code"], "product_store_error");
+}

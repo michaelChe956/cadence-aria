@@ -240,18 +240,26 @@ pub async fn create_group_coding_attempt(
     Ok(Json(coding_attempt_dto(&persisted_attempt)))
 }
 
-fn coding_plan_revision_binding_api_error(_error: ProductStoreError) -> ApiError {
-    ApiError::validation(
-        "coding_plan_revision_binding_missing",
-        "group coding requires complete authoritative plan revision bindings",
-    )
+fn coding_plan_revision_binding_api_error(error: ProductStoreError) -> ApiError {
+    if is_group_business_validation_error(&error) {
+        ApiError::validation(
+            "coding_plan_revision_binding_missing",
+            "group coding requires complete authoritative plan revision bindings",
+        )
+    } else {
+        product_store_api_error(error)
+    }
 }
 
-fn coding_group_attempt_incomplete_api_error(_error: ProductStoreError) -> ApiError {
-    ApiError::validation(
-        "coding_group_attempt_incomplete",
-        "existing group coding attempt is only partially initialized or inconsistent",
-    )
+fn coding_group_attempt_incomplete_api_error(error: ProductStoreError) -> ApiError {
+    if is_group_business_validation_error(&error) {
+        ApiError::validation(
+            "coding_group_attempt_incomplete",
+            "existing group coding attempt is only partially initialized or inconsistent",
+        )
+    } else {
+        product_store_api_error(error)
+    }
 }
 
 fn rollback_group_attempt_creation(

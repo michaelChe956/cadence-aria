@@ -21,7 +21,7 @@ use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
-    CreateGroupCodingAttemptInput,
+    CreateGroupCodingAttemptInput, is_group_business_validation_error,
 };
 use crate::product::coding_models::{
     CodingAttemptPlanBinding, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
