@@ -9,3 +9,4 @@ include!("web_coding_ws_handler/part_08.rs");
 include!("web_coding_ws_handler/part_09.rs");
 include!("web_coding_ws_handler/part_10.rs");
 include!("web_coding_ws_handler/part_11.rs");
+include!("web_coding_ws_handler/part_12.rs");

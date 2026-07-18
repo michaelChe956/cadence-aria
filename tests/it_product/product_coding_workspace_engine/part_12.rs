@@ -1,3 +1,14 @@
+use cadence_aria::product::coding_models::CodingAttemptPlanBinding;
+use cadence_aria::product::models::{
+    DependencyGraphRevision, LogicalWorkItem, PlanRevisionReason, WorkItemPlanLineage,
+    WorkItemPlanRevision, WorkItemPlanStatus, WorkItemRevision,
+};
+use cadence_aria::product::work_item_contract::{
+    CanonicalWorkItemContract, HandoffContract, WorkItemContractIdentity, WorkItemGoal,
+    WorkItemWritePolicy, canonical_contract_hash,
+};
+use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
+
 fn group_engine_with_two_units() -> (
     tempfile::TempDir,
     ProductAppPaths,
@@ -75,7 +86,7 @@ fn group_engine_with_last_running_unit() -> (
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            current_work_item_id: "work_item_0002".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
             base_branch: "HEAD".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: Some(worktree),
@@ -127,6 +138,132 @@ fn init_group_worktree(worktree: &Path) {
     run_git(worktree, &["commit", "-m", "seed group files"]);
 }
 
+fn seed_authoritative_group_terminal_fixture(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    let revision_store = WorkItemRevisionStore::new(store.paths());
+    let lineage = WorkItemPlanLineage {
+        id: "work_item_plan_0001".to_string(),
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
+        story_spec_refs: Vec::new(),
+        design_spec_refs: Vec::new(),
+        active_revision_id: None,
+        active_amendment_id: None,
+        created_at: "2026-06-27T00:00:00Z".to_string(),
+        updated_at: "2026-06-27T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_plan_lineage(&lineage)
+        .expect("put group plan lineage");
+    let mut bindings = std::collections::BTreeMap::new();
+    for (logical_id, revision_id) in [
+        ("work_item_0001", "work_item_revision_0001"),
+        ("work_item_0002", "work_item_revision_0002"),
+    ] {
+        let logical = LogicalWorkItem {
+            id: logical_id.to_string(),
+            plan_id: lineage.id.clone(),
+            title: logical_id.to_string(),
+            active_revision_id: None,
+            created_at: "2026-06-27T00:00:00Z".to_string(),
+            updated_at: "2026-06-27T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_logical_work_item(&lineage, &logical)
+            .expect("put logical work item");
+        let contract = CanonicalWorkItemContract {
+            schema_version: 1,
+            identity: WorkItemContractIdentity {
+                logical_work_item_id: logical.id.clone(),
+                title: logical.title.clone(),
+                kind: "implementation".to_string(),
+            },
+            goal: WorkItemGoal {
+                summary: logical.title.clone(),
+            },
+            non_goals: Vec::new(),
+            input_contracts: Vec::new(),
+            output_contracts: Vec::new(),
+            tasks: Vec::new(),
+            write_policy: WorkItemWritePolicy {
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+            },
+            acceptance_criteria: Vec::new(),
+            verification_checks: Vec::new(),
+            handoff_contract: HandoffContract {
+                required_fields: Vec::new(),
+                provided_contract_refs: Vec::new(),
+                reviewer_check_refs: Vec::new(),
+            },
+            blocker_rules: Vec::new(),
+            design_traceability: Vec::new(),
+        };
+        let revision = WorkItemRevision {
+            id: revision_id.to_string(),
+            logical_work_item_id: logical.id.clone(),
+            source_draft_revision_id: format!("draft_{logical_id}"),
+            canonical_contract_hash: canonical_contract_hash(&contract).expect("contract hash"),
+            canonical_contract: contract,
+            work_item_projection_bundle_id: format!("projection_{logical_id}"),
+            verification_plan_revision_id: format!("verification_{logical_id}"),
+            created_at: "2026-06-27T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_work_item_revision(&lineage, &revision)
+            .expect("put work item revision");
+        revision_store
+            .set_active_work_item_revision(&lineage, &logical, None, &revision.id)
+            .expect("activate work item revision");
+        bindings.insert(logical.id, revision.id);
+    }
+    let graph = DependencyGraphRevision {
+        id: "dependency_graph_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        edges: vec![cadence_aria::product::work_item_contract::DependencyContractEdge {
+            from: "work_item_0001".to_string(),
+            to: "work_item_0002".to_string(),
+            required_contracts: Vec::new(),
+        }],
+        created_at: "2026-06-27T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_dependency_graph_revision(&lineage, &graph)
+        .expect("put dependency graph revision");
+    let plan_revision = WorkItemPlanRevision {
+        id: "plan_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        revision_no: 1,
+        supersedes: None,
+        reason: PlanRevisionReason::InitialCompile,
+        work_item_bindings: bindings,
+        dependency_graph_revision_id: graph.id,
+        validation_report_ref: "validation_report_0001".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        created_at: "2026-06-27T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_plan_revision(&lineage, &plan_revision)
+        .expect("put plan revision");
+    revision_store
+        .set_active_plan_revision(&lineage, &plan_revision.id)
+        .expect("activate plan revision");
+    store
+        .save_plan_binding(
+            attempt,
+            &CodingAttemptPlanBinding {
+                attempt_id: attempt.id.clone(),
+                plan_id: lineage.id,
+                bound_plan_revision_id: plan_revision.id,
+                applied_amendment_ids: Vec::new(),
+                updated_at: "2026-06-27T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save group plan binding");
+}
+
 fn completed_group_attempt_with_handoffs() -> (
     tempfile::TempDir,
     ProductAppPaths,
@@ -136,7 +273,10 @@ fn completed_group_attempt_with_handoffs() -> (
 ) {
     let (root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
     let lifecycle = LifecycleStore::new(paths.clone());
-    for work_item_id in ["work_item_0001", "work_item_0002"] {
+    for (index, work_item_id) in ["work_item_0001", "work_item_0002"]
+        .into_iter()
+        .enumerate()
+    {
         lifecycle
             .create_work_item(CreateWorkItemInput {
                 id: Some(work_item_id.to_string()),
@@ -146,6 +286,9 @@ fn completed_group_attempt_with_handoffs() -> (
                 story_spec_ids: Vec::new(),
                 design_spec_ids: Vec::new(),
                 title: format!("title for {work_item_id}"),
+                work_item_set_id: Some("work_item_plan_0001".to_string()),
+                sequence_hint: Some(((index + 1) * 10) as u32),
+                plan_status: WorkItemPlanStatus::Confirmed,
                 ..Default::default()
             })
             .expect("create work item");
@@ -285,7 +428,10 @@ fn group_attempt_waiting_for_final_confirm() -> (
 ) {
     let (root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
     let lifecycle = LifecycleStore::new(paths.clone());
-    for work_item_id in ["work_item_0001", "work_item_0002"] {
+    for (index, work_item_id) in ["work_item_0001", "work_item_0002"]
+        .into_iter()
+        .enumerate()
+    {
         lifecycle
             .create_work_item(CreateWorkItemInput {
                 id: Some(work_item_id.to_string()),
@@ -295,6 +441,9 @@ fn group_attempt_waiting_for_final_confirm() -> (
                 story_spec_ids: Vec::new(),
                 design_spec_ids: Vec::new(),
                 title: format!("title for {work_item_id}"),
+                work_item_set_id: Some("work_item_plan_0001".to_string()),
+                sequence_hint: Some(((index + 1) * 10) as u32),
+                plan_status: WorkItemPlanStatus::Confirmed,
                 ..Default::default()
             })
             .expect("create work item");
@@ -307,6 +456,29 @@ fn group_attempt_waiting_for_final_confirm() -> (
             )
             .expect("set coding status");
     }
+    lifecycle
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("work_item_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            source_story_spec_ids: Vec::new(),
+            source_design_spec_ids: Vec::new(),
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Confirmed,
+            work_item_ids: vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .expect("create issue work item plan");
+    seed_authoritative_group_terminal_fixture(&store, &attempt);
     store
         .save_coding_unit_handoff(
             &attempt.project_id,

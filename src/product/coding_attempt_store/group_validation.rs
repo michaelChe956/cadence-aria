@@ -168,6 +168,22 @@ impl super::CodingAttemptStore {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<AuthoritativeGroupPlanBinding, ProductStoreError> {
+        let (stored, authoritative, units) = self.validate_group_attempt_structure(attempt)?;
+        validate_group_attempt_pointers(&stored, &units)?;
+        Ok(authoritative)
+    }
+
+    pub(super) fn validate_group_attempt_structure(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<
+        (
+            CodingExecutionAttempt,
+            AuthoritativeGroupPlanBinding,
+            Vec<CodingExecutionUnit>,
+        ),
+        ProductStoreError,
+    > {
         let stored = self.validate_attempt_lineage(attempt)?;
         let plan_id = match (&stored.scope, stored.work_item_group_id.as_deref()) {
             (CodingAttemptScope::WorkItemGroup, Some(plan_id)) => plan_id,
@@ -221,8 +237,7 @@ impl super::CodingAttemptStore {
                 "coding unit set is incomplete or inconsistent",
             ));
         }
-        validate_group_attempt_pointers(&stored, &units)?;
-        Ok(authoritative)
+        Ok((stored, authoritative, units))
     }
 }
 
@@ -278,9 +293,18 @@ fn validate_group_attempt_pointers(
             let final_review_units = units
                 .iter()
                 .all(|unit| unit.status == CodingExecutionUnitStatus::Completed);
-            let no_target_is_allowed = (!attempt.status.is_active() && terminal_units)
-                || (attempt.stage.order() >= CodingExecutionStage::ReviewRequest.order()
-                    && final_review_units);
+            let terminal_no_target_is_allowed = match attempt.status {
+                crate::product::coding_models::CodingAttemptStatus::Completed => final_review_units,
+                crate::product::coding_models::CodingAttemptStatus::Failed
+                | crate::product::coding_models::CodingAttemptStatus::Aborted => terminal_units,
+                _ => false,
+            };
+            let final_review_no_target_is_allowed = attempt.status.is_active()
+                && attempt.status != crate::product::coding_models::CodingAttemptStatus::Created
+                && attempt.stage.order() >= CodingExecutionStage::ReviewRequest.order()
+                && final_review_units;
+            let no_target_is_allowed =
+                terminal_no_target_is_allowed || final_review_no_target_is_allowed;
             if !pointers_are_empty || !no_target_is_allowed {
                 return Err(incomplete_group_attempt(
                     &attempt.id,
@@ -322,7 +346,7 @@ fn invalid_plan_binding(reason: &str) -> ProductStoreError {
     }
 }
 
-fn incomplete_group_attempt(attempt_id: &str, reason: &str) -> ProductStoreError {
+pub(super) fn incomplete_group_attempt(attempt_id: &str, reason: &str) -> ProductStoreError {
     ProductStoreError::Io(format!(
         "coding_group_attempt_incomplete: {attempt_id}: {reason}"
     ))

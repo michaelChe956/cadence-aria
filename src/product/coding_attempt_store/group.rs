@@ -8,6 +8,7 @@ use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use std::collections::HashSet;
 
+use super::locking::with_exclusive_lock;
 use super::{CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput};
 
 impl super::CodingAttemptStore {
@@ -267,52 +268,55 @@ impl super::CodingAttemptStore {
         validate_relative_id(issue_id)?;
         validate_relative_id(attempt_id)?;
         validate_relative_id(unit_id)?;
-        let path = self.coding_unit_path(project_id, issue_id, attempt_id, unit_id);
-        let mut unit: CodingExecutionUnit = read_json(&path)?;
-        if status.is_active()
-            && self
-                .list_coding_units(project_id, issue_id, attempt_id)?
-                .into_iter()
-                .any(|existing| existing.id != unit_id && existing.status.is_active())
-        {
-            return Err(ProductStoreError::Io(format!(
-                "active_coding_unit_exists: {}",
-                attempt_id
-            )));
-        }
-        let now = Utc::now().to_rfc3339();
-        if matches!(status, CodingExecutionUnitStatus::Running) && unit.started_at.is_none() {
-            unit.started_at = Some(now.clone());
-        }
-        if matches!(
-            status,
-            CodingExecutionUnitStatus::Completed
-                | CodingExecutionUnitStatus::Failed
-                | CodingExecutionUnitStatus::Superseded
-                | CodingExecutionUnitStatus::Skipped
-        ) {
-            unit.completed_at = Some(now.clone());
-        }
-        unit.status = status;
-        unit.summary = summary;
-        unit.updated_at = now;
-        write_json(&path, &unit)?;
-
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        match self.get_active_coding_unit(project_id, issue_id, attempt_id)? {
-            Some(active) => {
-                attempt.active_unit_id = Some(active.id.clone());
-                attempt.current_work_item_id = Some(active.logical_work_item_id.clone());
+        let attempt_path = self.attempt_path(project_id, issue_id, attempt_id);
+        with_exclusive_lock(&attempt_path, || {
+            let path = self.coding_unit_path(project_id, issue_id, attempt_id, unit_id);
+            let mut unit: CodingExecutionUnit = read_json(&path)?;
+            if status.is_active()
+                && self
+                    .list_coding_units(project_id, issue_id, attempt_id)?
+                    .into_iter()
+                    .any(|existing| existing.id != unit_id && existing.status.is_active())
+            {
+                return Err(ProductStoreError::Io(format!(
+                    "active_coding_unit_exists: {}",
+                    attempt_id
+                )));
             }
-            None => {
-                attempt.active_unit_id = None;
-                attempt.current_work_item_id = None;
+            let now = Utc::now().to_rfc3339();
+            if matches!(status, CodingExecutionUnitStatus::Running) && unit.started_at.is_none() {
+                unit.started_at = Some(now.clone());
             }
-        }
-        attempt.updated_at = Utc::now().to_rfc3339();
-        self.save_coding_attempt(&attempt)?;
+            if matches!(
+                status,
+                CodingExecutionUnitStatus::Completed
+                    | CodingExecutionUnitStatus::Failed
+                    | CodingExecutionUnitStatus::Superseded
+                    | CodingExecutionUnitStatus::Skipped
+            ) {
+                unit.completed_at = Some(now.clone());
+            }
+            unit.status = status;
+            unit.summary = summary;
+            unit.updated_at = now;
+            write_json(&path, &unit)?;
 
-        Ok(unit)
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            match self.get_active_coding_unit(project_id, issue_id, attempt_id)? {
+                Some(active) => {
+                    attempt.active_unit_id = Some(active.id.clone());
+                    attempt.current_work_item_id = Some(active.logical_work_item_id.clone());
+                }
+                None => {
+                    attempt.active_unit_id = None;
+                    attempt.current_work_item_id = None;
+                }
+            }
+            attempt.updated_at = Utc::now().to_rfc3339();
+            self.save_coding_attempt(&attempt)?;
+
+            Ok(unit)
+        })
     }
 
     pub fn update_coding_unit_latest_handoff_revision_id(

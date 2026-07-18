@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn rejects_second_group_attempt_after_original_completed() {
     let (_tmp, store) = setup_store();
-    let first = store
+    let mut first = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
@@ -16,22 +16,7 @@ fn rejects_second_group_attempt_after_original_completed() {
             max_auto_rework: 2,
         })
         .expect("first group attempt");
-    store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &first.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("start group attempt");
-    store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &first.id,
-            CodingAttemptStatus::Completed,
-        )
-        .expect("complete group attempt");
+    persist_completed_group_uniqueness_fixture(&store, &mut first);
 
     let error = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -59,7 +44,7 @@ fn rejects_second_group_attempt_after_original_completed() {
 #[test]
 fn allows_group_attempt_for_different_plan_after_original_completed() {
     let (_tmp, store) = setup_store();
-    let first = store
+    let mut first = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
@@ -72,22 +57,7 @@ fn allows_group_attempt_for_different_plan_after_original_completed() {
             max_auto_rework: 2,
         })
         .expect("first group attempt");
-    store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &first.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("start first attempt");
-    store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &first.id,
-            CodingAttemptStatus::Completed,
-        )
-        .expect("complete first attempt");
+    persist_completed_group_uniqueness_fixture(&store, &mut first);
 
     let second = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -107,4 +77,17 @@ fn allows_group_attempt_for_different_plan_after_original_completed() {
         second.work_item_group_id.as_deref(),
         Some("work_item_plan_0002")
     );
+}
+
+fn persist_completed_group_uniqueness_fixture(
+    store: &CodingAttemptStore,
+    attempt: &mut CodingExecutionAttempt,
+) {
+    let completed_at = chrono::Utc::now().to_rfc3339();
+    attempt.status = CodingAttemptStatus::Completed;
+    attempt.completed_at = Some(completed_at.clone());
+    attempt.updated_at = completed_at;
+    store
+        .save_coding_attempt(attempt)
+        .expect("persist terminal group uniqueness fixture");
 }

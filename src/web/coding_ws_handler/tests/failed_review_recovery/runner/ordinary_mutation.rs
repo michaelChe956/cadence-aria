@@ -34,7 +34,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
         OrdinaryMutationCase::ContextNote,
     ] {
         let fixture = failed_review_fixture(
-            CodingAttemptScope::WorkItemGroup,
+            CodingAttemptScope::WorkItem,
             FixtureCase::BlockedProviderInterrupted,
         );
         if matches!(case, OrdinaryMutationCase::AbortAttempt) {

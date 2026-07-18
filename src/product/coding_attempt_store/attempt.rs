@@ -13,6 +13,8 @@ use crate::product::json_store::{
 use crate::product::models::{ProviderConversationRef, WorkItemExecutionPlanStatus};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
+use super::locking::with_exclusive_lock;
+
 impl super::CodingAttemptStore {
     pub fn create_attempt(
         &self,
@@ -361,26 +363,38 @@ impl super::CodingAttemptStore {
         status: CodingAttemptStatus,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if !valid_status_transition(&attempt.status, &status) {
-            return Err(ProductStoreError::Io(format!(
-                "invalid_coding_attempt_status_transition: {:?} -> {:?}",
-                attempt.status, status
-            )));
-        }
-        let now = Utc::now().to_rfc3339();
-        if matches!(
-            status,
-            CodingAttemptStatus::Completed
-                | CodingAttemptStatus::Failed
-                | CodingAttemptStatus::Aborted
-        ) {
-            attempt.completed_at = Some(now.clone());
-        }
-        attempt.status = status;
-        attempt.updated_at = now;
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            if !valid_status_transition(&attempt.status, &status) {
+                return Err(ProductStoreError::Io(format!(
+                    "invalid_coding_attempt_status_transition: {:?} -> {:?}",
+                    attempt.status, status
+                )));
+            }
+            if attempt.scope == CodingAttemptScope::WorkItemGroup
+                && matches!(
+                    &status,
+                    CodingAttemptStatus::Completed
+                        | CodingAttemptStatus::Failed
+                        | CodingAttemptStatus::Aborted
+                )
+            {
+                return self.update_group_terminal_status_locked(attempt, status);
+            }
+            let now = Utc::now().to_rfc3339();
+            if matches!(
+                status,
+                CodingAttemptStatus::Completed
+                    | CodingAttemptStatus::Failed
+                    | CodingAttemptStatus::Aborted
+            ) {
+                attempt.completed_at = Some(now.clone());
+            }
+            attempt.status = status;
+            attempt.updated_at = now;
+            write_json(&path, &attempt)?;
+            Ok(attempt)
+        })
     }
 
     pub fn reopen_failed_code_review_attempt(
@@ -593,7 +607,10 @@ impl super::CodingAttemptStore {
     }
 }
 
-fn valid_status_transition(current: &CodingAttemptStatus, next: &CodingAttemptStatus) -> bool {
+pub(super) fn valid_status_transition(
+    current: &CodingAttemptStatus,
+    next: &CodingAttemptStatus,
+) -> bool {
     if current == next {
         return true;
     }

@@ -6,6 +6,7 @@ mod attempt;
 mod context;
 mod gate;
 mod group;
+mod group_terminal;
 mod group_validation;
 mod inputs;
 mod locking;
