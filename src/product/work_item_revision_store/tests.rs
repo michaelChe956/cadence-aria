@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use serde_json::json;
 use tempfile::TempDir;
 
 use crate::product::app_paths::ProductAppPaths;
@@ -535,12 +534,31 @@ fn work_item_revision_store_persists_amendment_artifacts_immutably() {
             WorkItemRevisionReplacement {
                 previous_revision_id: "work_item_revision_0001".to_string(),
                 next_revision_id: "work_item_revision_0002".to_string(),
-                delta_kind: "contract_changed".to_string(),
+                delta_kind: crate::product::models::ContractDeltaKind::BreakingContractChange,
             },
         )]),
         superseded_revisions: vec!["work_item_revision_0001".to_string()],
-        dependency_graph_changes: vec![json!({"kind": "replace_edge"})],
-        contract_deltas: vec![json!({"kind": "contract_changed"})],
+        dependency_graph_changes: vec![crate::product::models::DependencyGraphChange {
+            kind: crate::product::models::DependencyGraphChangeKind::EdgeReplaced,
+            previous: None,
+            next: None,
+        }],
+        contract_deltas: vec![crate::product::plan_repair::ContractDelta {
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            previous_revision_id: "work_item_revision_0001".to_string(),
+            next_revision_id: "work_item_revision_0002".to_string(),
+            kind: crate::product::models::ContractDeltaKind::BreakingContractChange,
+            added_contracts: vec![],
+            removed_contracts: vec!["contract_0001".to_string()],
+            added_capabilities: vec![],
+            removed_capabilities: vec!["capability_0001".to_string()],
+            changed_capabilities: vec![],
+            added_capability_associations: vec![],
+            removed_capability_associations: vec![],
+            acceptance_changed: false,
+            verification_changed: false,
+            write_policy_changed: false,
+        }],
         unaffected_units: vec![],
         revalidation_required_units: vec![WORK_ITEM_ID.to_string()],
         stale_units: vec![],
@@ -563,10 +581,19 @@ fn work_item_revision_store_persists_amendment_artifacts_immutably() {
 
     let journal = PlanAmendmentPublicationJournal {
         id: "amendment_publication_journal_0001".to_string(),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
         plan_id: PLAN_ID.to_string(),
         amendment_id: manifest.id,
+        request_id: "plan_repair_request_0001".to_string(),
+        base_plan_revision_id: "plan_revision_0001".to_string(),
+        new_plan_revision_id: "plan_revision_0002".to_string(),
+        confirmation: None,
+        artifact_fingerprint: "fingerprint_0001".to_string(),
+        snapshot: None,
         phase: PlanAmendmentPublicationPhase::Prepared,
         error: None,
+        recovery: None,
         created_at: "2026-07-17T00:00:13Z".to_string(),
         updated_at: "2026-07-17T00:00:13Z".to_string(),
     };

@@ -179,6 +179,46 @@ impl WorkItemRevisionStore {
         })
     }
 
+    pub fn publish_active_plan_amendment_revision(
+        &self,
+        lineage: &WorkItemPlanLineage,
+        amendment_id: &str,
+        base_revision_id: &str,
+        new_revision_id: &str,
+        updated_at: &str,
+    ) -> Result<WorkItemPlanLineage, ProductStoreError> {
+        for id in [amendment_id, base_revision_id, new_revision_id] {
+            validate_relative_id(id)?;
+        }
+        self.get_plan_revision(
+            &lineage.project_id,
+            &lineage.issue_id,
+            &lineage.id,
+            new_revision_id,
+        )?;
+        let path = self.plan_lineage_path(&lineage.project_id, &lineage.issue_id, &lineage.id);
+        with_exclusive_lock(&path, || {
+            let mut stored = self.ensure_plan_scope(lineage)?;
+            if stored.active_amendment_id.as_deref() != Some(amendment_id) {
+                return Err(identity_mismatch("active_plan_amendment", &lineage.id));
+            }
+            match stored.active_revision_id.as_deref() {
+                Some(active) if active == new_revision_id => return Ok(stored),
+                Some(active) if active == base_revision_id => {}
+                _ => {
+                    return Err(identity_mismatch(
+                        "active_work_item_plan_revision",
+                        &lineage.id,
+                    ));
+                }
+            }
+            stored.active_revision_id = Some(new_revision_id.to_string());
+            stored.updated_at = updated_at.to_string();
+            write_json(&path, &stored)?;
+            Ok(stored)
+        })
+    }
+
     pub fn acquire_active_amendment(
         &self,
         lineage: &WorkItemPlanLineage,

@@ -2,7 +2,7 @@ use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::models::PlanProjectionBundle;
 
-use super::review_context::load_plan_review_context;
+use super::review_context::{PlanReviewSource, load_plan_review_context};
 
 impl WorkspaceEngine {
     pub(crate) fn build_review_input(&self) -> Result<StreamingProviderInput, String> {
@@ -285,7 +285,8 @@ impl WorkspaceEngine {
         &self,
         projection: &PlanProjectionBundle,
     ) -> Result<StreamingProviderInput, String> {
-        let context = load_plan_review_context(self, projection)?;
+        let context =
+            load_plan_review_context(self, projection, PlanReviewSource::for_engine(self))?;
         let mut prompt = String::from(
             "请作为 Plan Reviewer 审核当前 Canonical Contract 与 Projection 候选。\n\n## Plan Review Context\n",
         );

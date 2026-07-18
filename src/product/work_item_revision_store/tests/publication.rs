@@ -16,10 +16,19 @@ fn publication_journal(
 ) -> PlanAmendmentPublicationJournal {
     PlanAmendmentPublicationJournal {
         id: format!("{amendment_id}_publication_journal"),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
         plan_id: PLAN_ID.to_string(),
         amendment_id: amendment_id.to_string(),
+        request_id: "plan_repair_request_0001".to_string(),
+        base_plan_revision_id: "plan_revision_0001".to_string(),
+        new_plan_revision_id: "plan_revision_0002".to_string(),
+        confirmation: None,
+        artifact_fingerprint: "fingerprint_0001".to_string(),
+        snapshot: None,
         phase,
         error: None,
+        recovery: None,
         created_at: "2026-07-17T00:00:13Z".to_string(),
         updated_at: "2026-07-17T00:00:13Z".to_string(),
     }
@@ -63,6 +72,37 @@ fn work_item_revision_publication_journal_allows_only_forward_idempotent_transit
         )
         .unwrap_err();
     assert!(error.to_string().contains("amendment_phase_regression"));
+}
+
+#[test]
+fn work_item_revision_publication_journal_preparing_phase_is_idempotent_before_artifacts() {
+    let (_temp, store, plan) = test_store_and_plan();
+    let journal = publication_journal(
+        "amendment_preparing_0001",
+        PlanAmendmentPublicationPhase::Preparing,
+    );
+    store
+        .put_plan_amendment_publication_journal(&plan, &journal)
+        .unwrap();
+
+    let prepared = store
+        .advance_plan_amendment_publication(
+            &plan,
+            &journal.id,
+            PlanAmendmentPublicationPhase::Prepared,
+        )
+        .unwrap();
+    assert_eq!(prepared.phase, PlanAmendmentPublicationPhase::Prepared);
+    assert_eq!(
+        store
+            .advance_plan_amendment_publication(
+                &plan,
+                &journal.id,
+                PlanAmendmentPublicationPhase::Prepared,
+            )
+            .unwrap(),
+        prepared
+    );
 }
 
 #[test]

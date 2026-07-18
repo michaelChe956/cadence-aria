@@ -2,19 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::product::models::ContractDeltaKind;
 use crate::product::work_item_contract::{
     CanonicalWorkItemContract, ContractCompatibilityPolicy, RequiredInputContract,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContractDeltaKind {
-    InformativeOnly,
-    ImplementationGuidance,
-    CompatibleContractExtension,
-    BreakingContractChange,
-    TopologyChange,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ContractCapabilityAssociation {

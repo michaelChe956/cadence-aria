@@ -400,7 +400,7 @@ fn work_item_revision_models_shared_records_roundtrip() {
     let replacement = WorkItemRevisionReplacement {
         previous_revision_id: "work_item_revision_0001".to_string(),
         next_revision_id: "work_item_revision_0002".to_string(),
-        delta_kind: "contract".to_string(),
+        delta_kind: crate::product::models::ContractDeltaKind::CompatibleContractExtension,
     };
     assert_serde_roundtrip(&replacement);
     let resume_target = AmendmentResumeTarget {
@@ -415,8 +415,27 @@ fn work_item_revision_models_shared_records_roundtrip() {
         new_plan_revision_id: "plan_revision_0002".to_string(),
         revised_work_items: BTreeMap::from([("wi_core".to_string(), replacement)]),
         superseded_revisions: vec!["work_item_revision_0001".to_string()],
-        dependency_graph_changes: vec![serde_json::json!({"op": "replace"})],
-        contract_deltas: vec![serde_json::json!({"path": "/objective"})],
+        dependency_graph_changes: vec![crate::product::models::DependencyGraphChange {
+            kind: crate::product::models::DependencyGraphChangeKind::EdgeReplaced,
+            previous: None,
+            next: None,
+        }],
+        contract_deltas: vec![crate::product::plan_repair::ContractDelta {
+            logical_work_item_id: "wi_core".to_string(),
+            previous_revision_id: "work_item_revision_0001".to_string(),
+            next_revision_id: "work_item_revision_0002".to_string(),
+            kind: crate::product::models::ContractDeltaKind::CompatibleContractExtension,
+            added_contracts: vec![],
+            removed_contracts: vec![],
+            added_capabilities: vec!["finalization_failure".to_string()],
+            removed_capabilities: vec![],
+            changed_capabilities: vec![],
+            added_capability_associations: vec![],
+            removed_capability_associations: vec![],
+            acceptance_changed: false,
+            verification_changed: false,
+            write_policy_changed: false,
+        }],
         unaffected_units: vec!["wi_docs".to_string()],
         revalidation_required_units: vec!["wi_api".to_string()],
         stale_units: vec!["wi_core".to_string()],
@@ -429,10 +448,19 @@ fn work_item_revision_models_shared_records_roundtrip() {
     });
     assert_serde_roundtrip(&PlanAmendmentPublicationJournal {
         id: "publication_journal_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
         plan_id: "issue_work_item_plan_0001".to_string(),
         amendment_id: "plan_amendment_0001".to_string(),
+        request_id: "plan_repair_request_0001".to_string(),
+        base_plan_revision_id: "plan_revision_0001".to_string(),
+        new_plan_revision_id: "plan_revision_0002".to_string(),
+        confirmation: None,
+        artifact_fingerprint: "fingerprint_0001".to_string(),
+        snapshot: None,
         phase: PlanAmendmentPublicationPhase::Prepared,
         error: None,
+        recovery: None,
         created_at: "2026-07-17T00:00:00Z".to_string(),
         updated_at: "2026-07-17T00:01:00Z".to_string(),
     });
@@ -535,17 +563,30 @@ fn work_item_revision_models_reject_missing_required_fields() {
 
     let publication_journal = serde_json::json!({
         "id": "publication_journal_0001",
+        "project_id": "project_0001",
+        "issue_id": "issue_0001",
         "plan_id": "issue_work_item_plan_0001",
         "amendment_id": "plan_amendment_0001",
+        "request_id": "plan_repair_request_0001",
+        "base_plan_revision_id": "plan_revision_0001",
+        "new_plan_revision_id": "plan_revision_0002",
+        "artifact_fingerprint": "fingerprint_0001",
         "phase": "prepared",
         "error": null,
+        "recovery": null,
         "created_at": "2026-07-17T00:00:00Z",
         "updated_at": "2026-07-17T00:01:00Z"
     });
     for field in [
         "id",
+        "project_id",
+        "issue_id",
         "plan_id",
         "amendment_id",
+        "request_id",
+        "base_plan_revision_id",
+        "new_plan_revision_id",
+        "artifact_fingerprint",
         "phase",
         "created_at",
         "updated_at",

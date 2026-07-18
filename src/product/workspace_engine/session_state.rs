@@ -164,6 +164,10 @@ pub(crate) fn build_artifact_version_summary(version: &ArtifactVersion) -> Artif
             let preview_text = format!("{} projection findings", report.findings.len());
             (size, preview(&preview_text))
         }
+        ArtifactPayload::PlanAmendmentManifest { manifest } => {
+            let size = serde_json::to_string(manifest).map_or(0, |s| s.len());
+            (size, preview(&manifest.id))
+        }
     };
     ArtifactVersionSummary {
         version: version.version,

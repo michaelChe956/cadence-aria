@@ -113,6 +113,15 @@ pub(crate) fn validate_persisted_awaiting_confirmation_package(
     let persisted_review = revision_store
         .get_plan_repair_review_attestation(plan, &package.package_identity.review_attestation_id)
         .map_err(PlanRepairError::Store)?;
+    let expected_review_scope = package
+        .amendment
+        .revalidation_required_units
+        .iter()
+        .chain(package.amendment.stale_units.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     if persisted_projection != package.projection
         || persisted_validation != package.validation
         || persisted_validation.plan_revision_id != package.amendment.new_plan_revision_id
@@ -124,6 +133,8 @@ pub(crate) fn validate_persisted_awaiting_confirmation_package(
         || persisted_review.reviewed_plan_revision_id != package.amendment.new_plan_revision_id
         || persisted_review.plan_projection_bundle_id != package.projection.id
         || persisted_review.generation_round_id != package.plan_review.generation_round_id
+        || persisted_review.accepted_impact_scope != expected_review_scope
+        || persisted_review.risk_acceptance_reason.is_some()
         || persisted_review.review != package.plan_review
     {
         return Err(invalid_package("persisted artifact provenance mismatch"));

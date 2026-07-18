@@ -92,6 +92,8 @@ pub struct PlanRepairReviewAttestation {
     pub reviewed_plan_revision_id: String,
     pub plan_projection_bundle_id: String,
     pub generation_round_id: String,
+    pub accepted_impact_scope: Vec<String>,
+    pub risk_acceptance_reason: Option<String>,
     pub review: WorkItemPlanReviewComplete,
     pub created_at: String,
 }

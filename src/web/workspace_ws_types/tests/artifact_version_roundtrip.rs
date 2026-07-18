@@ -2,7 +2,10 @@ use super::*;
 
 use std::collections::BTreeMap;
 
-use crate::product::models::{PlanProjectionBundle, WorkItemProjectionBundle};
+use crate::product::models::{
+    AmendmentResumeMode, AmendmentResumeTarget, PlanAmendmentManifest, PlanProjectionBundle,
+    WorkItemProjectionBundle,
+};
 use crate::product::work_item_contract::{
     build_dependency_contract_graph, canonical_contract_fixture,
 };
@@ -98,6 +101,40 @@ fn work_item_plan_projection_artifact_roundtrips_with_unique_flat_keys() {
     assert_eq!(update["type"], "artifact_update");
     assert!(update.get("plan_projection").is_some());
     assert!(update.get("projection").is_none());
+}
+
+#[test]
+fn plan_repair_amendment_manifest_artifact_roundtrips_with_typed_key() {
+    let manifest = PlanAmendmentManifest {
+        id: "plan_amendment_0001".to_string(),
+        repair_request_id: "plan_repair_request_0001".to_string(),
+        previous_plan_revision_id: "plan_revision_0001".to_string(),
+        new_plan_revision_id: "plan_revision_0002".to_string(),
+        revised_work_items: BTreeMap::new(),
+        superseded_revisions: vec![],
+        dependency_graph_changes: vec![],
+        contract_deltas: vec![],
+        unaffected_units: vec!["wi_unaffected".to_string()],
+        revalidation_required_units: vec!["wi_revalidate".to_string()],
+        stale_units: vec![],
+        replacement_units: BTreeMap::new(),
+        resume_target: AmendmentResumeTarget {
+            logical_work_item_id: "wi_revalidate".to_string(),
+            mode: AmendmentResumeMode::Revalidate,
+        },
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    let payload = ArtifactPayload::PlanAmendmentManifest {
+        manifest: Box::new(manifest),
+    };
+
+    let value = serde_json::to_value(&payload).unwrap();
+    assert!(value.get("plan_amendment_manifest").is_some());
+    assert!(value.get("type").is_none());
+    assert_eq!(
+        serde_json::from_value::<ArtifactPayload>(value).unwrap(),
+        payload
+    );
 }
 
 fn projection_bundle_fixtures() -> (PlanProjectionBundle, WorkItemProjectionBundle) {

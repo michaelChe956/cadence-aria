@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::product::models::{
-    PlanProjectionBundle, WorkItemBatchStatus, WorkItemDraftRecord, WorkItemPlanCommitState,
-    WorkItemPlanCompileStatus, WorkItemPlanOutline, WorkItemProjectionBundle,
+    PlanAmendmentManifest, PlanProjectionBundle, WorkItemBatchStatus, WorkItemDraftRecord,
+    WorkItemPlanCommitState, WorkItemPlanCompileStatus, WorkItemPlanOutline,
+    WorkItemProjectionBundle,
 };
 use crate::product::work_item_projection::ProjectionValidationReport;
 
@@ -55,6 +56,10 @@ pub enum ArtifactPayload {
         #[serde(rename = "projection_validation")]
         report: Box<ProjectionValidationReportDto>,
     },
+    PlanAmendmentManifest {
+        #[serde(rename = "plan_amendment_manifest")]
+        manifest: Box<PlanAmendmentManifestDto>,
+    },
 }
 
 impl ArtifactPayload {
@@ -71,6 +76,7 @@ impl ArtifactPayload {
             Self::WorkItemProjection { .. } => None,
             Self::WorkItemRevisionHistory { .. } => None,
             Self::ProjectionValidation { .. } => None,
+            Self::PlanAmendmentManifest { .. } => None,
         }
     }
 
@@ -91,6 +97,7 @@ impl ArtifactPayload {
             Self::WorkItemProjection { .. } => None,
             Self::WorkItemRevisionHistory { .. } => None,
             Self::ProjectionValidation { .. } => None,
+            Self::PlanAmendmentManifest { .. } => None,
         }
     }
 }
@@ -98,6 +105,7 @@ impl ArtifactPayload {
 pub type PlanProjectionBundleDto = PlanProjectionBundle;
 pub type WorkItemProjectionBundleDto = WorkItemProjectionBundle;
 pub type ProjectionValidationReportDto = ProjectionValidationReport;
+pub type PlanAmendmentManifestDto = PlanAmendmentManifest;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

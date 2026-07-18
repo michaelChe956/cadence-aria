@@ -484,7 +484,7 @@ impl WorkspaceEngine {
             && stored_request.amendment_id.as_deref() == Some(amendment_id))
     }
 
-    fn require_plan_repair_snapshot(
+    pub(crate) fn require_plan_repair_snapshot(
         &self,
     ) -> Result<&PlanRepairSessionSnapshotDto, PlanRepairError> {
         self.plan_repair_snapshot.as_ref().ok_or_else(|| {
@@ -494,7 +494,7 @@ impl WorkspaceEngine {
         })
     }
 
-    fn persistent_lifecycle(&self) -> Result<LifecycleStore, PlanRepairError> {
+    pub(crate) fn persistent_lifecycle(&self) -> Result<LifecycleStore, PlanRepairError> {
         self.lifecycle_store.clone().ok_or_else(|| {
             PlanRepairError::Store(ProductStoreError::Io(
                 "plan repair requires a persistent workspace engine".to_string(),

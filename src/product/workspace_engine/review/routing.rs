@@ -49,6 +49,15 @@ impl WorkspaceEngine {
         };
         self.mark_latest_artifact_reviewed(reviewer, Some(artifact_verdict));
 
+        if self
+            .plan_repair_session_state()
+            .is_some_and(|snapshot| snapshot.stage == PlanRepairSessionStage::PlanReview)
+            && active_node_type == Some(TimelineNodeType::WorkItemPlanOutlineReview)
+        {
+            self.route_plan_repair_candidate_review(verdict).await;
+            return;
+        }
+
         match active_node_type {
             Some(TimelineNodeType::WorkItemPlanOutlineReview) => {
                 self.route_work_item_plan_outline_review(verdict).await;

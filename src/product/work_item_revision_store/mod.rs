@@ -18,6 +18,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::WorkItemPlanLineage;
 
+mod amendment_publication;
 mod dependency;
 mod handoff;
 mod initial_publication;
@@ -28,6 +29,11 @@ mod projection;
 mod repair;
 mod work_item;
 
+pub use amendment_publication::PlanAmendmentPublicationIds;
+#[cfg(test)]
+pub(crate) use amendment_publication::{
+    PlanAmendmentPublicationCheckpoint, register_plan_amendment_publication_failpoint,
+};
 #[cfg(test)]
 pub(crate) use initial_publication::InitialPlanPublicationCheckpoint;
 pub use initial_publication::{

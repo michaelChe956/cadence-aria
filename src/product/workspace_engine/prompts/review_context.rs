@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::product::models::{
-    DependencyGraphRevision, PlanProjectionBundle, PlanRevisionReason, WorkItemProjectionBundle,
+    DependencyGraphRevision, PlanProjectionBundle, PlanRepairSessionSnapshotDto,
+    PlanRepairSessionStage, PlanRevisionReason, RepairTargetKind, WorkItemProjectionBundle,
     WorkItemRevision,
 };
 use crate::product::work_item_contract::{CanonicalWorkItemContract, canonical_contract_hash};
@@ -24,9 +25,27 @@ pub(super) struct PlanReviewContext {
     pub(super) repair_evidence: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum PlanReviewSource<'a> {
+    InitialActive,
+    PlanRepairCandidate(&'a PlanRepairSessionSnapshotDto),
+}
+
+impl<'a> PlanReviewSource<'a> {
+    pub(super) fn for_engine(engine: &'a WorkspaceEngine) -> Self {
+        match engine.plan_repair_snapshot.as_ref() {
+            Some(snapshot) if snapshot.stage == PlanRepairSessionStage::PlanReview => {
+                Self::PlanRepairCandidate(snapshot)
+            }
+            _ => Self::InitialActive,
+        }
+    }
+}
+
 pub(super) fn load_plan_review_context(
     engine: &WorkspaceEngine,
     projection: &PlanProjectionBundle,
+    source: PlanReviewSource<'_>,
 ) -> Result<PlanReviewContext, String> {
     let lifecycle = engine
         .lifecycle_store
@@ -48,12 +67,86 @@ pub(super) fn load_plan_review_context(
             &projection.plan_revision_id,
         )
         .map_err(|error| format!("load Plan Review revision failed: {error}"))?;
-    if lineage.active_revision_id.as_deref() != Some(projection.plan_revision_id.as_str()) {
-        return Err("Plan Review active revision binding mismatch".to_string());
-    }
-    if revision.reason != PlanRevisionReason::InitialCompile {
-        return Err("Plan Review Context only supports initial plan publication".to_string());
-    }
+    let (contract_delta, impact_analysis, repair_evidence) = match source {
+        PlanReviewSource::InitialActive => {
+            if lineage.active_revision_id.as_deref() != Some(projection.plan_revision_id.as_str()) {
+                return Err("Plan Review active revision binding mismatch".to_string());
+            }
+            if revision.reason != PlanRevisionReason::InitialCompile {
+                return Err(
+                    "Plan Review Context only supports initial plan publication".to_string()
+                );
+            }
+            (
+                vec!["initial_plan_publication: no previous contract delta".to_string()],
+                Vec::new(),
+                vec!["initial_plan_publication: no repair evidence".to_string()],
+            )
+        }
+        PlanReviewSource::PlanRepairCandidate(snapshot) => {
+            let request = &snapshot.request;
+            let amendment = snapshot
+                .amendment
+                .as_ref()
+                .ok_or_else(|| "Plan Repair review manifest is missing".to_string())?;
+            let amendment_id = request
+                .amendment_id
+                .as_deref()
+                .ok_or_else(|| "Plan Repair review amendment id is missing".to_string())?;
+            let expected_reason = match request.repair_target.kind {
+                RepairTargetKind::CurrentWorkItem => PlanRevisionReason::RepairCurrentWorkItem,
+                RepairTargetKind::UpstreamWorkItem => PlanRevisionReason::RepairUpstreamContract,
+                RepairTargetKind::Subgraph => PlanRevisionReason::SubgraphReplan,
+            };
+            if request.plan_id != lineage.id
+                || lineage.active_revision_id.as_deref()
+                    != Some(request.base_plan_revision_id.as_str())
+                || lineage.active_amendment_id.as_deref() != Some(amendment_id)
+                || amendment.repair_request_id != request.id
+                || amendment.previous_plan_revision_id != request.base_plan_revision_id
+                || amendment.new_plan_revision_id != revision.id
+                || revision.supersedes.as_deref() != Some(request.base_plan_revision_id.as_str())
+                || revision.reason != expected_reason
+                || snapshot.projection.as_ref() != Some(projection)
+            {
+                return Err("Plan Repair review candidate provenance mismatch".to_string());
+            }
+            let contract_delta = amendment
+                .contract_deltas
+                .iter()
+                .map(|delta| {
+                    serde_json::to_string(delta)
+                        .map_err(|error| format!("serialize Contract Delta failed: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let impact = snapshot
+                .impact
+                .as_ref()
+                .ok_or_else(|| "Plan Repair review impact analysis is missing".to_string())?;
+            if string_set(&impact.unaffected) != string_set(&amendment.unaffected_units)
+                || string_set(&impact.direct_revalidation)
+                    != string_set(&amendment.revalidation_required_units)
+                || string_set(&impact.direct_stale) != string_set(&amendment.stale_units)
+            {
+                return Err("Plan Repair review impact provenance mismatch".to_string());
+            }
+            let impact_analysis = vec![
+                serde_json::to_string(impact)
+                    .map_err(|error| format!("serialize Impact Analysis failed: {error}"))?,
+            ];
+            let mut repair_evidence = vec![format!(
+                "request_id={}, amendment_id={}, base_plan_revision_id={}",
+                request.id, amendment.id, request.base_plan_revision_id
+            )];
+            repair_evidence.extend(request.evidence.iter().map(|evidence| {
+                format!(
+                    "{}:{}:{}",
+                    evidence.kind, evidence.source_ref, evidence.message
+                )
+            }));
+            (contract_delta, impact_analysis, repair_evidence)
+        }
+    };
     let stored_projection = store
         .get_plan_projection_bundle(&lineage, &projection.id)
         .map_err(|error| format!("load Plan projection failed: {error}"))?;
@@ -73,10 +166,21 @@ pub(super) fn load_plan_review_context(
     let dependency_contract_graph = store
         .get_dependency_graph_revision(&lineage, &projection.dependency_graph_revision_id)
         .map_err(|error| format!("load Dependency Contract Graph failed: {error}"))?;
-    let projection_validation_report = store
+    let validation_report = store
         .get_plan_validation_report(&lineage, &revision.validation_report_ref)
-        .map_err(|error| format!("load Projection Validation Report failed: {error}"))?
-        .projection_validation;
+        .map_err(|error| format!("load Projection Validation Report failed: {error}"))?;
+    if validation_report.plan_id != lineage.id
+        || validation_report.plan_revision_id != revision.id
+        || validation_report.plan_projection_bundle_id != projection.id
+    {
+        return Err("Plan Review validation artifact binding mismatch".to_string());
+    }
+    if let PlanReviewSource::PlanRepairCandidate(snapshot) = source
+        && snapshot.validation.as_ref() != Some(&validation_report)
+    {
+        return Err("Plan Repair review validation provenance mismatch".to_string());
+    }
+    let projection_validation_report = validation_report.projection_validation;
     let work_item_revisions = revision
         .work_item_bindings
         .iter()
@@ -118,7 +222,7 @@ pub(super) fn load_plan_review_context(
         .iter()
         .map(|revision| revision.canonical_contract.clone())
         .collect();
-    let initial_work_item_ids = revision
+    let work_item_ids = revision
         .work_item_bindings
         .keys()
         .cloned()
@@ -132,10 +236,18 @@ pub(super) fn load_plan_review_context(
         plan_projection_bundle_candidate: projection.clone(),
         work_item_projection_bundle_candidates,
         projection_validation_report,
-        contract_delta: vec!["initial_plan_publication: no previous contract delta".to_string()],
-        impact_analysis: vec![format!("initial_full_set: {initial_work_item_ids}")],
-        repair_evidence: vec!["initial_plan_publication: no repair evidence".to_string()],
+        contract_delta,
+        impact_analysis: if impact_analysis.is_empty() {
+            vec![format!("initial_full_set: {work_item_ids}")]
+        } else {
+            impact_analysis
+        },
+        repair_evidence,
     })
+}
+
+fn string_set(values: &[String]) -> BTreeSet<&str> {
+    values.iter().map(String::as_str).collect()
 }
 
 fn validate_work_item_projection_bindings(

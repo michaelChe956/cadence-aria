@@ -14,6 +14,7 @@ use super::{
     compute_contract_delta, default_route, normalize_blocker_route, plan_defect_fingerprint,
 };
 
+mod amendment;
 mod review;
 
 fn repair_request_json() -> serde_json::Value {

@@ -13,6 +13,14 @@ fn plan_repair_review_attestation(
             .clone(),
         plan_projection_bundle_id: package.package_identity.projection_bundle_id.clone(),
         generation_round_id: package.plan_review.generation_round_id.clone(),
+        accepted_impact_scope: package
+            .amendment
+            .revalidation_required_units
+            .iter()
+            .chain(package.amendment.stale_units.iter())
+            .cloned()
+            .collect(),
+        risk_acceptance_reason: None,
         review: package.plan_review.clone(),
         created_at: "2026-07-18T00:00:02Z".to_string(),
     }
