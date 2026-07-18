@@ -21,6 +21,10 @@ fn plan_repair_review_attestation(
             .cloned()
             .collect(),
         risk_acceptance_reason: None,
+        candidate_package_artifact_id: package
+            .package_identity
+            .candidate_package_artifact_id
+            .clone(),
         candidate_package_fingerprint: package
             .package_identity
             .candidate_package_fingerprint
@@ -28,6 +32,46 @@ fn plan_repair_review_attestation(
         review: package.plan_review.clone(),
         created_at: "2026-07-18T00:00:02Z".to_string(),
     }
+}
+
+fn plan_repair_persist_candidate_package(
+    revision_store: &crate::product::work_item_revision_store::WorkItemRevisionStore,
+    plan: &crate::product::models::WorkItemPlanLineage,
+    request: &crate::product::models::PlanRepairRequest,
+    amendment: &crate::product::models::PlanAmendmentManifest,
+    projection: &crate::product::models::PlanProjectionBundle,
+    validation: &crate::product::models::PlanValidationReportArtifact,
+    impact: &crate::product::plan_repair::ContractImpactReport,
+) -> crate::product::models::PlanRepairCandidatePackageArtifact {
+    let work_item_projection_bundles = projection
+        .work_item_projection_bundle_refs
+        .iter()
+        .map(|bundle_id| {
+            revision_store
+                .get_work_item_projection_bundle(plan, bundle_id)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let candidate = crate::product::plan_repair::build_plan_repair_candidate_package(
+        plan,
+        request,
+        amendment,
+        projection,
+        &work_item_projection_bundles,
+        validation,
+        impact,
+    )
+    .unwrap();
+    revision_store
+        .put_plan_projection_bundle(plan, projection)
+        .unwrap();
+    revision_store
+        .put_plan_validation_report(plan, validation)
+        .unwrap();
+    revision_store
+        .put_plan_repair_candidate_package(plan, &candidate)
+        .unwrap();
+    candidate
 }
 
 fn plan_repair_persist_awaiting_provenance(
@@ -39,31 +83,23 @@ fn plan_repair_persist_awaiting_provenance(
     let request = revision_store
         .get_repair_request(plan, request_id)
         .unwrap();
-    revision_store
-        .put_amendment_manifest(plan, &package.amendment)
-        .unwrap();
     let persisted_projection = package.projection.clone();
     let mut persisted_validation = package.validation.clone();
     persisted_validation.plan_id = plan.id.clone();
-    let fingerprint = crate::product::plan_repair::candidate_package_fingerprint(
+    let candidate = plan_repair_persist_candidate_package(
+        revision_store,
+        plan,
         &request,
         &package.amendment,
         &persisted_projection,
-        &[],
         &persisted_validation,
         &package.impact,
-    )
-    .unwrap();
-    package.package_identity.candidate_package_fingerprint = fingerprint.clone();
+    );
+    package.package_identity.candidate_package_artifact_id = candidate.id.clone();
+    package.package_identity.candidate_package_fingerprint =
+        candidate.candidate_package_fingerprint.clone();
     let mut persisted_review = plan_repair_review_attestation(package);
     persisted_review.plan_id = plan.id.clone();
-    persisted_review.candidate_package_fingerprint = fingerprint;
-    revision_store
-        .put_plan_projection_bundle(plan, &persisted_projection)
-        .unwrap();
-    revision_store
-        .put_plan_validation_report(plan, &persisted_validation)
-        .unwrap();
     revision_store
         .put_plan_repair_review_attestation(plan, &persisted_review)
         .unwrap();
@@ -75,6 +111,16 @@ async fn plan_repair_enter_awaiting(
     plan: &crate::product::models::WorkItemPlanLineage,
     mut package: crate::product::models::PlanRepairAwaitingConfirmationPackage,
 ) -> Result<(), crate::product::plan_repair::PlanRepairError> {
+    plan_repair_prepare_awaiting_provenance(engine, revision_store, plan, &mut package);
+    engine.enter_plan_repair_awaiting_confirmation(package).await
+}
+
+fn plan_repair_prepare_awaiting_provenance(
+    engine: &mut WorkspaceEngine,
+    revision_store: &crate::product::work_item_revision_store::WorkItemRevisionStore,
+    plan: &crate::product::models::WorkItemPlanLineage,
+    package: &mut crate::product::models::PlanRepairAwaitingConfirmationPackage,
+) {
     let request_id = engine
         .plan_repair_session_state()
         .unwrap()
@@ -85,9 +131,18 @@ async fn plan_repair_enter_awaiting(
         revision_store,
         plan,
         &request_id,
-        &mut package,
+        package,
     );
-    engine.enter_plan_repair_awaiting_confirmation(package).await
+    engine
+        .plan_repair_snapshot
+        .as_mut()
+        .unwrap()
+        .candidate_package_artifact_id = Some(
+        package
+            .package_identity
+            .candidate_package_artifact_id
+            .clone(),
+    );
 }
 
 async fn plan_repair_assert_status_wins_journal_recovery(
@@ -261,6 +316,16 @@ async fn plan_repair_enter_awaiting_rejects_authoritative_request_evidence_diver
         &mut package,
     );
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+    child_engine
+        .plan_repair_snapshot
+        .as_mut()
+        .unwrap()
+        .candidate_package_artifact_id = Some(
+        package
+            .package_identity
+            .candidate_package_artifact_id
+            .clone(),
+    );
     let before = child_engine.plan_repair_session_state().unwrap().clone();
     revision_store
         .merge_repair_request_evidence(

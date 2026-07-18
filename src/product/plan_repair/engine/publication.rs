@@ -89,13 +89,13 @@ impl PlanRepairEngine {
             .get_plan_repair_review_attestation(&plan, attestation_id)
             .map_err(PlanRepairError::Store)?;
         validate_review_attestation(
+            &self.store,
+            &plan,
             &request,
             &prepared,
             &confirmation,
             &attestation,
-            &minimum,
             &accepted,
-            shrink,
         )?;
         let final_manifest =
             final_plan_amendment_manifest(&prepared.manifest, &known_units, &accepted);
@@ -226,30 +226,44 @@ fn validate_publication_identity(
 }
 
 fn validate_review_attestation(
+    store: &crate::product::work_item_revision_store::WorkItemRevisionStore,
+    plan: &crate::product::models::WorkItemPlanLineage,
     request: &crate::product::models::PlanRepairRequest,
     prepared: &PreparedPlanAmendment,
     confirmation: &PlanAmendmentConfirmation,
     attestation: &PlanRepairReviewAttestation,
-    minimum: &BTreeSet<String>,
     accepted: &BTreeSet<String>,
-    shrink: bool,
 ) -> Result<(), PlanRepairError> {
-    let candidate_package_fingerprint = crate::product::plan_repair::candidate_package_fingerprint(
-        request,
-        &prepared.manifest,
-        &prepared.plan_projection_bundle,
-        &prepared.work_item_projection_bundles,
-        &prepared.validation_report,
-        &prepared.impact_report,
+    let candidate_package = crate::product::plan_repair::load_plan_repair_candidate_package(
+        store,
+        plan,
+        &attestation.candidate_package_artifact_id,
     )?;
+    let prepared_candidate_package =
+        crate::product::plan_repair::build_plan_repair_candidate_package(
+            plan,
+            &candidate_package.request,
+            &prepared.manifest,
+            &prepared.plan_projection_bundle,
+            &prepared.work_item_projection_bundles,
+            &prepared.validation_report,
+            &prepared.impact_report,
+        )?;
+    let candidate_package_fingerprint = &candidate_package.candidate_package_fingerprint;
     let review = &attestation.review;
-    if attestation.request_id != prepared.manifest.repair_request_id
+    if !crate::product::plan_repair::candidate_request_binding_matches(
+        &candidate_package.request,
+        request,
+    ) || candidate_package != prepared.candidate_package
+        || candidate_package != prepared_candidate_package
+        || attestation.request_id != prepared.manifest.repair_request_id
         || attestation.amendment_id != prepared.manifest.id
         || attestation.plan_id != prepared.next_plan_revision.plan_id
         || attestation.base_plan_revision_id != prepared.base_plan_revision_id
         || attestation.reviewed_plan_revision_id != prepared.next_plan_revision.id
         || attestation.plan_projection_bundle_id != prepared.plan_projection_bundle.id
-        || attestation.candidate_package_fingerprint != candidate_package_fingerprint
+        || attestation.candidate_package_artifact_id != candidate_package.id
+        || &attestation.candidate_package_fingerprint != candidate_package_fingerprint
         || review.generation_round_id != attestation.generation_round_id
         || review.verdict != WorkItemPlanReviewVerdict::Pass
         || review.review_scope != WorkItemPlanReviewScope::Outline
@@ -267,6 +281,14 @@ fn validate_review_attestation(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let minimum = prepared
+        .manifest
+        .revalidation_required_units
+        .iter()
+        .chain(prepared.manifest.stale_units.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let shrink = !minimum.is_subset(accepted);
     if shrink {
         if &attested_scope != accepted
             || attestation.risk_acceptance_reason.as_deref()
@@ -276,7 +298,7 @@ fn validate_review_attestation(
                 "shrunken scope requires a new review attestation bound to scope and risk",
             ));
         }
-    } else if &attested_scope != minimum || attestation.risk_acceptance_reason.is_some() {
+    } else if attested_scope != minimum || attestation.risk_acceptance_reason.is_some() {
         return Err(invalid_publication(
             "normal or expanded scope must use the system-minimum review attestation",
         ));

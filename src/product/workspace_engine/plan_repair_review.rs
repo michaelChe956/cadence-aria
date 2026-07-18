@@ -4,11 +4,13 @@ use crate::product::models::{
     PlanRepairAwaitingConfirmationPackage, PlanRepairImpactScopeReview, PlanRepairPackageIdentity,
     PlanRepairRequestStatus, PlanRepairReviewAttestation, PlanRepairSessionStage,
 };
-use crate::product::plan_repair::{PlanRepairEngine, PlanRepairError, PreparedPlanAmendment};
+use crate::product::plan_repair::{
+    PlanRepairEngine, PlanRepairError, PreparedPlanAmendment,
+    candidate_request_matches_review_status, load_plan_repair_candidate_package,
+};
 
 use super::plan_repair_validation::{
-    awaiting_confirmation_package_from_snapshot, persisted_candidate_package_fingerprint,
-    validate_persisted_awaiting_confirmation_package,
+    awaiting_confirmation_package_from_snapshot, validate_persisted_awaiting_confirmation_package,
 };
 use super::*;
 
@@ -53,6 +55,7 @@ impl WorkspaceEngine {
         snapshot.impact = Some(prepared.impact_report.clone());
         snapshot.plan_review = None;
         snapshot.package_identity = None;
+        snapshot.candidate_package_artifact_id = Some(prepared.candidate_package.id.clone());
         snapshot.impact_scope_review = None;
         snapshot.error = None;
         lifecycle
@@ -151,15 +154,20 @@ impl WorkspaceEngine {
                 "proposed accepted impact scope contains an unknown unit",
             ));
         }
-        let fingerprint = persisted_candidate_package_fingerprint(
-            &store,
-            &plan,
-            &snapshot.request,
-            &package.amendment,
-            &package.projection,
-            &package.validation,
-            &package.impact,
+        let candidate_package_id = snapshot
+            .candidate_package_artifact_id
+            .as_deref()
+            .ok_or_else(|| {
+                invalid_plan_repair_review("candidate package artifact id is missing")
+            })?;
+        let candidate_package =
+            load_plan_repair_candidate_package(&store, &plan, candidate_package_id)?;
+        validate_snapshot_candidate_package(
+            &snapshot,
+            &candidate_package,
+            PlanRepairRequestStatus::AwaitingConfirmation,
         )?;
+        let fingerprint = candidate_package.candidate_package_fingerprint;
         if package.package_identity.candidate_package_fingerprint != fingerprint {
             return Err(invalid_plan_repair_review(
                 "awaiting package fingerprint changed before impact scope re-review",
@@ -285,20 +293,30 @@ impl WorkspaceEngine {
         let stored_request = store
             .get_repair_request(&plan, &snapshot.request.id)
             .map_err(PlanRepairError::Store)?;
-        if stored_request != snapshot.request {
+        let expected_request_status = if snapshot.impact_scope_review.is_some() {
+            PlanRepairRequestStatus::AwaitingConfirmation
+        } else {
+            PlanRepairRequestStatus::InProgress
+        };
+        if stored_request != snapshot.request || stored_request.status != expected_request_status {
             return Err(invalid_plan_repair_review(
                 "repair request changed while Plan Review was running",
             ));
         }
-        let candidate_package_fingerprint = persisted_candidate_package_fingerprint(
-            &store,
-            &plan,
-            &snapshot.request,
-            &amendment,
-            &projection,
-            &validation,
-            &impact,
+        let candidate_package_artifact_id = snapshot
+            .candidate_package_artifact_id
+            .clone()
+            .ok_or_else(|| {
+                invalid_plan_repair_review("candidate package artifact id is missing")
+            })?;
+        let candidate_package =
+            load_plan_repair_candidate_package(&store, &plan, &candidate_package_artifact_id)?;
+        validate_snapshot_candidate_package(
+            &snapshot,
+            &candidate_package,
+            expected_request_status,
         )?;
+        let candidate_package_fingerprint = candidate_package.candidate_package_fingerprint.clone();
         let (accepted_impact_scope, risk_acceptance_reason) = match &snapshot.impact_scope_review {
             Some(proposal) => {
                 if proposal.candidate_package_fingerprint != candidate_package_fingerprint
@@ -336,6 +354,7 @@ impl WorkspaceEngine {
             generation_round_id: review.generation_round_id.clone(),
             accepted_impact_scope,
             risk_acceptance_reason,
+            candidate_package_artifact_id: candidate_package_artifact_id.clone(),
             candidate_package_fingerprint: candidate_package_fingerprint.clone(),
             review: review.clone(),
             created_at,
@@ -355,6 +374,7 @@ impl WorkspaceEngine {
                 review_attestation_id: attestation_id,
                 reviewed_plan_revision_id: amendment.new_plan_revision_id.clone(),
                 review_generation_round_id: review.generation_round_id.clone(),
+                candidate_package_artifact_id,
                 candidate_package_fingerprint,
             },
             projection,
@@ -386,6 +406,32 @@ fn sorted_unique(values: Vec<String>) -> Vec<String> {
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn validate_snapshot_candidate_package(
+    snapshot: &crate::product::models::PlanRepairSessionSnapshotDto,
+    artifact: &crate::product::models::PlanRepairCandidatePackageArtifact,
+    expected_request_status: PlanRepairRequestStatus,
+) -> Result<(), PlanRepairError> {
+    if !candidate_request_matches_review_status(
+        &artifact.request,
+        &snapshot.request,
+        expected_request_status,
+    ) || snapshot.candidate_package_artifact_id.as_deref() != Some(artifact.id.as_str())
+        || snapshot.amendment.as_ref() != Some(&artifact.minimum_manifest)
+        || snapshot.projection.as_ref() != Some(&artifact.plan_projection_bundle)
+        || snapshot.validation.as_ref() != Some(&artifact.validation_report)
+        || snapshot.impact.as_ref() != Some(&artifact.impact_report)
+        || snapshot.package_identity.as_ref().is_some_and(|identity| {
+            identity.candidate_package_artifact_id != artifact.id
+                || identity.candidate_package_fingerprint != artifact.candidate_package_fingerprint
+        })
+    {
+        return Err(invalid_plan_repair_review(
+            "session snapshot differs from canonical candidate package artifact",
+        ));
+    }
+    Ok(())
 }
 
 fn invalid_plan_repair_review(message: &str) -> PlanRepairError {

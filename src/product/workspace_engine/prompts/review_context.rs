@@ -2,8 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::product::models::{
     DependencyGraphRevision, PlanProjectionBundle, PlanRepairImpactScopeReview,
-    PlanRepairSessionSnapshotDto, PlanRepairSessionStage, PlanRevisionReason, RepairTargetKind,
-    WorkItemProjectionBundle, WorkItemRevision,
+    PlanRepairRequestStatus, PlanRepairSessionSnapshotDto, PlanRepairSessionStage,
+    PlanRevisionReason, RepairTargetKind, WorkItemProjectionBundle, WorkItemRevision,
+};
+use crate::product::plan_repair::{
+    candidate_request_matches_review_status, load_plan_repair_candidate_package,
 };
 use crate::product::work_item_contract::{CanonicalWorkItemContract, canonical_contract_hash};
 use crate::product::work_item_projection::{
@@ -83,7 +86,13 @@ pub(super) fn load_plan_review_context(
             &projection.plan_revision_id,
         )
         .map_err(|error| format!("load Plan Review revision failed: {error}"))?;
-    let (contract_delta, impact_analysis, repair_evidence, impact_scope_review) = match source {
+    let (
+        contract_delta,
+        impact_analysis,
+        repair_evidence,
+        impact_scope_review,
+        candidate_package_artifact,
+    ) = match source {
         PlanReviewSource::InitialActive => {
             if lineage.active_revision_id.as_deref() != Some(projection.plan_revision_id.as_str()) {
                 return Err("Plan Review active revision binding mismatch".to_string());
@@ -98,6 +107,7 @@ pub(super) fn load_plan_review_context(
                 Vec::new(),
                 vec!["initial_plan_publication: no repair evidence".to_string()],
                 None,
+                None,
             )
         }
         PlanReviewSource::PlanRepairCandidate(snapshot) => {
@@ -107,6 +117,17 @@ pub(super) fn load_plan_review_context(
                     .get_repair_request(&lineage, &request.id)
                     .map_err(|error| {
                         format!("load authoritative Plan Repair request failed: {error}")
+                    })?;
+            let candidate_package_id = snapshot
+                .candidate_package_artifact_id
+                .as_deref()
+                .ok_or_else(|| {
+                    "Plan Repair candidate package artifact id is missing".to_string()
+                })?;
+            let candidate_package =
+                load_plan_repair_candidate_package(&store, &lineage, candidate_package_id)
+                    .map_err(|error| {
+                        format!("load canonical Plan Repair candidate failed: {error:?}")
                     })?;
             let amendment = snapshot
                 .amendment
@@ -121,11 +142,21 @@ pub(super) fn load_plan_review_context(
                 RepairTargetKind::UpstreamWorkItem => PlanRevisionReason::RepairUpstreamContract,
                 RepairTargetKind::Subgraph => PlanRevisionReason::SubgraphReplan,
             };
-            let persisted_manifest = store
-                .get_amendment_manifest(&lineage, &amendment.id)
-                .map_err(|error| format!("load persisted Plan Repair manifest failed: {error}"))?;
+            let expected_request_status = if snapshot.impact_scope_review.is_some() {
+                PlanRepairRequestStatus::AwaitingConfirmation
+            } else {
+                PlanRepairRequestStatus::InProgress
+            };
             if authoritative_request != *request
-                || persisted_manifest != *amendment
+                || !candidate_request_matches_review_status(
+                    &candidate_package.request,
+                    request,
+                    expected_request_status,
+                )
+                || candidate_package.minimum_manifest != *amendment
+                || candidate_package.plan_projection_bundle != *projection
+                || snapshot.validation.as_ref() != Some(&candidate_package.validation_report)
+                || snapshot.impact.as_ref() != Some(&candidate_package.impact_report)
                 || request.plan_id != lineage.id
                 || lineage.active_revision_id.as_deref()
                     != Some(request.base_plan_revision_id.as_str())
@@ -177,6 +208,7 @@ pub(super) fn load_plan_review_context(
                 impact_analysis,
                 repair_evidence,
                 snapshot.impact_scope_review.clone(),
+                Some(candidate_package),
             )
         }
     };
@@ -247,6 +279,11 @@ pub(super) fn load_plan_review_context(
                 .map_err(|error| format!("load WorkItem projection failed: {error}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if candidate_package_artifact.as_ref().is_some_and(|artifact| {
+        artifact.work_item_projection_bundles != work_item_projection_bundle_candidates
+    }) {
+        return Err("Plan Repair candidate WorkItem projections differ from artifact".to_string());
+    }
     validate_work_item_projection_bindings(
         &work_item_revisions,
         &work_item_projection_bundle_candidates,
@@ -258,23 +295,11 @@ pub(super) fn load_plan_review_context(
     let candidate_package_fingerprint = match source {
         PlanReviewSource::InitialActive => None,
         PlanReviewSource::PlanRepairCandidate(snapshot) => {
-            let amendment = snapshot
-                .amendment
+            let fingerprint = candidate_package_artifact
                 .as_ref()
-                .ok_or_else(|| "Plan Repair review manifest is missing".to_string())?;
-            let impact = snapshot
-                .impact
-                .as_ref()
-                .ok_or_else(|| "Plan Repair review impact analysis is missing".to_string())?;
-            let fingerprint = crate::product::plan_repair::candidate_package_fingerprint(
-                &snapshot.request,
-                amendment,
-                projection,
-                &work_item_projection_bundle_candidates,
-                &validation_report,
-                impact,
-            )
-            .map_err(|error| format!("fingerprint Plan Repair candidate failed: {error:?}"))?;
+                .ok_or_else(|| "Plan Repair candidate package artifact is missing".to_string())?
+                .candidate_package_fingerprint
+                .clone();
             if snapshot
                 .impact_scope_review
                 .as_ref()

@@ -2,7 +2,7 @@ fn plan_repair_awaiting_package(
     request_id: &str,
     amendment_id: &str,
 ) -> crate::product::models::PlanRepairAwaitingConfirmationPackage {
-    crate::product::models::PlanRepairAwaitingConfirmationPackage {
+    let mut package = crate::product::models::PlanRepairAwaitingConfirmationPackage {
         package_identity: crate::product::models::PlanRepairPackageIdentity {
             request_id: request_id.to_string(),
             amendment_id: amendment_id.to_string(),
@@ -14,6 +14,9 @@ fn plan_repair_awaiting_package(
             review_attestation_id: "plan_repair_review_attestation_0002".to_string(),
             reviewed_plan_revision_id: "plan_revision_0002".to_string(),
             review_generation_round_id: "repair_round_0001".to_string(),
+            candidate_package_artifact_id: format!(
+                "plan_repair_candidate_package_{amendment_id}"
+            ),
             candidate_package_fingerprint: "candidate_package_fingerprint_0001".to_string(),
         },
         projection: crate::product::models::PlanProjectionBundle {
@@ -86,7 +89,19 @@ fn plan_repair_awaiting_package(
             affects_items: Vec::new(),
             warnings: Vec::new(),
         },
-    }
+    };
+    let hashes = crate::product::work_item_projection::plan_projection_hashes(
+        &crate::product::work_item_projection::CompiledPlanProjections {
+            human: package.projection.human_group_projection.clone(),
+            coder: package.projection.coder_group_context.clone(),
+            reviewer: package.projection.reviewer_group_matrix.clone(),
+        },
+    )
+    .unwrap();
+    package.projection.human_group_projection_hash = hashes.human;
+    package.projection.coder_group_context_hash = hashes.coder;
+    package.projection.reviewer_group_matrix_hash = hashes.reviewer;
+    package
 }
 
 async fn plan_repair_awaiting_rejection<F>(
@@ -118,9 +133,26 @@ where
         .timeline_nodes
         .clone();
     let mut package = plan_repair_awaiting_package(&request.id, &amendment_id);
+    plan_repair_persist_awaiting_provenance(
+        &revision_store,
+        &plan,
+        &request.id,
+        &mut package,
+    );
+    child_engine
+        .plan_repair_snapshot
+        .as_mut()
+        .unwrap()
+        .candidate_package_artifact_id = Some(
+        package
+            .package_identity
+            .candidate_package_artifact_id
+            .clone(),
+    );
     mutate(&mut package);
 
-    let error = plan_repair_enter_awaiting(&mut child_engine, &revision_store, &plan, package)
+    let error = child_engine
+        .enter_plan_repair_awaiting_confirmation(package)
         .await
         .unwrap_err();
 
@@ -411,20 +443,20 @@ async fn plan_repair_awaiting_rejects_terminal_source_stage_without_writes() {
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+    let mut package = plan_repair_awaiting_package(&request.id, &amendment_id);
+    plan_repair_prepare_awaiting_provenance(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        &mut package,
+    );
     child_engine.plan_repair_snapshot.as_mut().unwrap().stage =
         crate::product::models::PlanRepairSessionStage::Failed;
     let before = child_engine.plan_repair_session_state().unwrap().clone();
 
-    let error = plan_repair_enter_awaiting(
-        &mut child_engine,
-        &revision_store,
-        &plan,
-        plan_repair_awaiting_package(
-            &request.id,
-            &amendment_id,
-        ),
-    )
-    .await
+    let error = child_engine
+        .enter_plan_repair_awaiting_confirmation(package)
+        .await
         .unwrap_err();
 
     assert!(matches!(
@@ -464,6 +496,13 @@ async fn plan_repair_awaiting_rejects_terminal_request_status_without_writes() {
             .unwrap();
         let amendment_id = request.amendment_id.clone().unwrap();
         let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+        let mut package = plan_repair_awaiting_package(&request.id, &amendment_id);
+        plan_repair_prepare_awaiting_provenance(
+            &mut child_engine,
+            &revision_store,
+            &plan,
+            &mut package,
+        );
         revision_store
             .update_repair_request_status(&plan, &request.id, status.clone())
             .unwrap();
@@ -475,16 +514,9 @@ async fn plan_repair_awaiting_rejects_terminal_request_status_without_writes() {
             .status = status.clone();
         let before = child_engine.plan_repair_session_state().unwrap().clone();
 
-        let error = plan_repair_enter_awaiting(
-            &mut child_engine,
-            &revision_store,
-            &plan,
-            plan_repair_awaiting_package(
-                &request.id,
-                &amendment_id,
-            ),
-        )
-        .await
+        let error = child_engine
+            .enter_plan_repair_awaiting_confirmation(package)
+            .await
             .unwrap_err();
 
         assert!(matches!(
@@ -520,21 +552,21 @@ async fn plan_repair_awaiting_requires_matching_active_amendment_without_writes(
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+    let mut package = plan_repair_awaiting_package(&request.id, &amendment_id);
+    plan_repair_prepare_awaiting_provenance(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        &mut package,
+    );
     revision_store
         .release_active_amendment(&plan, &amendment_id)
         .unwrap();
     let before = child_engine.plan_repair_session_state().unwrap().clone();
 
-    let error = plan_repair_enter_awaiting(
-        &mut child_engine,
-        &revision_store,
-        &plan,
-        plan_repair_awaiting_package(
-            &request.id,
-            &amendment_id,
-        ),
-    )
-    .await
+    let error = child_engine
+        .enter_plan_repair_awaiting_confirmation(package)
+        .await
         .unwrap_err();
 
     assert!(matches!(

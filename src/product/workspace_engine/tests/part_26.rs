@@ -16,15 +16,25 @@ async fn plan_repair_awaiting_rejects_persisted_validation_from_old_revision() {
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut package = plan_repair_awaiting_package(&request.id, &amendment_id);
-    package.validation.plan_revision_id = request.base_plan_revision_id.clone();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
-    let before = child_engine.plan_repair_session_state().unwrap().clone();
     plan_repair_persist_awaiting_provenance(
         &revision_store,
         &plan,
         &request.id,
         &mut package,
     );
+    child_engine
+        .plan_repair_snapshot
+        .as_mut()
+        .unwrap()
+        .candidate_package_artifact_id = Some(
+        package
+            .package_identity
+            .candidate_package_artifact_id
+            .clone(),
+    );
+    let before = child_engine.plan_repair_session_state().unwrap().clone();
+    package.validation.plan_revision_id = request.base_plan_revision_id.clone();
 
     let error = child_engine
         .enter_plan_repair_awaiting_confirmation(package)
@@ -56,25 +66,18 @@ async fn plan_repair_awaiting_rejects_persisted_outline_review_for_old_revision(
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut package = plan_repair_awaiting_package(&request.id, &amendment_id);
-    revision_store
-        .put_amendment_manifest(&plan, &package.amendment)
-        .unwrap();
-    revision_store
-        .put_plan_projection_bundle(&plan, &package.projection)
-        .unwrap();
-    revision_store
-        .put_plan_validation_report(&plan, &package.validation)
-        .unwrap();
+    let candidate = plan_repair_persist_candidate_package(
+        &revision_store,
+        &plan,
+        &request,
+        &package.amendment,
+        &package.projection,
+        &package.validation,
+        &package.impact,
+    );
+    package.package_identity.candidate_package_artifact_id = candidate.id;
     package.package_identity.candidate_package_fingerprint =
-        crate::product::plan_repair::candidate_package_fingerprint(
-            &request,
-            &package.amendment,
-            &package.projection,
-            &[],
-            &package.validation,
-            &package.impact,
-        )
-        .unwrap();
+        candidate.candidate_package_fingerprint;
     let mut old_attestation = plan_repair_review_attestation(&package);
     old_attestation.reviewed_plan_revision_id = request.base_plan_revision_id.clone();
     revision_store

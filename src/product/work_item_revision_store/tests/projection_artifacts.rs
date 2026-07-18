@@ -181,6 +181,7 @@ fn plan_repair_review_attestation_store_is_scoped_immutable_and_idempotent() {
         generation_round_id: "repair_round_0001".to_string(),
         accepted_impact_scope: vec![WORK_ITEM_ID.to_string()],
         risk_acceptance_reason: None,
+        candidate_package_artifact_id: "plan_repair_candidate_package_0001".to_string(),
         candidate_package_fingerprint: "candidate_package_fingerprint_0001".to_string(),
         review: WorkItemPlanReviewComplete {
             verdict: WorkItemPlanReviewVerdict::Pass,

@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::models::{
     AmendmentResumeMode, AmendmentResumeTarget, DependencyGraphChange, DependencyGraphChangeKind,
-    DependencyGraphRevision, PlanAmendmentManifest, PlanRevisionReason,
-    PlanValidationReportArtifact, VerificationPlanRevision, WorkItemDraftRevision,
-    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
-    WorkItemRevisionReplacement,
+    DependencyGraphRevision, PlanAmendmentManifest, PlanRepairCandidatePackageArtifact,
+    PlanRevisionReason, PlanValidationReportArtifact, VerificationPlanRevision,
+    WorkItemDraftRevision, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle,
+    WorkItemRevision, WorkItemRevisionReplacement,
 };
 use crate::product::work_item_contract::{
     DependencyContractEdge, DependencyContractGraph, build_dependency_contract_graph,
@@ -28,7 +28,8 @@ use crate::product::workspace_engine::{
 use super::{
     ContractDelta, ContractImpactAnalyzer, ContractImpactReport, ImpactExplanationPath,
     PlanExecutionState, PlanRepairError, PlanRepairRequest, RepairTargetKind,
-    UnitExecutionSnapshot, compute_contract_delta,
+    UnitExecutionSnapshot, build_plan_repair_candidate_package,
+    canonical_work_item_projection_bundles, compute_contract_delta,
 };
 
 mod publication;
@@ -51,6 +52,7 @@ pub struct PreparedPlanAmendment {
     pub contract_deltas: Vec<ContractDelta>,
     pub impact_report: ContractImpactReport,
     pub manifest: PlanAmendmentManifest,
+    pub candidate_package: PlanRepairCandidatePackageArtifact,
 }
 
 #[derive(Debug, Clone)]
@@ -142,7 +144,6 @@ impl PlanRepairEngine {
         let mut revised_items = Vec::new();
         let mut draft_revisions = Vec::new();
         let mut verification_plan_revisions = Vec::new();
-        let mut work_item_projection_bundles = Vec::new();
         let mut contract_deltas = Vec::new();
         let mut revised_work_items = BTreeMap::new();
         let mut superseded_revisions = Vec::new();
@@ -194,7 +195,6 @@ impl PlanRepairEngine {
                 draft_revisions.push(compiled.draft_revision.clone());
                 revised_items.push(compiled.work_item_revision.clone());
                 verification_plan_revisions.push(compiled.verification_plan_revision.clone());
-                work_item_projection_bundles.push(compiled.projection_bundle.clone());
                 contract_deltas.push(delta);
                 compiled_items.push(compiled);
             } else {
@@ -272,6 +272,13 @@ impl PlanRepairEngine {
             &compiled_items,
         )
         .map_err(|error| invalid_target(&error.to_string()))?;
+        let work_item_projection_bundles = canonical_work_item_projection_bundles(
+            &plan_projection_bundle,
+            &compiled_items
+                .iter()
+                .map(|item| item.projection_bundle.clone())
+                .collect::<Vec<_>>(),
+        )?;
         let projection_validation =
             crate::product::work_item_projection::ProjectionValidationReport {
                 findings: Vec::new(),
@@ -331,6 +338,15 @@ impl PlanRepairEngine {
             resume_target,
             created_at: self.created_at.clone(),
         };
+        let candidate_package = build_plan_repair_candidate_package(
+            &plan,
+            request,
+            &manifest,
+            &plan_projection_bundle,
+            &work_item_projection_bundles,
+            &validation_report,
+            &impact_report,
+        )?;
 
         Ok(PreparedPlanAmendment {
             base_plan_revision_id: base_revision.id,
@@ -346,6 +362,7 @@ impl PlanRepairEngine {
             contract_deltas,
             impact_report,
             manifest,
+            candidate_package,
         })
     }
 
@@ -378,6 +395,20 @@ impl PlanRepairEngine {
                 ),
             });
         }
+        let canonical_package = build_plan_repair_candidate_package(
+            &plan,
+            &prepared.candidate_package.request,
+            &prepared.manifest,
+            &prepared.plan_projection_bundle,
+            &prepared.work_item_projection_bundles,
+            &prepared.validation_report,
+            &prepared.impact_report,
+        )?;
+        if canonical_package != prepared.candidate_package {
+            return Err(invalid_target(
+                "prepared candidate package differs from canonical package",
+            ));
+        }
         for draft in &prepared.draft_revisions {
             self.store
                 .put_draft_revision(&plan, draft)
@@ -409,6 +440,9 @@ impl PlanRepairEngine {
             .map_err(PlanRepairError::Store)?;
         self.store
             .put_plan_revision(&plan, &prepared.next_plan_revision)
+            .map_err(PlanRepairError::Store)?;
+        self.store
+            .put_plan_repair_candidate_package(&plan, &prepared.candidate_package)
             .map_err(PlanRepairError::Store)
     }
 

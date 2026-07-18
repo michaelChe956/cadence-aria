@@ -116,7 +116,27 @@ async fn plan_repair_review_race_fixture() -> PlanRepairReviewRaceFixture {
         },
         created_at: "2026-07-18T00:00:03Z".to_string(),
     };
-    store.put_amendment_manifest(&plan, &manifest).unwrap();
+    let impact = crate::product::plan_repair::ContractImpactReport {
+        unaffected: candidate_revision
+            .work_item_bindings
+            .keys()
+            .filter(|candidate| **candidate != logical_id && **candidate != minimum_scope_unit)
+            .cloned()
+            .collect(),
+        direct_revalidation: vec![minimum_scope_unit.clone()],
+        direct_stale: vec![],
+        conditional_downstream: vec![],
+        explanation_paths: vec![],
+    };
+    let candidate_package = plan_repair_persist_candidate_package(
+        &store,
+        &plan,
+        &request,
+        &manifest,
+        &candidate_projection,
+        &candidate_validation,
+        &impact,
+    );
     let link = crate::product::models::WorkspaceSessionLink {
         id: "workspace_session_link_review_race_0001".to_string(),
         relation: crate::product::models::WorkspaceSessionRelation::PlanRepair,
@@ -147,20 +167,10 @@ async fn plan_repair_review_race_fixture() -> PlanRepairReviewRaceFixture {
         projection: Some(candidate_projection.clone()),
         amendment: Some(manifest),
         validation: Some(candidate_validation),
-        impact: Some(crate::product::plan_repair::ContractImpactReport {
-            unaffected: candidate_revision
-                .work_item_bindings
-                .keys()
-                .filter(|candidate| **candidate != logical_id && **candidate != minimum_scope_unit)
-                .cloned()
-                .collect(),
-            direct_revalidation: vec![minimum_scope_unit],
-            direct_stale: vec![],
-            conditional_downstream: vec![],
-            explanation_paths: vec![],
-        }),
+        impact: Some(impact),
         plan_review: None,
         package_identity: None,
+        candidate_package_artifact_id: Some(candidate_package.id),
         impact_scope_review: None,
         timeline_nodes: vec![],
         error: None,

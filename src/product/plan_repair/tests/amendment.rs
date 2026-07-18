@@ -667,6 +667,7 @@ pub(super) fn persist_review_attestation(
         generation_round_id: "round_0001".to_string(),
         accepted_impact_scope: vec!["wi_registration".to_string()],
         risk_acceptance_reason: None,
+        candidate_package_artifact_id: prepared.candidate_package.id.clone(),
         candidate_package_fingerprint: super::super::candidate_package_fingerprint(
             &fixture.request,
             &prepared.manifest,

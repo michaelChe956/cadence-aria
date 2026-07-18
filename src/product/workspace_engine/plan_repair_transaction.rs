@@ -112,6 +112,12 @@ pub(crate) fn awaiting_confirmation_transition(
     snapshot.validation = Some(package.validation);
     snapshot.impact = Some(package.impact);
     snapshot.plan_review = Some(package.plan_review);
+    snapshot.candidate_package_artifact_id = Some(
+        package
+            .package_identity
+            .candidate_package_artifact_id
+            .clone(),
+    );
     snapshot.package_identity = Some(package.package_identity);
     snapshot.timeline_nodes = timeline_nodes.clone();
     snapshot.error = None;

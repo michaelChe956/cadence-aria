@@ -6,6 +6,7 @@ use crate::web::workspace_ws_types::WorkItemPlanReviewComplete;
 
 use super::{
     PlanAmendmentManifest, PlanProjectionBundle, PlanRepairRequest, PlanValidationReportArtifact,
+    WorkItemProjectionBundle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +81,7 @@ pub struct PlanRepairPackageIdentity {
     pub review_attestation_id: String,
     pub reviewed_plan_revision_id: String,
     pub review_generation_round_id: String,
+    pub candidate_package_artifact_id: String,
     pub candidate_package_fingerprint: String,
 }
 
@@ -95,8 +97,29 @@ pub struct PlanRepairReviewAttestation {
     pub generation_round_id: String,
     pub accepted_impact_scope: Vec<String>,
     pub risk_acceptance_reason: Option<String>,
+    pub candidate_package_artifact_id: String,
     pub candidate_package_fingerprint: String,
     pub review: WorkItemPlanReviewComplete,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRepairCandidatePackageArtifact {
+    pub id: String,
+    pub project_id: String,
+    pub issue_id: String,
+    pub plan_id: String,
+    pub request: PlanRepairRequest,
+    pub request_id: String,
+    pub amendment_id: String,
+    pub base_plan_revision_id: String,
+    pub new_plan_revision_id: String,
+    pub minimum_manifest: PlanAmendmentManifest,
+    pub plan_projection_bundle: PlanProjectionBundle,
+    pub work_item_projection_bundles: Vec<WorkItemProjectionBundle>,
+    pub validation_report: PlanValidationReportArtifact,
+    pub impact_report: ContractImpactReport,
+    pub candidate_package_fingerprint: String,
     pub created_at: String,
 }
 
@@ -134,7 +157,7 @@ pub struct PlanRepairSessionSnapshotDto {
     pub plan_review: Option<WorkItemPlanReviewComplete>,
     #[serde(default)]
     pub package_identity: Option<PlanRepairPackageIdentity>,
-    #[serde(default)]
+    pub candidate_package_artifact_id: Option<String>,
     pub impact_scope_review: Option<PlanRepairImpactScopeReview>,
     pub timeline_nodes: Vec<TimelineNode>,
     pub error: Option<String>,

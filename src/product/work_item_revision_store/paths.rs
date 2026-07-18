@@ -234,6 +234,18 @@ impl WorkItemRevisionStore {
             .join(format!("{amendment_id}.json"))
     }
 
+    pub(super) fn plan_repair_candidate_package_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        package_id: &str,
+    ) -> PathBuf {
+        self.plan_root(project_id, issue_id, plan_id)
+            .join("plan-repair-candidate-packages")
+            .join(format!("{package_id}.json"))
+    }
+
     pub(super) fn plan_repair_review_attestation_path(
         &self,
         project_id: &str,

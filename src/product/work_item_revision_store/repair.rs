@@ -316,6 +316,7 @@ impl WorkItemRevisionStore {
             &value.reviewed_plan_revision_id,
             &value.plan_projection_bundle_id,
             &value.generation_round_id,
+            &value.candidate_package_artifact_id,
         ] {
             validate_relative_id(id)?;
         }
@@ -366,6 +367,7 @@ impl WorkItemRevisionStore {
         if value.id != attestation_id
             || value.plan_id != plan.id
             || value.review.generation_round_id != value.generation_round_id
+            || value.candidate_package_artifact_id.trim().is_empty()
             || value.candidate_package_fingerprint.trim().is_empty()
             || !is_sorted_unique(&value.accepted_impact_scope)
             || value

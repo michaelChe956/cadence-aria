@@ -19,6 +19,7 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 use crate::product::models::WorkItemPlanLineage;
 
 mod amendment_publication;
+mod candidate_package;
 mod dependency;
 mod handoff;
 mod initial_publication;

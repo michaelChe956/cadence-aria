@@ -97,6 +97,212 @@ fn plan_repair_candidate_package_fingerprint_changes_for_manifest_provenance() {
 }
 
 #[test]
+fn plan_repair_prepare_candidate_package_contains_all_referenced_projection_bundles() {
+    let fixture = plan_repair_engine_fixture();
+
+    let prepared = fixture.engine.prepare_amendment(&fixture.request).unwrap();
+
+    let bundle_ids = prepared
+        .work_item_projection_bundles
+        .iter()
+        .map(|bundle| bundle.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bundle_ids,
+        prepared
+            .plan_projection_bundle
+            .work_item_projection_bundle_refs
+    );
+    assert_eq!(bundle_ids.len(), 4);
+    assert!(
+        bundle_ids
+            .iter()
+            .any(|id| id == "work_item_projection_bundle_wi_core_0002")
+    );
+    for unchanged in ["wi_registration", "wi_docs", "wi_ops"] {
+        assert!(
+            bundle_ids
+                .iter()
+                .any(|id| id == &format!("work_item_projection_bundle_{unchanged}_0001")),
+            "missing unchanged projection bundle for {unchanged}"
+        );
+    }
+}
+
+#[test]
+fn plan_repair_candidate_package_fingerprint_binds_normalized_request_evidence() {
+    let fixture = plan_repair_engine_fixture();
+    let prepared = fixture.engine.prepare_amendment(&fixture.request).unwrap();
+    let fingerprint = |request: &crate::product::models::PlanRepairRequest| {
+        super::super::candidate_package_fingerprint(
+            request,
+            &prepared.manifest,
+            &prepared.plan_projection_bundle,
+            &prepared.work_item_projection_bundles,
+            &prepared.validation_report,
+            &prepared.impact_report,
+        )
+        .unwrap()
+    };
+    let original = fingerprint(&fixture.request);
+    let mut with_evidence = fixture.request.clone();
+    with_evidence
+        .evidence
+        .push(crate::product::models::PlanDefectEvidence {
+            kind: "late_review_evidence".to_string(),
+            source_ref: "review://late".to_string(),
+            message: "new authoritative evidence".to_string(),
+        });
+    let with_evidence_fingerprint = fingerprint(&with_evidence);
+    assert_ne!(with_evidence_fingerprint, original);
+    with_evidence.evidence.reverse();
+    with_evidence
+        .evidence
+        .push(with_evidence.evidence[0].clone());
+    assert_eq!(fingerprint(&with_evidence), with_evidence_fingerprint);
+}
+
+#[test]
+fn plan_repair_candidate_request_lifecycle_is_not_part_of_fingerprint_but_review_is_stage_aware() {
+    let fixture = plan_repair_engine_fixture();
+    let prepared = fixture.engine.prepare_amendment(&fixture.request).unwrap();
+    let fingerprint = |request: &crate::product::models::PlanRepairRequest| {
+        super::super::candidate_package_fingerprint(
+            request,
+            &prepared.manifest,
+            &prepared.plan_projection_bundle,
+            &prepared.work_item_projection_bundles,
+            &prepared.validation_report,
+            &prepared.impact_report,
+        )
+        .unwrap()
+    };
+    let original = fingerprint(&fixture.request);
+    let mut awaiting = fixture.request.clone();
+    awaiting.status = crate::product::models::PlanRepairRequestStatus::AwaitingConfirmation;
+    awaiting.updated_at = "2026-07-18T00:00:04Z".to_string();
+    assert_eq!(fingerprint(&awaiting), original);
+    assert!(super::super::candidate_request_matches_review_status(
+        &fixture.request,
+        &awaiting,
+        crate::product::models::PlanRepairRequestStatus::AwaitingConfirmation,
+    ));
+    assert!(!super::super::candidate_request_matches_review_status(
+        &fixture.request,
+        &awaiting,
+        crate::product::models::PlanRepairRequestStatus::InProgress,
+    ));
+
+    for terminal in [
+        crate::product::models::PlanRepairRequestStatus::Published,
+        crate::product::models::PlanRepairRequestStatus::Applied,
+        crate::product::models::PlanRepairRequestStatus::Cancelled,
+        crate::product::models::PlanRepairRequestStatus::Failed,
+    ] {
+        let mut authoritative = awaiting.clone();
+        authoritative.status = terminal.clone();
+        assert!(!super::super::candidate_request_matches_review_status(
+            &fixture.request,
+            &authoritative,
+            terminal,
+        ));
+    }
+}
+
+#[test]
+fn plan_repair_candidate_package_fingerprint_rejects_projection_content_with_stale_hashes() {
+    let fixture = plan_repair_engine_fixture();
+    let prepared = fixture.engine.prepare_amendment(&fixture.request).unwrap();
+    let mut plan_projection = prepared.plan_projection_bundle.clone();
+    plan_projection
+        .human_group_projection
+        .goal
+        .push_str(" tampered");
+
+    let plan_error = super::super::candidate_package_fingerprint(
+        &fixture.request,
+        &prepared.manifest,
+        &plan_projection,
+        &prepared.work_item_projection_bundles,
+        &prepared.validation_report,
+        &prepared.impact_report,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        plan_error,
+        super::super::PlanRepairError::InvalidRepairTarget(message)
+            if message.contains("Plan projection payload hash mismatch")
+    ));
+
+    let mut work_item_projections = prepared.work_item_projection_bundles.clone();
+    work_item_projections[0]
+        .human_projection
+        .goal
+        .push_str(" tampered");
+    let work_item_error = super::super::candidate_package_fingerprint(
+        &fixture.request,
+        &prepared.manifest,
+        &prepared.plan_projection_bundle,
+        &work_item_projections,
+        &prepared.validation_report,
+        &prepared.impact_report,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        work_item_error,
+        super::super::PlanRepairError::InvalidRepairTarget(message)
+            if message.contains("WorkItem projection payload hash mismatch")
+    ));
+}
+
+#[test]
+fn plan_repair_candidate_package_artifact_is_scoped_immutable_and_not_a_final_manifest() {
+    let fixture = plan_repair_engine_fixture();
+    let prepared = fixture.engine.prepare_amendment(&fixture.request).unwrap();
+    let artifact = prepared.candidate_package.clone();
+
+    fixture.engine.persist_candidate(&prepared).unwrap();
+    fixture.engine.persist_candidate(&prepared).unwrap();
+
+    assert_eq!(
+        fixture
+            .store
+            .get_plan_repair_candidate_package(&fixture.plan, &artifact.id)
+            .unwrap(),
+        artifact
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .get_amendment_manifest(&fixture.plan, &prepared.manifest.id),
+        Err(crate::product::json_store::ProductStoreError::NotFound { .. })
+    ));
+    let mut conflicting = artifact.clone();
+    conflicting
+        .request
+        .evidence
+        .push(crate::product::models::PlanDefectEvidence {
+            kind: "conflict".to_string(),
+            source_ref: "candidate://conflict".to_string(),
+            message: "immutable candidate package changed".to_string(),
+        });
+    assert!(matches!(
+        fixture
+            .store
+            .put_plan_repair_candidate_package(&fixture.plan, &conflicting),
+        Err(crate::product::json_store::ProductStoreError::IdentityMismatch { .. })
+    ));
+    let mut wrong_scope = artifact;
+    wrong_scope.project_id = "project_other".to_string();
+    assert!(matches!(
+        fixture
+            .store
+            .put_plan_repair_candidate_package(&fixture.plan, &wrong_scope),
+        Err(crate::product::json_store::ProductStoreError::IdentityMismatch { .. })
+    ));
+}
+
+#[test]
 fn contract_impact_multi_delta_stale_takes_precedence_over_revalidation() {
     let mut provider_a_before = canonical_contract_fixture("wi_provider_a");
     provider_a_before.input_contracts.clear();
@@ -340,6 +546,61 @@ fn plan_repair_publish_records_plan_published_request_status_failures_and_recove
 }
 
 #[test]
+fn plan_repair_publish_rejects_old_attestation_after_authoritative_evidence_merge_before_journal() {
+    let fixture = plan_repair_engine_fixture();
+    let prepared = fixture.engine.prepare_amendment(&fixture.request).unwrap();
+    fixture.engine.persist_candidate(&prepared).unwrap();
+    let attestation = persist_review_attestation(&fixture, &prepared);
+    fixture
+        .store
+        .update_repair_request_status(
+            &fixture.plan,
+            &fixture.request.id,
+            crate::product::models::PlanRepairRequestStatus::AwaitingConfirmation,
+        )
+        .unwrap();
+    fixture
+        .store
+        .merge_repair_request_evidence(
+            &fixture.plan,
+            &fixture.request.id,
+            vec![crate::product::models::PlanDefectEvidence {
+                kind: "late_publication_evidence".to_string(),
+                source_ref: "review://late-publication".to_string(),
+                message: "arrived after review attestation".to_string(),
+            }],
+        )
+        .unwrap();
+
+    let error = fixture
+        .engine
+        .publish_amendment(
+            prepared.clone(),
+            confirmation(&attestation, &["wi_registration"], None),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        super::super::PlanRepairError::InvalidRepairTarget(message)
+            if message.contains("persisted candidate package differs")
+    ));
+    assert!(matches!(
+        fixture.store.get_plan_amendment_publication_journal(
+            &fixture.plan,
+            &prepared.publication_ids.journal_id,
+        ),
+        Err(crate::product::json_store::ProductStoreError::NotFound { .. })
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .get_amendment_manifest(&fixture.plan, &prepared.manifest.id),
+        Err(crate::product::json_store::ProductStoreError::NotFound { .. })
+    ));
+}
+
+#[test]
 fn plan_repair_publish_rejects_attestation_reuse_after_candidate_package_tampering() {
     for tamper in [
         "replacement_units",
@@ -401,12 +662,17 @@ fn plan_repair_publish_rejects_attestation_reuse_after_candidate_package_tamperi
                 );
             }
             "plan_projection" => {
-                prepared.plan_projection_bundle.human_group_projection_hash =
-                    "tampered_plan_projection_hash".to_string();
+                prepared
+                    .plan_projection_bundle
+                    .human_group_projection
+                    .goal
+                    .push_str(" tampered");
             }
             "work_item_projection" => {
-                prepared.work_item_projection_bundles[0].human_projection_hash =
-                    "tampered_work_item_projection_hash".to_string();
+                prepared.work_item_projection_bundles[0]
+                    .human_projection
+                    .goal
+                    .push_str(" tampered");
             }
             _ => unreachable!(),
         }
@@ -424,6 +690,7 @@ fn plan_repair_publish_rejects_attestation_reuse_after_candidate_package_tamperi
                 error,
                 super::super::PlanRepairError::InvalidRepairTarget(message)
                     if message.contains("review attestation provenance mismatch")
+                        || message.contains("projection payload hash mismatch")
             ),
             "tamper case {tamper}"
         );
