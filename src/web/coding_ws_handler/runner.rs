@@ -513,8 +513,8 @@ pub(crate) async fn execute_start_coding_flow(
                         &coder_provider_name,
                         "coding coder provider (reviewer feedback fix)",
                     )?;
-                    current = engine
-                        .execute_coder_fix_from_review(
+                    let rework_outcome = engine
+                        .execute_coder_fix_from_review_outcome(
                             &current,
                             &review_report,
                             &execution_context,
@@ -522,6 +522,7 @@ pub(crate) async fn execute_start_coding_flow(
                             &mut command_rx,
                         )
                         .await?;
+                    current = rework_outcome.attempt;
                     current = coding_store.get_attempt(
                         &current.project_id,
                         &current.issue_id,
@@ -537,6 +538,12 @@ pub(crate) async fn execute_start_coding_flow(
                     .await?
                     {
                         return Ok(());
+                    }
+                    if rework_outcome
+                        .plan_defect_decision
+                        .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
+                    {
+                        return emit_current_session_state(event_tx, coding_store, &current).await;
                     }
                     match current.status {
                         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman => {

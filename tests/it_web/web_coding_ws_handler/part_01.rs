@@ -159,11 +159,7 @@ fn seed_authoritative_group_plan_fixture(
                 provided_contract_refs: Vec::new(),
                 reviewer_check_refs: Vec::new(),
             },
-            blocker_rules: vec![BlockerRule {
-                reason_code: "current_work_item_contract_invalid".to_string(),
-                route: BlockerRoute::PlanRepairCurrent,
-                target_contract_refs: Vec::new(),
-            }],
+            blocker_rules: authoritative_group_blocker_rules_fixture(),
             design_traceability: Vec::new(),
         };
         let revision = WorkItemRevision {
