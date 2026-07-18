@@ -49,6 +49,38 @@ impl WorkspaceEngine {
             .iter()
             .find(|existing| existing.fingerprint == request.fingerprint)
             .cloned();
+        if let Some(active_amendment_id) = plan.active_amendment_id.as_deref() {
+            let selected_amendment_id = selected
+                .as_ref()
+                .map(|existing| amendment_id_for(&existing.fingerprint))
+                .unwrap_or_else(|| amendment_id_for(&request.fingerprint));
+            if active_amendment_id != selected_amendment_id {
+                let active_request = open_requests
+                    .iter()
+                    .find(|existing| existing.amendment_id.as_deref() == Some(active_amendment_id))
+                    .ok_or_else(|| PlanRepairError::ActiveAmendmentExists {
+                        amendment_id: active_amendment_id.to_string(),
+                    })?;
+                validate_persisted_repair_request(&plan, active_request)?;
+                let (link, child) = linked_child_session(
+                    lifecycle,
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    active_request,
+                )?
+                .ok_or_else(|| PlanRepairError::ActiveAmendmentExists {
+                    amendment_id: active_amendment_id.to_string(),
+                })?;
+                return reconcile_plan_repair_child(
+                    lifecycle,
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    active_request,
+                    link,
+                    child,
+                );
+            }
+        }
         if let Some(existing) = selected.as_ref() {
             validate_persisted_repair_request(&plan, existing)?;
             validate_reused_repair_request(existing, &request)?;
@@ -83,37 +115,9 @@ impl WorkspaceEngine {
         if selected.is_none()
             && let Some(active_amendment_id) = plan.active_amendment_id.as_deref()
         {
-            let requested_amendment_id = amendment_id_for(&request.fingerprint);
-            if active_amendment_id == requested_amendment_id {
-                let mut recovering = request.clone();
-                recovering.amendment_id = Some(active_amendment_id.to_string());
-                selected = Some(recovering);
-            } else {
-                let active_request = open_requests
-                    .iter()
-                    .find(|existing| existing.amendment_id.as_deref() == Some(active_amendment_id))
-                    .ok_or_else(|| PlanRepairError::ActiveAmendmentExists {
-                        amendment_id: active_amendment_id.to_string(),
-                    })?;
-                validate_persisted_repair_request(&plan, active_request)?;
-                let (link, child) = linked_child_session(
-                    lifecycle,
-                    &self.session.project_id,
-                    &self.session.issue_id,
-                    active_request,
-                )?
-                .ok_or_else(|| PlanRepairError::ActiveAmendmentExists {
-                    amendment_id: active_amendment_id.to_string(),
-                })?;
-                return reconcile_plan_repair_child(
-                    lifecycle,
-                    &self.session.project_id,
-                    &self.session.issue_id,
-                    active_request,
-                    link,
-                    child,
-                );
-            }
+            let mut recovering = request.clone();
+            recovering.amendment_id = Some(active_amendment_id.to_string());
+            selected = Some(recovering);
         }
 
         if let Some(existing) = selected.as_ref()

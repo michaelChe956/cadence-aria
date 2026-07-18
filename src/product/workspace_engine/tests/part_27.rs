@@ -352,3 +352,118 @@ async fn plan_repair_reuse_linked_awaiting_request_preserves_status_and_syncs_sn
         1
     );
 }
+
+#[tokio::test]
+async fn plan_repair_active_amendment_arbitration_precedes_selected_request_reuse() {
+    let (_tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let active_fingerprint = "fingerprint_active_g";
+    let active_child = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_active_g",
+            active_fingerprint,
+        ))
+        .await
+        .unwrap();
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let active_request = revision_store
+        .get_repair_request(&plan, "plan_repair_request_active_g")
+        .unwrap();
+    let selected_fingerprint = "fingerprint_selected_f";
+    let selected_request = plan_repair_fixture(
+        "plan_repair_request_selected_f",
+        selected_fingerprint,
+    );
+    revision_store
+        .put_repair_request(&plan, &selected_request)
+        .unwrap();
+    let before_selected = revision_store
+        .get_repair_request(&plan, &selected_request.id)
+        .unwrap();
+    let before_active = revision_store
+        .get_repair_request(&plan, &active_request.id)
+        .unwrap();
+    let before_sessions = lifecycle
+        .list_workspace_sessions("project_0001", "issue_0001")
+        .unwrap()
+        .len();
+    let before_links = lifecycle
+        .list_session_links("project_0001", "issue_0001")
+        .unwrap()
+        .len();
+    let before_requests = revision_store.list_open_repair_requests(&plan).unwrap().len();
+    let before_snapshot = lifecycle
+        .load_plan_repair_session_state("project_0001", "issue_0001", &active_child.id)
+        .unwrap();
+    let selected_amendment_id = format!("plan_amendment_{selected_fingerprint}");
+    let selected_child_id = format!("workspace_session_{selected_amendment_id}");
+    let selected_snapshot_path = lifecycle
+        .workspace_timeline_root_for_issue_session(
+            "project_0001",
+            "issue_0001",
+            &selected_child_id,
+        )
+        .unwrap()
+        .join("plan_repair_session_state.json");
+    assert!(!selected_snapshot_path.exists());
+    let mut incoming = plan_repair_fixture(
+        "plan_repair_request_incoming_f",
+        selected_fingerprint,
+    );
+    incoming.trigger_attempt_id = "coding_attempt_0002".to_string();
+    incoming.trigger_unit_run_id = "coding_unit_run_0003".to_string();
+    incoming.trigger_review_id = Some("code_review_0002".to_string());
+    incoming.trigger_finding_id = "finding_incoming_f".to_string();
+    incoming.evidence[0].source_ref = "code_review_0002#finding_incoming_f".to_string();
+
+    let result = parent.start_plan_repair(incoming).await;
+
+    assert_eq!(
+        revision_store
+            .get_repair_request(&plan, &selected_request.id)
+            .unwrap(),
+        before_selected
+    );
+    assert_eq!(
+        revision_store
+            .get_repair_request(&plan, &active_request.id)
+            .unwrap(),
+        before_active
+    );
+    let returned = result.unwrap();
+    assert_eq!(returned.id, active_child.id);
+    assert_eq!(
+        revision_store
+            .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+            .unwrap()
+            .active_amendment_id,
+        active_request.amendment_id
+    );
+    assert_eq!(
+        revision_store.list_open_repair_requests(&plan).unwrap().len(),
+        before_requests
+    );
+    assert_eq!(
+        lifecycle
+            .list_workspace_sessions("project_0001", "issue_0001")
+            .unwrap()
+            .len(),
+        before_sessions
+    );
+    assert_eq!(
+        lifecycle
+            .list_session_links("project_0001", "issue_0001")
+            .unwrap()
+            .len(),
+        before_links
+    );
+    assert_eq!(
+        lifecycle
+            .load_plan_repair_session_state("project_0001", "issue_0001", &active_child.id)
+            .unwrap(),
+        before_snapshot
+    );
+    assert!(!selected_snapshot_path.exists());
+    assert!(lifecycle.get_workspace_session(&selected_child_id).is_err());
+}
