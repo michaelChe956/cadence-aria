@@ -53,6 +53,32 @@ impl WorkItemRevisionStore {
         })
     }
 
+    pub fn transition_orphan_repair_request_to_in_progress(
+        &self,
+        plan: &WorkItemPlanLineage,
+        request_id: &str,
+    ) -> Result<PlanRepairRequest, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(request_id)?;
+        let path = self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id);
+        with_exclusive_lock(&path, || {
+            let mut request = self.get_repair_request(plan, request_id)?;
+            match request.status {
+                PlanRepairRequestStatus::Open => {
+                    request.status = PlanRepairRequestStatus::InProgress;
+                    request.updated_at = Utc::now().to_rfc3339();
+                    write_json(&path, &request)?;
+                    Ok(request)
+                }
+                PlanRepairRequestStatus::InProgress => Ok(request),
+                _ => Err(identity_mismatch(
+                    "plan_repair_request_orphan_transition",
+                    request_id,
+                )),
+            }
+        })
+    }
+
     pub fn transition_repair_request_to_awaiting_confirmation(
         &self,
         plan: &WorkItemPlanLineage,

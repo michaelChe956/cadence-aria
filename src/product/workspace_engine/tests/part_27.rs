@@ -196,3 +196,159 @@ async fn plan_repair_awaiting_idempotent_rejects_authoritative_successor_status(
         );
     }
 }
+
+#[tokio::test]
+async fn plan_repair_orphan_recovery_rejects_awaiting_request_before_writes() {
+    let (_tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let fingerprint = "fingerprint_awaiting_orphan";
+    let child = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_persisted",
+            fingerprint,
+        ))
+        .await
+        .unwrap();
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let request = revision_store
+        .get_repair_request(&plan, "plan_repair_request_persisted")
+        .unwrap();
+    let amendment_id = request.amendment_id.clone().unwrap();
+    let mut child_engine =
+        plan_repair_restarted_child_engine(&_tmp, &lifecycle, child.clone());
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(&request.id, &amendment_id),
+    )
+    .await
+    .unwrap();
+    let before_request = revision_store
+        .get_repair_request(&plan, &request.id)
+        .unwrap();
+    let before_snapshot = lifecycle
+        .load_plan_repair_session_state("project_0001", "issue_0001", &child.id)
+        .unwrap();
+    let before_session = lifecycle.get_workspace_session(&child.id).unwrap();
+    let before_sessions = lifecycle
+        .list_workspace_sessions("project_0001", "issue_0001")
+        .unwrap();
+    let link = lifecycle.get_session_link(&child.id).unwrap();
+    let link_path = lifecycle
+        .app_paths()
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("workspace-session-links")
+        .join(format!("{}.json", link.id));
+    std::fs::remove_file(link_path).unwrap();
+    let mut retry = plan_repair_fixture("plan_repair_request_incoming", fingerprint);
+    retry.trigger_attempt_id = "coding_attempt_0002".to_string();
+    retry.trigger_unit_run_id = "coding_unit_run_0003".to_string();
+    retry.trigger_review_id = Some("code_review_0002".to_string());
+    retry.trigger_finding_id = "finding_incoming".to_string();
+    retry.evidence[0].source_ref = "code_review_0002#finding_incoming".to_string();
+
+    let error = parent.start_plan_repair(retry).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::product::plan_repair::PlanRepairError::InvalidRepairTarget(_)
+            | crate::product::plan_repair::PlanRepairError::Store(
+                crate::product::json_store::ProductStoreError::IdentityMismatch { .. }
+            )
+    ));
+    assert_eq!(
+        revision_store
+            .get_repair_request(&plan, &request.id)
+            .unwrap(),
+        before_request
+    );
+    assert_eq!(
+        lifecycle
+            .load_plan_repair_session_state("project_0001", "issue_0001", &child.id)
+            .unwrap(),
+        before_snapshot
+    );
+    assert_eq!(lifecycle.get_workspace_session(&child.id).unwrap(), before_session);
+    assert_eq!(
+        lifecycle
+            .list_workspace_sessions("project_0001", "issue_0001")
+            .unwrap(),
+        before_sessions
+    );
+    assert!(
+        lifecycle
+            .list_session_links("project_0001", "issue_0001")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn plan_repair_reuse_linked_awaiting_request_preserves_status_and_syncs_snapshot() {
+    let (_tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let fingerprint = "fingerprint_linked_awaiting_reuse";
+    let child = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_persisted",
+            fingerprint,
+        ))
+        .await
+        .unwrap();
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let request = revision_store
+        .get_repair_request(&plan, "plan_repair_request_persisted")
+        .unwrap();
+    let amendment_id = request.amendment_id.clone().unwrap();
+    let mut child_engine =
+        plan_repair_restarted_child_engine(&_tmp, &lifecycle, child.clone());
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(&request.id, &amendment_id),
+    )
+    .await
+    .unwrap();
+    let mut retry = plan_repair_fixture("plan_repair_request_incoming", fingerprint);
+    retry.trigger_attempt_id = "coding_attempt_0002".to_string();
+    retry.trigger_unit_run_id = "coding_unit_run_0003".to_string();
+    retry.trigger_review_id = Some("code_review_0002".to_string());
+    retry.trigger_finding_id = "finding_incoming".to_string();
+    retry.evidence[0].source_ref = "code_review_0002#finding_incoming".to_string();
+
+    let reused = parent.start_plan_repair(retry).await.unwrap();
+
+    assert_eq!(reused.id, child.id);
+    assert_eq!(
+        reused.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman
+    );
+    let stored_request = revision_store
+        .get_repair_request(&plan, &request.id)
+        .unwrap();
+    assert_eq!(
+        stored_request.status,
+        crate::product::models::PlanRepairRequestStatus::AwaitingConfirmation
+    );
+    assert_eq!(stored_request.evidence.len(), 2);
+    let snapshot = lifecycle
+        .load_plan_repair_session_state("project_0001", "issue_0001", &child.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.request, stored_request);
+    assert_eq!(
+        snapshot.stage,
+        crate::product::models::PlanRepairSessionStage::AwaitingConfirmation
+    );
+    assert_eq!(
+        lifecycle
+            .list_session_links("project_0001", "issue_0001")
+            .unwrap()
+            .len(),
+        1
+    );
+}

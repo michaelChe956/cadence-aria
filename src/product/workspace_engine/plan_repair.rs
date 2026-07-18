@@ -49,19 +49,33 @@ impl WorkspaceEngine {
             .iter()
             .find(|existing| existing.fingerprint == request.fingerprint)
             .cloned();
-        let mut selected_child = None;
         if let Some(existing) = selected.as_ref() {
             validate_persisted_repair_request(&plan, existing)?;
             validate_reused_repair_request(existing, &request)?;
-            selected_child = linked_child_session(
+            if let Some((link, child)) = linked_child_session(
                 lifecycle,
                 &self.session.project_id,
                 &self.session.issue_id,
                 existing,
-            )?;
+            )? {
+                let selected = revision_store
+                    .merge_repair_request_evidence(&plan, &existing.id, request.evidence.clone())
+                    .map_err(PlanRepairError::Store)?;
+                return reconcile_plan_repair_child(
+                    lifecycle,
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    &selected,
+                    link,
+                    child,
+                );
+            }
+            let recovering = revision_store
+                .transition_orphan_repair_request_to_in_progress(&plan, &existing.id)
+                .map_err(PlanRepairError::Store)?;
             selected = Some(
                 revision_store
-                    .merge_repair_request_evidence(&plan, &existing.id, request.evidence.clone())
+                    .merge_repair_request_evidence(&plan, &recovering.id, request.evidence.clone())
                     .map_err(PlanRepairError::Store)?,
             );
         }
@@ -102,24 +116,19 @@ impl WorkspaceEngine {
             }
         }
 
-        if selected_child.is_none()
-            && let Some(existing) = selected.as_ref()
-        {
-            selected_child = linked_child_session(
+        if let Some(existing) = selected.as_ref()
+            && let Some((link, child)) = linked_child_session(
                 lifecycle,
                 &self.session.project_id,
                 &self.session.issue_id,
                 existing,
-            )?;
-        }
-        if let Some((link, child)) = selected_child {
+            )?
+        {
             return reconcile_plan_repair_child(
                 lifecycle,
                 &self.session.project_id,
                 &self.session.issue_id,
-                selected
-                    .as_ref()
-                    .expect("linked plan repair child requires a selected request"),
+                existing,
                 link,
                 child,
             );
@@ -142,24 +151,22 @@ impl WorkspaceEngine {
         if selected.amendment_id.is_none() {
             selected.amendment_id = Some(amendment_id.clone());
         }
-        selected.status = PlanRepairRequestStatus::InProgress;
-        selected.updated_at = Utc::now().to_rfc3339();
         match revision_store.get_repair_request(&plan, &selected.id) {
             Ok(_) => {
                 selected = revision_store
                     .assign_repair_request_amendment(&plan, &selected.id, &amendment_id)
                     .map_err(PlanRepairError::Store)?;
                 selected = revision_store
-                    .update_repair_request_status(
-                        &plan,
-                        &selected.id,
-                        PlanRepairRequestStatus::InProgress,
-                    )
+                    .transition_orphan_repair_request_to_in_progress(&plan, &selected.id)
                     .map_err(PlanRepairError::Store)?;
             }
-            Err(ProductStoreError::NotFound { .. }) => revision_store
-                .put_repair_request(&plan, &selected)
-                .map_err(PlanRepairError::Store)?,
+            Err(ProductStoreError::NotFound { .. }) => {
+                selected.status = PlanRepairRequestStatus::InProgress;
+                selected.updated_at = Utc::now().to_rfc3339();
+                revision_store
+                    .put_repair_request(&plan, &selected)
+                    .map_err(PlanRepairError::Store)?;
+            }
             Err(error) => return Err(PlanRepairError::Store(error)),
         }
 
