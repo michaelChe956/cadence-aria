@@ -1,13 +1,19 @@
-use cadence_aria::product::coding_models::CodingAttemptPlanBinding;
+use cadence_aria::product::coding_models::{
+    CodingAttemptPlanBinding, CodingUnitRun, CodingUnitRunStatus,
+};
 use cadence_aria::product::models::{
-    DependencyGraphRevision, LogicalWorkItem, PlanRevisionReason, WorkItemPlanLineage,
-    WorkItemPlanRevision, WorkItemPlanStatus, WorkItemRevision,
+    DependencyGraphRevision, HandoffRevision, LogicalWorkItem, PlanRevisionReason,
+    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle,
+    WorkItemRevision,
 };
 use cadence_aria::product::work_item_contract::{
     CanonicalWorkItemContract, HandoffContract, WorkItemContractIdentity, WorkItemGoal,
     WorkItemWritePolicy, canonical_contract_hash,
 };
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
+use cadence_aria::product::work_item_projection::{
+    WorkItemProjectionCompiler, projection_hashes, renderer_for,
+};
 
 fn group_engine_with_two_units() -> (
     tempfile::TempDir,
@@ -214,6 +220,29 @@ fn seed_authoritative_group_terminal_fixture(
         revision_store
             .put_work_item_revision(&lineage, &revision)
             .expect("put work item revision");
+        let projections = WorkItemProjectionCompiler
+            .compile(&revision.canonical_contract, &revision.id)
+            .expect("compile work item projections");
+        let hashes = projection_hashes(&projections).expect("projection hashes");
+        revision_store
+            .put_work_item_projection_bundle(
+                &lineage,
+                &WorkItemProjectionBundle {
+                    id: revision.work_item_projection_bundle_id.clone(),
+                    work_item_revision_id: revision.id.clone(),
+                    canonical_contract_hash: revision.canonical_contract_hash.clone(),
+                    projection_schema_version: 1,
+                    compiler_version: "work-item-projection-compiler-v1".to_string(),
+                    human_projection: projections.human,
+                    coder_projection: projections.coder,
+                    reviewer_projection: projections.reviewer,
+                    human_projection_hash: hashes.human,
+                    coder_projection_hash: hashes.coder,
+                    reviewer_projection_hash: hashes.reviewer,
+                    created_at: "2026-06-27T00:00:00Z".to_string(),
+                },
+            )
+            .expect("put work item projection bundle");
         revision_store
             .set_active_work_item_revision(&lineage, &logical, None, &revision.id)
             .expect("activate work item revision");
@@ -262,6 +291,88 @@ fn seed_authoritative_group_terminal_fixture(
             },
         )
         .expect("save group plan binding");
+}
+
+fn seed_authoritative_group_coder_fixture(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    seed_authoritative_group_terminal_fixture(store, attempt);
+    let revision_store = WorkItemRevisionStore::new(store.paths());
+    let lineage = revision_store
+        .get_plan_lineage(&attempt.project_id, &attempt.issue_id, "work_item_plan_0001")
+        .expect("group plan lineage");
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("group coding units");
+    let source_unit = units
+        .iter()
+        .find(|unit| unit.logical_work_item_id == "work_item_0001")
+        .expect("source coding unit");
+    let revision = revision_store
+        .get_work_item_revision(
+            &lineage,
+            &source_unit.logical_work_item_id,
+            &source_unit.work_item_revision_id,
+        )
+        .expect("source work item revision");
+    let bundle = revision_store
+        .get_work_item_projection_bundle(&lineage, &revision.work_item_projection_bundle_id)
+        .expect("source projection bundle");
+    let renderer_version = renderer_for(&ProviderName::Fake).renderer_version().to_string();
+    let run = CodingUnitRun {
+        id: "coding_unit_run_0001".to_string(),
+        unit_id: source_unit.id.clone(),
+        execution_no: 1,
+        work_item_revision_id: revision.id.clone(),
+        resolved_handoff_revision_ids: Vec::new(),
+        canonical_contract_hash: revision.canonical_contract_hash.clone(),
+        projection_bundle_id: bundle.id.clone(),
+        projection_compiler_version: bundle.compiler_version.clone(),
+        coder_provider_renderer_version: renderer_version.clone(),
+        reviewer_provider_renderer_version: renderer_version,
+        coder_projection_hash: bundle.coder_projection_hash.clone(),
+        reviewer_projection_hash: bundle.reviewer_projection_hash.clone(),
+        coder_execution_context_hash: None,
+        reviewer_execution_context_hash: None,
+        status: CodingUnitRunStatus::Completed,
+        unit_rework_count: 0,
+        verification_retry_count: 0,
+        operational_retry_count: 0,
+        plan_repair_count: 0,
+        start_commit: Some("seed-commit".to_string()),
+        completion_commit: Some("seed-commit".to_string()),
+        created_at: "2026-06-27T00:00:00Z".to_string(),
+        updated_at: "2026-06-27T00:00:00Z".to_string(),
+    };
+    store
+        .create_coding_unit_run(attempt, &run)
+        .expect("source coding unit run");
+    let handoff = HandoffRevision {
+        id: "handoff_revision_0001".to_string(),
+        logical_work_item_id: source_unit.logical_work_item_id.clone(),
+        work_item_revision_id: source_unit.work_item_revision_id.clone(),
+        coding_unit_run_id: run.id,
+        provided_contracts: Vec::new(),
+        provided_capabilities: std::collections::BTreeMap::new(),
+        contract_hash: revision.canonical_contract_hash,
+        commit_sha: "seed-commit".to_string(),
+        tests: Vec::new(),
+        artifacts: Vec::new(),
+        created_at: "2026-06-27T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_handoff_revision(&lineage, &handoff)
+        .expect("source handoff revision");
+    store
+        .update_coding_unit_latest_handoff_revision_id(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &source_unit.id,
+            Some(handoff.id),
+        )
+        .expect("source handoff binding");
 }
 
 fn completed_group_attempt_with_handoffs() -> (

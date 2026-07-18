@@ -19,6 +19,7 @@ pub use report::{
     build_plan_based_testing_report, build_testing_report, format_test_plan_chat_summary,
     format_testing_report_chat_summary,
 };
+pub(crate) use types::ProviderTestExecutionPayload;
 pub use types::{
     TESTER_TOOL_FAILURE_LIMIT, TesterAgentError, TesterAgentOptions, TesterToolOutcome,
 };

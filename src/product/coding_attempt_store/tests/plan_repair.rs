@@ -7,9 +7,9 @@ use crate::product::coding_models::{
 };
 use crate::product::work_item_projection::RenderedExecutionContext;
 
-const PLAN_ID: &str = "issue_plan_0001";
+pub(super) const PLAN_ID: &str = "issue_plan_0001";
 
-fn coding_plan_repair_attempt(store: &CodingAttemptStore) -> CodingExecutionAttempt {
+pub(super) fn coding_plan_repair_attempt(store: &CodingAttemptStore) -> CodingExecutionAttempt {
     store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: PROJECT_ID.to_string(),
@@ -25,7 +25,7 @@ fn coding_plan_repair_attempt(store: &CodingAttemptStore) -> CodingExecutionAtte
         .expect("group attempt")
 }
 
-fn coding_unit_run_unit(
+pub(super) fn coding_unit_run_unit(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
     logical_work_item_id: &str,
@@ -52,7 +52,7 @@ fn coding_unit_run_unit(
         .expect("coding unit")
 }
 
-fn coding_unit_run_record(
+pub(super) fn coding_unit_run_record(
     id: &str,
     unit_id: &str,
     execution_no: u32,

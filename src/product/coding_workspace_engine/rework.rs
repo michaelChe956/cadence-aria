@@ -201,6 +201,18 @@ impl CodingWorkspaceEngine {
                 timeout_reason_code: None,
             })
             .await?;
+        let plan_defect_report =
+            parse_execution_plan_defects(PlanDefectSource::Coder, &full_output)?;
+        let plan_defect_route = if plan_defect_report.findings.is_empty() {
+            None
+        } else {
+            let projection = self.reviewer_projection_for_attempt(&updated)?;
+            Some(
+                execution_plan_defect_flow_decision(&plan_defect_report, &projection)
+                    .label()
+                    .to_string(),
+            )
+        };
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &updated,
             CodingExecutionStage::Coding,
@@ -240,6 +252,7 @@ impl CodingWorkspaceEngine {
             full_output: &full_output,
             raw_provider_output_ref: &raw_provider_output_ref,
             source: "coding",
+            plan_defect_route: plan_defect_route.as_deref(),
         })
         .await;
 

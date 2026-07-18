@@ -27,7 +27,8 @@ use cadence_aria::product::models::WorkItemStatus;
 use cadence_aria::product::models::{
     DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
     PlanRevisionReason, ProviderName, WorkItemPlanLineage, WorkItemPlanRevision,
-    WorkItemPlanStatus, WorkItemRevision, WorkspaceSessionStatus, WorkspaceType,
+    WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision, WorkspaceSessionStatus,
+    WorkspaceType,
 };
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use cadence_aria::product::work_item_contract::{
@@ -35,6 +36,9 @@ use cadence_aria::product::work_item_contract::{
     WorkItemWritePolicy, canonical_contract_hash,
 };
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
+use cadence_aria::product::work_item_projection::{
+    WorkItemProjectionCompiler, projection_hashes,
+};
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::coding_ws_handler::{
@@ -171,6 +175,29 @@ fn seed_authoritative_group_plan_fixture(
         revision_store
             .put_work_item_revision(&lineage, &revision)
             .expect("work item revision");
+        let projections = WorkItemProjectionCompiler
+            .compile(&revision.canonical_contract, &revision.id)
+            .expect("compile work item projections");
+        let hashes = projection_hashes(&projections).expect("projection hashes");
+        revision_store
+            .put_work_item_projection_bundle(
+                &lineage,
+                &WorkItemProjectionBundle {
+                    id: revision.work_item_projection_bundle_id.clone(),
+                    work_item_revision_id: revision.id.clone(),
+                    canonical_contract_hash: revision.canonical_contract_hash.clone(),
+                    projection_schema_version: 1,
+                    compiler_version: "work-item-projection-compiler-v1".to_string(),
+                    human_projection: projections.human,
+                    coder_projection: projections.coder,
+                    reviewer_projection: projections.reviewer,
+                    human_projection_hash: hashes.human,
+                    coder_projection_hash: hashes.coder,
+                    reviewer_projection_hash: hashes.reviewer,
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("work item projection bundle");
         revision_store
             .set_active_work_item_revision(&lineage, &logical, None, revision_id)
             .expect("active work item revision");

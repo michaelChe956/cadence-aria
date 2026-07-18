@@ -14,12 +14,13 @@ use crate::product::lifecycle_store::{
 use crate::product::models::{
     DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
     PlanRevisionReason, ProviderConversationRef, ProviderConversationRole, WorkItemPlanLineage,
-    WorkItemPlanRevision, WorkItemPlanStatus, WorkItemRevision,
+    WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::work_item_contract::{
-    CanonicalWorkItemContract, HandoffContract, WorkItemContractIdentity, WorkItemGoal,
-    WorkItemWritePolicy, canonical_contract_hash,
+    BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract,
+    WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
 };
+use crate::product::work_item_projection::{WorkItemProjectionCompiler, projection_hashes};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use std::fs;
@@ -48,6 +49,7 @@ fn blocked_report_with(missing: Vec<String>, skipped: Vec<String>) -> TestingRep
         skipped_required_steps: skipped,
         context_warnings: Vec::new(),
         raw_provider_output_ref: None,
+        plan_defect_findings: Vec::new(),
     }
 }
 
@@ -55,6 +57,7 @@ fn seed_group_attempt_fixture(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
     initialize_attempt: bool,
+    with_dependency: bool,
 ) {
     let lifecycle = LifecycleStore::new(store.paths());
     let work_items = [
@@ -156,7 +159,11 @@ fn seed_group_attempt_fixture(
                 provided_contract_refs: Vec::new(),
                 reviewer_check_refs: Vec::new(),
             },
-            blocker_rules: Vec::new(),
+            blocker_rules: vec![BlockerRule {
+                reason_code: "current_work_item_contract_invalid".to_string(),
+                route: BlockerRoute::PlanRepairCurrent,
+                target_contract_refs: Vec::new(),
+            }],
             design_traceability: Vec::new(),
         };
         let work_item_revision = WorkItemRevision {
@@ -172,6 +179,32 @@ fn seed_group_attempt_fixture(
         revision_store
             .put_work_item_revision(&lineage, &work_item_revision)
             .expect("work item revision");
+        let projections = WorkItemProjectionCompiler
+            .compile(
+                &work_item_revision.canonical_contract,
+                &work_item_revision.id,
+            )
+            .expect("work item projections");
+        let hashes = projection_hashes(&projections).expect("projection hashes");
+        revision_store
+            .put_work_item_projection_bundle(
+                &lineage,
+                &WorkItemProjectionBundle {
+                    id: work_item_revision.work_item_projection_bundle_id.clone(),
+                    work_item_revision_id: work_item_revision.id.clone(),
+                    canonical_contract_hash: work_item_revision.canonical_contract_hash.clone(),
+                    projection_schema_version: 1,
+                    compiler_version: "work-item-projection-compiler-v1".to_string(),
+                    human_projection: projections.human,
+                    coder_projection: projections.coder,
+                    reviewer_projection: projections.reviewer,
+                    human_projection_hash: hashes.human,
+                    coder_projection_hash: hashes.coder,
+                    reviewer_projection_hash: hashes.reviewer,
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("work item projection bundle");
         revision_store
             .set_active_work_item_revision(&lineage, &logical, None, &work_item_revision.id)
             .expect("active work item revision");
@@ -180,7 +213,15 @@ fn seed_group_attempt_fixture(
     let graph = DependencyGraphRevision {
         id: "dependency_graph_revision_0001".to_string(),
         plan_id: lineage.id.clone(),
-        edges: Vec::new(),
+        edges: if with_dependency {
+            vec![crate::product::work_item_contract::DependencyContractEdge {
+                from: "work_item_0001".to_string(),
+                to: "work_item_0002".to_string(),
+                required_contracts: Vec::new(),
+            }]
+        } else {
+            Vec::new()
+        },
         created_at: "2026-07-18T00:00:00Z".to_string(),
     };
     revision_store
@@ -228,7 +269,11 @@ fn seed_group_attempt_fixture(
                 plan_id: lineage.id.clone(),
                 logical_work_item_id: (*work_item_id).to_string(),
                 work_item_revision_id: (*revision_id).to_string(),
-                dependency_logical_work_item_ids: Vec::new(),
+                dependency_logical_work_item_ids: if with_dependency && index == 1 {
+                    vec!["work_item_0001".to_string()]
+                } else {
+                    Vec::new()
+                },
                 order_index: index as u32,
                 status: if index == 0 {
                     CodingExecutionUnitStatus::Running
@@ -245,7 +290,9 @@ mod gate_coder_feedback;
 mod gate_rework;
 mod group_terminal;
 mod parser_prompt;
+mod plan_defect_entrypoints;
 mod provider_driven;
+mod provider_execution_context;
 mod provider_failure_recovery;
 
 #[tokio::test]
@@ -271,7 +318,7 @@ async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node(
             max_auto_rework: 2,
         })
         .expect("group attempt");
-    seed_group_attempt_fixture(&store, &attempt, true);
+    seed_group_attempt_fixture(&store, &attempt, true, false);
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -320,7 +367,7 @@ async fn coding_plan_repair_partial_group_attempt_cannot_start_coding() {
             max_auto_rework: 2,
         })
         .expect("partial group attempt");
-    seed_group_attempt_fixture(&store, &attempt, false);
+    seed_group_attempt_fixture(&store, &attempt, false, false);
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -362,7 +409,7 @@ async fn coding_plan_repair_group_attempt_missing_active_pointer_cannot_start() 
             max_auto_rework: 2,
         })
         .expect("group attempt");
-    seed_group_attempt_fixture(&store, &attempt, true);
+    seed_group_attempt_fixture(&store, &attempt, true, false);
     attempt = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("complete group attempt");

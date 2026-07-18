@@ -268,9 +268,17 @@ impl CodingWorkspaceEngine {
             Some(raw_provider_output_ref.clone()),
             &role_run,
         )?;
+        let reviewer_projection =
+            self.reviewer_projection_for_internal_review(&attempt, &review)?;
+        let review_flow_decision = internal_review_flow_decision(&review, &reviewer_projection);
         self.store.save_internal_pr_review(&attempt, &review)?;
-        self.emit_internal_pr_review_chat_entry(&attempt, &node.id, &review)
-            .await;
+        self.emit_internal_pr_review_chat_entry(
+            &attempt,
+            &node.id,
+            &review,
+            review_flow_decision.label(),
+        )
+        .await;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::InternalPrReviewComplete {

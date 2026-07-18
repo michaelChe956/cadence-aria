@@ -125,6 +125,7 @@ fn test_plan_and_testing_report_round_trip_preserve_step_evidence() {
         raw_provider_output_ref: Some(
             "provider-raw/testing/execute_test_plan_0001.txt".to_string(),
         ),
+        plan_defect_findings: Vec::new(),
     };
     let report_value = serde_json::to_value(&report).expect("serialize testing report");
     assert_eq!(report_value["overall_status"], "passed_with_warnings");
@@ -143,9 +144,17 @@ fn test_plan_and_testing_report_round_trip_preserve_step_evidence() {
             required_action: Some("add validation".to_string()),
             source_stage: CodingExecutionStage::CodeReview,
             evidence: vec!["diff:src/lib.rs".to_string()],
+            plan_defect_evidence: Vec::new(),
             related_requirements: vec!["REQ-1".to_string()],
             related_design_constraints: vec!["DES-1".to_string()],
             related_work_item_tasks: vec!["TASK-1".to_string()],
+            defect_class: crate::product::models::PlanDefectClass::ImplementationDefect,
+            reason_code: None,
+            contract_refs: Vec::new(),
+            capability_refs: Vec::new(),
+            repair_target: None,
+            recommended_route: crate::product::models::PlanDefectRoute::CoderRework,
+            confidence: None,
         }],
         tested_evidence_refs: vec!["testing_report_0001.json".to_string()],
         diff_refs: vec!["attempt.diff".to_string()],

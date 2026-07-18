@@ -74,16 +74,28 @@ impl CodingWorkspaceEngine {
         let context_note_input =
             format_rework_context_notes(&context_notes, REWORK_CONTEXT_NOTE_CHAR_LIMIT);
         let coding_context_notes = (!context_note_ids.is_empty()).then_some(&context_note_input);
-        let full_prompt = build_coding_prompt(
+        let rendered_context = self.render_coder_unit_run_context(
             &attempt,
-            context,
-            rework_instruction.as_ref(),
-            coding_context_notes,
-        );
-        let prompt_mode = if resume_provider_session_id.is_some() {
-            CodingPromptMode::DeltaOnly
-        } else {
+            &coder_provider,
+            rework_instruction
+                .as_ref()
+                .map(|instruction| instruction.summary.clone()),
+        )?;
+        let full_prompt = rendered_context
+            .as_ref()
+            .map(|rendered| rendered.text.clone())
+            .unwrap_or_else(|| {
+                build_coding_prompt(
+                    &attempt,
+                    context,
+                    rework_instruction.as_ref(),
+                    coding_context_notes,
+                )
+            });
+        let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
+        } else {
+            CodingPromptMode::DeltaOnly
         };
         let prompt = match prompt_mode {
             CodingPromptMode::FullConversation => full_prompt.clone(),
@@ -195,6 +207,18 @@ impl CodingWorkspaceEngine {
                 return Err(error);
             }
         };
+        let plan_defect_report =
+            parse_execution_plan_defects(PlanDefectSource::Coder, &full_output)?;
+        let plan_defect_route = if plan_defect_report.findings.is_empty() {
+            None
+        } else {
+            let projection = self.reviewer_projection_for_attempt(&attempt)?;
+            Some(
+                execution_plan_defect_flow_decision(&plan_defect_report, &projection)
+                    .label()
+                    .to_string(),
+            )
+        };
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &attempt,
             CodingExecutionStage::Coding,
@@ -234,6 +258,7 @@ impl CodingWorkspaceEngine {
             full_output: &full_output,
             raw_provider_output_ref: &raw_provider_output_ref,
             source: "coding",
+            plan_defect_route: plan_defect_route.as_deref(),
         })
         .await;
         Ok(attempt)
@@ -281,6 +306,7 @@ impl CodingWorkspaceEngine {
             full_output,
             raw_provider_output_ref,
             source,
+            plan_defect_route,
         } = input;
         let completed_at = role_run
             .completed_at
@@ -299,6 +325,7 @@ impl CodingWorkspaceEngine {
                 "role_run_id": role_run.id,
                 "run_no": role_run.run_no,
                 "raw_provider_output_ref": raw_provider_output_ref,
+                "plan_defect_route": plan_defect_route,
                 "started_at": role_run.started_at,
                 "completed_at": completed_at
             })),

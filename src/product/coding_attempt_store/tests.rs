@@ -13,6 +13,7 @@ use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 mod failed_review_recovery;
 mod group_uniqueness;
 mod plan_repair;
+mod unit_run_execution_context;
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";

@@ -24,7 +24,7 @@ fn running_group_attempt() -> (
             max_auto_rework: 2,
         })
         .expect("group attempt");
-    seed_group_attempt_fixture(&store, &attempt, true);
+    seed_group_attempt_fixture(&store, &attempt, true, false);
     let attempt = store
         .update_attempt_status(
             &attempt.project_id,

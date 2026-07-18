@@ -18,6 +18,10 @@ const PROFILE: ProviderRenderProfile = ProviderRenderProfile {
 pub(super) struct ClaudeCodeProjectionRenderer;
 
 impl ProviderProjectionRenderer for ClaudeCodeProjectionRenderer {
+    fn renderer_version(&self) -> &'static str {
+        PROFILE.renderer_version
+    }
+
     fn render_coder(
         &self,
         projection: &CoderWorkItemProjection,

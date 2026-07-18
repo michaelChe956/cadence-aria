@@ -51,10 +51,10 @@ use crate::product::models::{
 };
 use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
 use crate::product::tester_agent_loop::{
-    TestContextLoader, TesterAgentOptions, build_plan_based_testing_report,
-    build_tester_execute_repair_prompt, build_tester_plan_prompt, build_tester_plan_repair_prompt,
-    build_testing_report, execute_tester_tool_call_with_context, format_test_plan_chat_summary,
-    format_testing_report_chat_summary, parse_test_plan_payload,
+    ProviderTestExecutionPayload, TestContextLoader, TesterAgentOptions,
+    build_plan_based_testing_report, build_tester_execute_repair_prompt, build_tester_plan_prompt,
+    build_tester_plan_repair_prompt, build_testing_report, execute_tester_tool_call_with_context,
+    format_test_plan_chat_summary, format_testing_report_chat_summary, parse_test_plan_payload,
 };
 use crate::protocol::contracts::ProviderType;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
@@ -72,6 +72,8 @@ mod group;
 mod handoffs;
 mod internal_pr_review;
 mod lifecycle;
+mod plan_defect;
+mod plan_defect_routing;
 mod prompts;
 mod provider_failure;
 mod provider_stream;
@@ -94,6 +96,7 @@ pub(crate) struct CoderOutputChatEntryInput<'a> {
     pub(crate) full_output: &'a str,
     pub(crate) raw_provider_output_ref: &'a str,
     pub(crate) source: &'a str,
+    pub(crate) plan_defect_route: Option<&'a str>,
 }
 
 pub use testing_parser::{
@@ -105,7 +108,11 @@ pub use types::{
 };
 
 pub(crate) fn code_review_report_has_actionable_findings(report: &CodeReviewReport) -> bool {
-    report.findings.iter().any(|finding| {
+    review_findings_have_actionable_findings(&report.findings)
+}
+
+pub(crate) fn review_findings_have_actionable_findings(findings: &[ReviewFinding]) -> bool {
+    findings.iter().any(|finding| {
         matches!(
             finding.severity,
             FindingSeverity::Error | FindingSeverity::Warning
@@ -160,6 +167,10 @@ pub(crate) use failed_review_recovery::{FailedCodeReviewRecovery, recoverable_fa
 pub(crate) use gates::*;
 #[allow(unused_imports)]
 pub(crate) use group::*;
+#[allow(unused_imports)]
+pub(crate) use plan_defect::*;
+#[allow(unused_imports)]
+pub(crate) use plan_defect_routing::*;
 #[allow(unused_imports)]
 pub(crate) use prompts::*;
 #[allow(unused_imports)]

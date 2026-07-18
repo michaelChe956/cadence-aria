@@ -47,13 +47,34 @@ pub(crate) struct RawReviewFinding {
     #[serde(default)]
     pub(crate) title: Option<String>,
     #[serde(default)]
-    pub(crate) evidence: Vec<String>,
+    pub(crate) evidence: Vec<RawReviewEvidence>,
     #[serde(default)]
     pub(crate) related_requirements: Vec<String>,
     #[serde(default)]
     pub(crate) related_design_constraints: Vec<String>,
     #[serde(default)]
     pub(crate) related_work_item_tasks: Vec<String>,
+    #[serde(default)]
+    pub(crate) defect_class: Option<crate::product::models::PlanDefectClass>,
+    #[serde(default)]
+    pub(crate) reason_code: Option<String>,
+    #[serde(default)]
+    pub(crate) contract_refs: Vec<String>,
+    #[serde(default)]
+    pub(crate) capability_refs: Vec<String>,
+    #[serde(default)]
+    pub(crate) repair_target: Option<crate::product::models::RepairTarget>,
+    #[serde(default)]
+    pub(crate) recommended_route: Option<crate::product::models::PlanDefectRoute>,
+    #[serde(default)]
+    pub(crate) confidence: Option<crate::product::plan_repair::PlanDefectConfidence>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RawReviewEvidence {
+    Reference(String),
+    Canonical(crate::product::models::PlanDefectEvidence),
 }
 
 fn deserialize_review_finding_source_stage<'de, D>(
@@ -133,6 +154,24 @@ impl RawReviewFinding {
         self,
         default_source_stage: CodingExecutionStage,
     ) -> ReviewFinding {
+        let mut evidence = Vec::new();
+        let mut plan_defect_evidence = Vec::new();
+        for item in self.evidence {
+            match item {
+                RawReviewEvidence::Reference(reference) => evidence.push(reference),
+                RawReviewEvidence::Canonical(canonical) => plan_defect_evidence.push(canonical),
+            }
+        }
+        let defect_class = self
+            .defect_class
+            .unwrap_or(crate::product::models::PlanDefectClass::ImplementationDefect);
+        let recommended_route = self.recommended_route.unwrap_or_else(|| {
+            if defect_class == crate::product::models::PlanDefectClass::ImplementationDefect {
+                crate::product::models::PlanDefectRoute::CoderRework
+            } else {
+                crate::product::models::PlanDefectRoute::HumanTriage
+            }
+        });
         ReviewFinding {
             severity: self
                 .severity
@@ -145,10 +184,18 @@ impl RawReviewFinding {
                 .unwrap_or_else(|| "review finding".to_string()),
             required_action: self.required_action,
             source_stage: self.source_stage.unwrap_or(default_source_stage),
-            evidence: self.evidence,
+            evidence,
+            plan_defect_evidence,
             related_requirements: self.related_requirements,
             related_design_constraints: self.related_design_constraints,
             related_work_item_tasks: self.related_work_item_tasks,
+            defect_class,
+            reason_code: self.reason_code,
+            contract_refs: self.contract_refs,
+            capability_refs: self.capability_refs,
+            repair_target: self.repair_target,
+            recommended_route,
+            confidence: self.confidence,
         }
     }
 }

@@ -210,6 +210,8 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         node_id: &str,
         report: &CodeReviewReport,
+        plan_defect_source: &str,
+        plan_defect_route: &str,
     ) {
         let entry = CodingChatEntry {
             id: format!("{node_id}_code_review_report"),
@@ -225,6 +227,8 @@ impl CodingWorkspaceEngine {
                 "findings_count": report.findings.len(),
                 "role_run_id": report.role_run_id,
                 "run_no": report.run_no,
+                "plan_defect_source": plan_defect_source,
+                "plan_defect_route": plan_defect_route,
             })),
             created_at: Utc::now().to_rfc3339(),
         };
@@ -236,6 +240,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         node_id: &str,
         review: &InternalPrReview,
+        plan_defect_route: &str,
     ) {
         let entry = CodingChatEntry {
             id: format!("{node_id}_internal_pr_review"),
@@ -252,6 +257,7 @@ impl CodingWorkspaceEngine {
                 "impact_scope": &review.impact_scope,
                 "role_run_id": review.role_run_id,
                 "run_no": review.run_no,
+                "plan_defect_route": plan_defect_route,
             })),
             created_at: Utc::now().to_rfc3339(),
         };

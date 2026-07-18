@@ -11,7 +11,10 @@ use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
 use std::fs;
 use std::process::Command as StdCommand;
 
+mod plan_defect_prompt;
 mod review_parser;
+
+use plan_defect_prompt::assert_plan_defect_output_contract;
 
 #[test]
 fn provider_projection_renderer_coding_prompt_integration_preserves_normative_context() {
@@ -55,6 +58,7 @@ fn provider_projection_renderer_coding_prompt_integration_preserves_normative_co
                 .contains("repository_state_prompt_integration")
         );
         assert!(rendered.text.contains("handoff_prompt_integration"));
+        assert_plan_defect_output_contract(&rendered.text, "plan_defect_findings");
         assert_eq!(rendered.content_hash.len(), 64);
     }
 }

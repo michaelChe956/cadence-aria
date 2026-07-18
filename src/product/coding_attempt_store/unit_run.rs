@@ -156,10 +156,32 @@ impl super::CodingAttemptStore {
             }
             match role {
                 CodingProviderRole::Coder => {
+                    if let Some(existing_hash) = run.coder_execution_context_hash.as_deref() {
+                        if run.coder_provider_renderer_version == rendered.renderer_version
+                            && existing_hash == rendered.content_hash
+                        {
+                            return Ok(run);
+                        }
+                        return Err(identity_mismatch(
+                            "coding_unit_run_execution_context",
+                            unit_run_id,
+                        ));
+                    }
                     run.coder_provider_renderer_version = rendered.renderer_version.clone();
                     run.coder_execution_context_hash = Some(rendered.content_hash.clone());
                 }
                 CodingProviderRole::CodeReviewer => {
+                    if let Some(existing_hash) = run.reviewer_execution_context_hash.as_deref() {
+                        if run.reviewer_provider_renderer_version == rendered.renderer_version
+                            && existing_hash == rendered.content_hash
+                        {
+                            return Ok(run);
+                        }
+                        return Err(identity_mismatch(
+                            "coding_unit_run_execution_context",
+                            unit_run_id,
+                        ));
+                    }
                     run.reviewer_provider_renderer_version = rendered.renderer_version.clone();
                     run.reviewer_execution_context_hash = Some(rendered.content_hash.clone());
                 }

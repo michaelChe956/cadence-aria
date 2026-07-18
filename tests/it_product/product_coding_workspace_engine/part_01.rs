@@ -158,6 +158,7 @@ fn testing_report_failed_or_blocked_needs_blocked_gate() {
         skipped_required_steps: Vec::new(),
         context_warnings: vec!["test_plan_parse_error".to_string()],
         raw_provider_output_ref: Some("provider-raw/testing/plan_tests_0001.txt".to_string()),
+        plan_defect_findings: Vec::new(),
     };
     assert!(testing_report_needs_blocked_gate(&blocked));
 
@@ -628,6 +629,7 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
 #[tokio::test]
 async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() {
     let (_root, _paths, store, _engine, attempt) = group_engine_with_last_running_unit();
+    seed_authoritative_group_coder_fixture(&store, &attempt);
     let attempt = store
         .update_attempt_status(
             &attempt.project_id,
@@ -672,8 +674,10 @@ async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() 
     assert_eq!(inputs.len(), 1);
     let input = &inputs[0];
     assert_eq!(input.resume_provider_session_id, None);
-    assert!(input.prompt.contains("# Work Item 002"));
-    assert!(input.prompt.contains("ProviderDescriptor 元数据层"));
+    assert!(input.prompt.contains("work_item_revision_0002"));
+    assert!(input.prompt.contains("work_item_0002"));
+    assert!(!input.prompt.contains("# Work Item 002"));
+    assert!(!input.prompt.contains("ProviderDescriptor 元数据层"));
     assert!(!input.prompt.contains("增量代码编写指令"));
     assert!(!input.prompt.contains("本轮没有新增修复要求"));
 }

@@ -47,7 +47,12 @@ impl CodingWorkspaceEngine {
             "execute_test_plan",
             &full_output,
         )?;
-        for provider_step_result in parse_testing_step_results_from_provider_output(&full_output) {
+        let execution_payload = parse_test_execution_payload_from_provider_output(&full_output)?;
+        let mut plan_defect_report = ExecutionPlanDefectReport {
+            source: PlanDefectSource::Tester,
+            findings: execution_payload.plan_defect_findings,
+        };
+        for provider_step_result in execution_payload.step_results {
             if !step_results
                 .iter()
                 .any(|existing| existing.step_id == provider_step_result.step_id)
@@ -135,10 +140,13 @@ impl CodingWorkspaceEngine {
                 "execute_test_plan_repair",
                 &repair_output,
             )?;
+            let repair_payload = parse_test_execution_payload_from_provider_output(&repair_output)?;
+            plan_defect_report = ExecutionPlanDefectReport {
+                source: PlanDefectSource::Tester,
+                findings: repair_payload.plan_defect_findings,
+            };
             report_raw_ref = repair_raw_ref;
-            for provider_step_result in
-                parse_testing_step_results_from_provider_output(&repair_output)
-            {
+            for provider_step_result in repair_payload.step_results {
                 if !step_results
                     .iter()
                     .any(|existing| existing.step_id == provider_step_result.step_id)
@@ -162,6 +170,17 @@ impl CodingWorkspaceEngine {
             report.overall_status = TestingOverallStatus::Blocked;
             report.context_warnings.push(summary);
         }
+        report.plan_defect_findings = plan_defect_report.findings.clone();
+        let plan_defect_route = if plan_defect_report.findings.is_empty() {
+            None
+        } else {
+            let projection = self.reviewer_projection_for_attempt(&attempt)?;
+            Some(
+                execution_plan_defect_flow_decision(&plan_defect_report, &projection)
+                    .label()
+                    .to_string(),
+            )
+        };
         bind_testing_report_role_run(&mut report, &role_run);
         self.store.save_testing_report(&attempt, &report)?;
         let entry = tester_chat_entry(
@@ -176,6 +195,7 @@ impl CodingWorkspaceEngine {
                 "role_run_id": role_run.id.clone(),
                 "run_no": role_run.run_no,
                 "raw_provider_output_ref": report.raw_provider_output_ref.clone()
+                ,"plan_defect_route": plan_defect_route
             })),
         );
         self.save_and_emit_chat_entry(&attempt, entry).await;

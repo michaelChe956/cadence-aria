@@ -8,6 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::product::models::ProviderName;
+use crate::product::plan_repair::plan_defect_structured_output_contract;
 
 use super::{
     CoderExecutionEnvelope, CoderWorkItemProjection, RenderedExecutionContext,
@@ -151,6 +152,8 @@ impl std::fmt::Display for ProjectionRenderError {
 impl std::error::Error for ProjectionRenderError {}
 
 pub trait ProviderProjectionRenderer: Send + Sync {
+    fn renderer_version(&self) -> &'static str;
+
     fn render_coder(
         &self,
         projection: &CoderWorkItemProjection,
@@ -468,11 +471,12 @@ fn render(
     validate_mandatory_sections(role, &sections)?;
 
     let mut text = format!(
-        "# {} {} Work Item Projection\n\nPermission and Tool Guidance: {}\n\nStructured Output: {}\n",
+        "# {} {} Work Item Projection\n\nPermission and Tool Guidance: {}\n\nStructured Output: {}\n{}",
         profile.provider_label,
         role.label(),
         profile.permission_and_tool_hint,
         profile.structured_output_wrapper,
+        plan_defect_structured_output_contract(),
     );
     for section in sections {
         text.push_str("\n## ");

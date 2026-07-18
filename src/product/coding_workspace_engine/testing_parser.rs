@@ -196,21 +196,25 @@ pub(crate) fn derive_testing_blocked_reason_code(
     "testing_blocked".to_string()
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct ProviderTestingStepResultsPayload {
-    #[serde(default)]
-    pub(crate) step_results: Vec<TestingStepResult>,
-}
-
-pub(crate) fn parse_testing_step_results_from_provider_output(
+pub(crate) fn parse_test_execution_payload_from_provider_output(
     output: &str,
-) -> Vec<TestingStepResult> {
+) -> Result<ProviderTestExecutionPayload, CodingWorkspaceEngineError> {
     let Some(json) = extract_json_object(output) else {
-        return Vec::new();
+        return Ok(ProviderTestExecutionPayload::default());
     };
-    serde_json::from_str::<ProviderTestingStepResultsPayload>(json)
-        .map(|payload| payload.step_results)
-        .unwrap_or_default()
+    let payload = serde_json::from_str::<ProviderTestExecutionPayload>(json).map_err(|error| {
+        CodingWorkspaceEngineError::ProviderStream(format!(
+            "tester_execution_payload_invalid: {error}"
+        ))
+    })?;
+    for finding in &payload.plan_defect_findings {
+        finding.validate().map_err(|error| {
+            CodingWorkspaceEngineError::ProviderStream(format!(
+                "tester_plan_defect_finding_invalid: {error:?}"
+            ))
+        })?;
+    }
+    Ok(payload)
 }
 
 pub fn testing_report_has_execution_evidence(report: &TestingReport) -> bool {

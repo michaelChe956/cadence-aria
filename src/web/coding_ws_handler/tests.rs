@@ -28,6 +28,7 @@ use super::{
     should_emit_coding_runner_protocol_error, should_resume_runner_after_gate_response,
 };
 
+mod code_review_router;
 mod failed_review_recovery;
 
 #[test]
@@ -96,37 +97,36 @@ fn coding_execution_context_uses_final_compile_work_item_when_workspace_artifact
 
 #[test]
 fn code_review_flow_decision_routes_reviewer_verdicts() {
+    let projection = code_review_router::reviewer_projection_fixture();
     assert_eq!(
-        code_review_flow_decision(&code_review_report_with(
-            ReviewVerdict::RequestChanges,
-            Vec::new()
-        )),
+        code_review_flow_decision(
+            &code_review_report_with(ReviewVerdict::RequestChanges, Vec::new()),
+            &projection
+        ),
         CodeReviewFlowDecision::RunCoderFix
     );
     assert_eq!(
-        code_review_flow_decision(&code_review_report_with(
-            ReviewVerdict::Blocked,
-            vec![ReviewFinding {
-                severity: FindingSeverity::Error,
-                file_path: Some("src/lib.rs".to_string()),
-                line: Some(42),
-                message: "missing validation".to_string(),
-                required_action: Some("add validation".to_string()),
-                source_stage: CodingExecutionStage::CodeReview,
-                evidence: Vec::new(),
-                related_requirements: Vec::new(),
-                related_design_constraints: Vec::new(),
-                related_work_item_tasks: Vec::new(),
-            }]
-        )),
+        code_review_flow_decision(
+            &code_review_report_with(
+                ReviewVerdict::Blocked,
+                vec![code_review_router::implementation_finding()]
+            ),
+            &projection
+        ),
         CodeReviewFlowDecision::RunCoderFix
     );
     assert_eq!(
-        code_review_flow_decision(&code_review_report_with(ReviewVerdict::Blocked, Vec::new())),
+        code_review_flow_decision(
+            &code_review_report_with(ReviewVerdict::Blocked, Vec::new()),
+            &projection,
+        ),
         CodeReviewFlowDecision::StopForHumanTriage
     );
     assert_eq!(
-        code_review_flow_decision(&code_review_report_with(ReviewVerdict::Approve, Vec::new())),
+        code_review_flow_decision(
+            &code_review_report_with(ReviewVerdict::Approve, Vec::new()),
+            &projection,
+        ),
         CodeReviewFlowDecision::ContinueAfterApprove
     );
 }

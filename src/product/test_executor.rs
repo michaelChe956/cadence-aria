@@ -256,6 +256,7 @@ pub async fn run_all_tests(
         skipped_required_steps: Vec::new(),
         context_warnings: Vec::new(),
         raw_provider_output_ref: None,
+        plan_defect_findings: Vec::new(),
     })
 }
 

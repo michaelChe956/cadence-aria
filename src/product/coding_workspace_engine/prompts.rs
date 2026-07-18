@@ -29,6 +29,7 @@ impl CodingWorkspaceEngine {
              {}\
              {}\
              {}\
+             {}\
              \n代码规范:\n\
              - 优先检查正确性、边界条件、测试覆盖、安全、性能和可维护性。\n\
              - findings 必须包含 severity、file_path、line、message、required_action、source_stage=code_review。\n\
@@ -46,6 +47,7 @@ impl CodingWorkspaceEngine {
             attempt.branch_name,
             attempt.base_branch,
             code_review_material_protocol(),
+            crate::product::plan_repair::plan_defect_structured_output_contract(),
             reviewer_test_scope_contract(),
             no_default_stack_assumption_contract(),
             work_item.unwrap_or_else(
@@ -92,6 +94,7 @@ impl CodingWorkspaceEngine {
              {}\
              {}\
              {}\
+             {}\
              \n输出要求:\n\
              - 分析影响范围（影响范围/impact_scope）。\n\
              - 给出 PR description 预览。\n\
@@ -113,6 +116,7 @@ impl CodingWorkspaceEngine {
             evaluation_context_json,
             truncate_prompt_section(&diff, 30_000),
             group_final_review_material_protocol(),
+            crate::product::plan_repair::plan_defect_structured_output_contract(),
             no_default_stack_assumption_contract(),
             retry_diagnostic_section
         ))
@@ -182,6 +186,7 @@ pub(crate) fn build_coding_prompt(
     prompt.push_str(coding_execution_protocol());
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
+    prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
 
@@ -250,6 +255,7 @@ pub(crate) fn build_coding_delta_prompt(
     prompt.push_str(coding_delta_execution_protocol());
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
+    prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
 
@@ -316,6 +322,7 @@ pub(crate) fn code_review_material_protocol() -> &'static str {
      - verdict 只能使用 approve、request_changes、blocked。\n\
      - finding.severity 只能使用 error、warning、info。\n\
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
+     - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
      - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
 }
 
@@ -332,7 +339,8 @@ pub(crate) fn group_final_review_material_protocol() -> &'static str {
      - verdict 只能使用 approve、request_changes、blocked。\n\
      - finding.severity 只能使用 error、warning、info。\n\
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
-     - findings 必须包含 source_stage=group_final_review。\n"
+     - findings 必须包含 source_stage=group_final_review。\n\
+     - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n"
 }
 
 pub(crate) fn append_coding_context_notes(
@@ -431,8 +439,9 @@ pub(crate) fn build_tester_execute_plan_prompt(
          If the plan is wrong, out of scope, or impossible to execute reliably, mark the affected required step blocked.\n\
          Do not generate new TestPlan steps during execute_test_plan.\n\
          If the current TestPlan is wrong, out of scope, or impossible to execute reliably, return blocked step_results for affected required steps with provider_analysis prefixed by \"test_plan_insufficient:\".\n\
-         At the end of execute_test_plan, output a JSON object with:\n\
-         {{\"step_results\":[{{\"step_id\":\"...\",\"status\":\"passed|failed|blocked|skipped\",\"evidence_refs\":[\"...\"],\"provider_analysis\":\"...\"}}]}}\n\
+         At the end of execute_test_plan, output only the canonical ProviderTestExecutionPayload JSON object:\n\
+         {{\"step_results\":[{{\"step_id\":\"...\",\"status\":\"passed|failed|blocked|skipped\",\"evidence_refs\":[\"...\"],\"provider_analysis\":\"...\"}}],\"plan_defect_findings\":[]}}\n\
+         plan_defect_findings 使用 canonical 字段 finding_id、severity、defect_class、reason_code、message、evidence、contract_refs、capability_refs、repair_target、recommended_route、confidence；普通 implementation defect 不放入该数组，而是通过 failed/blocked step_results 表达；普通 legacy output 缺少该数组时按空数组处理，不伪造 plan defect。\n\
          \n\
          TestPlan:\n```json\n{}\n```\n\
          \n\

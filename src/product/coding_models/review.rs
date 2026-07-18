@@ -1,6 +1,8 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::execution::CodingExecutionStage;
+use crate::product::models::{PlanDefectClass, PlanDefectRoute, RepairTarget};
+use crate::product::plan_repair::PlanDefectConfidence;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,16 +110,40 @@ pub struct ReviewFinding {
     pub source_stage: CodingExecutionStage,
     #[serde(default)]
     pub evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan_defect_evidence: Vec<crate::product::models::PlanDefectEvidence>,
     #[serde(default)]
     pub related_requirements: Vec<String>,
     #[serde(default)]
     pub related_design_constraints: Vec<String>,
     #[serde(default)]
     pub related_work_item_tasks: Vec<String>,
+    #[serde(default = "default_review_finding_defect_class")]
+    pub defect_class: PlanDefectClass,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub contract_refs: Vec<String>,
+    #[serde(default)]
+    pub capability_refs: Vec<String>,
+    #[serde(default)]
+    pub repair_target: Option<RepairTarget>,
+    #[serde(default = "default_review_finding_route")]
+    pub recommended_route: PlanDefectRoute,
+    #[serde(default)]
+    pub confidence: Option<PlanDefectConfidence>,
 }
 
 fn default_review_finding_source_stage() -> CodingExecutionStage {
     CodingExecutionStage::CodeReview
+}
+
+fn default_review_finding_defect_class() -> PlanDefectClass {
+    PlanDefectClass::ImplementationDefect
+}
+
+fn default_review_finding_route() -> PlanDefectRoute {
+    PlanDefectRoute::CoderRework
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

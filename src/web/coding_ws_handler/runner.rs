@@ -5,12 +5,12 @@ use tokio::sync::{mpsc, oneshot};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    ReviewVerdict,
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, ReviewVerdict,
 };
-use crate::product::coding_workspace_engine::{
-    CodingWorkspaceEngine, CodingWorkspaceEngineError, code_review_report_has_actionable_findings,
+pub(crate) use crate::product::coding_workspace_engine::{
+    CodeReviewFlowDecision, code_review_flow_decision, internal_review_flow_decision,
 };
+use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::{CodingAttemptRunKey, CodingRunReservation, WebAppState};
@@ -266,24 +266,6 @@ pub(crate) fn should_emit_coding_runner_protocol_error(status: &CodingAttemptSta
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodeReviewFlowDecision {
-    RunCoderFix,
-    StopForHumanTriage,
-    ContinueAfterApprove,
-}
-
-pub(crate) fn code_review_flow_decision(report: &CodeReviewReport) -> CodeReviewFlowDecision {
-    match report.verdict {
-        ReviewVerdict::RequestChanges => CodeReviewFlowDecision::RunCoderFix,
-        ReviewVerdict::Blocked if code_review_report_has_actionable_findings(report) => {
-            CodeReviewFlowDecision::RunCoderFix
-        }
-        ReviewVerdict::Blocked => CodeReviewFlowDecision::StopForHumanTriage,
-        ReviewVerdict::Approve => CodeReviewFlowDecision::ContinueAfterApprove,
-    }
-}
-
 pub(crate) async fn execute_start_coding_flow(
     state: &WebAppState,
     coding_store: &CodingAttemptStore,
@@ -426,8 +408,10 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            match internal_review.verdict {
-                ReviewVerdict::Approve => {
+            let internal_reviewer_projection =
+                engine.reviewer_projection_for_internal_review(&current, &internal_review)?;
+            match internal_review_flow_decision(&internal_review, &internal_reviewer_projection) {
+                CodeReviewFlowDecision::ContinueAfterApprove => {
                     current = if current.scope
                         == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
                     {
@@ -439,7 +423,13 @@ pub(crate) async fn execute_start_coding_flow(
                     };
                     return emit_current_session_state(event_tx, coding_store, &current).await;
                 }
-                ReviewVerdict::RequestChanges | ReviewVerdict::Blocked => {
+                CodeReviewFlowDecision::RunCoderFix
+                | CodeReviewFlowDecision::RetryVerification
+                | CodeReviewFlowDecision::StartPlanRepair
+                | CodeReviewFlowDecision::StartStoryAmendment
+                | CodeReviewFlowDecision::StartDesignAmendment
+                | CodeReviewFlowDecision::OpenOperationalGate
+                | CodeReviewFlowDecision::StopForHumanTriage => {
                     return emit_current_session_state(event_tx, coding_store, &current).await;
                 }
             }
@@ -488,7 +478,8 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            match code_review_flow_decision(&review_report) {
+            let reviewer_projection = engine.reviewer_projection_for_attempt(&current)?;
+            match code_review_flow_decision(&review_report, &reviewer_projection) {
                 CodeReviewFlowDecision::RunCoderFix => {
                     let coder_provider_name = coding_store
                         .get_role_provider_config_snapshot(
@@ -535,7 +526,12 @@ pub(crate) async fn execute_start_coding_flow(
                         _ => continue 'pipeline,
                     }
                 }
-                CodeReviewFlowDecision::StopForHumanTriage => {
+                CodeReviewFlowDecision::RetryVerification
+                | CodeReviewFlowDecision::StartPlanRepair
+                | CodeReviewFlowDecision::StartStoryAmendment
+                | CodeReviewFlowDecision::StartDesignAmendment
+                | CodeReviewFlowDecision::OpenOperationalGate
+                | CodeReviewFlowDecision::StopForHumanTriage => {
                     return emit_current_session_state(event_tx, coding_store, &current).await;
                 }
                 CodeReviewFlowDecision::ContinueAfterApprove => {

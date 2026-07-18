@@ -50,7 +50,10 @@ impl StreamingProviderAdapter for ProviderDrivenTestingNoToolCallProvider {
                         "status": "passed",
                         "evidence_refs": ["provider-managed-unit.log"],
                         "provider_analysis": "unit evidence accepted"
-                    }]
+                    }],
+                    "plan_defect_findings": [
+                        super::provider_execution_context::current_plan_defect_finding()
+                    ]
                 })
                 .to_string()
             };
@@ -404,6 +407,19 @@ async fn real_provider_driven_testing_accepts_final_step_results_without_tool_ca
     assert_eq!(report.overall_status, TestingOverallStatus::Passed);
     assert!(report.plan_id.is_some());
     assert_eq!(report.steps.len(), 1);
+    assert_eq!(report.plan_defect_findings.len(), 1);
+    assert_eq!(
+        report.plan_defect_findings[0].finding_id,
+        "tester_finding_0001"
+    );
+    assert_eq!(
+        report.plan_defect_findings[0].defect_class,
+        crate::product::models::PlanDefectClass::CurrentWorkItemInvalid
+    );
+    assert_eq!(
+        report.plan_defect_findings[0].evidence[0].source_ref,
+        "provider-managed-unit.log"
+    );
     assert_eq!(report.steps[0].step_id, "unit");
     assert_eq!(
         report.steps[0].evidence_refs,
@@ -442,6 +458,12 @@ async fn real_provider_driven_testing_accepts_final_step_results_without_tool_ca
                 .and_then(|metadata| metadata.get("phase"))
                 .and_then(|phase| phase.as_str())
                 == Some("testing_result")
+            && entry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("plan_defect_route"))
+                .and_then(|route| route.as_str())
+                == Some("stop_for_human_triage")
     }));
 }
 
@@ -750,9 +772,17 @@ fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeRev
             required_action: Some("add validation".to_string()),
             source_stage: CodingExecutionStage::CodeReview,
             evidence: vec!["review-output.log".to_string()],
+            plan_defect_evidence: Vec::new(),
             related_requirements: Vec::new(),
             related_design_constraints: Vec::new(),
             related_work_item_tasks: Vec::new(),
+            defect_class: crate::product::models::PlanDefectClass::ImplementationDefect,
+            reason_code: None,
+            contract_refs: Vec::new(),
+            capability_refs: Vec::new(),
+            repair_target: None,
+            recommended_route: crate::product::models::PlanDefectRoute::CoderRework,
+            confidence: None,
         }],
         tested_evidence_refs: Vec::new(),
         diff_refs: Vec::new(),
