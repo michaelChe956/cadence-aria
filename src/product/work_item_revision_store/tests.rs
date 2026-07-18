@@ -21,6 +21,7 @@ mod concurrency;
 mod initial_publication;
 mod projection_artifacts;
 mod publication;
+mod repair_status;
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";

@@ -496,6 +496,8 @@ impl WorkspaceEngine {
         let validation_report = PlanValidationReportArtifact {
             id: allocated_ids.validation_report_id.clone(),
             plan_id: previous_plan.id.clone(),
+            plan_revision_id: plan_revision.id.clone(),
+            plan_projection_bundle_id: plan_projection_bundle.id.clone(),
             contract_validation: contract_validation.clone(),
             projection_validation: projection_validation.clone(),
             created_at: publication_created_at.clone(),

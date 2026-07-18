@@ -625,6 +625,13 @@ fn validate_initial_publication_journal(
         || journal.artifacts.dependency_graph_revision.id
             != journal.allocated_ids.dependency_graph_revision_id
         || journal.artifacts.validation_report.id != journal.allocated_ids.validation_report_id
+        || journal.artifacts.validation_report.plan_revision_id
+            != journal.allocated_ids.plan_revision_id
+        || journal
+            .artifacts
+            .validation_report
+            .plan_projection_bundle_id
+            != journal.allocated_ids.plan_projection_bundle_id
         || journal.artifacts.plan_projection_bundle.id
             != journal.allocated_ids.plan_projection_bundle_id
         || journal.artifact_fingerprint != publication_fingerprint(&journal.artifacts)?

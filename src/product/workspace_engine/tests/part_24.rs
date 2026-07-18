@@ -123,12 +123,16 @@ async fn plan_repair_cancelled_replay_is_idempotent_without_state_writes() {
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap();
     child_engine
         .cancel_plan_amendment(&amendment_id, Some("first cancel".to_string()))

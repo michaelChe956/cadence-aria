@@ -353,6 +353,9 @@ fn plan_repair_store_status_and_evidence_updates_wait_for_request_lock() {
     };
     store.put_plan_lineage(&plan).unwrap();
     store.put_repair_request(&plan, &request).unwrap();
+    store
+        .update_repair_request_status(&plan, &request.id, PlanRepairRequestStatus::InProgress)
+        .unwrap();
 
     let target_path =
         store.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, &request.id);
@@ -364,11 +367,7 @@ fn plan_repair_store_status_and_evidence_updates_wait_for_request_lock() {
         let plan = plan.clone();
         let request_id = request.id.clone();
         spawn_operation(result_sender.clone(), move || {
-            store.update_repair_request_status(
-                &plan,
-                &request_id,
-                PlanRepairRequestStatus::InProgress,
-            )
+            store.transition_repair_request_to_awaiting_confirmation(&plan, &request_id)
         });
     }
     {
@@ -389,7 +388,7 @@ fn plan_repair_store_status_and_evidence_updates_wait_for_request_lock() {
         result.unwrap();
     }
     let stored = store.list_open_repair_requests(&plan).unwrap().remove(0);
-    assert_eq!(stored.status, PlanRepairRequestStatus::InProgress);
+    assert_eq!(stored.status, PlanRepairRequestStatus::AwaitingConfirmation);
     assert!(stored.evidence.contains(&extra));
 }
 

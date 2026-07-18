@@ -113,6 +113,8 @@ pub struct VerificationPlanRevision {
 pub struct PlanValidationReportArtifact {
     pub id: String,
     pub plan_id: String,
+    pub plan_revision_id: String,
+    pub plan_projection_bundle_id: String,
     pub contract_validation: ContractValidationReport,
     pub projection_validation: ProjectionValidationReport,
     pub created_at: String,

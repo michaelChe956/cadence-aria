@@ -77,8 +77,23 @@ pub struct PlanRepairPackageIdentity {
     pub next_plan_revision_id: String,
     pub projection_bundle_id: String,
     pub validation_report_id: String,
+    pub review_attestation_id: String,
     pub reviewed_plan_revision_id: String,
     pub review_generation_round_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRepairReviewAttestation {
+    pub id: String,
+    pub request_id: String,
+    pub amendment_id: String,
+    pub plan_id: String,
+    pub base_plan_revision_id: String,
+    pub reviewed_plan_revision_id: String,
+    pub plan_projection_bundle_id: String,
+    pub generation_round_id: String,
+    pub review: WorkItemPlanReviewComplete,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

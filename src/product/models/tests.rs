@@ -322,6 +322,8 @@ fn work_item_revision_models_shared_records_roundtrip() {
     assert_serde_roundtrip(&PlanValidationReportArtifact {
         id: "validation_report_0001".to_string(),
         plan_id: "issue_work_item_plan_0001".to_string(),
+        plan_revision_id: "plan_revision_0001".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
         contract_validation: ContractValidationReport { findings: vec![] },
         projection_validation: ProjectionValidationReport { findings: vec![] },
         created_at: "2026-07-17T00:00:00Z".to_string(),

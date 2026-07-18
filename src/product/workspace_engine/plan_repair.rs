@@ -3,8 +3,8 @@ use chrono::Utc;
 use crate::product::models::{
     PlanAmendmentManifest, PlanAmendmentPublicationPhase, PlanRepairAwaitingConfirmationPackage,
     PlanRepairRequest, PlanRepairRequestStatus, PlanRepairSessionSnapshotDto,
-    PlanRepairSessionStage, RepairTarget, WorkspaceReturnContext, WorkspaceSessionLink,
-    WorkspaceSessionLinkTrigger, WorkspaceSessionRelation,
+    PlanRepairSessionStage, RepairTarget, WorkItemPlanLineage, WorkspaceReturnContext,
+    WorkspaceSessionLink, WorkspaceSessionLinkTrigger, WorkspaceSessionRelation,
 };
 use crate::product::plan_repair::PlanRepairError;
 
@@ -51,6 +51,7 @@ impl WorkspaceEngine {
             .cloned();
         let mut selected_child = None;
         if let Some(existing) = selected.as_ref() {
+            validate_persisted_repair_request(&plan, existing)?;
             validate_reused_repair_request(existing, &request)?;
             selected_child = linked_child_session(
                 lifecycle,
@@ -80,7 +81,7 @@ impl WorkspaceEngine {
                     .ok_or_else(|| PlanRepairError::ActiveAmendmentExists {
                         amendment_id: active_amendment_id.to_string(),
                     })?;
-                validate_reused_repair_request(active_request, &request)?;
+                validate_persisted_repair_request(&plan, active_request)?;
                 let (link, child) = linked_child_session(
                     lifecycle,
                     &self.session.project_id,
@@ -227,10 +228,8 @@ impl WorkspaceEngine {
     }
 
     pub(crate) fn is_cancelled_plan_amendment_replay(&self, amendment_id: &str) -> bool {
-        self.plan_repair_snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.request.status == PlanRepairRequestStatus::Cancelled
-                && snapshot.request.amendment_id.as_deref() == Some(amendment_id)
-        })
+        self.validate_cancelled_plan_amendment_replay(amendment_id)
+            .unwrap_or(false)
     }
 
     pub async fn enter_plan_repair_awaiting_confirmation(
@@ -248,8 +247,24 @@ impl WorkspaceEngine {
                 &snapshot.request.plan_id,
             )
             .map_err(PlanRepairError::Store)?;
-        validate_awaiting_confirmation_package(&snapshot, &plan, &package)?;
+        let stored_request = revision_store
+            .get_repair_request(&plan, &snapshot.request.id)
+            .map_err(PlanRepairError::Store)?;
+        validate_persisted_awaiting_confirmation_package(
+            &revision_store,
+            &snapshot,
+            &plan,
+            &package,
+        )?;
         if snapshot.stage == PlanRepairSessionStage::AwaitingConfirmation {
+            if stored_request != snapshot.request
+                || stored_request.status != PlanRepairRequestStatus::AwaitingConfirmation
+            {
+                return Err(PlanRepairError::InvalidRepairTarget(
+                    "awaiting-confirmation entry requires the authoritative awaiting request"
+                        .to_string(),
+                ));
+            }
             if snapshot.projection.as_ref() == Some(&package.projection)
                 && snapshot.amendment.as_ref() == Some(&package.amendment)
                 && snapshot.validation.as_ref() == Some(&package.validation)
@@ -275,9 +290,6 @@ impl WorkspaceEngine {
                 snapshot.stage
             )));
         }
-        let stored_request = revision_store
-            .get_repair_request(&plan, &snapshot.request.id)
-            .map_err(PlanRepairError::Store)?;
         if snapshot.request.status != PlanRepairRequestStatus::InProgress
             || stored_request.status != PlanRepairRequestStatus::InProgress
         {
@@ -318,7 +330,12 @@ impl WorkspaceEngine {
             ));
         }
         let package = awaiting_confirmation_package_from_snapshot(&snapshot)?;
-        validate_awaiting_confirmation_package(&snapshot, &plan, &package)?;
+        validate_persisted_awaiting_confirmation_package(
+            &revision_store,
+            &snapshot,
+            &plan,
+            &package,
+        )?;
         let amendment = package.amendment;
         if amendment.id != amendment_id {
             return Err(PlanRepairError::AmendmentConflict {
@@ -356,23 +373,27 @@ impl WorkspaceEngine {
                 actual: amendment_id.to_string(),
             });
         }
-        if original_snapshot.request.status == PlanRepairRequestStatus::Cancelled {
+        if self.validate_cancelled_plan_amendment_replay(amendment_id)? {
             return Ok(());
         }
-        if matches!(
-            original_snapshot.stage,
-            PlanRepairSessionStage::Published
-                | PlanRepairSessionStage::ApplyingAmendment
-                | PlanRepairSessionStage::AmendmentApplyFailed
-                | PlanRepairSessionStage::Completed
-        ) || matches!(
-            original_snapshot.request.status,
-            PlanRepairRequestStatus::Published | PlanRepairRequestStatus::Applied
-        ) {
-            return Err(plan_published_conflict());
+        if original_snapshot.stage != PlanRepairSessionStage::AwaitingConfirmation
+            || original_snapshot.request.status != PlanRepairRequestStatus::AwaitingConfirmation
+            || self.session.stage != WorkspaceStage::HumanConfirm
+        {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair cancellation requires an awaiting-confirmation session".to_string(),
+            ));
         }
 
         let lifecycle = self.persistent_lifecycle()?;
+        let stored_session = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(PlanRepairError::Store)?;
+        if stored_session.status != WorkspaceSessionStatus::WaitingForHuman {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair cancellation requires the authoritative waiting session".to_string(),
+            ));
+        }
         let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
         let plan = revision_store
             .get_plan_lineage(
@@ -381,6 +402,23 @@ impl WorkspaceEngine {
                 &original_snapshot.request.plan_id,
             )
             .map_err(PlanRepairError::Store)?;
+        let stored_request = revision_store
+            .get_repair_request(&plan, &original_snapshot.request.id)
+            .map_err(PlanRepairError::Store)?;
+        if stored_request != original_snapshot.request
+            || stored_request.status != PlanRepairRequestStatus::AwaitingConfirmation
+        {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair cancellation requires the authoritative awaiting request".to_string(),
+            ));
+        }
+        let package = awaiting_confirmation_package_from_snapshot(&original_snapshot)?;
+        validate_persisted_awaiting_confirmation_package(
+            &revision_store,
+            &original_snapshot,
+            &plan,
+            &package,
+        )?;
         match revision_store.find_plan_amendment_publication_journal(&plan, amendment_id) {
             Ok(Some(journal)) if journal.phase == PlanAmendmentPublicationPhase::PlanPublished => {
                 return Err(plan_published_conflict());
@@ -396,6 +434,43 @@ impl WorkspaceEngine {
             .unwrap_or_else(|| "用户取消 Plan Amendment".to_string());
         let journal = cancellation_transition(self, original_snapshot, cancel_summary);
         self.commit_plan_repair_transition(journal)
+    }
+
+    fn validate_cancelled_plan_amendment_replay(
+        &self,
+        amendment_id: &str,
+    ) -> Result<bool, PlanRepairError> {
+        let Some(snapshot) = self.plan_repair_snapshot.as_ref() else {
+            return Ok(false);
+        };
+        if snapshot.request.status != PlanRepairRequestStatus::Cancelled
+            || snapshot.request.amendment_id.as_deref() != Some(amendment_id)
+            || snapshot.stage != PlanRepairSessionStage::Completed
+            || self.session.stage != WorkspaceStage::Completed
+        {
+            return Ok(false);
+        }
+        let lifecycle = self.persistent_lifecycle()?;
+        let stored_session = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(PlanRepairError::Store)?;
+        if stored_session.status != WorkspaceSessionStatus::Terminated {
+            return Ok(false);
+        }
+        let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+        let plan = revision_store
+            .get_plan_lineage(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &snapshot.request.plan_id,
+            )
+            .map_err(PlanRepairError::Store)?;
+        let stored_request = revision_store
+            .get_repair_request(&plan, &snapshot.request.id)
+            .map_err(PlanRepairError::Store)?;
+        Ok(stored_request == snapshot.request
+            && stored_request.status == PlanRepairRequestStatus::Cancelled
+            && stored_request.amendment_id.as_deref() == Some(amendment_id))
     }
 
     fn require_plan_repair_snapshot(
@@ -447,14 +522,37 @@ fn validate_reused_repair_request(
     if persisted.plan_id != incoming.plan_id
         || persisted.base_plan_revision_id != incoming.base_plan_revision_id
         || persisted.fingerprint != incoming.fingerprint
-        || persisted.trigger_attempt_id != incoming.trigger_attempt_id
-        || persisted.trigger_unit_run_id != incoming.trigger_unit_run_id
-        || persisted.trigger_review_id != incoming.trigger_review_id
-        || persisted.trigger_finding_id != incoming.trigger_finding_id
+        || persisted.defect_class != incoming.defect_class
+        || !persisted
+            .reason_code
+            .trim()
+            .eq_ignore_ascii_case(incoming.reason_code.trim())
         || !same_repair_target_identity(&persisted.repair_target, &incoming.repair_target)
+        || !same_string_set(&persisted.contract_refs, &incoming.contract_refs)
+        || !same_string_set(&persisted.capability_refs, &incoming.capability_refs)
     {
         return Err(PlanRepairError::InvalidRepairTarget(
-            "persisted plan repair request lineage does not match the incoming trigger".to_string(),
+            "persisted plan repair request identity does not match the incoming request"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_persisted_repair_request(
+    plan: &WorkItemPlanLineage,
+    request: &PlanRepairRequest,
+) -> Result<(), PlanRepairError> {
+    if request.plan_id != plan.id
+        || plan.active_revision_id.as_deref() != Some(request.base_plan_revision_id.as_str())
+        || request
+            .amendment_id
+            .as_deref()
+            .is_some_and(|amendment_id| amendment_id != amendment_id_for(&request.fingerprint))
+    {
+        return Err(PlanRepairError::InvalidRepairTarget(
+            "persisted plan repair request lineage is inconsistent with the active plan"
+                .to_string(),
         ));
     }
     Ok(())

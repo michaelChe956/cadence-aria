@@ -17,7 +17,7 @@ use crate::web::workspace_ws_types::{
 
 use super::{
     WorkspaceSession, awaiting_confirmation_package_from_snapshot,
-    validate_awaiting_confirmation_package,
+    validate_persisted_awaiting_confirmation_package,
 };
 
 pub(crate) fn initial_plan_repair_timeline(session: &WorkspaceSessionRecord) -> Vec<TimelineNode> {
@@ -240,8 +240,13 @@ fn validate_refresh_identity(
         }
         let package = awaiting_confirmation_package_from_snapshot(snapshot)
             .map_err(|error| format!("plan repair awaiting package invalid: {error:?}"))?;
-        validate_awaiting_confirmation_package(snapshot, &plan, &package)
-            .map_err(|error| format!("plan repair awaiting package invalid: {error:?}"))?;
+        validate_persisted_awaiting_confirmation_package(
+            &revision_store,
+            snapshot,
+            &plan,
+            &package,
+        )
+        .map_err(|error| format!("plan repair awaiting package invalid: {error:?}"))?;
     }
     Ok(())
 }

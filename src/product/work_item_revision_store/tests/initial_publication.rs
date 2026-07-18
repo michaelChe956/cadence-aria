@@ -370,6 +370,8 @@ fn initial_publication_journal(
         validation_report: PlanValidationReportArtifact {
             id: ids.validation_report_id.clone(),
             plan_id: PLAN_ID.to_string(),
+            plan_revision_id: ids.plan_revision_id.clone(),
+            plan_projection_bundle_id: ids.plan_projection_bundle_id.clone(),
             contract_validation: ContractValidationReport { findings: vec![] },
             projection_validation: ProjectionValidationReport { findings: vec![] },
             created_at: timestamp.to_string(),

@@ -23,3 +23,5 @@ include!("tests/part_22.rs");
 include!("tests/part_23.rs");
 include!("tests/part_24.rs");
 include!("tests/part_25.rs");
+include!("tests/part_26.rs");
+include!("tests/part_27.rs");

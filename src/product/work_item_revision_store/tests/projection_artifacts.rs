@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::product::models::{
     DependencyGraphRevision, HandoffRevision, HumanPresentationRevision, PlanProjectionBundle,
-    PlanValidationReportArtifact, WorkItemProjectionBundle,
+    PlanRepairReviewAttestation, PlanValidationReportArtifact, WorkItemProjectionBundle,
 };
 use crate::product::work_item_contract::{
     ContractValidationReport, build_dependency_contract_graph,
@@ -10,6 +10,10 @@ use crate::product::work_item_contract::{
 use crate::product::work_item_projection::{
     PlanProjectionCompileInput, PlanProjectionCompiler, ProjectionValidationReport,
     WorkItemProjectionCompiler, projection_hashes,
+};
+use crate::web::workspace_ws_types::{
+    WorkItemPlanReviewAction, WorkItemPlanReviewComplete, WorkItemPlanReviewScope,
+    WorkItemPlanReviewVerdict,
 };
 
 use super::{PLAN_ID, WORK_ITEM_ID, logical_work_item, test_store_and_plan, work_item_revision};
@@ -29,6 +33,8 @@ fn work_item_revision_store_persists_scoped_revision_artifacts() {
     let validation = PlanValidationReportArtifact {
         id: "plan_validation_report_0001".to_string(),
         plan_id: PLAN_ID.to_string(),
+        plan_revision_id: "plan_revision_0001".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
         contract_validation: ContractValidationReport { findings: vec![] },
         projection_validation: ProjectionValidationReport { findings: vec![] },
         created_at: "2026-07-17T00:00:05Z".to_string(),
@@ -159,6 +165,53 @@ fn work_item_revision_store_persists_scoped_revision_artifacts() {
             .unwrap(),
         handoff
     );
+}
+
+#[test]
+fn plan_repair_review_attestation_store_is_scoped_immutable_and_idempotent() {
+    let (_temp, store, plan) = test_store_and_plan();
+    let attestation = PlanRepairReviewAttestation {
+        id: "plan_repair_review_attestation_0001".to_string(),
+        request_id: "plan_repair_request_0001".to_string(),
+        amendment_id: "plan_amendment_0001".to_string(),
+        plan_id: PLAN_ID.to_string(),
+        base_plan_revision_id: "plan_revision_0001".to_string(),
+        reviewed_plan_revision_id: "plan_revision_0002".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0002".to_string(),
+        generation_round_id: "repair_round_0001".to_string(),
+        review: WorkItemPlanReviewComplete {
+            verdict: WorkItemPlanReviewVerdict::Pass,
+            review_scope: WorkItemPlanReviewScope::Outline,
+            target_outline_id: None,
+            generation_round_id: "repair_round_0001".to_string(),
+            draft_id: None,
+            batch_id: None,
+            review_action: WorkItemPlanReviewAction::Continue,
+            gates: Vec::new(),
+            affects_items: Vec::new(),
+            warnings: Vec::new(),
+        },
+        created_at: "2026-07-18T00:00:02Z".to_string(),
+    };
+
+    store
+        .put_plan_repair_review_attestation(&plan, &attestation)
+        .unwrap();
+    store
+        .put_plan_repair_review_attestation(&plan, &attestation)
+        .unwrap();
+    assert_eq!(
+        store
+            .get_plan_repair_review_attestation(&plan, &attestation.id)
+            .unwrap(),
+        attestation
+    );
+    let mut conflicting = attestation.clone();
+    conflicting.reviewed_plan_revision_id = "plan_revision_wrong".to_string();
+    assert!(matches!(
+        store.put_plan_repair_review_attestation(&plan, &conflicting),
+        Err(crate::product::json_store::ProductStoreError::IdentityMismatch { .. })
+    ));
 }
 
 fn assert_presentation_roundtrip(

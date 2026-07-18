@@ -15,6 +15,8 @@ impl WorkItemRevisionStore {
         self.ensure_plan_scope(plan)?;
         validate_relative_id(&value.id)?;
         validate_relative_id(&value.plan_id)?;
+        validate_relative_id(&value.plan_revision_id)?;
+        validate_relative_id(&value.plan_projection_bundle_id)?;
         if value.plan_id != plan.id {
             return Err(identity_mismatch("plan_validation_report", &value.id));
         }
@@ -48,7 +50,11 @@ impl WorkItemRevisionStore {
             "plan_validation_report",
             report_id,
         )?;
-        if value.id != report_id || value.plan_id != plan.id {
+        if value.id != report_id
+            || value.plan_id != plan.id
+            || validate_relative_id(&value.plan_revision_id).is_err()
+            || validate_relative_id(&value.plan_projection_bundle_id).is_err()
+        {
             return Err(identity_mismatch("plan_validation_report", report_id));
         }
         Ok(value)

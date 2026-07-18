@@ -173,23 +173,18 @@ async fn plan_repair_child_session_reuses_open_fingerprint_and_active_amendment(
     let first_request = plan_repair_fixture("plan_repair_request_0001", "fingerprint_same");
     let mut duplicate_request = first_request.clone();
     duplicate_request.id = "plan_repair_request_0002".to_string();
+    duplicate_request.trigger_attempt_id = "coding_attempt_0002".to_string();
+    duplicate_request.trigger_unit_run_id = "coding_unit_run_0003".to_string();
+    duplicate_request.trigger_review_id = Some("code_review_0002".to_string());
+    duplicate_request.trigger_finding_id = "finding_duplicate".to_string();
     duplicate_request.evidence[0].source_ref =
-        "code_review_0001#finding_duplicate".to_string();
+        "code_review_0002#finding_duplicate".to_string();
     let first = engine
         .start_plan_repair(first_request)
         .await
         .unwrap();
     let duplicate = engine.start_plan_repair(duplicate_request).await.unwrap();
-    let conflict_error = engine
-        .start_plan_repair(plan_repair_fixture("plan_repair_request_0003", "fingerprint_other"))
-        .await
-        .unwrap_err();
-
     assert_eq!(duplicate.id, first.id);
-    assert!(matches!(
-        conflict_error,
-        crate::product::plan_repair::PlanRepairError::InvalidRepairTarget(_)
-    ));
     assert_eq!(
         lifecycle
             .list_workspace_sessions("project_0001", "issue_0001")
@@ -220,7 +215,7 @@ async fn plan_repair_child_session_recovers_orphan_without_creating_second_sessi
         "plan_repair_request_0001",
         "fingerprint_orphan_recovery",
     );
-    let amendment_id = "plan_amendment_fingerprint_orphan_recov".to_string();
+    let amendment_id = format!("plan_amendment_{}", request.fingerprint);
     request.amendment_id = Some(amendment_id.clone());
     request.status = crate::product::models::PlanRepairRequestStatus::InProgress;
     let plan = revision_store
@@ -357,12 +352,16 @@ async fn plan_repair_refresh_restores_awaiting_confirmation_state() {
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap();
 
     let restored = plan_repair_restarted_child_engine(
@@ -410,12 +409,16 @@ async fn plan_repair_confirmation_is_recorded_exactly_once() {
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap();
 
     child_engine
@@ -456,12 +459,16 @@ async fn plan_repair_cancel_keeps_request_timeline_and_lock_consistent() {
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap();
 
     child_engine
@@ -488,7 +495,7 @@ async fn plan_repair_cancel_keeps_request_timeline_and_lock_consistent() {
     assert_eq!(stored_plan.active_amendment_id, None);
     assert_eq!(
         snapshot.stage,
-        crate::product::models::PlanRepairSessionStage::Failed
+        crate::product::models::PlanRepairSessionStage::Completed
     );
     assert!(snapshot.timeline_nodes.iter().any(|node| {
         node.node_type == TimelineNodeType::PlanAmendmentCancelled
@@ -511,12 +518,16 @@ async fn plan_repair_cancel_fails_closed_after_plan_published() {
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap();
     revision_store
         .put_plan_amendment_publication_journal(

@@ -5,17 +5,18 @@ async fn plan_repair_reuse_rejects_persisted_request_lineage_mismatch_without_wr
         ("base", |request| {
             request.base_plan_revision_id = "plan_revision_wrong".to_string();
         }),
-        ("attempt", |request| {
-            request.trigger_attempt_id = "coding_attempt_wrong".to_string();
+        ("defect_class", |request| {
+            request.defect_class =
+                crate::product::models::PlanDefectClass::UpstreamContractInvalid;
         }),
-        ("unit_run", |request| {
-            request.trigger_unit_run_id = "coding_unit_run_wrong".to_string();
+        ("reason", |request| {
+            request.reason_code = "different_reason".to_string();
         }),
-        ("review", |request| {
-            request.trigger_review_id = Some("code_review_wrong".to_string());
+        ("contract_refs", |request| {
+            request.contract_refs = vec!["contract_wrong".to_string()];
         }),
-        ("finding", |request| {
-            request.trigger_finding_id = "finding_wrong".to_string();
+        ("capability_refs", |request| {
+            request.capability_refs = vec!["capability_wrong".to_string()];
         }),
         ("repair_target", |request| {
             request.repair_target.logical_work_item_ids =
@@ -98,6 +99,40 @@ async fn plan_repair_reuse_accepts_reordered_equivalent_repair_target_identity()
     let duplicate_child = parent.start_plan_repair(duplicate).await.unwrap();
 
     assert_eq!(duplicate_child.id, first_child.id);
+}
+
+#[tokio::test]
+async fn plan_repair_active_amendment_returns_existing_child_for_different_fingerprint() {
+    let (_tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let first = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_0001",
+            "fingerprint_active_existing",
+        ))
+        .await
+        .unwrap();
+    let incoming = plan_repair_fixture(
+        "plan_repair_request_0002",
+        "fingerprint_active_different",
+    );
+
+    let recovered = parent.start_plan_repair(incoming).await.unwrap();
+
+    assert_eq!(recovered.id, first.id);
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let requests = revision_store.list_open_repair_requests(&plan).unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].id, "plan_repair_request_0001");
+    assert_eq!(requests[0].evidence.len(), 1);
+    assert_eq!(
+        lifecycle
+            .list_workspace_sessions("project_0001", "issue_0001")
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -273,12 +308,16 @@ async fn plan_repair_refresh_rejects_incomplete_awaiting_package_as_failed() {
             .unwrap();
         let amendment_id = request.amendment_id.clone().unwrap();
         let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
-        child_engine
-            .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+        plan_repair_enter_awaiting(
+            &mut child_engine,
+            &revision_store,
+            &plan,
+            plan_repair_awaiting_package(
                 &request.id,
                 &amendment_id,
-            ))
-            .await
+            ),
+        )
+        .await
             .unwrap();
         let mut snapshot = child_engine.plan_repair_session_state().unwrap().clone();
         mutate(&mut snapshot);
@@ -332,12 +371,16 @@ async fn plan_repair_confirm_revalidates_awaiting_package_and_current_amendment_
             .unwrap();
         let amendment_id = request.amendment_id.clone().unwrap();
         let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
-        child_engine
-            .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+        plan_repair_enter_awaiting(
+            &mut child_engine,
+            &revision_store,
+            &plan,
+            plan_repair_awaiting_package(
                 &request.id,
                 &amendment_id,
-            ))
-            .await
+            ),
+        )
+        .await
             .unwrap();
         if missing_package_identity {
             child_engine
@@ -398,12 +441,16 @@ async fn plan_repair_refresh_rejects_tampered_awaiting_package_as_failed() {
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap();
     let mut snapshot = child_engine.plan_repair_session_state().unwrap().clone();
     snapshot
@@ -448,12 +495,16 @@ async fn plan_repair_refresh_rejects_stale_base_or_active_amendment_as_failed() 
             .unwrap();
         let amendment_id = request.amendment_id.clone().unwrap();
         let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
-        child_engine
-            .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+        plan_repair_enter_awaiting(
+            &mut child_engine,
+            &revision_store,
+            &plan,
+            plan_repair_awaiting_package(
                 &request.id,
                 &amendment_id,
-            ))
-            .await
+            ),
+        )
+        .await
             .unwrap();
         if stale_base {
             revision_store

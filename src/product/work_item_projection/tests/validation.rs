@@ -454,6 +454,8 @@ fn work_item_projection_strong_bundles_and_validation_artifact_roundtrip() {
     let artifact = PlanValidationReportArtifact {
         id: "validation_0001".to_string(),
         plan_id: "plan_0001".to_string(),
+        plan_revision_id: "plan_revision_0001".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
         contract_validation: ContractValidationReport { findings: vec![] },
         projection_validation: ProjectionValidationReport { findings: vec![] },
         created_at: "2026-07-17T00:00:00Z".to_string(),

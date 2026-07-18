@@ -26,12 +26,16 @@ async fn plan_repair_awaiting_journal_recovers_every_persistence_boundary() {
         child_engine.plan_repair_crash_after = Some(crash_point);
 
         assert!(
-            child_engine
-                .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+            plan_repair_enter_awaiting(
+                &mut child_engine,
+                &revision_store,
+                &plan,
+                plan_repair_awaiting_package(
                     &request.id,
                     &amendment_id,
-                ))
-                .await
+                ),
+            )
+            .await
                 .is_err()
         );
 
@@ -82,12 +86,16 @@ async fn plan_repair_confirm_journal_recovers_completed_confirmation_exactly_onc
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap();
     child_engine.plan_repair_crash_after = Some(PlanRepairCrashPoint::TimelinePersisted);
 
@@ -132,12 +140,16 @@ async fn plan_repair_cancel_journal_recovers_after_lock_release() {
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap();
     child_engine.plan_repair_crash_after = Some(PlanRepairCrashPoint::LockReleased);
 
@@ -193,12 +205,16 @@ async fn plan_repair_cancel_journal_fails_closed_when_publication_wins_recovery_
         .unwrap();
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap();
     child_engine.plan_repair_crash_after = Some(PlanRepairCrashPoint::SessionPersisted);
     assert!(
@@ -273,8 +289,12 @@ async fn plan_repair_cancel_rejects_active_revision_already_published_without_jo
     let amendment_id = request.amendment_id.clone().unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
     let package = plan_repair_awaiting_package(&request.id, &amendment_id);
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(package.clone())
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        package.clone(),
+    )
         .await
         .unwrap();
     revision_store
@@ -371,8 +391,12 @@ async fn plan_repair_cancel_journal_restores_request_when_publication_wins_after
         )
         .unwrap();
     let mut child_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, child.clone());
-    child_engine
-        .enter_plan_repair_awaiting_confirmation(package.clone())
+    plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        package.clone(),
+    )
         .await
         .unwrap();
     child_engine.plan_repair_crash_after = Some(PlanRepairCrashPoint::RequestPersisted);

@@ -11,6 +11,7 @@ fn plan_repair_awaiting_package(
             next_plan_revision_id: "plan_revision_0002".to_string(),
             projection_bundle_id: "plan_projection_bundle_0002".to_string(),
             validation_report_id: "plan_validation_report_0002".to_string(),
+            review_attestation_id: "plan_repair_review_attestation_0002".to_string(),
             reviewed_plan_revision_id: "plan_revision_0002".to_string(),
             review_generation_round_id: "repair_round_0001".to_string(),
         },
@@ -53,6 +54,8 @@ fn plan_repair_awaiting_package(
         validation: crate::product::models::PlanValidationReportArtifact {
             id: "plan_validation_report_0002".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
+            plan_revision_id: "plan_revision_0002".to_string(),
+            plan_projection_bundle_id: "plan_projection_bundle_0002".to_string(),
             contract_validation:
                 crate::product::work_item_contract::ContractValidationReport {
                     findings: Vec::new(),
@@ -116,8 +119,7 @@ where
     let mut package = plan_repair_awaiting_package(&request.id, &amendment_id);
     mutate(&mut package);
 
-    let error = child_engine
-        .enter_plan_repair_awaiting_confirmation(package)
+    let error = plan_repair_enter_awaiting(&mut child_engine, &revision_store, &plan, package)
         .await
         .unwrap_err();
 
@@ -364,12 +366,16 @@ async fn plan_repair_awaiting_rejects_stale_base_revision_before_timeline_persis
         .timeline_nodes
         .clone();
 
-    let error = child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    let error = plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap_err();
 
     assert!(matches!(
@@ -407,12 +413,16 @@ async fn plan_repair_awaiting_rejects_terminal_source_stage_without_writes() {
         crate::product::models::PlanRepairSessionStage::Failed;
     let before = child_engine.plan_repair_session_state().unwrap().clone();
 
-    let error = child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    let error = plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap_err();
 
     assert!(matches!(
@@ -463,12 +473,16 @@ async fn plan_repair_awaiting_rejects_terminal_request_status_without_writes() {
             .status = status.clone();
         let before = child_engine.plan_repair_session_state().unwrap().clone();
 
-        let error = child_engine
-            .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+        let error = plan_repair_enter_awaiting(
+            &mut child_engine,
+            &revision_store,
+            &plan,
+            plan_repair_awaiting_package(
                 &request.id,
                 &amendment_id,
-            ))
-            .await
+            ),
+        )
+        .await
             .unwrap_err();
 
         assert!(matches!(
@@ -509,12 +523,16 @@ async fn plan_repair_awaiting_requires_matching_active_amendment_without_writes(
         .unwrap();
     let before = child_engine.plan_repair_session_state().unwrap().clone();
 
-    let error = child_engine
-        .enter_plan_repair_awaiting_confirmation(plan_repair_awaiting_package(
+    let error = plan_repair_enter_awaiting(
+        &mut child_engine,
+        &revision_store,
+        &plan,
+        plan_repair_awaiting_package(
             &request.id,
             &amendment_id,
-        ))
-        .await
+        ),
+    )
+    .await
         .unwrap_err();
 
     assert!(matches!(

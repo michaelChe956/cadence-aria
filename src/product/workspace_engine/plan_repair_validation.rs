@@ -4,6 +4,7 @@ use crate::product::models::{
     PlanRepairAwaitingConfirmationPackage, PlanRepairSessionSnapshotDto, WorkItemPlanLineage,
 };
 use crate::product::plan_repair::PlanRepairError;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::workspace_ws_types::{
     WorkItemPlanReviewAction, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
 };
@@ -95,6 +96,39 @@ pub(crate) fn validate_awaiting_confirmation_package(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_persisted_awaiting_confirmation_package(
+    revision_store: &WorkItemRevisionStore,
+    snapshot: &PlanRepairSessionSnapshotDto,
+    plan: &WorkItemPlanLineage,
+    package: &PlanRepairAwaitingConfirmationPackage,
+) -> Result<(), PlanRepairError> {
+    let persisted_projection = revision_store
+        .get_plan_projection_bundle(plan, &package.package_identity.projection_bundle_id)
+        .map_err(PlanRepairError::Store)?;
+    let persisted_validation = revision_store
+        .get_plan_validation_report(plan, &package.package_identity.validation_report_id)
+        .map_err(PlanRepairError::Store)?;
+    let persisted_review = revision_store
+        .get_plan_repair_review_attestation(plan, &package.package_identity.review_attestation_id)
+        .map_err(PlanRepairError::Store)?;
+    if persisted_projection != package.projection
+        || persisted_validation != package.validation
+        || persisted_validation.plan_revision_id != package.amendment.new_plan_revision_id
+        || persisted_validation.plan_projection_bundle_id != package.projection.id
+        || persisted_review.request_id != snapshot.request.id
+        || persisted_review.amendment_id != package.amendment.id
+        || persisted_review.plan_id != snapshot.request.plan_id
+        || persisted_review.base_plan_revision_id != snapshot.request.base_plan_revision_id
+        || persisted_review.reviewed_plan_revision_id != package.amendment.new_plan_revision_id
+        || persisted_review.plan_projection_bundle_id != package.projection.id
+        || persisted_review.generation_round_id != package.plan_review.generation_round_id
+        || persisted_review.review != package.plan_review
+    {
+        return Err(invalid_package("persisted artifact provenance mismatch"));
+    }
+    validate_awaiting_confirmation_package(snapshot, plan, package)
 }
 
 pub(crate) fn awaiting_confirmation_package_from_snapshot(

@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    PlanAmendmentPublicationPhase, PlanRepairAwaitingConfirmationPackage, PlanRepairRequestStatus,
-    PlanRepairSessionSnapshotDto, PlanRepairSessionStage, WorkItemPlanLineage,
-    WorkspaceSessionStatus,
+    PlanAmendmentPublicationPhase, PlanRepairAwaitingConfirmationPackage, PlanRepairRequest,
+    PlanRepairRequestStatus, PlanRepairSessionSnapshotDto, PlanRepairSessionStage,
+    WorkItemPlanLineage, WorkspaceSessionStatus,
 };
 use crate::product::plan_repair::PlanRepairError;
 use crate::product::work_item_revision_store::{
@@ -185,7 +185,7 @@ pub(crate) fn cancellation_transition(
     );
     snapshot.request.status = PlanRepairRequestStatus::Cancelled;
     snapshot.request.updated_at = now.clone();
-    snapshot.stage = PlanRepairSessionStage::Failed;
+    snapshot.stage = PlanRepairSessionStage::Completed;
     snapshot.timeline_nodes = timeline_nodes.clone();
     snapshot.error = Some(cancel_summary);
     transition_journal(
@@ -310,6 +310,7 @@ fn apply_transition_journal(
     ensure_cancel_not_published(&revision_store, journal)?;
 
     if journal.phase < PlanRepairTransitionPhase::TimelinePersisted {
+        ensure_transition_request_status(&revision_store, journal)?;
         lifecycle
             .save_timeline_nodes(&journal.session_id, &journal.target_timeline_nodes)
             .map_err(PlanRepairError::Store)?;
@@ -321,6 +322,7 @@ fn apply_transition_journal(
         maybe_simulate_crash(crash_after, PlanRepairCrashPoint::TimelinePersisted)?;
     }
     if journal.phase < PlanRepairTransitionPhase::SnapshotPersisted {
+        ensure_transition_request_status(&revision_store, journal)?;
         lifecycle
             .save_plan_repair_session_state(
                 &journal.project_id,
@@ -337,6 +339,7 @@ fn apply_transition_journal(
         maybe_simulate_crash(crash_after, PlanRepairCrashPoint::SnapshotPersisted)?;
     }
     if journal.phase < PlanRepairTransitionPhase::SessionPersisted {
+        ensure_transition_request_status(&revision_store, journal)?;
         lifecycle
             .update_workspace_session_status(
                 &journal.session_id,
@@ -352,16 +355,11 @@ fn apply_transition_journal(
     }
     if journal.phase < PlanRepairTransitionPhase::RequestPersisted {
         ensure_cancel_not_published(&revision_store, journal)?;
+        ensure_transition_request_status(&revision_store, journal)?;
         let plan = revision_store
             .get_plan_lineage(&journal.project_id, &journal.issue_id, &journal.plan_id)
             .map_err(PlanRepairError::Store)?;
-        let request = revision_store
-            .update_repair_request_status(
-                &plan,
-                &journal.request_id,
-                journal.target_request_status.clone(),
-            )
-            .map_err(PlanRepairError::Store)?;
+        let request = persist_transition_request_status(&revision_store, &plan, journal)?;
         journal.target_snapshot.request = request;
         save_transition_journal(lifecycle, journal)?;
         lifecycle
@@ -437,6 +435,48 @@ fn apply_transition_journal(
     save_transition_journal(lifecycle, journal)?;
     delete_transition_journal(lifecycle, journal)?;
     Ok(())
+}
+
+fn ensure_transition_request_status(
+    revision_store: &WorkItemRevisionStore,
+    journal: &PlanRepairTransitionJournal,
+) -> Result<(), PlanRepairError> {
+    let plan = revision_store
+        .get_plan_lineage(&journal.project_id, &journal.issue_id, &journal.plan_id)
+        .map_err(PlanRepairError::Store)?;
+    match journal.operation {
+        PlanRepairTransitionOperation::AwaitingConfirmation => revision_store
+            .ensure_repair_request_can_enter_awaiting_confirmation(&plan, &journal.request_id)
+            .map(|_| ())
+            .map_err(PlanRepairError::Store),
+        PlanRepairTransitionOperation::Confirm => revision_store
+            .confirm_repair_request_awaiting_confirmation(&plan, &journal.request_id)
+            .map(|_| ())
+            .map_err(PlanRepairError::Store),
+        PlanRepairTransitionOperation::Cancel => Ok(()),
+    }
+}
+
+fn persist_transition_request_status(
+    revision_store: &WorkItemRevisionStore,
+    plan: &WorkItemPlanLineage,
+    journal: &PlanRepairTransitionJournal,
+) -> Result<PlanRepairRequest, PlanRepairError> {
+    match journal.operation {
+        PlanRepairTransitionOperation::AwaitingConfirmation => revision_store
+            .transition_repair_request_to_awaiting_confirmation(plan, &journal.request_id)
+            .map_err(PlanRepairError::Store),
+        PlanRepairTransitionOperation::Confirm => revision_store
+            .confirm_repair_request_awaiting_confirmation(plan, &journal.request_id)
+            .map_err(PlanRepairError::Store),
+        PlanRepairTransitionOperation::Cancel => revision_store
+            .update_repair_request_status(
+                plan,
+                &journal.request_id,
+                journal.target_request_status.clone(),
+            )
+            .map_err(PlanRepairError::Store),
+    }
 }
 
 fn ensure_cancel_not_published(

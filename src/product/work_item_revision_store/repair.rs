@@ -3,7 +3,8 @@ use chrono::Utc;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
-    PlanDefectEvidence, PlanRepairRequest, PlanRepairRequestStatus, WorkItemPlanLineage,
+    PlanDefectEvidence, PlanRepairRequest, PlanRepairRequestStatus, PlanRepairReviewAttestation,
+    WorkItemPlanLineage,
 };
 
 use super::{
@@ -49,6 +50,77 @@ impl WorkItemRevisionStore {
             request.updated_at = Utc::now().to_rfc3339();
             write_json(&path, &request)?;
             Ok(request)
+        })
+    }
+
+    pub fn transition_repair_request_to_awaiting_confirmation(
+        &self,
+        plan: &WorkItemPlanLineage,
+        request_id: &str,
+    ) -> Result<PlanRepairRequest, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(request_id)?;
+        let path = self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id);
+        with_exclusive_lock(&path, || {
+            let mut request = self.get_repair_request(plan, request_id)?;
+            match request.status {
+                PlanRepairRequestStatus::InProgress => {
+                    request.status = PlanRepairRequestStatus::AwaitingConfirmation;
+                    request.updated_at = Utc::now().to_rfc3339();
+                    write_json(&path, &request)?;
+                    Ok(request)
+                }
+                PlanRepairRequestStatus::AwaitingConfirmation => Ok(request),
+                _ => Err(identity_mismatch(
+                    "plan_repair_request_awaiting_transition",
+                    request_id,
+                )),
+            }
+        })
+    }
+
+    pub fn ensure_repair_request_can_enter_awaiting_confirmation(
+        &self,
+        plan: &WorkItemPlanLineage,
+        request_id: &str,
+    ) -> Result<PlanRepairRequest, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(request_id)?;
+        let path = self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id);
+        with_exclusive_lock(&path, || {
+            let request = self.get_repair_request(plan, request_id)?;
+            if matches!(
+                request.status,
+                PlanRepairRequestStatus::InProgress | PlanRepairRequestStatus::AwaitingConfirmation
+            ) {
+                Ok(request)
+            } else {
+                Err(identity_mismatch(
+                    "plan_repair_request_awaiting_guard",
+                    request_id,
+                ))
+            }
+        })
+    }
+
+    pub fn confirm_repair_request_awaiting_confirmation(
+        &self,
+        plan: &WorkItemPlanLineage,
+        request_id: &str,
+    ) -> Result<PlanRepairRequest, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(request_id)?;
+        let path = self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, request_id);
+        with_exclusive_lock(&path, || {
+            let request = self.get_repair_request(plan, request_id)?;
+            if request.status == PlanRepairRequestStatus::AwaitingConfirmation {
+                Ok(request)
+            } else {
+                Err(identity_mismatch(
+                    "plan_repair_request_confirm_transition",
+                    request_id,
+                ))
+            }
         })
     }
 
@@ -170,6 +242,73 @@ impl WorkItemRevisionStore {
         )?;
         if value.id != amendment_id {
             return Err(identity_mismatch("plan_amendment_manifest", amendment_id));
+        }
+        Ok(value)
+    }
+
+    pub fn put_plan_repair_review_attestation(
+        &self,
+        plan: &WorkItemPlanLineage,
+        value: &PlanRepairReviewAttestation,
+    ) -> Result<(), ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        for id in [
+            &value.id,
+            &value.request_id,
+            &value.amendment_id,
+            &value.plan_id,
+            &value.base_plan_revision_id,
+            &value.reviewed_plan_revision_id,
+            &value.plan_projection_bundle_id,
+            &value.generation_round_id,
+        ] {
+            validate_relative_id(id)?;
+        }
+        if value.plan_id != plan.id || value.review.generation_round_id != value.generation_round_id
+        {
+            return Err(identity_mismatch(
+                "plan_repair_review_attestation",
+                &value.id,
+            ));
+        }
+        write_immutable(
+            &self.plan_repair_review_attestation_path(
+                &plan.project_id,
+                &plan.issue_id,
+                &plan.id,
+                &value.id,
+            ),
+            "plan_repair_review_attestation",
+            &value.id,
+            value,
+        )
+    }
+
+    pub fn get_plan_repair_review_attestation(
+        &self,
+        plan: &WorkItemPlanLineage,
+        attestation_id: &str,
+    ) -> Result<PlanRepairReviewAttestation, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(attestation_id)?;
+        let value: PlanRepairReviewAttestation = read_required_json(
+            &self.plan_repair_review_attestation_path(
+                &plan.project_id,
+                &plan.issue_id,
+                &plan.id,
+                attestation_id,
+            ),
+            "plan_repair_review_attestation",
+            attestation_id,
+        )?;
+        if value.id != attestation_id
+            || value.plan_id != plan.id
+            || value.review.generation_round_id != value.generation_round_id
+        {
+            return Err(identity_mismatch(
+                "plan_repair_review_attestation",
+                attestation_id,
+            ));
         }
         Ok(value)
     }
