@@ -40,6 +40,15 @@ impl CodingWorkspaceEngine {
             }
             _ => coding_gate_action_for_id("retry_review").expect("retry review action"),
         };
+        let available_actions = if reason_code == "code_review_provider_interrupted" {
+            vec![retry_action]
+        } else {
+            vec![
+                retry_action,
+                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
+                coding_gate_action_for_id("abort").expect("abort action"),
+            ]
+        };
         let updated = self.store.update_attempt_status(
             &attempt.project_id,
             &attempt.issue_id,
@@ -58,11 +67,7 @@ impl CodingWorkspaceEngine {
                 reason_code: Some(reason_code.to_string()),
                 evidence_refs,
                 raw_provider_output_ref,
-                available_actions: vec![
-                    retry_action,
-                    coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
-                    coding_gate_action_for_id("abort").expect("abort action"),
-                ],
+                available_actions,
             },
         )?;
         let _ = self

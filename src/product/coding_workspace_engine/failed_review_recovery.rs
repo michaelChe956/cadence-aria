@@ -1,18 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
-
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, FailedCodeReviewRecoveryJournal,
     FailedCodeReviewRecoveryPhase,
 };
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingGateRequired, CodingProviderRole, CodingReworkInstruction,
-    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNodeStatus,
+    CodingExecutionUnitStatus, CodingGateRequired, CodingProviderRole, CodingRoleRunStatus,
+    CodingRoleRunTrigger, CodingTimelineNodeStatus,
 };
-use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
 use super::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
@@ -114,72 +111,6 @@ pub(crate) fn recoverable_failed_code_review(
 }
 
 impl CodingWorkspaceEngine {
-    pub(crate) fn send_interrupted_code_review_to_coder(
-        &self,
-        current: &CodingExecutionAttempt,
-        extra_context: Option<String>,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        if current.stage != CodingExecutionStage::CodeReview
-            || current.status != CodingAttemptStatus::Blocked
-        {
-            return Err(CodingWorkspaceEngineError::ProviderStream(
-                "send_to_coder_not_available".to_string(),
-            ));
-        }
-
-        let operator_context = extra_context
-            .map(|content| content.trim().to_string())
-            .filter(|content| !content.is_empty())
-            .ok_or_else(|| {
-                CodingWorkspaceEngineError::ProviderStream(
-                    "coding_gate_extra_context_required".to_string(),
-                )
-            })?;
-        self.store
-            .create_context_note(current, operator_context.clone())?;
-
-        let existing = self.store.list_rework_instructions(
-            &current.project_id,
-            &current.issue_id,
-            &current.id,
-        )?;
-        self.store.save_rework_instruction(
-            current,
-            &CodingReworkInstruction {
-                id: next_sequential_id("coding_rework_instruction", existing.len()),
-                attempt_id: current.id.clone(),
-                source_stage: CodingExecutionStage::CodeReview,
-                rework_round: current.rework_count + 1,
-                summary: operator_context,
-                fix_hints: Vec::new(),
-                questions: Vec::new(),
-                created_at: Utc::now().to_rfc3339(),
-                consumed_by_node_id: None,
-                consumed_at: None,
-            },
-        )?;
-
-        let running = self.store.update_attempt_status(
-            &current.project_id,
-            &current.issue_id,
-            &current.id,
-            CodingAttemptStatus::Running,
-        )?;
-        let coding_attempt = self.store.update_attempt_stage(
-            &running.project_id,
-            &running.issue_id,
-            &running.id,
-            CodingExecutionStage::Coding,
-        )?;
-        self.store
-            .increment_attempt_rework_count(
-                &coding_attempt.project_id,
-                &coding_attempt.issue_id,
-                &coding_attempt.id,
-            )
-            .map_err(CodingWorkspaceEngineError::from)
-    }
-
     pub async fn recover_failed_code_review(
         &self,
         gate_id: &str,

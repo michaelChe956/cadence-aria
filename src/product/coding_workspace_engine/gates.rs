@@ -406,6 +406,13 @@ impl CodingWorkspaceEngine {
         else {
             return Ok(self.store.get_attempt(project_id, issue_id, attempt_id)?);
         };
+        let code_review_provider_interrupted =
+            super::failed_review_recovery::is_code_review_provider_interrupted_gate(&gate);
+        if code_review_provider_interrupted && action_id != "retry_review" {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "coding_failed_review_recovery_action_not_allowed".to_string(),
+            ));
+        }
         let action = gate
             .available_actions
             .iter()
@@ -416,7 +423,7 @@ impl CodingWorkspaceEngine {
                 )
             })?;
         if action.action_type == CodingGateActionType::RetryReview
-            && super::failed_review_recovery::is_code_review_provider_interrupted_gate(&gate)
+            && code_review_provider_interrupted
         {
             return Err(CodingWorkspaceEngineError::ProviderStream(
                 "coding_failed_review_recovery_requires_reservation".to_string(),
@@ -539,9 +546,7 @@ impl CodingWorkspaceEngine {
                 )?
             }
             CodingGateActionType::SendToCoder => {
-                if super::failed_review_recovery::is_code_review_provider_interrupted_gate(&gate) {
-                    self.send_interrupted_code_review_to_coder(&current, extra_context)?
-                } else if is_code_review_blocked_gate(&gate) {
+                if is_code_review_blocked_gate(&gate) {
                     self.send_code_review_feedback_to_coder(&current, extra_context)?
                 } else {
                     self.send_review_limit_feedback_to_coder(&current, extra_context)?

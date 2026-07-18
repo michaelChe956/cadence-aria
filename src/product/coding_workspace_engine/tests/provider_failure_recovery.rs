@@ -165,7 +165,7 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
             .iter()
             .map(|action| action.action_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["retry_review", "send_to_coder", "abort"]
+        vec!["retry_review"]
     );
     assert_eq!(recovery_gate.available_actions[0].label, "重试代码审查");
     assert!(
@@ -190,59 +190,83 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
         Some(WORK_ITEM_ID)
     );
 
-    let missing_context_error = engine
-        .handle_blocked_gate_response(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            &recovery_gate.gate_id,
-            "send_to_coder",
-            Some("   ".to_string()),
-        )
-        .await
-        .expect_err("operator context is required");
-    assert!(matches!(
-        missing_context_error,
-        CodingWorkspaceEngineError::ProviderStream(ref message)
-            if message == "coding_gate_extra_context_required"
-    ));
+    let attempt_before = persisted.clone();
+    let units_before = store
+        .list_coding_units(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("coding units before rejected send to coder");
+    let gates_before = open_gates.clone();
+    let role_runs_before = store
+        .list_role_runs(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("role runs before rejected send to coder");
+    let journal_before = store
+        .get_failed_code_review_recovery_journal(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("recovery journal before rejected send to coder");
+    let notes_before = store
+        .list_context_notes(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("context notes before rejected send to coder");
+    let instructions_before = store
+        .list_rework_instructions(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("rework instructions before rejected send to coder");
+    let recovery_gate_id = recovery_gate.gate_id.clone();
 
-    let operator_context = "请 Coder 检查权限请求超时前未完成的改动并继续修复";
-    let resumed = engine
+    let error = engine
         .handle_blocked_gate_response(
             PROJECT_ID,
             ISSUE_ID,
             &attempt.id,
-            &recovery_gate.gate_id,
+            &recovery_gate_id,
             "send_to_coder",
-            Some(operator_context.to_string()),
+            Some("请 Coder 检查权限请求超时前未完成的改动并继续修复".to_string()),
         )
         .await
-        .expect("send interrupted review to coder");
-    assert_eq!(resumed.status, CodingAttemptStatus::Running);
-    assert_eq!(resumed.stage, CodingExecutionStage::Coding);
-    assert_eq!(resumed.rework_count, 1);
-    assert!(
+        .expect_err("provider interruption cannot bypass review recovery");
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::ProviderStream(ref message)
+            if message == "coding_failed_review_recovery_action_not_allowed"
+    ));
+    assert_eq!(
+        store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("attempt after rejected send to coder"),
+        attempt_before
+    );
+    assert_eq!(
+        store
+            .list_coding_units(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("coding units after rejected send to coder"),
+        units_before
+    );
+    assert_eq!(
         store
             .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
-            .expect("resolved recovery gate")
-            .is_empty()
+            .expect("gates after rejected send to coder"),
+        gates_before
     );
-    let notes = store
-        .list_context_notes(PROJECT_ID, ISSUE_ID, &attempt.id)
-        .expect("context notes");
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].content, operator_context);
-    let instructions = store
-        .list_rework_instructions(PROJECT_ID, ISSUE_ID, &attempt.id)
-        .expect("rework instructions");
-    assert_eq!(instructions.len(), 1);
     assert_eq!(
-        instructions[0].source_stage,
-        CodingExecutionStage::CodeReview
+        store
+            .list_role_runs(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("role runs after rejected send to coder"),
+        role_runs_before
     );
-    assert_eq!(instructions[0].rework_round, 1);
-    assert_eq!(instructions[0].summary, operator_context);
+    assert_eq!(
+        store
+            .get_failed_code_review_recovery_journal(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("recovery journal after rejected send to coder"),
+        journal_before
+    );
+    assert_eq!(
+        store
+            .list_context_notes(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("context notes after rejected send to coder"),
+        notes_before
+    );
+    assert_eq!(
+        store
+            .list_rework_instructions(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("rework instructions after rejected send to coder"),
+        instructions_before
+    );
 }
 
 #[tokio::test]
