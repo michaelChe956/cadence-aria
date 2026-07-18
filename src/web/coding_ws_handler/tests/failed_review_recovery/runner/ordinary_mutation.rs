@@ -18,7 +18,7 @@ use crate::web::coding_ws_handler::{
 use crate::web::runtime::WebRuntime;
 use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
-use super::super::support::{FixtureCase, failed_review_fixture};
+use super::super::support::provider_interrupted_review_fixture;
 use super::wait_for_runner_count;
 
 #[derive(Debug, Clone, Copy)]
@@ -33,10 +33,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
         OrdinaryMutationCase::AbortAttempt,
         OrdinaryMutationCase::ContextNote,
     ] {
-        let fixture = failed_review_fixture(
-            CodingAttemptScope::WorkItem,
-            FixtureCase::BlockedProviderInterrupted,
-        );
+        let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItem).await;
         if matches!(case, OrdinaryMutationCase::AbortAttempt) {
             fs::remove_file(
                 fixture

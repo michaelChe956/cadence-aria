@@ -104,6 +104,14 @@ async fn coding_plan_repair_group_terminal_abort_converges_units_and_clears_resu
 #[tokio::test]
 async fn coding_plan_repair_group_terminal_failure_fails_active_unit_and_skips_pending_units() {
     let (_root, store, attempt) = running_group_attempt();
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("code review group attempt");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -126,6 +134,11 @@ async fn coding_plan_repair_group_terminal_failure_fails_active_unit_and_skips_p
     store
         .validate_group_attempt_integrity(&failed)
         .expect("failed group integrity");
+    assert!(
+        recoverable_failed_code_review(&store, &failed)
+            .expect("inspect fatal review failure")
+            .is_none()
+    );
 }
 
 #[test]

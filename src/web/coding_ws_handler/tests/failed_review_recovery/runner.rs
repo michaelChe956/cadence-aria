@@ -21,14 +21,13 @@ use crate::web::coding_ws_handler::{
 use crate::web::runtime::WebRuntime;
 use crate::web::state::{CodingAttemptRunKey, CodingRunRegistry, WebAppState};
 
-use super::support::{FixtureCase, failed_review_fixture, seed_repeated_interrupted_review};
+use super::support::{provider_interrupted_review_fixture, seed_repeated_interrupted_review};
 
 mod ordinary_mutation;
 
 #[tokio::test]
 async fn reserved_spawn_creates_task_then_completes_journal_before_provider_entry() {
-    let fixture =
-        failed_review_fixture(CodingAttemptScope::WorkItemGroup, FixtureCase::Recoverable);
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let gate_id = fixture
         .dirty_gate
         .as_ref()
@@ -94,8 +93,7 @@ async fn reserved_spawn_creates_task_then_completes_journal_before_provider_entr
 
 #[tokio::test]
 async fn journal_completion_failure_stops_task_before_provider_entry_and_cleans_registry() {
-    let fixture =
-        failed_review_fixture(CodingAttemptScope::WorkItemGroup, FixtureCase::Recoverable);
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let gate_id = fixture
         .dirty_gate
         .as_ref()
@@ -154,10 +152,9 @@ async fn journal_completion_failure_stops_task_before_provider_entry_and_cleans_
     );
 }
 
-#[test]
-fn failed_review_websocket_guard_allows_only_the_exact_retry_gate_request() {
-    let fixture =
-        failed_review_fixture(CodingAttemptScope::WorkItemGroup, FixtureCase::Recoverable);
+#[tokio::test]
+async fn failed_review_websocket_guard_allows_only_the_exact_retry_gate_request() {
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let dirty_gate = fixture.dirty_gate.as_ref().expect("dirty gate");
     let retry = CodingWsInMessage::GateResponse {
         gate_id: dirty_gate.gate_id.clone(),
@@ -197,12 +194,9 @@ fn failed_review_websocket_guard_allows_only_the_exact_retry_gate_request() {
     ));
 }
 
-#[test]
-fn unfinished_blocked_review_journal_allows_only_its_exact_retry_message() {
-    let fixture = failed_review_fixture(
-        CodingAttemptScope::WorkItemGroup,
-        FixtureCase::BlockedProviderInterrupted,
-    );
+#[tokio::test]
+async fn unfinished_blocked_review_journal_allows_only_its_exact_retry_message() {
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let gate = fixture
         .dirty_gate
         .as_ref()
@@ -275,12 +269,9 @@ fn unfinished_blocked_review_journal_allows_only_its_exact_retry_message() {
     }
 }
 
-#[test]
-fn blocked_review_retry_reservation_rejects_an_old_runner_before_persistence() {
-    let fixture = failed_review_fixture(
-        CodingAttemptScope::WorkItemGroup,
-        FixtureCase::BlockedProviderInterrupted,
-    );
+#[tokio::test]
+async fn blocked_review_retry_reservation_rejects_an_old_runner_before_persistence() {
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let gate = fixture
         .dirty_gate
         .as_ref()
@@ -331,10 +322,7 @@ fn blocked_review_retry_reservation_rejects_an_old_runner_before_persistence() {
 
 #[tokio::test]
 async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner() {
-    let fixture = failed_review_fixture(
-        CodingAttemptScope::WorkItemGroup,
-        FixtureCase::BlockedProviderInterrupted,
-    );
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let gate_id = fixture
         .dirty_gate
         .as_ref()
@@ -397,10 +385,7 @@ async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner()
 
 #[tokio::test]
 async fn two_repeated_review_retry_sockets_converge_to_one_current_run_and_runner() {
-    let fixture = failed_review_fixture(
-        CodingAttemptScope::WorkItemGroup,
-        FixtureCase::BlockedProviderInterrupted,
-    );
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let repeated = seed_repeated_interrupted_review(&fixture).await;
     let gate_id = repeated.second_gate.gate_id.clone();
     let retry = CodingWsInMessage::GateResponse {
@@ -490,10 +475,7 @@ async fn two_repeated_review_retry_sockets_converge_to_one_current_run_and_runne
 
 #[tokio::test]
 async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note() {
-    let fixture = failed_review_fixture(
-        CodingAttemptScope::WorkItemGroup,
-        FixtureCase::BlockedProviderInterrupted,
-    );
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let attempt_id = fixture.attempt.id.clone();
     let attempt_key = CodingAttemptRunKey::from_attempt(&fixture.attempt);
     let gate_id = fixture

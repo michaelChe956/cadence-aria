@@ -113,7 +113,7 @@ fn code_review_can_route_directly_back_to_coding_for_reviewer_feedback() {
 }
 
 #[test]
-fn reopen_failed_code_review_attempt_is_narrow_and_clears_completed_at() {
+fn failed_code_review_attempt_cannot_be_reopened_as_recoverable() {
     let (_tmp, store, attempt) = setup();
     let attempt = store
         .update_attempt_status(
@@ -141,13 +141,20 @@ fn reopen_failed_code_review_attempt_is_narrow_and_clears_completed_at() {
         .expect("fail attempt");
     assert!(failed.completed_at.is_some());
 
-    let reopened = store
+    let error = store
         .reopen_failed_code_review_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("reopen failed code review");
-
-    assert_eq!(reopened.status, CodingAttemptStatus::Blocked);
-    assert_eq!(reopened.stage, CodingExecutionStage::CodeReview);
-    assert_eq!(reopened.completed_at, None);
+        .expect_err("terminal failed code review cannot become recoverable");
+    assert!(
+        error
+            .to_string()
+            .contains("coding_failed_review_not_recoverable")
+    );
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("terminal attempt remains readable"),
+        failed
+    );
 }
 
 #[test]

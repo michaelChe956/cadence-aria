@@ -110,57 +110,7 @@ pub(crate) fn recoverable_failed_code_review(
         }));
     }
 
-    if attempt.status != CodingAttemptStatus::Failed
-        || attempt.stage != CodingExecutionStage::CodeReview
-        || attempt.completed_at.is_none()
-    {
-        return Ok(None);
-    }
-    if !attempt_execution_fingerprint_is_valid(coding_store, attempt)? {
-        return Ok(None);
-    }
-
-    let Some(failed_node) = coding_store
-        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        .into_iter()
-        .rev()
-        .find(|node| node.stage == CodingExecutionStage::CodeReview)
-    else {
-        return Ok(None);
-    };
-    if failed_node.status != CodingTimelineNodeStatus::Failed {
-        return Ok(None);
-    }
-
-    let Some(stale_role_run) = coding_store.latest_role_run(
-        &attempt.project_id,
-        &attempt.issue_id,
-        &attempt.id,
-        CodingExecutionStage::CodeReview,
-        CodingProviderRole::CodeReviewer,
-    )?
-    else {
-        return Ok(None);
-    };
-    if stale_role_run.status != CodingRoleRunStatus::Running
-        || stale_role_run.node_id.as_deref() != Some(failed_node.id.as_str())
-    {
-        return Ok(None);
-    }
-
-    let Some(dirty_gate) = coding_store
-        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        .into_iter()
-        .find(|gate| gate.reason_code.as_deref() == Some("shared_worktree_dirty_manual_gate"))
-    else {
-        return Ok(None);
-    };
-
-    Ok(Some(FailedCodeReviewRecovery {
-        gate_id: dirty_gate.gate_id,
-        failed_node_id: failed_node.id,
-        stale_role_run_id: stale_role_run.id,
-    }))
+    Ok(None)
 }
 
 impl CodingWorkspaceEngine {
@@ -292,11 +242,6 @@ impl CodingWorkspaceEngine {
         }
 
         let reopened = match current.status {
-            CodingAttemptStatus::Failed => self.store.reopen_failed_code_review_attempt(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-            )?,
             CodingAttemptStatus::Blocked | CodingAttemptStatus::Running => current,
             _ => return Err(recovery_state_changed()),
         };
@@ -459,12 +404,9 @@ fn journal_recovery_prefix_is_valid(
         || attempt.stage != CodingExecutionStage::CodeReview
         || !matches!(
             attempt.status,
-            CodingAttemptStatus::Failed
-                | CodingAttemptStatus::Blocked
-                | CodingAttemptStatus::Running
+            CodingAttemptStatus::Blocked | CodingAttemptStatus::Running
         )
-        || (attempt.status == CodingAttemptStatus::Failed && attempt.completed_at.is_none())
-        || (attempt.status != CodingAttemptStatus::Failed && attempt.completed_at.is_some())
+        || attempt.completed_at.is_some()
         || !attempt_execution_fingerprint_is_valid(coding_store, attempt)?
     {
         return Ok(false);

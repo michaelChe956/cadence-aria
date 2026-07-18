@@ -403,20 +403,10 @@ impl super::CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
-        let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if attempt.status != CodingAttemptStatus::Failed
-            || attempt.stage != CodingExecutionStage::CodeReview
-        {
-            return Err(ProductStoreError::Io(
-                "coding_failed_review_not_recoverable".to_string(),
-            ));
-        }
-        attempt.status = CodingAttemptStatus::Blocked;
-        attempt.completed_at = None;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        self.get_attempt(project_id, issue_id, attempt_id)?;
+        Err(ProductStoreError::Io(
+            "coding_failed_review_not_recoverable".to_string(),
+        ))
     }
 
     pub fn update_attempt_stage(

@@ -2,10 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn blocked_provider_interrupted_review_retry_enters_the_same_recovery_journal() {
-    let fixture = failed_review_fixture(
-        CodingAttemptScope::WorkItemGroup,
-        FixtureCase::BlockedProviderInterrupted,
-    );
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let gate = fixture
         .dirty_gate
         .as_ref()
@@ -68,10 +65,7 @@ async fn blocked_provider_interrupted_review_retry_enters_the_same_recovery_jour
 
 #[tokio::test]
 async fn blocked_provider_interrupted_retry_cannot_use_the_ordinary_gate_path() {
-    let fixture = failed_review_fixture(
-        CodingAttemptScope::WorkItemGroup,
-        FixtureCase::BlockedProviderInterrupted,
-    );
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let gate = fixture
         .dirty_gate
         .as_ref()
@@ -151,10 +145,7 @@ async fn blocked_provider_interrupted_recovery_prefixes_converge_idempotently() 
         RecoveryPrefix::AttemptRunning,
         RecoveryPrefix::GateResolved,
     ] {
-        let fixture = failed_review_fixture(
-            CodingAttemptScope::WorkItemGroup,
-            FixtureCase::BlockedProviderInterrupted,
-        );
+        let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
         let recovery = recoverable_failed_code_review(&fixture.store, &fixture.attempt)
             .expect("inspect blocked recovery")
             .expect("blocked recovery identity");
