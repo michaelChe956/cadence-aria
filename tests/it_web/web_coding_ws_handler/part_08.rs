@@ -319,6 +319,63 @@ fn materialize_completed_unit_run_for_logical(
     run
 }
 
+fn materialize_running_unit_run_for_logical(store: &CodingAttemptStore, logical_work_item_id: &str) {
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    let unit = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("units")
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == logical_work_item_id)
+        .expect("unit");
+    let revision_store = WorkItemRevisionStore::new(store.paths());
+    let lineage = revision_store
+        .get_plan_lineage(&attempt.project_id, &attempt.issue_id, "work_item_plan_0001")
+        .expect("plan lineage");
+    let revision = revision_store
+        .get_work_item_revision(&lineage, logical_work_item_id, &unit.work_item_revision_id)
+        .expect("work item revision");
+    let bundle = revision_store
+        .get_work_item_projection_bundle(&lineage, &revision.work_item_projection_bundle_id)
+        .expect("projection bundle");
+    let renderer_version = cadence_aria::product::work_item_projection::renderer_for(
+        &ProviderName::Fake,
+    )
+    .renderer_version()
+    .to_string();
+    store
+        .create_coding_unit_run(
+            &attempt,
+            &cadence_aria::product::coding_models::CodingUnitRun {
+                id: format!("coding_unit_run_running_{logical_work_item_id}"),
+                unit_id: unit.id,
+                execution_no: 1,
+                work_item_revision_id: revision.id,
+                resolved_handoff_revision_ids: Vec::new(),
+                canonical_contract_hash: bundle.canonical_contract_hash,
+                projection_bundle_id: bundle.id,
+                projection_compiler_version: bundle.compiler_version,
+                coder_provider_renderer_version: renderer_version.clone(),
+                reviewer_provider_renderer_version: renderer_version,
+                coder_projection_hash: bundle.coder_projection_hash,
+                reviewer_projection_hash: bundle.reviewer_projection_hash,
+                coder_execution_context_hash: None,
+                reviewer_execution_context_hash: None,
+                status: cadence_aria::product::coding_models::CodingUnitRunStatus::Running,
+                unit_rework_count: 0,
+                verification_retry_count: 0,
+                operational_retry_count: 0,
+                plan_repair_count: 0,
+                start_commit: attempt.head_commit.clone(),
+                completion_commit: None,
+                created_at: "2026-07-19T00:00:00Z".to_string(),
+                updated_at: "2026-07-19T00:00:00Z".to_string(),
+            },
+        )
+        .expect("running unit run");
+}
+
 fn bind_completed_first_unit_handoff_revision(store: &CodingAttemptStore) {
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
@@ -552,6 +609,7 @@ async fn coding_ws_group_attempt_recovers_review_request_running_unit_without_re
             CodingExecutionStage::ReviewRequest,
         )
         .expect("set review request stage");
+    materialize_running_unit_run_for_logical(&store, "work_item_0001");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {

@@ -2,6 +2,7 @@ use chrono::Utc;
 
 use crate::product::coding_models::{
     CodingExecutionAttempt, CodingExecutionUnit, CodingProviderRole, CodingUnitRun,
+    CodingUnitRunStatus,
 };
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::work_item_projection::RenderedExecutionContext;
@@ -238,6 +239,44 @@ impl super::CodingAttemptStore {
                     ));
                 }
             }
+            run.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &run)?;
+            Ok(run)
+        })
+    }
+
+    pub fn complete_coding_unit_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit_run_id: &str,
+        completion_commit: &str,
+    ) -> Result<CodingUnitRun, ProductStoreError> {
+        self.validate_attempt_lineage(attempt)?;
+        validate_relative_id(unit_run_id)?;
+        validate_relative_id(completion_commit)?;
+        let (path, found) = self
+            .find_unit_run_by_id(attempt, unit_run_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "coding_unit_run",
+                id: unit_run_id.to_string(),
+            })?;
+        self.authoritative_unit(attempt, &found.unit_id)?;
+        with_exclusive_lock(&path, || {
+            let mut run: CodingUnitRun = read_json(&path)?;
+            if run.id != unit_run_id || run.unit_id != found.unit_id {
+                return Err(identity_mismatch("coding_unit_run", unit_run_id));
+            }
+            if run.status == CodingUnitRunStatus::Completed {
+                if run.completion_commit.as_deref() == Some(completion_commit) {
+                    return Ok(run);
+                }
+                return Err(identity_mismatch("coding_unit_run", unit_run_id));
+            }
+            if run.status != CodingUnitRunStatus::Running || run.completion_commit.is_some() {
+                return Err(identity_mismatch("coding_unit_run", unit_run_id));
+            }
+            run.status = CodingUnitRunStatus::Completed;
+            run.completion_commit = Some(completion_commit.to_string());
             run.updated_at = Utc::now().to_rfc3339();
             write_json(&path, &run)?;
             Ok(run)

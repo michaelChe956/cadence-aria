@@ -113,10 +113,23 @@ pub(crate) fn review_findings_flow_decision(
     verdict: &ReviewVerdict,
     reviewer_projection: &ReviewerWorkItemProjection,
 ) -> CodeReviewFlowDecision {
-    let valid = findings
-        .iter()
-        .filter(|finding| validate_plan_defect_finding(finding, reviewer_projection).is_ok())
-        .collect::<Vec<_>>();
+    review_findings_flow_decision_with_validator(findings, verdict, |finding| {
+        validate_plan_defect_finding(finding, reviewer_projection)
+    })
+}
+
+pub(crate) fn review_findings_flow_decision_with_validator<F>(
+    findings: &[ReviewFinding],
+    verdict: &ReviewVerdict,
+    mut validate: F,
+) -> CodeReviewFlowDecision
+where
+    F: FnMut(&ReviewFinding) -> Result<(), PlanRepairError>,
+{
+    if findings.iter().any(|finding| validate(finding).is_err()) {
+        return CodeReviewFlowDecision::StopForHumanTriage;
+    }
+    let valid = findings.iter().collect::<Vec<_>>();
     for (class, decision) in [
         (
             PlanDefectClass::StoryAmendmentRequired,
@@ -152,12 +165,6 @@ pub(crate) fn review_findings_flow_decision(
         .any(|finding| finding.defect_class == PlanDefectClass::VerificationIncomplete)
     {
         return CodeReviewFlowDecision::RetryVerification;
-    }
-    if findings
-        .iter()
-        .any(|finding| validate_plan_defect_finding(finding, reviewer_projection).is_err())
-    {
-        return CodeReviewFlowDecision::StopForHumanTriage;
     }
     match verdict {
         ReviewVerdict::RequestChanges => CodeReviewFlowDecision::RunCoderFix,

@@ -274,6 +274,7 @@ async fn completing_last_group_unit_enters_review_request_stage() {
 #[tokio::test]
 async fn completing_group_units_saves_distinct_handoffs_per_unit() {
     let (_root, _paths, store, engine, attempt) = group_engine_with_two_units();
+    create_active_coding_unit_run(&store, &attempt);
 
     let after_first = engine
         .complete_group_unit_after_code_review(&attempt)
@@ -294,6 +295,7 @@ async fn completing_group_units_saves_distinct_handoffs_per_unit() {
         .expect("attempt handoff")
         .is_none());
 
+    create_active_coding_unit_run(&store, &after_first);
     let after_second = engine
         .complete_group_unit_after_code_review(&after_first)
         .await
@@ -368,6 +370,7 @@ async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit(
         Arc::new(ParseFailingHandoffProvider),
         tx,
     );
+    create_active_coding_unit_run(&store, &attempt);
 
     let updated = engine
         .complete_group_unit_after_code_review(&attempt)

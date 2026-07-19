@@ -6,7 +6,7 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::{
     CodingAttemptPlanBinding, CodingAttemptScope, CodingExecutionUnitStatus, CodingProviderRole,
-    RemoteKind,
+    CodingUnitRun, CodingUnitRunStatus, RemoteKind,
 };
 use crate::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, LifecycleStore,
@@ -159,11 +159,28 @@ fn seed_group_attempt_fixture(
                 provided_contract_refs: Vec::new(),
                 reviewer_check_refs: Vec::new(),
             },
-            blocker_rules: vec![BlockerRule {
-                reason_code: "current_work_item_contract_invalid".to_string(),
-                route: BlockerRoute::PlanRepairCurrent,
-                target_contract_refs: Vec::new(),
-            }],
+            blocker_rules: vec![
+                BlockerRule {
+                    reason_code: "current_work_item_contract_invalid".to_string(),
+                    route: BlockerRoute::PlanRepairCurrent,
+                    target_contract_refs: Vec::new(),
+                },
+                BlockerRule {
+                    reason_code: "story_scope_invalid".to_string(),
+                    route: BlockerRoute::StoryAmendment,
+                    target_contract_refs: Vec::new(),
+                },
+                BlockerRule {
+                    reason_code: "design_constraint_invalid".to_string(),
+                    route: BlockerRoute::DesignAmendment,
+                    target_contract_refs: Vec::new(),
+                },
+                BlockerRule {
+                    reason_code: "verification_incomplete".to_string(),
+                    route: BlockerRoute::VerificationRetry,
+                    target_contract_refs: Vec::new(),
+                },
+            ],
             design_traceability: Vec::new(),
         };
         let work_item_revision = WorkItemRevision {
@@ -593,6 +610,48 @@ async fn group_unit_completion_commits_changes_and_advances_to_next_unit() {
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("current attempt");
 
+    let error = engine
+        .complete_group_unit_after_code_review(&attempt)
+        .await
+        .expect_err("missing authoritative UnitRun must fail closed");
+    assert!(error.to_string().contains("coding_unit_run"));
+    let attempt = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt after fail closed");
+    store
+        .create_coding_unit_run(
+            &attempt,
+            &CodingUnitRun {
+                id: "coding_unit_run_0001".to_string(),
+                unit_id: unit1.id.clone(),
+                execution_no: 1,
+                work_item_revision_id: unit1.work_item_revision_id.clone(),
+                resolved_handoff_revision_ids: Vec::new(),
+                canonical_contract_hash: "contract_hash_0001".to_string(),
+                projection_bundle_id: "projection_bundle_0001".to_string(),
+                projection_compiler_version: "projection_compiler_v1".to_string(),
+                coder_provider_renderer_version: "coder_renderer_v1".to_string(),
+                reviewer_provider_renderer_version: "reviewer_renderer_v1".to_string(),
+                coder_projection_hash: "coder_projection_hash_0001".to_string(),
+                reviewer_projection_hash: "reviewer_projection_hash_0001".to_string(),
+                coder_execution_context_hash: None,
+                reviewer_execution_context_hash: None,
+                status: CodingUnitRunStatus::Running,
+                unit_rework_count: 0,
+                verification_retry_count: 0,
+                operational_retry_count: 0,
+                plan_repair_count: 0,
+                start_commit: attempt.head_commit.clone(),
+                completion_commit: None,
+                created_at: "2026-07-19T00:00:00Z".to_string(),
+                updated_at: "2026-07-19T00:00:00Z".to_string(),
+            },
+        )
+        .expect("running unit run");
+    let completion_commit = attempt.head_commit.as_deref().expect("completion commit");
+    store
+        .complete_coding_unit_run(&attempt, "coding_unit_run_0001", completion_commit)
+        .expect("persist partial UnitRun completion");
     let updated = engine
         .complete_group_unit_after_code_review(&attempt)
         .await
@@ -619,6 +678,17 @@ async fn group_unit_completion_commits_changes_and_advances_to_next_unit() {
         .expect("completion commit");
     assert_eq!(completion_commit.len(), 40);
     assert_eq!(updated.head_commit.as_deref(), Some(completion_commit));
+    let completed_run = store
+        .list_coding_unit_runs(&updated, &unit1.id)
+        .expect("unit runs")
+        .into_iter()
+        .next()
+        .expect("completed unit run");
+    assert_eq!(completed_run.status, CodingUnitRunStatus::Completed);
+    assert_eq!(
+        completed_run.completion_commit.as_deref(),
+        Some(completion_commit)
+    );
     assert_eq!(
         git_stdout(&worktree, &["status", "--porcelain"]),
         "",

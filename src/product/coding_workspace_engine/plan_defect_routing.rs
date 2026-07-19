@@ -1,7 +1,16 @@
 use super::*;
-use crate::product::plan_repair::{PlanDefectFinding, PlanDefectSeverity};
+use crate::product::models::{PlanDefectRoute, RepairTargetKind};
+use crate::product::plan_repair::{
+    PlanDefectFinding, PlanDefectSeverity, PlanRepairError, normalize_blocker_route,
+};
 use crate::product::work_item_projection::ReviewerWorkItemProjection;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+
+#[derive(Debug, Clone)]
+pub(crate) struct GroupReviewerProjectionBinding {
+    pub(crate) logical_work_item_id: String,
+    pub(crate) projection: ReviewerWorkItemProjection,
+}
 
 pub(crate) fn internal_review_flow_decision(
     review: &InternalPrReview,
@@ -11,36 +20,36 @@ pub(crate) fn internal_review_flow_decision(
     review_findings_flow_decision(&review.findings, &review.verdict, reviewer_projection)
 }
 
+pub(crate) fn internal_review_flow_decision_with_bindings(
+    review: &InternalPrReview,
+    bindings: &[GroupReviewerProjectionBinding],
+) -> CodeReviewFlowDecision {
+    let _source = PlanDefectSource::GroupReviewer;
+    review_findings_flow_decision_with_validator(&review.findings, &review.verdict, |finding| {
+        validate_group_reviewer_finding(finding, bindings)
+    })
+}
+
 impl CodingWorkspaceEngine {
-    pub(crate) fn reviewer_projection_for_internal_review(
+    pub(crate) fn internal_review_flow_decision_for_attempt(
         &self,
         attempt: &CodingExecutionAttempt,
         review: &InternalPrReview,
-    ) -> Result<ReviewerWorkItemProjection, CodingWorkspaceEngineError> {
+    ) -> Result<CodeReviewFlowDecision, CodingWorkspaceEngineError> {
         if attempt.scope != crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
-            return self.reviewer_projection_for_attempt(attempt);
+            let projection = self.reviewer_projection_for_attempt(attempt)?;
+            return Ok(internal_review_flow_decision(review, &projection));
         }
-        let Some(logical_id) = review.findings.iter().find_map(|finding| {
-            (finding.defect_class != crate::product::models::PlanDefectClass::ImplementationDefect)
-                .then_some(finding.repair_target.as_ref())
-                .flatten()
-                .and_then(|target| target.logical_work_item_ids.first())
-        }) else {
-            return Ok(empty_reviewer_projection());
-        };
-        let run = self
-            .store
-            .list_unit_runs_by_logical_id(attempt, logical_id)?
-            .into_iter()
-            .filter(|run| {
-                run.status == crate::product::coding_models::CodingUnitRunStatus::Completed
-            })
-            .max_by_key(|run| run.execution_no)
-            .ok_or_else(|| {
-                CodingWorkspaceEngineError::ProviderStream(format!(
-                    "group_review_unit_run_missing: {logical_id}"
-                ))
-            })?;
+        let bindings = self.group_reviewer_projection_bindings(attempt)?;
+        Ok(internal_review_flow_decision_with_bindings(
+            review, &bindings,
+        ))
+    }
+
+    fn group_reviewer_projection_bindings(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<GroupReviewerProjectionBinding>, CodingWorkspaceEngineError> {
         let plan_id = attempt.work_item_group_id.as_deref().ok_or_else(|| {
             CodingWorkspaceEngineError::ProviderStream(
                 "group_review_plan_binding_missing".to_string(),
@@ -49,25 +58,143 @@ impl CodingWorkspaceEngine {
         let revision_store = WorkItemRevisionStore::new(self.store.paths());
         let lineage =
             revision_store.get_plan_lineage(&attempt.project_id, &attempt.issue_id, plan_id)?;
-        let revision = revision_store.get_work_item_revision(
-            &lineage,
-            logical_id,
-            &run.work_item_revision_id,
-        )?;
-        let bundle =
-            revision_store.get_work_item_projection_bundle(&lineage, &run.projection_bundle_id)?;
-        validate_projection_bundle(&run.work_item_revision_id, &revision, &bundle)?;
-        if run.canonical_contract_hash != bundle.canonical_contract_hash
-            || run.projection_compiler_version != bundle.compiler_version
-            || run.reviewer_projection_hash != bundle.reviewer_projection_hash
-        {
-            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
-                "group_review_projection_binding_mismatch: {}",
-                run.id
-            )));
+        let mut units =
+            self.store
+                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        units.sort_by(|left, right| {
+            left.order_index
+                .cmp(&right.order_index)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let mut bindings = Vec::with_capacity(units.len());
+        for unit in units {
+            let run = self
+                .store
+                .list_coding_unit_runs(attempt, &unit.id)?
+                .into_iter()
+                .max_by_key(|run| run.execution_no)
+                .ok_or_else(|| {
+                    CodingWorkspaceEngineError::ProviderStream(format!(
+                        "group_review_unit_run_missing: {}",
+                        unit.logical_work_item_id
+                    ))
+                })?;
+            if run.status != crate::product::coding_models::CodingUnitRunStatus::Completed {
+                return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "group_review_unit_run_not_completed: {}",
+                    run.id
+                )));
+            }
+            let revision = revision_store.get_work_item_revision(
+                &lineage,
+                &unit.logical_work_item_id,
+                &run.work_item_revision_id,
+            )?;
+            let bundle = revision_store
+                .get_work_item_projection_bundle(&lineage, &run.projection_bundle_id)?;
+            validate_projection_bundle(&run.work_item_revision_id, &revision, &bundle)?;
+            if run.work_item_revision_id != unit.work_item_revision_id
+                || run.canonical_contract_hash != bundle.canonical_contract_hash
+                || run.projection_compiler_version != bundle.compiler_version
+                || run.reviewer_projection_hash != bundle.reviewer_projection_hash
+            {
+                return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "group_review_projection_binding_mismatch: {}",
+                    run.id
+                )));
+            }
+            bindings.push(GroupReviewerProjectionBinding {
+                logical_work_item_id: unit.logical_work_item_id,
+                projection: bundle.reviewer_projection,
+            });
         }
-        Ok(bundle.reviewer_projection)
+        Ok(bindings)
     }
+}
+
+fn validate_group_reviewer_finding(
+    finding: &ReviewFinding,
+    bindings: &[GroupReviewerProjectionBinding],
+) -> Result<(), PlanRepairError> {
+    if finding.defect_class == crate::product::models::PlanDefectClass::ImplementationDefect {
+        return validate_plan_defect_finding(finding, &empty_reviewer_projection());
+    }
+    let matches = matching_group_reviewer_bindings(finding, bindings);
+    if matches.is_empty() {
+        return Err(PlanRepairError::InvalidFinding(
+            "group reviewer projection blocker rule is missing".to_string(),
+        ));
+    }
+    let mut signatures = matches
+        .iter()
+        .filter_map(|binding| blocker_rule_signature(finding, &binding.projection));
+    let Some(first) = signatures.next() else {
+        return Err(PlanRepairError::InvalidFinding(
+            "group reviewer projection blocker rule is missing".to_string(),
+        ));
+    };
+    if signatures.any(|signature| signature != first) {
+        return Err(PlanRepairError::InvalidFinding(
+            "group reviewer projection blocker rule is ambiguous".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn matching_group_reviewer_bindings<'a>(
+    finding: &ReviewFinding,
+    bindings: &'a [GroupReviewerProjectionBinding],
+) -> Vec<&'a GroupReviewerProjectionBinding> {
+    let candidates = match finding.repair_target.as_ref() {
+        Some(target) => {
+            let all_targets_exist = target.logical_work_item_ids.iter().all(|logical_id| {
+                bindings.iter().any(|binding| {
+                    binding.logical_work_item_id == *logical_id
+                        && target
+                            .work_item_revision_ids
+                            .contains(&binding.projection.work_item_revision_id)
+                })
+            });
+            if !all_targets_exist {
+                return Vec::new();
+            }
+            match target.kind {
+                RepairTargetKind::UpstreamWorkItem => bindings.iter().collect::<Vec<_>>(),
+                RepairTargetKind::CurrentWorkItem | RepairTargetKind::Subgraph => bindings
+                    .iter()
+                    .filter(|binding| {
+                        target
+                            .logical_work_item_ids
+                            .contains(&binding.logical_work_item_id)
+                            && target
+                                .work_item_revision_ids
+                                .contains(&binding.projection.work_item_revision_id)
+                    })
+                    .collect::<Vec<_>>(),
+            }
+        }
+        None => bindings.iter().collect::<Vec<_>>(),
+    };
+    candidates
+        .into_iter()
+        .filter(|binding| validate_plan_defect_finding(finding, &binding.projection).is_ok())
+        .collect()
+}
+
+fn blocker_rule_signature(
+    finding: &ReviewFinding,
+    projection: &ReviewerWorkItemProjection,
+) -> Option<(PlanDefectRoute, Option<RepairTargetKind>, Vec<String>)> {
+    let reason_code = finding.reason_code.as_deref()?;
+    let rule = projection
+        .blocker_routing
+        .iter()
+        .find(|rule| rule.reason_code == reason_code)?;
+    let normalized = normalize_blocker_route(rule.route.clone());
+    let mut refs = rule.target_contract_refs.clone();
+    refs.sort();
+    refs.dedup();
+    Some((normalized.route, normalized.required_target_kind, refs))
 }
 
 pub(crate) fn execution_plan_defect_flow_decision(

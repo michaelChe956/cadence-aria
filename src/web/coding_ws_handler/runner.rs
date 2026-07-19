@@ -8,7 +8,7 @@ use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
 };
 pub(crate) use crate::product::coding_workspace_engine::{
-    CodeReviewFlowDecision, code_review_flow_decision, internal_review_flow_decision,
+    CodeReviewFlowDecision, code_review_flow_decision,
 };
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
@@ -273,9 +273,9 @@ async fn handle_internal_review_flow_decision(
     current: &CodingExecutionAttempt,
     internal_review: &crate::product::coding_models::InternalPrReview,
 ) -> Result<(), CodingWorkspaceEngineError> {
-    let reviewer_projection =
-        engine.reviewer_projection_for_internal_review(current, internal_review)?;
-    let current = match internal_review_flow_decision(internal_review, &reviewer_projection) {
+    let current = match engine
+        .internal_review_flow_decision_for_attempt(current, internal_review)?
+    {
         CodeReviewFlowDecision::ContinueAfterApprove => {
             if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
                 engine

@@ -1,4 +1,23 @@
 use super::*;
+
+pub(crate) fn internal_review_blocked_gate_reason(
+    decision: CodeReviewFlowDecision,
+    is_group_final_review: bool,
+) -> Option<&'static str> {
+    match decision {
+        CodeReviewFlowDecision::RunCoderFix if is_group_final_review => {
+            Some("group_final_review_blocked")
+        }
+        CodeReviewFlowDecision::RunCoderFix => Some("internal_review_blocked"),
+        CodeReviewFlowDecision::OpenOperationalGate => Some("internal_review_operational_blocker"),
+        CodeReviewFlowDecision::StopForHumanTriage => Some("internal_review_human_triage"),
+        CodeReviewFlowDecision::RetryVerification
+        | CodeReviewFlowDecision::StartPlanRepair
+        | CodeReviewFlowDecision::StartStoryAmendment
+        | CodeReviewFlowDecision::StartDesignAmendment
+        | CodeReviewFlowDecision::ContinueAfterApprove => None,
+    }
+}
 use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
@@ -268,9 +287,8 @@ impl CodingWorkspaceEngine {
             Some(raw_provider_output_ref.clone()),
             &role_run,
         )?;
-        let reviewer_projection =
-            self.reviewer_projection_for_internal_review(&attempt, &review)?;
-        let review_flow_decision = internal_review_flow_decision(&review, &reviewer_projection);
+        let review_flow_decision =
+            self.internal_review_flow_decision_for_attempt(&attempt, &review)?;
         self.store.save_internal_pr_review(&attempt, &review)?;
         self.emit_internal_pr_review_chat_entry(
             &attempt,
@@ -350,24 +368,31 @@ impl CodingWorkspaceEngine {
             role_run_status,
             reason_code,
         )?;
-        if review.verdict == ReviewVerdict::Blocked {
+        let blocked_gate_reason = (review.verdict == ReviewVerdict::Blocked)
+            .then(|| {
+                internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review)
+            })
+            .flatten();
+        if let Some(blocked_gate_reason) = blocked_gate_reason {
+            let operational = blocked_gate_reason == "internal_review_operational_blocker";
+            let human_triage = blocked_gate_reason == "internal_review_human_triage";
             self.create_review_blocked_gate(ReviewBlockedGateInput {
                 attempt: &attempt,
                 node_id: &node.id,
                 stage: CodingExecutionStage::InternalPrReview,
                 role: CodingProviderRole::InternalReviewer,
-                title: if is_group_final_review {
+                title: if operational {
+                    "Internal review operational blocker"
+                } else if human_triage {
+                    "Internal review requires human triage"
+                } else if is_group_final_review {
                     "GroupFinalReview blocked"
                 } else {
                     "Internal PR review blocked"
                 }
                 .to_string(),
                 description: review.summary.clone(),
-                reason_code: if is_group_final_review {
-                    "group_final_review_blocked"
-                } else {
-                    "internal_review_blocked"
-                },
+                reason_code: blocked_gate_reason,
                 evidence_refs: vec![review.id.clone()],
                 raw_provider_output_ref: Some(raw_provider_output_ref),
             })

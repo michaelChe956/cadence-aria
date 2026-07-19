@@ -139,6 +139,7 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
             max_auto_rework: 2,
         })
         .expect("create group attempt");
+    seed_authoritative_group_final_review_fixture(&store, &attempt);
     store
         .update_attempt_status(
             "project_0001",
@@ -300,6 +301,7 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
             max_auto_rework: 2,
         })
         .expect("create group attempt");
+    seed_authoritative_group_final_review_fixture(&store, &attempt);
     store
         .update_attempt_status(
             "project_0001",
@@ -351,10 +353,10 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
         .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
         .expect("open blocked gates");
     assert_eq!(gates.len(), 1);
-    assert_eq!(gates[0].title, "GroupFinalReview blocked");
+    assert_eq!(gates[0].title, "Internal review requires human triage");
     assert_eq!(
         gates[0].reason_code.as_deref(),
-        Some("group_final_review_blocked")
+        Some("internal_review_human_triage")
     );
 }
 
@@ -388,6 +390,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
             max_auto_rework: 2,
         })
         .expect("create group attempt");
+    seed_authoritative_group_final_review_fixture(&store, &attempt);
     store
         .update_role_provider_config_snapshot(
             "project_0001",

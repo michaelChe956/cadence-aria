@@ -87,6 +87,44 @@ fn coding_plan_repair_router_rejects_polluted_implementation_findings() {
     }
 }
 
+#[test]
+fn coding_plan_repair_router_rejects_mixed_valid_and_invalid_findings() {
+    let projection = reviewer_projection_fixture();
+    let mut polluted = implementation_finding();
+    polluted.repair_target = Some(crate::product::models::RepairTarget {
+        kind: crate::product::models::RepairTargetKind::CurrentWorkItem,
+        logical_work_item_ids: vec!["work_item_0001".to_string()],
+        work_item_revision_ids: vec!["work_item_revision_0001".to_string()],
+    });
+
+    assert_eq!(
+        code_review_flow_decision(
+            &code_review_report_with(
+                ReviewVerdict::Blocked,
+                vec![story_amendment_finding(), polluted],
+            ),
+            &projection,
+        ),
+        CodeReviewFlowDecision::StopForHumanTriage,
+    );
+}
+
+#[test]
+fn coding_plan_repair_router_preserves_priority_when_all_findings_are_valid() {
+    let projection = reviewer_projection_fixture();
+
+    assert_eq!(
+        code_review_flow_decision(
+            &code_review_report_with(
+                ReviewVerdict::Blocked,
+                vec![upstream_plan_defect_finding(), story_amendment_finding()],
+            ),
+            &projection,
+        ),
+        CodeReviewFlowDecision::StartStoryAmendment,
+    );
+}
+
 fn upstream_plan_defect_finding() -> ReviewFinding {
     ReviewFinding {
         severity: FindingSeverity::Error,
@@ -110,6 +148,29 @@ fn upstream_plan_defect_finding() -> ReviewFinding {
             work_item_revision_ids: vec!["work_item_revision_0001".to_string()],
         }),
         recommended_route: crate::product::models::PlanDefectRoute::PlanRepair,
+        confidence: Some(PlanDefectConfidence::High),
+    }
+}
+
+fn story_amendment_finding() -> ReviewFinding {
+    ReviewFinding {
+        severity: FindingSeverity::Error,
+        file_path: None,
+        line: None,
+        message: "story scope must be amended".to_string(),
+        required_action: None,
+        source_stage: CodingExecutionStage::CodeReview,
+        evidence: Vec::new(),
+        plan_defect_evidence: Vec::new(),
+        related_requirements: Vec::new(),
+        related_design_constraints: Vec::new(),
+        related_work_item_tasks: Vec::new(),
+        defect_class: crate::product::models::PlanDefectClass::StoryAmendmentRequired,
+        reason_code: Some("story_scope_invalid".to_string()),
+        contract_refs: Vec::new(),
+        capability_refs: Vec::new(),
+        repair_target: None,
+        recommended_route: crate::product::models::PlanDefectRoute::StoryAmendment,
         confidence: Some(PlanDefectConfidence::High),
     }
 }
@@ -154,10 +215,17 @@ pub(super) fn reviewer_projection_fixture() -> ReviewerWorkItemProjection {
         }],
         output_contract_checks: Vec::new(),
         verification_evidence_rules: Vec::new(),
-        blocker_routing: vec![BlockerRule {
-            reason_code: "upstream_contract_capability_missing".to_string(),
-            route: BlockerRoute::PlanRepairUpstream,
-            target_contract_refs: vec!["repository_initialization_finalization".to_string()],
-        }],
+        blocker_routing: vec![
+            BlockerRule {
+                reason_code: "upstream_contract_capability_missing".to_string(),
+                route: BlockerRoute::PlanRepairUpstream,
+                target_contract_refs: vec!["repository_initialization_finalization".to_string()],
+            },
+            BlockerRule {
+                reason_code: "story_scope_invalid".to_string(),
+                route: BlockerRoute::StoryAmendment,
+                target_contract_refs: Vec::new(),
+            },
+        ],
     }
 }

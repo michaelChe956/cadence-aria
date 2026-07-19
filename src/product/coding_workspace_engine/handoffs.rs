@@ -1,5 +1,5 @@
 use super::*;
-use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_models::{CodingAttemptScope, CodingUnitRunStatus};
 
 impl CodingWorkspaceEngine {
     pub(crate) fn active_work_item_id_for_attempt<'a>(
@@ -585,6 +585,35 @@ impl CodingWorkspaceEngine {
         let attempt = self.commit_current_group_unit_changes(attempt).await?;
         self.generate_and_save_work_item_handoff_if_missing(&attempt)
             .await?;
+        let active = self
+            .store
+            .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::WorkItemHandoffMissing(attempt.id.clone())
+            })?;
+        let runs = self.store.list_coding_unit_runs(&attempt, &active.id)?;
+        let run = runs
+            .iter()
+            .max_by_key(|run| run.execution_no)
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "coding_unit_run",
+                id: active.id.clone(),
+            })?;
+        let active_run_count = runs.iter().filter(|run| run.status.is_active()).count();
+        let completion_retry =
+            run.status == CodingUnitRunStatus::Completed && active_run_count == 0;
+        if !completion_retry && active_run_count != 1 {
+            return Err(ProductStoreError::Ambiguous {
+                kind: "coding_unit_run",
+                id: active.id,
+            }
+            .into());
+        }
+        let completion_commit = attempt.head_commit.as_deref().ok_or_else(|| {
+            CodingWorkspaceEngineError::CompletionCommitMissing(attempt.id.clone())
+        })?;
+        self.store
+            .complete_coding_unit_run(&attempt, &run.id, completion_commit)?;
         self.complete_current_group_unit(&attempt, Some("当前 Work Item 已完成".to_string()))
             .await
     }

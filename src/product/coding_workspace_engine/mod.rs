@@ -168,6 +168,8 @@ pub(crate) use gates::*;
 #[allow(unused_imports)]
 pub(crate) use group::*;
 #[allow(unused_imports)]
+pub(crate) use internal_pr_review::internal_review_blocked_gate_reason;
+#[allow(unused_imports)]
 pub(crate) use plan_defect::*;
 #[allow(unused_imports)]
 pub(crate) use plan_defect_routing::*;

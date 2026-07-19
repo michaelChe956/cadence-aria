@@ -42,6 +42,14 @@ impl CodingWorkspaceEngine {
         };
         let available_actions = if reason_code == "code_review_provider_interrupted" {
             vec![retry_action]
+        } else if matches!(
+            reason_code,
+            "internal_review_operational_blocker" | "internal_review_human_triage"
+        ) {
+            vec![
+                retry_action,
+                coding_gate_action_for_id("abort").expect("abort action"),
+            ]
         } else {
             vec![
                 retry_action,
