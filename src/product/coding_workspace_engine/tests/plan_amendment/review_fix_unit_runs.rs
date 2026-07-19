@@ -9,7 +9,11 @@ async fn coding_amendment_recovery_rejects_forged_deterministic_unit_run_without
     );
     fixture
         .store
-        .materialize_unit_runs_from_manifest(&fixture.attempt, &fixture.manifest)
+        .materialize_unit_runs_from_manifest(
+            &fixture.attempt,
+            &fixture.manifest,
+            fixture.attempt.head_commit.as_deref(),
+        )
         .unwrap();
     let runs = fixture
         .store
@@ -83,7 +87,11 @@ async fn coding_amendment_status_update_rejects_forged_deterministic_unit_run() 
     );
     fixture
         .store
-        .materialize_unit_runs_from_manifest(&fixture.attempt, &fixture.manifest)
+        .materialize_unit_runs_from_manifest(
+            &fixture.attempt,
+            &fixture.manifest,
+            fixture.attempt.head_commit.as_deref(),
+        )
         .unwrap();
     let mut forged = fixture
         .store
@@ -175,11 +183,19 @@ async fn coding_amendment_supersedes_only_active_replacement_source_runs() {
 
     fixture
         .store
-        .materialize_unit_runs_from_manifest(&fixture.attempt, &manifest)
+        .materialize_unit_runs_from_manifest(
+            &fixture.attempt,
+            &manifest,
+            fixture.attempt.head_commit.as_deref(),
+        )
         .unwrap();
     fixture
         .store
-        .materialize_unit_runs_from_manifest(&fixture.attempt, &manifest)
+        .materialize_unit_runs_from_manifest(
+            &fixture.attempt,
+            &manifest,
+            fixture.attempt.head_commit.as_deref(),
+        )
         .unwrap();
 
     let source_runs = fixture

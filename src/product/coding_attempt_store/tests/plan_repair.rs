@@ -299,6 +299,7 @@ fn coding_amendment_journal_create_get_and_phase_advance_are_monotonic() {
         id: "coding_amendment_application_plan_amendment_0001".to_string(),
         attempt_id: attempt.id.clone(),
         amendment_id: "plan_amendment_0001".to_string(),
+        materialization_head_commit: Some("commit_materialization".to_string()),
         phase: CodingAmendmentApplicationPhase::Started,
         error: None,
         created_at: "2026-07-18T00:00:00Z".to_string(),

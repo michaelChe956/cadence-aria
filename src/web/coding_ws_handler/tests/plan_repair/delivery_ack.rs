@@ -9,13 +9,48 @@ use futures_util::Sink;
 
 use crate::product::models::{AmendmentResumeMode, AmendmentResumeTarget, PlanAmendmentManifest};
 use crate::web::coding_ws_handler::delivery_ack::register_plan_amendment_socket_write;
-use crate::web::coding_ws_handler::send_coding_event;
+use crate::web::coding_ws_handler::{OutboundEventReceiver, send_coding_event};
 
 use super::*;
 
 struct TestSocketSink {
     fail_write: bool,
     messages: Vec<Message>,
+}
+
+struct PendingSocketSink {
+    flush_entered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Sink<Message> for PendingSocketSink {
+    type Error = io::Error;
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, _message: Message) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.flush_entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Poll::Pending
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 impl TestSocketSink {
@@ -101,6 +136,75 @@ async fn coding_ws_plan_repair_socket_writer_failure_rejects_delivery_acknowledg
             .contains("plan_amendment_socket_write_failed:event_socket_write_failure")
     );
     assert!(socket.messages.is_empty());
+}
+
+#[tokio::test]
+async fn coding_ws_plan_repair_socket_writer_abort_rejects_dequeued_delivery_acknowledgement() {
+    let event_id = "event_socket_write_abort";
+    let event = plan_amendment_event(event_id);
+    let waiter = register_plan_amendment_socket_write(event_id).unwrap();
+    let flush_entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer_flush_entered = std::sync::Arc::clone(&flush_entered);
+    let writer = tokio::spawn(async move {
+        let mut socket = PendingSocketSink {
+            flush_entered: writer_flush_entered,
+        };
+        send_coding_event(&mut socket, &event).await
+    });
+
+    tokio::time::timeout(Duration::from_millis(250), async {
+        while !flush_entered.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("writer must dequeue the event and enter the pending socket flush");
+    writer.abort();
+    assert!(writer.await.unwrap_err().is_cancelled());
+
+    let error = tokio::time::timeout(Duration::from_millis(250), waiter.wait())
+        .await
+        .expect("aborting a dequeued socket write must settle the acknowledgement")
+        .expect_err("aborting a dequeued socket write must reject delivery acknowledgement");
+    assert!(
+        error
+            .to_string()
+            .contains("plan_amendment_socket_write_failed:event_socket_write_abort")
+    );
+
+    let retry_waiter = register_plan_amendment_socket_write(event_id).unwrap();
+    let retry_event = plan_amendment_event(event_id);
+    let mut retry_socket = TestSocketSink::successful();
+    assert!(send_coding_event(&mut retry_socket, &retry_event).await);
+    retry_waiter.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn coding_ws_plan_repair_outbound_receiver_drop_rejects_queued_delivery_acknowledgement() {
+    let event_id = "event_socket_receiver_drop";
+    let event = plan_amendment_event(event_id);
+    let waiter = register_plan_amendment_socket_write(event_id).unwrap();
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+    let receiver = OutboundEventReceiver::new(event_rx);
+    event_tx.send(event).await.unwrap();
+
+    drop(receiver);
+
+    let error = tokio::time::timeout(Duration::from_millis(250), waiter.wait())
+        .await
+        .expect("dropping the outbound receiver must settle queued acknowledgements")
+        .expect_err("dropping the outbound receiver must reject queued delivery acknowledgement");
+    assert!(
+        error
+            .to_string()
+            .contains("plan_amendment_socket_write_failed:event_socket_receiver_drop")
+    );
+
+    let retry_waiter = register_plan_amendment_socket_write(event_id).unwrap();
+    let retry_event = plan_amendment_event(event_id);
+    let mut retry_socket = TestSocketSink::successful();
+    assert!(send_coding_event(&mut retry_socket, &retry_event).await);
+    retry_waiter.wait().await.unwrap();
 }
 
 fn plan_amendment_event(event_id: &str) -> CodingWsOutMessage {

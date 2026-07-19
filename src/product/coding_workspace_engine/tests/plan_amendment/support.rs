@@ -93,7 +93,11 @@ pub(super) fn prepare_application_phase(
     }
     fixture
         .store
-        .materialize_unit_runs_from_manifest(&fixture.attempt, &fixture.manifest)
+        .materialize_unit_runs_from_manifest(
+            &fixture.attempt,
+            &fixture.manifest,
+            fixture.attempt.head_commit.as_deref(),
+        )
         .unwrap();
     fixture
         .store

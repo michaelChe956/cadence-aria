@@ -32,6 +32,7 @@ impl super::CodingAttemptStore {
         &self,
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
+        materialization_head_commit: Option<&str>,
     ) -> Result<Vec<CodingUnitRun>, ProductStoreError> {
         let current = self.validate_attempt_lineage(attempt)?;
         let revision_store = WorkItemRevisionStore::new(self.paths());
@@ -57,7 +58,6 @@ impl super::CodingAttemptStore {
                 ));
             };
             let expected = expected_run(
-                &current,
                 manifest,
                 &context,
                 &revision_store,
@@ -66,6 +66,7 @@ impl super::CodingAttemptStore {
                 coder_renderer.renderer_version(),
                 reviewer_renderer.renderer_version(),
                 false,
+                materialization_head_commit,
             )?;
             if let Some((_, existing)) = self.find_unit_run_by_id(&current, &expected.id)? {
                 validate_materialized_unit(unit, manifest, &context, false)?;
@@ -153,7 +154,6 @@ impl super::CodingAttemptStore {
             let unit = unique_unit_mut(&mut units, logical_id)?;
             let runs = self.list_coding_unit_runs(&current, &unit.id)?;
             let expected = expected_run(
-                &current,
                 manifest,
                 &context,
                 &revision_store,
@@ -162,6 +162,7 @@ impl super::CodingAttemptStore {
                 coder_renderer.renderer_version(),
                 reviewer_renderer.renderer_version(),
                 false,
+                materialization_head_commit,
             )?;
             if let Some((_, existing)) = self.find_unit_run_by_id(&current, &expected.id)? {
                 materialized.push(existing);
@@ -203,6 +204,7 @@ impl super::CodingAttemptStore {
         manifest: &PlanAmendmentManifest,
         resume_target_written: bool,
         completed_replay: bool,
+        materialization_head_commit: Option<&str>,
     ) -> Result<Vec<CodingUnitRun>, ProductStoreError> {
         let current = self.validate_attempt_lineage(attempt)?;
         let revision_store = WorkItemRevisionStore::new(self.paths());
@@ -252,7 +254,6 @@ impl super::CodingAttemptStore {
             }
             let runs = self.list_coding_unit_runs(&current, &unit.id)?;
             let expected = expected_run(
-                &current,
                 manifest,
                 &context,
                 &revision_store,
@@ -261,6 +262,7 @@ impl super::CodingAttemptStore {
                 coder_renderer.renderer_version(),
                 reviewer_renderer.renderer_version(),
                 resume_target_written,
+                materialization_head_commit,
             )?;
             let existing = self
                 .find_unit_run_by_id(&current, &expected.id)?
@@ -308,7 +310,6 @@ impl super::CodingAttemptStore {
             .unwrap_or(&current.provider_config_snapshot.author);
         let reviewer_renderer = renderer_for(reviewer_provider);
         let mut expected = expected_run(
-            &current,
             manifest,
             &context,
             &revision_store,
@@ -317,6 +318,7 @@ impl super::CodingAttemptStore {
             coder_renderer.renderer_version(),
             reviewer_renderer.renderer_version(),
             false,
+            current.head_commit.as_deref(),
         )?;
         expected.status = run.status.clone();
         if !same_initial_materialization_state(&run, &expected) {
@@ -440,7 +442,6 @@ impl super::CodingAttemptStore {
 
 #[allow(clippy::too_many_arguments)]
 fn expected_run(
-    current: &CodingExecutionAttempt,
     manifest: &PlanAmendmentManifest,
     context: &AmendmentRunContext,
     revision_store: &WorkItemRevisionStore,
@@ -449,6 +450,7 @@ fn expected_run(
     coder_renderer_version: &str,
     reviewer_renderer_version: &str,
     resume_target_written: bool,
+    materialization_head_commit: Option<&str>,
 ) -> Result<CodingUnitRun, ProductStoreError> {
     let logical_id = &unit.logical_work_item_id;
     let revision_id = context
@@ -518,7 +520,7 @@ fn expected_run(
         verification_retry_count: 0,
         operational_retry_count: 0,
         plan_repair_count,
-        start_commit: current.head_commit.clone(),
+        start_commit: materialization_head_commit.map(str::to_string),
         completion_commit: None,
         created_at: String::new(),
         updated_at: String::new(),

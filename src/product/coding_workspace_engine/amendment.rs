@@ -195,13 +195,17 @@ impl CodingWorkspaceEngine {
         }
         if journal.phase.order() < CodingAmendmentApplicationPhase::UnitRunsWritten.order() {
             let revision_store = WorkItemRevisionStore::new(self.store.paths());
+            let materialization_head_commit = journal.materialization_head_commit.clone();
             *journal = revision_store.with_active_amendment_identity(
                 &authority.plan,
                 &manifest.id,
                 &manifest.new_plan_revision_id,
                 || {
-                    self.store
-                        .materialize_unit_runs_from_manifest(attempt, manifest)?;
+                    self.store.materialize_unit_runs_from_manifest(
+                        attempt,
+                        manifest,
+                        materialization_head_commit.as_deref(),
+                    )?;
                     self.store.advance_amendment_application_journal(
                         attempt,
                         &manifest.id,
@@ -380,6 +384,7 @@ impl CodingWorkspaceEngine {
                 journal.phase.order()
                     >= CodingAmendmentApplicationPhase::ResumeTargetWritten.order(),
                 journal.phase == CodingAmendmentApplicationPhase::Completed,
+                journal.materialization_head_commit.as_deref(),
             )?;
         }
         if journal.phase == CodingAmendmentApplicationPhase::Completed {

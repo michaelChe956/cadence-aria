@@ -448,7 +448,27 @@ pub(super) fn valid_materialized_runtime_evolution(
     current: &CodingUnitRun,
     initial: &CodingUnitRun,
 ) -> bool {
-    same_immutable_materialization_identity(current, initial)
+    same_stable_materialization_identity(current, initial)
+        && valid_bound_renderer_evolution(
+            &current.coder_provider_renderer_version,
+            &initial.coder_provider_renderer_version,
+            current.coder_execution_context_hash.as_deref(),
+        )
+        && valid_bound_renderer_evolution(
+            &current.reviewer_provider_renderer_version,
+            &initial.reviewer_provider_renderer_version,
+            current.reviewer_execution_context_hash.as_deref(),
+        )
+        && match (
+            current
+                .internal_reviewer_provider_renderer_version
+                .as_deref(),
+            current.internal_reviewer_execution_context_hash.as_deref(),
+        ) {
+            (None, None) => true,
+            (Some(renderer), Some(hash)) => !renderer.is_empty() && !hash.is_empty(),
+            _ => false,
+        }
         && current.unit_rework_count >= initial.unit_rework_count
         && current.verification_retry_count >= initial.verification_retry_count
         && current.operational_retry_count >= initial.operational_retry_count
@@ -467,6 +487,33 @@ pub(super) fn valid_materialized_runtime_evolution(
             .as_deref()
             .is_none_or(|hash| !hash.is_empty())
         && (current.status != CodingUnitRunStatus::Completed || current.completion_commit.is_some())
+}
+
+fn same_stable_materialization_identity(left: &CodingUnitRun, right: &CodingUnitRun) -> bool {
+    left.unit_id == right.unit_id
+        && left.execution_no == right.execution_no
+        && left.work_item_revision_id == right.work_item_revision_id
+        && left.resolved_handoff_revision_ids == right.resolved_handoff_revision_ids
+        && left.canonical_contract_hash == right.canonical_contract_hash
+        && left.projection_bundle_id == right.projection_bundle_id
+        && left.projection_compiler_version == right.projection_compiler_version
+        && left.coder_projection_hash == right.coder_projection_hash
+        && left.reviewer_projection_hash == right.reviewer_projection_hash
+        && left.start_commit == right.start_commit
+}
+
+fn valid_bound_renderer_evolution(
+    current_renderer: &str,
+    initial_renderer: &str,
+    execution_context_hash: Option<&str>,
+) -> bool {
+    if current_renderer.is_empty() {
+        return false;
+    }
+    match execution_context_hash {
+        Some(hash) => !hash.is_empty(),
+        None => current_renderer == initial_renderer,
+    }
 }
 
 fn valid_runtime_status(initial: &CodingUnitRunStatus, current: &CodingUnitRunStatus) -> bool {

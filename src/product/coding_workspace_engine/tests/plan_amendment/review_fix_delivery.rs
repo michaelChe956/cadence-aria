@@ -1,5 +1,51 @@
+use std::io;
+use std::pin::Pin;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::task::{Context, Poll};
+
+use axum::extract::ws::Message;
+use futures_util::Sink;
+
 use super::*;
 use crate::product::coding_attempt_store::register_plan_amendment_delivery_mark_failpoint;
+use crate::web::coding_ws_handler::{OutboundEventReceiver, send_coding_event};
+
+struct PendingDeliverySink {
+    flush_entered: Arc<AtomicBool>,
+}
+
+impl Sink<Message> for PendingDeliverySink {
+    type Error = io::Error;
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, _message: Message) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.flush_entered.store(true, Ordering::SeqCst);
+        Poll::Pending
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
 
 #[tokio::test]
 async fn coding_amendment_delivery_enqueue_keeps_marker_pending_until_socket_write() {
@@ -131,6 +177,99 @@ async fn coding_amendment_delivery_socket_write_failure_keeps_attempt_non_runnab
             .status,
         crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Pending
     );
+}
+
+#[tokio::test]
+async fn coding_amendment_delivery_writer_abort_releases_arbitration_and_recovers_same_event() {
+    let fixture = amendment_fixture().await;
+    let attempt = fixture.attempt.clone();
+    let manifest = fixture.manifest.clone();
+    let store = fixture.store.clone();
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let mut outbound = OutboundEventReceiver::new(event_rx);
+    let apply = tokio::spawn(async move {
+        CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx)
+            .apply_plan_amendment(&attempt, &manifest)
+            .await
+    });
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), outbound.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let event_id = plan_amendment_event_id(&event);
+    let flush_entered = Arc::new(AtomicBool::new(false));
+    let writer_flush_entered = Arc::clone(&flush_entered);
+    let writer = tokio::spawn(async move {
+        let mut sink = PendingDeliverySink {
+            flush_entered: writer_flush_entered,
+        };
+        send_coding_event(&mut sink, &event).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !flush_entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("writer must enter the pending socket flush");
+    writer.abort();
+    assert!(writer.await.unwrap_err().is_cancelled());
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), apply)
+        .await
+        .expect("writer abort must release the amendment producer")
+        .unwrap()
+        .expect_err("writer abort must fail delivery before the Attempt becomes runnable");
+    assert!(
+        error
+            .to_string()
+            .contains("plan_amendment_socket_write_failed")
+    );
+    drop(outbound);
+
+    assert_pending_delivery_and_recover_same_event(&fixture, &event_id).await;
+}
+
+#[tokio::test]
+async fn coding_amendment_delivery_receiver_drop_releases_arbitration_and_recovers_same_event() {
+    let fixture = amendment_fixture().await;
+    let attempt = fixture.attempt.clone();
+    let manifest = fixture.manifest.clone();
+    let store = fixture.store.clone();
+    let (event_tx, event_rx) = mpsc::channel(1);
+    let capacity_probe = event_tx.clone();
+    let outbound = OutboundEventReceiver::new(event_rx);
+    let apply = tokio::spawn(async move {
+        CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx)
+            .apply_plan_amendment(&attempt, &manifest)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while capacity_probe.capacity() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("producer must enqueue the amendment event before receiver drop");
+    let event_id = fixture
+        .store
+        .get_plan_amendment_delivery(&fixture.attempt, &fixture.manifest.id)
+        .unwrap()
+        .event_id;
+
+    drop(outbound);
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), apply)
+        .await
+        .expect("receiver drop must release the amendment producer")
+        .unwrap()
+        .expect_err("receiver drop must fail delivery before the Attempt becomes runnable");
+    assert!(
+        error
+            .to_string()
+            .contains("plan_amendment_socket_write_failed")
+    );
+
+    assert_pending_delivery_and_recover_same_event(&fixture, &event_id).await;
 }
 
 #[tokio::test]
@@ -310,6 +449,63 @@ async fn coding_amendment_concurrent_recovery_reconciles_one_durable_delivery() 
     assert_eq!(delivery.event_id, event_id);
     assert_eq!(
         delivery.status,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Delivered
+    );
+}
+
+fn plan_amendment_event_id(event: &CodingWsOutMessage) -> String {
+    match event {
+        CodingWsOutMessage::PlanAmendmentUpdated { event_id, .. } => event_id.clone(),
+        event => panic!("unexpected amendment delivery event: {event:?}"),
+    }
+}
+
+async fn assert_pending_delivery_and_recover_same_event(
+    fixture: &AmendmentFixture,
+    expected_event_id: &str,
+) {
+    let failed = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .unwrap();
+    assert_eq!(failed.status, CodingAttemptStatus::AmendmentApplyFailed);
+    let pending = fixture
+        .store
+        .get_plan_amendment_delivery(&failed, &fixture.manifest.id)
+        .unwrap();
+    assert_eq!(pending.event_id, expected_event_id);
+    assert_eq!(
+        pending.status,
+        crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Pending
+    );
+
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let mut outbound = OutboundEventReceiver::new(event_rx);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+    let recovery = tokio::spawn(async move { engine.recover_plan_amendment(&failed).await });
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), outbound.recv())
+        .await
+        .expect("recovery must reacquire amendment arbitration")
+        .expect("recovery must enqueue the pending amendment event");
+    assert_eq!(plan_amendment_event_id(&event), expected_event_id);
+    crate::web::coding_ws_handler::delivery_ack::confirm_plan_amendment_socket_write(&event);
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), recovery)
+        .await
+        .expect("same-event recovery must finish")
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.status, CodingAttemptStatus::Running);
+    assert_eq!(
+        fixture
+            .store
+            .get_plan_amendment_delivery(&recovered, &fixture.manifest.id)
+            .unwrap()
+            .status,
         crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Delivered
     );
 }

@@ -1,7 +1,6 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, State};
 use axum::response::IntoResponse;
-use futures_util::Sink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
@@ -13,6 +12,9 @@ use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
+use super::outbound::{
+    OutboundEventReceiver, flush_queued_coding_events, send_coding_event, send_coding_json,
+};
 use super::{
     CodingWsInMessage, CodingWsOutMessage, build_coding_session_state,
     coding_attempt_lookup_protocol_error, confirm_open_stage_gate, context_note_chat_entry,
@@ -88,7 +90,8 @@ async fn handle_coding_socket(
         return;
     }
 
-    let (event_tx, mut event_rx) = mpsc::channel(1024);
+    let (event_tx, event_rx) = mpsc::channel(1024);
+    let mut event_rx = OutboundEventReceiver::new(event_rx);
     let mut runner_started = false;
     let mut runner_command_tx: Option<mpsc::Sender<CodingRunnerCommand>> = None;
     loop {
@@ -284,11 +287,7 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
-                    while let Ok(event) = event_rx.try_recv() {
-                        if !send_coding_event(&mut socket_tx, &event).await {
-                            break;
-                        }
-                    }
+                    flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
@@ -338,11 +337,7 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
-                    while let Ok(event) = event_rx.try_recv() {
-                        if !send_coding_event(&mut socket_tx, &event).await {
-                            break;
-                        }
-                    }
+                    flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
@@ -383,11 +378,7 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
-                    while let Ok(event) = event_rx.try_recv() {
-                        if !send_coding_event(&mut socket_tx, &event).await {
-                            break;
-                        }
-                    }
+                    flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
@@ -688,33 +679,6 @@ async fn handle_coding_socket(
             }
         }
     }
-    event_rx.close();
-    while let Ok(event) = event_rx.try_recv() {
-        super::delivery_ack::fail_plan_amendment_socket_write(&event);
-    }
-}
-
-pub(crate) async fn send_coding_json<S>(socket: &mut S, message: &CodingWsOutMessage) -> bool
-where
-    S: Sink<Message> + Unpin,
-{
-    match serde_json::to_string(message) {
-        Ok(json) => socket.send(Message::Text(json.into())).await.is_ok(),
-        Err(_) => false,
-    }
-}
-
-pub(crate) async fn send_coding_event<S>(socket: &mut S, event: &CodingWsOutMessage) -> bool
-where
-    S: Sink<Message> + Unpin,
-{
-    let written = send_coding_json(socket, event).await;
-    if written {
-        super::delivery_ack::confirm_plan_amendment_socket_write(event);
-    } else {
-        super::delivery_ack::fail_plan_amendment_socket_write(event);
-    }
-    written
 }
 
 pub fn is_coding_ws_message_allowed(

@@ -596,6 +596,19 @@ async fn amendment_fixture() -> AmendmentFixture {
     let mut revised_bundle = old_bundle;
     revised_bundle.id = revised.work_item_projection_bundle_id.clone();
     revised_bundle.work_item_revision_id = revised.id.clone();
+    revised_bundle.coder_projection.work_item_revision_id = revised.id.clone();
+    revised_bundle.reviewer_projection.work_item_revision_id = revised.id.clone();
+    let revised_hashes = projection_hashes(
+        &crate::product::work_item_projection::CompiledWorkItemProjections {
+            human: revised_bundle.human_projection.clone(),
+            coder: revised_bundle.coder_projection.clone(),
+            reviewer: revised_bundle.reviewer_projection.clone(),
+        },
+    )
+    .unwrap();
+    revised_bundle.human_projection_hash = revised_hashes.human;
+    revised_bundle.coder_projection_hash = revised_hashes.coder;
+    revised_bundle.reviewer_projection_hash = revised_hashes.reviewer;
     revised_bundle.created_at = "2026-07-19T00:00:01Z".to_string();
     revision_store
         .put_work_item_projection_bundle(&plan, &revised_bundle)

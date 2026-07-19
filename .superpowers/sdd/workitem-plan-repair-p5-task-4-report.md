@@ -81,6 +81,24 @@
 | Critical 2 | 同步 `flock(LOCK_EX)` 阻塞 Tokio worker | current-thread ticker 延迟 329ms；6 waiters > 2 workers 发生 worker starvation，手工终止 exit 130 | `spawn_blocking` 获取 cross-process flock，guard 继续跨 await 持有；测试改为 runtime 释放信号 + std watchdog 的确定性调度证明，不依赖机器时间阈值；锁序仍为 attempt arbitration → plan lineage → entity |
 | Important 1 | mpsc enqueue 后即标记 Delivered，socket 尚未实际写出 | enqueue 回归得到 marker `Delivered`，期望 `Pending`；临时移除 writer settle 后 success/failure 测试 0/2，均因 waiter `Elapsed` 失败 | producer 等待 writer success/failure ACK；writer success/failure 2/2，enqueue Pending、socket failure、send-before-mark crash + reconnect、并发 recovery 全部收敛 |
 
+## Final Re-review 1 Critical / 1 Important：RED → GREEN
+
+| 级别 | 问题与根因 | RED 证据 | GREEN 结果 |
+| --- | --- | --- | --- |
+| Critical 1 | Completed replay 继续使用当前 Attempt HEAD 重建 UnitRun `start_commit`；真实 group completion 会推进 HEAD，provider 绑定也会合法更新 renderer 与 execution-context hash，因此稳定物化身份与运行时演进仍被混为一体 | `cargo test --locked --lib coding_amendment_completed_replay_accepts`：新增 2 个真实路径回归均在 `coding_amendment_unit_run` 报 `IdentityMismatch` | Journal 创建时重读权威 Attempt，并持久化 `materialization_head_commit`；初始物化和 completed-prefix validation 显式使用 Journal HEAD；稳定 lineage/revision/handoff/contract/projection/compiler/hash/start commit 保持严格，renderer/context/status/counters/completion commit 仅允许受控演进；2/2 回归转绿 |
+| Important 1 | `send_coding_event` 只在 `socket.send(...).await` 返回后 settle；writer future 在 Pending send 中被 abort 时跳过后置 fail。自然退出才执行的 receiver drain 也覆盖不了 handler cancellation，导致当前或队列 ACK sender 悬挂，producer 持有 arbitration 永久等待 | writer abort 回归超时为 `Elapsed(())`；queued receiver-drop 回归在 `OutboundEventReceiver` 尚不存在时编译 RED | 新增 `outbound.rs`：`OutboundWriteSettlement` 在 Drop 自动 fail 当前 dequeued event；`OutboundEventReceiver` 在 Drop close + drain queued events；success/failure/abort 与 receiver-drop 均释放 waiter，允许相同 event ID 重新注册并恢复，低层 4/4、业务集成 2/2 转绿 |
+
+### Final Re-review RED/GREEN 命令与输出
+
+- RED：`cargo test --locked --lib coding_amendment_completed_replay_accepts`，2 个新增测试均失败，错误为 `IdentityMismatch { kind: "coding_amendment_unit_run", ... }`。
+- RED：`cargo test --locked --lib coding_ws_plan_repair_socket_writer_abort_rejects_dequeued_delivery_acknowledgement`，waiter 未被 settle，测试以 `Elapsed(())` 失败。
+- RED：queued receiver-drop 回归首次编译失败，原因是 cancellation-safe `OutboundEventReceiver` 尚未实现。
+- GREEN：`cargo test --locked --lib coding_amendment_completed_replay`，5 passed，0 failed。
+- GREEN：`cargo test --locked --lib coding_amendment_journal`，3 passed，0 failed。
+- GREEN：`cargo test --locked --lib coding_amendment_`，42 passed，0 failed。
+- GREEN：`cargo test --locked --lib coding_ws_plan_repair_`，6 passed，0 failed。
+- GREEN：writer success/failure/abort 3/3，receiver drop 1/1；writer-abort 与 receiver-drop 业务恢复集成 2/2。
+
 ## 主要 RED/GREEN 测试
 
 - `coding_amendment_existing_journal_identity_mismatch_is_zero_write_at_every_phase`：Started、PlanBindingWritten、UnitRunsWritten、ResumeTargetWritten × clean/dirty，共 8 个矩阵场景。
@@ -109,6 +127,12 @@
 - `coding_amendment_concurrent_recovery_reconciles_one_durable_delivery`。
 - `coding_ws_plan_repair_socket_writer_success_acknowledges_delivery`。
 - `coding_ws_plan_repair_socket_writer_failure_rejects_delivery_acknowledgement`。
+- `coding_amendment_completed_replay_accepts_group_completion_head_evolution`。
+- `coding_amendment_completed_replay_accepts_provider_renderer_context_evolution`。
+- `coding_ws_plan_repair_socket_writer_abort_rejects_dequeued_delivery_acknowledgement`。
+- `coding_ws_plan_repair_outbound_receiver_drop_rejects_queued_delivery_acknowledgement`。
+- `coding_amendment_delivery_writer_abort_releases_arbitration_and_recovers_same_event`。
+- `coding_amendment_delivery_receiver_drop_releases_arbitration_and_recovers_same_event`。
 
 ## Full gate 首个失败与最小修复
 
@@ -120,12 +144,13 @@
 
 ### Fresh focused
 
-- `cargo test --locked --lib coding_amendment_completed_replay_`：3 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_completed_replay`：5 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_journal`：3 passed，0 failed。
 - `cargo test --locked --lib coding_amendment_arbitration_`：3 passed，0 failed。
-- `cargo test --locked --lib coding_amendment_delivery_`：4 passed，0 failed；另 `coding_amendment_concurrent_recovery_reconciles_one_durable_delivery`：1 passed，0 failed。
-- `cargo test --locked --lib coding_ws_plan_repair_socket_writer_`：2 passed，0 failed。
-- `cargo test --locked --lib coding_amendment_`：38 passed，0 failed。
-- `cargo test --locked --lib coding_ws_plan_repair_`：4 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_delivery_`：6 passed，0 failed；另 `coding_amendment_concurrent_recovery_reconciles_one_durable_delivery`：1 passed，0 failed。
+- `cargo test --locked --lib coding_ws_plan_repair_socket_writer_`：3 passed，0 failed；receiver drop 1 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_`：42 passed，0 failed。
+- `cargo test --locked --lib coding_ws_plan_repair_`：6 passed，0 failed。
 - `cargo test --locked --lib coding_amendment_updated_roundtrips`：1 passed，0 failed。
 - `cd web && pnpm tsc -b`：PASS，exit 0。
 
@@ -135,7 +160,7 @@
 - `cargo check --locked`：PASS，exit 0。
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，exit 0，0 warnings。
 - `cargo test --locked`：PASS，exit 0：
-  - lib：1128 passed；
+  - lib：1134 passed；
   - main：0 tests；
   - it_core：143 passed；
   - it_interactive：43 passed；
@@ -144,7 +169,7 @@
   - it_task_run：31 passed；
   - it_web：258 passed，12 ignored；
   - doc-test：1 passed；
-  - 合计：1870 passed，12 ignored，0 failed。
+  - 合计：1876 passed，12 ignored，0 failed。
 - `cd web && pnpm tsc -b`：PASS，exit 0。
 - `cargo test --locked --test it_core large_file_guard::product_source_and_test_files_stay_under_line_limit`：1 passed，0 failed。
 - 测试命名审计：PASS；新增行为测试使用 `coding_amendment_` / `coding_ws_plan_repair_` 前缀，无 `test`、`tmp`、`todo` 等占位命名。
@@ -155,24 +180,23 @@
 
 | 文件 | 行数 |
 | --- | ---: |
-| `src/web/coding_ws_handler/socket.rs` | 794 |
-| `src/product/coding_workspace_engine/tests/plan_amendment.rs` | 782 |
-| `src/web/coding_ws_handler/tests/plan_repair.rs` | 767 |
-| `src/product/coding_workspace_engine/amendment.rs` | 727 |
-| `src/product/coding_attempt_store/unit_run_amendment.rs` | 665 |
-| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_identity.rs` | 657 |
-| `src/product/coding_attempt_store/unit_run.rs` | 554 |
-| `src/web/coding_ws_handler/tests/plan_repair/runner_amendment_recovery.rs` | 479 |
-| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs` | 315 |
-| `src/web/coding_ws_handler/tests/plan_repair/delivery_ack.rs` | 129 |
-| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_replay.rs` | 114 |
-| `src/web/coding_ws_handler/delivery_ack.rs` | 111 |
-| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_async_lock.rs` | 108 |
-| `src/product/coding_attempt_store/amendment_recovery.rs` | 99 |
-| `src/product/coding_attempt_store/amendment_arbitration.rs` | 33 |
-| `src/web/coding_ws_handler/mod.rs` | 28 |
+| `src/product/coding_workspace_engine/tests/plan_amendment.rs` | 795 |
+| `src/product/coding_attempt_store/tests/plan_repair.rs` | 783 |
+| `src/web/coding_ws_handler/socket.rs` | 758 |
+| `src/product/coding_workspace_engine/amendment.rs` | 732 |
+| `src/product/coding_attempt_store/unit_run_amendment.rs` | 667 |
+| `src/product/coding_attempt_store/unit_run.rs` | 601 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs` | 511 |
+| `src/product/coding_attempt_store/plan_binding.rs` | 386 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_replay.rs` | 308 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_unit_runs.rs` | 271 |
+| `src/web/coding_ws_handler/tests/plan_repair/delivery_ack.rs` | 233 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/support.rs` | 130 |
+| `src/product/coding_models/plan_repair.rs` | 122 |
+| `src/web/coding_ws_handler/outbound.rs` | 99 |
+| `src/web/coding_ws_handler/mod.rs` | 29 |
 
-本次 changed Rust/TS/TSX 文件最大为 794 行；large-file guard fresh 通过，全部不超过 800 行。
+本轮 changed Rust/TS/TSX 文件最大为 795 行；`socket.rs` 为 758 行，新增 `outbound.rs` 为 99 行。large-file guard fresh 通过，全部不超过 800 行。
 
 ## 自审结论与边界
 
@@ -180,6 +204,8 @@
 - forged same-ID Journal/UnitRun、lineage replacement、并发 recovery、dirty identity mismatch 均有回归覆盖。
 - provider entry 在 durable delivery 成功且 finalization 收敛前保持阻断。
 - delivery 保证 socket-write-confirmed at-least-once 与稳定 event ID；socket write 后 durable mark 前崩溃可能重复，不宣称客户端 ACK、消费成功或 exactly-once。
+- Completed replay 的稳定身份继续严格校验 materialization-time HEAD；renderer 改变必须伴随非空 execution-context hash，无 context hash 时 renderer 必须保持初始值，internal reviewer renderer/hash 必须成对出现。
+- socket writer future abort 与 outbound receiver drop 都会 settle 当前或排队 Amendment ACK；marker 保持 Pending、Attempt 保持非 runnable，并可使用相同 event ID 立即恢复。
 - P6 客户端 ACK/dedup 与 Repair Session UI 未在 Task 4 实现。
 - 未添加历史 v1/缺失 Plan lineage 兼容 fallback。
 - worktree 保留；单个原子 fix commit；不 push。

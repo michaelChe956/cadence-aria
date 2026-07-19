@@ -83,18 +83,20 @@ impl super::CodingAttemptStore {
             Err(ProductStoreError::NotFound { .. }) => {}
             Err(error) => return Err(error),
         }
+        let current = self.validate_attempt_lineage(attempt)?;
         let now = Utc::now().to_rfc3339();
         let journal = CodingAmendmentApplicationJournal {
             id: format!("coding_amendment_application_{}", manifest.id),
-            attempt_id: attempt.id.clone(),
+            attempt_id: current.id.clone(),
             amendment_id: manifest.id.clone(),
+            materialization_head_commit: current.head_commit.clone(),
             phase: CodingAmendmentApplicationPhase::Started,
             error: None,
             created_at: now.clone(),
             updated_at: now,
         };
-        self.create_amendment_application_journal(attempt, &journal)?;
-        self.get_amendment_application_journal(attempt, &manifest.id)
+        self.create_amendment_application_journal(&current, &journal)?;
+        self.get_amendment_application_journal(&current, &manifest.id)
     }
 
     pub fn list_amendment_application_journals(

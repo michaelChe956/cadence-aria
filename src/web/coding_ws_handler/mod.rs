@@ -1,6 +1,7 @@
 mod context;
 pub(crate) mod delivery_ack;
 mod gates;
+mod outbound;
 pub mod protocol;
 mod runner;
 mod runner_support;
@@ -25,4 +26,4 @@ pub(crate) use crate::product::coding_models::CodingExecutionAttempt;
 #[cfg(test)]
 pub(crate) use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 #[cfg(test)]
-pub(crate) use socket::send_coding_event;
+pub(crate) use outbound::{OutboundEventReceiver, send_coding_event};

@@ -95,6 +95,7 @@ pub struct CodingAmendmentApplicationJournal {
     pub id: String,
     pub attempt_id: String,
     pub amendment_id: String,
+    pub materialization_head_commit: Option<String>,
     pub phase: CodingAmendmentApplicationPhase,
     pub error: Option<String>,
     pub created_at: String,
