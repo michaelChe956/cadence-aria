@@ -210,7 +210,7 @@ fn coding_plan_repair_parser_maps_legacy_review_finding_only_to_implementation()
 }
 
 #[test]
-fn coding_and_tester_plan_defects_use_the_same_finding_schema() {
+fn coding_plan_repair_coding_and_tester_plan_defects_use_the_same_finding_schema() {
     let output = serde_json::json!({
         "plan_defect_findings": [{
             "severity": "error",

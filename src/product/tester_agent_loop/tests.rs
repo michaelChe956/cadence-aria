@@ -49,7 +49,7 @@ fn test_attempt() -> CodingExecutionAttempt {
 }
 
 #[test]
-fn provider_test_execution_payload_roundtrip_preserves_plan_defect_findings() {
+fn coding_plan_repair_provider_test_execution_payload_roundtrip_preserves_plan_defect_findings() {
     let raw = serde_json::json!({
         "step_results": [{
             "step_id": "unit",

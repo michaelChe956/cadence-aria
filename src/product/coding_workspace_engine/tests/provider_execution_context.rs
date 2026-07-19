@@ -54,7 +54,8 @@ impl StreamingProviderAdapter for CapturingProjectionProvider {
 }
 
 #[tokio::test]
-async fn coding_provider_execution_context_binds_authoritative_coder_and_reviewer_envelopes() {
+async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_and_reviewer_envelopes()
+ {
     let root = tempdir().unwrap();
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).unwrap();
@@ -205,7 +206,8 @@ async fn coding_provider_execution_context_binds_authoritative_coder_and_reviewe
 }
 
 #[tokio::test]
-async fn coding_group_final_reviewer_uses_all_authoritative_unit_contexts_in_stable_order() {
+async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_contexts_in_stable_order()
+ {
     let root = tempdir().unwrap();
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).unwrap();
@@ -519,7 +521,7 @@ pub(super) fn review_plan_defect_output() -> String {
 }
 
 #[tokio::test]
-async fn coding_provider_execution_context_dependency_handoff_mismatch_fails_closed() {
+async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_fails_closed() {
     let root = tempdir().unwrap();
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).unwrap();
