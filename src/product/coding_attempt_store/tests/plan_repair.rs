@@ -296,7 +296,7 @@ fn coding_amendment_journal_create_get_and_phase_advance_are_monotonic() {
     let (tmp, store) = setup_store();
     let attempt = coding_plan_repair_attempt(&store);
     let journal = CodingAmendmentApplicationJournal {
-        id: "coding_amendment_application_0001".to_string(),
+        id: "coding_amendment_application_plan_amendment_0001".to_string(),
         attempt_id: attempt.id.clone(),
         amendment_id: "plan_amendment_0001".to_string(),
         phase: CodingAmendmentApplicationPhase::Started,

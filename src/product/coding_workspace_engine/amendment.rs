@@ -5,9 +5,10 @@ use chrono::Utc;
 use super::*;
 use crate::product::coding_models::{
     CodingAmendmentApplicationJournal, CodingAmendmentApplicationPhase, CodingAttemptScope,
+    CodingPlanAmendmentDeliveryStatus,
 };
 use crate::product::models::{
-    PlanAmendmentManifest, PlanRepairRequest, PlanRepairRequestStatus,
+    AmendmentResumeMode, PlanAmendmentManifest, PlanRepairRequest, PlanRepairRequestStatus,
     PlanRepairSessionSnapshotDto, PlanRepairSessionStage, WorkspaceSessionStatus,
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
@@ -19,6 +20,19 @@ struct AmendmentApplicationAuthority {
 
 impl CodingWorkspaceEngine {
     pub async fn apply_plan_amendment(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let _arbitration = self.store.acquire_amendment_application_arbitration(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        self.apply_plan_amendment_locked(attempt, manifest).await
+    }
+
+    async fn apply_plan_amendment_locked(
         &self,
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
@@ -37,6 +51,12 @@ impl CodingWorkspaceEngine {
             }
             Err(error) => return Err(error.into()),
         };
+        self.validate_amendment_application_identity(
+            &current,
+            manifest,
+            journal.phase == CodingAmendmentApplicationPhase::Completed,
+        )?;
+        self.validate_amendment_application_prefix(&current, manifest, &journal)?;
         if journal.phase != CodingAmendmentApplicationPhase::Completed {
             self.ensure_plan_amendment_worktree_ready(&current).await?;
         }
@@ -46,6 +66,15 @@ impl CodingWorkspaceEngine {
         match result {
             Ok(updated) => Ok(updated),
             Err(error) => {
+                if matches!(
+                    error,
+                    CodingWorkspaceEngineError::Store(
+                        ProductStoreError::IdentityMismatch { .. }
+                            | ProductStoreError::Ambiguous { .. }
+                    )
+                ) {
+                    return Err(error);
+                }
                 self.record_amendment_application_failure(&current, manifest, &error);
                 Err(error)
             }
@@ -56,6 +85,11 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let _arbitration = self.store.acquire_amendment_application_arbitration(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
         let current = self.store.validate_attempt_lineage(attempt)?;
         let binding = self.store.get_plan_binding(&current)?;
         let revision_store = WorkItemRevisionStore::new(self.store.paths());
@@ -66,14 +100,48 @@ impl CodingWorkspaceEngine {
         )?;
         let amendment_id = match plan.active_amendment_id.clone() {
             Some(id) => id,
-            None => binding
-                .applied_amendment_ids
-                .last()
-                .cloned()
-                .ok_or_else(|| amendment_identity_error(&current.id))?,
+            None => self.current_amendment_journal_id(&current, &plan, &revision_store)?,
         };
         let manifest = revision_store.get_amendment_manifest(&plan, &amendment_id)?;
-        self.apply_plan_amendment(&current, &manifest).await
+        self.apply_plan_amendment_locked(&current, &manifest).await
+    }
+
+    fn current_amendment_journal_id(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        plan: &crate::product::models::WorkItemPlanLineage,
+        revision_store: &WorkItemRevisionStore,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let mut candidates = Vec::new();
+        for journal in self.store.list_amendment_application_journals(attempt)? {
+            let manifest = revision_store.get_amendment_manifest(plan, &journal.amendment_id)?;
+            let is_current_revision =
+                plan.active_revision_id.as_deref() == Some(manifest.new_plan_revision_id.as_str());
+            let delivered_current = journal.phase == CodingAmendmentApplicationPhase::Completed
+                && attempt.status == CodingAttemptStatus::Running
+                && self
+                    .store
+                    .get_plan_amendment_delivery(attempt, &journal.amendment_id)
+                    .is_ok_and(|delivery| {
+                        delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered
+                    });
+            let is_unfinished = journal.phase != CodingAmendmentApplicationPhase::Completed
+                || matches!(
+                    attempt.status,
+                    CodingAttemptStatus::ApplyingPlanAmendment
+                        | CodingAttemptStatus::AmendmentApplyFailed
+                )
+                || (attempt.status == CodingAttemptStatus::AwaitingPlanAmendment
+                    && manifest.resume_target.mode == AmendmentResumeMode::AwaitHandoff)
+                || delivered_current;
+            if is_current_revision && is_unfinished {
+                candidates.push(journal.amendment_id);
+            }
+        }
+        match candidates.as_slice() {
+            [amendment_id] => Ok(amendment_id.clone()),
+            _ => Err(amendment_identity_error(&attempt.id).into()),
+        }
     }
 
     async fn apply_plan_amendment_from_journal(
@@ -119,53 +187,72 @@ impl CodingWorkspaceEngine {
             )?;
         }
         if journal.phase.order() < CodingAmendmentApplicationPhase::UnitRunsWritten.order() {
-            self.ensure_active_amendment_lock(&authority.plan, manifest)?;
-            self.store
-                .materialize_unit_runs_from_manifest(attempt, manifest)?;
-            *journal = self.store.advance_amendment_application_journal(
-                attempt,
+            let revision_store = WorkItemRevisionStore::new(self.store.paths());
+            *journal = revision_store.with_active_amendment_identity(
+                &authority.plan,
                 &manifest.id,
-                CodingAmendmentApplicationPhase::UnitRunsWritten,
-                None,
-                Utc::now().to_rfc3339(),
+                &manifest.new_plan_revision_id,
+                || {
+                    self.store
+                        .materialize_unit_runs_from_manifest(attempt, manifest)?;
+                    self.store.advance_amendment_application_journal(
+                        attempt,
+                        &manifest.id,
+                        CodingAmendmentApplicationPhase::UnitRunsWritten,
+                        None,
+                        Utc::now().to_rfc3339(),
+                    )
+                },
             )?;
         }
         if journal.phase.order() < CodingAmendmentApplicationPhase::ResumeTargetWritten.order() {
-            self.ensure_active_amendment_lock(&authority.plan, manifest)?;
-            self.store
-                .set_resume_target_from_manifest(attempt, manifest)?;
-            *journal = self.store.advance_amendment_application_journal(
-                attempt,
+            let revision_store = WorkItemRevisionStore::new(self.store.paths());
+            *journal = revision_store.with_active_amendment_identity(
+                &authority.plan,
                 &manifest.id,
-                CodingAmendmentApplicationPhase::ResumeTargetWritten,
-                None,
-                Utc::now().to_rfc3339(),
+                &manifest.new_plan_revision_id,
+                || {
+                    self.store
+                        .set_resume_target_from_manifest(attempt, manifest)?;
+                    self.store.advance_amendment_application_journal(
+                        attempt,
+                        &manifest.id,
+                        CodingAmendmentApplicationPhase::ResumeTargetWritten,
+                        None,
+                        Utc::now().to_rfc3339(),
+                    )
+                },
             )?;
         }
         if journal.phase.order() < CodingAmendmentApplicationPhase::Completed.order() {
-            self.ensure_active_amendment_lock(&authority.plan, manifest)?;
-            *journal = self.store.advance_amendment_application_journal(
-                attempt,
+            let revision_store = WorkItemRevisionStore::new(self.store.paths());
+            *journal = revision_store.with_active_amendment_identity(
+                &authority.plan,
                 &manifest.id,
-                CodingAmendmentApplicationPhase::Completed,
-                None,
-                Utc::now().to_rfc3339(),
+                &manifest.new_plan_revision_id,
+                || {
+                    self.store.advance_amendment_application_journal(
+                        attempt,
+                        &manifest.id,
+                        CodingAmendmentApplicationPhase::Completed,
+                        None,
+                        Utc::now().to_rfc3339(),
+                    )
+                },
             )?;
         }
 
-        let updated = self.finalize_completed_amendment_application(
+        self.finalize_completed_amendment_application(
             attempt,
             manifest,
             &authority.plan,
             &authority.request,
         )?;
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::PlanAmendmentUpdated {
-                amendment: Box::new(manifest.clone()),
-            })
-            .await;
-        Ok(updated)
+        self.reconcile_plan_amendment_delivery(attempt, manifest)
+            .await?;
+        self.store
+            .resume_attempt_after_amendment(attempt, manifest)
+            .map_err(CodingWorkspaceEngineError::from)
     }
 
     fn validate_amendment_application_identity(
@@ -265,34 +352,125 @@ impl CodingWorkspaceEngine {
         Ok(())
     }
 
+    fn validate_amendment_application_prefix(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+        journal: &CodingAmendmentApplicationJournal,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        if journal.phase.order() >= CodingAmendmentApplicationPhase::PlanBindingWritten.order() {
+            let binding = self.store.get_plan_binding(attempt)?;
+            if binding.bound_plan_revision_id != manifest.new_plan_revision_id
+                || binding.applied_amendment_ids.last() != Some(&manifest.id)
+            {
+                return Err(amendment_identity_error(&manifest.id).into());
+            }
+        }
+        if journal.phase.order() >= CodingAmendmentApplicationPhase::UnitRunsWritten.order() {
+            self.store.validate_materialized_unit_runs_from_manifest(
+                attempt,
+                manifest,
+                journal.phase.order()
+                    >= CodingAmendmentApplicationPhase::ResumeTargetWritten.order(),
+            )?;
+        }
+        if journal.phase == CodingAmendmentApplicationPhase::Completed {
+            self.validate_completed_amendment_session_prefix(attempt, manifest)?;
+        }
+        Ok(())
+    }
+
+    fn validate_completed_amendment_session_prefix(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let mut links = lifecycle
+            .list_session_links(&attempt.project_id, &attempt.issue_id)?
+            .into_iter()
+            .filter(|link| {
+                link.trigger.attempt_id == attempt.id
+                    && link.trigger.repair_request_id == manifest.repair_request_id
+                    && link.trigger.amendment_id == manifest.id
+            });
+        let link = links
+            .next()
+            .ok_or_else(|| amendment_identity_error(&manifest.id))?;
+        if links.next().is_some() {
+            return Err(ProductStoreError::Ambiguous {
+                kind: "coding_plan_amendment_session_link",
+                id: manifest.id.clone(),
+            }
+            .into());
+        }
+        let snapshot = lifecycle
+            .load_plan_repair_session_state(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &link.child_session_id,
+            )?
+            .ok_or_else(|| amendment_identity_error(&link.child_session_id))?;
+        if snapshot.link != link
+            || snapshot.amendment.as_ref() != Some(manifest)
+            || snapshot.request.id != manifest.repair_request_id
+            || snapshot.request.trigger_attempt_id != attempt.id
+            || snapshot.request.amendment_id.as_deref() != Some(manifest.id.as_str())
+        {
+            return Err(amendment_identity_error(&link.child_session_id).into());
+        }
+        Ok(())
+    }
+
     fn finalize_completed_amendment_application(
         &self,
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
         plan: &crate::product::models::WorkItemPlanLineage,
         request: &PlanRepairRequest,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+    ) -> Result<(), CodingWorkspaceEngineError> {
         let revision_store = WorkItemRevisionStore::new(self.store.paths());
         let current_plan =
             revision_store.get_plan_lineage(&attempt.project_id, &attempt.issue_id, &plan.id)?;
-        let applied = revision_store.update_repair_request_status(
-            &current_plan,
-            &request.id,
-            PlanRepairRequestStatus::Applied,
-        )?;
+        let applied =
+            revision_store.compare_and_mark_repair_request_applied(&current_plan, request)?;
         self.finalize_plan_repair_session(attempt, manifest, &applied)?;
         let current_plan =
             revision_store.get_plan_lineage(&attempt.project_id, &attempt.issue_id, &plan.id)?;
-        match current_plan.active_amendment_id.as_deref() {
-            Some(id) if id == manifest.id => {
-                revision_store.release_active_amendment(&current_plan, &manifest.id)?;
-            }
-            None => {}
-            _ => return Err(amendment_identity_error(&manifest.id).into()),
+        revision_store.compare_and_release_applied_amendment(
+            &current_plan,
+            &manifest.id,
+            &manifest.new_plan_revision_id,
+        )?;
+        Ok(())
+    }
+
+    async fn reconcile_plan_amendment_delivery(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let delivery = self
+            .store
+            .load_or_prepare_plan_amendment_delivery(attempt, &manifest.id)?;
+        if delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered {
+            return Ok(());
         }
-        self.store
-            .resume_attempt_after_amendment(attempt, manifest)
-            .map_err(CodingWorkspaceEngineError::from)
+        self.event_tx
+            .send(CodingWsOutMessage::PlanAmendmentUpdated {
+                event_id: delivery.event_id.clone(),
+                amendment: Box::new(manifest.clone()),
+            })
+            .await
+            .map_err(|_| {
+                ProductStoreError::Io("plan_amendment_delivery_send_failed".to_string())
+            })?;
+        self.store.mark_plan_amendment_delivery_delivered(
+            attempt,
+            &manifest.id,
+            &delivery.event_id,
+        )?;
+        Ok(())
     }
 
     fn finalize_plan_repair_session(
@@ -327,23 +505,28 @@ impl CodingWorkspaceEngine {
                 &link.child_session_id,
             )?
             .ok_or_else(|| amendment_identity_error(&link.child_session_id))?;
+        let session = lifecycle.get_workspace_session(&link.child_session_id)?;
         if snapshot.link != link
             || snapshot.amendment.as_ref() != Some(manifest)
             || snapshot.request.id != applied.id
+            || session.project_id != attempt.project_id
+            || session.issue_id != attempt.issue_id
         {
             return Err(amendment_identity_error(&link.child_session_id).into());
         }
+        let expected_snapshot = snapshot.clone();
         snapshot.request = applied.clone();
         snapshot.stage = PlanRepairSessionStage::Completed;
         snapshot.error = None;
-        lifecycle.save_plan_repair_session_state(
+        lifecycle.compare_and_save_plan_repair_session_state(
             &attempt.project_id,
             &attempt.issue_id,
             &link.child_session_id,
+            &expected_snapshot,
             &snapshot,
         )?;
-        lifecycle.update_workspace_session_status(
-            &link.child_session_id,
+        lifecycle.compare_and_update_workspace_session_status(
+            &session,
             WorkspaceSessionStatus::Terminated,
         )?;
         Ok(())

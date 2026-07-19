@@ -2,6 +2,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
+mod amendment_arbitration;
+mod amendment_delivery;
 mod amendment_recovery;
 mod attempt;
 mod context;
@@ -10,7 +12,7 @@ mod group;
 mod group_terminal;
 mod group_validation;
 mod inputs;
-mod locking;
+pub(crate) mod locking;
 mod paths;
 mod plan_binding;
 pub(crate) mod plan_repair_reconcile;
@@ -20,8 +22,11 @@ mod role_run;
 mod role_run_event;
 mod timeline;
 mod unit_run;
+mod unit_run_amendment;
 mod utils;
 
+#[cfg(test)]
+pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
 pub use group_validation::*;
 pub use inputs::*;
 pub(crate) use recovery::FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE;

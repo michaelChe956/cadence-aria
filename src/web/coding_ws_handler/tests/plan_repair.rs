@@ -329,6 +329,7 @@ async fn coding_plan_repair_reconnect_state_resolves_published_request() {
 #[test]
 fn coding_amendment_updated_roundtrips() {
     let message = CodingWsOutMessage::PlanAmendmentUpdated {
+        event_id: "coding_plan_amendment_updated_attempt_0001_plan_amendment_0001".to_string(),
         amendment: Box::new(PlanAmendmentManifest {
             id: "plan_amendment_0001".to_string(),
             repair_request_id: "plan_repair_request_0001".to_string(),
@@ -352,6 +353,10 @@ fn coding_amendment_updated_roundtrips() {
 
     let encoded = serde_json::to_value(&message).unwrap();
     assert_eq!(encoded["type"], "plan_amendment_updated");
+    assert_eq!(
+        encoded["event_id"],
+        "coding_plan_amendment_updated_attempt_0001_plan_amendment_0001"
+    );
     assert_eq!(encoded["amendment"]["resume_target"]["mode"], "reexecute");
     assert_eq!(
         serde_json::from_value::<CodingWsOutMessage>(encoded).unwrap(),

@@ -20,6 +20,9 @@ use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSe
 
 mod identity;
 mod recovery;
+mod review_fix_delivery;
+mod review_fix_identity;
+mod review_fix_unit_runs;
 mod support;
 use support::{prepare_application_phase, seed_unit_run};
 
@@ -32,6 +35,7 @@ struct AmendmentFixture {
     manifest: PlanAmendmentManifest,
     child_session_id: String,
     engine: CodingWorkspaceEngine,
+    _event_rx: mpsc::Receiver<CodingWsOutMessage>,
 }
 
 #[tokio::test]
@@ -695,7 +699,7 @@ async fn amendment_fixture() -> AmendmentFixture {
     lifecycle
         .update_workspace_session_status(&child.id, WorkspaceSessionStatus::WaitingForHuman)
         .unwrap();
-    let (event_tx, _event_rx) = mpsc::channel(16);
+    let (event_tx, event_rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
 
     AmendmentFixture {
@@ -707,6 +711,7 @@ async fn amendment_fixture() -> AmendmentFixture {
         manifest,
         child_session_id: child.id,
         engine,
+        _event_rx: event_rx,
     }
 }
 

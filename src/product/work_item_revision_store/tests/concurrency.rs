@@ -340,6 +340,63 @@ fn plan_repair_conditional_release_rereads_revision_after_waiting_for_lineage_lo
 }
 
 #[test]
+fn applied_amendment_release_rejects_replaced_lineage_after_waiting_for_lock() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths.clone());
+    let plan = plan_lineage();
+    let next_revision = plan_revision("plan_revision_0002", 2);
+    store.put_plan_lineage(&plan).unwrap();
+    store.put_plan_revision(&plan, &next_revision).unwrap();
+    let plan = store
+        .set_active_plan_revision(&plan, &next_revision.id)
+        .unwrap();
+    let plan = store
+        .acquire_active_amendment(&plan, "plan_amendment_old")
+        .unwrap();
+    let target_path = store.plan_lineage_path(&plan.project_id, &plan.issue_id, &plan.id);
+    let guard = ExclusiveFileLock::acquire(&target_path).unwrap();
+    let (_hook_guard, lock_attempt_receiver) = register_lock_attempt_hook(&target_path);
+    let (result_sender, result_receiver) = mpsc::channel();
+    let worker_store = WorkItemRevisionStore::new(paths);
+    let worker_plan = plan.clone();
+    let revision_id = next_revision.id.clone();
+    spawn_operation(result_sender, move || {
+        worker_store.compare_and_release_applied_amendment(
+            &worker_plan,
+            "plan_amendment_old",
+            &revision_id,
+        )
+    });
+    assert_workers_waiting_on_lock(&lock_attempt_receiver, &result_receiver, 1);
+    let mut replaced = read_json::<WorkItemPlanLineage>(&target_path).unwrap();
+    replaced.active_amendment_id = Some("plan_amendment_new".to_string());
+    write_json(&target_path, &replaced).unwrap();
+    drop(guard);
+
+    let error = receive_results(&result_receiver, 1)
+        .pop()
+        .unwrap()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProductStoreError::IdentityMismatch {
+            kind: "active_plan_amendment",
+            ..
+        }
+    ));
+    assert_eq!(
+        store
+            .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .active_amendment_id
+            .as_deref(),
+        Some("plan_amendment_new")
+    );
+}
+
+#[test]
 fn plan_repair_store_status_and_evidence_updates_wait_for_request_lock() {
     let temp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));

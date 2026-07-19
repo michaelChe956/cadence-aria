@@ -117,6 +117,18 @@ impl super::CodingAttemptStore {
             .join(format!("{amendment_id}.json"))
     }
 
+    pub(crate) fn amendment_event_delivery_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        amendment_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("amendment-event-deliveries")
+            .join(format!("{amendment_id}.json"))
+    }
+
     pub(crate) fn coding_unit_runs_root(
         &self,
         project_id: &str,

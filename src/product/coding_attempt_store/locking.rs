@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::product::json_store::ProductStoreError;
 
-pub(super) fn with_exclusive_lock<T>(
+pub(crate) fn with_exclusive_lock<T>(
     target_path: &Path,
     operation: impl FnOnce() -> Result<T, ProductStoreError>,
 ) -> Result<T, ProductStoreError> {
@@ -14,12 +14,12 @@ pub(super) fn with_exclusive_lock<T>(
     operation()
 }
 
-pub(super) struct ExclusiveFileLock {
+pub(crate) struct ExclusiveFileLock {
     file: File,
 }
 
 impl ExclusiveFileLock {
-    pub(super) fn acquire(target_path: &Path) -> Result<Self, ProductStoreError> {
+    pub(crate) fn acquire(target_path: &Path) -> Result<Self, ProductStoreError> {
         let lock_path = lock_path_for(target_path);
         if let Some(parent) = lock_path.parent()
             && !parent.as_os_str().is_empty()

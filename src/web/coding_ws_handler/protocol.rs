@@ -131,6 +131,7 @@ pub enum CodingWsOutMessage {
         session_link: Option<WorkspaceSessionLinkDto>,
     },
     PlanAmendmentUpdated {
+        event_id: String,
         amendment: Box<PlanAmendmentManifestDto>,
     },
 }

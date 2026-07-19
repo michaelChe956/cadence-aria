@@ -15,12 +15,14 @@ impl super::CodingAttemptStore {
         manifest: &PlanAmendmentManifest,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let current = self.validate_attempt_lineage(attempt)?;
-        if !matches!(
+        let await_handoff = manifest.resume_target.mode == AmendmentResumeMode::AwaitHandoff;
+        if !(matches!(
             current.status,
             CodingAttemptStatus::ApplyingPlanAmendment
                 | CodingAttemptStatus::AmendmentApplyFailed
                 | CodingAttemptStatus::Running
-        ) {
+        ) || await_handoff && current.status == CodingAttemptStatus::AwaitingPlanAmendment)
+        {
             return Err(identity_mismatch(
                 "coding_amendment_resume_attempt",
                 &current.id,
@@ -52,7 +54,17 @@ impl super::CodingAttemptStore {
         with_exclusive_lock(&path, || {
             let mut latest =
                 self.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
-            latest.status = CodingAttemptStatus::Running;
+            if latest != current {
+                return Err(identity_mismatch(
+                    "coding_amendment_resume_attempt",
+                    &current.id,
+                ));
+            }
+            latest.status = if await_handoff {
+                CodingAttemptStatus::AwaitingPlanAmendment
+            } else {
+                CodingAttemptStatus::Running
+            };
             latest.stage = match manifest.resume_target.mode {
                 AmendmentResumeMode::Reexecute | AmendmentResumeMode::AwaitHandoff => {
                     CodingExecutionStage::Coding

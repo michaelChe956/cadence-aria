@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
+use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
@@ -19,6 +20,42 @@ use super::{
 };
 
 impl LifecycleStore {
+    pub fn compare_and_save_plan_repair_session_state(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        expected: &PlanRepairSessionSnapshotDto,
+        next: &PlanRepairSessionSnapshotDto,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(session_id)?;
+        if expected.link.child_session_id != session_id || next.link.child_session_id != session_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "plan_repair_session_state",
+                id: session_id.to_string(),
+            });
+        }
+        let path = self
+            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
+            .join("plan_repair_session_state.json");
+        with_exclusive_lock(&path, || {
+            let stored: PlanRepairSessionSnapshotDto = read_json(&path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "plan_repair_session_state",
+                    id: session_id.to_string(),
+                });
+            }
+            if stored == *next {
+                return Ok(());
+            }
+            write_json(&path, next)
+        })
+    }
+
     pub fn save_plan_repair_session_state(
         &self,
         project_id: &str,
@@ -308,6 +345,31 @@ impl LifecycleStore {
         session.updated_at = Utc::now().to_rfc3339();
         write_json(&session_path, &session)?;
         Ok(session)
+    }
+
+    pub fn compare_and_update_workspace_session_status(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        status: WorkspaceSessionStatus,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(&expected.id)?;
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        with_exclusive_lock(&session_path, || {
+            let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            if stored.status == status {
+                return Ok(stored);
+            }
+            stored.status = status;
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &stored)?;
+            Ok(stored)
+        })
     }
 
     pub fn update_workspace_session_providers(

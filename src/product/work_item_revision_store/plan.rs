@@ -17,6 +17,27 @@ pub enum ActiveAmendmentReleaseOutcome {
 }
 
 impl WorkItemRevisionStore {
+    pub(crate) fn with_active_amendment_identity<T>(
+        &self,
+        lineage: &WorkItemPlanLineage,
+        amendment_id: &str,
+        active_revision_id: &str,
+        operation: impl FnOnce() -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
+        validate_relative_id(amendment_id)?;
+        validate_relative_id(active_revision_id)?;
+        let path = self.plan_lineage_path(&lineage.project_id, &lineage.issue_id, &lineage.id);
+        with_exclusive_lock(&path, || {
+            let stored = self.ensure_plan_scope(lineage)?;
+            if stored.active_amendment_id.as_deref() != Some(amendment_id)
+                || stored.active_revision_id.as_deref() != Some(active_revision_id)
+            {
+                return Err(identity_mismatch("active_plan_amendment", &lineage.id));
+            }
+            operation()
+        })
+    }
+
     pub fn put_plan_lineage(&self, value: &WorkItemPlanLineage) -> Result<(), ProductStoreError> {
         validate_plan_lineage(value)?;
         write_immutable(
@@ -264,6 +285,36 @@ impl WorkItemRevisionStore {
             stored.updated_at = Utc::now().to_rfc3339();
             write_json(&path, &stored)?;
             Ok(stored)
+        })
+    }
+
+    pub fn compare_and_release_applied_amendment(
+        &self,
+        lineage: &WorkItemPlanLineage,
+        amendment_id: &str,
+        active_revision_id: &str,
+    ) -> Result<WorkItemPlanLineage, ProductStoreError> {
+        validate_relative_id(amendment_id)?;
+        validate_relative_id(active_revision_id)?;
+        let path = self.plan_lineage_path(&lineage.project_id, &lineage.issue_id, &lineage.id);
+        with_exclusive_lock(&path, || {
+            let mut stored = self.ensure_plan_scope(lineage)?;
+            if stored.active_revision_id.as_deref() != Some(active_revision_id) {
+                return Err(identity_mismatch(
+                    "active_work_item_plan_revision",
+                    &lineage.id,
+                ));
+            }
+            match stored.active_amendment_id.as_deref() {
+                Some(active) if active == amendment_id => {
+                    stored.active_amendment_id = None;
+                    stored.updated_at = Utc::now().to_rfc3339();
+                    write_json(&path, &stored)?;
+                    Ok(stored)
+                }
+                None => Ok(stored),
+                Some(_) => Err(identity_mismatch("active_plan_amendment", &lineage.id)),
+            }
         })
     }
 

@@ -100,3 +100,22 @@ pub struct CodingAmendmentApplicationJournal {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingPlanAmendmentDeliveryStatus {
+    Pending,
+    Delivered,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingPlanAmendmentDelivery {
+    pub id: String,
+    pub event_id: String,
+    pub attempt_id: String,
+    pub amendment_id: String,
+    pub status: CodingPlanAmendmentDeliveryStatus,
+    pub delivered_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}

@@ -40,6 +40,37 @@ static REPAIR_REQUEST_STATUS_FAILPOINTS: OnceLock<
 static NEXT_REPAIR_REQUEST_STATUS_FAILPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl WorkItemRevisionStore {
+    pub fn compare_and_mark_repair_request_applied(
+        &self,
+        plan: &WorkItemPlanLineage,
+        expected: &PlanRepairRequest,
+    ) -> Result<PlanRepairRequest, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(&expected.id)?;
+        let path =
+            self.repair_request_path(&plan.project_id, &plan.issue_id, &plan.id, &expected.id);
+        #[cfg(test)]
+        maybe_fail_repair_request_status(&path, &PlanRepairRequestStatus::Applied)?;
+        with_exclusive_lock(&path, || {
+            let mut stored = self.get_repair_request(plan, &expected.id)?;
+            if !same_repair_request_identity(&stored, expected)
+                || !matches!(
+                    stored.status,
+                    PlanRepairRequestStatus::Published | PlanRepairRequestStatus::Applied
+                )
+            {
+                return Err(identity_mismatch("plan_repair_request", &expected.id));
+            }
+            if stored.status == PlanRepairRequestStatus::Applied {
+                return Ok(stored);
+            }
+            stored.status = PlanRepairRequestStatus::Applied;
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &stored)?;
+            Ok(stored)
+        })
+    }
+
     pub fn put_repair_request(
         &self,
         plan: &WorkItemPlanLineage,
@@ -492,4 +523,14 @@ fn is_open_status(status: &PlanRepairRequestStatus) -> bool {
 
 fn is_sorted_unique(values: &[String]) -> bool {
     values.windows(2).all(|window| window[0] < window[1])
+}
+
+fn same_repair_request_identity(left: &PlanRepairRequest, right: &PlanRepairRequest) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.status = PlanRepairRequestStatus::Open;
+    right.status = PlanRepairRequestStatus::Open;
+    left.updated_at.clear();
+    right.updated_at.clear();
+    left == right
 }

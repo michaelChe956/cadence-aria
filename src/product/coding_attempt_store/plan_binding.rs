@@ -8,6 +8,7 @@ use crate::product::coding_models::{
 };
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::PlanAmendmentManifest;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 use super::locking::with_exclusive_lock;
 
@@ -17,37 +18,59 @@ impl super::CodingAttemptStore {
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
     ) -> Result<CodingAttemptPlanBinding, ProductStoreError> {
-        let mut binding = self.get_plan_binding(attempt)?;
-        match binding
-            .applied_amendment_ids
-            .iter()
-            .position(|id| id == &manifest.id)
-        {
-            Some(index)
-                if index + 1 == binding.applied_amendment_ids.len()
-                    && binding.bound_plan_revision_id == manifest.new_plan_revision_id =>
-            {
-                return Ok(binding);
-            }
-            Some(_) => {
-                return Err(identity_mismatch(
-                    "coding_attempt_plan_binding",
-                    &attempt.id,
-                ));
-            }
-            None if binding.bound_plan_revision_id == manifest.previous_plan_revision_id => {}
-            None => {
-                return Err(identity_mismatch(
-                    "coding_attempt_plan_binding",
-                    &attempt.id,
-                ));
-            }
-        }
-        binding.bound_plan_revision_id = manifest.new_plan_revision_id.clone();
-        binding.applied_amendment_ids.push(manifest.id.clone());
-        binding.updated_at = Utc::now().to_rfc3339();
-        self.save_plan_binding(attempt, &binding)?;
-        Ok(binding)
+        let current = self.validate_attempt_lineage(attempt)?;
+        let binding = self.get_plan_binding(&current)?;
+        let revision_store = WorkItemRevisionStore::new(self.paths());
+        let plan = revision_store.get_plan_lineage(
+            &current.project_id,
+            &current.issue_id,
+            &binding.plan_id,
+        )?;
+        revision_store.with_active_amendment_identity(
+            &plan,
+            &manifest.id,
+            &manifest.new_plan_revision_id,
+            || {
+                let path =
+                    self.plan_binding_path(&current.project_id, &current.issue_id, &current.id);
+                with_exclusive_lock(&path, || {
+                    let mut stored: CodingAttemptPlanBinding = read_json(&path)?;
+                    validate_plan_binding(&current, &stored)?;
+                    match stored
+                        .applied_amendment_ids
+                        .iter()
+                        .position(|id| id == &manifest.id)
+                    {
+                        Some(index)
+                            if index + 1 == stored.applied_amendment_ids.len()
+                                && stored.bound_plan_revision_id
+                                    == manifest.new_plan_revision_id =>
+                        {
+                            return Ok(stored);
+                        }
+                        Some(_) => {
+                            return Err(identity_mismatch(
+                                "coding_attempt_plan_binding",
+                                &current.id,
+                            ));
+                        }
+                        None if stored.bound_plan_revision_id
+                            == manifest.previous_plan_revision_id => {}
+                        None => {
+                            return Err(identity_mismatch(
+                                "coding_attempt_plan_binding",
+                                &current.id,
+                            ));
+                        }
+                    }
+                    stored.bound_plan_revision_id = manifest.new_plan_revision_id.clone();
+                    stored.applied_amendment_ids.push(manifest.id.clone());
+                    stored.updated_at = Utc::now().to_rfc3339();
+                    write_json(&path, &stored)?;
+                    Ok(stored)
+                })
+            },
+        )
     }
 
     pub fn load_or_prepare_amendment_application(
@@ -245,7 +268,9 @@ impl super::CodingAttemptStore {
             }
             let mut journal: CodingAmendmentApplicationJournal = read_json(&path)?;
             validate_journal(attempt, &journal)?;
-            if journal.amendment_id != amendment_id || phase.order() < journal.phase.order() {
+            let same_phase = journal.phase == phase;
+            let adjacent_phase = phase.order() == journal.phase.order().saturating_add(1);
+            if journal.amendment_id != amendment_id || (!same_phase && !adjacent_phase) {
                 return Err(identity_mismatch(
                     "coding_amendment_application_journal",
                     amendment_id,
@@ -340,7 +365,9 @@ fn validate_journal(
     ] {
         validate_relative_id(id)?;
     }
-    if journal.attempt_id != attempt.id {
+    if journal.attempt_id != attempt.id
+        || journal.id != format!("coding_amendment_application_{}", journal.amendment_id)
+    {
         return Err(identity_mismatch(
             "coding_amendment_application_journal",
             &journal.id,

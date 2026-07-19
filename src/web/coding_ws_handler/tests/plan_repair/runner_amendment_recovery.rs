@@ -5,7 +5,9 @@ use std::time::Duration;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::product::coding_models::{
     CodingAmendmentApplicationPhase, CodingAttemptStatus, CodingExecutionAttempt,
+    CodingExecutionStage,
 };
+use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     AmendmentResumeMode, AmendmentResumeTarget, ContractDeltaKind, PlanAmendmentManifest,
@@ -39,7 +41,8 @@ async fn coding_ws_plan_repair_runner_recovers_amendment_before_provider_entry()
 async fn assert_runner_recovers_amendment_before_provider(state: RunnerRecoveryState) {
     let fixture = plan_repair_fixture();
     init_runner_test_git_repo(fixture.attempt.worktree_path.as_deref().unwrap());
-    let (attempt, manifest) = prepare_runner_amendment(&fixture, state).await;
+    let (attempt, manifest) =
+        prepare_runner_amendment(&fixture, state, AmendmentResumeMode::Reexecute).await;
     let provider = CountingProvider::default();
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::Codex, Arc::new(provider.clone()));
@@ -82,7 +85,7 @@ async fn assert_runner_recovers_amendment_before_provider(state: RunnerRecoveryS
             .unwrap_or_else(|_| panic!("runner event timeout for {state:?}"))
             .unwrap_or_else(|| panic!("runner ended before amendment recovery for {state:?}"));
         match event {
-            CodingWsOutMessage::PlanAmendmentUpdated { amendment } => {
+            CodingWsOutMessage::PlanAmendmentUpdated { amendment, .. } => {
                 assert_eq!(amendment.id, manifest.id, "{state:?}");
                 amendment_updates += 1;
             }
@@ -122,9 +125,82 @@ async fn assert_runner_recovers_amendment_before_provider(state: RunnerRecoveryS
     assert!(cancelled.is_cancelled(), "{state:?}: {cancelled}");
 }
 
+#[tokio::test]
+async fn coding_ws_plan_repair_await_handoff_stays_blocked_after_stage_gate_continue() {
+    let fixture = plan_repair_fixture();
+    init_runner_test_git_repo(fixture.attempt.worktree_path.as_deref().unwrap());
+    let (attempt, manifest) = prepare_runner_amendment(
+        &fixture,
+        RunnerRecoveryState::Awaiting,
+        AmendmentResumeMode::AwaitHandoff,
+    )
+    .await;
+    let provider = CountingProvider::default();
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Codex, Arc::new(provider.clone()));
+    let mut web_state = WebAppState::new(
+        fixture._tmp.path().to_path_buf(),
+        WebRuntime::new_fake(fixture._tmp.path().to_path_buf()),
+    );
+    web_state.provider_registry = Arc::new(registry);
+    web_state.test_provider_enabled = true;
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let (command_tx, command_rx) = mpsc::channel(8);
+    command_tx
+        .send(CodingRunnerCommand::StageGateConfirm {
+            stage: CodingExecutionStage::Coding,
+        })
+        .await
+        .unwrap();
+    let engine = CodingWorkspaceEngine::with_provider(
+        fixture.store.clone(),
+        GitWorkspaceService::new(),
+        web_state.provider_adapter.clone(),
+        event_tx.clone(),
+    );
+
+    let error = execute_start_coding_flow(
+        &web_state,
+        &fixture.store,
+        &engine,
+        &event_tx,
+        command_rx,
+        &attempt,
+    )
+    .await
+    .expect_err("AwaitHandoff must remain provider-blocked");
+    drop(engine);
+    drop(command_tx);
+    drop(event_tx);
+
+    assert!(
+        error
+            .to_string()
+            .contains("plan_amendment_blocks_provider_run")
+    );
+    assert_eq!(provider.starts(), 0);
+    let mut amendment_updates = 0;
+    while let Some(event) = event_rx.recv().await {
+        if let CodingWsOutMessage::PlanAmendmentUpdated { amendment, .. } = event {
+            assert_eq!(amendment.id, manifest.id);
+            amendment_updates += 1;
+        }
+    }
+    assert_eq!(amendment_updates, 1);
+    assert_eq!(
+        fixture
+            .store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap()
+            .status,
+        CodingAttemptStatus::AwaitingPlanAmendment
+    );
+}
+
 async fn prepare_runner_amendment(
     fixture: &PlanRepairFixture,
     state: RunnerRecoveryState,
+    resume_mode: AmendmentResumeMode,
 ) -> (CodingExecutionAttempt, PlanAmendmentManifest) {
     let report = plan_defect_report(plan_defect_finding("runner_amendment_recovery"));
     let awaiting = fixture
@@ -245,7 +321,7 @@ async fn prepare_runner_amendment(
         replacement_units: BTreeMap::new(),
         resume_target: AmendmentResumeTarget {
             logical_work_item_id: logical.id,
-            mode: AmendmentResumeMode::Reexecute,
+            mode: resume_mode,
         },
         created_at: "2026-07-19T00:00:04Z".to_string(),
     };

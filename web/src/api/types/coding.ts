@@ -615,4 +615,8 @@ export type CodingWsOutMessage =
       request: PlanRepairRequest;
       session_link: WorkspaceSessionLink | null;
     }
-  | { type: "plan_amendment_updated"; amendment: PlanAmendmentManifest };
+  | {
+      type: "plan_amendment_updated";
+      event_id: string;
+      amendment: PlanAmendmentManifest;
+    };

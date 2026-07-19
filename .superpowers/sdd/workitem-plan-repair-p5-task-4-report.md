@@ -1,123 +1,169 @@
-# P5 Task 4 幂等应用 Plan Amendment 与崩溃恢复实施报告
+# P5 Task 4 Plan Amendment 应用与恢复评审修复报告
 
 ## 交付摘要
 
-- 基线：`1bf8955b9fabf5927c186d703b84952dfbf5e85e`
-- 分支：`feat-b-0715`
-- 目标提交：`feat(coding-repair): apply and recover plan amendments`
-- 范围：P5 Task 4，仅实现 Amendment 应用、Journal 恢复、Binding/UnitRun/Resume Target 切换与 Coding WS runner 恢复。
-- 明确未实现：P5 Task 5 Handoff Revision 与运行时影响传播。
+- 评审修复基线：`3d88790c65422bc233a9041296a3e837c44f9b73`（`feat(coding-repair): apply and recover plan amendments`）。
+- 分支：`feat-b-0715`。
+- 提交策略：单个原子 fix commit，不 push。
+- 范围：P5 Task 4 的 Amendment 权威身份、durable Journal、并发仲裁/CAS、UnitRun materialization、Resume Target、WS runner 恢复与 durable event delivery。
+- 明确不含：P5 Task 5 Handoff Revision 解析与运行时 impact propagation；未运行 E2E、Playwright 或 browser。
 
-## 实现结果
+## 最终实现
 
-1. 新增 Amendment application engine：
-   - 严格校验 WorkItemGroup Attempt、Plan Binding、Plan lineage、active revision、active amendment lock、repair request、stored manifest、revision supersedes、session link 与 snapshot identity。
-   - 缺失或不一致的 v1/历史 lineage 不做兼容 fallback，统一 fail-closed。
-   - dirty worktree 在创建 Journal 前阻断，并幂等创建 `worktree_dirty_before_plan_amendment` manual gate。
+### 1. 权威 Amendment 身份与 durable Journal
 
-2. 新增 durable application Journal：
-   - Phase：`Started -> PlanBindingWritten -> UnitRunsWritten -> ResumeTargetWritten -> Completed`。
-   - Phase 仅允许单调推进；相同 amendment ID 重放保持幂等。
-   - 任一步失败时保留最后成功 Phase，写入 error，并将 Attempt 更新为 `AmendmentApplyFailed`。
-   - 恢复时清除 error，从最后 durable Phase 继续。
+- Recovery identity 只允许来自 active amendment lock，或唯一满足当前 revision 与 durable delivery/pending recovery 条件的 authoritative Journal。
+- 删除 binding history fallback；历史 Completed Journal 不再能冒充当前 Amendment。
+- Completed/Running Journal 只有在存在对应 durable `Delivered` marker 时才可作为当前 Journal；`AwaitHandoff` 的 Completed Journal 仍可继续幂等收敛。
+- existing Journal 在 dirty-worktree gate 之前完成 identity 与 durable-prefix 校验；IdentityMismatch/Ambiguous 不进入 operational failure recorder，保持 zero-write。
+- Journal ID 由 Attempt + Amendment 确定生成；Phase 只允许同 phase 幂等写或相邻 phase 推进。
+- 每个 durable phase 都校验 Binding、UnitRuns、Resume Target，以及 Completed session/finalization prefix。
 
-3. Binding 与 UnitRun materialization：
-   - Plan Binding 只允许从 manifest previous revision 前进到 new revision，并将 amendment ID 追加到 applied 列表末尾。
-   - 只 materialize revised、stale、revalidation-required 与 replacement target Units。
-   - unaffected Units 不创建新 UnitRun。
-   - 历史 Completed UnitRun 保持 Completed；仅 supersede active run。
-   - 新 UnitRun 的 unit/verification/operational retry counter 归零，Attempt 全局 `rework_count` 不变。
-   - 相同 amendment 重放不会创建重复 UnitRun。
+### 2. 并发仲裁、锁序与 CAS
 
-4. Resume Target 与最终化：
-   - `Reexecute` 恢复到 Coding/Running。
-   - `Revalidate` 恢复到 Testing/NeedsRevalidation。
-   - `AwaitHandoff` 保持 AwaitingAmendment 并恢复到 Coding stage。
-   - repair request 更新为 Applied、child session 更新为 Completed、workspace session 终止。
-   - active amendment lock 仅在 Journal durable Completed 后释放。
-   - Completed Journal 不 early-return，仍会重复 reconcile request/session/lock/Attempt resume。
+- Public apply/recover 入口均先持有 per-attempt amendment application arbitration flock，串行化同一 Attempt 的 apply/recover。
+- 统一锁序：
+  1. Attempt amendment arbitration；
+  2. Plan lineage lock；
+  3. Binding / Unit / UnitRun / Journal 等下游实体锁。
+- Binding write 在 Plan lineage lock 内重新校验 exact amendment ID 与 active revision，等待期间 lineage 被替换时 fail-closed。
+- UnitRuns、ResumeTarget、Completed phase 均在 exact amendment + revision 的 Plan lineage lock 内执行。
+- finalization 使用 expected-state CAS：
+  - repair request compare-and-mark `Applied`；
+  - plan compare-and-release exact applied amendment + active revision；
+  - Plan Repair session snapshot compare-and-save；
+  - Workspace session compare-and-update；
+  - Attempt 在写锁内比较完整 expected Attempt 后恢复。
 
-5. 失败与崩溃恢复：
-   - 覆盖 Started、PlanBindingWritten、UnitRunsWritten、ResumeTargetWritten 每个 durable boundary。
-   - 覆盖 Completed 后 request/session/lock/Attempt 未最终化的恢复。
-   - 覆盖 Completed 后最终化失败并再次恢复。
-   - phase failure 后 session snapshot 进入 `AmendmentApplyFailed`；恢复 identity 校验仅在 Attempt 同为 `AmendmentApplyFailed` 且 snapshot 带 error 时接受该 stage，其他 identity 条件不放宽。
+### 3. UnitRun 与 AwaitHandoff
 
-6. Coding WS runner：
-   - runner 入口读取 authoritative Attempt 后，遇到 `AwaitingPlanAmendment`、`ApplyingPlanAmendment` 或 `AmendmentApplyFailed`，先调用 `recover_plan_amendment`。
-   - provider gate 使用恢复后的 Attempt；application durable completion 前 provider 不会进入。
-   - Awaiting、Applying crash 与 Failed recovery 三态均覆盖。
-   - 每次 runner recovery 在 Coding stage gate 前恰好发送一次 `PlanAmendmentUpdated`，并确认 provider start count 为 0。
+- Amendment UnitRun 职责从 `unit_run.rs` 拆至 `unit_run_amendment.rs`，删除原文件中禁用/复制实现。
+- deterministic UnitRun identity 完整覆盖 execution/revision/handoffs/contracts/projection/compiler/renderers、execution-context hashes、status/counters/start/completion commits。
+- forged same-ID UnitRun 在 recovery 与 status update 两条路径均 fail-closed。
+- replacement source 只允许 active run 转为 `Superseded`；历史 `Completed` run 保持不变；重复恢复不产生重复 UnitRun。
+- `AwaitHandoff` 完成后 Attempt 保持 `AwaitingPlanAmendment`，stage 为 Coding，provider 继续 blocked。
+- WS runner 覆盖已排队 Coding stage-gate continue；恢复完成前 provider start count 为 0。
 
-## TDD 与问题定位记录
+### 4. Durable WS delivery
 
-### Amendment failure recovery
+- 新增 amendment-ID keyed durable delivery marker，状态为 `Pending` / `Delivered`。
+- event ID 确定生成：`coding_plan_amendment_updated_{attempt_id}_{amendment_id}`，Rust 与 TypeScript contract 均携带 `event_id`。
+- durable 顺序固定为：
+  1. request/session/active-lock finalization；
+  2. 写入或读取 durable `Pending` marker；
+  3. 发送 `PlanAmendmentUpdated`；
+  4. marker compare-and-mark `Delivered`；
+  5. 恢复 Attempt 为 runnable，或保持 `AwaitHandoff` blocked。
+- send 失败或 Delivered 标记失败时 Attempt 不会变为 runnable。
+- send 成功但 mark 前崩溃时，恢复会用相同 `event_id` 重发；因此语义是 **no-loss + consumer-idempotent，允许重复投递**，不是物理 exactly-once。
+- 同一 Attempt 的并发 recovery 由 arbitration 串行化，durable marker 最终收敛到一次 `Delivered` 状态。
 
-- RED：`coding_amendment_recovers_failed_phase_and_clears_error` 返回：
-  - `IdentityMismatch { kind: "coding_plan_amendment_application", id: "plan_amendment_plan_repair_fingerprint_0001" }`
-- exact identity 审计确认 journal、binding、plan、request、stored manifest、session link 与 snapshot ID 全部一致。
-- 根因：首轮失败有意将 snapshot stage 写为 `AmendmentApplyFailed`，恢复校验却无条件要求 `Published`。
-- GREEN：仅增加 Attempt/snapshot/error 三字段一致的失败恢复状态组合，focused 14/14 通过。
+## Reviewer 3 Critical / 5 Important：RED → GREEN
 
-### WS runner recovery
+| 级别 | 问题 | RED 证据 | GREEN 结果 |
+| --- | --- | --- | --- |
+| Critical 1 | Recovery 使用非权威历史/Binding 身份，且 dirty gate 可能先于 identity mismatch 写状态 | 历史 Completed Journal 被选中；existing Journal identity mismatch 在 dirty worktree 下先命中 gate | 删除 binding history fallback；只接受 active lock 或唯一 authoritative Journal；所有 durable phase 的 clean/dirty identity mismatch 均 zero-write |
+| Critical 2 | apply/recover 与 lineage replacement 并发时缺少统一仲裁和锁内重读 | 等待 lineage lock 后，已被替换的 binding 仍可写入；第二个 recovery 可能收到 identity mismatch | per-attempt arbitration + `attempt arbitration -> plan lineage -> entity` 锁序；Binding/UnitRuns/ResumeTarget/Completed 均锁内复核 exact amendment/revision；并发恢复收敛 |
+| Critical 3 | WS event send/mark 失败可能丢事件或让 Attempt 提前 runnable | send failure 被忽略并恢复 Running | durable Pending marker 先于 send；send/mark 任一失败均保持非 runnable；mark 前崩溃用同一 event ID 重发；并发恢复只收敛一个 durable delivery |
+| Important 1 | Journal identity/phase/prefix 约束不足 | 非相邻 phase 可直接推进；forged deterministic ID 或 corrupt prefix 可被接受 | deterministic Journal ID；仅同 phase/相邻 phase；Binding、UnitRuns、ResumeTarget、Completed session prefix 均严格验证 |
+| Important 2 | deterministic UnitRun 只看 ID，forged same-ID 内容可污染恢复 | forged UnitRun 被恢复到 Running，或 status update 接受伪造内容 | 对完整 immutable execution context、contracts、hashes、counters 与 commits 做 identity 比较，两条写路径均 fail-closed |
+| Important 3 | replacement source 的终态规则不正确 | active replacement source 保持 Running，或可能改写历史 Completed run | 只把 active source 转为 Superseded；Completed 不变；重复恢复幂等 |
+| Important 4 | `AwaitHandoff` 完成后错误恢复为 Running | Attempt 进入 Running，provider 可继续 | Attempt 保持 `AwaitingPlanAmendment`；runner stage-gate continue 集成测试确认 provider starts = 0 |
+| Important 5 | Completed finalization 缺少完整 expected-state/prefix CAS | corrupt Completed session 时 repair request 可先变 Applied；corrupt ResumeTarget 时 Journal 仍推进 Completed | finalization 前验证 durable prefix；request/session/workspace/Attempt/active lock 全部使用 exact expected-state compare-and-update，冲突 fail-closed |
 
-- RED：Awaiting case 在任何 amendment event 前结束，首个失败为 `runner ended before amendment recovery for Awaiting`。
-- 根因：`execute_start_coding_flow` 在恢复前立即调用 `ensure_provider_run_allowed`。
-- GREEN：将三种 amendment status 的恢复放在 provider gate 前；Awaiting/Applying/Failed 三态均恢复完成，provider 未提前启动。
+## 主要 RED/GREEN 测试
 
-### 质量门禁修复
+- `coding_amendment_existing_journal_identity_mismatch_is_zero_write_at_every_phase`：Started、PlanBindingWritten、UnitRunsWritten、ResumeTargetWritten × clean/dirty，共 8 个矩阵场景。
+- `coding_amendment_recovery_does_not_select_historical_completed_journal`。
+- `coding_amendment_journal_rejects_non_adjacent_phase_advance`。
+- `coding_amendment_journal_rejects_forged_deterministic_id`。
+- `coding_amendment_recovery_rejects_corrupt_skipped_binding_prefix_without_writes`。
+- `coding_amendment_recovery_rejects_corrupt_resume_target_prefix_without_writes`。
+- `coding_amendment_completed_prefix_rejects_corrupt_session_identity_without_writes`。
+- `coding_amendment_binding_write_rejects_replaced_lineage_lock`。
+- `coding_amendment_arbitration_rechecks_lineage_before_first_write`。
+- `coding_amendment_recovery_rejects_forged_deterministic_unit_run_without_writes`。
+- `coding_amendment_status_update_rejects_forged_deterministic_unit_run`。
+- `coding_amendment_supersedes_only_active_replacement_source_runs`。
+- `coding_amendment_await_handoff_keeps_attempt_provider_blocked`。
+- `coding_ws_plan_repair_await_handoff_stays_blocked_after_stage_gate_continue`。
+- `coding_amendment_delivery_send_failure_keeps_attempt_non_runnable_with_pending_marker`。
+- `coding_amendment_delivery_retries_same_event_after_send_before_mark_failure`。
+- `coding_amendment_concurrent_recovery_reconciles_one_durable_delivery`。
 
-- strict clippy 首次失败：测试 helper `seed_unit_run` 8 参数触发 `too_many_arguments`。
-- 修复：helper 内从 `store.paths()` 构造 revision store，删除冗余参数，不添加 lint allow。
-- full test 首次唯一失败：rustfmt 后 `tests/plan_amendment.rs` 为 818 行，触发 800 行 guard。
-- 修复：将 `seed_unit_run` 原样迁入 `tests/plan_amendment/support.rs`；最终主测试文件 764 行。
+## Full gate 首个失败与最小修复
+
+- RED：首次 strict clippy 在 `amendment_recovery.rs` 报 `clippy::nonminimal_bool`。
+- 根因：新增 `AwaitHandoff` 合法状态后使用 `!A && !B`，语义正确但不满足 strict lint。
+- GREEN：改为等价 De Morgan 表达式 `!(A || B)`，不添加 lint allow；AwaitHandoff 定向测试 1/1 与 strict clippy fresh 通过。
 
 ## 验证结果
 
-### Task 4 focused
+### Fresh focused
 
-- `cargo fmt --check`：PASS。
-- `cargo check --locked`：PASS。
-- `cargo test --locked --lib coding_unit_run_`：10 passed，0 failed。
-- `cargo test --locked --lib coding_plan_repair_`：86 passed，0 failed。
-- `cargo test --locked --lib coding_amendment_`：14 passed，0 failed。
-- `cargo test --locked --lib coding_ws_plan_repair_`：1 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_`：31 passed，0 failed。
+- `cargo test --locked --lib coding_ws_plan_repair_`：2 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_updated_roundtrips`：1 passed，0 failed。
+- 上述 Rust 命令共 34 次 test execution；protocol roundtrip 已包含于 Amendment 31，因此为 33 个 unique tests。
+- `cd web && pnpm tsc -b`：PASS，exit 0。
 
-### 最终非 E2E 门禁
+### 最终非 E2E full gate
 
 - `cargo fmt --check`：PASS，exit 0。
 - `cargo check --locked`：PASS，exit 0。
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，exit 0，0 warnings。
 - `cargo test --locked`：PASS，exit 0：
-  - lib：1100 passed，0 failed；
-  - it_core：143 passed，0 failed；
-  - it_web：258 passed，0 failed，12 ignored；
-  - doc-test：1 passed，0 failed；
-  - 其余 integration targets 全部通过。
+  - lib：1119 passed；
+  - it_core：143 passed；
+  - it_interactive：43 passed；
+  - it_product：211 passed；
+  - it_provider：55 passed；
+  - it_task_run：31 passed；
+  - it_web：258 passed，12 ignored；
+  - doc-test：1 passed；
+  - 合计：1861 passed，12 ignored，0 failed。
 - `cd web && pnpm tsc -b`：PASS，exit 0。
 - `cargo test --locked --test it_core large_file_guard::product_source_and_test_files_stay_under_line_limit`：1 passed，0 failed。
-- 测试命名审计：PASS；新增行为测试分别以 `coding_amendment_`、`coding_ws_plan_repair_` 开头。
+- 测试命名审计：PASS；新增行为测试使用 `coding_amendment_` / `coding_ws_plan_repair_` 前缀，无 `test`、`tmp`、`todo` 等占位命名。
 - `git diff --check`：PASS，exit 0。
+- 未运行 E2E、Playwright 或 browser。
 
-## 文件规模
+## 文件行数
 
-- `src/product/coding_attempt_store/unit_run.rs`：766 行。
-- `src/product/coding_attempt_store/recovery.rs`：789 行，未继续扩张。
-- `src/product/coding_attempt_store/amendment_recovery.rs`：77 行。
-- `src/product/coding_workspace_engine/amendment.rs`：534 行。
-- `src/product/coding_workspace_engine/tests/plan_amendment.rs`：764 行。
-- `src/product/coding_workspace_engine/tests/plan_amendment/support.rs`：126 行。
-- `src/web/coding_ws_handler/runner.rs`：784 行。
-- `src/web/coding_ws_handler/tests/plan_repair.rs`：761 行。
-- `src/web/coding_ws_handler/tests/plan_repair/runner_amendment_recovery.rs`：381 行。
+| 文件 | 行数 |
+| --- | ---: |
+| `src/product/coding_attempt_store/tests/plan_repair.rs` | 782 |
+| `src/product/coding_workspace_engine/tests/plan_amendment.rs` | 769 |
+| `src/web/coding_ws_handler/tests/plan_repair.rs` | 766 |
+| `src/product/lifecycle_store/workspace.rs` | 733 |
+| `src/product/coding_workspace_engine/amendment.rs` | 717 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_identity.rs` | 656 |
+| `src/product/work_item_revision_store/tests/concurrency.rs` | 641 |
+| `web/src/api/types/coding.ts` | 622 |
+| `src/product/coding_attempt_store/unit_run_amendment.rs` | 621 |
+| `src/product/work_item_revision_store/repair.rs` | 536 |
+| `src/product/coding_attempt_store/unit_run.rs` | 486 |
+| `src/web/coding_ws_handler/tests/plan_repair/runner_amendment_recovery.rs` | 457 |
+| `src/product/work_item_revision_store/plan.rs` | 385 |
+| `src/product/coding_attempt_store/plan_binding.rs` | 384 |
+| `src/product/coding_attempt_store/paths.rs` | 353 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_unit_runs.rs` | 255 |
+| `src/web/coding_ws_handler/protocol.rs` | 217 |
+| `src/product/coding_attempt_store/amendment_delivery.rs` | 217 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs` | 192 |
+| `src/product/coding_attempt_store/mod.rs` | 128 |
+| `src/product/coding_models/plan_repair.rs` | 121 |
+| `src/product/coding_attempt_store/locking.rs` | 91 |
+| `src/product/coding_attempt_store/amendment_recovery.rs` | 89 |
+| `src/product/coding_attempt_store/amendment_arbitration.rs` | 28 |
 
-所有产品源码与测试文件均满足不超过 800 行门禁。
+本次 changed Rust/TS/TSX 文件最大为 782 行；large-file guard fresh 通过，全部不超过 800 行。
 
 ## 自审结论与边界
 
-- active amendment lock、Journal Phase 与最终化顺序符合 Task 4 durable recovery 要求。
-- Completed Journal 重放会收敛全部最终状态，不依赖调用方陈旧 Attempt。
-- provider entry 在 application durable completion 前保持阻断。
-- 未添加历史 v1/缺失 Plan lineage 兼容。
-- 未实现 Handoff Revision 解析、runtime handoff propagation 或 Task 5 impact propagation。
-- worktree 保留，不 push。
+- authoritative identity、durable Journal、arbitration/CAS 与锁序满足 fail-closed、zero-write 和崩溃恢复要求。
+- forged same-ID Journal/UnitRun、lineage replacement、并发 recovery、dirty identity mismatch 均有回归覆盖。
+- provider entry 在 durable delivery 成功且 finalization 收敛前保持阻断。
+- delivery 保证 no-loss 与稳定 event ID 下的 consumer idempotency；可能重复，不宣称 exactly-once。
+- 未添加历史 v1/缺失 Plan lineage 兼容 fallback。
+- worktree 保留；单个原子 fix commit；不 push。
