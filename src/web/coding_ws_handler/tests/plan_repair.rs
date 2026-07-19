@@ -43,6 +43,7 @@ mod failed_review_recovery;
 mod identity;
 mod provider_start_failure_recovery;
 mod reconciliation;
+mod runner_amendment_recovery;
 mod support;
 mod typed_sources;
 

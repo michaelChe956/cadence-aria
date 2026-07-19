@@ -338,6 +338,14 @@ pub(crate) async fn execute_start_coding_flow(
 
     let mut current =
         coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    if matches!(
+        current.status,
+        CodingAttemptStatus::AwaitingPlanAmendment
+            | CodingAttemptStatus::ApplyingPlanAmendment
+            | CodingAttemptStatus::AmendmentApplyFailed
+    ) {
+        current = engine.recover_plan_amendment(&current).await?;
+    }
     coding_store.ensure_provider_run_allowed(&current)?;
     'pipeline: loop {
         ensure_work_item_execution_plan_confirmed(&app_paths, &current)?;

@@ -64,6 +64,7 @@ use crate::web::workspace_ws_types::{
     WsPermissionRiskLevel,
 };
 
+mod amendment;
 mod code_review;
 mod coding;
 mod failed_review_recovery;

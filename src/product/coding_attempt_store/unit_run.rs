@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::Utc;
 
 use crate::product::coding_models::{
@@ -5,11 +7,299 @@ use crate::product::coding_models::{
     CodingUnitRunStatus,
 };
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
-use crate::product::work_item_projection::RenderedExecutionContext;
+use crate::product::models::PlanAmendmentManifest;
+use crate::product::work_item_projection::{RenderedExecutionContext, renderer_for};
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 use super::locking::with_exclusive_lock;
 
 impl super::CodingAttemptStore {
+    pub fn materialize_unit_runs_from_manifest(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<Vec<CodingUnitRun>, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        let binding = self.get_plan_binding(&current)?;
+        if binding.bound_plan_revision_id != manifest.new_plan_revision_id
+            || binding.applied_amendment_ids.last() != Some(&manifest.id)
+        {
+            return Err(identity_mismatch(
+                "coding_amendment_unit_run_binding",
+                &manifest.id,
+            ));
+        }
+        let revision_store = WorkItemRevisionStore::new(self.paths());
+        let plan = revision_store.get_plan_lineage(
+            &current.project_id,
+            &current.issue_id,
+            &binding.plan_id,
+        )?;
+        if plan.active_amendment_id.as_deref() != Some(manifest.id.as_str())
+            || plan.active_revision_id.as_deref() != Some(manifest.new_plan_revision_id.as_str())
+        {
+            return Err(identity_mismatch(
+                "coding_amendment_unit_run_binding",
+                &manifest.id,
+            ));
+        }
+        let plan_revision = revision_store.get_plan_revision(
+            &current.project_id,
+            &current.issue_id,
+            &plan.id,
+            &manifest.new_plan_revision_id,
+        )?;
+        let graph = revision_store
+            .get_dependency_graph_revision(&plan, &plan_revision.dependency_graph_revision_id)?;
+        let mut dependencies = plan_revision
+            .work_item_bindings
+            .keys()
+            .cloned()
+            .map(|id| (id, Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        for edge in graph.edges {
+            let target = dependencies
+                .get_mut(&edge.to)
+                .ok_or_else(|| identity_mismatch("coding_amendment_dependency_graph", &edge.to))?;
+            target.push(edge.from);
+        }
+        for values in dependencies.values_mut() {
+            values.sort();
+            values.dedup();
+        }
+
+        let revised = manifest
+            .revised_work_items
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let stale = manifest
+            .stale_units
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let revalidation = manifest
+            .revalidation_required_units
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let replacement_targets = manifest
+            .replacement_units
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let affected = revised
+            .iter()
+            .chain(stale.iter())
+            .chain(revalidation.iter())
+            .chain(replacement_targets.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut units =
+            self.list_coding_units(&current.project_id, &current.issue_id, &current.id)?;
+        for superseded_id in manifest.replacement_units.keys() {
+            let unit = unique_unit_mut(&mut units, superseded_id)?;
+            unit.status = crate::product::coding_models::CodingExecutionUnitStatus::Superseded;
+            unit.completed_at = Some(Utc::now().to_rfc3339());
+            unit.updated_at = Utc::now().to_rfc3339();
+            write_json(
+                &self.coding_unit_path(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    &unit.id,
+                ),
+                unit,
+            )?;
+        }
+        let next_order_index = units
+            .iter()
+            .map(|unit| unit.order_index)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for (offset, logical_id) in affected.iter().enumerate() {
+            if units
+                .iter()
+                .all(|unit| &unit.logical_work_item_id != logical_id)
+            {
+                if !replacement_targets.contains(logical_id) {
+                    return Err(identity_mismatch(
+                        "coding_amendment_execution_unit",
+                        logical_id,
+                    ));
+                }
+                let revision_id = plan_revision
+                    .work_item_bindings
+                    .get(logical_id)
+                    .ok_or_else(|| {
+                        identity_mismatch("coding_amendment_execution_unit", logical_id)
+                    })?;
+                let created = self.create_coding_unit(super::CreateCodingExecutionUnitInput {
+                    attempt_id: current.id.clone(),
+                    project_id: current.project_id.clone(),
+                    issue_id: current.issue_id.clone(),
+                    plan_id: plan.id.clone(),
+                    logical_work_item_id: logical_id.clone(),
+                    work_item_revision_id: revision_id.clone(),
+                    dependency_logical_work_item_ids: dependencies
+                        .get(logical_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    order_index: next_order_index.saturating_add(offset as u32),
+                    status: crate::product::coding_models::CodingExecutionUnitStatus::Pending,
+                })?;
+                units.push(created);
+            }
+        }
+
+        let coder_renderer = renderer_for(&current.provider_config_snapshot.author);
+        let reviewer_provider = current
+            .provider_config_snapshot
+            .reviewer
+            .as_ref()
+            .unwrap_or(&current.provider_config_snapshot.author);
+        let reviewer_renderer = renderer_for(reviewer_provider);
+        let mut materialized = Vec::new();
+        for logical_id in affected {
+            let unit = unique_unit_mut(&mut units, &logical_id)?;
+            let revision_id = plan_revision
+                .work_item_bindings
+                .get(&logical_id)
+                .ok_or_else(|| identity_mismatch("coding_amendment_execution_unit", &logical_id))?
+                .clone();
+            if let Some(replacement) = manifest.revised_work_items.get(&logical_id)
+                && replacement.next_revision_id != revision_id
+            {
+                return Err(identity_mismatch(
+                    "coding_amendment_execution_unit",
+                    &logical_id,
+                ));
+            }
+            unit.work_item_revision_id = revision_id.clone();
+            unit.dependency_logical_work_item_ids =
+                dependencies.get(&logical_id).cloned().unwrap_or_default();
+            unit.status = crate::product::coding_models::CodingExecutionUnitStatus::Pending;
+            unit.started_at = None;
+            unit.completed_at = None;
+            unit.summary = Some(format!("Plan Amendment {} materialized", manifest.id));
+            unit.updated_at = Utc::now().to_rfc3339();
+            write_json(
+                &self.coding_unit_path(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    &unit.id,
+                ),
+                unit,
+            )?;
+
+            let run_id = amendment_unit_run_id(&unit.id, &manifest.id);
+            let mut runs = self.list_coding_unit_runs(&current, &unit.id)?;
+            if let Some(existing) = runs.iter().find(|run| run.id == run_id) {
+                materialized.push(existing.clone());
+                continue;
+            }
+            for run in runs.iter_mut().filter(|run| run.status.is_active()) {
+                let path = self.coding_unit_run_path(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    &unit.id,
+                    &run.id,
+                );
+                run.status = CodingUnitRunStatus::Superseded;
+                run.updated_at = Utc::now().to_rfc3339();
+                write_json(&path, run)?;
+            }
+            let execution_no = runs
+                .iter()
+                .map(|run| run.execution_no)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            let plan_repair_count = runs
+                .iter()
+                .map(|run| run.plan_repair_count)
+                .max()
+                .unwrap_or(0);
+            let revision =
+                revision_store.get_work_item_revision(&plan, &logical_id, &revision_id)?;
+            let bundle = revision_store
+                .get_work_item_projection_bundle(&plan, &revision.work_item_projection_bundle_id)?;
+            let status = if stale.contains(&logical_id) {
+                CodingUnitRunStatus::Stale
+            } else if revalidation.contains(&logical_id) {
+                CodingUnitRunStatus::NeedsRevalidation
+            } else {
+                CodingUnitRunStatus::AwaitingAmendment
+            };
+            let requested = CodingUnitRun {
+                id: run_id,
+                unit_id: unit.id.clone(),
+                execution_no,
+                work_item_revision_id: revision_id,
+                resolved_handoff_revision_ids: Vec::new(),
+                canonical_contract_hash: revision.canonical_contract_hash,
+                projection_bundle_id: bundle.id,
+                projection_compiler_version: bundle.compiler_version,
+                coder_provider_renderer_version: coder_renderer.renderer_version().to_string(),
+                reviewer_provider_renderer_version: reviewer_renderer
+                    .renderer_version()
+                    .to_string(),
+                internal_reviewer_provider_renderer_version: None,
+                coder_projection_hash: bundle.coder_projection_hash,
+                reviewer_projection_hash: bundle.reviewer_projection_hash,
+                coder_execution_context_hash: None,
+                reviewer_execution_context_hash: None,
+                internal_reviewer_execution_context_hash: None,
+                status,
+                unit_rework_count: 0,
+                verification_retry_count: 0,
+                operational_retry_count: 0,
+                plan_repair_count,
+                start_commit: current.head_commit.clone(),
+                completion_commit: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            };
+            materialized.push(self.load_or_create_coding_unit_run(&current, &requested)?);
+        }
+        Ok(materialized)
+    }
+
+    pub fn set_materialized_amendment_unit_run_status(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+        logical_work_item_id: &str,
+        status: CodingUnitRunStatus,
+    ) -> Result<CodingUnitRun, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        let units = self.list_coding_units(&current.project_id, &current.issue_id, &current.id)?;
+        let unit = unique_unit(&units, logical_work_item_id)?;
+        let run_id = amendment_unit_run_id(&unit.id, &manifest.id);
+        let path = self.coding_unit_run_path(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+            &unit.id,
+            &run_id,
+        );
+        let mut run: CodingUnitRun = read_json(&path)?;
+        if run.id != run_id || run.work_item_revision_id != unit.work_item_revision_id {
+            return Err(identity_mismatch("coding_amendment_unit_run", &run_id));
+        }
+        if run.status == status {
+            return Ok(run);
+        }
+        run.status = status;
+        run.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &run)?;
+        Ok(run)
+    }
+
     pub fn create_coding_unit_run(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -418,6 +708,54 @@ fn same_materialization_identity(left: &CodingUnitRun, right: &CodingUnitRun) ->
         && left.coder_projection_hash == right.coder_projection_hash
         && left.reviewer_projection_hash == right.reviewer_projection_hash
         && left.start_commit == right.start_commit
+}
+
+fn unique_unit<'a>(
+    units: &'a [crate::product::coding_models::CodingExecutionUnit],
+    logical_work_item_id: &str,
+) -> Result<&'a crate::product::coding_models::CodingExecutionUnit, ProductStoreError> {
+    let mut matches = units
+        .iter()
+        .filter(|unit| unit.logical_work_item_id == logical_work_item_id);
+    let unit = matches.next().ok_or_else(|| ProductStoreError::NotFound {
+        kind: "coding_execution_unit",
+        id: logical_work_item_id.to_string(),
+    })?;
+    if matches.next().is_some() {
+        return Err(ProductStoreError::Ambiguous {
+            kind: "coding_execution_unit",
+            id: logical_work_item_id.to_string(),
+        });
+    }
+    Ok(unit)
+}
+
+fn unique_unit_mut<'a>(
+    units: &'a mut [crate::product::coding_models::CodingExecutionUnit],
+    logical_work_item_id: &str,
+) -> Result<&'a mut crate::product::coding_models::CodingExecutionUnit, ProductStoreError> {
+    let indexes = units
+        .iter()
+        .enumerate()
+        .filter_map(|(index, unit)| {
+            (unit.logical_work_item_id == logical_work_item_id).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    match indexes.as_slice() {
+        [index] => Ok(&mut units[*index]),
+        [] => Err(ProductStoreError::NotFound {
+            kind: "coding_execution_unit",
+            id: logical_work_item_id.to_string(),
+        }),
+        _ => Err(ProductStoreError::Ambiguous {
+            kind: "coding_execution_unit",
+            id: logical_work_item_id.to_string(),
+        }),
+    }
+}
+
+fn amendment_unit_run_id(unit_id: &str, amendment_id: &str) -> String {
+    format!("coding_unit_run_{unit_id}_{amendment_id}")
 }
 
 fn identity_mismatch(kind: &'static str, id: &str) -> ProductStoreError {

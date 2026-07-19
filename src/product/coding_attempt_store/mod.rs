@@ -2,6 +2,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
+mod amendment_recovery;
 mod attempt;
 mod context;
 mod gate;

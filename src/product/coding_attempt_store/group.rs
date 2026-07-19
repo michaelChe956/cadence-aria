@@ -3,15 +3,70 @@ use chrono::Utc;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
     CodingExecutionUnit, CodingExecutionUnitStatus, CodingRoleProviderConfigSnapshot,
+    CodingUnitRunStatus,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::models::{AmendmentResumeMode, PlanAmendmentManifest};
 use std::collections::HashSet;
 
 use super::locking::with_exclusive_lock;
 use super::{CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput};
 
 impl super::CodingAttemptStore {
+    pub fn set_resume_target_from_manifest(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<CodingExecutionUnit, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        let mut units = self
+            .list_coding_units(&current.project_id, &current.issue_id, &current.id)?
+            .into_iter()
+            .filter(|unit| {
+                unit.logical_work_item_id == manifest.resume_target.logical_work_item_id
+            });
+        let target = units.next().ok_or_else(|| ProductStoreError::NotFound {
+            kind: "coding_amendment_resume_target",
+            id: manifest.resume_target.logical_work_item_id.clone(),
+        })?;
+        if units.next().is_some() {
+            return Err(ProductStoreError::Ambiguous {
+                kind: "coding_amendment_resume_target",
+                id: manifest.resume_target.logical_work_item_id.clone(),
+            });
+        }
+        let (unit_status, run_status) = match manifest.resume_target.mode {
+            AmendmentResumeMode::Reexecute => (
+                CodingExecutionUnitStatus::Running,
+                CodingUnitRunStatus::Running,
+            ),
+            AmendmentResumeMode::Revalidate => (
+                CodingExecutionUnitStatus::NeedsRevalidation,
+                CodingUnitRunStatus::NeedsRevalidation,
+            ),
+            AmendmentResumeMode::AwaitHandoff => (
+                CodingExecutionUnitStatus::AwaitingAmendment,
+                CodingUnitRunStatus::AwaitingAmendment,
+            ),
+        };
+        let target = self.update_coding_unit_status(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+            &target.id,
+            unit_status,
+            Some(format!("Resume after Plan Amendment {}", manifest.id)),
+        )?;
+        self.set_materialized_amendment_unit_run_status(
+            &current,
+            manifest,
+            &target.logical_work_item_id,
+            run_status,
+        )?;
+        Ok(target)
+    }
+
     pub fn get_attempt_for_work_item_group(
         &self,
         project_id: &str,

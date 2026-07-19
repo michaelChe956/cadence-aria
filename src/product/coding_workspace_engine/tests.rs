@@ -311,6 +311,7 @@ mod gate_rework;
 mod group_completion_authority;
 mod group_terminal;
 mod parser_prompt;
+mod plan_amendment;
 mod plan_defect_entrypoints;
 mod provider_driven;
 mod provider_execution_context;

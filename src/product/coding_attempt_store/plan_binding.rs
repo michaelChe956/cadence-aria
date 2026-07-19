@@ -1,14 +1,129 @@
 use std::collections::HashSet;
 
+use chrono::Utc;
+
 use crate::product::coding_models::{
     CodingAmendmentApplicationJournal, CodingAmendmentApplicationPhase, CodingAttemptPlanBinding,
     CodingAttemptScope, CodingExecutionAttempt,
 };
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::models::PlanAmendmentManifest;
 
 use super::locking::with_exclusive_lock;
 
 impl super::CodingAttemptStore {
+    pub fn update_plan_binding_from_manifest(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<CodingAttemptPlanBinding, ProductStoreError> {
+        let mut binding = self.get_plan_binding(attempt)?;
+        match binding
+            .applied_amendment_ids
+            .iter()
+            .position(|id| id == &manifest.id)
+        {
+            Some(index)
+                if index + 1 == binding.applied_amendment_ids.len()
+                    && binding.bound_plan_revision_id == manifest.new_plan_revision_id =>
+            {
+                return Ok(binding);
+            }
+            Some(_) => {
+                return Err(identity_mismatch(
+                    "coding_attempt_plan_binding",
+                    &attempt.id,
+                ));
+            }
+            None if binding.bound_plan_revision_id == manifest.previous_plan_revision_id => {}
+            None => {
+                return Err(identity_mismatch(
+                    "coding_attempt_plan_binding",
+                    &attempt.id,
+                ));
+            }
+        }
+        binding.bound_plan_revision_id = manifest.new_plan_revision_id.clone();
+        binding.applied_amendment_ids.push(manifest.id.clone());
+        binding.updated_at = Utc::now().to_rfc3339();
+        self.save_plan_binding(attempt, &binding)?;
+        Ok(binding)
+    }
+
+    pub fn load_or_prepare_amendment_application(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<CodingAmendmentApplicationJournal, ProductStoreError> {
+        match self.get_amendment_application_journal(attempt, &manifest.id) {
+            Ok(journal) => return Ok(journal),
+            Err(ProductStoreError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        let now = Utc::now().to_rfc3339();
+        let journal = CodingAmendmentApplicationJournal {
+            id: format!("coding_amendment_application_{}", manifest.id),
+            attempt_id: attempt.id.clone(),
+            amendment_id: manifest.id.clone(),
+            phase: CodingAmendmentApplicationPhase::Started,
+            error: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.create_amendment_application_journal(attempt, &journal)?;
+        self.get_amendment_application_journal(attempt, &manifest.id)
+    }
+
+    pub fn list_amendment_application_journals(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<CodingAmendmentApplicationJournal>, ProductStoreError> {
+        self.validate_attempt_lineage(attempt)?;
+        let mut journals: Vec<CodingAmendmentApplicationJournal> = super::list_json_records(
+            &self.amendment_applications_root(&attempt.project_id, &attempt.issue_id, &attempt.id),
+        )?;
+        for journal in &journals {
+            validate_journal(attempt, journal)?;
+        }
+        journals.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(journals)
+    }
+
+    pub fn mark_amendment_application_failed(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        amendment_id: &str,
+        error: String,
+    ) -> Result<CodingAmendmentApplicationJournal, ProductStoreError> {
+        let journal = self.get_amendment_application_journal(attempt, amendment_id)?;
+        self.advance_amendment_application_journal(
+            attempt,
+            amendment_id,
+            journal.phase,
+            Some(error),
+            Utc::now().to_rfc3339(),
+        )
+    }
+
+    pub fn clear_amendment_application_error(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        amendment_id: &str,
+    ) -> Result<CodingAmendmentApplicationJournal, ProductStoreError> {
+        let journal = self.get_amendment_application_journal(attempt, amendment_id)?;
+        self.advance_amendment_application_journal(
+            attempt,
+            amendment_id,
+            journal.phase,
+            None,
+            Utc::now().to_rfc3339(),
+        )
+    }
+
     pub fn save_plan_binding(
         &self,
         attempt: &CodingExecutionAttempt,
