@@ -232,7 +232,33 @@ impl super::CodingAttemptStore {
                     run.reviewer_provider_renderer_version = rendered.renderer_version.clone();
                     run.reviewer_execution_context_hash = Some(rendered.content_hash.clone());
                 }
-                CodingProviderRole::Tester | CodingProviderRole::InternalReviewer => {
+                CodingProviderRole::InternalReviewer => {
+                    if let Some(existing_hash) =
+                        run.internal_reviewer_execution_context_hash.as_deref()
+                    {
+                        if run.internal_reviewer_provider_renderer_version.as_deref()
+                            == Some(rendered.renderer_version.as_str())
+                            && existing_hash == rendered.content_hash
+                        {
+                            return Ok(run);
+                        }
+                        return Err(identity_mismatch(
+                            "coding_unit_run_execution_context",
+                            unit_run_id,
+                        ));
+                    }
+                    if run.internal_reviewer_provider_renderer_version.is_some() {
+                        return Err(identity_mismatch(
+                            "coding_unit_run_execution_context",
+                            unit_run_id,
+                        ));
+                    }
+                    run.internal_reviewer_provider_renderer_version =
+                        Some(rendered.renderer_version.clone());
+                    run.internal_reviewer_execution_context_hash =
+                        Some(rendered.content_hash.clone());
+                }
+                CodingProviderRole::Tester => {
                     return Err(identity_mismatch(
                         "coding_unit_run_execution_context_role",
                         unit_run_id,
@@ -365,6 +391,12 @@ fn validate_unit_run(run: &CodingUnitRun) -> Result<(), ProductStoreError> {
         ]
         .into_iter()
         .any(str::is_empty)
+        || run
+            .internal_reviewer_provider_renderer_version
+            .as_deref()
+            .is_some_and(str::is_empty)
+        || run.internal_reviewer_provider_renderer_version.is_some()
+            != run.internal_reviewer_execution_context_hash.is_some()
     {
         return Err(identity_mismatch("coding_unit_run", &run.id));
     }
@@ -381,6 +413,8 @@ fn same_materialization_identity(left: &CodingUnitRun, right: &CodingUnitRun) ->
         && left.projection_compiler_version == right.projection_compiler_version
         && left.coder_provider_renderer_version == right.coder_provider_renderer_version
         && left.reviewer_provider_renderer_version == right.reviewer_provider_renderer_version
+        && left.internal_reviewer_provider_renderer_version
+            == right.internal_reviewer_provider_renderer_version
         && left.coder_projection_hash == right.coder_projection_hash
         && left.reviewer_projection_hash == right.reviewer_projection_hash
         && left.start_commit == right.start_commit

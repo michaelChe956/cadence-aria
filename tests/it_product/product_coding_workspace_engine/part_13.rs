@@ -274,6 +274,7 @@ async fn completing_last_group_unit_enters_review_request_stage() {
 #[tokio::test]
 async fn completing_group_units_saves_distinct_handoffs_per_unit() {
     let (_root, _paths, store, engine, attempt) = group_engine_with_two_units();
+    seed_authoritative_group_terminal_fixture(&store, &attempt);
     create_active_coding_unit_run(&store, &attempt);
 
     let after_first = engine
@@ -317,11 +318,11 @@ async fn completing_group_units_saves_distinct_handoffs_per_unit() {
     assert_eq!(unit2_handoff.work_item_id, "work_item_0002");
     assert_eq!(
         units[0].latest_handoff_revision_id.as_deref(),
-        None
+        Some("handoff_revision_coding_unit_run_coding_unit_0001")
     );
     assert_eq!(
         units[1].latest_handoff_revision_id.as_deref(),
-        None
+        Some("handoff_revision_coding_unit_run_coding_unit_0002")
     );
     assert_ne!(unit1_handoff.work_item_id, unit2_handoff.work_item_id);
 }
@@ -347,6 +348,7 @@ impl cadence_aria::cross_cutting::provider_adapter::ProviderAdapter
 #[tokio::test]
 async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit() {
     let (_root, paths, store, _engine, attempt) = group_engine_with_two_units();
+    seed_authoritative_group_terminal_fixture(&store, &attempt);
     let shared_worktree = paths.root().join("shared-worktree");
     std::fs::create_dir_all(&shared_worktree).expect("create shared worktree");
     let lifecycle = LifecycleStore::new(paths);
@@ -400,7 +402,7 @@ async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit(
     );
     assert_eq!(
         units[0].latest_handoff_revision_id.as_deref(),
-        None
+        Some("handoff_revision_coding_unit_run_coding_unit_0001")
     );
     assert_eq!(units[0].status, CodingExecutionUnitStatus::Completed);
     assert_eq!(units[1].status, CodingExecutionUnitStatus::Running);

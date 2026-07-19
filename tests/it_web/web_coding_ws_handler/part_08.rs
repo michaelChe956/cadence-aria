@@ -357,11 +357,13 @@ fn materialize_running_unit_run_for_logical(store: &CodingAttemptStore, logical_
                 projection_bundle_id: bundle.id,
                 projection_compiler_version: bundle.compiler_version,
                 coder_provider_renderer_version: renderer_version.clone(),
-                reviewer_provider_renderer_version: renderer_version,
+                reviewer_provider_renderer_version: renderer_version.clone(),
+                internal_reviewer_provider_renderer_version: None,
                 coder_projection_hash: bundle.coder_projection_hash,
                 reviewer_projection_hash: bundle.reviewer_projection_hash,
                 coder_execution_context_hash: None,
                 reviewer_execution_context_hash: None,
+                internal_reviewer_execution_context_hash: None,
                 status: cadence_aria::product::coding_models::CodingUnitRunStatus::Running,
                 unit_rework_count: 0,
                 verification_retry_count: 0,
@@ -392,29 +394,23 @@ fn bind_completed_first_unit_handoff_revision(store: &CodingAttemptStore) {
     let lineage = revision_store
         .get_plan_lineage(&attempt.project_id, &attempt.issue_id, "work_item_plan_0001")
         .expect("lineage");
-    let revision = revision_store
-        .get_work_item_revision(
+    let handoff = revision_store
+        .get_handoff_revision(
             &lineage,
             &first.logical_work_item_id,
-            &first.work_item_revision_id,
+            &format!("handoff_revision_{}", run.id),
         )
-        .expect("first revision");
-    let handoff = cadence_aria::product::models::HandoffRevision {
-        id: "handoff_revision_0001".to_string(),
-        logical_work_item_id: first.logical_work_item_id.clone(),
-        work_item_revision_id: first.work_item_revision_id.clone(),
-        coding_unit_run_id: run.id,
-        provided_contracts: Vec::new(),
-        provided_capabilities: std::collections::BTreeMap::new(),
-        contract_hash: revision.canonical_contract_hash,
-        commit_sha: run.completion_commit.unwrap_or_else(|| "HEAD".to_string()),
-        tests: Vec::new(),
-        artifacts: Vec::new(),
-        created_at: "2026-07-19T00:00:00Z".to_string(),
-    };
-    revision_store
-        .put_handoff_revision(&lineage, &handoff)
-        .expect("handoff revision");
+        .expect("canonical handoff revision");
+    assert_eq!(handoff.coding_unit_run_id, run.id);
+    store
+        .update_coding_unit_completion_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &first.id,
+            Some(handoff.commit_sha.clone()),
+        )
+        .expect("completion commit binding");
     store
         .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,

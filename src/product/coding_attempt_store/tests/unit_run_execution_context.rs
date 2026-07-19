@@ -23,6 +23,13 @@ fn coding_unit_run_execution_context_rebind_rejects_different_identity() {
         CodingUnitRunStatus::Running,
     );
     store.create_coding_unit_run(&attempt, &run).unwrap();
+    assert!(
+        store
+            .get_active_unit_run(&attempt)
+            .unwrap()
+            .internal_reviewer_provider_renderer_version
+            .is_none()
+    );
     let first = RenderedExecutionContext {
         text: "authoritative context".to_string(),
         renderer_version: "codex-provider-projection-renderer-v1".to_string(),
@@ -62,6 +69,53 @@ fn coding_unit_run_execution_context_rebind_rejects_different_identity() {
     assert_eq!(
         persisted.coder_execution_context_hash.as_deref(),
         Some(first.content_hash.as_str())
+    );
+
+    let internal = RenderedExecutionContext {
+        text: "authoritative internal reviewer context".to_string(),
+        renderer_version: "claude-code-provider-projection-renderer-v1".to_string(),
+        content_hash: "internal_context_hash_0001".to_string(),
+    };
+    store
+        .bind_unit_run_execution_context(
+            &attempt,
+            &run.id,
+            CodingProviderRole::InternalReviewer,
+            &internal,
+        )
+        .expect("initial internal reviewer binding");
+    store
+        .bind_unit_run_execution_context(
+            &attempt,
+            &run.id,
+            CodingProviderRole::InternalReviewer,
+            &internal,
+        )
+        .expect("identical internal reviewer binding is idempotent");
+    assert!(matches!(
+        store.bind_unit_run_execution_context(
+            &attempt,
+            &run.id,
+            CodingProviderRole::InternalReviewer,
+            &different,
+        ),
+        Err(ProductStoreError::IdentityMismatch {
+            kind: "coding_unit_run_execution_context",
+            ..
+        })
+    ));
+    let persisted = store.get_active_unit_run(&attempt).unwrap();
+    assert_eq!(
+        persisted
+            .internal_reviewer_provider_renderer_version
+            .as_deref(),
+        Some(internal.renderer_version.as_str())
+    );
+    assert_eq!(
+        persisted
+            .internal_reviewer_execution_context_hash
+            .as_deref(),
+        Some(internal.content_hash.as_str())
     );
 }
 

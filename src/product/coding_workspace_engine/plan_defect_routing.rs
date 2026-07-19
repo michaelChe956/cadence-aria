@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::coding_models::CodingUnitRun;
 use crate::product::models::{PlanDefectRoute, RepairTargetKind};
 use crate::product::plan_repair::{
     PlanDefectFinding, PlanDefectSeverity, PlanRepairError, normalize_blocker_route,
@@ -10,6 +11,12 @@ use crate::product::work_item_revision_store::WorkItemRevisionStore;
 pub(crate) struct GroupReviewerProjectionBinding {
     pub(crate) logical_work_item_id: String,
     pub(crate) projection: ReviewerWorkItemProjection,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AuthoritativeGroupReviewerBinding {
+    pub(crate) run: CodingUnitRun,
+    pub(crate) projection_binding: GroupReviewerProjectionBinding,
 }
 
 pub(crate) fn internal_review_flow_decision(
@@ -46,10 +53,21 @@ impl CodingWorkspaceEngine {
         ))
     }
 
-    fn group_reviewer_projection_bindings(
+    pub(crate) fn group_reviewer_projection_bindings(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<Vec<GroupReviewerProjectionBinding>, CodingWorkspaceEngineError> {
+        Ok(self
+            .authoritative_group_reviewer_bindings(attempt)?
+            .into_iter()
+            .map(|binding| binding.projection_binding)
+            .collect())
+    }
+
+    pub(crate) fn authoritative_group_reviewer_bindings(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<AuthoritativeGroupReviewerBinding>, CodingWorkspaceEngineError> {
         let plan_id = attempt.work_item_group_id.as_deref().ok_or_else(|| {
             CodingWorkspaceEngineError::ProviderStream(
                 "group_review_plan_binding_missing".to_string(),
@@ -93,6 +111,14 @@ impl CodingWorkspaceEngine {
             let bundle = revision_store
                 .get_work_item_projection_bundle(&lineage, &run.projection_bundle_id)?;
             validate_projection_bundle(&run.work_item_revision_id, &revision, &bundle)?;
+            let resolved_handoff_revision_ids =
+                self.authoritative_resolved_handoff_revision_ids(attempt, &unit, &lineage)?;
+            if run.resolved_handoff_revision_ids != resolved_handoff_revision_ids {
+                return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "group_review_handoff_binding_mismatch: {}",
+                    run.id
+                )));
+            }
             if run.work_item_revision_id != unit.work_item_revision_id
                 || run.canonical_contract_hash != bundle.canonical_contract_hash
                 || run.projection_compiler_version != bundle.compiler_version
@@ -103,9 +129,12 @@ impl CodingWorkspaceEngine {
                     run.id
                 )));
             }
-            bindings.push(GroupReviewerProjectionBinding {
-                logical_work_item_id: unit.logical_work_item_id,
-                projection: bundle.reviewer_projection,
+            bindings.push(AuthoritativeGroupReviewerBinding {
+                run,
+                projection_binding: GroupReviewerProjectionBinding {
+                    logical_work_item_id: unit.logical_work_item_id,
+                    projection: bundle.reviewer_projection,
+                },
             });
         }
         Ok(bindings)

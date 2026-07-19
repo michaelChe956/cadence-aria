@@ -70,10 +70,12 @@ pub(super) fn coding_unit_run_record(
         projection_compiler_version: "projection-v1".to_string(),
         coder_provider_renderer_version: "codex-v1".to_string(),
         reviewer_provider_renderer_version: "claude-code-v1".to_string(),
+        internal_reviewer_provider_renderer_version: None,
         coder_projection_hash: "coder_projection_hash".to_string(),
         reviewer_projection_hash: "reviewer_projection_hash".to_string(),
         coder_execution_context_hash: None,
         reviewer_execution_context_hash: None,
+        internal_reviewer_execution_context_hash: None,
         status,
         unit_rework_count: 2,
         verification_retry_count: 3,
@@ -600,7 +602,7 @@ fn coding_unit_run_concurrent_role_context_binding_does_not_lose_updates() {
     );
     store.create_coding_unit_run(&attempt, &run).unwrap();
 
-    let barrier = Arc::new(Barrier::new(3));
+    let barrier = Arc::new(Barrier::new(4));
     let mut handles = Vec::new();
     for (role, version, hash) in [
         (CodingProviderRole::Coder, "coder-v2", "coder-context"),
@@ -608,6 +610,11 @@ fn coding_unit_run_concurrent_role_context_binding_does_not_lose_updates() {
             CodingProviderRole::CodeReviewer,
             "reviewer-v2",
             "reviewer-context",
+        ),
+        (
+            CodingProviderRole::InternalReviewer,
+            "internal-reviewer-v2",
+            "internal-reviewer-context",
         ),
     ] {
         let store = store.clone();
@@ -645,6 +652,18 @@ fn coding_unit_run_concurrent_role_context_binding_does_not_lose_updates() {
     assert_eq!(
         persisted.reviewer_execution_context_hash.as_deref(),
         Some("reviewer-context")
+    );
+    assert_eq!(
+        persisted
+            .internal_reviewer_provider_renderer_version
+            .as_deref(),
+        Some("internal-reviewer-v2")
+    );
+    assert_eq!(
+        persisted
+            .internal_reviewer_execution_context_hash
+            .as_deref(),
+        Some("internal-reviewer-context")
     );
 }
 

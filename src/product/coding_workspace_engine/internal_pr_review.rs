@@ -194,7 +194,12 @@ impl CodingWorkspaceEngine {
             .internal_reviewer;
         let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
         let is_group_final_review = attempt.scope == CodingAttemptScope::WorkItemGroup;
-        let prompt = if is_group_final_review {
+        let prepared_group_context = if is_group_final_review {
+            Some(self.prepare_group_reviewer_context(&attempt, &reviewer)?)
+        } else {
+            None
+        };
+        let legacy_prompt = if is_group_final_review {
             self.build_group_internal_pr_review_prompt(
                 &attempt,
                 &review_request,
@@ -211,6 +216,10 @@ impl CodingWorkspaceEngine {
             )
             .await?
         };
+        let prompt = prepared_group_context
+            .as_ref()
+            .map(|context| format!("{}\n\n{legacy_prompt}", context.prompt_section))
+            .unwrap_or(legacy_prompt);
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -287,8 +296,12 @@ impl CodingWorkspaceEngine {
             Some(raw_provider_output_ref.clone()),
             &role_run,
         )?;
-        let review_flow_decision =
-            self.internal_review_flow_decision_for_attempt(&attempt, &review)?;
+        let review_flow_decision = match prepared_group_context.as_ref() {
+            Some(context) => {
+                internal_review_flow_decision_with_bindings(&review, &context.bindings)
+            }
+            None => self.internal_review_flow_decision_for_attempt(&attempt, &review)?,
+        };
         self.store.save_internal_pr_review(&attempt, &review)?;
         self.emit_internal_pr_review_chat_entry(
             &attempt,

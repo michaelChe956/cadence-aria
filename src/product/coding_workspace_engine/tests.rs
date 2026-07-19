@@ -6,7 +6,7 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::{
     CodingAttemptPlanBinding, CodingAttemptScope, CodingExecutionUnitStatus, CodingProviderRole,
-    CodingUnitRun, CodingUnitRunStatus, RemoteKind,
+    RemoteKind,
 };
 use crate::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, LifecycleStore,
@@ -17,7 +17,7 @@ use crate::product::models::{
     WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::work_item_contract::{
-    BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract,
+    BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract, PromisedOutputContract,
     WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
 };
 use crate::product::work_item_projection::{WorkItemProjectionCompiler, projection_hashes};
@@ -146,7 +146,10 @@ fn seed_group_attempt_fixture(
             },
             non_goals: Vec::new(),
             input_contracts: Vec::new(),
-            output_contracts: Vec::new(),
+            output_contracts: vec![PromisedOutputContract {
+                contract_id: format!("contract_{work_item_id}"),
+                capabilities: vec![format!("capability_{work_item_id}")],
+            }],
             tasks: Vec::new(),
             write_policy: WorkItemWritePolicy {
                 exclusive_scopes: Vec::new(),
@@ -156,7 +159,7 @@ fn seed_group_attempt_fixture(
             verification_checks: Vec::new(),
             handoff_contract: HandoffContract {
                 required_fields: Vec::new(),
-                provided_contract_refs: Vec::new(),
+                provided_contract_refs: vec![format!("contract_{work_item_id}")],
                 reviewer_check_refs: Vec::new(),
             },
             blocker_rules: vec![
@@ -305,6 +308,7 @@ fn seed_group_attempt_fixture(
 mod coder_resume_recovery;
 mod gate_coder_feedback;
 mod gate_rework;
+mod group_completion_authority;
 mod group_terminal;
 mod parser_prompt;
 mod plan_defect_entrypoints;
@@ -529,170 +533,6 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
             .expect("timeline")
             .iter()
             .all(|node| node.stage != CodingExecutionStage::InternalPrReview)
-    );
-}
-
-#[tokio::test]
-async fn group_unit_completion_commits_changes_and_advances_to_next_unit() {
-    let root = tempdir().expect("tempdir");
-    let worktree = root.path().join("worktree");
-    fs::create_dir_all(&worktree).expect("worktree dir");
-    init_test_git_repo(&worktree);
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let lifecycle = LifecycleStore::new(store.paths());
-    for work_item_id in ["work_item_0001", "work_item_0002"] {
-        lifecycle
-            .create_work_item(CreateWorkItemInput {
-                id: Some(work_item_id.to_string()),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                repository_id: "repository_0001".to_string(),
-                title: work_item_id.to_string(),
-                ..Default::default()
-            })
-            .expect("create work item");
-    }
-    let attempt = store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            current_work_item_id: "work_item_0001".to_string(),
-            base_branch: "HEAD~1".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: Some(worktree.clone()),
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Codex,
-                reviewer: Some(ProviderName::ClaudeCode),
-                review_rounds: 1,
-            },
-            max_auto_rework: 2,
-        })
-        .expect("group attempt");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running attempt");
-    let unit1 = store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            plan_id: "work_item_plan_0001".to_string(),
-            logical_work_item_id: "work_item_0001".to_string(),
-            work_item_revision_id: "work_item_revision_0001".to_string(),
-            dependency_logical_work_item_ids: Vec::new(),
-            order_index: 1,
-            status: CodingExecutionUnitStatus::Running,
-        })
-        .expect("unit1");
-    let unit2 = store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            plan_id: "work_item_plan_0001".to_string(),
-            logical_work_item_id: "work_item_0002".to_string(),
-            work_item_revision_id: "work_item_revision_0002".to_string(),
-            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
-            order_index: 2,
-            status: CodingExecutionUnitStatus::Pending,
-        })
-        .expect("unit2");
-    fs::write(worktree.join("unit1.txt"), "unit 1 change\n").expect("unit change");
-    let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let attempt = store
-        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("current attempt");
-
-    let error = engine
-        .complete_group_unit_after_code_review(&attempt)
-        .await
-        .expect_err("missing authoritative UnitRun must fail closed");
-    assert!(error.to_string().contains("coding_unit_run"));
-    let attempt = store
-        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("attempt after fail closed");
-    store
-        .create_coding_unit_run(
-            &attempt,
-            &CodingUnitRun {
-                id: "coding_unit_run_0001".to_string(),
-                unit_id: unit1.id.clone(),
-                execution_no: 1,
-                work_item_revision_id: unit1.work_item_revision_id.clone(),
-                resolved_handoff_revision_ids: Vec::new(),
-                canonical_contract_hash: "contract_hash_0001".to_string(),
-                projection_bundle_id: "projection_bundle_0001".to_string(),
-                projection_compiler_version: "projection_compiler_v1".to_string(),
-                coder_provider_renderer_version: "coder_renderer_v1".to_string(),
-                reviewer_provider_renderer_version: "reviewer_renderer_v1".to_string(),
-                coder_projection_hash: "coder_projection_hash_0001".to_string(),
-                reviewer_projection_hash: "reviewer_projection_hash_0001".to_string(),
-                coder_execution_context_hash: None,
-                reviewer_execution_context_hash: None,
-                status: CodingUnitRunStatus::Running,
-                unit_rework_count: 0,
-                verification_retry_count: 0,
-                operational_retry_count: 0,
-                plan_repair_count: 0,
-                start_commit: attempt.head_commit.clone(),
-                completion_commit: None,
-                created_at: "2026-07-19T00:00:00Z".to_string(),
-                updated_at: "2026-07-19T00:00:00Z".to_string(),
-            },
-        )
-        .expect("running unit run");
-    let completion_commit = attempt.head_commit.as_deref().expect("completion commit");
-    store
-        .complete_coding_unit_run(&attempt, "coding_unit_run_0001", completion_commit)
-        .expect("persist partial UnitRun completion");
-    let updated = engine
-        .complete_group_unit_after_code_review(&attempt)
-        .await
-        .expect("complete unit");
-
-    assert_eq!(
-        updated.current_work_item_id.as_deref(),
-        Some("work_item_0002")
-    );
-    assert_eq!(updated.active_unit_id.as_deref(), Some(unit2.id.as_str()));
-    assert_eq!(updated.stage, CodingExecutionStage::PrepareContext);
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
-    let units = store
-        .list_coding_units(&updated.project_id, &updated.issue_id, &updated.id)
-        .expect("units");
-    let completed_unit = units
-        .iter()
-        .find(|unit| unit.id == unit1.id)
-        .expect("completed unit");
-    assert_eq!(completed_unit.status, CodingExecutionUnitStatus::Completed);
-    let completion_commit = completed_unit
-        .completion_commit
-        .as_deref()
-        .expect("completion commit");
-    assert_eq!(completion_commit.len(), 40);
-    assert_eq!(updated.head_commit.as_deref(), Some(completion_commit));
-    let completed_run = store
-        .list_coding_unit_runs(&updated, &unit1.id)
-        .expect("unit runs")
-        .into_iter()
-        .next()
-        .expect("completed unit run");
-    assert_eq!(completed_run.status, CodingUnitRunStatus::Completed);
-    assert_eq!(
-        completed_run.completion_commit.as_deref(),
-        Some(completion_commit)
-    );
-    assert_eq!(
-        git_stdout(&worktree, &["status", "--porcelain"]),
-        "",
-        "unit completion should leave no staged or unstaged source changes"
     );
 }
 

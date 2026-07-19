@@ -135,51 +135,6 @@ fn group_engine_with_last_running_unit() -> (
     (root, paths, store, engine, attempt)
 }
 
-fn create_active_coding_unit_run(
-    store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-) {
-    let unit = store
-        .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("active unit lookup")
-        .expect("active unit");
-    let execution_no = store
-        .list_coding_unit_runs(attempt, &unit.id)
-        .expect("existing unit runs")
-        .len() as u32
-        + 1;
-    store
-        .create_coding_unit_run(
-            attempt,
-            &CodingUnitRun {
-                id: format!("coding_unit_run_{}", unit.id),
-                unit_id: unit.id,
-                execution_no,
-                work_item_revision_id: unit.work_item_revision_id,
-                resolved_handoff_revision_ids: Vec::new(),
-                canonical_contract_hash: "contract_hash_0001".to_string(),
-                projection_bundle_id: "projection_bundle_0001".to_string(),
-                projection_compiler_version: "projection_compiler_v1".to_string(),
-                coder_provider_renderer_version: "coder_renderer_v1".to_string(),
-                reviewer_provider_renderer_version: "reviewer_renderer_v1".to_string(),
-                coder_projection_hash: "coder_projection_hash_0001".to_string(),
-                reviewer_projection_hash: "reviewer_projection_hash_0001".to_string(),
-                coder_execution_context_hash: None,
-                reviewer_execution_context_hash: None,
-                status: CodingUnitRunStatus::Running,
-                unit_rework_count: 0,
-                verification_retry_count: 0,
-                operational_retry_count: 0,
-                plan_repair_count: 0,
-                start_commit: attempt.head_commit.clone(),
-                completion_commit: None,
-                created_at: "2026-07-19T00:00:00Z".to_string(),
-                updated_at: "2026-07-19T00:00:00Z".to_string(),
-            },
-        )
-        .expect("create active unit run");
-}
-
 fn init_group_worktree(worktree: &Path) {
     init_repo(worktree);
     fs::create_dir_all(worktree.join("src")).expect("create group src dir");
@@ -375,11 +330,13 @@ fn seed_authoritative_group_coder_fixture(
         projection_bundle_id: bundle.id.clone(),
         projection_compiler_version: bundle.compiler_version.clone(),
         coder_provider_renderer_version: renderer_version.clone(),
-        reviewer_provider_renderer_version: renderer_version,
+        reviewer_provider_renderer_version: renderer_version.clone(),
+        internal_reviewer_provider_renderer_version: None,
         coder_projection_hash: bundle.coder_projection_hash.clone(),
         reviewer_projection_hash: bundle.reviewer_projection_hash.clone(),
         coder_execution_context_hash: None,
         reviewer_execution_context_hash: None,
+        internal_reviewer_execution_context_hash: None,
         status: CodingUnitRunStatus::Completed,
         unit_rework_count: 0,
         verification_retry_count: 0,
@@ -394,10 +351,10 @@ fn seed_authoritative_group_coder_fixture(
         .create_coding_unit_run(attempt, &run)
         .expect("source coding unit run");
     let handoff = HandoffRevision {
-        id: "handoff_revision_0001".to_string(),
+        id: format!("handoff_revision_{}", run.id),
         logical_work_item_id: source_unit.logical_work_item_id.clone(),
         work_item_revision_id: source_unit.work_item_revision_id.clone(),
-        coding_unit_run_id: run.id,
+        coding_unit_run_id: run.id.clone(),
         provided_contracts: Vec::new(),
         provided_capabilities: std::collections::BTreeMap::new(),
         contract_hash: revision.canonical_contract_hash,
@@ -409,6 +366,15 @@ fn seed_authoritative_group_coder_fixture(
     revision_store
         .put_handoff_revision(&lineage, &handoff)
         .expect("source handoff revision");
+    store
+        .update_coding_unit_completion_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &source_unit.id,
+            Some("seed-commit".to_string()),
+        )
+        .expect("source completion commit");
     store
         .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,

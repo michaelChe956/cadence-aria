@@ -523,10 +523,12 @@ fn complete_group_units_with_authoritative_runs(
                         )
                         .renderer_version()
                         .to_string(),
+                    internal_reviewer_provider_renderer_version: None,
                     coder_projection_hash: bundle.coder_projection_hash,
                     reviewer_projection_hash: bundle.reviewer_projection_hash,
                     coder_execution_context_hash: None,
                     reviewer_execution_context_hash: None,
+                    internal_reviewer_execution_context_hash: None,
                     status: CodingUnitRunStatus::Completed,
                     unit_rework_count: 0,
                     verification_retry_count: 0,

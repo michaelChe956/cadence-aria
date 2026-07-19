@@ -7,7 +7,15 @@ fn seed_authoritative_group_final_review_fixture(
     let lineage = revision_store
         .get_plan_lineage(&attempt.project_id, &attempt.issue_id, "work_item_plan_0001")
         .expect("group plan lineage");
-    let renderer_version = renderer_for(&ProviderName::Fake).renderer_version().to_string();
+    let providers = store
+        .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("provider snapshot");
+    let coder_renderer_version = renderer_for(&providers.coder)
+        .renderer_version()
+        .to_string();
+    let reviewer_renderer_version = renderer_for(&providers.code_reviewer)
+        .renderer_version()
+        .to_string();
     for (index, logical_id) in ["work_item_0001", "work_item_0002"]
         .into_iter()
         .enumerate()
@@ -44,12 +52,14 @@ fn seed_authoritative_group_final_review_fixture(
                     canonical_contract_hash: bundle.canonical_contract_hash,
                     projection_bundle_id: bundle.id,
                     projection_compiler_version: bundle.compiler_version,
-                    coder_provider_renderer_version: renderer_version.clone(),
-                    reviewer_provider_renderer_version: renderer_version.clone(),
+                    coder_provider_renderer_version: coder_renderer_version.clone(),
+                    reviewer_provider_renderer_version: reviewer_renderer_version.clone(),
+                    internal_reviewer_provider_renderer_version: None,
                     coder_projection_hash: bundle.coder_projection_hash,
                     reviewer_projection_hash: bundle.reviewer_projection_hash,
                     coder_execution_context_hash: None,
                     reviewer_execution_context_hash: None,
+                    internal_reviewer_execution_context_hash: None,
                     status: CodingUnitRunStatus::Completed,
                     unit_rework_count: 0,
                     verification_retry_count: 0,

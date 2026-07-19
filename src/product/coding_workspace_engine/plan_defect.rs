@@ -1,7 +1,10 @@
 use super::*;
-use crate::product::coding_models::{CodingUnitRun, CodingUnitRunStatus};
+use crate::product::coding_models::{
+    CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
+};
 use crate::product::models::{
-    PlanDefectClass, PlanDefectRoute, RepairTargetKind, WorkItemProjectionBundle,
+    PlanDefectClass, PlanDefectRoute, RepairTargetKind, WorkItemPlanLineage,
+    WorkItemProjectionBundle,
 };
 use crate::product::plan_repair::{
     PlanDefectConfidence, PlanDefectFinding, PlanRepairError, normalize_blocker_route,
@@ -409,6 +412,67 @@ impl CodingWorkspaceEngine {
         Ok(Some(rendered))
     }
 
+    pub(crate) fn authoritative_resolved_handoff_revision_ids(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit: &CodingExecutionUnit,
+        lineage: &WorkItemPlanLineage,
+    ) -> Result<Vec<String>, CodingWorkspaceEngineError> {
+        let units =
+            self.store
+                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let revision_store = WorkItemRevisionStore::new(self.store.paths());
+        unit.dependency_logical_work_item_ids
+            .iter()
+            .map(|dependency_id| {
+                let mut matches = units
+                    .iter()
+                    .filter(|candidate| candidate.logical_work_item_id == *dependency_id);
+                let dependency = matches.next().ok_or_else(|| {
+                    CodingWorkspaceEngineError::WorkItemHandoffMissing(dependency_id.clone())
+                })?;
+                if matches.next().is_some() {
+                    return Err(ProductStoreError::Ambiguous {
+                        kind: "coding_execution_unit",
+                        id: dependency_id.clone(),
+                    }
+                    .into());
+                }
+                let handoff_id = dependency
+                    .latest_handoff_revision_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        CodingWorkspaceEngineError::WorkItemHandoffMissing(dependency_id.clone())
+                    })?;
+                let handoff =
+                    revision_store.get_handoff_revision(lineage, dependency_id, handoff_id)?;
+                let source_run = self
+                    .store
+                    .list_coding_unit_runs(attempt, &dependency.id)?
+                    .into_iter()
+                    .max_by_key(|run| run.execution_no);
+                if dependency.status != CodingExecutionUnitStatus::Completed
+                    || dependency.completion_commit.as_deref() != Some(handoff.commit_sha.as_str())
+                    || handoff.id != format!("handoff_revision_{}", handoff.coding_unit_run_id)
+                    || handoff.logical_work_item_id != dependency.logical_work_item_id
+                    || handoff.work_item_revision_id != dependency.work_item_revision_id
+                    || !source_run.is_some_and(|run| {
+                        run.id == handoff.coding_unit_run_id
+                            && run.unit_id == dependency.id
+                            && run.work_item_revision_id == dependency.work_item_revision_id
+                            && run.status == CodingUnitRunStatus::Completed
+                            && run.completion_commit.as_deref() == Some(handoff.commit_sha.as_str())
+                    })
+                {
+                    return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                        "unit_run_handoff_binding_mismatch: {handoff_id}"
+                    )));
+                }
+                Ok(handoff_id.to_string())
+            })
+            .collect()
+    }
+
     fn active_unit_run_projection(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -440,41 +504,8 @@ impl CodingWorkspaceEngine {
         let bundle = revision_store
             .get_work_item_projection_bundle(&lineage, &revision.work_item_projection_bundle_id)?;
         validate_projection_bundle(&active_unit.work_item_revision_id, &revision, &bundle)?;
-        let resolved_handoff_revision_ids = active_unit
-            .dependency_logical_work_item_ids
-            .iter()
-            .map(|dependency_id| {
-                let dependency = self
-                    .store
-                    .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-                    .into_iter()
-                    .find(|unit| unit.logical_work_item_id == *dependency_id)
-                    .ok_or_else(|| {
-                        CodingWorkspaceEngineError::WorkItemHandoffMissing(dependency_id.clone())
-                    })?;
-                let handoff_id = dependency.latest_handoff_revision_id.ok_or_else(|| {
-                    CodingWorkspaceEngineError::WorkItemHandoffMissing(dependency_id.clone())
-                })?;
-                let handoff =
-                    revision_store.get_handoff_revision(&lineage, dependency_id, &handoff_id)?;
-                let source_run = self
-                    .store
-                    .list_coding_unit_runs(attempt, &dependency.id)?
-                    .into_iter()
-                    .find(|run| run.id == handoff.coding_unit_run_id);
-                if handoff.work_item_revision_id != dependency.work_item_revision_id
-                    || !source_run.is_some_and(|run| {
-                        run.work_item_revision_id == dependency.work_item_revision_id
-                            && run.status == CodingUnitRunStatus::Completed
-                    })
-                {
-                    return Err(CodingWorkspaceEngineError::ProviderStream(format!(
-                        "unit_run_handoff_binding_mismatch: {handoff_id}"
-                    )));
-                }
-                Ok(handoff_id)
-            })
-            .collect::<Result<Vec<_>, CodingWorkspaceEngineError>>()?;
+        let resolved_handoff_revision_ids =
+            self.authoritative_resolved_handoff_revision_ids(attempt, &active_unit, &lineage)?;
         let providers = self.store.get_role_provider_config_snapshot(
             &attempt.project_id,
             &attempt.issue_id,
@@ -518,10 +549,12 @@ impl CodingWorkspaceEngine {
                     projection_compiler_version: bundle.compiler_version.clone(),
                     coder_provider_renderer_version: coder_renderer_version.clone(),
                     reviewer_provider_renderer_version: reviewer_renderer_version.clone(),
+                    internal_reviewer_provider_renderer_version: None,
                     coder_projection_hash: bundle.coder_projection_hash.clone(),
                     reviewer_projection_hash: bundle.reviewer_projection_hash.clone(),
                     coder_execution_context_hash: None,
                     reviewer_execution_context_hash: None,
+                    internal_reviewer_execution_context_hash: None,
                     status: CodingUnitRunStatus::Running,
                     unit_rework_count: 0,
                     verification_retry_count: 0,

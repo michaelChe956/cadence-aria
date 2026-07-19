@@ -1,5 +1,5 @@
 use super::*;
-use crate::product::coding_models::{CodingAttemptScope, CodingUnitRunStatus};
+use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
     pub(crate) fn active_work_item_id_for_attempt<'a>(
@@ -576,102 +576,6 @@ impl CodingWorkspaceEngine {
             &current_work_item_id,
         )?;
         Ok(completed)
-    }
-
-    pub async fn complete_group_unit_after_code_review(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let attempt = self.commit_current_group_unit_changes(attempt).await?;
-        self.generate_and_save_work_item_handoff_if_missing(&attempt)
-            .await?;
-        let active = self
-            .store
-            .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .ok_or_else(|| {
-                CodingWorkspaceEngineError::WorkItemHandoffMissing(attempt.id.clone())
-            })?;
-        let runs = self.store.list_coding_unit_runs(&attempt, &active.id)?;
-        let run = runs
-            .iter()
-            .max_by_key(|run| run.execution_no)
-            .ok_or_else(|| ProductStoreError::NotFound {
-                kind: "coding_unit_run",
-                id: active.id.clone(),
-            })?;
-        let active_run_count = runs.iter().filter(|run| run.status.is_active()).count();
-        let completion_retry =
-            run.status == CodingUnitRunStatus::Completed && active_run_count == 0;
-        if !completion_retry && active_run_count != 1 {
-            return Err(ProductStoreError::Ambiguous {
-                kind: "coding_unit_run",
-                id: active.id,
-            }
-            .into());
-        }
-        let completion_commit = attempt.head_commit.as_deref().ok_or_else(|| {
-            CodingWorkspaceEngineError::CompletionCommitMissing(attempt.id.clone())
-        })?;
-        self.store
-            .complete_coding_unit_run(&attempt, &run.id, completion_commit)?;
-        self.complete_current_group_unit(&attempt, Some("当前 Work Item 已完成".to_string()))
-            .await
-    }
-
-    async fn commit_current_group_unit_changes(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        if attempt.scope != CodingAttemptScope::WorkItemGroup {
-            return Ok(attempt.clone());
-        }
-        let Some(worktree_path) = attempt.worktree_path.as_ref() else {
-            return Err(CodingWorkspaceEngineError::MissingWorktree(
-                attempt.id.clone(),
-            ));
-        };
-        let active = self
-            .store
-            .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .ok_or_else(|| {
-                CodingWorkspaceEngineError::WorkItemHandoffMissing(attempt.id.clone())
-            })?;
-
-        self._git_service
-            .git_add_work_item_changes(worktree_path)
-            .await?;
-        let completion_commit = if self
-            ._git_service
-            .git_has_staged_changes(worktree_path)
-            .await?
-        {
-            self._git_service
-                .git_commit(
-                    worktree_path,
-                    &format!("feat: complete {}", active.logical_work_item_id),
-                )
-                .await?
-                .commit_sha
-        } else if let Some(head_commit) = attempt.head_commit.clone() {
-            head_commit
-        } else {
-            self._git_service.git_current_head(worktree_path).await?
-        };
-
-        let updated = self.store.update_attempt_head_commit(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            Some(completion_commit.clone()),
-        )?;
-        self.store.update_coding_unit_completion_commit(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &active.id,
-            Some(completion_commit),
-        )?;
-        Ok(updated)
     }
 
     fn mark_completed_group_work_items_if_present(
