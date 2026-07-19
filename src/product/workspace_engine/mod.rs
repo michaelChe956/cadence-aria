@@ -124,6 +124,9 @@ pub(crate) use lifecycle_recovery::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;
 pub(crate) use plan_outline::*;
+pub(crate) use plan_repair::{
+    amendment_id_for, canonical_plan_repair_parent_session, linked_child_session,
+};
 pub(crate) use plan_repair_recovery::*;
 pub(crate) use plan_repair_transaction::*;
 pub(crate) use plan_repair_validation::*;

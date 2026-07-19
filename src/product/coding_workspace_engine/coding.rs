@@ -3,6 +3,7 @@ use super::*;
 pub(crate) struct CoderExecutionOutcome {
     pub(crate) attempt: CodingExecutionAttempt,
     pub(crate) plan_defect_decision: Option<CodeReviewFlowDecision>,
+    pub(crate) plan_defect_report: Option<ExecutionPlanDefectReport>,
 }
 
 impl CodingWorkspaceEngine {
@@ -226,14 +227,15 @@ impl CodingWorkspaceEngine {
                 return Err(error);
             }
         };
-        let plan_defect_decision =
+        let (plan_defect_report, plan_defect_decision) =
             match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
-                Ok(report) if report.findings.is_empty() => None,
+                Ok(report) if report.findings.is_empty() => (None, None),
                 Ok(report) => {
                     let projection = self.reviewer_projection_for_attempt(&attempt)?;
-                    Some(execution_plan_defect_flow_decision(&report, &projection))
+                    let decision = execution_plan_defect_flow_decision(&report, &projection);
+                    (Some(report), Some(decision))
                 }
-                Err(_) => Some(CodeReviewFlowDecision::StopForHumanTriage),
+                Err(_) => (None, Some(CodeReviewFlowDecision::StopForHumanTriage)),
             };
         let plan_defect_route = plan_defect_decision.map(CodeReviewFlowDecision::label);
         let raw_provider_output_ref = self.store.save_provider_raw_output(
@@ -281,6 +283,7 @@ impl CodingWorkspaceEngine {
         Ok(CoderExecutionOutcome {
             attempt,
             plan_defect_decision,
+            plan_defect_report,
         })
     }
 

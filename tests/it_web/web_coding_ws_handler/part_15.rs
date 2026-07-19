@@ -248,6 +248,8 @@ async fn run_reviewer_triggered_rework_case(
     let mut saw_route = false;
     let mut saw_second_review_gate = false;
     let mut saw_protocol_error = false;
+    let mut emitted_plan_repair_request = None;
+    let mut saw_plan_repair_state = false;
     for _ in 0..180 {
         match timeout(Duration::from_millis(500), recv_json(&mut ws)).await {
             Ok(CodingWsOutMessage::CodingGateRequired { gate })
@@ -276,10 +278,31 @@ async fn run_reviewer_triggered_rework_case(
             {
                 saw_route = true;
             }
+            Ok(CodingWsOutMessage::CodingSessionState { status, stage, .. })
+                if matches!(case, ReviewerTriggeredReworkCase::Plan)
+                    && stage == CodingExecutionStage::Coding
+                    && status == CodingAttemptStatus::AwaitingPlanAmendment =>
+            {
+                saw_plan_repair_state = true;
+                if emitted_plan_repair_request.is_some() {
+                    break;
+                }
+            }
             Ok(CodingWsOutMessage::CodingSessionState { stage, .. })
-                if saw_route && stage == CodingExecutionStage::Coding =>
+                if saw_route
+                    && !matches!(case, ReviewerTriggeredReworkCase::Plan)
+                    && stage == CodingExecutionStage::Coding =>
             {
                 break;
+            }
+            Ok(CodingWsOutMessage::PlanRepairRequired { request, .. })
+                if matches!(case, ReviewerTriggeredReworkCase::Plan) =>
+            {
+                emitted_plan_repair_request = Some(*request);
+                saw_route = true;
+                if saw_plan_repair_state {
+                    break;
+                }
             }
             Ok(CodingWsOutMessage::CodeReviewComplete { .. })
                 if provider
@@ -294,7 +317,8 @@ async fn run_reviewer_triggered_rework_case(
                 break;
             }
             Ok(_) => {}
-            Err(_) if saw_route => break,
+            Err(_) if saw_route && !matches!(case, ReviewerTriggeredReworkCase::Plan) => break,
+            Err(_) if matches!(case, ReviewerTriggeredReworkCase::Plan) => continue,
             Err(_) => panic!("{} rework case timed out", case.label()),
         }
     }
@@ -305,7 +329,45 @@ async fn run_reviewer_triggered_rework_case(
     let reviewer_calls = provider
         .reviewer_calls
         .load(std::sync::atomic::Ordering::SeqCst);
-    if case.expected_route().is_some() {
+    if matches!(case, ReviewerTriggeredReworkCase::Plan) {
+        let revision_store = WorkItemRevisionStore::new(store.paths());
+        let lineage = revision_store
+            .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+            .expect("lineage");
+        let requests = revision_store
+            .list_repair_requests(&lineage)
+            .expect("repair requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            emitted_plan_repair_request.as_ref(),
+            requests.first(),
+            "PlanRepairRequired must expose the durable request"
+        );
+        assert_eq!(requests[0].trigger_review_id, None);
+        assert_eq!(
+            requests[0].trigger_finding_id,
+            "coder_rework_plan_defect_0001"
+        );
+        let unit = store
+            .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("active unit")
+            .expect("active unit");
+        let trigger_run = store
+            .list_coding_unit_runs(&attempt, &unit.id)
+            .expect("unit runs")
+            .into_iter()
+            .find(|run| run.id == requests[0].trigger_unit_run_id)
+            .expect("trigger unit run");
+        assert_eq!(trigger_run.verification_retry_count, 0, "{}", case.label());
+        assert_eq!(trigger_run.operational_retry_count, 0, "{}", case.label());
+        assert_eq!(trigger_run.plan_repair_count, 1, "{}", case.label());
+        assert_eq!(
+            trigger_run.status,
+            cadence_aria::product::coding_models::CodingUnitRunStatus::BlockedByPlanDefect,
+            "{}",
+            case.label()
+        );
+    } else if case.expected_route().is_some() {
         let unit_run = store.get_active_unit_run(&attempt).expect("active unit run");
         assert_eq!(unit_run.verification_retry_count, 0, "{}", case.label());
         assert_eq!(unit_run.operational_retry_count, 0, "{}", case.label());
@@ -344,7 +406,7 @@ async fn run_reviewer_triggered_rework_case(
 }
 
 #[tokio::test]
-async fn coding_plan_repair_reviewer_triggered_rework_plan_routes_safe_stop_before_next_review() {
+async fn coding_plan_repair_reviewer_triggered_rework_routes_plan_and_safe_stops_other_sources() {
     let _guard = WS_TEST_LOCK.lock().await;
     for case in [
         ReviewerTriggeredReworkCase::Plan,
@@ -363,7 +425,16 @@ async fn coding_plan_repair_reviewer_triggered_rework_plan_routes_safe_stop_befo
             "{} must not open another CodeReview gate",
             case.label()
         );
-        assert_eq!(attempt.status, CodingAttemptStatus::Running, "{}", case.label());
+        assert_eq!(
+            attempt.status,
+            if matches!(case, ReviewerTriggeredReworkCase::Plan) {
+                CodingAttemptStatus::AwaitingPlanAmendment
+            } else {
+                CodingAttemptStatus::Running
+            },
+            "{}",
+            case.label()
+        );
         assert_eq!(attempt.stage, CodingExecutionStage::Coding, "{}", case.label());
     }
 }

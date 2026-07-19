@@ -39,8 +39,10 @@ use crate::product::work_item_contract::{
 use crate::product::work_item_projection::{WorkItemProjectionCompiler, projection_hashes};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
+mod identity;
 mod reconciliation;
 mod support;
+mod typed_sources;
 
 use support::*;
 
@@ -214,7 +216,7 @@ async fn coding_plan_repair_duplicate_finding_reuses_open_request() {
 }
 
 #[tokio::test]
-async fn coding_ws_plan_repair_reconnect_state_contains_linked_snapshot() {
+async fn coding_plan_repair_reconnect_state_contains_linked_snapshot() {
     let fixture = plan_repair_fixture();
     let report = plan_defect_report(plan_defect_finding("evidence_a"));
     let after = fixture
@@ -242,7 +244,7 @@ async fn coding_ws_plan_repair_reconnect_state_contains_linked_snapshot() {
 }
 
 #[tokio::test]
-async fn coding_ws_plan_repair_reconnect_state_resolves_published_request() {
+async fn coding_plan_repair_reconnect_state_resolves_published_request() {
     let fixture = plan_repair_fixture();
     let report = plan_defect_report(plan_defect_finding("published_reconnect"));
     let started = fixture
@@ -322,7 +324,7 @@ async fn coding_ws_plan_repair_reconnect_state_resolves_published_request() {
 }
 
 #[test]
-fn coding_ws_plan_amendment_updated_roundtrips() {
+fn coding_amendment_updated_roundtrips() {
     let message = CodingWsOutMessage::PlanAmendmentUpdated {
         amendment: Box::new(PlanAmendmentManifest {
             id: "plan_amendment_0001".to_string(),
@@ -568,7 +570,7 @@ async fn coding_plan_repair_group_internal_review_ambiguous_run_fails_closed() {
 }
 
 #[tokio::test]
-async fn coding_ws_plan_repair_provider_runs_fail_closed_during_amendment() {
+async fn coding_plan_repair_provider_runs_fail_closed_during_amendment() {
     for status in [
         CodingAttemptStatus::AwaitingPlanAmendment,
         CodingAttemptStatus::ApplyingPlanAmendment,

@@ -119,6 +119,19 @@ fn app_with_group_full_chain_attempt_fixture(
             validator_findings: Vec::new(),
         })
         .expect("create work item plan");
+    lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "work_item_plan_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .expect("create work item plan session");
 
     let store = CodingAttemptStore::new(app_paths);
     let attempt = create_legacy_group_coding_attempt_fixture(

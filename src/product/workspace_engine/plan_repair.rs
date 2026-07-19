@@ -27,6 +27,22 @@ impl WorkspaceEngine {
                 "plan repair requires a persistent workspace engine".to_string(),
             ))
         })?;
+        let amendment_id = request
+            .amendment_id
+            .clone()
+            .unwrap_or_else(|| amendment_id_for(&request.fingerprint));
+        let canonical_parent = canonical_plan_repair_parent_session(
+            lifecycle,
+            &self.session.project_id,
+            &self.session.issue_id,
+            &request.plan_id,
+            &amendment_id,
+        )?;
+        if canonical_parent.id != self.session.session_id {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair parent is not the canonical WorkItemPlan workspace".to_string(),
+            ));
+        }
         let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
         let plan = revision_store
             .get_plan_lineage(
@@ -513,16 +529,51 @@ impl WorkspaceEngine {
     }
 }
 
-fn amendment_id_for(fingerprint: &str) -> String {
+pub(crate) fn amendment_id_for(fingerprint: &str) -> String {
     format!("plan_amendment_{fingerprint}")
 }
 
-fn child_session_id_for(amendment_id: &str) -> String {
+pub(crate) fn child_session_id_for(amendment_id: &str) -> String {
     format!("workspace_session_{amendment_id}")
 }
 
-fn link_id_for(amendment_id: &str) -> String {
+pub(crate) fn link_id_for(amendment_id: &str) -> String {
     format!("workspace_session_link_{amendment_id}")
+}
+
+pub(crate) fn canonical_plan_repair_parent_session(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    amendment_id: &str,
+) -> Result<WorkspaceSessionRecord, PlanRepairError> {
+    let expected_child_id = child_session_id_for(amendment_id);
+    let links = lifecycle
+        .list_session_links(project_id, issue_id)
+        .map_err(PlanRepairError::Store)?;
+    let mut candidates = lifecycle
+        .list_workspace_sessions(project_id, issue_id)
+        .map_err(PlanRepairError::Store)?
+        .into_iter()
+        .filter(|session| {
+            session.entity_id == plan_id
+                && session.workspace_type == WorkspaceType::WorkItemPlan
+                && session.status != WorkspaceSessionStatus::Terminated
+                && session.id != expected_child_id
+                && !links.iter().any(|link| link.child_session_id == session.id)
+        });
+    let parent = candidates.next().ok_or_else(|| {
+        PlanRepairError::InvalidRepairTarget(
+            "Plan Repair parent WorkItemPlan workspace is missing".to_string(),
+        )
+    })?;
+    if candidates.next().is_some() {
+        return Err(PlanRepairError::InvalidRepairTarget(
+            "Plan Repair parent WorkItemPlan workspace is ambiguous".to_string(),
+        ));
+    }
+    Ok(parent)
 }
 
 fn plan_published_conflict() -> PlanRepairError {
@@ -595,7 +646,7 @@ fn same_string_set(left: &[String], right: &[String]) -> bool {
     left == right
 }
 
-fn linked_child_session(
+pub(crate) fn linked_child_session(
     lifecycle: &LifecycleStore,
     project_id: &str,
     issue_id: &str,

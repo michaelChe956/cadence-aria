@@ -84,7 +84,7 @@ async fn coding_plan_repair_distinct_finding_does_not_reuse_active_request() {
 }
 
 #[tokio::test]
-async fn coding_ws_plan_repair_reconnect_ignores_historical_completed_link() {
+async fn coding_plan_repair_reconnect_ignores_historical_completed_link() {
     let fixture = plan_repair_fixture();
     let report = plan_defect_report(plan_defect_finding("current_reconnect"));
     let started = fixture

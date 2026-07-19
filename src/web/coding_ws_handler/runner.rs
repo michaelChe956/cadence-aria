@@ -272,6 +272,26 @@ pub(crate) fn should_emit_coding_runner_protocol_error(status: &CodingAttemptSta
     )
 }
 
+pub(crate) async fn start_plan_repair_for_execution_outcome_if_needed(
+    engine: &CodingWorkspaceEngine,
+    current: &CodingExecutionAttempt,
+    decision: Option<CodeReviewFlowDecision>,
+    report: Option<&crate::product::coding_workspace_engine::ExecutionPlanDefectReport>,
+) -> Result<Option<CodingExecutionAttempt>, CodingWorkspaceEngineError> {
+    if decision != Some(CodeReviewFlowDecision::StartPlanRepair) {
+        return Ok(None);
+    }
+    let report = report.ok_or_else(|| {
+        CodingWorkspaceEngineError::ProviderStream(
+            "plan_repair_execution_report_missing".to_string(),
+        )
+    })?;
+    engine
+        .start_plan_repair_from_execution_report(current, report)
+        .await
+        .map(Some)
+}
+
 async fn handle_internal_review_flow_decision(
     coding_store: &CodingAttemptStore,
     engine: &CodingWorkspaceEngine,
@@ -390,6 +410,8 @@ pub(crate) async fn execute_start_coding_flow(
                     &mut command_rx,
                 )
                 .await?;
+            let plan_defect_decision = coding_outcome.plan_defect_decision;
+            let plan_defect_report = coding_outcome.plan_defect_report;
             current = coding_outcome.attempt;
             if handle_pending_runner_commands(
                 &mut command_rx,
@@ -402,8 +424,18 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            if coding_outcome
-                .plan_defect_decision
+            if let Some(paused) = start_plan_repair_for_execution_outcome_if_needed(
+                engine,
+                &current,
+                plan_defect_decision,
+                plan_defect_report.as_ref(),
+            )
+            .await?
+            {
+                current = paused;
+                return emit_current_session_state(event_tx, coding_store, &current).await;
+            }
+            if plan_defect_decision
                 .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
             {
                 return emit_current_session_state(event_tx, coding_store, &current).await;
@@ -533,6 +565,8 @@ pub(crate) async fn execute_start_coding_flow(
                             &mut command_rx,
                         )
                         .await?;
+                    let plan_defect_decision = rework_outcome.plan_defect_decision;
+                    let plan_defect_report = rework_outcome.plan_defect_report;
                     current = rework_outcome.attempt;
                     current = coding_store.get_attempt(
                         &current.project_id,
@@ -550,8 +584,18 @@ pub(crate) async fn execute_start_coding_flow(
                     {
                         return Ok(());
                     }
-                    if rework_outcome
-                        .plan_defect_decision
+                    if let Some(paused) = start_plan_repair_for_execution_outcome_if_needed(
+                        engine,
+                        &current,
+                        plan_defect_decision,
+                        plan_defect_report.as_ref(),
+                    )
+                    .await?
+                    {
+                        current = paused;
+                        return emit_current_session_state(event_tx, coding_store, &current).await;
+                    }
+                    if plan_defect_decision
                         .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
                     {
                         return emit_current_session_state(event_tx, coding_store, &current).await;

@@ -14,12 +14,12 @@ pub(super) fn with_exclusive_lock<T>(
     operation()
 }
 
-struct ExclusiveFileLock {
+pub(super) struct ExclusiveFileLock {
     file: File,
 }
 
 impl ExclusiveFileLock {
-    fn acquire(target_path: &Path) -> Result<Self, ProductStoreError> {
+    pub(super) fn acquire(target_path: &Path) -> Result<Self, ProductStoreError> {
         let lock_path = lock_path_for(target_path);
         if let Some(parent) = lock_path.parent()
             && !parent.as_os_str().is_empty()

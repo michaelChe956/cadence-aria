@@ -213,16 +213,7 @@ impl CodingWorkspaceEngine {
         let current =
             self.store
                 .get_attempt(&journal.project_id, &journal.issue_id, &journal.attempt_id)?;
-        let running = match current.status {
-            CodingAttemptStatus::Blocked => self.store.update_attempt_status(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-                CodingAttemptStatus::Running,
-            )?,
-            CodingAttemptStatus::Running => current,
-            _ => return Err(recovery_state_changed()),
-        };
+        let running = self.store.reopen_failed_review_attempt_running(&current)?;
         journal = self.store.advance_failed_code_review_recovery_journal(
             &journal,
             FailedCodeReviewRecoveryPhase::AttemptRunning,

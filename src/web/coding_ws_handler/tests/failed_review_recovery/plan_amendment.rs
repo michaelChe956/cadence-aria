@@ -4,7 +4,7 @@ use crate::product::coding_models::{
 };
 
 #[tokio::test]
-async fn global_failed_review_recovery_ignores_unrelated_amendment_gate_id_collision() {
+async fn coding_plan_repair_global_failed_review_recovery_ignores_unrelated_gate_id_collision() {
     let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItem).await;
     let gate_id = fixture
         .dirty_gate

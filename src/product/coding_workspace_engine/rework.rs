@@ -69,6 +69,7 @@ impl CodingWorkspaceEngine {
                 .map(|attempt| CoderExecutionOutcome {
                     attempt,
                     plan_defect_decision: None,
+                    plan_defect_report: None,
                 })
                 .map_err(CodingWorkspaceEngineError::from);
         }
@@ -228,14 +229,15 @@ impl CodingWorkspaceEngine {
                 timeout_reason_code: None,
             })
             .await?;
-        let plan_defect_decision =
+        let (plan_defect_report, plan_defect_decision) =
             match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
-                Ok(report) if report.findings.is_empty() => None,
+                Ok(report) if report.findings.is_empty() => (None, None),
                 Ok(report) => {
                     let projection = self.reviewer_projection_for_attempt(&updated)?;
-                    Some(execution_plan_defect_flow_decision(&report, &projection))
+                    let decision = execution_plan_defect_flow_decision(&report, &projection);
+                    (Some(report), Some(decision))
                 }
-                Err(_) => Some(CodeReviewFlowDecision::StopForHumanTriage),
+                Err(_) => (None, Some(CodeReviewFlowDecision::StopForHumanTriage)),
             };
         let plan_defect_route = plan_defect_decision.map(CodeReviewFlowDecision::label);
         let raw_provider_output_ref = self.store.save_provider_raw_output(
@@ -298,6 +300,7 @@ impl CodingWorkspaceEngine {
         Ok(CoderExecutionOutcome {
             attempt,
             plan_defect_decision,
+            plan_defect_report,
         })
     }
 

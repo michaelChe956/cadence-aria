@@ -217,8 +217,14 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
                 canonical_contract_hash: bundle.canonical_contract_hash,
                 projection_bundle_id: bundle.id,
                 projection_compiler_version: bundle.compiler_version,
-                coder_provider_renderer_version: "coder-v1".to_string(),
-                reviewer_provider_renderer_version: "reviewer-v1".to_string(),
+                coder_provider_renderer_version:
+                    crate::product::work_item_projection::renderer_for(&ProviderName::Codex)
+                        .renderer_version()
+                        .to_string(),
+                reviewer_provider_renderer_version:
+                    crate::product::work_item_projection::renderer_for(&ProviderName::ClaudeCode)
+                        .renderer_version()
+                        .to_string(),
                 internal_reviewer_provider_renderer_version: None,
                 coder_projection_hash: hashes.coder,
                 reviewer_projection_hash: hashes.reviewer,

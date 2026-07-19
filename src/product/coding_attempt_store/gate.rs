@@ -283,6 +283,33 @@ impl super::CodingAttemptStore {
         Ok(gate)
     }
 
+    pub(crate) fn reopen_failed_code_review_gate_for_plan_repair(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
+        let open_path = gates_root.join(format!("{gate_id}.json"));
+        if super::path_is_regular_file(&open_path)? {
+            return Ok(());
+        }
+        let resolved_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
+        if !super::path_is_regular_file(&resolved_path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_blocked_gate",
+                id: gate_id.to_string(),
+            });
+        }
+        let mut record: BlockedGateRecord = read_json(&resolved_path)?;
+        record.status = BlockedGateStatus::Open;
+        record.updated_at = Utc::now().to_rfc3339();
+        write_json(&open_path, &record)?;
+        super::remove_file_if_exists(&resolved_path)
+    }
+
     pub fn create_choice_gate(
         &self,
         attempt: &CodingExecutionAttempt,

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::*;
@@ -6,12 +5,15 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::coding_models::CodingUnitRun;
 use crate::product::models::{
     PlanDefectRoute, PlanRepairRequest, PlanRepairRequestStatus, PlanRepairSessionSnapshotDto,
-    WorkItemPlanLineage, WorkspaceSessionLink, WorkspaceSessionStatus, WorkspaceType,
+    WorkItemPlanLineage, WorkspaceSessionLink,
 };
 use crate::product::plan_repair::{PlanDefectFinding, PlanDefectSeverity, plan_defect_fingerprint};
 use crate::product::work_item_projection::ReviewerWorkItemProjection;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
-use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
+use crate::product::workspace_engine::{
+    EngineEvent, WorkspaceEngine, WorkspaceSession, amendment_id_for,
+    canonical_plan_repair_parent_session,
+};
 
 impl CodingWorkspaceEngine {
     pub(crate) async fn start_plan_repair_from_review(
@@ -26,7 +28,7 @@ impl CodingWorkspaceEngine {
         let trigger_run = self.store.get_active_unit_run(&current)?;
         self.start_plan_repair_from_finding(
             &current,
-            review_id,
+            Some(review_id),
             finding_id,
             finding,
             reviewer_projection,
@@ -61,7 +63,7 @@ impl CodingWorkspaceEngine {
         let trigger = unique_authoritative_group_reviewer_binding(finding, &bindings)?;
         self.start_plan_repair_from_finding(
             &current,
-            &review.id,
+            Some(&review.id),
             &format!("{}_finding_{:04}", review.id, finding_index + 1),
             finding,
             &trigger.projection_binding.projection,
@@ -70,10 +72,54 @@ impl CodingWorkspaceEngine {
         .await
     }
 
+    pub(crate) async fn start_plan_repair_from_execution_report(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        report: &ExecutionPlanDefectReport,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if !matches!(
+            report.source,
+            PlanDefectSource::Coder | PlanDefectSource::Tester
+        ) {
+            return Err(plan_repair_start_error(
+                "execution Plan Repair source is not supported".to_string(),
+            ));
+        }
+        let mut findings = report.findings.iter().filter(|finding| {
+            matches!(
+                finding.defect_class,
+                crate::product::models::PlanDefectClass::CurrentWorkItemInvalid
+                    | crate::product::models::PlanDefectClass::UpstreamContractInvalid
+                    | crate::product::models::PlanDefectClass::DependencyGraphInvalid
+            )
+        });
+        let finding = findings.next().ok_or_else(|| {
+            plan_repair_start_error("execution Plan Repair finding is missing".to_string())
+        })?;
+        if findings.next().is_some() {
+            return Err(plan_repair_start_error(
+                "execution Plan Repair finding is ambiguous".to_string(),
+            ));
+        }
+        let current = self.store.validate_attempt_lineage(attempt)?;
+        let trigger_run = self.store.get_active_unit_run(&current)?;
+        let projection = self.reviewer_projection_for_attempt(&current)?;
+        let adapted = execution_finding_adapter(&report.source, finding);
+        self.start_plan_repair_from_finding(
+            &current,
+            None,
+            &finding.finding_id,
+            &adapted,
+            &projection,
+            &trigger_run,
+        )
+        .await
+    }
+
     async fn start_plan_repair_from_finding(
         &self,
         attempt: &CodingExecutionAttempt,
-        review_id: &str,
+        review_id: Option<&str>,
         finding_id: &str,
         finding: &ReviewFinding,
         reviewer_projection: &ReviewerWorkItemProjection,
@@ -116,6 +162,14 @@ impl CodingWorkspaceEngine {
             .iter()
             .find(|request| request.fingerprint == fingerprint)
             .cloned();
+        if existing.as_ref().is_some_and(|request| {
+            request.trigger_attempt_id != current.id
+                || request.trigger_unit_run_id != trigger_run.id
+        }) {
+            return Err(plan_repair_start_error(
+                "Plan Repair linked snapshot identity mismatch".to_string(),
+            ));
+        }
         let now = Utc::now().to_rfc3339();
         let request = PlanRepairRequest {
             id: existing
@@ -126,7 +180,7 @@ impl CodingWorkspaceEngine {
             base_plan_revision_id,
             trigger_attempt_id: current.id.clone(),
             trigger_unit_run_id: trigger_run.id.clone(),
-            trigger_review_id: Some(review_id.to_string()),
+            trigger_review_id: review_id.map(str::to_string),
             trigger_finding_id: finding_id.to_string(),
             amendment_id: existing
                 .as_ref()
@@ -148,7 +202,18 @@ impl CodingWorkspaceEngine {
             updated_at: now,
         };
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let parent = unique_plan_repair_parent_session(&lifecycle, &current, &plan.id)?;
+        let amendment_id = request
+            .amendment_id
+            .clone()
+            .unwrap_or_else(|| amendment_id_for(&request.fingerprint));
+        let parent = canonical_plan_repair_parent_session(
+            &lifecycle,
+            &current.project_id,
+            &current.issue_id,
+            &plan.id,
+            &amendment_id,
+        )
+        .map_err(|error| plan_repair_start_error(format!("{error:?}")))?;
         let checkpoint_store = Arc::new(CheckpointStore::new(
             self.store
                 .paths()
@@ -161,10 +226,18 @@ impl CodingWorkspaceEngine {
             workspace_tx,
             WorkspaceSession::from_record(parent),
         );
+        let recovery_arbitration = self.store.acquire_failed_code_review_recovery_arbitration(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+        )?;
+        self.store
+            .ensure_plan_repair_can_win_recovery_arbitration(&current)?;
         let child = workspace_engine
             .start_plan_repair(request.clone())
             .await
             .map_err(|error| plan_repair_start_error(format!("{error:?}")))?;
+        drop(recovery_arbitration);
         let session_link = lifecycle.get_session_link(&child.id)?;
         let snapshot = lifecycle
             .load_plan_repair_session_state(&current.project_id, &current.issue_id, &child.id)?
@@ -249,36 +322,6 @@ fn allocate_plan_repair_request_id(
     Err(plan_repair_start_error(
         "Plan Repair request id space exhausted".to_string(),
     ))
-}
-
-fn unique_plan_repair_parent_session(
-    lifecycle: &LifecycleStore,
-    attempt: &CodingExecutionAttempt,
-    plan_id: &str,
-) -> Result<crate::product::models::WorkspaceSessionRecord, CodingWorkspaceEngineError> {
-    let child_ids = lifecycle
-        .list_session_links(&attempt.project_id, &attempt.issue_id)?
-        .into_iter()
-        .map(|link| link.child_session_id)
-        .collect::<HashSet<_>>();
-    let mut candidates = lifecycle
-        .list_workspace_sessions(&attempt.project_id, &attempt.issue_id)?
-        .into_iter()
-        .filter(|session| {
-            session.entity_id == plan_id
-                && session.workspace_type == WorkspaceType::WorkItemPlan
-                && session.status != WorkspaceSessionStatus::Terminated
-                && !child_ids.contains(&session.id)
-        });
-    let parent = candidates.next().ok_or_else(|| {
-        plan_repair_start_error("Plan Repair parent WorkItemPlan workspace is missing".to_string())
-    })?;
-    if candidates.next().is_some() {
-        return Err(plan_repair_start_error(
-            "Plan Repair parent WorkItemPlan workspace is ambiguous".to_string(),
-        ));
-    }
-    Ok(parent)
 }
 
 fn validate_linked_plan_repair_snapshot(

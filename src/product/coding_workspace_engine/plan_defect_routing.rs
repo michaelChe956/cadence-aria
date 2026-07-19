@@ -293,7 +293,7 @@ impl CodeReviewFlowDecision {
     }
 }
 
-fn execution_finding_adapter(
+pub(crate) fn execution_finding_adapter(
     source: &PlanDefectSource,
     finding: &PlanDefectFinding,
 ) -> ReviewFinding {

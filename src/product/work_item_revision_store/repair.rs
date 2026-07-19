@@ -238,6 +238,17 @@ impl WorkItemRevisionStore {
         &self,
         plan: &WorkItemPlanLineage,
     ) -> Result<Vec<PlanRepairRequest>, ProductStoreError> {
+        Ok(self
+            .list_repair_requests(plan)?
+            .into_iter()
+            .filter(|request| is_open_status(&request.status))
+            .collect())
+    }
+
+    pub fn list_repair_requests(
+        &self,
+        plan: &WorkItemPlanLineage,
+    ) -> Result<Vec<PlanRepairRequest>, ProductStoreError> {
         self.ensure_plan_scope(plan)?;
         let mut requests = Vec::new();
         for path in
@@ -256,9 +267,7 @@ impl WorkItemRevisionStore {
             if request.id != file_id || request.plan_id != plan.id {
                 return Err(identity_mismatch("plan_repair_request", file_id));
             }
-            if is_open_status(&request.status) {
-                requests.push(request);
-            }
+            requests.push(request);
         }
         requests.sort_by(|left, right| {
             (left.created_at.as_str(), left.id.as_str())

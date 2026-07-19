@@ -362,6 +362,13 @@ impl super::CodingAttemptStore {
         attempt_id: &str,
         status: CodingAttemptStatus,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let _recovery_arbitration = if status == CodingAttemptStatus::AwaitingPlanAmendment {
+            Some(self.acquire_failed_code_review_recovery_arbitration(
+                project_id, issue_id, attempt_id,
+            )?)
+        } else {
+            None
+        };
         let path = self.attempt_path(project_id, issue_id, attempt_id);
         with_exclusive_lock(&path, || {
             let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
@@ -382,7 +389,7 @@ impl super::CodingAttemptStore {
                 return self.update_group_terminal_status_locked(attempt, status);
             }
             if status == CodingAttemptStatus::AwaitingPlanAmendment {
-                self.discard_prepared_failed_code_review_recovery_for_plan_amendment(&attempt)?;
+                self.rollback_failed_code_review_recovery_for_plan_amendment_locked(&attempt)?;
             }
             let now = Utc::now().to_rfc3339();
             if matches!(
@@ -634,7 +641,9 @@ pub(super) fn valid_status_transition(
         CodingAttemptStatus::Blocked => {
             matches!(
                 next,
-                CodingAttemptStatus::Running | CodingAttemptStatus::Aborted
+                CodingAttemptStatus::Running
+                    | CodingAttemptStatus::AwaitingPlanAmendment
+                    | CodingAttemptStatus::Aborted
             )
         }
         CodingAttemptStatus::AwaitingPlanAmendment => matches!(

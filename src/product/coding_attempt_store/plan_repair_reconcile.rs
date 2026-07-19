@@ -8,9 +8,10 @@ use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     PlanRepairRequestStatus, PlanRepairSessionSnapshotDto, PlanRepairSessionStage,
-    WorkspaceSessionRelation,
 };
+use crate::product::plan_repair::PlanRepairError;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use crate::product::workspace_engine::linked_child_session;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PlanRepairPauseReconciliation {
@@ -106,52 +107,38 @@ impl super::CodingAttemptStore {
             None => return Ok(None),
         };
         let lifecycle = LifecycleStore::new(self.paths());
-        let mut links = lifecycle
-            .list_session_links(&attempt.project_id, &attempt.issue_id)?
+        let mut requests = revision_store
+            .list_repair_requests(&plan)?
             .into_iter()
-            .filter(|link| {
-                link.relation == WorkspaceSessionRelation::PlanRepair
-                    && link.trigger.attempt_id == attempt.id
-                    && link.trigger.amendment_id == active_amendment_id
-            });
-        let link = match links.next() {
-            Some(link) => link,
-            None if amendment_status(&attempt.status) => {
-                return Err(ProductStoreError::NotFound {
-                    kind: "coding_linked_plan_repair",
-                    id: attempt.id.clone(),
-                });
-            }
-            None => return Ok(None),
-        };
-        if links.next().is_some() {
+            .filter(|request| request.amendment_id.as_deref() == Some(active_amendment_id));
+        let request = requests.next().ok_or_else(|| ProductStoreError::NotFound {
+            kind: "coding_linked_plan_repair_request",
+            id: active_amendment_id.to_string(),
+        })?;
+        if requests.next().is_some() {
             return Err(ProductStoreError::Ambiguous {
-                kind: "coding_linked_plan_repair",
-                id: attempt.id.clone(),
+                kind: "coding_linked_plan_repair_request",
+                id: active_amendment_id.to_string(),
             });
         }
-        let request = revision_store.get_repair_request(&plan, &link.trigger.repair_request_id)?;
-        if request.id != link.trigger.repair_request_id
-            || request.plan_id != plan.id
-            || request.base_plan_revision_id != link.trigger.base_plan_revision_id
-            || request.trigger_attempt_id != attempt.id
-            || request.trigger_unit_run_id != link.trigger.unit_run_id
-            || request.trigger_review_id != link.trigger.review_id
-            || request.trigger_finding_id != link.trigger.finding_id
-            || request.amendment_id.as_deref() != Some(active_amendment_id)
-            || request.fingerprint != link.trigger.fingerprint
-            || !matches!(
-                request.status,
-                PlanRepairRequestStatus::InProgress
-                    | PlanRepairRequestStatus::AwaitingConfirmation
-                    | PlanRepairRequestStatus::Published
-            )
-        {
+        if !matches!(
+            request.status,
+            PlanRepairRequestStatus::InProgress
+                | PlanRepairRequestStatus::AwaitingConfirmation
+                | PlanRepairRequestStatus::Published
+        ) {
             return Err(ProductStoreError::IdentityMismatch {
                 kind: "coding_linked_plan_repair_request",
                 id: request.id,
             });
         }
+        let (link, _child) =
+            linked_child_session(&lifecycle, &attempt.project_id, &attempt.issue_id, &request)
+                .map_err(plan_repair_reconnect_error)?
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "coding_linked_plan_repair",
+                    id: attempt.id.clone(),
+                })?;
         let snapshot = lifecycle
             .load_plan_repair_session_state(
                 &attempt.project_id,
@@ -237,6 +224,16 @@ impl super::CodingAttemptStore {
         };
         self.save_timeline_node(attempt, node.clone())?;
         Ok((node, true))
+    }
+}
+
+fn plan_repair_reconnect_error(error: PlanRepairError) -> ProductStoreError {
+    match error {
+        PlanRepairError::Store(error) => error,
+        error => ProductStoreError::IdentityMismatch {
+            kind: "coding_linked_plan_repair_lineage",
+            id: format!("{error:?}"),
+        },
     }
 }
 
