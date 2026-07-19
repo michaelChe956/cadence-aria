@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
@@ -60,6 +60,20 @@ impl PlanAmendmentSocketWriteWaiter {
                 "plan_amendment_socket_write_failed:{}",
                 self.event_id
             ))),
+        }
+    }
+
+    pub(crate) async fn wait_or_channel_closed(
+        self,
+        event_tx: &mpsc::Sender<CodingWsOutMessage>,
+    ) -> Result<(), ProductStoreError> {
+        let event_id = self.event_id.clone();
+        tokio::select! {
+            biased;
+            _ = event_tx.closed() => Err(ProductStoreError::Io(format!(
+                "plan_amendment_delivery_channel_closed:{event_id}"
+            ))),
+            result = self.wait() => result,
         }
     }
 }

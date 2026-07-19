@@ -99,6 +99,23 @@
 - GREEN：`cargo test --locked --lib coding_ws_plan_repair_`，6 passed，0 failed。
 - GREEN：writer success/failure/abort 3/3，receiver drop 1/1；writer-abort 与 receiver-drop 业务恢复集成 2/2。
 
+## Final Re-review Follow-up 1 Important：RED → GREEN
+
+| 级别 | 问题与根因 | RED 证据 | GREEN 结果 |
+| --- | --- | --- | --- |
+| Important 1 | `OutboundEventReceiver::drop` 的 `close() + try_recv()` 只能 settle 已进入可见队列的 event；close 前取得的 Tokio mpsc `Permit/OwnedPermit` 可在 receiver drop 后继续 `send`，该 event 没有 writer settlement。producer 在 enqueue 后只等待 socket ACK，会永久持有 amendment arbitration | 新回归用真实 `reserve_owned` 证明 receiver drop 后 permit 仍可 send，纯 `socket_write.wait()` 在 50ms 内保持 Pending；随后期望 channel-aware wait 时，精确测试编译 RED：`E0599 no method named wait_or_channel_closed` | `PlanAmendmentSocketWriteWaiter` 新增 biased `wait_or_channel_closed`，producer enqueue 后同时等待 socket ACK 与 `event_tx.closed()`；closed 优先，ACK/closed 同时 ready 时保守失败并重发，不会错误标记 Delivered。失败会 Drop waiter、释放 registration/arbitration；相同 event ID 可立即重新注册并恢复 |
+
+### Final Re-review Follow-up RED/GREEN 命令与输出
+
+- RED：`cargo test --locked --lib coding_ws_plan_repair_outstanding_permit_receiver_drop_rejects_channel_aware_delivery_wait`，exit 101，`E0599`：`PlanAmendmentSocketWriteWaiter` 不存在 `wait_or_channel_closed`。
+- GREEN：同一精确测试 1 passed，0 failed；测试同时确认 ACK-only wait 会超时、channel-aware wait 返回 `plan_amendment_delivery_channel_closed:<event_id>`、registration 清理后相同 event ID 可重新注册。
+- GREEN：`cargo test --locked --lib coding_amendment_delivery_outstanding_permit_receiver_drop_releases_waiter_and_recovers_same_event`，1 passed，0 failed；Attempt 保持 non-runnable、marker 保持 Pending、arbitration 释放并用相同 event ID 恢复。
+- GREEN：`cargo test --locked --lib coding_amendment_`，43 passed，0 failed。
+- GREEN：`cargo test --locked --lib coding_amendment_delivery_`，7 passed，0 failed。
+- GREEN：`cargo test --locked --lib coding_ws_plan_repair_`，7 passed，0 failed。
+- GREEN：`cargo fmt --check`、`cargo check --locked`、strict clippy、large-file guard、测试命名审计、`git diff --check` 全部通过。
+- 本轮按指令未运行 full `cargo test --locked`；由主线程在最终交付前 fresh 执行。
+
 ## 主要 RED/GREEN 测试
 
 - `coding_amendment_existing_journal_identity_mismatch_is_zero_write_at_every_phase`：Started、PlanBindingWritten、UnitRunsWritten、ResumeTargetWritten × clean/dirty，共 8 个矩阵场景。
@@ -147,10 +164,10 @@
 - `cargo test --locked --lib coding_amendment_completed_replay`：5 passed，0 failed。
 - `cargo test --locked --lib coding_amendment_journal`：3 passed，0 failed。
 - `cargo test --locked --lib coding_amendment_arbitration_`：3 passed，0 failed。
-- `cargo test --locked --lib coding_amendment_delivery_`：6 passed，0 failed；另 `coding_amendment_concurrent_recovery_reconciles_one_durable_delivery`：1 passed，0 failed。
-- `cargo test --locked --lib coding_ws_plan_repair_socket_writer_`：3 passed，0 failed；receiver drop 1 passed，0 failed。
-- `cargo test --locked --lib coding_amendment_`：42 passed，0 failed。
-- `cargo test --locked --lib coding_ws_plan_repair_`：6 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_delivery_`：7 passed，0 failed；另 `coding_amendment_concurrent_recovery_reconciles_one_durable_delivery`：1 passed，0 failed。
+- `cargo test --locked --lib coding_ws_plan_repair_socket_writer_`：3 passed，0 failed；receiver drop 与 outstanding permit 各 1 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_`：43 passed，0 failed。
+- `cargo test --locked --lib coding_ws_plan_repair_`：7 passed，0 failed。
 - `cargo test --locked --lib coding_amendment_updated_roundtrips`：1 passed，0 failed。
 - `cd web && pnpm tsc -b`：PASS，exit 0。
 
@@ -160,7 +177,7 @@
 - `cargo check --locked`：PASS，exit 0。
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，exit 0，0 warnings。
 - `cargo test --locked`：PASS，exit 0：
-  - lib：1134 passed；
+  - lib：1136 passed；
   - main：0 tests；
   - it_core：143 passed；
   - it_interactive：43 passed；
@@ -169,7 +186,7 @@
   - it_task_run：31 passed；
   - it_web：258 passed，12 ignored；
   - doc-test：1 passed；
-  - 合计：1876 passed，12 ignored，0 failed。
+  - 合计：1878 passed，12 ignored，0 failed。
 - `cd web && pnpm tsc -b`：PASS，exit 0。
 - `cargo test --locked --test it_core large_file_guard::product_source_and_test_files_stay_under_line_limit`：1 passed，0 failed。
 - 测试命名审计：PASS；新增行为测试使用 `coding_amendment_` / `coding_ws_plan_repair_` 前缀，无 `test`、`tmp`、`todo` 等占位命名。

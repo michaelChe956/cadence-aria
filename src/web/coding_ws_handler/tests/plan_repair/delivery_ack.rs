@@ -207,6 +207,49 @@ async fn coding_ws_plan_repair_outbound_receiver_drop_rejects_queued_delivery_ac
     retry_waiter.wait().await.unwrap();
 }
 
+#[tokio::test]
+async fn coding_ws_plan_repair_outstanding_permit_receiver_drop_rejects_channel_aware_delivery_wait()
+ {
+    let ack_only_event_id = "event_socket_outstanding_permit_ack_only";
+    let ack_only_waiter = register_plan_amendment_socket_write(ack_only_event_id).unwrap();
+    let (ack_only_tx, ack_only_rx) = tokio::sync::mpsc::channel(1);
+    let ack_only_permit = ack_only_tx.clone().reserve_owned().await.unwrap();
+    let ack_only_receiver = OutboundEventReceiver::new(ack_only_rx);
+    drop(ack_only_receiver);
+    let ack_only_sender = ack_only_permit.send(plan_amendment_event(ack_only_event_id));
+    assert!(ack_only_sender.is_closed());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), ack_only_waiter.wait())
+            .await
+            .is_err(),
+        "socket-only acknowledgement wait must remain pending when an outstanding permit sends after receiver drop"
+    );
+
+    let event_id = "event_socket_outstanding_permit_channel_closed";
+    let waiter = register_plan_amendment_socket_write(event_id).unwrap();
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+    let outstanding_permit = event_tx.clone().reserve_owned().await.unwrap();
+    let receiver = OutboundEventReceiver::new(event_rx);
+    drop(receiver);
+    let permit_sender = outstanding_permit.send(plan_amendment_event(event_id));
+    assert!(permit_sender.is_closed());
+
+    let error = tokio::time::timeout(
+        Duration::from_millis(250),
+        waiter.wait_or_channel_closed(&event_tx),
+    )
+    .await
+    .expect("channel-aware wait must finish after receiver drop")
+    .expect_err("channel-aware wait must reject delivery after receiver drop");
+    assert!(error.to_string().contains(
+        "plan_amendment_delivery_channel_closed:event_socket_outstanding_permit_channel_closed"
+    ));
+
+    let retry_waiter = register_plan_amendment_socket_write(event_id)
+        .expect("channel-aware failure must remove the stale acknowledgement registration");
+    drop(retry_waiter);
+}
+
 fn plan_amendment_event(event_id: &str) -> CodingWsOutMessage {
     CodingWsOutMessage::PlanAmendmentUpdated {
         event_id: event_id.to_string(),

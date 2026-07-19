@@ -479,7 +479,7 @@ impl CodingWorkspaceEngine {
             .map_err(|_| {
                 ProductStoreError::Io("plan_amendment_delivery_send_failed".to_string())
             })?;
-        socket_write.wait().await?;
+        socket_write.wait_or_channel_closed(&self.event_tx).await?;
         self.store.mark_plan_amendment_delivery_delivered(
             attempt,
             &manifest.id,

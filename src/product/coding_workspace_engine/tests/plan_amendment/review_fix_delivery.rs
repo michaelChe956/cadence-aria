@@ -11,6 +11,7 @@ use futures_util::Sink;
 
 use super::*;
 use crate::product::coding_attempt_store::register_plan_amendment_delivery_mark_failpoint;
+use crate::web::coding_ws_handler::delivery_ack::register_plan_amendment_socket_write;
 use crate::web::coding_ws_handler::{OutboundEventReceiver, send_coding_event};
 
 struct PendingDeliverySink {
@@ -266,9 +267,64 @@ async fn coding_amendment_delivery_receiver_drop_releases_arbitration_and_recove
     assert!(
         error
             .to_string()
-            .contains("plan_amendment_socket_write_failed")
+            .contains("plan_amendment_delivery_channel_closed")
     );
 
+    assert_pending_delivery_and_recover_same_event(&fixture, &event_id).await;
+}
+
+#[tokio::test]
+async fn coding_amendment_delivery_outstanding_permit_receiver_drop_releases_waiter_and_recovers_same_event()
+ {
+    let fixture = amendment_fixture().await;
+    let attempt = fixture.attempt.clone();
+    let manifest = fixture.manifest.clone();
+    let store = fixture.store.clone();
+    let (event_tx, event_rx) = mpsc::channel(2);
+    let outstanding_permit = event_tx
+        .clone()
+        .reserve_owned()
+        .await
+        .expect("the first channel slot must be reserved before amendment delivery");
+    let capacity_probe = event_tx.clone();
+    let outbound = OutboundEventReceiver::new(event_rx);
+    let apply = tokio::spawn(async move {
+        CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx)
+            .apply_plan_amendment(&attempt, &manifest)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while capacity_probe.capacity() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("amendment delivery must occupy the slot behind the outstanding permit");
+    let event_id = fixture
+        .store
+        .get_plan_amendment_delivery(&fixture.attempt, &fixture.manifest.id)
+        .unwrap()
+        .event_id;
+
+    drop(outbound);
+    let permit_sender = outstanding_permit.send(CodingWsOutMessage::CodingPong);
+    drop(permit_sender);
+
+    let error = tokio::time::timeout(std::time::Duration::from_millis(250), apply)
+        .await
+        .expect("receiver closure must release an ACK wait hidden behind an outstanding permit")
+        .unwrap()
+        .expect_err("receiver closure must fail delivery before the Attempt becomes runnable");
+    assert!(
+        error
+            .to_string()
+            .contains("plan_amendment_delivery_channel_closed"),
+        "unexpected delivery error: {error}"
+    );
+
+    let retry_registration = register_plan_amendment_socket_write(&event_id)
+        .expect("failed channel wait must remove the stale ACK registration");
+    drop(retry_registration);
     assert_pending_delivery_and_recover_same_event(&fixture, &event_id).await;
 }
 
