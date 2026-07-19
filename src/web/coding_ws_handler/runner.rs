@@ -216,6 +216,12 @@ fn spawn_coding_runner_task(task: CodingRunnerTask) {
                     CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
                         "work_item_execution_plan_not_confirmed".to_string()
                     }
+                    _ if error
+                        .to_string()
+                        .contains("plan_amendment_blocks_provider_run") =>
+                    {
+                        "plan_amendment_blocks_provider_run".to_string()
+                    }
                     _ => "coding_start_failed".to_string(),
                 };
                 let _ = event_tx
@@ -285,9 +291,13 @@ async fn handle_internal_review_flow_decision(
                 engine.complete_attempt_after_final_rework(current).await?
             }
         }
+        CodeReviewFlowDecision::StartPlanRepair => {
+            engine
+                .start_plan_repair_from_internal_review(current, internal_review)
+                .await?
+        }
         CodeReviewFlowDecision::RunCoderFix
         | CodeReviewFlowDecision::RetryVerification
-        | CodeReviewFlowDecision::StartPlanRepair
         | CodeReviewFlowDecision::StartStoryAmendment
         | CodeReviewFlowDecision::StartDesignAmendment
         | CodeReviewFlowDecision::OpenOperationalGate
@@ -308,6 +318,7 @@ pub(crate) async fn execute_start_coding_flow(
 
     let mut current =
         coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    coding_store.ensure_provider_run_allowed(&current)?;
     'pipeline: loop {
         ensure_work_item_execution_plan_confirmed(&app_paths, &current)?;
 
@@ -553,8 +564,36 @@ pub(crate) async fn execute_start_coding_flow(
                         _ => continue 'pipeline,
                     }
                 }
+                CodeReviewFlowDecision::StartPlanRepair => {
+                    let (finding_index, finding) = review_report
+                        .findings
+                        .iter()
+                        .enumerate()
+                        .find(|(_, finding)| {
+                            matches!(
+                                finding.defect_class,
+                                crate::product::models::PlanDefectClass::CurrentWorkItemInvalid
+                                    | crate::product::models::PlanDefectClass::UpstreamContractInvalid
+                                    | crate::product::models::PlanDefectClass::DependencyGraphInvalid
+                            )
+                        })
+                        .ok_or_else(|| {
+                            CodingWorkspaceEngineError::ProviderStream(
+                                "plan_repair_finding_missing".to_string(),
+                            )
+                        })?;
+                    current = engine
+                        .start_plan_repair_from_review(
+                            &current,
+                            &review_report.id,
+                            &format!("{}_finding_{:04}", review_report.id, finding_index + 1),
+                            finding,
+                            &reviewer_projection,
+                        )
+                        .await?;
+                    return emit_current_session_state(event_tx, coding_store, &current).await;
+                }
                 CodeReviewFlowDecision::RetryVerification
-                | CodeReviewFlowDecision::StartPlanRepair
                 | CodeReviewFlowDecision::StartStoryAmendment
                 | CodeReviewFlowDecision::StartDesignAmendment
                 | CodeReviewFlowDecision::OpenOperationalGate

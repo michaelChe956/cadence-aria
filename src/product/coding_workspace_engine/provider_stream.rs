@@ -64,6 +64,7 @@ impl CodingWorkspaceEngine {
             timeout,
             timeout_reason_code,
         } = run;
+        self.store.ensure_provider_run_allowed(attempt)?;
         let mut active_legacy_input = legacy_input.clone();
         let mut active_input = input;
         let mut fresh_retry = fresh_retry;

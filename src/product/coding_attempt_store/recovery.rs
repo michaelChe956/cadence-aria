@@ -5,11 +5,13 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::product::coding_models::{
-    CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole, CodingRoleRun,
-    CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole,
+    CodingRoleRun, CodingRoleRunStatus, CodingRoleRunTrigger,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+
+use super::locking::with_exclusive_lock;
 
 pub(crate) const FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE: &str =
     "failed-code-review-recovery.json";
@@ -169,44 +171,95 @@ impl super::CodingAttemptStore {
         validate_relative_id(gate_id)?;
         validate_relative_id(failed_node_id)?;
         validate_relative_id(stale_role_run_id)?;
-        if let Some(existing) = self.get_failed_code_review_recovery_journal(
+        let attempt_path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        let journal_path = self.failed_code_review_recovery_journal_path(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-        )? {
-            if existing.expected_gate_id == gate_id
-                && existing.expected_failed_node_id == failed_node_id
-                && existing.expected_stale_role_run_id == stale_role_run_id
-            {
-                return Ok(existing);
+        )?;
+        with_exclusive_lock(&attempt_path, || {
+            let current = self.validate_attempt_lineage(attempt)?;
+            if matches!(
+                current.status,
+                CodingAttemptStatus::AwaitingPlanAmendment
+                    | CodingAttemptStatus::ApplyingPlanAmendment
+                    | CodingAttemptStatus::AmendmentApplyFailed
+            ) {
+                return Err(ProductStoreError::Io(
+                    "plan_amendment_blocks_provider_run".to_string(),
+                ));
             }
-            if !existing.is_completed() {
-                return Err(recovery_state_changed());
-            }
-            self.archive_completed_failed_code_review_recovery_journal(&existing)?;
-        }
+            with_exclusive_lock(&journal_path, || {
+                if let Some(existing) = self.get_failed_code_review_recovery_journal(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                )? {
+                    if existing.expected_gate_id == gate_id
+                        && existing.expected_failed_node_id == failed_node_id
+                        && existing.expected_stale_role_run_id == stale_role_run_id
+                    {
+                        return Ok(existing);
+                    }
+                    if !existing.is_completed() {
+                        return Err(recovery_state_changed());
+                    }
+                    self.archive_completed_failed_code_review_recovery_journal(&existing)?;
+                }
 
-        let now = Utc::now().to_rfc3339();
-        let journal = FailedCodeReviewRecoveryJournal {
-            attempt_id: attempt.id.clone(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            expected_gate_id: gate_id.to_string(),
-            expected_failed_node_id: failed_node_id.to_string(),
-            expected_stale_role_run_id: stale_role_run_id.to_string(),
-            recovery_key: format!(
-                "failed_code_review_recovery:{}:{gate_id}:{stale_role_run_id}",
-                attempt.id
-            ),
-            retry_role_run_id: None,
-            phase: FailedCodeReviewRecoveryPhase::Prepared,
-            runner_started_at: None,
-            completed_at: None,
-            created_at: now.clone(),
-            updated_at: now,
+                let now = Utc::now().to_rfc3339();
+                let journal = FailedCodeReviewRecoveryJournal {
+                    attempt_id: current.id.clone(),
+                    project_id: current.project_id.clone(),
+                    issue_id: current.issue_id.clone(),
+                    expected_gate_id: gate_id.to_string(),
+                    expected_failed_node_id: failed_node_id.to_string(),
+                    expected_stale_role_run_id: stale_role_run_id.to_string(),
+                    recovery_key: format!(
+                        "failed_code_review_recovery:{}:{gate_id}:{stale_role_run_id}",
+                        current.id
+                    ),
+                    retry_role_run_id: None,
+                    phase: FailedCodeReviewRecoveryPhase::Prepared,
+                    runner_started_at: None,
+                    completed_at: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                self.save_failed_code_review_recovery_journal(&journal)?;
+                Ok(journal)
+            })
+        })
+    }
+
+    pub(crate) fn discard_prepared_failed_code_review_recovery_for_plan_amendment(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        let Some(journal) = self.get_failed_code_review_recovery_journal(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?
+        else {
+            return Ok(());
         };
-        self.save_failed_code_review_recovery_journal(&journal)?;
-        Ok(journal)
+        if journal.is_completed() {
+            return Ok(());
+        }
+        if journal.phase != FailedCodeReviewRecoveryPhase::Prepared
+            || journal.retry_role_run_id.is_some()
+            || journal.runner_started_at.is_some()
+            || journal.completed_at.is_some()
+        {
+            return Err(recovery_state_changed());
+        }
+        let path = self.failed_code_review_recovery_journal_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        super::remove_file_if_exists(&path)
     }
 
     pub fn advance_failed_code_review_recovery_journal(

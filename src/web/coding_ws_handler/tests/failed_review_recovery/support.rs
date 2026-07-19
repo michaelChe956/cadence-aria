@@ -8,13 +8,15 @@ use crate::product::coding_attempt_store::{
     FailedCodeReviewRecoveryJournal,
 };
 use crate::product::coding_models::{
-    CodingAgentRole, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
-    CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType,
-    CodingGateRequired, CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger,
-    CodingTimelineNode, CodingTimelineNodeStatus,
+    CodingAgentRole, CodingAttemptPlanBinding, CodingAttemptScope, CodingAttemptStatus,
+    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
+    CodingGateActionType, CodingGateRequired, CodingProviderRole, CodingRoleRunStatus,
+    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
+use crate::product::models::WorkItemPlanLineage;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 use super::super::{
     CodingWsOutMessage, build_coding_session_state, seed_compiled_work_item_fixture,
@@ -118,6 +120,7 @@ pub(super) async fn provider_interrupted_review_fixture(
         .save_coding_attempt(&attempt)
         .expect("save running review attempt");
     if matches!(scope, CodingAttemptScope::WorkItemGroup) {
+        seed_group_plan_facts(&store, &attempt);
         store
             .create_coding_unit(CreateCodingExecutionUnitInput {
                 attempt_id: attempt.id.clone(),
@@ -452,6 +455,9 @@ pub(super) fn failed_review_fixture(
     store
         .save_coding_attempt(&attempt)
         .expect("save historical failed attempt");
+    if matches!(scope, CodingAttemptScope::WorkItemGroup) {
+        seed_group_plan_facts(&store, &attempt);
+    }
 
     if matches!(scope, CodingAttemptScope::WorkItemGroup)
         && !matches!(case, FixtureCase::GroupWithoutActiveUnit)
@@ -613,4 +619,36 @@ pub(super) fn failed_review_fixture(
         dirty_gate,
         stale_role_run_id: role_run.id,
     }
+}
+
+fn seed_group_plan_facts(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
+    let plan_id = attempt
+        .work_item_group_id
+        .as_deref()
+        .expect("group attempt plan id");
+    WorkItemRevisionStore::new(store.paths())
+        .put_plan_lineage(&WorkItemPlanLineage {
+            id: plan_id.to_string(),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            story_spec_refs: Vec::new(),
+            design_spec_refs: Vec::new(),
+            active_revision_id: Some("plan_revision_0001".to_string()),
+            active_amendment_id: None,
+            created_at: "2026-07-12T00:00:00Z".to_string(),
+            updated_at: "2026-07-12T00:00:00Z".to_string(),
+        })
+        .expect("group plan lineage");
+    store
+        .save_plan_binding(
+            attempt,
+            &CodingAttemptPlanBinding {
+                attempt_id: attempt.id.clone(),
+                plan_id: plan_id.to_string(),
+                bound_plan_revision_id: "plan_revision_0001".to_string(),
+                applied_amendment_ids: Vec::new(),
+                updated_at: "2026-07-12T00:00:00Z".to_string(),
+            },
+        )
+        .expect("group plan binding");
 }

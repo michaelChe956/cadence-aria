@@ -16,6 +16,7 @@ use crate::web::state::{CodingAttemptRunKey, CodingRunRegistry};
 use super::{CodingWsOutMessage, build_coding_session_state};
 
 mod blocked;
+mod plan_amendment;
 mod production_failure;
 mod repeated;
 mod runner;

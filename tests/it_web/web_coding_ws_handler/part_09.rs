@@ -120,6 +120,7 @@ fn app_with_group_attempt(root_path: &std::path::Path) -> axum::Router {
             max_auto_rework: 2,
         },
     );
+    seed_authoritative_group_plan_fixture(&store, &attempt);
     store
         .create_coding_unit(CreateCodingExecutionUnitInput {
             attempt_id: attempt.id.clone(),

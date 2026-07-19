@@ -129,6 +129,7 @@ describe("CodingWorkspacePage shell and actions", () => {
       verification_commands: [],
       work_item_execution_plan: null,
       work_item_handoff: null,
+      linked_plan_repair: null,
       require_execution_plan_confirm: false,
       ...overrides,
     });

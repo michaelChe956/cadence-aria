@@ -41,6 +41,7 @@ impl CodingWorkspaceEngine {
         options: TesterAgentOptions,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),

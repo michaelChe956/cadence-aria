@@ -75,6 +75,7 @@ mod internal_pr_review;
 mod lifecycle;
 mod plan_defect;
 mod plan_defect_routing;
+mod plan_repair_start;
 mod prompts;
 mod provider_failure;
 mod provider_stream;

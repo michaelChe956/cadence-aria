@@ -7,13 +7,16 @@ use crate::product::coding_attempt_store::{
     CreateBlockedGateInput, CreateChoiceGateInput, CreateQualityBypassAuditInput,
 };
 use crate::product::coding_models::{
-    CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus, CodingExecutionAttempt,
-    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingGateKind,
-    CodingGateRequired, CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingStageGateState,
-    CodingStageGateStatus, QualityGateBypassAudit,
+    CodingAttemptStatus, CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus,
+    CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
+    CodingGateKind, CodingGateRequired, CodingProviderRole, CodingRoleProviderConfigSnapshot,
+    CodingStageGateState, CodingStageGateStatus, CodingUnitRun, CodingUnitRunStatus,
+    QualityGateBypassAudit,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+
+use super::locking::with_exclusive_lock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +36,128 @@ struct BlockedGateRecord {
 }
 
 impl super::CodingAttemptStore {
+    pub fn ensure_provider_run_allowed(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let authoritative = self.validate_attempt_lineage(attempt)?;
+        let current = match self.reconcile_linked_plan_repair_pause(&authoritative) {
+            Ok(reconciliation) => reconciliation.attempt,
+            Err(_)
+                if matches!(
+                    authoritative.status,
+                    CodingAttemptStatus::AwaitingPlanAmendment
+                        | CodingAttemptStatus::ApplyingPlanAmendment
+                        | CodingAttemptStatus::AmendmentApplyFailed
+                ) =>
+            {
+                return Err(ProductStoreError::Io(
+                    "plan_amendment_blocks_provider_run".to_string(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if matches!(
+            current.status,
+            CodingAttemptStatus::AwaitingPlanAmendment
+                | CodingAttemptStatus::ApplyingPlanAmendment
+                | CodingAttemptStatus::AmendmentApplyFailed
+        ) {
+            return Err(ProductStoreError::Io(
+                "plan_amendment_blocks_provider_run".to_string(),
+            ));
+        }
+        Ok(current)
+    }
+
+    pub fn block_active_unit_run_for_plan_repair(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        increment_plan_repair_count: bool,
+    ) -> Result<CodingUnitRun, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        let active = self.get_active_unit_run(&current)?;
+        self.block_unit_run_for_plan_repair(
+            &current,
+            &active.unit_id,
+            &active.id,
+            increment_plan_repair_count,
+        )
+    }
+
+    pub fn block_unit_run_for_plan_repair(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit_id: &str,
+        unit_run_id: &str,
+        increment_plan_repair_count: bool,
+    ) -> Result<CodingUnitRun, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        if !matches!(
+            current.status,
+            CodingAttemptStatus::Running | CodingAttemptStatus::AwaitingPlanAmendment
+        ) {
+            return Err(ProductStoreError::Io(format!(
+                "plan_repair_invalid_attempt_status: {:?}",
+                current.status
+            )));
+        }
+        validate_relative_id(unit_id)?;
+        validate_relative_id(unit_run_id)?;
+        let latest = self
+            .list_coding_unit_runs(&current, unit_id)?
+            .into_iter()
+            .max_by_key(|run| run.execution_no)
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "coding_unit_run",
+                id: unit_id.to_string(),
+            })?;
+        if latest.id != unit_run_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_unit_run_plan_repair_authority",
+                id: unit_run_id.to_string(),
+            });
+        }
+        let path = self.coding_unit_run_path(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+            unit_id,
+            unit_run_id,
+        );
+        with_exclusive_lock(&path, || {
+            let mut run: CodingUnitRun = read_json(&path)?;
+            if run.id != unit_run_id || run.unit_id != unit_id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_unit_run",
+                    id: unit_run_id.to_string(),
+                });
+            }
+            if run.status == CodingUnitRunStatus::BlockedByPlanDefect {
+                return Ok(run);
+            }
+            if !matches!(
+                run.status,
+                CodingUnitRunStatus::Pending
+                    | CodingUnitRunStatus::Running
+                    | CodingUnitRunStatus::Completed
+                    | CodingUnitRunStatus::Blocked
+            ) {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_unit_run_plan_repair_transition",
+                    id: run.id,
+                });
+            }
+            run.status = CodingUnitRunStatus::BlockedByPlanDefect;
+            if increment_plan_repair_count {
+                run.plan_repair_count = run.plan_repair_count.saturating_add(1);
+            }
+            run.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &run)?;
+            Ok(run)
+        })
+    }
+
     pub fn create_blocked_gate(
         &self,
         attempt: &CodingExecutionAttempt,

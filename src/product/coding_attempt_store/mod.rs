@@ -12,6 +12,7 @@ mod inputs;
 mod locking;
 mod paths;
 mod plan_binding;
+pub(crate) mod plan_repair_reconcile;
 mod recovery;
 mod report;
 mod role_run;

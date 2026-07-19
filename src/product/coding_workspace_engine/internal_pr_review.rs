@@ -140,6 +140,7 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
+        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -420,12 +421,13 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
+        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
         if attempt.scope != CodingAttemptScope::WorkItemGroup {
             return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
                 attempt.id.clone(),
             ));
         }
-        self.execute_internal_pr_review_with_commands(attempt, provider, command_rx)
+        self.execute_internal_pr_review_with_commands(&attempt, provider, command_rx)
             .await
     }
 

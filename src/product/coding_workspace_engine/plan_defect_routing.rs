@@ -141,6 +141,46 @@ impl CodingWorkspaceEngine {
     }
 }
 
+pub(crate) fn unique_authoritative_group_reviewer_binding(
+    finding: &ReviewFinding,
+    bindings: &[AuthoritativeGroupReviewerBinding],
+) -> Result<AuthoritativeGroupReviewerBinding, CodingWorkspaceEngineError> {
+    let projection_bindings = bindings
+        .iter()
+        .map(|binding| binding.projection_binding.clone())
+        .collect::<Vec<_>>();
+    let matches = matching_group_reviewer_bindings(finding, &projection_bindings);
+    let matched = match matches.as_slice() {
+        [] => {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "plan_repair_group_trigger binding is missing".to_string(),
+            ));
+        }
+        [matched] => *matched,
+        _ => {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "plan_repair_group_trigger binding is ambiguous".to_string(),
+            ));
+        }
+    };
+    let mut authoritative = bindings.iter().filter(|binding| {
+        binding.projection_binding.logical_work_item_id == matched.logical_work_item_id
+            && binding.projection_binding.projection.work_item_revision_id
+                == matched.projection.work_item_revision_id
+    });
+    let selected = authoritative.next().cloned().ok_or_else(|| {
+        CodingWorkspaceEngineError::ProviderStream(
+            "plan_repair_group_trigger binding is missing".to_string(),
+        )
+    })?;
+    if authoritative.next().is_some() {
+        return Err(CodingWorkspaceEngineError::ProviderStream(
+            "plan_repair_group_trigger binding is ambiguous".to_string(),
+        ));
+    }
+    Ok(selected)
+}
+
 fn validate_group_reviewer_finding(
     finding: &ReviewFinding,
     bindings: &[GroupReviewerProjectionBinding],

@@ -117,12 +117,23 @@ impl CodingWorkspaceEngine {
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let candidates = failed_review_gate_attempts(&self.store, gate_id)?;
         let mut recoverable = Vec::new();
+        let mut amendment_blocked = Vec::new();
         for candidate in candidates {
             let current = self.store.get_attempt(
                 &candidate.project_id,
                 &candidate.issue_id,
                 &candidate.id,
             )?;
+            let current = match self.store.ensure_provider_run_allowed(&current) {
+                Ok(current) => current,
+                Err(ProductStoreError::Io(message))
+                    if message == "plan_amendment_blocks_provider_run" =>
+                {
+                    amendment_blocked.push(current);
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             if matches!(
                 recoverable_failed_code_review(&self.store, &current)?,
                 Some(recovery) if recovery.gate_id == gate_id
@@ -130,11 +141,21 @@ impl CodingWorkspaceEngine {
                 recoverable.push(current);
             }
         }
-        if recoverable.len() != 1 {
-            return Err(recovery_state_changed());
+        match recoverable.as_slice() {
+            [attempt] => {
+                return self
+                    .recover_failed_code_review_for_attempt(attempt, gate_id)
+                    .await;
+            }
+            [] if amendment_blocked.len() == 1 => {
+                return Err(ProductStoreError::Io(
+                    "plan_amendment_blocks_provider_run".to_string(),
+                )
+                .into());
+            }
+            _ => {}
         }
-        self.recover_failed_code_review_for_attempt(&recoverable[0], gate_id)
-            .await
+        Err(recovery_state_changed())
     }
 
     pub(crate) async fn recover_failed_code_review_for_attempt(
@@ -143,9 +164,7 @@ impl CodingWorkspaceEngine {
         gate_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         validate_relative_id(gate_id)?;
-        let current =
-            self.store
-                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let current = self.store.ensure_provider_run_allowed(attempt)?;
         let Some(recovery) = recoverable_failed_code_review(&self.store, &current)? else {
             return Err(recovery_state_changed());
         };

@@ -381,6 +381,9 @@ impl super::CodingAttemptStore {
             {
                 return self.update_group_terminal_status_locked(attempt, status);
             }
+            if status == CodingAttemptStatus::AwaitingPlanAmendment {
+                self.discard_prepared_failed_code_review_recovery_for_plan_amendment(&attempt)?;
+            }
             let now = Utc::now().to_rfc3339();
             if matches!(
                 status,

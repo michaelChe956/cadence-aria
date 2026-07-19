@@ -9,6 +9,30 @@ import type {
   WorkItemHandoff,
   WorkspaceProviderName,
 } from "./common";
+import type {
+  PlanAmendmentManifest,
+  PlanRepairRequest,
+  PlanRepairSessionSnapshot,
+  WorkspaceSessionLink,
+} from "./coding-plan-repair";
+
+export type {
+  ContractDeltaKind,
+  ContractImpactReport,
+  ContractValidationFinding,
+  ImpactExplanationPath,
+  PlanAmendmentManifest,
+  PlanDefectClass,
+  PlanDefectEvidence,
+  PlanRepairImpactScopeReview,
+  PlanRepairPackageIdentity,
+  PlanRepairRequest,
+  PlanRepairSessionSnapshot,
+  PlanValidationReportArtifact,
+  RepairTarget,
+  WorkItemPlanReviewComplete,
+  WorkspaceSessionLink,
+} from "./coding-plan-repair";
 
 export type CodingAttemptStatus =
   | "created"
@@ -536,6 +560,7 @@ export type CodingWsOutMessage =
       verification_commands: string[];
       work_item_execution_plan: WorkItemExecutionPlan | null;
       work_item_handoff: WorkItemHandoff | null;
+      linked_plan_repair: PlanRepairSessionSnapshot | null;
       require_execution_plan_confirm: boolean;
     } & Omit<CodingAttemptSnapshotResponse, "attempt">)
   | { type: "coding_stage_change"; stage: CodingExecutionStage }
@@ -584,4 +609,10 @@ export type CodingWsOutMessage =
       provider: WorkspaceProviderName;
     }
   | { type: "coding_protocol_error"; code: string; message: string }
-  | { type: "coding_pong" };
+  | { type: "coding_pong" }
+  | {
+      type: "plan_repair_required";
+      request: PlanRepairRequest;
+      session_link: WorkspaceSessionLink | null;
+    }
+  | { type: "plan_amendment_updated"; amendment: PlanAmendmentManifest };

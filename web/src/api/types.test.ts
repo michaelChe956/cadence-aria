@@ -314,6 +314,7 @@ describe("workspace websocket protocol types", () => {
       verification_commands: [],
       work_item_execution_plan: null,
       work_item_handoff: null,
+      linked_plan_repair: null,
       require_execution_plan_confirm: false,
       timeline_nodes: snapshot.timeline_nodes,
       role_runs: [

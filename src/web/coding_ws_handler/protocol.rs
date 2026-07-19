@@ -11,6 +11,9 @@ use crate::product::coding_models::{
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
+use crate::product::models::{
+    PlanAmendmentManifest, PlanRepairRequest, PlanRepairSessionSnapshotDto, WorkspaceSessionLink,
+};
 use crate::web::types::CodingExecutionUnitDto;
 use crate::web::workspace_ws_types::{
     ChoiceOption, ProviderConfigSnapshot, WsExecutionEvent, WsPermissionRiskLevel,
@@ -53,6 +56,7 @@ pub enum CodingWsOutMessage {
         verification_commands: Box<Vec<String>>,
         work_item_execution_plan: Box<Option<WorkItemExecutionPlan>>,
         work_item_handoff: Box<Option<WorkItemHandoff>>,
+        linked_plan_repair: Box<Option<PlanRepairSessionSnapshotDto>>,
     },
     CodingStageChange {
         stage: CodingExecutionStage,
@@ -122,7 +126,18 @@ pub enum CodingWsOutMessage {
         message: String,
     },
     CodingPong,
+    PlanRepairRequired {
+        request: Box<PlanRepairRequestDto>,
+        session_link: Option<WorkspaceSessionLinkDto>,
+    },
+    PlanAmendmentUpdated {
+        amendment: Box<PlanAmendmentManifestDto>,
+    },
 }
+
+pub type PlanRepairRequestDto = PlanRepairRequest;
+pub type WorkspaceSessionLinkDto = WorkspaceSessionLink;
+pub type PlanAmendmentManifestDto = PlanAmendmentManifest;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
