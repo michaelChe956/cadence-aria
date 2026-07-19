@@ -1,10 +1,164 @@
+fn group_completion_fixture_at_stage(
+    with_dependency: bool,
+    dirty: bool,
+    stage: CodingExecutionStage,
+) -> GroupCompletionFixture {
+    let root = tempdir().expect("tempdir");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    init_test_git_repo(&worktree);
+    let original_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: original_head.clone(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree.clone()),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+    seed_group_attempt_fixture(&store, &attempt, true, with_dependency);
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            stage,
+        )
+        .expect("completion stage");
+    if dirty {
+        fs::write(worktree.join("unit1.txt"), "unit 1 change\n").expect("unit change");
+    }
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    GroupCompletionFixture {
+        _root: root,
+        worktree,
+        store,
+        engine,
+        attempt,
+        original_head,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GroupCompletionStateSnapshot {
+    attempt: CodingExecutionAttempt,
+    units: Vec<crate::product::coding_models::CodingExecutionUnit>,
+    runs: Vec<Vec<CodingUnitRun>>,
+    legacy_handoffs: Vec<Option<WorkItemHandoff>>,
+    canonical_handoffs: Vec<HandoffRevision>,
+    head: String,
+    status: String,
+}
+
+fn snapshot_group_completion_state(
+    fixture: &GroupCompletionFixture,
+) -> GroupCompletionStateSnapshot {
+    let attempt = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("attempt snapshot");
+    let units = fixture
+        .store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("unit snapshot");
+    let runs = units
+        .iter()
+        .map(|unit| {
+            fixture
+                .store
+                .list_coding_unit_runs(&attempt, &unit.id)
+                .expect("run snapshot")
+        })
+        .collect();
+    let legacy_handoffs = units
+        .iter()
+        .map(|unit| {
+            fixture.store.get_coding_unit_handoff(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &unit.id,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("legacy handoff snapshot");
+    let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+    let lineage = revision_store
+        .get_plan_lineage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            attempt
+                .work_item_group_id
+                .as_deref()
+                .expect("group plan binding"),
+        )
+        .expect("lineage snapshot");
+    let canonical_handoffs = units
+        .iter()
+        .filter_map(|unit| {
+            unit.latest_handoff_revision_id.as_ref().map(|handoff_id| {
+                revision_store
+                    .get_handoff_revision(&lineage, &unit.logical_work_item_id, handoff_id)
+                    .expect("canonical handoff snapshot")
+            })
+        })
+        .collect();
+    GroupCompletionStateSnapshot {
+        attempt,
+        units,
+        runs,
+        legacy_handoffs,
+        canonical_handoffs,
+        head: git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string(),
+        status: git_stdout(&fixture.worktree, &["status", "--porcelain"]),
+    }
+}
+
 fn cleared_active_recovery_fixture() -> (
     GroupCompletionFixture,
     CodingExecutionAttempt,
     WorkItemPlanLineage,
     HandoffRevision,
 ) {
-    let fixture = group_completion_fixture(true, false);
+    cleared_active_recovery_fixture_at_stage(CodingExecutionStage::ReviewRequest)
+}
+
+fn cleared_active_recovery_fixture_at_stage(
+    stage: CodingExecutionStage,
+) -> (
+    GroupCompletionFixture,
+    CodingExecutionAttempt,
+    WorkItemPlanLineage,
+    HandoffRevision,
+) {
+    let fixture = group_completion_fixture_at_stage(true, false, stage);
     let source_run = create_authoritative_active_run(
         &fixture,
         "coding_unit_run_0001",
@@ -97,12 +251,15 @@ fn cleared_active_recovery_fixture() -> (
 
 #[tokio::test]
 async fn coding_plan_repair_group_completion_recovers_after_active_pointer_was_cleared() {
-    let (fixture, partial, lineage, handoff) = cleared_active_recovery_fixture();
+    let (fixture, authoritative, lineage, handoff) = cleared_active_recovery_fixture();
     let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+    let mut stale_attempt = authoritative.clone();
+    stale_attempt.stage = CodingExecutionStage::PrepareContext;
+    assert_eq!(authoritative.stage, CodingExecutionStage::ReviewRequest);
 
     let updated = fixture
         .engine
-        .complete_group_unit_after_code_review(&partial)
+        .complete_group_unit_after_code_review(&stale_attempt)
         .await
         .expect("recover cleared active pointer boundary");
     let units = fixture
@@ -125,7 +282,100 @@ async fn coding_plan_repair_group_completion_recovers_after_active_pointer_was_c
 }
 
 #[tokio::test]
-async fn coding_plan_repair_group_completion_rejects_stale_attempt_after_review_request() {
+async fn coding_plan_repair_group_completion_running_wrong_stages_are_zero_write() {
+    for stage in [
+        CodingExecutionStage::PrepareContext,
+        CodingExecutionStage::WorktreePrepare,
+        CodingExecutionStage::Coding,
+        CodingExecutionStage::Testing,
+        CodingExecutionStage::CodeReview,
+        CodingExecutionStage::InternalPrReview,
+        CodingExecutionStage::FinalConfirm,
+    ] {
+        let fixture = group_completion_fixture_at_stage(true, true, stage);
+        create_authoritative_active_run(
+            &fixture,
+            "coding_unit_run_0001",
+            1,
+            CodingUnitRunStatus::Running,
+            None,
+            None,
+        );
+        let before = snapshot_group_completion_state(&fixture);
+
+        let error = fixture
+            .engine
+            .complete_group_unit_after_code_review(&fixture.attempt)
+            .await
+            .expect_err("wrong running stage must fail closed");
+
+        assert!(
+            error.to_string().contains("group_completion_stage_not_ready"),
+            "{error}"
+        );
+        assert_eq!(snapshot_group_completion_state(&fixture), before);
+        assert!(
+            fixture
+                .store
+                .list_open_blocked_gates(
+                    &fixture.attempt.project_id,
+                    &fixture.attempt.issue_id,
+                    &fixture.attempt.id,
+                )
+                .expect("blocked gates")
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn coding_plan_repair_group_completion_completed_retry_wrong_stages_are_zero_write() {
+    for stage in [
+        CodingExecutionStage::PrepareContext,
+        CodingExecutionStage::WorktreePrepare,
+        CodingExecutionStage::Coding,
+        CodingExecutionStage::Testing,
+        CodingExecutionStage::CodeReview,
+        CodingExecutionStage::InternalPrReview,
+        CodingExecutionStage::FinalConfirm,
+    ] {
+        let (fixture, stale_attempt, lineage, handoff) =
+            cleared_active_recovery_fixture_at_stage(stage);
+        let before = snapshot_group_completion_state(&fixture);
+
+        let error = fixture
+            .engine
+            .complete_group_unit_after_code_review(&stale_attempt)
+            .await
+            .expect_err("wrong completed retry stage must fail closed");
+
+        assert!(
+            error.to_string().contains("group_completion_stage_not_ready"),
+            "{error}"
+        );
+        assert_eq!(snapshot_group_completion_state(&fixture), before);
+        assert_eq!(
+            WorkItemRevisionStore::new(fixture.store.paths())
+                .get_handoff_revision(&lineage, &handoff.logical_work_item_id, &handoff.id)
+                .expect("canonical handoff after rejection"),
+            handoff
+        );
+        assert!(
+            fixture
+                .store
+                .list_open_blocked_gates(
+                    &stale_attempt.project_id,
+                    &stale_attempt.issue_id,
+                    &stale_attempt.id,
+                )
+                .expect("blocked gates")
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn coding_plan_repair_group_completion_completed_retry_dirty_worktree_reuses_manual_gate() {
     let (fixture, stale_attempt, _, _) = cleared_active_recovery_fixture();
     fixture
         .store
@@ -136,44 +386,79 @@ async fn coding_plan_repair_group_completion_rejects_stale_attempt_after_review_
             CodingExecutionStage::ReviewRequest,
         )
         .expect("review request stage");
-    let units_before = fixture
+    fs::write(fixture.worktree.join("staged.txt"), "staged\n").expect("staged file");
+    run_test_git(&fixture.worktree, &["add", "staged.txt"]);
+    fs::write(fixture.worktree.join("README.md"), "unstaged\n").expect("unstaged file");
+    fs::write(fixture.worktree.join("untracked.txt"), "untracked\n")
+        .expect("untracked file");
+    let before = snapshot_group_completion_state(&fixture);
+
+    let first_error = fixture
+        .engine
+        .complete_group_unit_after_code_review(&stale_attempt)
+        .await
+        .expect_err("dirty completed retry must create manual gate");
+    assert!(
+        first_error
+            .to_string()
+            .contains("shared_worktree_dirty_manual_gate"),
+        "{first_error}"
+    );
+    let first_gates = fixture
         .store
-        .list_coding_units(
+        .list_open_blocked_gates(
             &stale_attempt.project_id,
             &stale_attempt.issue_id,
             &stale_attempt.id,
         )
-        .expect("units before");
+        .expect("first blocked gates");
+    assert_eq!(first_gates.len(), 1);
+    let first_gate = &first_gates[0];
+    assert_eq!(
+        first_gate.stage,
+        Some(CodingExecutionStage::ReviewRequest)
+    );
+    assert_eq!(
+        first_gate.reason_code.as_deref(),
+        Some("shared_worktree_dirty_manual_gate")
+    );
+    assert_eq!(first_gate.available_actions.len(), 2);
+    assert!(first_gate.available_actions.iter().any(|action| {
+        action.action_type == CodingGateActionType::ManualContinue
+    }));
+    assert!(
+        first_gate
+            .available_actions
+            .iter()
+            .any(|action| action.action_type == CodingGateActionType::Abort)
+    );
+    assert!(!first_gate.available_actions.iter().any(|action| {
+        action.action_type == CodingGateActionType::SendToCoder
+    }));
+    assert_eq!(snapshot_group_completion_state(&fixture), before);
 
-    fixture
+    let second_error = fixture
         .engine
         .complete_group_unit_after_code_review(&stale_attempt)
         .await
-        .expect_err("stale attempt must not bypass review request guard");
-
-    assert_eq!(
-        fixture
-            .store
-            .list_coding_units(
-                &stale_attempt.project_id,
-                &stale_attempt.issue_id,
-                &stale_attempt.id,
-            )
-            .expect("units after"),
-        units_before
+        .expect_err("dirty completed retry must reuse manual gate");
+    assert!(
+        second_error
+            .to_string()
+            .contains("shared_worktree_dirty_manual_gate"),
+        "{second_error}"
     );
-    assert_eq!(
-        fixture
-            .store
-            .get_attempt(
-                &stale_attempt.project_id,
-                &stale_attempt.issue_id,
-                &stale_attempt.id,
-            )
-            .expect("attempt after")
-            .stage,
-        CodingExecutionStage::ReviewRequest
-    );
+    let second_gates = fixture
+        .store
+        .list_open_blocked_gates(
+            &stale_attempt.project_id,
+            &stale_attempt.issue_id,
+            &stale_attempt.id,
+        )
+        .expect("second blocked gates");
+    assert_eq!(second_gates.len(), 1);
+    assert_eq!(second_gates[0].gate_id, first_gate.gate_id);
+    assert_eq!(snapshot_group_completion_state(&fixture), before);
 }
 
 #[tokio::test]

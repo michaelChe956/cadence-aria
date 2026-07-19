@@ -13,53 +13,7 @@ struct GroupCompletionFixture {
 }
 
 fn group_completion_fixture(with_dependency: bool, dirty: bool) -> GroupCompletionFixture {
-    let root = tempdir().expect("tempdir");
-    let worktree = root.path().join("worktree");
-    fs::create_dir_all(&worktree).expect("worktree");
-    init_test_git_repo(&worktree);
-    let original_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
-        .trim()
-        .to_string();
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            current_work_item_id: "work_item_0001".to_string(),
-            base_branch: original_head.clone(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: Some(worktree.clone()),
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Codex,
-                reviewer: Some(ProviderName::ClaudeCode),
-                review_rounds: 1,
-            },
-            max_auto_rework: 2,
-        })
-        .expect("group attempt");
-    seed_group_attempt_fixture(&store, &attempt, true, with_dependency);
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running attempt");
-    if dirty {
-        fs::write(worktree.join("unit1.txt"), "unit 1 change\n").expect("unit change");
-    }
-    let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    GroupCompletionFixture {
-        _root: root,
-        worktree,
-        store,
-        engine,
-        attempt,
-        original_head,
-    }
+    group_completion_fixture_at_stage(with_dependency, dirty, CodingExecutionStage::ReviewRequest)
 }
 
 fn create_authoritative_active_run(
@@ -536,7 +490,15 @@ async fn coding_plan_repair_group_completion_rejects_dependency_handoff_binding_
         .complete_group_unit_after_code_review(&fixture.attempt)
         .await
         .expect("complete source unit");
-    fixture.attempt = after_first;
+    fixture.attempt = fixture
+        .store
+        .update_attempt_stage(
+            &after_first.project_id,
+            &after_first.issue_id,
+            &after_first.id,
+            CodingExecutionStage::ReviewRequest,
+        )
+        .expect("second unit review request stage");
     fixture.original_head = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
         .trim()
         .to_string();
@@ -570,6 +532,15 @@ async fn coding_plan_repair_group_completion_rejects_noncanonical_dependency_han
             .complete_group_unit_after_code_review(&fixture.attempt)
             .await
             .expect("complete source unit");
+        fixture.attempt = fixture
+            .store
+            .update_attempt_stage(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                CodingExecutionStage::ReviewRequest,
+            )
+            .expect("second unit review request stage");
         fixture.original_head = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
             .trim()
             .to_string();

@@ -115,11 +115,25 @@ impl CodingWorkspaceEngine {
         if !worktree_path.exists() {
             return Ok(());
         }
-        let status = self._git_service.git_status(&worktree_path).await?;
+        self.ensure_worktree_clean_with_manual_gate(
+            attempt,
+            &worktree_path,
+            CodingExecutionStage::FinalConfirm,
+        )
+        .await
+    }
+
+    pub(crate) async fn ensure_worktree_clean_with_manual_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        worktree_path: &Path,
+        stage: CodingExecutionStage,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let status = self._git_service.git_status(worktree_path).await?;
         if !status.is_empty() {
             self.store.create_blocked_gate(attempt, CreateBlockedGateInput {
                 attempt_id: attempt.id.clone(),
-                stage: CodingExecutionStage::FinalConfirm,
+                stage,
                 node_id: None,
                 role: None,
                 title: "Shared worktree has uncommitted changes".to_string(),

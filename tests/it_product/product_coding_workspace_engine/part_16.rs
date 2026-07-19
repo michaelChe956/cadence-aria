@@ -2,6 +2,14 @@ fn create_active_coding_unit_run(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
 ) {
+    store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::ReviewRequest,
+        )
+        .expect("review request stage before group completion");
     let unit = store
         .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("active unit lookup")

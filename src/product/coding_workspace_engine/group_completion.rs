@@ -58,6 +58,15 @@ impl CodingWorkspaceEngine {
                     .await?
             }
             GroupUnitCompletionMode::CompletedRetry { completion_commit } => {
+                let worktree_path = attempt.worktree_path.as_ref().ok_or_else(|| {
+                    CodingWorkspaceEngineError::MissingWorktree(attempt.id.clone())
+                })?;
+                self.ensure_worktree_clean_with_manual_gate(
+                    &attempt,
+                    worktree_path,
+                    CodingExecutionStage::ReviewRequest,
+                )
+                .await?;
                 self.recover_completed_group_unit_commit(&attempt, &facts.active, completion_commit)
                     .await?
             }
@@ -182,6 +191,12 @@ impl CodingWorkspaceEngine {
             return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
                 attempt.id.clone(),
             ));
+        }
+        if attempt.stage != CodingExecutionStage::ReviewRequest {
+            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                "group_completion_stage_not_ready: {}",
+                attempt.id
+            )));
         }
         let (active, recovering_cleared_active) = match self.store.get_active_coding_unit(
             &attempt.project_id,
@@ -309,11 +324,6 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionUnit, CodingWorkspaceEngineError> {
-        if attempt.stage.order() >= CodingExecutionStage::ReviewRequest.order() {
-            return Err(CodingWorkspaceEngineError::WorkItemHandoffMissing(
-                attempt.id.clone(),
-            ));
-        }
         let units =
             self.store
                 .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
