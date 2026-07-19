@@ -316,6 +316,7 @@ mod provider_driven;
 mod provider_execution_context;
 mod provider_failure_recovery;
 mod provider_rework_context;
+mod provider_start_persistence;
 mod tester_repair_plan_defect;
 
 #[tokio::test]

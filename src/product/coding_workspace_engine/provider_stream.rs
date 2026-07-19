@@ -24,6 +24,25 @@ impl CodingWorkspaceEngine {
         }
     }
 
+    fn record_provider_start_required(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role_run: Option<&CodingRoleRun>,
+        payload: serde_json::Value,
+    ) -> Result<(), ProductStoreError> {
+        let Some(role_run) = role_run else {
+            return Ok(());
+        };
+        self.store
+            .append_role_run_event(
+                attempt,
+                role_run,
+                CodingRoleRunEventType::ProviderStart,
+                payload,
+            )
+            .map(|_| ())
+    }
+
     pub(crate) fn unresolved_provider_choice_error(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -108,15 +127,18 @@ impl CodingWorkspaceEngine {
             };
             let mut session = match start_result {
                 Ok(session) => {
-                    self.record_role_run_event(
+                    if let Err(error) = self.record_provider_start_required(
                         attempt,
                         role_run,
-                        CodingRoleRunEventType::ProviderStart,
                         json!({
                             "provider": provider_name,
                             "role": format!("{provider_role:?}")
                         }),
-                    );
+                    ) {
+                        cancel.cancel();
+                        drop(session);
+                        return Err(error.into());
+                    }
                     session
                 }
                 Err(error)
@@ -644,19 +666,21 @@ impl CodingWorkspaceEngine {
         provider_name: &ProviderName,
         provider_role: CodingProviderRole,
     ) -> Result<String, CodingWorkspaceEngineError> {
-        let mut stream = provider
-            .run_streaming(input, CancellationToken::new())
-            .await?;
-        self.record_role_run_event(
+        let cancel = CancellationToken::new();
+        let mut stream = provider.run_streaming(input, cancel.clone()).await?;
+        if let Err(error) = self.record_provider_start_required(
             attempt,
             role_run,
-            CodingRoleRunEventType::ProviderStart,
             json!({
                 "provider": provider_name,
                 "role": format!("{provider_role:?}"),
                 "mode": "legacy_stream"
             }),
-        );
+        ) {
+            cancel.cancel();
+            drop(stream);
+            return Err(error.into());
+        }
         let mut full_output = String::new();
         while let Some(chunk) = stream.recv().await {
             match chunk {
