@@ -135,9 +135,10 @@ impl CodingWorkspaceEngine {
                             "role": format!("{provider_role:?}")
                         }),
                     ) {
+                        let message = error.to_string();
                         cancel.cancel();
                         drop(session);
-                        return Err(error.into());
+                        return self.fail_provider_stream(attempt, node_id, message).await;
                     }
                     session
                 }
@@ -677,9 +678,10 @@ impl CodingWorkspaceEngine {
                 "mode": "legacy_stream"
             }),
         ) {
+            let message = error.to_string();
             cancel.cancel();
             drop(stream);
-            return Err(error.into());
+            return self.fail_provider_stream(attempt, node_id, message).await;
         }
         let mut full_output = String::new();
         while let Some(chunk) = stream.recv().await {

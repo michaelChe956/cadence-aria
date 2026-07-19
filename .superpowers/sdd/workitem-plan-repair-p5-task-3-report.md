@@ -48,6 +48,10 @@
    - modern `provider.start` 成功后，必须先写入 role-run event，成功后才消费 `session.events`；写失败立即 cancel 并 drop session；
    - legacy fallback `run_streaming` 成功后同样必须先写入，写失败立即 cancel 并 drop receiver；
    - `ProviderPrompt`、`TextDelta`、Tool 等普通诊断事件继续 best-effort；未把更早写入的 `runner_started_at` 误当 provider-entry 证据。
+12. Completed recovery 的 required `ProviderStart` 写失败新增 durable compensation：
+   - modern 与 legacy 均在 cancel/drop provider 通道后调用现有 provider-interruption transition；
+   - 已绑定的 retry CodeReviewer role-run 与 CodeReview timeline node 转为 `Failed`，Attempt 转为 `Blocked`，并创建新的 `code_review_provider_interrupted` open gate；
+   - 下一次 recovery 归档旧 Completed journal、以新 gate/stale retry identity 创建新 retry；恢复后的正常 provider 可再次完成 required `ProviderStart` ownership handoff，并以 exact `StartPlanRepair` 暂停 Attempt。
 
 ## TDD 证据
 
@@ -69,10 +73,11 @@
 - recovery journal 已标记 Completed、但 retry reviewer provider 尚未真正启动时，旧语义要么永久阻止 Plan Repair，要么过早让出 ownership；真实 retry reviewer 返回 exact `StartPlanRepair` 后 Attempt 仍停留在 `Running`。
 - Tester 真实 provider 已生成并持久化 canonical Plan Defect report，但 finalize 流程没有启动 Repair，Attempt 仍为 `Running` 而非 `AwaitingPlanAmendment`。
 - modern 与 legacy fallback 均在 provider 已 start 后 best-effort 写 `ProviderStart`；将 role-run event log 注入为不可写时，两条路径都吞掉 Store 错误、继续消费输出，并实际返回 `StartPlanRepair`，但 Completed recovery journal 永远缺少唯一 durable ownership 证据。
+- 在真实 failed-review recovery 已进入 Completed journal、retry role-run 已绑定新 CodeReview node 后，modern/legacy required `ProviderStart` 写失败虽会停止输出，但 retry role-run 与 timeline node 仍为 `Running`、Attempt 仍为 `Running`、没有新的 interrupted gate；原 retry identity 无 `ProviderStart` 且 Completed journal 无法轮换，后续恢复永久失去入口。
 
 ### GREEN / Focused
 
-- `cargo test --locked --lib coding_plan_repair_`：84 passed，0 failed。
+- `cargo test --locked --lib coding_plan_repair_`：86 passed，0 failed。
 - `cargo test --locked --lib coding_ws_plan_repair_`：4 passed，0 failed。
 - `cargo test --locked --lib failed_review_recovery`：42 passed，0 failed。
 - `cargo test --locked --lib coding_plan_repair_rollback_converges_`：2 passed，0 failed。
@@ -81,6 +86,8 @@
 - `cargo test --locked --lib coding_plan_repair_tester_repair_`：2 passed，0 failed。
 - `cargo test --locked --lib coding_plan_repair_modern_provider_start_persistence_failure_`：RED 为写失败仍到达 `StartPlanRepair`；GREEN 为 1 passed，0 failed。
 - `cargo test --locked --lib coding_plan_repair_legacy_provider_start_persistence_failure_`：RED 为写失败仍到达 `StartPlanRepair`；GREEN 为 1 passed，0 failed。
+- `cargo test --locked --lib coding_plan_repair_provider_start_failure_recovery`：RED 为 modern/legacy 两条真实 Completed recovery 用例均得到 retry role-run `Running`（期望 `Failed`）；GREEN 为 2 passed，0 failed，并完成第二次 recovery 与 exact `StartPlanRepair`。
+- `cargo test --locked --lib provider_start_persistence`：2 passed，0 failed。
 - recovery/amendment 并发回归循环 20 次：全部通过，最终 journal 均为 `None`。
 - 修复 Group fixture 后，原挂起精确 `it_web` 用例：1 passed，0 failed，约 0.04s。
 - 补齐 canonical WorkItemPlan parent 后，reviewer-triggered rework 集成用例：1 passed，0 failed；同时断言 WS event request 等于 durable request、trigger identity 正确、`plan_repair_count == 1`。
@@ -101,7 +108,8 @@
 11. **Advanced-prefix rollback**：retry-created/stale-unlinked、stale-cleared/retry-present、retry-deleted，以及 resolved-only/open+resolved/open-only gate 前缀均可重复回滚并收敛；恢复 stale run、删除 retry、清理 resolved 副本后才删除 journal。
 12. **Completed recovery ownership handoff**：Completed journal 在 provider 尚未启动时继续返回 `coding_failed_review_recovery_state_changed`；retry role-run、真实 CodeReview node 与 `ProviderStart` 三者 identity 完整后归档 journal，让真实 reviewer 的 exact `StartPlanRepair` 接管 Attempt。
 13. **Tester 真实 provider**：`finalize_provider_testing_report_phase` 在 report/chat/role-run/timeline 完成后，仅对 exact `StartPlanRepair` 调统一 start API；回归测试走真实 provider-driven testing，而非手工拼接 report。
-14. **Durable ProviderStart**：modern 与 legacy fallback 在消费任何 provider 输出前强制持久化 `ProviderStart`；写失败取消并释放 provider 通道、返回 Store 错误，避免产生无法由 Completed journal 归档的 `StartPlanRepair`。其他普通 role-run event 仍为 best-effort。
+14. **Durable ProviderStart**：modern 与 legacy fallback 在消费任何 provider 输出前强制持久化 `ProviderStart`；写失败取消并释放 provider 通道，再进入 provider-interruption failure transition，避免产生无法由 Completed journal 归档的 `StartPlanRepair`。其他普通 role-run event 仍为 best-effort。
+15. **ProviderStart failure recovery compensation**：required 写失败在释放 provider 通道后复用 `fail_provider_stream`，把已绑定 retry/node 收敛为 interrupted failure 与新 gate；下一次 recovery 轮换旧 Completed journal，避免 retry identity 永久锁死。
 
 ## 最终完整门禁
 
@@ -109,14 +117,14 @@
 - `cargo check --locked`：PASS，exit 0。
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，exit 0，0 warnings。
 - `cargo test --locked`：PASS，exit 0：
-  - lib：1085 tests，0 failed；
+  - lib：1087 tests，0 failed；
   - it_core：143 passed，0 failed；
   - it_web：258 passed，0 failed，12 ignored；
   - doc-test：1 passed，0 failed；
   - 其余 integration targets 全部通过。
 - `cd web && pnpm tsc -b`：PASS，exit 0。
 - `cargo test --locked --test it_core large_file_guard::product_source_and_test_files_stay_under_line_limit`：1 passed，0 failed。
-- Task 3 测试命名审计（含新增 `failed_review_recovery_rollback.rs`、`plan_repair/failed_review_recovery.rs` 与 `provider_start_persistence.rs`）：PASS，新增测试均以 `coding_plan_repair_` 开头。
+- Task 3 测试命名审计（含新增 `failed_review_recovery_rollback.rs`、`plan_repair/failed_review_recovery.rs`、`plan_repair/provider_start_failure_recovery.rs` 与 `provider_start_persistence.rs`）：PASS，新增测试均以 `coding_plan_repair_` 开头。
 - `git diff --check`：PASS，exit 0。
 
 ## 文件规模
@@ -126,12 +134,13 @@
 - `src/product/coding_attempt_store/tests/failed_review_recovery.rs`：677 行。
 - `src/product/coding_attempt_store/tests/failed_review_recovery_rollback.rs`：138 行。
 - `src/product/coding_workspace_engine/testing_provider/report.rs`：323 行。
-- `src/product/coding_workspace_engine/provider_stream.rs`：748 行。
+- `src/product/coding_workspace_engine/provider_stream.rs`：750 行。
 - `src/product/coding_workspace_engine/tests.rs`：638 行。
 - `src/product/coding_workspace_engine/tests/provider_start_persistence.rs`：304 行。
-- `src/web/coding_ws_handler/tests/plan_repair.rs`：759 行。
+- `src/web/coding_ws_handler/tests/plan_repair.rs`：760 行。
 - `src/web/coding_ws_handler/tests/plan_repair/typed_sources.rs`：343 行。
 - `src/web/coding_ws_handler/tests/plan_repair/failed_review_recovery.rs`：336 行。
+- `src/web/coding_ws_handler/tests/plan_repair/provider_start_failure_recovery.rs`：515 行。
 
 所有相关 Rust/TS/TSX 文件均满足不超过 800 行门禁。
 

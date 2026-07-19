@@ -41,6 +41,7 @@ use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 mod failed_review_recovery;
 mod identity;
+mod provider_start_failure_recovery;
 mod reconciliation;
 mod support;
 mod typed_sources;
