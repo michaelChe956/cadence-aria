@@ -11,6 +11,7 @@ use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 mod failed_review_recovery;
+mod failed_review_recovery_rollback;
 mod group_uniqueness;
 mod plan_repair;
 mod unit_run_execution_context;

@@ -314,6 +314,10 @@ impl CodingWorkspaceEngine {
             summary,
         )
         .await?;
+        if plan_defect_decision == Some(CodeReviewFlowDecision::StartPlanRepair) {
+            self.start_plan_repair_from_execution_report(&attempt, &plan_defect_report)
+                .await?;
+        }
         Ok(report)
     }
 }

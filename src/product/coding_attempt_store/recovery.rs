@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole,
-    CodingRoleRun, CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingRoleRun, CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -81,17 +81,69 @@ impl super::CodingAttemptStore {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), ProductStoreError> {
-        if self
-            .get_failed_code_review_recovery_journal(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-            )?
-            .is_some_and(|journal| journal.is_completed())
+        let Some(journal) = self.get_failed_code_review_recovery_journal(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?
+        else {
+            return Ok(());
+        };
+        if !journal.is_completed() {
+            return Ok(());
+        }
+        let Some(retry_role_run_id) = journal.retry_role_run_id.as_deref() else {
+            return Err(recovery_state_changed());
+        };
+        let retry = self.get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            retry_role_run_id,
+        )?;
+        let Some(node_id) = retry.node_id.as_deref() else {
+            return Err(recovery_state_changed());
+        };
+        if retry.attempt_id != journal.attempt_id
+            || retry.stage != CodingExecutionStage::CodeReview
+            || retry.role != CodingProviderRole::CodeReviewer
+            || retry.trigger != CodingRoleRunTrigger::RetryReview
+            || retry.supersedes_run_id.as_deref()
+                != Some(journal.expected_stale_role_run_id.as_str())
+            || !matches!(
+                retry.status,
+                CodingRoleRunStatus::Running
+                    | CodingRoleRunStatus::Completed
+                    | CodingRoleRunStatus::Blocked
+            )
         {
             return Err(recovery_state_changed());
         }
-        Ok(())
+        let matching_nodes = self
+            .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .filter(|node| {
+                node.id == node_id
+                    && node.attempt_id == attempt.id
+                    && node.stage == CodingExecutionStage::CodeReview
+            })
+            .count();
+        let provider_started = self
+            .list_role_run_events(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                retry_role_run_id,
+            )?
+            .iter()
+            .any(|event| {
+                event.event_type == CodingRoleRunEventType::ProviderStart
+                    && event.node_id.as_deref() == Some(node_id)
+            });
+        if matching_nodes != 1 || !provider_started {
+            return Err(recovery_state_changed());
+        }
+        self.archive_completed_failed_code_review_recovery_journal(&journal)
     }
 
     fn failed_code_review_recovery_journal_path(
@@ -288,32 +340,49 @@ impl super::CodingAttemptStore {
         if journal.is_completed() {
             return Err(recovery_state_changed());
         }
-        let matching_retries = self
-            .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
+        let role_runs = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let matching_retries = role_runs
+            .iter()
             .filter(|run| run.reason_code.as_deref() == Some(journal.recovery_key.as_str()))
             .collect::<Vec<_>>();
         if matching_retries.len() > 1 {
             return Err(recovery_state_changed());
         }
-        let retry = matching_retries.into_iter().next();
+        let matching_retry = matching_retries.into_iter().next();
+        let retry = if let Some(retry_role_run_id) = journal.retry_role_run_id.as_deref() {
+            let retry = role_runs.iter().find(|run| run.id == retry_role_run_id);
+            if retry.is_some_and(|run| {
+                run.reason_code.as_deref() != Some(journal.recovery_key.as_str())
+            }) || matching_retry.is_some_and(|run| run.id != retry_role_run_id)
+            {
+                return Err(recovery_state_changed());
+            }
+            retry
+        } else {
+            matching_retry
+        };
         if let Some(retry) = retry.as_ref() {
             validate_retry_role_run(retry, &journal)?;
+        }
+        let retry_role_run_id = retry
+            .map(|run| run.id.as_str())
+            .or(journal.retry_role_run_id.as_deref());
+        if let Some(retry_role_run_id) = retry_role_run_id {
             let mut stale = self.get_role_run(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
                 &journal.expected_stale_role_run_id,
             )?;
-            if stale.superseded_by_run_id.as_deref() != Some(retry.id.as_str()) {
-                return Err(recovery_state_changed());
-            }
+            validate_stale_role_run(&stale, &journal, retry_role_run_id)?;
             stale.status = CodingRoleRunStatus::Failed;
             stale.superseded_by_run_id = None;
             if stale.completed_at.is_none() {
                 stale.completed_at = Some(Utc::now().to_rfc3339());
             }
             self.save_role_run(&attempt.project_id, &attempt.issue_id, &stale)?;
+        }
+        if let Some(retry) = retry {
             super::remove_file_if_exists(&self.role_run_path(
                 &attempt.project_id,
                 &attempt.issue_id,

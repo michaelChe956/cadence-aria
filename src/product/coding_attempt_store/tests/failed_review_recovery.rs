@@ -40,7 +40,7 @@ fn journal(
     }
 }
 
-fn current_path(
+pub(super) fn current_path(
     store: &crate::product::coding_attempt_store::CodingAttemptStore,
     attempt: &crate::product::coding_models::CodingExecutionAttempt,
 ) -> PathBuf {
@@ -606,7 +606,7 @@ fn coding_plan_repair_amendment_status_blocks_every_recovery_write_boundary() {
     }
 }
 
-fn recovery_boundary_fixture() -> (
+pub(super) fn recovery_boundary_fixture() -> (
     tempfile::TempDir,
     crate::product::coding_attempt_store::CodingAttemptStore,
     crate::product::coding_models::CodingExecutionAttempt,

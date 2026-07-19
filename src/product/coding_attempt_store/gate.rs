@@ -294,7 +294,8 @@ impl super::CodingAttemptStore {
         let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
         let open_path = gates_root.join(format!("{gate_id}.json"));
         if super::path_is_regular_file(&open_path)? {
-            return Ok(());
+            let resolved_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
+            return super::remove_file_if_exists(&resolved_path);
         }
         let resolved_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
         if !super::path_is_regular_file(&resolved_path)? {
