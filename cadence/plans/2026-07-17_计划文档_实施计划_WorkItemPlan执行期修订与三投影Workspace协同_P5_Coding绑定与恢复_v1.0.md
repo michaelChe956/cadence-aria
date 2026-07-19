@@ -15,7 +15,7 @@
 - 旧 completed UnitRun 不改回 running。
 - Manifest 应用失败时不得继续 Coding。
 - 当前工作树有未提交 Diff 时必须阻止自动回退并创建 Gate。
-- 所有测试名称使用 `coding_plan_repair_`、`coding_unit_run_` 或 `coding_amendment_` 前缀。
+- 所有测试名称使用 `coding_plan_repair_`、`coding_unit_run_`、`coding_amendment_` 或 `coding_runtime_handoff_` 前缀。
 
 ---
 
