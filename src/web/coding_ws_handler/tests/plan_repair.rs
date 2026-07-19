@@ -39,6 +39,7 @@ use crate::product::work_item_contract::{
 use crate::product::work_item_projection::{WorkItemProjectionCompiler, projection_hashes};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
+mod delivery_ack;
 mod failed_review_recovery;
 mod identity;
 mod provider_start_failure_recovery;

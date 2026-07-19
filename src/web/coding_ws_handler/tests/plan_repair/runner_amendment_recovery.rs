@@ -52,7 +52,18 @@ async fn assert_runner_recovers_amendment_before_provider(state: RunnerRecoveryS
     );
     web_state.provider_registry = Arc::new(registry);
     web_state.test_provider_enabled = true;
-    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let (event_tx, mut socket_event_rx) = mpsc::channel(64);
+    let (observed_event_tx, mut event_rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        while let Some(event) = socket_event_rx.recv().await {
+            crate::web::coding_ws_handler::delivery_ack::confirm_plan_amendment_socket_write(
+                &event,
+            );
+            if observed_event_tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
     let (_command_tx, command_rx) = mpsc::channel(8);
     let runner_state = web_state.clone();
     let runner_store = fixture.store.clone();
@@ -144,7 +155,18 @@ async fn coding_ws_plan_repair_await_handoff_stays_blocked_after_stage_gate_cont
     );
     web_state.provider_registry = Arc::new(registry);
     web_state.test_provider_enabled = true;
-    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let (event_tx, mut socket_event_rx) = mpsc::channel(64);
+    let (observed_event_tx, mut event_rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        while let Some(event) = socket_event_rx.recv().await {
+            crate::web::coding_ws_handler::delivery_ack::confirm_plan_amendment_socket_write(
+                &event,
+            );
+            if observed_event_tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
     let (command_tx, command_rx) = mpsc::channel(8);
     command_tx
         .send(CodingRunnerCommand::StageGateConfirm {

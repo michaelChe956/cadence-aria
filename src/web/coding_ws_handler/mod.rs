@@ -1,4 +1,5 @@
 mod context;
+pub(crate) mod delivery_ack;
 mod gates;
 pub mod protocol;
 mod runner;
@@ -23,3 +24,5 @@ pub(crate) use state::*;
 pub(crate) use crate::product::coding_models::CodingExecutionAttempt;
 #[cfg(test)]
 pub(crate) use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+#[cfg(test)]
+pub(crate) use socket::send_coding_event;

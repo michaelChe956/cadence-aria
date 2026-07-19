@@ -1,7 +1,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, State};
 use axum::response::IntoResponse;
-use futures_util::stream::SplitSink;
+use futures_util::Sink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
@@ -33,8 +33,6 @@ pub(crate) use preparation::{
 };
 #[cfg(test)]
 pub(crate) use preparation::{CodingRecoveryPreparationProbe, prepare_coding_message_with_probe};
-
-pub(crate) type CodingWsSender = SplitSink<WebSocket, Message>;
 
 pub async fn coding_ws(
     ws: WebSocketUpgrade,
@@ -99,7 +97,7 @@ async fn handle_coding_socket(
                 let Some(event) = event else {
                     continue;
                 };
-                if !send_coding_json(&mut socket_tx, &event).await {
+                if !send_coding_event(&mut socket_tx, &event).await {
                     break;
                 }
             }
@@ -287,7 +285,7 @@ async fn handle_coding_socket(
                     };
                     drop(mutation_lease);
                     while let Ok(event) = event_rx.try_recv() {
-                        if !send_coding_json(&mut socket_tx, &event).await {
+                        if !send_coding_event(&mut socket_tx, &event).await {
                             break;
                         }
                     }
@@ -341,7 +339,7 @@ async fn handle_coding_socket(
                     };
                     drop(mutation_lease);
                     while let Ok(event) = event_rx.try_recv() {
-                        if !send_coding_json(&mut socket_tx, &event).await {
+                        if !send_coding_event(&mut socket_tx, &event).await {
                             break;
                         }
                     }
@@ -386,7 +384,7 @@ async fn handle_coding_socket(
                     };
                     drop(mutation_lease);
                     while let Ok(event) = event_rx.try_recv() {
-                        if !send_coding_json(&mut socket_tx, &event).await {
+                        if !send_coding_event(&mut socket_tx, &event).await {
                             break;
                         }
                     }
@@ -690,16 +688,33 @@ async fn handle_coding_socket(
             }
         }
     }
+    event_rx.close();
+    while let Ok(event) = event_rx.try_recv() {
+        super::delivery_ack::fail_plan_amendment_socket_write(&event);
+    }
 }
 
-pub(crate) async fn send_coding_json(
-    socket: &mut CodingWsSender,
-    message: &CodingWsOutMessage,
-) -> bool {
+pub(crate) async fn send_coding_json<S>(socket: &mut S, message: &CodingWsOutMessage) -> bool
+where
+    S: Sink<Message> + Unpin,
+{
     match serde_json::to_string(message) {
         Ok(json) => socket.send(Message::Text(json.into())).await.is_ok(),
         Err(_) => false,
     }
+}
+
+pub(crate) async fn send_coding_event<S>(socket: &mut S, event: &CodingWsOutMessage) -> bool
+where
+    S: Sink<Message> + Unpin,
+{
+    let written = send_coding_json(socket, event).await;
+    if written {
+        super::delivery_ack::confirm_plan_amendment_socket_write(event);
+    } else {
+        super::delivery_ack::fail_plan_amendment_socket_write(event);
+    }
+    written
 }
 
 pub fn is_coding_ws_message_allowed(

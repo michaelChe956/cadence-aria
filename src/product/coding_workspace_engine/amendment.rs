@@ -12,6 +12,7 @@ use crate::product::models::{
     PlanRepairSessionSnapshotDto, PlanRepairSessionStage, WorkspaceSessionStatus,
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use crate::web::coding_ws_handler::delivery_ack::register_plan_amendment_socket_write;
 
 struct AmendmentApplicationAuthority {
     plan: crate::product::models::WorkItemPlanLineage,
@@ -24,11 +25,14 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let _arbitration = self.store.acquire_amendment_application_arbitration(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )?;
+        let _arbitration = self
+            .store
+            .acquire_amendment_application_arbitration(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )
+            .await?;
         self.apply_plan_amendment_locked(attempt, manifest).await
     }
 
@@ -85,11 +89,14 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let _arbitration = self.store.acquire_amendment_application_arbitration(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )?;
+        let _arbitration = self
+            .store
+            .acquire_amendment_application_arbitration(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )
+            .await?;
         let current = self.store.validate_attempt_lineage(attempt)?;
         let binding = self.store.get_plan_binding(&current)?;
         let revision_store = WorkItemRevisionStore::new(self.store.paths());
@@ -372,6 +379,7 @@ impl CodingWorkspaceEngine {
                 manifest,
                 journal.phase.order()
                     >= CodingAmendmentApplicationPhase::ResumeTargetWritten.order(),
+                journal.phase == CodingAmendmentApplicationPhase::Completed,
             )?;
         }
         if journal.phase == CodingAmendmentApplicationPhase::Completed {
@@ -456,6 +464,7 @@ impl CodingWorkspaceEngine {
         if delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered {
             return Ok(());
         }
+        let socket_write = register_plan_amendment_socket_write(&delivery.event_id)?;
         self.event_tx
             .send(CodingWsOutMessage::PlanAmendmentUpdated {
                 event_id: delivery.event_id.clone(),
@@ -465,6 +474,7 @@ impl CodingWorkspaceEngine {
             .map_err(|_| {
                 ProductStoreError::Io("plan_amendment_delivery_send_failed".to_string())
             })?;
+        socket_write.wait().await?;
         self.store.mark_plan_amendment_delivery_delivered(
             attempt,
             &manifest.id,

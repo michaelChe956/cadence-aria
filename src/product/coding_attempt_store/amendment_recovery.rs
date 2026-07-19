@@ -16,13 +16,23 @@ impl super::CodingAttemptStore {
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let current = self.validate_attempt_lineage(attempt)?;
         let await_handoff = manifest.resume_target.mode == AmendmentResumeMode::AwaitHandoff;
-        if !(matches!(
+        let amendment_blocked = matches!(
             current.status,
-            CodingAttemptStatus::ApplyingPlanAmendment
-                | CodingAttemptStatus::AmendmentApplyFailed
-                | CodingAttemptStatus::Running
-        ) || await_handoff && current.status == CodingAttemptStatus::AwaitingPlanAmendment)
-        {
+            CodingAttemptStatus::ApplyingPlanAmendment | CodingAttemptStatus::AmendmentApplyFailed
+        );
+        if !amendment_blocked {
+            if matches!(
+                current.status,
+                CodingAttemptStatus::Running
+                    | CodingAttemptStatus::WaitingForHuman
+                    | CodingAttemptStatus::Blocked
+                    | CodingAttemptStatus::Completed
+                    | CodingAttemptStatus::Failed
+                    | CodingAttemptStatus::Aborted
+            ) || await_handoff && current.status == CodingAttemptStatus::AwaitingPlanAmendment
+            {
+                return Ok(current);
+            }
             return Err(identity_mismatch(
                 "coding_amendment_resume_attempt",
                 &current.id,

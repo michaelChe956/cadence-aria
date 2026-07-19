@@ -51,11 +51,13 @@
 - durable 顺序固定为：
   1. request/session/active-lock finalization；
   2. 写入或读取 durable `Pending` marker；
-  3. 发送 `PlanAmendmentUpdated`；
-  4. marker compare-and-mark `Delivered`；
-  5. 恢复 Attempt 为 runnable，或保持 `AwaitHandoff` blocked。
-- send 失败或 Delivered 标记失败时 Attempt 不会变为 runnable。
-- send 成功但 mark 前崩溃时，恢复会用相同 `event_id` 重发；因此语义是 **no-loss + consumer-idempotent，允许重复投递**，不是物理 exactly-once。
+  3. producer 注册 process-local socket-write waiter，并将 `PlanAmendmentUpdated` 入队；
+  4. WebSocket writer 只有在 `Sink::send(...).await` 成功后确认 waiter；socket write 失败或断连 drain 会拒绝 waiter；
+  5. producer 收到 writer 确认后 marker compare-and-mark `Delivered`；
+  6. 恢复 Attempt 为 runnable，或保持 `AwaitHandoff` blocked。
+- mpsc enqueue、socket write 或 Delivered 标记任一步失败时 Attempt 都不会变为 runnable，marker 保持 `Pending`。
+- socket send 成功但 durable mark 前崩溃时，恢复会在重连后用相同 `event_id` 重发；因此语义是 **socket-write-confirmed at-least-once + stable event ID**，允许重复，不是客户端 exactly-once。
+- socket loop 退出前先关闭 event receiver，再拒绝所有已排队 Amendment waiter，避免 drain 与新 enqueue 的竞态悬挂。
 - 同一 Attempt 的并发 recovery 由 arbitration 串行化，durable marker 最终收敛到一次 `Delivered` 状态。
 
 ## Reviewer 3 Critical / 5 Important：RED → GREEN
@@ -70,6 +72,14 @@
 | Important 3 | replacement source 的终态规则不正确 | active replacement source 保持 Running，或可能改写历史 Completed run | 只把 active source 转为 Superseded；Completed 不变；重复恢复幂等 |
 | Important 4 | `AwaitHandoff` 完成后错误恢复为 Running | Attempt 进入 Running，provider 可继续 | Attempt 保持 `AwaitingPlanAmendment`；runner stage-gate continue 集成测试确认 provider starts = 0 |
 | Important 5 | Completed finalization 缺少完整 expected-state/prefix CAS | corrupt Completed session 时 repair request 可先变 Applied；corrupt ResumeTarget 时 Journal 仍推进 Completed | finalization 前验证 durable prefix；request/session/workspace/Attempt/active lock 全部使用 exact expected-state compare-and-update，冲突 fail-closed |
+
+## Re-review 2 Critical / 1 Important：RED → GREEN
+
+| 级别 | 问题 | RED 证据 | GREEN 结果 |
+| --- | --- | --- | --- |
+| Critical 1 | Completed replay 把合法 runtime progress 误判为 forged，并可能把 Testing/CodeReview Attempt 回退 | execution-context binding、UnitRun Completed、Attempt Testing 三个 replay 测试均失败 | immutable materialization identity 与 mutable runtime evolution 分离；Completed replay 接受状态/counters/context hashes/completion commit 的合法单调演进；只恢复仍处于 amendment-blocked 状态的 Attempt |
+| Critical 2 | 同步 `flock(LOCK_EX)` 阻塞 Tokio worker | current-thread ticker 延迟 329ms；6 waiters > 2 workers 发生 worker starvation，手工终止 exit 130 | `spawn_blocking` 获取 cross-process flock，guard 继续跨 await 持有；测试改为 runtime 释放信号 + std watchdog 的确定性调度证明，不依赖机器时间阈值；锁序仍为 attempt arbitration → plan lineage → entity |
+| Important 1 | mpsc enqueue 后即标记 Delivered，socket 尚未实际写出 | enqueue 回归得到 marker `Delivered`，期望 `Pending`；临时移除 writer settle 后 success/failure 测试 0/2，均因 waiter `Elapsed` 失败 | producer 等待 writer success/failure ACK；writer success/failure 2/2，enqueue Pending、socket failure、send-before-mark crash + reconnect、并发 recovery 全部收敛 |
 
 ## 主要 RED/GREEN 测试
 
@@ -87,9 +97,18 @@
 - `coding_amendment_supersedes_only_active_replacement_source_runs`。
 - `coding_amendment_await_handoff_keeps_attempt_provider_blocked`。
 - `coding_ws_plan_repair_await_handoff_stays_blocked_after_stage_gate_continue`。
-- `coding_amendment_delivery_send_failure_keeps_attempt_non_runnable_with_pending_marker`。
+- `coding_amendment_completed_replay_allows_bound_execution_context`。
+- `coding_amendment_completed_replay_allows_completed_unit_run`。
+- `coding_amendment_completed_replay_preserves_later_attempt_stage`。
+- `coding_amendment_arbitration_contention_does_not_block_current_thread_runtime`。
+- `coding_amendment_arbitration_waiters_exceeding_workers_still_make_progress`。
+- `coding_amendment_delivery_enqueue_keeps_marker_pending_until_socket_write`。
+- `coding_amendment_delivery_channel_closed_keeps_attempt_non_runnable_with_pending_marker`。
+- `coding_amendment_delivery_socket_write_failure_keeps_attempt_non_runnable_with_pending_marker`。
 - `coding_amendment_delivery_retries_same_event_after_send_before_mark_failure`。
 - `coding_amendment_concurrent_recovery_reconciles_one_durable_delivery`。
+- `coding_ws_plan_repair_socket_writer_success_acknowledges_delivery`。
+- `coding_ws_plan_repair_socket_writer_failure_rejects_delivery_acknowledgement`。
 
 ## Full gate 首个失败与最小修复
 
@@ -101,10 +120,13 @@
 
 ### Fresh focused
 
-- `cargo test --locked --lib coding_amendment_`：31 passed，0 failed。
-- `cargo test --locked --lib coding_ws_plan_repair_`：2 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_completed_replay_`：3 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_arbitration_`：3 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_delivery_`：4 passed，0 failed；另 `coding_amendment_concurrent_recovery_reconciles_one_durable_delivery`：1 passed，0 failed。
+- `cargo test --locked --lib coding_ws_plan_repair_socket_writer_`：2 passed，0 failed。
+- `cargo test --locked --lib coding_amendment_`：38 passed，0 failed。
+- `cargo test --locked --lib coding_ws_plan_repair_`：4 passed，0 failed。
 - `cargo test --locked --lib coding_amendment_updated_roundtrips`：1 passed，0 failed。
-- 上述 Rust 命令共 34 次 test execution；protocol roundtrip 已包含于 Amendment 31，因此为 33 个 unique tests。
 - `cd web && pnpm tsc -b`：PASS，exit 0。
 
 ### 最终非 E2E full gate
@@ -113,7 +135,8 @@
 - `cargo check --locked`：PASS，exit 0。
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，exit 0，0 warnings。
 - `cargo test --locked`：PASS，exit 0：
-  - lib：1119 passed；
+  - lib：1128 passed；
+  - main：0 tests；
   - it_core：143 passed；
   - it_interactive：43 passed；
   - it_product：211 passed；
@@ -121,7 +144,7 @@
   - it_task_run：31 passed；
   - it_web：258 passed，12 ignored；
   - doc-test：1 passed；
-  - 合计：1861 passed，12 ignored，0 failed。
+  - 合计：1870 passed，12 ignored，0 failed。
 - `cd web && pnpm tsc -b`：PASS，exit 0。
 - `cargo test --locked --test it_core large_file_guard::product_source_and_test_files_stay_under_line_limit`：1 passed，0 failed。
 - 测试命名审计：PASS；新增行为测试使用 `coding_amendment_` / `coding_ws_plan_repair_` 前缀，无 `test`、`tmp`、`todo` 等占位命名。
@@ -132,38 +155,31 @@
 
 | 文件 | 行数 |
 | --- | ---: |
-| `src/product/coding_attempt_store/tests/plan_repair.rs` | 782 |
-| `src/product/coding_workspace_engine/tests/plan_amendment.rs` | 769 |
-| `src/web/coding_ws_handler/tests/plan_repair.rs` | 766 |
-| `src/product/lifecycle_store/workspace.rs` | 733 |
-| `src/product/coding_workspace_engine/amendment.rs` | 717 |
-| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_identity.rs` | 656 |
-| `src/product/work_item_revision_store/tests/concurrency.rs` | 641 |
-| `web/src/api/types/coding.ts` | 622 |
-| `src/product/coding_attempt_store/unit_run_amendment.rs` | 621 |
-| `src/product/work_item_revision_store/repair.rs` | 536 |
-| `src/product/coding_attempt_store/unit_run.rs` | 486 |
-| `src/web/coding_ws_handler/tests/plan_repair/runner_amendment_recovery.rs` | 457 |
-| `src/product/work_item_revision_store/plan.rs` | 385 |
-| `src/product/coding_attempt_store/plan_binding.rs` | 384 |
-| `src/product/coding_attempt_store/paths.rs` | 353 |
-| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_unit_runs.rs` | 255 |
-| `src/web/coding_ws_handler/protocol.rs` | 217 |
-| `src/product/coding_attempt_store/amendment_delivery.rs` | 217 |
-| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs` | 192 |
-| `src/product/coding_attempt_store/mod.rs` | 128 |
-| `src/product/coding_models/plan_repair.rs` | 121 |
-| `src/product/coding_attempt_store/locking.rs` | 91 |
-| `src/product/coding_attempt_store/amendment_recovery.rs` | 89 |
-| `src/product/coding_attempt_store/amendment_arbitration.rs` | 28 |
+| `src/web/coding_ws_handler/socket.rs` | 794 |
+| `src/product/coding_workspace_engine/tests/plan_amendment.rs` | 782 |
+| `src/web/coding_ws_handler/tests/plan_repair.rs` | 767 |
+| `src/product/coding_workspace_engine/amendment.rs` | 727 |
+| `src/product/coding_attempt_store/unit_run_amendment.rs` | 665 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_identity.rs` | 657 |
+| `src/product/coding_attempt_store/unit_run.rs` | 554 |
+| `src/web/coding_ws_handler/tests/plan_repair/runner_amendment_recovery.rs` | 479 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_delivery.rs` | 315 |
+| `src/web/coding_ws_handler/tests/plan_repair/delivery_ack.rs` | 129 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_replay.rs` | 114 |
+| `src/web/coding_ws_handler/delivery_ack.rs` | 111 |
+| `src/product/coding_workspace_engine/tests/plan_amendment/review_fix_async_lock.rs` | 108 |
+| `src/product/coding_attempt_store/amendment_recovery.rs` | 99 |
+| `src/product/coding_attempt_store/amendment_arbitration.rs` | 33 |
+| `src/web/coding_ws_handler/mod.rs` | 28 |
 
-本次 changed Rust/TS/TSX 文件最大为 782 行；large-file guard fresh 通过，全部不超过 800 行。
+本次 changed Rust/TS/TSX 文件最大为 794 行；large-file guard fresh 通过，全部不超过 800 行。
 
 ## 自审结论与边界
 
 - authoritative identity、durable Journal、arbitration/CAS 与锁序满足 fail-closed、zero-write 和崩溃恢复要求。
 - forged same-ID Journal/UnitRun、lineage replacement、并发 recovery、dirty identity mismatch 均有回归覆盖。
 - provider entry 在 durable delivery 成功且 finalization 收敛前保持阻断。
-- delivery 保证 no-loss 与稳定 event ID 下的 consumer idempotency；可能重复，不宣称 exactly-once。
+- delivery 保证 socket-write-confirmed at-least-once 与稳定 event ID；socket write 后 durable mark 前崩溃可能重复，不宣称客户端 ACK、消费成功或 exactly-once。
+- P6 客户端 ACK/dedup 与 Repair Session UI 未在 Task 4 实现。
 - 未添加历史 v1/缺失 Plan lineage 兼容 fallback。
 - worktree 保留；单个原子 fix commit；不 push。

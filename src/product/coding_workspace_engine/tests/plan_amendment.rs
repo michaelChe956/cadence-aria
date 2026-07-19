@@ -20,8 +20,10 @@ use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSe
 
 mod identity;
 mod recovery;
+mod review_fix_async_lock;
 mod review_fix_delivery;
 mod review_fix_identity;
+mod review_fix_replay;
 mod review_fix_unit_runs;
 mod support;
 use support::{prepare_application_phase, seed_unit_run};
@@ -699,7 +701,18 @@ async fn amendment_fixture() -> AmendmentFixture {
     lifecycle
         .update_workspace_session_status(&child.id, WorkspaceSessionStatus::WaitingForHuman)
         .unwrap();
-    let (event_tx, event_rx) = mpsc::channel(16);
+    let (event_tx, mut socket_event_rx) = mpsc::channel(16);
+    let (observed_event_tx, event_rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(event) = socket_event_rx.recv().await {
+            crate::web::coding_ws_handler::delivery_ack::confirm_plan_amendment_socket_write(
+                &event,
+            );
+            if observed_event_tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
 
     AmendmentFixture {

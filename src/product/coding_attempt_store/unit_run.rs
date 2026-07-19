@@ -71,7 +71,7 @@ impl super::CodingAttemptStore {
                 .into_iter()
                 .find(|run| run.execution_no == requested.execution_no)
             {
-                if same_materialization_identity(&existing, requested) {
+                if same_initial_materialization_state(&existing, requested) {
                     return Ok(existing);
                 }
                 return Err(identity_mismatch("coding_unit_run", &requested.id));
@@ -403,7 +403,10 @@ fn validate_unit_run(run: &CodingUnitRun) -> Result<(), ProductStoreError> {
     Ok(())
 }
 
-pub(super) fn same_materialization_identity(left: &CodingUnitRun, right: &CodingUnitRun) -> bool {
+pub(super) fn same_immutable_materialization_identity(
+    left: &CodingUnitRun,
+    right: &CodingUnitRun,
+) -> bool {
     left.unit_id == right.unit_id
         && left.execution_no == right.execution_no
         && left.work_item_revision_id == right.work_item_revision_id
@@ -413,10 +416,22 @@ pub(super) fn same_materialization_identity(left: &CodingUnitRun, right: &Coding
         && left.projection_compiler_version == right.projection_compiler_version
         && left.coder_provider_renderer_version == right.coder_provider_renderer_version
         && left.reviewer_provider_renderer_version == right.reviewer_provider_renderer_version
-        && left.internal_reviewer_provider_renderer_version
-            == right.internal_reviewer_provider_renderer_version
         && left.coder_projection_hash == right.coder_projection_hash
         && left.reviewer_projection_hash == right.reviewer_projection_hash
+        && left.start_commit == right.start_commit
+        && left
+            .internal_reviewer_provider_renderer_version
+            .as_deref()
+            .is_none_or(|version| version == right.reviewer_provider_renderer_version)
+}
+
+pub(super) fn same_initial_materialization_state(
+    left: &CodingUnitRun,
+    right: &CodingUnitRun,
+) -> bool {
+    same_immutable_materialization_identity(left, right)
+        && left.internal_reviewer_provider_renderer_version
+            == right.internal_reviewer_provider_renderer_version
         && left.coder_execution_context_hash == right.coder_execution_context_hash
         && left.reviewer_execution_context_hash == right.reviewer_execution_context_hash
         && left.internal_reviewer_execution_context_hash
@@ -426,8 +441,61 @@ pub(super) fn same_materialization_identity(left: &CodingUnitRun, right: &Coding
         && left.verification_retry_count == right.verification_retry_count
         && left.operational_retry_count == right.operational_retry_count
         && left.plan_repair_count == right.plan_repair_count
-        && left.start_commit == right.start_commit
         && left.completion_commit == right.completion_commit
+}
+
+pub(super) fn valid_materialized_runtime_evolution(
+    current: &CodingUnitRun,
+    initial: &CodingUnitRun,
+) -> bool {
+    same_immutable_materialization_identity(current, initial)
+        && current.unit_rework_count >= initial.unit_rework_count
+        && current.verification_retry_count >= initial.verification_retry_count
+        && current.operational_retry_count >= initial.operational_retry_count
+        && current.plan_repair_count >= initial.plan_repair_count
+        && valid_runtime_status(&initial.status, &current.status)
+        && current
+            .coder_execution_context_hash
+            .as_deref()
+            .is_none_or(|hash| !hash.is_empty())
+        && current
+            .reviewer_execution_context_hash
+            .as_deref()
+            .is_none_or(|hash| !hash.is_empty())
+        && current
+            .internal_reviewer_execution_context_hash
+            .as_deref()
+            .is_none_or(|hash| !hash.is_empty())
+        && (current.status != CodingUnitRunStatus::Completed || current.completion_commit.is_some())
+}
+
+fn valid_runtime_status(initial: &CodingUnitRunStatus, current: &CodingUnitRunStatus) -> bool {
+    match initial {
+        CodingUnitRunStatus::Running => !matches!(
+            current,
+            CodingUnitRunStatus::Pending
+                | CodingUnitRunStatus::AwaitingAmendment
+                | CodingUnitRunStatus::NeedsRevalidation
+                | CodingUnitRunStatus::Stale
+        ),
+        CodingUnitRunStatus::NeedsRevalidation => !matches!(
+            current,
+            CodingUnitRunStatus::Pending
+                | CodingUnitRunStatus::AwaitingAmendment
+                | CodingUnitRunStatus::Stale
+        ),
+        CodingUnitRunStatus::AwaitingAmendment => !matches!(
+            current,
+            CodingUnitRunStatus::Pending
+                | CodingUnitRunStatus::NeedsRevalidation
+                | CodingUnitRunStatus::Stale
+        ),
+        CodingUnitRunStatus::Stale => matches!(
+            current,
+            CodingUnitRunStatus::Stale | CodingUnitRunStatus::Superseded
+        ),
+        _ => current == initial,
+    }
 }
 
 pub(super) fn unique_unit<'a>(

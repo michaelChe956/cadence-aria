@@ -12,7 +12,8 @@ use crate::product::work_item_projection::renderer_for;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 use super::unit_run::{
-    amendment_unit_run_id, same_materialization_identity, unique_unit, unique_unit_mut,
+    amendment_unit_run_id, same_initial_materialization_state, unique_unit, unique_unit_mut,
+    valid_materialized_runtime_evolution,
 };
 
 struct AmendmentRunContext {
@@ -68,7 +69,7 @@ impl super::CodingAttemptStore {
             )?;
             if let Some((_, existing)) = self.find_unit_run_by_id(&current, &expected.id)? {
                 validate_materialized_unit(unit, manifest, &context, false)?;
-                if !same_materialization_identity(&existing, &expected) {
+                if !same_initial_materialization_state(&existing, &expected) {
                     return Err(identity_mismatch("coding_amendment_unit_run", &expected.id));
                 }
             }
@@ -201,6 +202,7 @@ impl super::CodingAttemptStore {
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
         resume_target_written: bool,
+        completed_replay: bool,
     ) -> Result<Vec<CodingUnitRun>, ProductStoreError> {
         let current = self.validate_attempt_lineage(attempt)?;
         let revision_store = WorkItemRevisionStore::new(self.paths());
@@ -214,7 +216,7 @@ impl super::CodingAttemptStore {
             .unwrap_or(&current.provider_config_snapshot.author);
         let reviewer_renderer = renderer_for(reviewer_provider);
         let units = self.list_coding_units(&current.project_id, &current.issue_id, &current.id)?;
-        if resume_target_written {
+        if resume_target_written && !completed_replay {
             let target = unique_unit(&units, &manifest.resume_target.logical_work_item_id)?;
             if current.active_unit_id.as_deref() != Some(target.id.as_str())
                 || current.current_work_item_id.as_deref()
@@ -243,7 +245,11 @@ impl super::CodingAttemptStore {
         let mut validated = Vec::new();
         for logical_id in &context.affected {
             let unit = unique_unit(&units, logical_id)?;
-            validate_materialized_unit(unit, manifest, &context, resume_target_written)?;
+            if completed_replay {
+                validate_materialized_unit_identity(unit, &context)?;
+            } else {
+                validate_materialized_unit(unit, manifest, &context, resume_target_written)?;
+            }
             let runs = self.list_coding_unit_runs(&current, &unit.id)?;
             let expected = expected_run(
                 &current,
@@ -260,7 +266,12 @@ impl super::CodingAttemptStore {
                 .find_unit_run_by_id(&current, &expected.id)?
                 .map(|(_, run)| run)
                 .ok_or_else(|| identity_mismatch("coding_amendment_unit_run", &expected.id))?;
-            if !same_materialization_identity(&existing, &expected) {
+            let valid = if completed_replay {
+                valid_materialized_runtime_evolution(&existing, &expected)
+            } else {
+                same_initial_materialization_state(&existing, &expected)
+            };
+            if !valid {
                 return Err(identity_mismatch("coding_amendment_unit_run", &expected.id));
             }
             validated.push(existing);
@@ -308,7 +319,7 @@ impl super::CodingAttemptStore {
             false,
         )?;
         expected.status = run.status.clone();
-        if !same_materialization_identity(&run, &expected) {
+        if !same_initial_materialization_state(&run, &expected) {
             return Err(identity_mismatch("coding_amendment_unit_run", &run_id));
         }
         if run.status == status {
@@ -455,9 +466,16 @@ fn expected_run(
         ));
     }
     let run_id = amendment_unit_run_id(&unit.id, &manifest.id);
+    let existing_execution_no = runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .map(|run| run.execution_no);
     let predecessors = runs
         .iter()
         .filter(|run| run.id != run_id)
+        .filter(|run| {
+            existing_execution_no.is_none_or(|execution_no| run.execution_no < execution_no)
+        })
         .collect::<Vec<_>>();
     let execution_no = predecessors
         .iter()
@@ -541,6 +559,32 @@ fn validate_materialized_unit(
         || (expected_status == CodingExecutionUnitStatus::Running && expected_started.is_none())
         || unit.completed_at.is_some()
         || unit.summary.as_deref() != Some(expected_summary.as_str())
+    {
+        return Err(identity_mismatch(
+            "coding_amendment_execution_unit",
+            logical_id,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_materialized_unit_identity(
+    unit: &CodingExecutionUnit,
+    context: &AmendmentRunContext,
+) -> Result<(), ProductStoreError> {
+    let logical_id = &unit.logical_work_item_id;
+    let expected_revision = context
+        .revision
+        .work_item_bindings
+        .get(logical_id)
+        .ok_or_else(|| identity_mismatch("coding_amendment_execution_unit", logical_id))?;
+    if &unit.work_item_revision_id != expected_revision
+        || unit.dependency_logical_work_item_ids
+            != context
+                .dependencies
+                .get(logical_id)
+                .cloned()
+                .unwrap_or_default()
     {
         return Err(identity_mismatch(
             "coding_amendment_execution_unit",

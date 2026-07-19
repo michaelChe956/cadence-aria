@@ -602,6 +602,7 @@ async fn coding_amendment_arbitration_rechecks_lineage_before_first_write() {
             &fixture.attempt.issue_id,
             &fixture.attempt.id,
         )
+        .await
         .unwrap();
     let attempt = fixture.attempt.clone();
     let manifest = fixture.manifest.clone();

@@ -9,7 +9,7 @@ pub(crate) struct AmendmentApplicationArbitrationGuard {
 }
 
 impl super::CodingAttemptStore {
-    pub(crate) fn acquire_amendment_application_arbitration(
+    pub(crate) async fn acquire_amendment_application_arbitration(
         &self,
         project_id: &str,
         issue_id: &str,
@@ -21,8 +21,13 @@ impl super::CodingAttemptStore {
         let target = self
             .attempt_dir(project_id, issue_id, attempt_id)
             .join(AMENDMENT_APPLICATION_ARBITRATION_TARGET);
-        Ok(AmendmentApplicationArbitrationGuard {
-            _lock: ExclusiveFileLock::acquire(&target)?,
-        })
+        let lock = tokio::task::spawn_blocking(move || ExclusiveFileLock::acquire(&target))
+            .await
+            .map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "amendment application arbitration task failed: {error}"
+                ))
+            })??;
+        Ok(AmendmentApplicationArbitrationGuard { _lock: lock })
     }
 }
