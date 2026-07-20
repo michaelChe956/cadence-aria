@@ -217,6 +217,44 @@ async fn coding_ws_plan_repair_await_handoff_stays_blocked_after_stage_gate_cont
             .status,
         CodingAttemptStatus::AwaitingPlanAmendment
     );
+
+    let (replay_event_tx, mut replay_event_rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(event) = replay_event_rx.recv().await {
+            crate::web::coding_ws_handler::delivery_ack::confirm_plan_amendment_socket_write(
+                &event,
+            );
+        }
+    });
+    let (_replay_command_tx, replay_command_rx) = mpsc::channel(8);
+    let replay_engine = CodingWorkspaceEngine::with_provider(
+        fixture.store.clone(),
+        GitWorkspaceService::new(),
+        web_state.provider_adapter.clone(),
+        replay_event_tx.clone(),
+    );
+    let replay_attempt = fixture
+        .store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .unwrap();
+    let replay_error = execute_start_coding_flow(
+        &web_state,
+        &fixture.store,
+        &replay_engine,
+        &replay_event_tx,
+        replay_command_rx,
+        &replay_attempt,
+    )
+    .await
+    .expect_err("AwaitHandoff replay must remain provider-blocked");
+
+    assert!(
+        replay_error
+            .to_string()
+            .contains("plan_amendment_blocks_provider_run"),
+        "{replay_error}"
+    );
+    assert_eq!(provider.starts(), 0);
 }
 
 async fn prepare_runner_amendment(

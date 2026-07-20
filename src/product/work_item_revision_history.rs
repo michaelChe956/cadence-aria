@@ -19,6 +19,7 @@ pub(crate) struct AuthoritativeCodingRevisionHistory {
 pub(crate) fn build_authoritative_coding_revision_history(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
+    current_child_session_id: Option<&str>,
 ) -> Result<AuthoritativeCodingRevisionHistory, ProductStoreError> {
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let binding = coding_store.get_plan_binding(attempt)?;
@@ -75,23 +76,26 @@ pub(crate) fn build_authoritative_coding_revision_history(
             .cmp(&right.created_at)
             .then_with(|| left.id.cmp(&right.id))
     });
-    let base_history = sessions
+    let base_session = sessions
         .iter()
         .rev()
-        .find_map(|session| {
-            lifecycle
-                .list_artifact_versions(&session.id)
-                .ok()?
-                .into_iter()
-                .rev()
-                .find_map(|version| match version.payload {
-                    ArtifactPayload::WorkItemRevisionHistory { history } => Some(*history),
-                    _ => None,
-                })
+        .find(|session| current_child_session_id != Some(session.id.as_str()))
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "coding_revision_history_plan_session",
+            id: binding.plan_id.clone(),
+        })?;
+    let base_history = lifecycle
+        .list_artifact_versions(&base_session.id)?
+        .into_iter()
+        .rev()
+        .find_map(|version| match version.payload {
+            ArtifactPayload::WorkItemRevisionHistory { history } => Some(*history),
+            _ => None,
         })
-        .unwrap_or(WorkItemRevisionHistoryDto {
-            entries: Vec::new(),
-        });
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "coding_revision_history_artifact",
+            id: base_session.id.clone(),
+        })?;
 
     Ok(AuthoritativeCodingRevisionHistory {
         history: base_history.merge_runtime_entries(runtime_entries),

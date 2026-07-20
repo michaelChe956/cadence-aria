@@ -89,6 +89,15 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        self.recover_plan_amendment_with_history_session(attempt)
+            .await
+            .map(|(attempt, _)| attempt)
+    }
+
+    pub(crate) async fn recover_plan_amendment_with_history_session(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(CodingExecutionAttempt, String), CodingWorkspaceEngineError> {
         let _arbitration = self
             .store
             .acquire_amendment_application_arbitration(
@@ -110,7 +119,11 @@ impl CodingWorkspaceEngine {
             None => self.current_amendment_journal_id(&current, &plan, &revision_store)?,
         };
         let manifest = revision_store.get_amendment_manifest(&plan, &amendment_id)?;
-        self.apply_plan_amendment_locked(&current, &manifest).await
+        let updated = self
+            .apply_plan_amendment_locked(&current, &manifest)
+            .await?;
+        let child_session_id = self.completed_amendment_child_session_id(&current, &manifest)?;
+        Ok((updated, child_session_id))
     }
 
     fn current_amendment_journal_id(
@@ -398,6 +411,15 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        self.completed_amendment_child_session_id(attempt, manifest)
+            .map(|_| ())
+    }
+
+    fn completed_amendment_child_session_id(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<String, CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
         let mut links = lifecycle
             .list_session_links(&attempt.project_id, &attempt.issue_id)?
@@ -432,7 +454,7 @@ impl CodingWorkspaceEngine {
         {
             return Err(amendment_identity_error(&link.child_session_id).into());
         }
-        Ok(())
+        Ok(link.child_session_id)
     }
 
     fn finalize_completed_amendment_application(

@@ -618,14 +618,9 @@ function reconcileChildTimelineNodes(
     ...current.filter(
       (node) =>
         !snapshotIds.has(node.node_id) &&
-        isLiveTimelineNode(node) &&
-        node.started_at > snapshotWatermark,
+        (node.completed_at ?? node.started_at) > snapshotWatermark,
     ),
   ];
-}
-
-function isLiveTimelineNode(node: TimelineNode) {
-  return node.status === "active" || node.status === "paused";
 }
 
 function isTerminalRepairRequest(request: PlanRepairRequest) {

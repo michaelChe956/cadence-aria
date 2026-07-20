@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::CodingExecutionAttempt;
+use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionAttempt};
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::json_store::ProductStoreError;
@@ -19,18 +19,39 @@ use super::{
     update_provider_selection,
 };
 
+pub(super) async fn recover_plan_amendment_if_needed(
+    engine: &CodingWorkspaceEngine,
+    attempt: &CodingExecutionAttempt,
+) -> Result<(CodingExecutionAttempt, Option<String>), CodingWorkspaceEngineError> {
+    if matches!(
+        attempt.status,
+        CodingAttemptStatus::AwaitingPlanAmendment
+            | CodingAttemptStatus::ApplyingPlanAmendment
+            | CodingAttemptStatus::AmendmentApplyFailed
+    ) {
+        let (recovered, child_session_id) = engine
+            .recover_plan_amendment_with_history_session(attempt)
+            .await?;
+        return Ok((recovered, Some(child_session_id)));
+    }
+    Ok((attempt.clone(), None))
+}
+
 pub(super) fn refresh_runtime_revision_history(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
+    current_child_session_id: Option<&str>,
 ) -> Result<(), CodingWorkspaceEngineError> {
     if attempt.scope != crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
         return Ok(());
     }
-    refresh_coding_runtime_revision_history(app_paths, attempt).map_err(|error| {
-        CodingWorkspaceEngineError::ProviderStream(format!(
-            "runtime_revision_history_refresh_failed: {error}"
-        ))
-    })?;
+    refresh_coding_runtime_revision_history(app_paths, attempt, current_child_session_id).map_err(
+        |error| {
+            CodingWorkspaceEngineError::ProviderStream(format!(
+                "runtime_revision_history_refresh_failed: {error}"
+            ))
+        },
+    )?;
     Ok(())
 }
 

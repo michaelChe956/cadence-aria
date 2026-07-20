@@ -11,9 +11,11 @@ pub(crate) fn ws_artifact_update(version: u32, payload: ArtifactPayload) -> WsOu
 pub(crate) fn refresh_coding_runtime_revision_history(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
+    current_child_session_id: Option<&str>,
 ) -> Result<WorkItemRevisionHistoryDto, String> {
-    let projection = build_authoritative_coding_revision_history(app_paths, attempt)
-        .map_err(|error| format!("build coding runtime revision history failed: {error}"))?;
+    let projection =
+        build_authoritative_coding_revision_history(app_paths, attempt, current_child_session_id)
+            .map_err(|error| format!("build coding runtime revision history failed: {error}"))?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     for session_id in projection.plan_session_ids {
         let mut versions = lifecycle

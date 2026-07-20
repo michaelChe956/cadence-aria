@@ -243,7 +243,8 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             },
         )
         .unwrap();
-    LifecycleStore::new(paths.clone())
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let plan_session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: attempt.project_id.clone(),
             issue_id: attempt.issue_id.clone(),
@@ -255,6 +256,46 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             superpowers_enabled: true,
             openspec_enabled: true,
         })
+        .unwrap();
+    lifecycle
+        .save_artifact_versions(
+            &plan_session.id,
+            &[crate::web::workspace_ws_types::ArtifactVersion {
+                version: 1,
+                payload:
+                    crate::web::workspace_ws_types::ArtifactPayload::WorkItemRevisionHistory {
+                        history: Box::new(
+                            crate::web::workspace_ws_types::WorkItemRevisionHistoryDto {
+                                entries: vec![
+                                    crate::web::workspace_ws_types::WorkItemHistoryEntryDto {
+                                        kind: crate::web::workspace_ws_types::WorkItemHistoryEntryKind::WorkItemRevision,
+                                        id: upstream_revision.id,
+                                        logical_work_item_id: upstream.id,
+                                        related_revision_id: None,
+                                        summary: "Compiled upstream WorkItem revision".to_string(),
+                                        created_at: "2026-07-19T00:00:00Z".to_string(),
+                                    },
+                                    crate::web::workspace_ws_types::WorkItemHistoryEntryDto {
+                                        kind: crate::web::workspace_ws_types::WorkItemHistoryEntryKind::WorkItemRevision,
+                                        id: "work_item_revision_current".to_string(),
+                                        logical_work_item_id: current.id,
+                                        related_revision_id: None,
+                                        summary: "Compiled current WorkItem revision".to_string(),
+                                        created_at: "2026-07-19T00:00:00Z".to_string(),
+                                    },
+                                ],
+                            },
+                        ),
+                    },
+                generated_by: ProviderName::Codex,
+                reviewed_by: None,
+                review_verdict: None,
+                confirmed_by: None,
+                is_current: false,
+                created_at: "2026-07-19T00:00:00Z".to_string(),
+                source_node_id: "timeline_node_compile".to_string(),
+            }],
+        )
         .unwrap();
     let (event_tx, event_rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);

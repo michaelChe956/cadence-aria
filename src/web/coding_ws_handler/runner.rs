@@ -16,7 +16,8 @@ use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::{CodingAttemptRunKey, CodingRunReservation, WebAppState};
 
 use super::runner_support::{
-    handle_pending_runner_commands, provider_for, refresh_runtime_revision_history,
+    handle_pending_runner_commands, provider_for, recover_plan_amendment_if_needed,
+    refresh_runtime_revision_history,
 };
 use super::{
     CodingWsOutMessage, await_stage_gate, coding_execution_context, emit_current_session_state,
@@ -338,20 +339,18 @@ pub(crate) async fn execute_start_coding_flow(
 ) -> Result<(), CodingWorkspaceEngineError> {
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
 
-    let mut current =
-        coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-    if matches!(
-        current.status,
-        CodingAttemptStatus::AwaitingPlanAmendment
-            | CodingAttemptStatus::ApplyingPlanAmendment
-            | CodingAttemptStatus::AmendmentApplyFailed
-    ) {
-        current = engine.recover_plan_amendment(&current).await?;
-        refresh_runtime_revision_history(&app_paths, &current)?;
+    let current = coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let (mut current, current_child_session_id) =
+        recover_plan_amendment_if_needed(engine, &current).await?;
+    let refresh_runtime_history = |attempt: &CodingExecutionAttempt| {
+        refresh_runtime_revision_history(&app_paths, attempt, current_child_session_id.as_deref())
+    };
+    if current_child_session_id.is_some() {
+        refresh_runtime_history(&current)?;
     }
     coding_store.ensure_provider_run_allowed(&current)?;
     'pipeline: loop {
-        refresh_runtime_revision_history(&app_paths, &current)?;
+        refresh_runtime_history(&current)?;
         ensure_work_item_execution_plan_confirmed(&app_paths, &current)?;
 
         if matches!(current.stage, CodingExecutionStage::PrepareContext) {
@@ -425,7 +424,7 @@ pub(crate) async fn execute_start_coding_flow(
             let plan_defect_decision = coding_outcome.plan_defect_decision;
             let plan_defect_report = coding_outcome.plan_defect_report;
             current = coding_outcome.attempt;
-            refresh_runtime_revision_history(&app_paths, &current)?;
+            refresh_runtime_history(&current)?;
             if handle_pending_runner_commands(
                 &mut command_rx,
                 coding_store,
@@ -581,7 +580,7 @@ pub(crate) async fn execute_start_coding_flow(
                     let plan_defect_decision = rework_outcome.plan_defect_decision;
                     let plan_defect_report = rework_outcome.plan_defect_report;
                     current = rework_outcome.attempt;
-                    refresh_runtime_revision_history(&app_paths, &current)?;
+                    refresh_runtime_history(&current)?;
                     current = coding_store.get_attempt(
                         &current.project_id,
                         &current.issue_id,
@@ -682,7 +681,7 @@ pub(crate) async fn execute_start_coding_flow(
             current = engine
                 .complete_group_unit_after_code_review(&current)
                 .await?;
-            refresh_runtime_revision_history(&app_paths, &current)?;
+            refresh_runtime_history(&current)?;
             emit_current_session_state(event_tx, coding_store, &current).await?;
             if current.stage == CodingExecutionStage::PrepareContext {
                 continue 'pipeline;

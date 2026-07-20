@@ -28,9 +28,12 @@ impl WorkspaceEngine {
                 &snapshot.request.trigger_attempt_id,
             )
             .map_err(PlanRepairError::Store)?;
-        let projection =
-            build_authoritative_coding_revision_history(&lifecycle.app_paths(), &attempt)
-                .map_err(PlanRepairError::Store)?;
+        let projection = build_authoritative_coding_revision_history(
+            &lifecycle.app_paths(),
+            &attempt,
+            Some(&self.session.session_id),
+        )
+        .map_err(PlanRepairError::Store)?;
         if projection.plan_id != snapshot.request.plan_id
             || projection.plan_revision_id != snapshot.request.base_plan_revision_id
             || !projection.history.entries.iter().any(|entry| {

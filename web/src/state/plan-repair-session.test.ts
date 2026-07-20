@@ -458,6 +458,49 @@ describe("plan repair session aggregation", () => {
     ).toEqual(["new_live"]);
   });
 
+  it.each(["completed", "failed"] as const)(
+    "keeps an omitted %s node only when its last event is newer than the snapshot watermark",
+    (status) => {
+      const store = useCodingWorkspaceStore.getState();
+      const current = snapshot({ timeline_nodes: [] });
+      store.setSessionState(codingSessionState(current));
+      store.addPlanRepairTimelineNode(
+        current,
+        liveTimelineNode({ node_id: "old_terminal", started_at: "2026-07-18T00:04:00Z" }),
+      );
+      store.updatePlanRepairTimelineNode(
+        current,
+        "old_terminal",
+        status,
+        "old terminal",
+        "2026-07-18T00:07:00Z",
+      );
+      store.addPlanRepairTimelineNode(
+        current,
+        liveTimelineNode({ node_id: "new_terminal", started_at: "2026-07-18T00:09:00Z" }),
+      );
+      store.updatePlanRepairTimelineNode(
+        current,
+        "new_terminal",
+        status,
+        "new terminal",
+        "2026-07-18T00:10:00Z",
+      );
+
+      store.updatePlanRepairSession({
+        ...current,
+        request: { ...current.request, updated_at: "2026-07-18T00:08:00Z" },
+        timeline_nodes: [],
+      });
+
+      expect(
+        useCodingWorkspaceStore
+          .getState()
+          .activePlanRepair?.timelineNodes.map((node) => [node.id, node.status]),
+      ).toEqual([["new_terminal", status]]);
+    },
+  );
+
   it("does not downgrade stage for an equal-version child snapshot", () => {
     const store = useCodingWorkspaceStore.getState();
     const current = snapshot({ stage: "validating_contract" });
