@@ -88,3 +88,74 @@
 - Story/Design amendment 未接入 Coding Plan Repair aggregator。
 - 未新增生产测试路由，未运行被禁止的 E2E/浏览器/真实 provider 网络流程。
 - worktree 保留；完成后仅创建单个原子提交，不 push。
+
+## Round 2 Review 修复（2026-07-20）
+
+### 1. Subgraph Replan durable recovery
+
+- Candidate package 显式持久化 `subgraph_replan`，并将完整 readiness 纳入 package fingerprint、canonical reload、publication 与 review attestation 校验。
+- `load_prepared_amendment` 从 durable candidate 恢复真实 `SubgraphReplanResult`，并与权威 base/next dependency graph revision 交叉校验。
+- `subgraph_replan` 使用 required-Option 反序列化：字段必须存在，显式 `null` 仅允许非 Subgraph candidate；不接受旧 Schema 的缺字段默认兼容。
+- topology fixture 拆分到 `src/web/test_controls/plan_repair/topology.rs`，避免原 fixture 文件超过 800 行。
+- 覆盖 topology partial publication recovery 与 Child/Coding 双真实 WebSocket 确认、发布、应用、runner 恢复。
+
+### 2. Issue worktree lease、并发 Attempt 与终态顺序
+
+- `IssueSharedWorktree.current_lock_owner_id` 为 required-Option 严格字段；所有 Issue worktree RMW 均在跨 Store 文件锁内执行。
+- acquire 返回 `IssueWorktreeLockLease`；成功 Attempt 将临时 lease owner 绑定为 `attempt.id`；transfer/release/complete 校验 owner。
+- stale Work Item release 即使 owner 相同也返回 typed conflict；其他 Work Item 正持锁时，complete 必须匹配当前 owner 才能写完成历史。
+- group Unit 推进在任何 Unit/run/Attempt 写入前校验 lease owner；owner conflict 下 Unit 与 Attempt 均保持原状态。
+- Final Confirm、Abort、Failed、Delete 与自动完成路径在写 Attempt/Work Item 终态前统一预检 owner；wrong-owner focused 测试确认无终态副作用。
+- 同 Work Item 双 HTTP 并发由默认关闭、无 HTTP route 的 `Notify` seam 确定性协调：winner 保留 lease，loser 返回稳定 `coding_attempt_active` 409，其他 Work Item 在 winner abort 前仍被 `issue_worktree_active` 阻止。
+- 并发 HTTP 测试等待窗口由 1 秒提升到项目常用的 3 秒，协调本身仍由 Notify 事件驱动，不依赖 sleep 竞争。
+
+### 3. Equal-version timeline snapshot
+
+- `reconcileChildTimelineNodes` 对 snapshot 与 live 同 ID 节点复用 `shouldKeepTimelineNode`，terminal live 节点不会被 equal-version active/paused snapshot 回退。
+- snapshot watermark 后的合法新 live node 继续保留。
+- Story/Design amendment relation 的表驱动覆盖继续确认其不进入 Coding Plan Repair aggregator；本轮前端改动仅位于共享 Plan Repair 聚合层，未改变 Story/Design Workspace 自身链路。
+
+### 4. 追加 RED → GREEN
+
+| 场景 | RED | GREEN |
+| --- | --- | --- |
+| Candidate package 严格 Schema | 缺少 `subgraph_replan` 仍被 Serde 解为 `None` | required-Option 拒绝缺字段 |
+| Issue worktree 严格 Schema | 缺少 `current_lock_owner_id` 仍被 Serde 解为 `None` | required-Option 拒绝缺字段 |
+| stale Work Item release | lock 已转移后旧 Work Item release 静默成功 | 返回 `issue_worktree_lock_owner` conflict，lease 保持在新 Work Item |
+| wrong-owner complete | winner 持有其他 Work Item lease 时 loser 可改写 `last_completed` | typed conflict，历史与 owner 均不变 |
+| group Unit owner conflict | Unit、Attempt 已推进后 transfer 才失败 | 写前预检，Unit/Attempt/lease 零状态变化 |
+| terminal owner conflict | Final Confirm/Abort/Failed 先写终态再报 owner conflict | 写前预检，Attempt 保持原状态 |
+
+对应 focused GREEN：
+
+- `plan_repair_candidate_package_rejects_missing_subgraph_readiness_field`
+- `issue_shared_worktree_rejects_missing_lock_owner_field`
+- `stale_work_item_release_is_rejected_even_for_current_owner`
+- `wrong_owner_completion_does_not_mutate_worktree_history`
+- `group_unit_owner_conflict_does_not_advance_unit_or_attempt`
+- `final_confirm_owner_conflict_does_not_complete_attempt`
+- `abort_owner_conflict_does_not_abort_attempt`
+- `failure_owner_conflict_does_not_fail_attempt`
+- `concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease`
+- `topology_plan_repair_recovers_partial_publication_from_durable_candidate`
+- `topology_child_confirmation_applies_and_resumes_through_real_websockets`
+- equal-version completed/failed timeline snapshot 回退用例。
+
+### 5. Round 2 最终门禁与审计
+
+- `cargo fmt --check`：PASS。
+- `cargo check --locked`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS。
+- `cargo test --locked`：PASS，exit 0；lib、integration、Web integration 与 doc-test 无失败；Web integration 270 passed、12 ignored，doc-test 1 passed。
+- `cd web && pnpm tsc -b`：PASS。
+- `cd web && pnpm test`：89 files、724 tests passed。
+- `cd web && pnpm build`：PASS；仅既有 Vite 大 chunk 提示。
+- `git diff --check`：PASS。
+- 40 个改动/新增 Rust、TS 文件全部不超过 800 行；最大为 `tests/it_product/product_coding_workspace_engine/part_13.rs`，792 行。
+- `src/web/app.rs` 无 diff；现有 `/api/test/*` 仍仅在 `test_controls_enabled()` 为真时注册，未新增默认生产可达路由。
+- 明确未运行：E2E、Playwright、browser、真实 Provider/网络 CLI。
+
+### 6. Round 2 提交
+
+- Commit：`050e728`（`fix(plan-repair): close round two recovery races`）。
+- 策略：新原子 fix commit，不 amend `1fba4dc`，不 push；worktree 保留。
