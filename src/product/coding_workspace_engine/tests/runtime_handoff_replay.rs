@@ -14,6 +14,29 @@ fn runtime_registration_unit(
         .unwrap()
 }
 
+fn set_runtime_handoff_pointer(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    logical_work_item_id: &str,
+    handoff_id: &str,
+) {
+    let source = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .unwrap()
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == logical_work_item_id)
+        .unwrap();
+    store
+        .update_coding_unit_latest_handoff_revision_id(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &source.id,
+            Some(handoff_id.to_string()),
+        )
+        .unwrap();
+}
+
 fn seed_runtime_source_handoff_runs(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
@@ -301,6 +324,12 @@ fn append_runtime_source_handoff(
     revision_store
         .put_handoff_revision(&lineage, &handoff)
         .unwrap();
+    set_runtime_handoff_pointer(
+        &fixture.store,
+        &fixture.attempt,
+        "wi_core",
+        &handoff.id,
+    );
     handoff
 }
 
@@ -737,3 +766,5 @@ fn coding_runtime_handoff_placeholder_different_tuple_stale_converges_unit() {
     assert_eq!(runs[1], completed);
     assert_eq!(runs[2], created);
 }
+
+include!("runtime_handoff_latest_authority.rs");

@@ -237,7 +237,7 @@ impl CodingWorkspaceEngine {
                 next_handoff.id
             )));
         }
-        let next_run = self.authoritative_handoff_run(&current, next_handoff)?;
+        let next_run = self.authoritative_current_handoff_run(&current, next_handoff)?;
         let previous = self.authoritative_previous_handoff_for_run(
             &current,
             &lineage,

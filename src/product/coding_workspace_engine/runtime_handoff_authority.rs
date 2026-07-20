@@ -42,6 +42,32 @@ impl CodingWorkspaceEngine {
         Ok(run)
     }
 
+    pub(super) fn authoritative_current_handoff_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        handoff: &HandoffRevision,
+    ) -> Result<CodingUnitRun, CodingWorkspaceEngineError> {
+        let units =
+            self.store
+                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let unit = unique_authority_unit(&units, &handoff.logical_work_item_id)
+            .map_err(|_| runtime_handoff_authority_conflict(&handoff.id))?;
+        if unit.latest_handoff_revision_id.as_deref() != Some(handoff.id.as_str()) {
+            return Err(runtime_handoff_authority_conflict(&handoff.id));
+        }
+        let run = self.authoritative_handoff_run(attempt, handoff)?;
+        let latest = self
+            .store
+            .list_coding_unit_runs(attempt, &unit.id)?
+            .into_iter()
+            .max_by_key(|candidate| candidate.execution_no)
+            .ok_or_else(|| runtime_handoff_authority_conflict(&handoff.id))?;
+        if latest != run {
+            return Err(runtime_handoff_authority_conflict(&handoff.id));
+        }
+        Ok(run)
+    }
+
     pub(super) fn authoritative_previous_handoff_for_run(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -89,7 +115,7 @@ impl CodingWorkspaceEngine {
         previous: Option<HandoffRevision>,
         next: HandoffRevision,
     ) -> Result<AuthoritativeHandoffTransition, CodingWorkspaceEngineError> {
-        let next_run = self.authoritative_handoff_run(attempt, &next)?;
+        let next_run = self.authoritative_current_handoff_run(attempt, &next)?;
         if let Some(previous_handoff) = previous.as_ref() {
             if previous_handoff.logical_work_item_id != next.logical_work_item_id {
                 return Err(runtime_handoff_authority_conflict(&next.id));

@@ -437,6 +437,7 @@ fn runtime_handoff_fixture(
     revision_store
         .put_handoff_revision(&lineage, &next_handoff)
         .expect("next handoff");
+    set_runtime_handoff_pointer(&store, &attempt, "wi_core", &next_handoff.id);
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     RuntimeHandoffFixture {
@@ -751,6 +752,12 @@ async fn coding_runtime_handoff_releases_conditional_consumer_only_after_changed
     revision_store
         .put_handoff_revision(&lineage, &next)
         .unwrap();
+    set_runtime_handoff_pointer(
+        &fixture.store,
+        &fixture.attempt,
+        "wi_registration",
+        &next.id,
+    );
 
     let result = fixture
         .engine

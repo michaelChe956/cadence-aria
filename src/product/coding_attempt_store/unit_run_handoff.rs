@@ -176,6 +176,14 @@ impl super::CodingAttemptStore {
                 }
             }
         };
+        let latest_execution_no = self
+            .list_coding_unit_runs(&current, &unit.id)?
+            .into_iter()
+            .map(|run| run.execution_no)
+            .max();
+        if latest_execution_no != Some(resolved.execution_no) {
+            return Ok(resolved);
+        }
         unit.status = unit_status(&resolved.status);
         unit.started_at = None;
         unit.completed_at = None;
