@@ -25,6 +25,7 @@ export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sendHumanConfirm: vi.fn(() => true),
     confirmPlanAmendment: vi.fn(() => true),
     cancelPlanAmendment: vi.fn(() => true),
+    startLinkedWorkspaceAmendment: vi.fn(() => true),
     sendHello: vi.fn(),
     sendPing: vi.fn(),
     startGeneration: vi.fn(),

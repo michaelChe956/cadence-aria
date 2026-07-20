@@ -41,6 +41,24 @@ fn plan_repair_parent_engine(
     let lifecycle_store = LifecycleStore::new(app_paths.clone());
     let revision_store =
         crate::product::work_item_revision_store::WorkItemRevisionStore::new(app_paths);
+    let story = lifecycle_store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Story 0001".to_string(),
+        })
+        .unwrap();
+    assert_eq!(story.id, "story_spec_0001");
+    let design = lifecycle_store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            story_spec_ids: vec![story.id.clone()],
+            title: "Design 0001".to_string(),
+        })
+        .unwrap();
+    assert_eq!(design.id, "design_spec_0001");
     let plan = crate::product::models::WorkItemPlanLineage {
         id: "work_item_plan_0001".to_string(),
         project_id: "project_0001".to_string(),

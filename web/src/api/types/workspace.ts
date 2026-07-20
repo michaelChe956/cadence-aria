@@ -29,6 +29,7 @@ import type {
 import type {
   PlanAmendmentManifest,
   PlanRepairSessionSnapshot,
+  WorkspaceSessionLink,
 } from "./coding-plan-repair";
 
 export type WorkspaceMessage = {
@@ -115,6 +116,28 @@ export type RecoverableInterruptedRun = {
   label: string;
 };
 
+export type LinkedWorkspaceAmendmentTarget = {
+  entity_id: string;
+  workspace_type: "story" | "design";
+  relation: "story_amendment" | "design_amendment";
+};
+
+export type LinkedWorkspaceSessionSnapshot = {
+  link: WorkspaceSessionLink;
+  workspace_type: "story" | "design" | "work_item" | "work_item_plan";
+  artifact_version_id: number | null;
+  timeline_nodes: TimelineNode[];
+  selected_timeline_node_id: string | null;
+  human_confirm_state:
+    | "open"
+    | "running"
+    | "waiting_for_human"
+    | "confirmed"
+    | "change_requested"
+    | "blocked_provider_unavailable"
+    | "terminated";
+};
+
 export type WsInMessage =
   | { type: "user_message"; content: string }
   | { type: "context_note"; content: string }
@@ -166,6 +189,10 @@ export type WsInMessage =
       type: "cancel_plan_amendment";
       amendment_id: string;
       reason?: string | null;
+    }
+  | {
+      type: "start_linked_workspace_amendment";
+      target: LinkedWorkspaceAmendmentTarget;
     }
   | { type: "abort" }
   | { type: "hello"; session_id: string; last_seen_node_id?: string | null }
@@ -486,6 +513,10 @@ export type WsOutMessage =
       type: "human_presentation_revision_save_failed";
       source_projection_bundle_id: string;
       message: string;
+    }
+  | {
+      type: "linked_workspace_amendment_created";
+      snapshot: LinkedWorkspaceSessionSnapshot;
     }
   | {
       type: "session_state";

@@ -20,6 +20,7 @@ impl PlanRepairEngine {
         prepared: PreparedPlanAmendment,
         mut confirmation: PlanAmendmentConfirmation,
     ) -> Result<PlanAmendmentManifest, PlanRepairError> {
+        self.validate_prepared_subgraph(&prepared)?;
         let plan = self
             .store
             .get_plan_lineage(&self.plan.project_id, &self.plan.issue_id, &self.plan.id)
@@ -134,7 +135,7 @@ impl PlanRepairEngine {
                 .ok_or_else(|| invalid_publication("published journal snapshot is missing"))?
                 .manifest);
         }
-        let snapshot = publication_snapshot(&self.store, &plan, &prepared, final_manifest.clone())?;
+        let snapshot = publication_snapshot(&plan, &prepared, final_manifest.clone())?;
         let artifact_fingerprint = artifact_fingerprint(&snapshot, &confirmation)?;
         let journal = PlanAmendmentPublicationJournal {
             id: prepared.publication_ids.journal_id.clone(),
@@ -365,7 +366,6 @@ pub(crate) fn final_plan_amendment_manifest(
 }
 
 fn publication_snapshot(
-    store: &crate::product::work_item_revision_store::WorkItemRevisionStore,
     plan: &crate::product::models::WorkItemPlanLineage,
     prepared: &PreparedPlanAmendment,
     manifest: PlanAmendmentManifest,
@@ -385,13 +385,19 @@ fn publication_snapshot(
         .iter()
         .map(|value| (value.work_item_revision_id.as_str(), value))
         .collect::<BTreeMap<_, _>>();
+    let logical_work_items = prepared
+        .logical_work_items
+        .iter()
+        .map(|value| (value.id.as_str(), value))
+        .collect::<BTreeMap<_, _>>();
     let mut work_items = Vec::new();
     for revision in &prepared.revised_work_items {
         let logical_id = revision.logical_work_item_id.as_str();
         work_items.push(PlanAmendmentWorkItemArtifacts {
-            logical_work_item: store
-                .get_logical_work_item(plan, logical_id)
-                .map_err(PlanRepairError::Store)?,
+            logical_work_item: (*logical_work_items
+                .get(logical_id)
+                .ok_or_else(|| invalid_publication("logical work item is missing"))?)
+            .clone(),
             draft_revision: (*drafts
                 .get(logical_id)
                 .ok_or_else(|| invalid_publication("candidate draft is missing"))?)

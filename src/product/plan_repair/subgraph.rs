@@ -6,6 +6,7 @@ use crate::product::models::DependencyGraphRevision;
 use crate::product::work_item_contract::{
     CanonicalWorkItemContract, ContractCompatibilityPolicy, DependencyContractEdge,
     DependencyContractGraph, RequiredDependencyContract, RequiredInputContract,
+    build_dependency_contract_graph, validate_dependency_contract_graph,
 };
 
 use super::PlanRepairError;
@@ -14,22 +15,43 @@ use super::PlanRepairError;
 #[serde(deny_unknown_fields)]
 pub struct SubgraphReplanRequest {
     pub plan_id: String,
-    pub dependency_graph_revision_id: String,
+    pub base_plan_revision_id: String,
+    pub repair_request_id: String,
     pub changed_logical_work_item_ids: Vec<String>,
     pub replacement_contracts: Vec<CanonicalWorkItemContract>,
     pub replacement_mapping: BTreeMap<String, Vec<String>>,
     pub story_spec_refs_changed: bool,
     pub design_spec_refs_changed: bool,
-    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubgraphReplanReadiness {
+    ScopeAnalysis,
+    PublicationReady,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubgraphReplanResult {
+    pub base_plan_revision_id: String,
+    pub base_dependency_graph_revision_id: String,
     pub input_boundary: Vec<String>,
     pub output_boundary: Vec<String>,
     pub affected_logical_work_items: Vec<String>,
     pub replacement_mapping: BTreeMap<String, Vec<String>>,
-    pub dependency_graph_revision: DependencyGraphRevision,
+    pub readiness: SubgraphReplanReadiness,
+    pub dependency_graph_revision: Option<DependencyGraphRevision>,
+    pub full_replan_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubgraphReplanAnalysis {
+    pub input_boundary: Vec<String>,
+    pub output_boundary: Vec<String>,
+    pub affected_logical_work_items: Vec<String>,
+    pub replacement_mapping: BTreeMap<String, Vec<String>>,
+    pub readiness: SubgraphReplanReadiness,
+    pub rebuilt_graph: Option<DependencyContractGraph>,
     pub full_replan_required: bool,
 }
 
@@ -39,29 +61,36 @@ pub struct SubgraphReplanner {
 }
 
 impl SubgraphReplanner {
-    pub fn replan(
+    pub(crate) fn analyze(
         &self,
         graph: &DependencyContractGraph,
         request: &SubgraphReplanRequest,
-    ) -> Result<SubgraphReplanResult, PlanRepairError> {
-        let replacement_contracts = validate_request(graph, request)?;
-        let changed = request
-            .changed_logical_work_item_ids
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let mut affected = changed.clone();
+    ) -> Result<SubgraphReplanAnalysis, PlanRepairError> {
+        let validated = validate_request(graph, request)?;
+        let mut affected = validated.changed.clone();
+        affected.extend(validated.mapping_keys.iter().cloned());
 
         loop {
-            let boundaries = boundaries(graph, &affected);
+            let boundary = boundaries(graph, &affected);
             let mut expansion = BTreeSet::new();
-            for edge in &boundaries.input_edges {
-                if !input_boundary_satisfied(graph, request, &replacement_contracts, edge) {
+            for edge in &boundary.input_edges {
+                if input_boundary_status(
+                    graph,
+                    &request.replacement_mapping,
+                    &validated.replacements,
+                    edge,
+                )? == BoundaryStatus::Unsatisfied
+                {
                     expansion.insert(edge.from.clone());
                 }
             }
-            for edge in &boundaries.output_edges {
-                if !output_boundary_satisfied(request, &replacement_contracts, edge) {
+            for edge in &boundary.output_edges {
+                if output_boundary_status(
+                    &request.replacement_mapping,
+                    &validated.replacements,
+                    edge,
+                )? == BoundaryStatus::Unsatisfied
+                {
                     expansion.insert(edge.to.clone());
                 }
             }
@@ -72,38 +101,54 @@ impl SubgraphReplanner {
             }
         }
 
-        let boundaries = boundaries(graph, &affected);
-        let dependency_graph_revision =
-            build_dependency_graph_revision(graph, request, &replacement_contracts, &changed)?;
-        Ok(SubgraphReplanResult {
-            input_boundary: boundary_nodes(&boundaries.input_edges, |edge| &edge.from),
-            output_boundary: boundary_nodes(&boundaries.output_edges, |edge| &edge.to),
-            affected_logical_work_items: affected.iter().cloned().collect(),
+        let boundary = boundaries(graph, &affected);
+        let full_replan_required = affected.len() == graph.contracts.len()
+            || request.story_spec_refs_changed
+            || request.design_spec_refs_changed;
+        let mapping_complete = validated.mapping_keys == affected;
+        let source_refs_changed =
+            request.story_spec_refs_changed || request.design_spec_refs_changed;
+        let (readiness, rebuilt_graph) = if mapping_complete && !source_refs_changed {
+            let graph = rebuild_typed_graph(
+                graph,
+                &affected,
+                &request.replacement_mapping,
+                &validated.replacements,
+            )?;
+            (SubgraphReplanReadiness::PublicationReady, Some(graph))
+        } else {
+            (SubgraphReplanReadiness::ScopeAnalysis, None)
+        };
+
+        Ok(SubgraphReplanAnalysis {
+            input_boundary: boundary_nodes(&boundary.input_edges, |edge| &edge.from),
+            output_boundary: boundary_nodes(&boundary.output_edges, |edge| &edge.to),
+            affected_logical_work_items: affected.into_iter().collect(),
             replacement_mapping: normalized_mapping(&request.replacement_mapping),
-            dependency_graph_revision,
-            full_replan_required: affected.len() == graph.contracts.len()
-                || request.story_spec_refs_changed
-                || request.design_spec_refs_changed,
+            readiness,
+            rebuilt_graph,
+            full_replan_required,
         })
     }
 }
 
-struct BoundaryEdges<'a> {
-    input_edges: Vec<&'a DependencyContractEdge>,
-    output_edges: Vec<&'a DependencyContractEdge>,
+struct ValidatedRequest<'a> {
+    changed: BTreeSet<String>,
+    mapping_keys: BTreeSet<String>,
+    replacements: BTreeMap<&'a str, &'a CanonicalWorkItemContract>,
 }
 
 fn validate_request<'a>(
     graph: &DependencyContractGraph,
     request: &'a SubgraphReplanRequest,
-) -> Result<BTreeMap<&'a str, &'a CanonicalWorkItemContract>, PlanRepairError> {
+) -> Result<ValidatedRequest<'a>, PlanRepairError> {
     for (field, value) in [
         ("plan_id", request.plan_id.as_str()),
         (
-            "dependency_graph_revision_id",
-            request.dependency_graph_revision_id.as_str(),
+            "base_plan_revision_id",
+            request.base_plan_revision_id.as_str(),
         ),
-        ("created_at", request.created_at.as_str()),
+        ("repair_request_id", request.repair_request_id.as_str()),
     ] {
         if value.trim().is_empty() {
             return Err(invalid(format!("subgraph replan {field} is blank")));
@@ -112,34 +157,35 @@ fn validate_request<'a>(
     let changed = request
         .changed_logical_work_item_ids
         .iter()
-        .map(String::as_str)
+        .cloned()
         .collect::<BTreeSet<_>>();
     if changed.is_empty() || changed.len() != request.changed_logical_work_item_ids.len() {
         return Err(invalid(
             "subgraph replan changed identities are empty or duplicated",
         ));
     }
-    if changed
-        .iter()
-        .any(|logical_id| !graph.contracts.contains_key(*logical_id))
-    {
+    if changed.iter().any(|id| !graph.contracts.contains_key(id)) {
         return Err(invalid(
             "subgraph replan changed identity is absent from the dependency graph",
         ));
     }
+
     let mapping_keys = request
         .replacement_mapping
         .keys()
-        .map(String::as_str)
+        .cloned()
         .collect::<BTreeSet<_>>();
-    if mapping_keys != changed
+    if !changed.is_subset(&mapping_keys)
+        || mapping_keys
+            .iter()
+            .any(|id| !graph.contracts.contains_key(id))
         || request
             .replacement_mapping
             .values()
-            .any(|replacement_ids| replacement_ids.is_empty())
+            .any(|ids| ids.is_empty() || ids.iter().collect::<BTreeSet<_>>().len() != ids.len())
     {
         return Err(invalid(
-            "subgraph replacement mapping must cover every changed identity exactly",
+            "subgraph replacement mapping must uniquely cover every changed identity",
         ));
     }
 
@@ -151,9 +197,9 @@ fn validate_request<'a>(
                 "subgraph replacement contract identities are blank or duplicated",
             ));
         }
-        if graph.contracts.contains_key(id) && !changed.contains(id) {
+        if graph.contracts.contains_key(id) && !mapping_keys.contains(id) {
             return Err(invalid(
-                "subgraph replacement identity collides with an unchanged work item",
+                "subgraph replacement identity collides with an unaffected work item",
             ));
         }
     }
@@ -168,7 +214,16 @@ fn validate_request<'a>(
             "subgraph replacement mapping and replacement contracts disagree",
         ));
     }
-    Ok(replacements)
+    Ok(ValidatedRequest {
+        changed,
+        mapping_keys,
+        replacements,
+    })
+}
+
+struct BoundaryEdges<'a> {
+    input_edges: Vec<&'a DependencyContractEdge>,
+    output_edges: Vec<&'a DependencyContractEdge>,
 }
 
 fn boundaries<'a>(
@@ -193,209 +248,304 @@ fn boundaries<'a>(
     }
 }
 
-fn input_boundary_satisfied(
-    graph: &DependencyContractGraph,
-    request: &SubgraphReplanRequest,
-    replacements: &BTreeMap<&str, &CanonicalWorkItemContract>,
-    edge: &DependencyContractEdge,
-) -> bool {
-    let Some(provider) = graph.contracts.get(&edge.from) else {
-        return false;
-    };
-    let consumer_inputs = request
-        .replacement_mapping
-        .get(&edge.to)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(|id| replacements.get(id.as_str()).copied())
-                .flat_map(|contract| contract.input_contracts.iter())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| {
-            graph
-                .contracts
-                .get(&edge.to)
-                .map(|contract| contract.input_contracts.iter().collect())
-                .unwrap_or_default()
-        });
-    consumer_inputs.iter().any(|input| {
-        input.provider_logical_work_item_id == edge.from
-            && input_contract_satisfied(provider, input)
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundaryStatus {
+    Unknown,
+    Satisfied,
+    Unsatisfied,
 }
 
-fn output_boundary_satisfied(
-    request: &SubgraphReplanRequest,
+fn input_boundary_status(
+    graph: &DependencyContractGraph,
+    mapping: &BTreeMap<String, Vec<String>>,
     replacements: &BTreeMap<&str, &CanonicalWorkItemContract>,
     edge: &DependencyContractEdge,
-) -> bool {
-    let Some(ids) = request.replacement_mapping.get(&edge.from) else {
-        return true;
+) -> Result<BoundaryStatus, PlanRepairError> {
+    let Some(ids) = mapping.get(&edge.to) else {
+        return Ok(BoundaryStatus::Unknown);
     };
-    ids.iter()
+    let Some(provider) = graph.contracts.get(&edge.from) else {
+        return Ok(BoundaryStatus::Unsatisfied);
+    };
+    let inputs = ids
+        .iter()
         .filter_map(|id| replacements.get(id.as_str()).copied())
-        .any(|provider| provider_satisfies_requirements(provider, &edge.required_contracts))
+        .flat_map(|contract| contract.input_contracts.iter())
+        .filter(|input| input.provider_logical_work_item_id == edge.from)
+        .collect::<Vec<_>>();
+    if inputs
+        .iter()
+        .any(|input| !input_contract_satisfied(provider, input))
+    {
+        return Ok(BoundaryStatus::Unsatisfied);
+    }
+    for required in &edge.required_contracts {
+        if !inputs.iter().any(|input| {
+            input.contract_id == required.contract_id && input_contract_satisfied(provider, input)
+        }) {
+            return Ok(BoundaryStatus::Unsatisfied);
+        }
+    }
+    Ok(BoundaryStatus::Satisfied)
+}
+
+fn output_boundary_status(
+    mapping: &BTreeMap<String, Vec<String>>,
+    replacements: &BTreeMap<&str, &CanonicalWorkItemContract>,
+    edge: &DependencyContractEdge,
+) -> Result<BoundaryStatus, PlanRepairError> {
+    let Some(ids) = mapping.get(&edge.from) else {
+        return Ok(BoundaryStatus::Unknown);
+    };
+    for required in &edge.required_contracts {
+        if assign_required_contract(ids, replacements, required, &edge.from, &edge.to)?.is_none() {
+            return Ok(BoundaryStatus::Unsatisfied);
+        }
+    }
+    Ok(BoundaryStatus::Satisfied)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequirementAssignment {
+    provider_id: String,
+    required_capabilities: Vec<String>,
+}
+
+fn assign_required_contract(
+    replacement_ids: &[String],
+    replacements: &BTreeMap<&str, &CanonicalWorkItemContract>,
+    required: &RequiredDependencyContract,
+    old_provider: &str,
+    consumer: &str,
+) -> Result<Option<Vec<RequirementAssignment>>, PlanRepairError> {
+    let providers = replacement_ids
+        .iter()
+        .filter_map(|id| {
+            replacements
+                .get(id.as_str())
+                .map(|contract| (id.as_str(), *contract))
+        })
+        .collect::<Vec<_>>();
+    let required_capabilities = required
+        .required_capabilities
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    match required.compatibility_policy {
+        ContractCompatibilityPolicy::RequireAll if !required_capabilities.is_empty() => {
+            let mut assignments = BTreeMap::<String, Vec<String>>::new();
+            for capability in required_capabilities {
+                let candidates = providers
+                    .iter()
+                    .filter(|(_, provider)| {
+                        provider_provides_capability(provider, &required.contract_id, &capability)
+                    })
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>();
+                match candidates.as_slice() {
+                    [] => return Ok(None),
+                    [provider_id] => assignments
+                        .entry((*provider_id).to_string())
+                        .or_default()
+                        .push(capability),
+                    _ => {
+                        return Err(ambiguous_provider(
+                            old_provider,
+                            consumer,
+                            &required.contract_id,
+                            Some(&capability),
+                        ));
+                    }
+                }
+            }
+            Ok(Some(
+                assignments
+                    .into_iter()
+                    .map(
+                        |(provider_id, required_capabilities)| RequirementAssignment {
+                            provider_id,
+                            required_capabilities,
+                        },
+                    )
+                    .collect(),
+            ))
+        }
+        ContractCompatibilityPolicy::RequireAll | ContractCompatibilityPolicy::RequireAny => {
+            let candidates = providers
+                .iter()
+                .filter(|(_, provider)| provider_satisfies_requirement(provider, required))
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [] => Ok(None),
+                [provider_id] => Ok(Some(vec![RequirementAssignment {
+                    provider_id: (*provider_id).to_string(),
+                    required_capabilities: required_capabilities.into_iter().collect(),
+                }])),
+                _ => Err(ambiguous_provider(
+                    old_provider,
+                    consumer,
+                    &required.contract_id,
+                    None,
+                )),
+            }
+        }
+    }
+}
+
+fn rebuild_typed_graph(
+    graph: &DependencyContractGraph,
+    affected: &BTreeSet<String>,
+    mapping: &BTreeMap<String, Vec<String>>,
+    replacements: &BTreeMap<&str, &CanonicalWorkItemContract>,
+) -> Result<DependencyContractGraph, PlanRepairError> {
+    let mut contracts = graph
+        .contracts
+        .iter()
+        .filter(|(id, _)| !affected.contains(*id))
+        .map(|(_, contract)| rewrite_unaffected_consumer(contract, mapping, replacements))
+        .collect::<Result<Vec<_>, _>>()?;
+    contracts.extend(replacements.values().map(|contract| (*contract).clone()));
+    let rebuilt =
+        build_dependency_contract_graph(&contracts).map_err(PlanRepairError::ContractValidation)?;
+    let validation = validate_dependency_contract_graph(&rebuilt);
+    if !validation.is_valid() {
+        return Err(PlanRepairError::ContractValidation(validation));
+    }
+    Ok(rebuilt)
+}
+
+fn rewrite_unaffected_consumer(
+    contract: &CanonicalWorkItemContract,
+    mapping: &BTreeMap<String, Vec<String>>,
+    replacements: &BTreeMap<&str, &CanonicalWorkItemContract>,
+) -> Result<CanonicalWorkItemContract, PlanRepairError> {
+    let mut rewritten = contract.clone();
+    let mut inputs = Vec::new();
+    for input in &contract.input_contracts {
+        let Some(replacement_ids) = mapping.get(&input.provider_logical_work_item_id) else {
+            inputs.push(input.clone());
+            continue;
+        };
+        let required = RequiredDependencyContract {
+            contract_id: input.contract_id.clone(),
+            required_capabilities: input.required_capabilities.clone(),
+            compatibility_policy: input.compatibility_policy.clone(),
+        };
+        let Some(assignments) = assign_required_contract(
+            replacement_ids,
+            replacements,
+            &required,
+            &input.provider_logical_work_item_id,
+            &contract.identity.logical_work_item_id,
+        )?
+        else {
+            return Err(invalid(format!(
+                "subgraph output boundary {} -> {} cannot be rewired for {}",
+                input.provider_logical_work_item_id,
+                contract.identity.logical_work_item_id,
+                input.contract_id
+            )));
+        };
+        inputs.extend(
+            assignments
+                .into_iter()
+                .map(|assignment| RequiredInputContract {
+                    contract_id: input.contract_id.clone(),
+                    provider_logical_work_item_id: assignment.provider_id,
+                    required_capabilities: assignment.required_capabilities,
+                    compatibility_policy: input.compatibility_policy.clone(),
+                }),
+        );
+    }
+    inputs.sort_by(|left, right| {
+        (
+            &left.provider_logical_work_item_id,
+            &left.contract_id,
+            compatibility_rank(&left.compatibility_policy),
+            &left.required_capabilities,
+        )
+            .cmp(&(
+                &right.provider_logical_work_item_id,
+                &right.contract_id,
+                compatibility_rank(&right.compatibility_policy),
+                &right.required_capabilities,
+            ))
+    });
+    rewritten.input_contracts = inputs;
+    Ok(rewritten)
 }
 
 fn input_contract_satisfied(
     provider: &CanonicalWorkItemContract,
     input: &RequiredInputContract,
 ) -> bool {
-    provider_satisfies_requirements(
+    provider_satisfies_requirement(
         provider,
-        &[RequiredDependencyContract {
+        &RequiredDependencyContract {
             contract_id: input.contract_id.clone(),
             required_capabilities: input.required_capabilities.clone(),
             compatibility_policy: input.compatibility_policy.clone(),
-        }],
+        },
     )
 }
 
-fn provider_satisfies_requirements(
+fn provider_satisfies_requirement(
     provider: &CanonicalWorkItemContract,
-    requirements: &[RequiredDependencyContract],
+    required: &RequiredDependencyContract,
 ) -> bool {
-    requirements.iter().all(|required| {
-        let outputs = provider
-            .output_contracts
-            .iter()
-            .filter(|output| output.contract_id == required.contract_id)
-            .collect::<Vec<_>>();
-        if outputs.is_empty() {
-            return false;
+    let outputs = provider
+        .output_contracts
+        .iter()
+        .filter(|output| output.contract_id == required.contract_id)
+        .collect::<Vec<_>>();
+    if outputs.is_empty() {
+        return false;
+    }
+    let provided = outputs
+        .iter()
+        .flat_map(|output| output.capabilities.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let needed = required
+        .required_capabilities
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    match required.compatibility_policy {
+        ContractCompatibilityPolicy::RequireAll => needed.is_subset(&provided),
+        ContractCompatibilityPolicy::RequireAny => {
+            needed.is_empty() || !needed.is_disjoint(&provided)
         }
-        let provided = outputs
-            .iter()
-            .flat_map(|output| output.capabilities.iter().map(String::as_str))
-            .collect::<BTreeSet<_>>();
-        let needed = required
-            .required_capabilities
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        match required.compatibility_policy {
-            ContractCompatibilityPolicy::RequireAll => needed.is_subset(&provided),
-            ContractCompatibilityPolicy::RequireAny => {
-                needed.is_empty() || !needed.is_disjoint(&provided)
-            }
-        }
+    }
+}
+
+fn provider_provides_capability(
+    provider: &CanonicalWorkItemContract,
+    contract_id: &str,
+    capability: &str,
+) -> bool {
+    provider.output_contracts.iter().any(|output| {
+        output.contract_id == contract_id
+            && output
+                .capabilities
+                .iter()
+                .any(|provided| provided == capability)
     })
 }
 
-fn build_dependency_graph_revision(
-    graph: &DependencyContractGraph,
-    request: &SubgraphReplanRequest,
-    replacements: &BTreeMap<&str, &CanonicalWorkItemContract>,
-    changed: &BTreeSet<String>,
-) -> Result<DependencyGraphRevision, PlanRepairError> {
-    let mut edges = BTreeMap::<(String, String), Vec<RequiredDependencyContract>>::new();
-    for edge in &graph.edges {
-        match (changed.contains(&edge.from), changed.contains(&edge.to)) {
-            (false, false) => insert_edge(&mut edges, edge.clone()),
-            (false, true) | (true, true) => {}
-            (true, false) => {
-                let providers = request
-                    .replacement_mapping
-                    .get(&edge.from)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|id| {
-                        replacements
-                            .get(id.as_str())
-                            .filter(|contract| {
-                                provider_satisfies_requirements(contract, &edge.required_contracts)
-                            })
-                            .map(|_| id.clone())
-                    })
-                    .collect::<Vec<_>>();
-                if providers.len() > 1 {
-                    return Err(invalid(format!(
-                        "subgraph output boundary {} -> {} has ambiguous replacement providers",
-                        edge.from, edge.to
-                    )));
-                }
-                if let Some(provider) = providers.first() {
-                    insert_edge(
-                        &mut edges,
-                        DependencyContractEdge {
-                            from: provider.clone(),
-                            to: edge.to.clone(),
-                            required_contracts: edge.required_contracts.clone(),
-                        },
-                    );
-                }
-            }
-        }
-    }
-    for contract in replacements.values() {
-        for input in &contract.input_contracts {
-            if changed.contains(&input.provider_logical_work_item_id) {
-                return Err(invalid(
-                    "replacement input references a superseded logical work item identity",
-                ));
-            }
-            if !graph
-                .contracts
-                .contains_key(&input.provider_logical_work_item_id)
-                && !replacements.contains_key(input.provider_logical_work_item_id.as_str())
-            {
-                return Err(invalid(
-                    "replacement input references an unknown logical work item identity",
-                ));
-            }
-            insert_edge(
-                &mut edges,
-                DependencyContractEdge {
-                    from: input.provider_logical_work_item_id.clone(),
-                    to: contract.identity.logical_work_item_id.clone(),
-                    required_contracts: vec![RequiredDependencyContract {
-                        contract_id: input.contract_id.clone(),
-                        required_capabilities: input.required_capabilities.clone(),
-                        compatibility_policy: input.compatibility_policy.clone(),
-                    }],
-                },
-            );
-        }
-    }
-    let edges = edges
-        .into_iter()
-        .map(|((from, to), mut required_contracts)| {
-            required_contracts.sort_by(|left, right| {
-                (
-                    &left.contract_id,
-                    compatibility_rank(&left.compatibility_policy),
-                    &left.required_capabilities,
-                )
-                    .cmp(&(
-                        &right.contract_id,
-                        compatibility_rank(&right.compatibility_policy),
-                        &right.required_capabilities,
-                    ))
-            });
-            required_contracts.dedup();
-            DependencyContractEdge {
-                from,
-                to,
-                required_contracts,
-            }
-        })
-        .collect();
-    Ok(DependencyGraphRevision {
-        id: request.dependency_graph_revision_id.clone(),
-        plan_id: request.plan_id.clone(),
-        edges,
-        created_at: request.created_at.clone(),
-    })
-}
-
-fn insert_edge(
-    edges: &mut BTreeMap<(String, String), Vec<RequiredDependencyContract>>,
-    edge: DependencyContractEdge,
-) {
-    edges
-        .entry((edge.from, edge.to))
-        .or_default()
-        .extend(edge.required_contracts);
+fn ambiguous_provider(
+    old_provider: &str,
+    consumer: &str,
+    contract_id: &str,
+    capability: Option<&str>,
+) -> PlanRepairError {
+    invalid(format!(
+        "subgraph output boundary {old_provider} -> {consumer} has ambiguous providers for {contract_id}{}",
+        capability
+            .map(|capability| format!(" capability {capability}"))
+            .unwrap_or_default()
+    ))
 }
 
 fn boundary_nodes<F>(edges: &[&DependencyContractEdge], select: F) -> Vec<String>
@@ -416,7 +566,6 @@ fn normalized_mapping(mapping: &BTreeMap<String, Vec<String>>) -> BTreeMap<Strin
         .map(|(old, replacements)| {
             let mut replacements = replacements.clone();
             replacements.sort();
-            replacements.dedup();
             (old.clone(), replacements)
         })
         .collect()

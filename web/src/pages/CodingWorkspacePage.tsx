@@ -18,6 +18,7 @@ import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import type { PlanRepairSessionState } from "../state/plan-repair-session";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { CodingArtifactTabs } from "./CodingWorkspaceArtifacts";
@@ -37,7 +38,7 @@ import { planRepairActionGenerationKey } from "./plan-repair-action-generation";
 
 type CodingWorkspaceDrawer = "providers" | "runs";
 type PendingRepairAction = {
-  action: Exclude<PlanRepairAction, "open_workspace">;
+  action: Exclude<PlanRepairAction, "adjust_scope" | "open_workspace">;
   childSessionId: string;
   amendmentId: string;
   repairGenerationKey: string;
@@ -68,6 +69,15 @@ export function CodingWorkspacePage({
   const planRepairProtocolError = useWorkspaceStore((state) => state.protocolError);
   const planRepairWorkspaceSessionId = useWorkspaceStore((state) => state.sessionId);
   const planRepairWorkspaceStage = useWorkspaceStore((state) => state.stage);
+  const linkedAmendmentStatus = useLinkedWorkspaceAmendmentStore(
+    (state) => state.status,
+  );
+  const linkedAmendmentSnapshot = useLinkedWorkspaceAmendmentStore(
+    (state) => state.snapshot,
+  );
+  const linkedAmendmentError = useLinkedWorkspaceAmendmentStore(
+    (state) => state.error,
+  );
   const connected = store.connectionStatus === "connected";
   const activeTab = store.activeTab;
   const [activePanel, setActivePanel] = useState<"chat" | "results">("chat");
@@ -127,6 +137,10 @@ export function CodingWorkspacePage({
     store.projectId === address.projectId &&
     store.issueId === address.issueId &&
     store.attemptId === address.attemptId;
+  const linkedAmendmentTargets = {
+    story: normalizedRefs(store.workItemExecutionPlan?.story_refs),
+    design: normalizedRefs(store.workItemExecutionPlan?.design_refs),
+  };
 
   useUnloadGuard({
     enabled: store.status === "running",
@@ -267,7 +281,7 @@ export function CodingWorkspacePage({
   }
 
   function handlePlanRepairAction(action: PlanRepairAction) {
-    if (action === "open_workspace") {
+    if (action === "adjust_scope" || action === "open_workspace") {
       return;
     }
     const activeRepair = store.activePlanRepair;
@@ -298,11 +312,6 @@ export function CodingWorkspacePage({
       case "regenerate":
         sent = planRepairApi.sendHumanConfirm("request-change", {
           description: "要求重新生成 Plan Repair 修订",
-        });
-        break;
-      case "adjust_scope":
-        sent = planRepairApi.sendHumanConfirm("request-change", {
-          description: "调整 Plan Repair 修订范围",
         });
         break;
       case "cancel":
@@ -406,6 +415,13 @@ export function CodingWorkspacePage({
                 }
                 actionPending={activeRepairActionPending}
                 actionStatus={planRepairActionStatus}
+                linkedAmendmentTargets={linkedAmendmentTargets}
+                linkedAmendmentStatus={linkedAmendmentStatus}
+                linkedAmendmentSnapshot={linkedAmendmentSnapshot}
+                linkedAmendmentError={linkedAmendmentError}
+                onStartLinkedAmendment={
+                  planRepairApi.startLinkedWorkspaceAmendment
+                }
               />
             </div>
           ) : (
@@ -614,6 +630,10 @@ function protocolErrorMatchesAction(
   if (action === "confirm") return code === "PLAN_AMENDMENT_CONFIRMATION_FAILED";
   if (action === "cancel") return code === "PLAN_AMENDMENT_CANCEL_FAILED";
   return true;
+}
+
+function normalizedRefs(refs: string[] | undefined): string[] {
+  return [...new Set((refs ?? []).map((ref) => ref.trim()).filter(Boolean))].sort();
 }
 
 function displayCodingStage(stage: string) {

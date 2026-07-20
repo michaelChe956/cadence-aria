@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { PlanRepairCenter } from "./PlanRepairCenter";
 import { repairAwaitingConfirmationFixture } from "./plan-repair-test-fixtures";
+import { linkedWorkspaceAmendmentSnapshotFixture } from "./plan-repair-test-fixtures";
 
 describe("PlanRepairCenter", () => {
   it("shows one amendment confirmation with impact and projection diffs", () => {
@@ -34,6 +35,55 @@ describe("PlanRepairCenter", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "确认修订并恢复执行" }));
     expect(onAction).toHaveBeenCalledWith("confirm");
+  });
+
+  it("opens Story and Design target selection inside adjust scope without adding a root action", async () => {
+    const onStartLinkedAmendment = vi.fn(() => true);
+    render(
+      <PlanRepairCenter
+        state={repairAwaitingConfirmationFixture()}
+        onAction={vi.fn()}
+        linkedAmendmentTargets={{
+          story: ["story_spec_0001"],
+          design: ["design_spec_0001"],
+        }}
+        onStartLinkedAmendment={onStartLinkedAmendment}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "调整修订范围" }));
+    expect(screen.getByRole("group", { name: "Plan Repair 操作" }).querySelectorAll("button, a"))
+      .toHaveLength(5);
+    expect(screen.getByRole("group", { name: "Story/Design 修订目标" }))
+      .toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("修订类型"), "design");
+    await userEvent.click(screen.getByRole("button", { name: "发起关联修订" }));
+
+    expect(onStartLinkedAmendment).toHaveBeenCalledWith({
+      entity_id: "design_spec_0001",
+      workspace_type: "design",
+      relation: "design_amendment",
+    });
+  });
+
+  it("renders a safe child link only after a matching ready snapshot", async () => {
+    const state = repairAwaitingConfirmationFixture();
+    render(
+      <PlanRepairCenter
+        state={state}
+        onAction={vi.fn()}
+        linkedAmendmentTargets={{ story: ["story_spec_0001"], design: [] }}
+        linkedAmendmentStatus="ready"
+        linkedAmendmentSnapshot={linkedWorkspaceAmendmentSnapshotFixture()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "调整修订范围" }));
+    expect(screen.getByRole("link", { name: "打开已创建的 Story Workspace" }))
+      .toHaveAttribute(
+        "href",
+        "/workbench/workspace/workspace_session_story_amendment_0001",
+      );
   });
 
   it.each([

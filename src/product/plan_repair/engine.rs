@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::models::{
     AmendmentResumeMode, AmendmentResumeTarget, DependencyGraphChange, DependencyGraphChangeKind,
-    DependencyGraphRevision, PlanAmendmentManifest, PlanRepairCandidatePackageArtifact,
-    PlanRevisionReason, PlanValidationReportArtifact, VerificationPlanRevision,
-    WorkItemDraftRevision, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle,
-    WorkItemRevision, WorkItemRevisionReplacement,
+    DependencyGraphRevision, LogicalWorkItem, PlanAmendmentManifest,
+    PlanRepairCandidatePackageArtifact, PlanRevisionReason, PlanValidationReportArtifact,
+    VerificationPlanRevision, WorkItemDraftRevision, WorkItemPlanLineage, WorkItemPlanRevision,
+    WorkItemProjectionBundle, WorkItemRevision, WorkItemRevisionReplacement,
 };
 use crate::product::work_item_contract::{
     DependencyContractEdge, DependencyContractGraph, build_dependency_contract_graph,
@@ -33,6 +33,8 @@ use super::{
 };
 
 mod publication;
+mod subgraph;
+mod topology;
 
 #[cfg(test)]
 pub(crate) use publication::final_plan_amendment_manifest;
@@ -46,6 +48,7 @@ pub struct PreparedPlanAmendment {
     pub revised_work_items: Vec<WorkItemRevision>,
     pub verification_plan_revisions: Vec<VerificationPlanRevision>,
     pub work_item_projection_bundles: Vec<WorkItemProjectionBundle>,
+    pub logical_work_items: Vec<LogicalWorkItem>,
     pub dependency_graph_revision: DependencyGraphRevision,
     pub plan_projection_bundle: crate::product::models::PlanProjectionBundle,
     pub validation_report: PlanValidationReportArtifact,
@@ -53,6 +56,7 @@ pub struct PreparedPlanAmendment {
     pub impact_report: ContractImpactReport,
     pub manifest: PlanAmendmentManifest,
     pub candidate_package: PlanRepairCandidatePackageArtifact,
+    pub subgraph_replan: Option<super::SubgraphReplanResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +65,7 @@ pub struct PlanRepairEngine {
     pub(super) plan: WorkItemPlanLineage,
     candidate_drafts: BTreeMap<String, WorkItemDraftRevision>,
     execution_state: Option<PlanExecutionState>,
+    subgraph_replan_request: Option<super::SubgraphReplanRequest>,
     created_at: String,
 }
 
@@ -71,6 +76,7 @@ impl PlanRepairEngine {
             plan,
             candidate_drafts: BTreeMap::new(),
             execution_state: None,
+            subgraph_replan_request: None,
             created_at: Utc::now().to_rfc3339(),
         }
     }
@@ -93,23 +99,13 @@ impl PlanRepairEngine {
         self
     }
 
-    pub fn replan_subgraph(
-        &self,
-        graph: &DependencyContractGraph,
-        request: &super::SubgraphReplanRequest,
-    ) -> Result<super::SubgraphReplanResult, PlanRepairError> {
-        if request.plan_id != self.plan.id {
-            return Err(invalid_target(
-                "subgraph replan request does not belong to this plan lineage",
-            ));
-        }
-        super::SubgraphReplanner::default().replan(graph, request)
-    }
-
     pub fn prepare_amendment(
         &self,
         request: &PlanRepairRequest,
     ) -> Result<PreparedPlanAmendment, PlanRepairError> {
+        if request.repair_target.kind == RepairTargetKind::Subgraph {
+            return self.prepare_topology_amendment(request);
+        }
         let (plan, base_revision, amendment_id) = self.validate_prepare_identity(request)?;
         let reason = repair_revision_reason(request)?;
         let next_revision_no = base_revision.revision_no + 1;
@@ -154,6 +150,7 @@ impl PlanRepairEngine {
         }
 
         let mut compiled_items = Vec::new();
+        let mut logical_work_items = Vec::new();
         let mut revised_items = Vec::new();
         let mut draft_revisions = Vec::new();
         let mut verification_plan_revisions = Vec::new();
@@ -168,6 +165,11 @@ impl PlanRepairEngine {
                 .get_work_item_revision(&plan, logical_id, previous_revision_id)
                 .map_err(PlanRepairError::Store)?;
             if target_ids.contains(logical_id) {
+                logical_work_items.push(
+                    self.store
+                        .get_logical_work_item(&plan, logical_id)
+                        .map_err(PlanRepairError::Store)?,
+                );
                 if !expected_previous_ids.contains(previous_revision_id) {
                     return Err(invalid_target(
                         "repair target previous revision does not match the active plan binding",
@@ -369,6 +371,7 @@ impl PlanRepairEngine {
             revised_work_items: revised_items,
             verification_plan_revisions,
             work_item_projection_bundles,
+            logical_work_items,
             dependency_graph_revision,
             plan_projection_bundle,
             validation_report,
@@ -376,6 +379,7 @@ impl PlanRepairEngine {
             impact_report,
             manifest,
             candidate_package,
+            subgraph_replan: None,
         })
     }
 
@@ -383,6 +387,7 @@ impl PlanRepairEngine {
         &self,
         prepared: &PreparedPlanAmendment,
     ) -> Result<(), PlanRepairError> {
+        self.validate_prepared_subgraph(prepared)?;
         let plan = self
             .store
             .get_plan_lineage(&self.plan.project_id, &self.plan.issue_id, &self.plan.id)
@@ -421,6 +426,11 @@ impl PlanRepairEngine {
             return Err(invalid_target(
                 "prepared candidate package differs from canonical package",
             ));
+        }
+        for logical_work_item in &prepared.logical_work_items {
+            self.store
+                .put_logical_work_item(&plan, logical_work_item)
+                .map_err(PlanRepairError::Store)?;
         }
         for draft in &prepared.draft_revisions {
             self.store

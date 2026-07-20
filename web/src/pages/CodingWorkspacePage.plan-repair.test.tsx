@@ -7,6 +7,7 @@ import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
   CODING_ATTEMPT_ADDRESS,
+  executionPlan,
   installCodingWorkspacePageTestHooks,
   mockCodingWs,
   mockPlanRepairWs,
@@ -64,7 +65,6 @@ describe("CodingWorkspacePage plan repair", () => {
   it.each([
     ["confirm", "确认修订并恢复执行"],
     ["regenerate", "要求重新生成"],
-    ["adjust_scope", "调整修订范围"],
     ["cancel", "取消修订"],
   ] as const)("sends the %s repair decision through the child transport", async (action, label) => {
     const repair = repairAwaitingConfirmationFixture();
@@ -102,6 +102,41 @@ describe("CodingWorkspacePage plan repair", () => {
         },
       );
     }
+  });
+
+  it("starts Story or Design amendment inside adjust scope without leaving Coding Workspace", async () => {
+    const repair = repairAwaitingConfirmationFixture();
+    mockCodingWs();
+    const startLinkedWorkspaceAmendment = vi.fn(() => true);
+    const repairApi = mockPlanRepairWs({ startLinkedWorkspaceAmendment });
+    window.history.replaceState(
+      {},
+      "",
+      "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_0001",
+    );
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "awaiting_plan_amendment",
+      stage: "code_review",
+      workItemExecutionPlan: executionPlan(),
+      activePlanRepair: repair,
+      timelineNodes: repair.timelineNodes,
+    });
+
+    render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "调整修订范围" }));
+    await userEvent.selectOptions(screen.getByLabelText("修订类型"), "design");
+    await userEvent.click(screen.getByRole("button", { name: "发起关联修订" }));
+
+    expect(startLinkedWorkspaceAmendment).toHaveBeenCalledWith({
+      entity_id: "design_spec_0001",
+      workspace_type: "design",
+      relation: "design_amendment",
+    });
+    expect(repairApi.sendHumanConfirm).not.toHaveBeenCalled();
+    expect(window.location.pathname).toContain("/coding/coding_attempt_0001");
   });
 
   it("sends exactly one mutation until a matching authoritative response arrives", async () => {

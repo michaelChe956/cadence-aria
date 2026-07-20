@@ -3,6 +3,7 @@ import type { WorkItemExecutionPlan } from "../api/types";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 
 type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
@@ -60,6 +61,7 @@ export function mockPlanRepairWs(
     confirmPlanAmendment: vi.fn(() => true),
     cancelPlanAmendment: vi.fn(() => true),
     sendHumanConfirm: vi.fn(() => true),
+    startLinkedWorkspaceAmendment: vi.fn(() => true),
     connectionStatus: "connected",
     sessionSnapshotGeneration: 1,
     ...overrides,
@@ -117,6 +119,7 @@ export function installCodingWorkspacePageTestHooks() {
       value: vi.fn(),
     });
     useCodingWorkspaceStore.getState().reset();
+    useLinkedWorkspaceAmendmentStore.getState().reset(null);
     useWorkspaceStore.getState().reset();
     vi.clearAllMocks();
   });

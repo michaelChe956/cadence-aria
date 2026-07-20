@@ -1,4 +1,5 @@
 import type {
+  LinkedWorkspaceSessionSnapshot,
   PlanAmendmentManifest,
   PlanProjectionBundle,
 } from "../../api/types";
@@ -194,6 +195,31 @@ export function repairAwaitingConfirmationFixture(): PlanRepairSessionState {
         },
       ],
     },
+  };
+}
+
+export function linkedWorkspaceAmendmentSnapshotFixture(
+  workspaceType: "story" | "design" = "story",
+): LinkedWorkspaceSessionSnapshot {
+  const repair = repairAwaitingConfirmationFixture();
+  const relation = workspaceType === "story" ? "story_amendment" : "design_amendment";
+  return {
+    link: {
+      ...repair.link,
+      id: `workspace_session_link_${relation}_0001`,
+      relation,
+      parent_session_id: repair.childSessionId,
+      child_session_id: `workspace_session_${relation}_0001`,
+      return_context: {
+        ...repair.link.return_context,
+        original_route: `/workbench/workspace/${repair.childSessionId}`,
+      },
+    },
+    workspace_type: workspaceType,
+    artifact_version_id: null,
+    timeline_nodes: [],
+    selected_timeline_node_id: null,
+    human_confirm_state: "open",
   };
 }
 

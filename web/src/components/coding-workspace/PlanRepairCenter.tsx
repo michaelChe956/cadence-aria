@@ -1,7 +1,16 @@
 import { useRef, useState } from "react";
+import type {
+  LinkedWorkspaceAmendmentTarget,
+  LinkedWorkspaceSessionSnapshot,
+} from "../../api/types";
+import type { LinkedWorkspaceAmendmentStatus } from "../../state/linked-workspace-amendment-store";
 import type { PlanRepairSessionState } from "../../state/plan-repair-session";
 import { WorkItemPlanOverview } from "../workspace/WorkItemPlanOverview";
 import { ImpactPreview } from "./ImpactPreview";
+import {
+  LinkedWorkspaceAmendmentSelector,
+  type LinkedWorkspaceAmendmentTargets,
+} from "./LinkedWorkspaceAmendmentSelector";
 import { SemanticContractDiff } from "./SemanticContractDiff";
 
 export type PlanRepairTab =
@@ -34,14 +43,25 @@ export function PlanRepairCenter({
   actionsDisabled = false,
   actionPending = false,
   actionStatus = null,
+  linkedAmendmentTargets = { story: [], design: [] },
+  linkedAmendmentStatus = "idle",
+  linkedAmendmentSnapshot = null,
+  linkedAmendmentError = null,
+  onStartLinkedAmendment,
 }: {
   state: PlanRepairSessionState;
   onAction?: (action: PlanRepairAction) => void;
   actionsDisabled?: boolean;
   actionPending?: boolean;
   actionStatus?: string | null;
+  linkedAmendmentTargets?: LinkedWorkspaceAmendmentTargets;
+  linkedAmendmentStatus?: LinkedWorkspaceAmendmentStatus;
+  linkedAmendmentSnapshot?: LinkedWorkspaceSessionSnapshot | null;
+  linkedAmendmentError?: string | null;
+  onStartLinkedAmendment?: (target: LinkedWorkspaceAmendmentTarget) => boolean;
 }) {
   const [activeTab, setActiveTab] = useState<PlanRepairTab>("summary");
+  const [scopeOpen, setScopeOpen] = useState(false);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const canMutate =
     !actionsDisabled &&
@@ -216,6 +236,17 @@ export function PlanRepairCenter({
       </div>
 
       <footer className="shrink-0 border-t border-[var(--aria-line)] bg-white p-3">
+        {scopeOpen ? (
+          <LinkedWorkspaceAmendmentSelector
+            parentSessionId={state.childSessionId}
+            targets={linkedAmendmentTargets}
+            status={linkedAmendmentStatus}
+            snapshot={linkedAmendmentSnapshot}
+            error={linkedAmendmentError}
+            disabled={!canMutate}
+            onStart={onStartLinkedAmendment}
+          />
+        ) : null}
         {actionStatus ? (
           <p role="status" className="mb-2 text-right text-xs text-[var(--aria-ink-muted)]">
             {actionStatus}
@@ -237,7 +268,10 @@ export function PlanRepairCenter({
           <button
             type="button"
             disabled={!canMutate}
-            onClick={() => onAction?.("adjust_scope")}
+            onClick={() => {
+              setScopeOpen((current) => !current);
+              onAction?.("adjust_scope");
+            }}
             className="h-9 rounded-md border border-[var(--aria-line)] px-3 text-xs font-semibold text-[var(--aria-ink)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
           >
             调整修订范围

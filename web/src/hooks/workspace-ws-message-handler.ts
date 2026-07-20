@@ -13,6 +13,7 @@ import type {
   WorkItemPlanOutlineCandidatePayload,
   WorkItemProjectionBundle,
   WorkItemRevisionHistoryDto,
+  WsOutMessage,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
 import {
@@ -29,10 +30,7 @@ import { stageChangeContent } from "../state/workspace-stage-labels";
 import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
 import { trustedReviewComments } from "../state/workspace-review-trust";
 
-export interface WsServerMessage {
-  type: string;
-  [key: string]: unknown;
-}
+export type WsServerMessage = WsOutMessage & Record<string, unknown>;
 
 export const ACTIVE_PROVIDER_STAGES = new Set(["running", "cross_review", "revision"]);
 

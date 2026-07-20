@@ -71,6 +71,12 @@ impl WorkspaceEngine {
                 "linked workspace amendment target is not referenced by the active plan",
             ));
         }
+        validate_target_record(
+            lifecycle,
+            &self.session.project_id,
+            &self.session.issue_id,
+            &target,
+        )?;
 
         let amendment_id = repair
             .request
@@ -78,34 +84,32 @@ impl WorkspaceEngine {
             .as_deref()
             .filter(|id| !id.trim().is_empty())
             .ok_or_else(|| invalid("Plan Repair amendment identity is missing"))?;
-        let identity_hash = compute_sha256(
-            format!(
-                "{}\n{}\n{}\n{}",
-                self.session.session_id,
-                relation_label(&target.relation),
-                target.entity_id,
-                amendment_id
-            )
-            .as_bytes(),
-        );
-        let child_session_id = format!(
-            "workspace_session_{}_{}",
-            relation_label(&target.relation),
-            identity_hash
-        );
-        let link_id = format!(
-            "workspace_session_link_{}_{}",
-            relation_label(&target.relation),
-            identity_hash
+        let (link_id, child_session_id) = linked_amendment_ids(
+            &self.session.session_id,
+            &target.relation,
+            &target.entity_id,
+            amendment_id,
         );
         if let Some(link) = find_existing_link(
             lifecycle,
-            &self.session.project_id,
-            &self.session.issue_id,
-            &link_id,
-            &child_session_id,
+            repair,
+            &target,
+            LinkedAmendmentLookup {
+                project_id: &self.session.project_id,
+                issue_id: &self.session.issue_id,
+                parent_session_id: &self.session.session_id,
+                link_id: &link_id,
+                child_session_id: &child_session_id,
+            },
         )? {
-            validate_upgrade_link(self, repair, &target, &link, &link_id, &child_session_id)?;
+            validate_upgrade_link(
+                &self.session.session_id,
+                repair,
+                &target,
+                &link,
+                &link_id,
+                &child_session_id,
+            )?;
             let child = lifecycle
                 .get_workspace_session(&link.child_session_id)
                 .map_err(PlanRepairError::Store)?;
@@ -186,7 +190,8 @@ pub fn restore_linked_workspace_snapshot(
     issue_id: &str,
     link: &WorkspaceSessionLink,
 ) -> Result<LinkedWorkspaceSessionSnapshot, PlanRepairError> {
-    validate_complete_link_identity(link)?;
+    let link = load_persisted_link(lifecycle, project_id, issue_id, link)?;
+    validate_complete_link_identity(&link)?;
     let child = lifecycle
         .get_workspace_session(&link.child_session_id)
         .map_err(PlanRepairError::Store)?;
@@ -195,6 +200,14 @@ pub fn restore_linked_workspace_snapshot(
         || !relation_matches_workspace(&link.relation, &child.workspace_type)
     {
         return Err(identity_mismatch("workspace_session", &child.id));
+    }
+    if matches!(
+        link.relation,
+        WorkspaceSessionRelation::StoryAmendment | WorkspaceSessionRelation::DesignAmendment
+    ) {
+        validate_linked_amendment_restore_authority(
+            lifecycle, project_id, issue_id, &link, &child,
+        )?;
     }
     let versions = lifecycle
         .list_artifact_versions_for_issue_session(project_id, issue_id, &child.id)
@@ -218,7 +231,7 @@ pub fn restore_linked_workspace_snapshot(
         return Err(identity_mismatch("workspace_timeline", &child.id));
     }
     Ok(LinkedWorkspaceSessionSnapshot {
-        link: link.clone(),
+        link,
         workspace_type: child.workspace_type,
         artifact_version_id: current_versions.first().copied(),
         selected_timeline_node_id: active_timeline_node_id(&timeline_nodes),
@@ -249,27 +262,46 @@ fn validate_amendment_target(
     Ok(())
 }
 
+struct LinkedAmendmentLookup<'a> {
+    project_id: &'a str,
+    issue_id: &'a str,
+    parent_session_id: &'a str,
+    link_id: &'a str,
+    child_session_id: &'a str,
+}
+
 fn find_existing_link(
     lifecycle: &LifecycleStore,
-    project_id: &str,
-    issue_id: &str,
-    link_id: &str,
-    child_session_id: &str,
+    repair: &PlanRepairSessionSnapshotDto,
+    target: &LinkedWorkspaceAmendmentTarget,
+    lookup: LinkedAmendmentLookup<'_>,
 ) -> Result<Option<WorkspaceSessionLink>, PlanRepairError> {
-    let mut links = lifecycle
-        .list_session_links(project_id, issue_id)
-        .map_err(PlanRepairError::Store)?
-        .into_iter()
-        .filter(|link| link.id == link_id || link.child_session_id == child_session_id);
-    let result = links.next();
-    if links.next().is_some() {
-        return Err(identity_mismatch("workspace_session_link", link_id));
+    let links = lifecycle
+        .list_session_links(lookup.project_id, lookup.issue_id)
+        .map_err(PlanRepairError::Store)?;
+    let mut candidates = Vec::new();
+    for link in links {
+        if link.id == lookup.link_id
+            || link.child_session_id == lookup.child_session_id
+            || semantic_upgrade_link_candidate(
+                lifecycle,
+                lookup.parent_session_id,
+                repair,
+                target,
+                &link,
+            )?
+        {
+            candidates.push(link);
+        }
     }
-    Ok(result)
+    if candidates.len() > 1 {
+        return Err(identity_mismatch("workspace_session_link", lookup.link_id));
+    }
+    Ok(candidates.pop())
 }
 
 fn validate_upgrade_link(
-    engine: &WorkspaceEngine,
+    parent_session_id: &str,
     repair: &PlanRepairSessionSnapshotDto,
     target: &LinkedWorkspaceAmendmentTarget,
     link: &WorkspaceSessionLink,
@@ -279,7 +311,7 @@ fn validate_upgrade_link(
     let amendment_id = repair.request.amendment_id.as_deref().unwrap_or_default();
     if link.id != link_id
         || link.relation != target.relation
-        || link.parent_session_id != engine.session.session_id
+        || link.parent_session_id != parent_session_id
         || link.child_session_id != child_session_id
         || link.trigger.attempt_id != repair.request.trigger_attempt_id
         || link.trigger.unit_run_id != repair.request.trigger_unit_run_id
@@ -292,12 +324,197 @@ fn validate_upgrade_link(
         || link.return_context.original_attempt_id != repair.request.trigger_attempt_id
         || link.return_context.original_unit_run_id != repair.request.trigger_unit_run_id
         || link.return_context.timeline_anchor_id != repair.request.trigger_finding_id
-        || link.return_context.original_route
-            != format!("/workbench/workspace/{}", engine.session.session_id)
+        || link.return_context.original_route != format!("/workbench/workspace/{parent_session_id}")
     {
         return Err(identity_mismatch("workspace_session_link", &link.id));
     }
     Ok(())
+}
+
+fn load_persisted_link(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    supplied: &WorkspaceSessionLink,
+) -> Result<WorkspaceSessionLink, PlanRepairError> {
+    let mut matches = lifecycle
+        .list_session_links(project_id, issue_id)
+        .map_err(PlanRepairError::Store)?
+        .into_iter()
+        .filter(|link| {
+            link.id == supplied.id || link.child_session_id == supplied.child_session_id
+        });
+    let persisted = matches
+        .next()
+        .ok_or_else(|| identity_mismatch("workspace_session_link", &supplied.id))?;
+    if matches.next().is_some() || persisted != *supplied {
+        return Err(identity_mismatch("workspace_session_link", &supplied.id));
+    }
+    Ok(persisted)
+}
+
+fn validate_linked_amendment_restore_authority(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    link: &WorkspaceSessionLink,
+    child: &WorkspaceSessionRecord,
+) -> Result<(), PlanRepairError> {
+    let repair = lifecycle
+        .load_plan_repair_session_state(project_id, issue_id, &link.parent_session_id)
+        .map_err(PlanRepairError::Store)?
+        .ok_or_else(|| identity_mismatch("plan_repair_session_state", &link.parent_session_id))?;
+    let (repair_link, repair_child) =
+        linked_child_session(lifecycle, project_id, issue_id, &repair.request)?
+            .ok_or_else(|| identity_mismatch("workspace_session_link", &repair.link.id))?;
+    if repair.link != repair_link
+        || repair_child.id != link.parent_session_id
+        || repair_child.entity_id != repair.request.plan_id
+    {
+        return Err(identity_mismatch(
+            "workspace_session",
+            &link.parent_session_id,
+        ));
+    }
+
+    let target = LinkedWorkspaceAmendmentTarget {
+        entity_id: child.entity_id.clone(),
+        workspace_type: child.workspace_type.clone(),
+        relation: link.relation.clone(),
+    };
+    validate_amendment_target(&target)?;
+    validate_target_record(lifecycle, project_id, issue_id, &target)?;
+    let plan = WorkItemRevisionStore::new(lifecycle.app_paths())
+        .get_plan_lineage(project_id, issue_id, &repair.request.plan_id)
+        .map_err(PlanRepairError::Store)?;
+    let target_refs = match target.workspace_type {
+        WorkspaceType::Story => &plan.story_spec_refs,
+        WorkspaceType::Design => &plan.design_spec_refs,
+        WorkspaceType::WorkItem | WorkspaceType::WorkItemPlan => unreachable!("validated"),
+    };
+    if plan.active_revision_id.as_deref() != Some(repair.request.base_plan_revision_id.as_str())
+        || !target_refs.iter().any(|id| id == &target.entity_id)
+    {
+        return Err(identity_mismatch("work_item_plan_lineage", &plan.id));
+    }
+    let amendment_id = repair
+        .request
+        .amendment_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| identity_mismatch("plan_repair_request", &repair.request.id))?;
+    let (link_id, child_session_id) = linked_amendment_ids(
+        &repair_child.id,
+        &target.relation,
+        &target.entity_id,
+        amendment_id,
+    );
+    validate_upgrade_link(
+        &repair_child.id,
+        &repair,
+        &target,
+        link,
+        &link_id,
+        &child_session_id,
+    )?;
+    let existing = find_existing_link(
+        lifecycle,
+        &repair,
+        &target,
+        LinkedAmendmentLookup {
+            project_id,
+            issue_id,
+            parent_session_id: &repair_child.id,
+            link_id: &link_id,
+            child_session_id: &child_session_id,
+        },
+    )?
+    .ok_or_else(|| identity_mismatch("workspace_session_link", &link_id))?;
+    if existing != *link {
+        return Err(identity_mismatch("workspace_session_link", &link.id));
+    }
+    Ok(())
+}
+
+fn semantic_upgrade_link_candidate(
+    lifecycle: &LifecycleStore,
+    parent_session_id: &str,
+    repair: &PlanRepairSessionSnapshotDto,
+    target: &LinkedWorkspaceAmendmentTarget,
+    link: &WorkspaceSessionLink,
+) -> Result<bool, PlanRepairError> {
+    let repair_identity_matches = link.parent_session_id == parent_session_id
+        || link.trigger.repair_request_id == repair.request.id
+        || repair
+            .request
+            .amendment_id
+            .as_deref()
+            .is_some_and(|amendment_id| link.trigger.amendment_id == amendment_id);
+    if !repair_identity_matches {
+        return Ok(false);
+    }
+    match lifecycle.get_workspace_session(&link.child_session_id) {
+        Ok(child) => Ok(child.entity_id == target.entity_id),
+        Err(ProductStoreError::NotFound { .. }) => Ok(link.relation == target.relation),
+        Err(error) => Err(PlanRepairError::Store(error)),
+    }
+}
+
+fn validate_target_record(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    target: &LinkedWorkspaceAmendmentTarget,
+) -> Result<(), PlanRepairError> {
+    let matches = match target.workspace_type {
+        WorkspaceType::Story => lifecycle
+            .list_story_specs(project_id, issue_id)
+            .map_err(PlanRepairError::Store)?
+            .into_iter()
+            .filter(|record| record.id == target.entity_id)
+            .count(),
+        WorkspaceType::Design => lifecycle
+            .list_design_specs(project_id, issue_id)
+            .map_err(PlanRepairError::Store)?
+            .into_iter()
+            .filter(|record| record.id == target.entity_id)
+            .count(),
+        WorkspaceType::WorkItem | WorkspaceType::WorkItemPlan => 0,
+    };
+    if matches != 1 {
+        return Err(identity_mismatch(
+            "linked_workspace_target",
+            &target.entity_id,
+        ));
+    }
+    Ok(())
+}
+
+fn linked_amendment_ids(
+    parent_session_id: &str,
+    relation: &WorkspaceSessionRelation,
+    entity_id: &str,
+    amendment_id: &str,
+) -> (String, String) {
+    let identity_hash = compute_sha256(
+        format!(
+            "{parent_session_id}\n{}\n{entity_id}\n{amendment_id}",
+            relation_label(relation)
+        )
+        .as_bytes(),
+    );
+    (
+        format!(
+            "workspace_session_link_{}_{}",
+            relation_label(relation),
+            identity_hash
+        ),
+        format!(
+            "workspace_session_{}_{}",
+            relation_label(relation),
+            identity_hash
+        ),
+    )
 }
 
 fn validate_target_child(

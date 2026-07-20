@@ -1,5 +1,7 @@
 import { act } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { linkedWorkspaceAmendmentSnapshotFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
+import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import {
   installWorkspaceWsTestHooks,
@@ -59,6 +61,86 @@ describe("useWorkspaceWs plan repair actions", () => {
         payload: { description: "调整 Plan Repair 修订范围" },
       }),
     ]);
+  });
+
+  it.each([
+    ["story", "story_amendment", "story_spec_0001"],
+    ["design", "design_amendment", "design_spec_0001"],
+  ] as const)("sends a typed %s amendment target", (workspaceType, relation, entityId) => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    let sent = false;
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(sessionState("workspace_session_repair_0001"));
+      harness.ws.sent.length = 0;
+      sent = harness.api.startLinkedWorkspaceAmendment({
+        entity_id: entityId,
+        workspace_type: workspaceType,
+        relation,
+      });
+    });
+
+    expect(sent).toBe(true);
+    expect(harness.ws.sent).toEqual([
+      JSON.stringify({
+        type: "start_linked_workspace_amendment",
+        target: {
+          entity_id: entityId,
+          workspace_type: workspaceType,
+          relation,
+        },
+      }),
+    ]);
+    expect(useLinkedWorkspaceAmendmentStore.getState().status).toBe("pending");
+  });
+
+  it("rejects a mismatched linked amendment target before sending", () => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    let sent = true;
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(sessionState("workspace_session_repair_0001"));
+      harness.ws.sent.length = 0;
+      sent = harness.api.startLinkedWorkspaceAmendment({
+        entity_id: "story_spec_0001",
+        workspace_type: "story",
+        relation: "design_amendment",
+      });
+    });
+
+    expect(sent).toBe(false);
+    expect(harness.ws.sent).toEqual([]);
+  });
+
+  it("consumes only a linked amendment snapshot bound to the active repair child", () => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    const snapshot = linkedWorkspaceAmendmentSnapshotFixture();
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(sessionState("workspace_session_repair_0001"));
+      harness.ws.receive({
+        type: "linked_workspace_amendment_created",
+        snapshot,
+      });
+    });
+    expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
+      status: "ready",
+      snapshot,
+    });
+
+    act(() => {
+      harness.ws.receive({
+        type: "linked_workspace_amendment_created",
+        snapshot: {
+          ...snapshot,
+          link: { ...snapshot.link, parent_session_id: "workspace_session_other" },
+        },
+      });
+    });
+    expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
+      status: "error",
+      snapshot: null,
+    });
   });
 
   it("keeps socket sends and readiness isolated when the child session changes", () => {

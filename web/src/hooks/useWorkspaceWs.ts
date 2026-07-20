@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AuthorDecision,
   HumanConfirmDecision,
-  PlanAmendmentManifest,
-  PlanRepairSessionSnapshot,
+  LinkedWorkspaceAmendmentTarget,
   ProviderConfigSnapshot,
   RevisionPath,
   SaveHumanPresentationRevisionMessage,
@@ -12,16 +11,11 @@ import type {
   WorkItemDraftDecision,
   WorkItemGenerationMode,
   WorkItemPlanCompileRecoveryAction,
-  WorkItemRevisionHistoryDto,
   WsInMessage,
 } from "../api/types";
 import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
-import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
-import {
-  repairSourceMatchesCurrent,
-  type PlanRepairIdentitySource,
-} from "../state/plan-repair-session";
-import { useWorkspaceStore, type TimelineNode } from "../state/workspace-ws-store";
+import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
+import { useWorkspaceStore } from "../state/workspace-ws-store";
 import type { ChoiceAnswerPayload } from "../state/chat-entries";
 import {
   ACTIVE_PROVIDER_STAGES,
@@ -30,7 +24,10 @@ import {
   type WsServerMessage,
   wsReadyStateName,
 } from "./workspace-ws-message-handler";
-
+import {
+  aggregatePlanRepairChildMessage,
+  type PlanRepairSourceState,
+} from "./useWorkspaceWs-plan-repair";
 
 type WorkspaceWsSendMessage =
   | WsInMessage
@@ -229,6 +226,7 @@ export function useWorkspaceWs(sessionId: string | null) {
 
   useEffect(() => {
     planRepairSourceRef.current = { hasSnapshot: false, source: null };
+    useLinkedWorkspaceAmendmentStore.getState().reset(sessionId);
     if (!sessionId) {
       clearPendingStreams();
       useWorkspaceStore.getState().reset();
@@ -406,6 +404,33 @@ export function useWorkspaceWs(sessionId: string | null) {
             reason: trimmedReason || null,
           })
         : false;
+    },
+    [sendJson],
+  );
+
+  const startLinkedWorkspaceAmendment = useCallback(
+    (target: LinkedWorkspaceAmendmentTarget) => {
+      const entityId = target.entity_id.trim();
+      const validPair =
+        (target.workspace_type === "story" &&
+          target.relation === "story_amendment") ||
+        (target.workspace_type === "design" &&
+          target.relation === "design_amendment");
+      if (!entityId || !validPair) {
+        return false;
+      }
+      const normalizedTarget = { ...target, entity_id: entityId };
+      const sent = sendJson({
+        type: "start_linked_workspace_amendment",
+        target: normalizedTarget,
+      });
+      const store = useLinkedWorkspaceAmendmentStore.getState();
+      if (sent) {
+        store.begin(normalizedTarget);
+      } else {
+        store.fail("关联修订请求发送失败，请检查 Child Workspace 连接。");
+      }
+      return sent;
     },
     [sendJson],
   );
@@ -649,6 +674,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendHumanConfirm,
     confirmPlanAmendment,
     cancelPlanAmendment,
+    startLinkedWorkspaceAmendment,
     sendHello,
     sendPing,
     startGeneration,
@@ -667,115 +693,5 @@ export function useWorkspaceWs(sessionId: string | null) {
     retryNow,
     sessionSnapshotGeneration:
       sessionSnapshot.sessionId === sessionId ? sessionSnapshot.generation : 0,
-  };
-}
-
-function aggregatePlanRepairChildMessage(
-  msg: WsServerMessage,
-  sessionId: string | null,
-  sourceState: PlanRepairSourceState,
-) {
-  if (!sessionId) {
-    return;
-  }
-  const codingStore = useCodingWorkspaceStore.getState();
-  switch (msg.type) {
-    case "session_state": {
-      sourceState.hasSnapshot = true;
-      sourceState.source = null;
-      const snapshot = msg.plan_repair as PlanRepairSessionSnapshot | null | undefined;
-      if (!snapshot || snapshot.link.child_session_id !== sessionId) {
-        return;
-      }
-      codingStore.updatePlanRepairSession(snapshot);
-      const current = useCodingWorkspaceStore.getState();
-      if (
-        !current.attemptId ||
-        !repairSourceMatchesCurrent(
-          current.activePlanRepair,
-          snapshot,
-          current.attemptId,
-        )
-      ) {
-        return;
-      }
-      sourceState.source = { request: snapshot.request, link: snapshot.link };
-      const artifacts = structuredPlanRepairArtifacts(msg);
-      const history = artifacts.history;
-      if (history) {
-        codingStore.setPlanRepairHistory(sourceState.source, history);
-      }
-      if (artifacts.amendment) {
-        codingStore.setPlanAmendment(artifacts.amendment, sourceState.source);
-      }
-      break;
-    }
-    case "timeline_node_created": {
-      const source = planRepairSourceForMessage(sourceState, sessionId);
-      if (!source) return;
-      codingStore.addPlanRepairTimelineNode(source, msg.node as TimelineNode);
-      break;
-    }
-    case "timeline_node_updated": {
-      const source = planRepairSourceForMessage(sourceState, sessionId);
-      if (!source) return;
-      codingStore.updatePlanRepairTimelineNode(
-        source,
-        msg.node_id as string,
-        msg.status as TimelineNode["status"],
-        msg.summary as string | null | undefined,
-        msg.completed_at as string | null | undefined,
-      );
-      break;
-    }
-    case "artifact_update": {
-      const source = planRepairSourceForMessage(sourceState, sessionId);
-      if (!source) return;
-      const history = msg.work_item_revision_history as
-        | WorkItemRevisionHistoryDto
-        | undefined;
-      if (history) {
-        codingStore.setPlanRepairHistory(source, history);
-      }
-      const amendment = msg.plan_amendment_manifest as
-        | PlanAmendmentManifest
-        | undefined;
-      if (amendment) {
-        codingStore.setPlanAmendment(amendment, source);
-      }
-      break;
-    }
-  }
-}
-
-type PlanRepairSourceState = {
-  hasSnapshot: boolean;
-  source: PlanRepairIdentitySource | null;
-};
-
-function planRepairSourceForMessage(
-  state: PlanRepairSourceState,
-  sessionId: string,
-): PlanRepairIdentitySource | null {
-  if (state.hasSnapshot) {
-    return state.source;
-  }
-  const current = useCodingWorkspaceStore.getState().activePlanRepair;
-  if (!current || current.childSessionId !== sessionId) {
-    return null;
-  }
-  return { request: current.request, link: current.link };
-}
-
-function structuredPlanRepairArtifacts(msg: WsServerMessage) {
-  const versions = ((msg as { artifact_versions?: Array<{
-    work_item_revision_history?: WorkItemRevisionHistoryDto;
-    plan_amendment_manifest?: PlanAmendmentManifest;
-  }> }).artifact_versions ?? []).slice().reverse();
-  return {
-    history: versions.find((version) => version.work_item_revision_history)
-      ?.work_item_revision_history,
-    amendment: versions.find((version) => version.plan_amendment_manifest)
-      ?.plan_amendment_manifest,
   };
 }
