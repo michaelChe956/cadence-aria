@@ -77,3 +77,8 @@ P6 Task 1: complete (commits ed66abf..1b66375, review approved after three fix w
   Decision: authoritative snapshots win same-ID timeline nodes while watermark-new current-only events survive out-of-order delivery; richer stage, history and terminal cleanup cannot regress on reconnect.
   Decision: Repair Child History/Manifest artifacts are persisted and broadcast through the real Workspace wire before session state; History always derives from the latest canonical non-Repair WorkItemPlan parent plus authoritative UnitRun/Handoff facts, never from historical Child sessions or empty/runtime-only fallback.
   Cross-task dependency: Task 2 consumes the approved linked Repair state for the inline Repair Center; Task 3 owns Story/Design/Work Item shared relation and subgraph protocol coverage.
+P6 Task 2: complete (commits 4492ad4..b6fa93c, review approved after two fix waves)
+  Decision: Coding Workspace embeds the Repair Center on the parent route and opens the complete Work Item Workspace only through an explicit safe link; all mutations use the real Child Generic Workspace transport.
+  Decision: stale Child sockets and mismatched session snapshots fail closed; stable semantic Repair generation preserves exact-once pending across equivalent reconnect snapshots, while a matching authoritative Child snapshot generation clears pending and scoped local send errors.
+  Decision: Semantic classification is single-source with actual affected > conditional-only > unaffected, and the unified timeline consumes only visible Repair projection without copying Provider streams.
+  Cross-task dependency: Task 3 owns Subgraph Replan plus Story/Design/Work Item shared upgrade relations and protocol coverage; Task 4 owns non-E2E recovery fixtures and final gates.
