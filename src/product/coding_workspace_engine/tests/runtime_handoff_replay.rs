@@ -569,15 +569,47 @@ fn coding_runtime_handoff_placeholder_same_tuple_completed_replay_is_unchanged()
     assert_eq!(runtime_registration_unit(&fixture), completed_unit);
 }
 
-#[test]
-fn coding_runtime_handoff_placeholder_different_tuple_creates_fixed_run() {
+fn complete_non_registration_runtime_units(fixture: &RuntimeHandoffFixture) {
+    for unit in fixture
+        .store
+        .list_coding_units(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .unwrap()
+        .into_iter()
+        .filter(|unit| unit.logical_work_item_id != "wi_registration")
+    {
+        fixture
+            .store
+            .update_coding_unit_status(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                CodingExecutionUnitStatus::Completed,
+                Some("Completed before runtime Handoff replay".to_string()),
+            )
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn coding_runtime_handoff_placeholder_different_tuple_converges_unit_and_replay() {
     let fixture = runtime_handoff_fixture(
         RuntimeContractChange::CompatibleExtension,
         CodingUnitRunStatus::AwaitingAmendment,
     );
     let first_handoffs = vec!["handoff_revision_0002".to_string()];
     let completed = complete_runtime_registration_placeholder(&fixture, &first_handoffs);
-    let completed_unit = runtime_registration_unit(&fixture);
+    complete_non_registration_runtime_units(&fixture);
+    assert!(
+        fixture
+            .engine
+            .group_attempt_ready_for_final_review(&fixture.attempt)
+            .unwrap()
+    );
     let next_handoffs = vec!["handoff_revision_0003".to_string()];
 
     let created = resolve_runtime_registration(
@@ -585,6 +617,35 @@ fn coding_runtime_handoff_placeholder_different_tuple_creates_fixed_run() {
         &next_handoffs,
         CodingUnitRunStatus::Pending,
     );
+    assert_eq!(
+        runtime_registration_unit(&fixture).status,
+        CodingExecutionUnitStatus::Pending
+    );
+    assert!(
+        !fixture
+            .engine
+            .group_attempt_ready_for_final_review(&fixture.attempt)
+            .unwrap()
+    );
+
+    fixture
+        .store
+        .update_coding_unit_status(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &completed.unit_id,
+            CodingExecutionUnitStatus::Completed,
+            Some("Simulated crash-window stale Unit state".to_string()),
+        )
+        .unwrap();
+    assert!(
+        fixture
+            .engine
+            .group_attempt_ready_for_final_review(&fixture.attempt)
+            .unwrap()
+    );
+
     let replayed = resolve_runtime_registration(
         &fixture,
         &next_handoffs,
@@ -597,11 +658,82 @@ fn coding_runtime_handoff_placeholder_different_tuple_creates_fixed_run() {
     assert_eq!(created.status, CodingUnitRunStatus::Pending);
     assert_eq!(created.resolved_handoff_revision_ids, next_handoffs);
     assert_eq!(replayed, created);
+    assert_eq!(
+        runtime_registration_unit(&fixture).status,
+        CodingExecutionUnitStatus::Pending
+    );
+    assert!(
+        !fixture
+            .engine
+            .group_attempt_ready_for_final_review(&fixture.attempt)
+            .unwrap()
+    );
     let runs = fixture
         .store
         .list_coding_unit_runs(&fixture.attempt, &completed.unit_id)
         .unwrap();
     assert_eq!(runs.len(), 3);
     assert_eq!(runs[1], completed);
-    assert_eq!(runtime_registration_unit(&fixture), completed_unit);
+
+    fixture
+        .engine
+        .advance_to_next_group_unit(&fixture.attempt)
+        .await
+        .unwrap();
+    let running_unit = runtime_registration_unit(&fixture);
+    assert_eq!(running_unit.status, CodingExecutionUnitStatus::Running);
+    let running = fixture
+        .store
+        .list_coding_unit_runs(&fixture.attempt, &completed.unit_id)
+        .unwrap()
+        .into_iter()
+        .find(|run| run.id == created.id)
+        .unwrap();
+    assert_eq!(running.status, CodingUnitRunStatus::Running);
+
+    let advanced_replay = resolve_runtime_registration(
+        &fixture,
+        &["handoff_revision_0003".to_string()],
+        CodingUnitRunStatus::Pending,
+    );
+    assert_eq!(advanced_replay, running);
+    assert_eq!(runtime_registration_unit(&fixture), running_unit);
+}
+
+#[test]
+fn coding_runtime_handoff_placeholder_different_tuple_stale_converges_unit() {
+    let fixture = runtime_handoff_fixture(
+        RuntimeContractChange::BreakingChange,
+        CodingUnitRunStatus::AwaitingAmendment,
+    );
+    let completed = complete_runtime_registration_placeholder(
+        &fixture,
+        &["handoff_revision_0002".to_string()],
+    );
+    complete_non_registration_runtime_units(&fixture);
+
+    let created = resolve_runtime_registration(
+        &fixture,
+        &["handoff_revision_0003".to_string()],
+        CodingUnitRunStatus::Stale,
+    );
+
+    assert_eq!(created.status, CodingUnitRunStatus::Stale);
+    assert_eq!(
+        runtime_registration_unit(&fixture).status,
+        CodingExecutionUnitStatus::Stale
+    );
+    assert!(
+        !fixture
+            .engine
+            .group_attempt_ready_for_final_review(&fixture.attempt)
+            .unwrap()
+    );
+    let runs = fixture
+        .store
+        .list_coding_unit_runs(&fixture.attempt, &completed.unit_id)
+        .unwrap();
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[1], completed);
+    assert_eq!(runs[2], created);
 }

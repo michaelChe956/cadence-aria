@@ -102,15 +102,10 @@ impl super::CodingAttemptStore {
             } else {
                 None
             };
-        let update_unit;
         let resolved = match placeholder_resolution {
-            Some(PlaceholderRunResolution::Resolved(run)) => {
-                update_unit = true;
-                run
-            }
+            Some(PlaceholderRunResolution::Resolved(run)) => run,
             Some(PlaceholderRunResolution::AdvancedReplay(run)) => return Ok(run),
-            placeholder_resolution => {
-                update_unit = placeholder_resolution.is_none();
+            Some(PlaceholderRunResolution::DifferentTuple) | None => {
                 let run_id = runtime_handoff_unit_run_id(
                     &current.id,
                     amendment_id,
@@ -125,71 +120,80 @@ impl super::CodingAttemptStore {
                     {
                         return Err(identity_mismatch(&run_id));
                     }
-                    return Ok(existing);
+                    if matches!(existing.status, CodingUnitRunStatus::Running)
+                        && existing.completion_commit.is_none()
+                        || matches!(existing.status, CodingUnitRunStatus::Completed)
+                            && existing.completion_commit.is_some()
+                    {
+                        return Ok(existing);
+                    }
+                    if existing.status != status || existing.completion_commit.is_some() {
+                        return Err(identity_mismatch(&run_id));
+                    }
+                    existing
+                } else {
+                    let run = CodingUnitRun {
+                        id: run_id,
+                        unit_id: unit.id.clone(),
+                        execution_no: runs
+                            .iter()
+                            .map(|run| run.execution_no)
+                            .max()
+                            .unwrap_or(0)
+                            .saturating_add(1),
+                        work_item_revision_id: revision.id.clone(),
+                        resolved_handoff_revision_ids: resolved_handoff_revision_ids.to_vec(),
+                        canonical_contract_hash: revision.canonical_contract_hash,
+                        projection_bundle_id: bundle.id,
+                        projection_compiler_version: bundle.compiler_version,
+                        coder_provider_renderer_version: renderer_for(&providers.coder)
+                            .renderer_version()
+                            .to_string(),
+                        reviewer_provider_renderer_version: renderer_for(&providers.code_reviewer)
+                            .renderer_version()
+                            .to_string(),
+                        internal_reviewer_provider_renderer_version: None,
+                        coder_projection_hash: bundle.coder_projection_hash,
+                        reviewer_projection_hash: bundle.reviewer_projection_hash,
+                        coder_execution_context_hash: None,
+                        reviewer_execution_context_hash: None,
+                        internal_reviewer_execution_context_hash: None,
+                        status: status.clone(),
+                        unit_rework_count: 0,
+                        verification_retry_count: 0,
+                        operational_retry_count: 0,
+                        plan_repair_count: runs
+                            .iter()
+                            .map(|run| run.plan_repair_count)
+                            .max()
+                            .unwrap_or(0),
+                        start_commit: current.head_commit.clone(),
+                        completion_commit: None,
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                    };
+                    self.load_or_create_coding_unit_run(&current, &run)?
                 }
-                let run = CodingUnitRun {
-                    id: run_id,
-                    unit_id: unit.id.clone(),
-                    execution_no: runs
-                        .iter()
-                        .map(|run| run.execution_no)
-                        .max()
-                        .unwrap_or(0)
-                        .saturating_add(1),
-                    work_item_revision_id: revision.id.clone(),
-                    resolved_handoff_revision_ids: resolved_handoff_revision_ids.to_vec(),
-                    canonical_contract_hash: revision.canonical_contract_hash,
-                    projection_bundle_id: bundle.id,
-                    projection_compiler_version: bundle.compiler_version,
-                    coder_provider_renderer_version: renderer_for(&providers.coder)
-                        .renderer_version()
-                        .to_string(),
-                    reviewer_provider_renderer_version: renderer_for(&providers.code_reviewer)
-                        .renderer_version()
-                        .to_string(),
-                    internal_reviewer_provider_renderer_version: None,
-                    coder_projection_hash: bundle.coder_projection_hash,
-                    reviewer_projection_hash: bundle.reviewer_projection_hash,
-                    coder_execution_context_hash: None,
-                    reviewer_execution_context_hash: None,
-                    internal_reviewer_execution_context_hash: None,
-                    status: status.clone(),
-                    unit_rework_count: 0,
-                    verification_retry_count: 0,
-                    operational_retry_count: 0,
-                    plan_repair_count: runs
-                        .iter()
-                        .map(|run| run.plan_repair_count)
-                        .max()
-                        .unwrap_or(0),
-                    start_commit: current.head_commit.clone(),
-                    completion_commit: None,
-                    created_at: String::new(),
-                    updated_at: String::new(),
-                };
-                self.load_or_create_coding_unit_run(&current, &run)?
             }
         };
-        if update_unit {
-            unit.status = unit_status(&status);
-            unit.started_at = None;
-            unit.completed_at = None;
-            unit.summary = Some(format!(
-                "Runtime Handoff {} resolved after Plan Amendment {}",
-                resolved_handoff_revision_ids.join(","),
-                amendment_id
-            ));
-            unit.updated_at = Utc::now().to_rfc3339();
-            write_json(
-                &self.coding_unit_path(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                    &unit.id,
-                ),
-                &unit,
-            )?;
-        }
+        unit.status = unit_status(&resolved.status);
+        unit.started_at = None;
+        unit.completed_at = None;
+        unit.summary = Some(format!(
+            "Runtime Handoff {} resolved after Plan Amendment {}",
+            resolved_handoff_revision_ids.join(","),
+            amendment_id
+        ));
+        unit.updated_at = Utc::now().to_rfc3339();
+        write_json(
+            &self.coding_unit_path(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                &unit.id,
+            ),
+            &unit,
+        )?;
         Ok(resolved)
     }
 
