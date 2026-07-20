@@ -1,5 +1,5 @@
 use super::*;
-use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_models::{CodingAttemptScope, CodingStageGateStatus};
 
 impl CodingWorkspaceEngine {
     pub(crate) fn active_work_item_id_for_attempt<'a>(
@@ -115,6 +115,19 @@ impl CodingWorkspaceEngine {
         self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
         self.ensure_issue_shared_worktree_clean(&current, &active_work_item_id)
             .await?;
+
+        for gate in self
+            .store
+            .list_open_stage_gates(project_id, issue_id, attempt_id)?
+        {
+            self.store.update_stage_gate_status(
+                project_id,
+                issue_id,
+                attempt_id,
+                &gate.gate_id,
+                CodingStageGateStatus::Cancelled,
+            )?;
+        }
 
         let updated = self.store.update_attempt_status(
             project_id,

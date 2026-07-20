@@ -88,7 +88,7 @@ impl CodingWorkspaceEngine {
         let mut active_input = input;
         let mut fresh_retry = fresh_retry;
         'provider_attempt: loop {
-            let cancel = CancellationToken::new();
+            let cancel = self.cancellation.child_token();
             self.record_role_run_event(
                 attempt,
                 role_run,
@@ -667,7 +667,7 @@ impl CodingWorkspaceEngine {
         provider_name: &ProviderName,
         provider_role: CodingProviderRole,
     ) -> Result<String, CodingWorkspaceEngineError> {
-        let cancel = CancellationToken::new();
+        let cancel = self.cancellation.child_token();
         let mut stream = provider.run_streaming(input, cancel.clone()).await?;
         if let Err(error) = self.record_provider_start_required(
             attempt,

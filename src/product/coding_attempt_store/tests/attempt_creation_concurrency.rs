@@ -113,3 +113,42 @@ fn single_work_item_attempt_creation_is_serialized_across_store_instances() {
         "losing request must not leave provider config"
     );
 }
+
+#[test]
+fn work_item_creation_guard_rejects_same_ids_from_different_store_root() {
+    let (_first_tmp, first_store) = setup_store();
+    let (_second_tmp, second_store) = setup_store();
+    let guard = first_store
+        .acquire_work_item_attempt_creation(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID)
+        .expect("first root creation guard");
+
+    let error = second_store
+        .create_attempt_with_guard(
+            CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: WORK_ITEM_ID.to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/work-items/work_item_0001/cross-root".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider_snapshot(),
+                max_auto_rework: 2,
+            },
+            &guard,
+        )
+        .expect_err("a guard from another Store root must be rejected");
+
+    assert!(matches!(
+        error,
+        ProductStoreError::IdentityMismatch {
+            kind: "work_item_attempt_creation_guard",
+            ..
+        }
+    ));
+    assert!(
+        second_store
+            .list_attempts_for_work_item(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID)
+            .expect("second root attempts")
+            .is_empty()
+    );
+}

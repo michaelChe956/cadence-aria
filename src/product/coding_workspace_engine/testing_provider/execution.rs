@@ -99,7 +99,7 @@ impl CodingWorkspaceEngine {
             env_vars: BTreeMap::new(),
             timeout_secs: options.timeout.as_secs().max(1),
         };
-        let cancel = CancellationToken::new();
+        let cancel = self.cancellation.child_token();
         let start_result = tokio::select! {
             result = provider.start(input, cancel.clone()) => result,
             _ = tokio::time::sleep(options.timeout) => {

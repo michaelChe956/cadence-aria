@@ -372,3 +372,77 @@ Focused 验证：
 - Story Spec 与 Design Spec Workspace 不受影响：本轮只修改 Coding Attempt 创建、Group initialization、Coding runner registry、Coding WebSocket Abort 与 Group Delete 路径。
 - 未修改 Story/Design/Work Item 产物 Workspace 共用的 timeline、chat entry、artifact version 或前端聚合链路；Work Item 影响限于 Coding Attempt 的创建唯一性与 Issue Shared Worktree owner 生命周期。
 - Round 4 代码、测试、设计、计划与本报告使用一个新原子提交；不 amend，不 push，提交后保留 worktree 且工作区必须 clean。
+
+## Round 5 最终修复（2026-07-21）
+
+### 1. Group replay、Single scope 与 guard identity
+
+- 新增 `BoundBeforePhaseAdvance` checkpoint，确定性覆盖 Issue Worktree 已绑定为 journal Attempt、journal 仍停留在 `AttemptPersisted` 的崩溃窗口。
+- Group replay 仅在 phase 至少为 `AttemptPersisted`、owner 精确等于 journal Attempt、磁盘 Attempt/provider config 与 journal 完全一致且该 Attempt 是唯一 active Attempt 时继续；验证过程只读，不补写缺失记录。
+- Single 创建遇到 active `WorkItemGroup` Attempt 时只返回 `coding_attempt_active`，不再替 Group journal 修复或绑定 lease；后续 Group retry 仍使用 journal 固定的 lease/Attempt identity 完成恢复。
+- `WorkItemAttemptCreationGuard` 现在同时绑定 project/issue/work-item、canonical Store root 与 canonical lock path；来自另一 Store root 的同业务 ID guard fail-closed，目标 Store 零写。
+
+### 2. Async-safe flock 与无 Tokio worker 饥饿
+
+- `ExclusiveFileLock::acquire_async` 使用 `tokio::task::spawn_blocking` 等待同步 `flock`，锁取得后仍由 RAII guard 跨 `.await` 持有，保留原有线性化语义。
+- Single create、Group create/replay 与 Group Delete 全部迁移到 async Store acquire；同步 Store API 与单元测试入口继续保留。
+- current-thread heartbeat 测试证明竞争 flock 时 Tokio worker 可在锁释放前继续调度；2-worker/8-contender 测试证明多个竞争者不会耗尽 runtime worker。
+- `concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease` 恢复为默认 current-thread `#[tokio::test]`，不再依赖 multi-thread runtime 掩盖阻塞锁。
+
+### 3. Registry-owned CancellationToken 与 attach 证明
+
+- `CodingRunEntry` production registration 在 registry mutex 内原子创建并写入 `CancellationToken`，返回 `CodingRunRegistration { run_id, cancellation }`；普通 runner、failed-review reserved runner 与 Plan Amendment reserved runner 均在 spawn 前取得 registration，不存在 spawn 后 attach 窗口。
+- runner task 首行建立 `CodingRunnerRegistrationGuard`，外层 `tokio::select!` 竞争完整业务 future 与 `cancellation.cancelled()`；正常返回、早退、panic、event send/provider wait/gate wait 被取消时均由 guard Drop 必达 `remove`。
+- `abort_attempt` 先同步写 retired/revoke reservation 并快照 entries，再 cancel 所有 production token；legacy test entry 仅使用无等待 `try_send`，closed receiver 立即 remove；最后等待 completion watch，全程没有 awaited command send。
+- `CodingWorkspaceEngine` 保存 parent token；modern stream、legacy stream 与 provider-driven testing execution 均使用 `child_token()`，runner cancel 会传播到 provider adapter/process，而不是仅 drop 上层 future。
+- `runner.rs` 从恰好 800 行降至 699 行，runner task 主体迁入 150 行的 `runner/task.rs`；全部修改/新增 Rust、TS 文件继续满足 800 行上限。
+
+### 4. HTTP/WS durable Abort/Delete 语义
+
+- HTTP Abort/Delete 保持 `cancel tokens → wait RAII completion → acquire Attempt mutation lease → reload → durable mutation/cleanup`；runner cancellation 分支本身不写 Attempt 终态或删除 journal。
+- WS Abort 先释放消息准备阶段 mutation lease，再 cancel/wait、drain 已排队事件并结算 delivery ACK，最后重新取得 mutation lease执行 `handle_abort`。
+- 移除旧的“存在 open stage gate 且已通知 runner 时直接 continue”短路；该逻辑依赖 runner command 写 durable Abort，与 token-only cancellation 不兼容。
+- `handle_abort` 统一取消所有 open stage gate 后再写 Attempt=`Aborted`、收口 timeline 并释放 Issue Worktree lease，HTTP 与 WS 使用同一 durable 终态路径。
+- 真实 router 回归覆盖：容量 1 outbound queue 满时 HTTP Abort 250ms 内 200、HTTP Delete 250ms 内 204；registry 归零，Abort 持久化 Aborted 并释放 lease，Delete 删除 Attempt 目录并释放 lease。
+- pending socket flush 不阻塞 HTTP Abort；writer task 取消后 delivery ACK 失败结算，不能伪造 Delivered。持久化 Plan Amendment marker 的既有回归同时确认 writer abort 后保持 Pending，并可用同 event ID 恢复。
+- runner panic HTTP Abort 与 closed command receiver HTTP Delete 均在 250ms 内完成 durable cleanup；Group retry/Delete 既有回归继续确认 journal、Attempt 与 delivery 子目录随 Delete 清除。
+
+### 5. RED → GREEN
+
+| 场景 | RED | GREEN |
+| --- | --- | --- |
+| bind-before-phase replay | retry 返回 `coding_group_attempt_incomplete` | 严格只读 identity 校验后恢复同 Attempt 并推进 Completed |
+| Single 遇未完成 Group | Single 把 temporary lease 改绑为 Group Attempt | 返回 `coding_attempt_active`，lease 保持 journal temporary ID，Group retry 后绑定 |
+| 跨 Store guard | root A guard 可用于 root B 创建 | canonical root/lock path mismatch，root B 零写 |
+| current-thread flock | async handler 直接阻塞 Tokio worker | `spawn_blocking` 等锁，heartbeat 在释放前运行 |
+| 多 flock contenders | 竞争者占满两个 worker | 8 个竞争者不饿死 heartbeat，释放后全部完成 |
+| Registry 满 command channel | awaited `send` 无界等待 | token 先 cancel，满 channel 不影响 RAII remove/completion |
+| 真实 runner 满 event queue | Abort 250ms timeout | outer select drop blocked send，registry=0 |
+| provider cancellation | provider 使用独立 token，runner cancel 不传播 | engine child token观察 parent cancel |
+| WS stage gate Abort | token drop 后旧短路不写终态，先无 snapshot、后 gate 仍 open | handler durable Abort，snapshot Aborted且 pending gate为空 |
+| HTTP Abort/Delete backpressure | runner completion 依赖 event/command channel 可写 | 满队列/pending writer/panic/closed receiver均有界完成 |
+
+### 6. 验证结果与边界
+
+Focused 验证：
+
+- Group bind replay 与 Single scope：新增 2 条及 journal boundary 既有回归均通过。
+- canonical guard：1 passed；async flock heartbeat/contenders：2 passed。
+- Coding run registry：6 passed；runner cleanup/真实 HTTP：8 passed；provider child token：1 passed。
+- Coding WS Abort：3 passed；pending socket ACK 与持久化 Pending marker recovery 各 1 passed。
+- 既有 HTTP Abort lease 与 dirty worktree Delete 各 1 passed。
+
+最终门禁：
+
+- `cargo fmt --check`：PASS。
+- `cargo check --locked`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，0 warnings。
+- `cargo test --locked`：PASS，exit 0；lib target 运行 1224 tests，Web integration 279 passed、12 ignored，doc-test 1 passed，所有 target 无失败。
+- `cd web && pnpm tsc -b`：PASS。
+- `git diff --check`：PASS。
+- `src/web/app.rs` 无 diff；未新增 HTTP/test route。`TestControls` 仅新增默认关闭、一次性消费的 checkpoint 枚举值。
+- 24 个修改/新增 Rust、TS 文件全部不超过 800 行；最大为 `src/product/coding_workspace_engine/testing_provider/execution.rs` 796 行，其次为 `src/web/coding_ws_handler/socket.rs` 774 行。
+- 本轮无前端 TypeScript/React 行为改动，因此未运行 Vitest 与前端 build。
+- 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
+- Story Spec 与 Design Spec Workspace 不受影响：本轮只修改 Coding Attempt 创建/Group initialization、runner cancellation、Coding HTTP/WS Abort/Delete 与 Issue Shared Worktree lease 链路；未改产物 Workspace 共用的 timeline/chat/artifact version 前端恢复路径。
+- Round 5 代码、测试、设计、计划与本报告使用一个新原子提交；不 amend，不 push，提交后 worktree 必须 clean。

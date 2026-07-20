@@ -95,10 +95,12 @@ pub async fn create_group_coding_attempt(
     };
 
     let _initialization_guard = coding_store
-        .acquire_group_initialization_arbitration(&project_id, &issue_id)
+        .acquire_group_initialization_arbitration_async(&project_id, &issue_id)
+        .await
         .map_err(product_store_api_error)?;
     let creation_guard = coding_store
-        .acquire_work_item_attempt_creation(&project_id, &issue_id, &current_work_item.id)
+        .acquire_work_item_attempt_creation_async(&project_id, &issue_id, &current_work_item.id)
+        .await
         .map_err(product_store_api_error)?;
     let mut journal = coding_store
         .prepare_group_initialization(
@@ -137,7 +139,7 @@ pub async fn create_group_coding_attempt(
         .map_err(issue_worktree_active_api_error)?;
     let replay_already_bound = journal
         .phase
-        .has_reached(CodingGroupInitializationPhase::WorktreeBound)
+        .has_reached(CodingGroupInitializationPhase::AttemptPersisted)
         && worktree_lease.worktree.current_lock_owner_id.as_deref()
             == Some(journal.attempt.id.as_str());
     if !worktree_lease.acquired && !replay_already_bound {
@@ -147,6 +149,11 @@ pub async fn create_group_coding_attempt(
                 id: journal.attempt.id.clone(),
             },
         ));
+    }
+    if !worktree_lease.acquired {
+        coding_store
+            .validate_materialized_group_initialization_attempt(&journal, &creation_guard)
+            .map_err(coding_group_attempt_incomplete_api_error)?;
     }
     state
         .test_controls
@@ -175,6 +182,10 @@ pub async fn create_group_coding_attempt(
             &attempt.id,
         )
         .map_err(product_store_api_error)?;
+    maybe_interrupt_group_initialization(
+        &state,
+        crate::web::test_controls::GroupAttemptInitializationCheckpoint::BoundBeforePhaseAdvance,
+    )?;
     journal = coding_store
         .advance_group_initialization_phase(&journal, CodingGroupInitializationPhase::WorktreeBound)
         .map_err(coding_group_attempt_incomplete_api_error)?;

@@ -38,7 +38,12 @@ impl super::CodingAttemptStore {
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.work_item_id)?;
         super::validate_max_auto_rework(input.max_auto_rework)?;
-        guard.validate_identity(&input.project_id, &input.issue_id, &input.work_item_id)?;
+        guard.validate_identity(
+            self,
+            &input.project_id,
+            &input.issue_id,
+            &input.work_item_id,
+        )?;
 
         if let Some(active) =
             self.get_active_attempt(&input.project_id, &input.issue_id, &input.work_item_id)?

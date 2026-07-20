@@ -158,6 +158,7 @@ pub struct CodingWorkspaceEngine {
     pub(crate) _git_service: GitWorkspaceService,
     pub(crate) provider: Option<Arc<dyn ProviderAdapter + Send + Sync>>,
     pub(crate) event_tx: mpsc::Sender<CodingWsOutMessage>,
+    pub(crate) cancellation: CancellationToken,
 }
 
 impl std::fmt::Debug for CodingWorkspaceEngine {

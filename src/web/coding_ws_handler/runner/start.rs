@@ -41,9 +41,9 @@ pub(crate) fn spawn_coding_runner_panicking_after_registration(
 ) -> oneshot::Receiver<()> {
     let (command_tx, command_rx) = mpsc::channel(1);
     let registry_attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
-    let registry_run_id = state
+    let registration = state
         .coding_runs
-        .insert(&registry_attempt_key, command_tx)
+        .insert_cancellable(&registry_attempt_key, command_tx)
         .expect("panic test runner registration");
     let (panic_entered_tx, panic_entered_rx) = oneshot::channel();
     spawn_coding_runner_task(CodingRunnerTask {
@@ -52,7 +52,8 @@ pub(crate) fn spawn_coding_runner_panicking_after_registration(
         event_tx,
         attempt,
         command_rx,
-        registry_run_id,
+        registry_run_id: registration.run_id,
+        cancellation: registration.cancellation,
         start_rx: None,
         probe: None,
         panic_after_registration: Some(panic_entered_tx),

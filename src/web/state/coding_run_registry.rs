@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
@@ -51,6 +52,12 @@ struct CodingRunRegistryInner {
 struct CodingRunEntry {
     command_tx: mpsc::Sender<CodingRunnerCommand>,
     completion_tx: watch::Sender<bool>,
+    cancellation: Option<CancellationToken>,
+}
+
+pub(crate) struct CodingRunRegistration {
+    pub(crate) run_id: u64,
+    pub(crate) cancellation: CancellationToken,
 }
 
 pub(crate) struct CodingAttemptMutationLease {
@@ -87,6 +94,7 @@ impl CodingRunReservation {
                 CodingRunEntry {
                     command_tx,
                     completion_tx,
+                    cancellation: None,
                 },
             );
         inner
@@ -94,6 +102,45 @@ impl CodingRunReservation {
             .insert(self.attempt_key.clone(), self.reservation_id);
         self.released = true;
         Some(self.reservation_id)
+    }
+
+    pub(crate) fn activate_cancellable(
+        mut self,
+        command_tx: mpsc::Sender<CodingRunnerCommand>,
+    ) -> Option<CodingRunRegistration> {
+        let mut inner = self
+            .registry
+            .inner
+            .lock()
+            .expect("coding run registry lock");
+        if inner.retired_attempts.contains(&self.attempt_key)
+            || inner.reservations.get(&self.attempt_key) != Some(&self.reservation_id)
+        {
+            return None;
+        }
+        inner.reservations.remove(&self.attempt_key);
+        let cancellation = CancellationToken::new();
+        let (completion_tx, _completion_rx) = watch::channel(false);
+        inner
+            .runs
+            .entry(self.attempt_key.clone())
+            .or_default()
+            .insert(
+                self.reservation_id,
+                CodingRunEntry {
+                    command_tx,
+                    completion_tx,
+                    cancellation: Some(cancellation.clone()),
+                },
+            );
+        inner
+            .exclusive_runs
+            .insert(self.attempt_key.clone(), self.reservation_id);
+        self.released = true;
+        Some(CodingRunRegistration {
+            run_id: self.reservation_id,
+            cancellation,
+        })
     }
 
     pub fn release(mut self) {
@@ -133,9 +180,40 @@ impl CodingRunRegistry {
             CodingRunEntry {
                 command_tx,
                 completion_tx,
+                cancellation: None,
             },
         );
         Some(run_id)
+    }
+
+    pub(crate) fn insert_cancellable(
+        &self,
+        attempt_key: &CodingAttemptRunKey,
+        command_tx: mpsc::Sender<CodingRunnerCommand>,
+    ) -> Option<CodingRunRegistration> {
+        let mut inner = self.inner.lock().expect("coding run registry lock");
+        if inner.retired_attempts.contains(attempt_key)
+            || inner.reservations.contains_key(attempt_key)
+            || inner.exclusive_runs.contains_key(attempt_key)
+        {
+            return None;
+        }
+        inner.next_run_id += 1;
+        let run_id = inner.next_run_id;
+        let cancellation = CancellationToken::new();
+        let (completion_tx, _completion_rx) = watch::channel(false);
+        inner.runs.entry(attempt_key.clone()).or_default().insert(
+            run_id,
+            CodingRunEntry {
+                command_tx,
+                completion_tx,
+                cancellation: Some(cancellation.clone()),
+            },
+        );
+        Some(CodingRunRegistration {
+            run_id,
+            cancellation,
+        })
     }
 
     pub fn remove(&self, attempt_key: &CodingAttemptRunKey, run_id: u64) {
@@ -167,6 +245,7 @@ impl CodingRunRegistry {
                             (
                                 *run_id,
                                 entry.command_tx.clone(),
+                                entry.cancellation.clone(),
                                 entry.completion_tx.subscribe(),
                             )
                         })
@@ -175,14 +254,25 @@ impl CodingRunRegistry {
                 .unwrap_or_default()
         };
         let mut sent = 0;
-        for (run_id, sender, _) in &runners {
-            if sender.send(CodingRunnerCommand::AbortAttempt).await.is_ok() {
+        for (_, _, cancellation, _) in &runners {
+            if let Some(cancellation) = cancellation {
+                cancellation.cancel();
                 sent += 1;
-            } else {
-                self.remove(attempt_key, *run_id);
             }
         }
-        for (_, _, mut completion_rx) in runners {
+        for (run_id, sender, cancellation, _) in &runners {
+            if cancellation.is_some() {
+                continue;
+            }
+            match sender.try_send(CodingRunnerCommand::AbortAttempt) {
+                Ok(()) => sent += 1,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.remove(attempt_key, *run_id);
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {}
+            }
+        }
+        for (_, _, _, mut completion_rx) in runners {
             while !*completion_rx.borrow() {
                 if completion_rx.changed().await.is_err() {
                     break;
@@ -378,6 +468,42 @@ mod tests {
         .expect("abort must not wait forever after command receiver closes");
 
         assert_eq!(sent, 0);
+        assert_eq!(registry.runner_count(&attempt), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellable_abort_ignores_full_command_channel_and_waits_for_removal() {
+        let registry = CodingRunRegistry::default();
+        let attempt = CodingAttemptRunKey::new(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_cancellable_backpressure",
+        );
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        command_tx
+            .try_send(CodingRunnerCommand::AbortAttempt)
+            .expect("fill command channel");
+        let registration = registry
+            .insert_cancellable(&attempt, command_tx)
+            .expect("cancellable runner");
+        let cancellation = registration.cancellation.clone();
+        let run_id = registration.run_id;
+        let registry_for_runner = registry.clone();
+        let attempt_for_runner = attempt.clone();
+        let runner = tokio::spawn(async move {
+            cancellation.cancelled().await;
+            registry_for_runner.remove(&attempt_for_runner, run_id);
+        });
+
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            registry.abort_attempt(&attempt),
+        )
+        .await
+        .expect("abort must not wait for command channel capacity");
+
+        runner.await.expect("runner cancellation observer");
+        assert_eq!(cancelled, 1);
         assert_eq!(registry.runner_count(&attempt), 0);
     }
 

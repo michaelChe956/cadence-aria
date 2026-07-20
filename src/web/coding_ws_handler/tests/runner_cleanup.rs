@@ -1,16 +1,74 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::io;
+use std::pin::Pin;
+use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use axum::body::{Body, to_bytes};
+use axum::extract::ws::Message;
+use axum::http::{Method, Request, StatusCode};
+use futures_util::Sink;
 use tokio::sync::mpsc;
+use tower::ServiceExt;
 
 use crate::product::coding_attempt_store::CodingAttemptStore;
+use crate::product::coding_models::{
+    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
+};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
-use crate::web::coding_ws_handler::runner::spawn_coding_runner_panicking_after_registration;
+use crate::product::lifecycle_store::{LifecycleStore, UpsertIssueSharedWorktreeInput};
+use crate::product::models::{AmendmentResumeMode, AmendmentResumeTarget, PlanAmendmentManifest};
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use crate::web::app::build_web_router;
+use crate::web::coding_ws_handler::delivery_ack::register_plan_amendment_socket_write;
+use crate::web::coding_ws_handler::runner::{
+    spawn_coding_runner, spawn_coding_runner_panicking_after_registration,
+};
 use crate::web::coding_ws_handler::socket::abort::abort_attempt_while_draining_events;
-use crate::web::coding_ws_handler::{CodingWsOutMessage, OutboundEventReceiver};
+use crate::web::coding_ws_handler::{CodingWsOutMessage, OutboundEventReceiver, send_coding_event};
 use crate::web::runtime::WebRuntime;
 use crate::web::state::{CodingAttemptRunKey, CodingRunRegistry, WebAppState};
+use tempfile::TempDir;
 
 use super::seed_compiled_work_item_fixture;
+
+struct PendingSocketSink {
+    flush_entered: Arc<AtomicBool>,
+}
+
+impl Sink<Message> for PendingSocketSink {
+    type Error = io::Error;
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, _message: Message) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.flush_entered.store(true, Ordering::SeqCst);
+        Poll::Pending
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
 
 #[tokio::test]
 async fn spawned_runner_panic_removes_registry_registration() {
@@ -95,4 +153,344 @@ async fn abort_drains_full_event_queue_until_runner_removes_registration() {
         .collect::<Vec<_>>();
     assert_eq!(codes, vec!["first", "second"]);
     assert_eq!(registry.runner_count(&attempt_key), 0);
+}
+
+#[tokio::test]
+async fn registry_abort_cancels_real_runner_blocked_on_full_event_queue() {
+    let (tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+    let state = WebAppState::new(
+        tmp.path().to_path_buf(),
+        WebRuntime::new_fake(tmp.path().to_path_buf()),
+    );
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let (event_tx, _event_rx) = mpsc::channel(1);
+    event_tx
+        .try_send(CodingWsOutMessage::CodingPong)
+        .expect("fill outbound event queue");
+    let _command_tx = spawn_coding_runner(
+        state.clone(),
+        CodingAttemptStore::new(app_paths),
+        event_tx,
+        attempt,
+    )
+    .expect("spawn coding runner");
+
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(250),
+        state.coding_runs.abort_attempt(&attempt_key),
+    )
+    .await
+    .expect("registry abort must cancel a runner blocked on outbound backpressure");
+
+    assert_eq!(cancelled, 1);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
+}
+
+#[tokio::test]
+async fn http_abort_cancels_full_event_queue_runner_and_releases_lease() {
+    let (tmp, app_paths, state, attempt) = seed_http_attempt_with_lease();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let (event_tx, _event_rx) = mpsc::channel(1);
+    event_tx
+        .try_send(CodingWsOutMessage::CodingPong)
+        .expect("fill outbound event queue");
+    let _command_tx = spawn_coding_runner(
+        state.clone(),
+        CodingAttemptStore::new(app_paths.clone()),
+        event_tx,
+        attempt.clone(),
+    )
+    .expect("spawn coding runner");
+
+    let response = send_attempt_request(&state, &attempt, Method::POST, "/abort").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("abort response body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("abort response json");
+    assert_eq!(body["status"], "aborted");
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
+    let stored = CodingAttemptStore::new(app_paths.clone())
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("aborted attempt");
+    assert_eq!(stored.status, CodingAttemptStatus::Aborted);
+    assert_issue_lease_released(&app_paths, &attempt);
+    drop(tmp);
+}
+
+#[tokio::test]
+async fn http_delete_cancels_full_event_queue_runner_and_removes_attempt() {
+    let (tmp, app_paths, state, attempt) = seed_http_attempt_with_lease();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let (event_tx, _event_rx) = mpsc::channel(1);
+    event_tx
+        .try_send(CodingWsOutMessage::CodingPong)
+        .expect("fill outbound event queue");
+    let _command_tx = spawn_coding_runner(
+        state.clone(),
+        CodingAttemptStore::new(app_paths.clone()),
+        event_tx,
+        attempt.clone(),
+    )
+    .expect("spawn coding runner");
+
+    let response = send_attempt_request(&state, &attempt, Method::DELETE, "").await;
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
+    assert!(
+        CodingAttemptStore::new(app_paths.clone())
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .is_err(),
+        "delete must remove attempt record"
+    );
+    assert_issue_lease_released(&app_paths, &attempt);
+    drop(tmp);
+}
+
+#[tokio::test]
+async fn http_abort_is_not_blocked_by_pending_socket_writer_or_acknowledges_delivery() {
+    let (tmp, app_paths, state, attempt) = seed_http_attempt_with_lease();
+    let (event_tx, _event_rx) = mpsc::channel(1);
+    event_tx
+        .try_send(CodingWsOutMessage::CodingPong)
+        .expect("fill outbound event queue");
+    let _command_tx = spawn_coding_runner(
+        state.clone(),
+        CodingAttemptStore::new(app_paths.clone()),
+        event_tx,
+        attempt.clone(),
+    )
+    .expect("spawn coding runner");
+
+    let event_id = "event_http_abort_pending_socket";
+    let waiter = register_plan_amendment_socket_write(event_id).expect("delivery waiter");
+    let flush_entered = Arc::new(AtomicBool::new(false));
+    let writer_flush_entered = Arc::clone(&flush_entered);
+    let event = plan_amendment_event(event_id);
+    let writer = tokio::spawn(async move {
+        let mut socket = PendingSocketSink {
+            flush_entered: writer_flush_entered,
+        };
+        send_coding_event(&mut socket, &event).await
+    });
+    tokio::time::timeout(Duration::from_millis(250), async {
+        while !flush_entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("socket writer must enter pending flush");
+
+    let response = send_attempt_request(&state, &attempt, Method::POST, "/abort").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    writer.abort();
+    assert!(
+        writer
+            .await
+            .expect_err("writer must be cancelled")
+            .is_cancelled()
+    );
+    let error = tokio::time::timeout(Duration::from_millis(250), waiter.wait())
+        .await
+        .expect("cancelled writer must settle delivery acknowledgement")
+        .expect_err("HTTP abort must not acknowledge a pending socket write");
+    assert!(
+        error
+            .to_string()
+            .contains("plan_amendment_socket_write_failed")
+    );
+    assert_eq!(
+        CodingAttemptStore::new(app_paths.clone())
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("aborted attempt")
+            .status,
+        CodingAttemptStatus::Aborted
+    );
+    assert_issue_lease_released(&app_paths, &attempt);
+    drop(tmp);
+}
+
+#[tokio::test]
+async fn http_abort_completes_after_runner_panics() {
+    let (tmp, app_paths, state, attempt) = seed_http_attempt_with_lease();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let (event_tx, _event_rx) = mpsc::channel(1);
+    let panic_entered = spawn_coding_runner_panicking_after_registration(
+        state.clone(),
+        CodingAttemptStore::new(app_paths.clone()),
+        event_tx,
+        attempt.clone(),
+    );
+    panic_entered.await.expect("runner panic probe");
+
+    let response = send_attempt_request(&state, &attempt, Method::POST, "/abort").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
+    assert_eq!(
+        CodingAttemptStore::new(app_paths.clone())
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("aborted attempt")
+            .status,
+        CodingAttemptStatus::Aborted
+    );
+    assert_issue_lease_released(&app_paths, &attempt);
+    drop(tmp);
+}
+
+#[tokio::test]
+async fn http_delete_completes_when_command_receiver_is_closed() {
+    let (tmp, app_paths, state, attempt) = seed_http_attempt_with_lease();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let (command_tx, command_rx) = mpsc::channel(1);
+    state
+        .coding_runs
+        .insert(&attempt_key, command_tx)
+        .expect("closed receiver registration");
+    drop(command_rx);
+
+    let response = send_attempt_request(&state, &attempt, Method::DELETE, "").await;
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
+    assert!(
+        CodingAttemptStore::new(app_paths.clone())
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .is_err(),
+        "delete must remove attempt after closed receiver cleanup"
+    );
+    assert_issue_lease_released(&app_paths, &attempt);
+    drop(tmp);
+}
+
+fn seed_http_attempt_with_lease() -> (
+    TempDir,
+    crate::product::app_paths::ProductAppPaths,
+    WebAppState,
+    CodingExecutionAttempt,
+) {
+    let (tmp, app_paths, mut attempt) = seed_compiled_work_item_fixture();
+    attempt.scope = CodingAttemptScope::WorkItem;
+    attempt.work_item_group_id = None;
+    attempt.current_work_item_id = None;
+    attempt.worktree_path = None;
+    attempt.status = CodingAttemptStatus::Running;
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    coding_store
+        .save_coding_attempt(&attempt)
+        .expect("persist HTTP attempt fixture");
+
+    let repository_path = tmp.path().join("repository");
+    fs::create_dir_all(&repository_path).expect("repository directory");
+    assert!(
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .arg(&repository_path)
+            .status()
+            .expect("git init")
+            .success(),
+        "git init must succeed"
+    );
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: attempt.project_id.clone(),
+            name: "repository".to_string(),
+            path: repository_path,
+            default_policy_preset: None,
+            default_provider_mode: Some("fake".to_string()),
+        })
+        .expect("repository record");
+    assert_eq!(repository.id, "repository_0001");
+
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            repository_id: repository.id,
+            branch_name: attempt.branch_name.clone(),
+            worktree_path: tmp.path().join("missing-shared-worktree"),
+            base_branch: attempt.base_branch.clone(),
+        })
+        .expect("shared worktree");
+    let lease = lifecycle
+        .try_acquire_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.work_item_id,
+            &attempt.id,
+        )
+        .expect("attempt worktree lease");
+    assert!(lease.acquired);
+
+    let state = WebAppState::new(
+        tmp.path().to_path_buf(),
+        WebRuntime::new_fake(tmp.path().to_path_buf()),
+    );
+    (tmp, app_paths, state, attempt)
+}
+
+async fn send_attempt_request(
+    state: &WebAppState,
+    attempt: &CodingExecutionAttempt,
+    method: Method,
+    suffix: &str,
+) -> axum::response::Response {
+    let uri = format!(
+        "/api/projects/{}/issues/{}/coding-attempts/{}{}",
+        attempt.project_id, attempt.issue_id, attempt.id, suffix
+    );
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        build_web_router(state.clone()).oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .expect("attempt request"),
+        ),
+    )
+    .await
+    .expect("HTTP attempt mutation must complete without runner backpressure")
+    .expect("HTTP attempt response")
+}
+
+fn assert_issue_lease_released(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) {
+    let shared = LifecycleStore::new(app_paths.clone())
+        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .expect("shared worktree")
+        .expect("shared worktree record");
+    assert!(shared.current_active_work_item_id.is_none());
+    assert!(shared.current_lock_owner_id.is_none());
+}
+
+fn plan_amendment_event(event_id: &str) -> CodingWsOutMessage {
+    CodingWsOutMessage::PlanAmendmentUpdated {
+        event_id: event_id.to_string(),
+        amendment: Box::new(PlanAmendmentManifest {
+            id: "plan_amendment_http_abort".to_string(),
+            repair_request_id: "plan_repair_request_http_abort".to_string(),
+            previous_plan_revision_id: "plan_revision_0001".to_string(),
+            new_plan_revision_id: "plan_revision_0002".to_string(),
+            revised_work_items: BTreeMap::new(),
+            superseded_revisions: Vec::new(),
+            dependency_graph_changes: Vec::new(),
+            contract_deltas: Vec::new(),
+            unaffected_units: Vec::new(),
+            revalidation_required_units: Vec::new(),
+            stale_units: Vec::new(),
+            replacement_units: BTreeMap::new(),
+            resume_target: AmendmentResumeTarget {
+                logical_work_item_id: "work_item_http_abort".to_string(),
+                mode: AmendmentResumeMode::Reexecute,
+            },
+            created_at: "2026-07-21T00:00:00Z".to_string(),
+        }),
+    }
 }

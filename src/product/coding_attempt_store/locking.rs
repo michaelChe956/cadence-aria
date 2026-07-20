@@ -23,6 +23,7 @@ pub(crate) fn with_exclusive_lock<T>(
 
 pub(crate) struct ExclusiveFileLock {
     file: File,
+    canonical_lock_path: PathBuf,
 }
 
 impl ExclusiveFileLock {
@@ -47,7 +48,24 @@ impl ExclusiveFileLock {
         #[cfg(test)]
         notify_lock_attempt(&lock_path);
         lock_file_exclusive(&file, &lock_path)?;
-        Ok(Self { file })
+        let canonical_lock_path = canonical_path_identity(&lock_path)?;
+        Ok(Self {
+            file,
+            canonical_lock_path,
+        })
+    }
+
+    pub(crate) fn canonical_lock_path(&self) -> &Path {
+        &self.canonical_lock_path
+    }
+
+    pub(crate) async fn acquire_async(target_path: &Path) -> Result<Self, ProductStoreError> {
+        let target_path = target_path.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::acquire(&target_path))
+            .await
+            .map_err(|error| {
+                ProductStoreError::Io(format!("join file lock acquisition: {error}"))
+            })?
     }
 }
 
@@ -144,6 +162,33 @@ impl Drop for ExclusiveFileLock {
     }
 }
 
+pub(crate) fn canonical_path_identity(path: &Path) -> Result<PathBuf, ProductStoreError> {
+    let mut current = path;
+    let mut missing = Vec::new();
+    while !current.exists() {
+        let name = current.file_name().ok_or_else(|| {
+            ProductStoreError::Io(format!("canonicalize path identity: {}", path.display()))
+        })?;
+        missing.push(name.to_os_string());
+        current = current.parent().ok_or_else(|| {
+            ProductStoreError::Io(format!("canonicalize path identity: {}", path.display()))
+        })?;
+    }
+    let mut canonical = std::fs::canonicalize(current).map_err(|error| {
+        ProductStoreError::Io(format!("canonicalize {}: {error}", current.display()))
+    })?;
+    for component in missing.into_iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
+}
+
+pub(crate) fn canonical_lock_path_identity(
+    target_path: &Path,
+) -> Result<PathBuf, ProductStoreError> {
+    canonical_path_identity(&lock_path_for(target_path))
+}
+
 fn lock_path_for(target_path: &Path) -> PathBuf {
     let file_name = target_path
         .file_name()
@@ -185,3 +230,88 @@ fn lock_file_exclusive(_file: &File, lock_path: &Path) -> Result<(), ProductStor
 
 #[cfg(not(unix))]
 fn unlock_file(_file: &File) {}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use tempfile::tempdir;
+
+    use super::ExclusiveFileLock;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_file_lock_does_not_block_current_thread_runtime() {
+        let tmp = tempdir().expect("tempdir");
+        let target = tmp.path().join("current-thread-lock");
+        let holder = ExclusiveFileLock::acquire(&target).expect("holder lock");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(holder);
+        });
+        let started = Instant::now();
+        let heartbeat = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            started.elapsed()
+        });
+        let contender_target = target.clone();
+        let contender = tokio::spawn(async move {
+            ExclusiveFileLock::acquire_async(&contender_target)
+                .await
+                .expect("async contender")
+        });
+
+        let heartbeat_elapsed = heartbeat.await.expect("heartbeat task");
+        assert!(
+            heartbeat_elapsed < Duration::from_millis(100),
+            "blocking flock delayed current-thread heartbeat by {heartbeat_elapsed:?}"
+        );
+        let acquired = tokio::time::timeout(Duration::from_secs(1), contender)
+            .await
+            .expect("async contender timeout")
+            .expect("async contender task");
+        drop(acquired);
+        release.join().expect("holder release thread");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_file_lock_contenders_do_not_exhaust_tokio_workers() {
+        let tmp = tempdir().expect("tempdir");
+        let target = tmp.path().join("multi-contender-lock");
+        let holder = ExclusiveFileLock::acquire(&target).expect("holder lock");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(holder);
+        });
+        let started = Instant::now();
+        let heartbeat = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            started.elapsed()
+        });
+        let contenders = (0..8)
+            .map(|_| {
+                let target = target.clone();
+                tokio::spawn(async move {
+                    let guard = ExclusiveFileLock::acquire_async(&target)
+                        .await
+                        .expect("async contender");
+                    tokio::task::yield_now().await;
+                    drop(guard);
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let heartbeat_elapsed = heartbeat.await.expect("heartbeat task");
+        assert!(
+            heartbeat_elapsed < Duration::from_millis(100),
+            "file-lock contenders exhausted Tokio workers for {heartbeat_elapsed:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for contender in contenders {
+                contender.await.expect("contender task");
+            }
+        })
+        .await
+        .expect("all async contenders must finish");
+        release.join().expect("holder release thread");
+    }
+}

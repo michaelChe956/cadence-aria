@@ -6,6 +6,7 @@ use super::provider_execution_context::{CapturingProjectionProvider, review_plan
 use super::*;
 use crate::cross_cutting::streaming_provider::ProviderCompletion;
 use crate::product::work_item_projection::ReviewerWorkItemProjection;
+use tokio::sync::Notify;
 
 #[derive(Default)]
 struct ProviderStartProbe {
@@ -33,6 +34,16 @@ struct LegacyProviderStartPersistenceFailure {
     attempt: CodingExecutionAttempt,
     output: String,
     probe: Arc<ProviderStartProbe>,
+}
+
+#[derive(Default)]
+struct ParentCancellationProbe {
+    entered: Notify,
+    cancelled: AtomicBool,
+}
+
+struct ParentCancellationProvider {
+    probe: Arc<ParentCancellationProbe>,
 }
 
 #[async_trait::async_trait]
@@ -64,6 +75,22 @@ impl StreamingProviderAdapter for LegacyProviderStartPersistenceFailure {
         let (chunk_tx, chunk_rx) = mpsc::channel(1);
         spawn_legacy_output(chunk_tx, self.output.clone(), cancel, self.probe.clone());
         Ok(chunk_rx)
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ParentCancellationProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.probe.entered.notify_one();
+        cancel.cancelled().await;
+        self.probe.cancelled.store(true, Ordering::SeqCst);
+        Err(ProviderAdapterError::command_missing(
+            "provider cancelled by parent token",
+        ))
     }
 }
 
@@ -115,6 +142,35 @@ async fn coding_plan_repair_legacy_provider_start_persistence_failure_aborts_bef
         "legacy",
     )
     .await;
+}
+
+#[tokio::test]
+async fn coding_provider_stream_uses_engine_cancellation_child_token() {
+    let fixture = provider_start_persistence_fixture().await;
+    let cancellation = CancellationToken::new();
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx)
+            .with_cancellation(cancellation.clone());
+    let probe = Arc::new(ParentCancellationProbe::default());
+    let provider = ParentCancellationProvider {
+        probe: probe.clone(),
+    };
+
+    let execute = engine.execute_code_review(&fixture.attempt, &provider);
+    let cancel_parent = async {
+        tokio::time::timeout(Duration::from_millis(250), probe.entered.notified())
+            .await
+            .expect("provider did not receive cancellation token");
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(execute, cancel_parent);
+
+    assert!(result.is_err(), "cancelled provider run must stop");
+    assert!(
+        probe.cancelled.load(Ordering::SeqCst),
+        "provider must observe engine parent cancellation"
+    );
 }
 
 async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture {

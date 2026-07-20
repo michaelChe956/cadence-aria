@@ -63,6 +63,7 @@ struct TestControlsInner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupAttemptInitializationCheckpoint {
     PersistedBeforeBind,
+    BoundBeforePhaseAdvance,
     BoundBeforePlanBinding,
     FirstUnitPersisted,
 }

@@ -300,19 +300,19 @@ async fn handle_coding_socket(
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
                 } else if inbound == CodingWsInMessage::AbortAttempt {
-                    let open_gates = coding_store
-                        .list_open_stage_gates(
-                            &current_attempt.project_id,
-                            &current_attempt.issue_id,
-                            &current_attempt.id,
-                        )
-                        .unwrap_or_default();
+                    let attempt_key = CodingAttemptRunKey::from_attempt(&current_attempt);
+                    drop(mutation_lease);
                     let abort_result = abort_attempt_while_draining_events(
                         &state.coding_runs,
-                        &CodingAttemptRunKey::from_attempt(&current_attempt),
+                        &attempt_key,
                         &mut event_rx,
                     )
                     .await;
+                    tracing::debug!(
+                        aborted_runners = abort_result.aborted_runners,
+                        attempt_id = current_attempt.id.as_str(),
+                        "coding runners stopped before durable websocket abort"
+                    );
                     runner_command_tx = None;
                     runner_started = false;
                     for (index, event) in abort_result.events.iter().enumerate() {
@@ -320,15 +320,10 @@ async fn handle_coding_socket(
                             for remaining in &abort_result.events[index + 1..] {
                                 fail_plan_amendment_socket_write(remaining);
                             }
-                            drop(mutation_lease);
                             break 'socket;
                         }
                     }
-                    let aborted_runners = abort_result.aborted_runners;
-                    if aborted_runners > 0 && !open_gates.is_empty() {
-                        drop(mutation_lease);
-                        continue;
-                    }
+                    let mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
                         GitWorkspaceService::new(),

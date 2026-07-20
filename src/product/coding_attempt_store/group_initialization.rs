@@ -80,6 +80,21 @@ impl super::CodingAttemptStore {
         })
     }
 
+    pub async fn acquire_group_initialization_arbitration_async(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<CodingGroupInitializationGuard, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        Ok(CodingGroupInitializationGuard {
+            _lock: ExclusiveFileLock::acquire_async(
+                &self.group_initialization_arbitration_path(project_id, issue_id),
+            )
+            .await?,
+        })
+    }
+
     pub fn prepare_group_initialization(
         &self,
         input: &CreateGroupCodingAttemptInput,
@@ -170,6 +185,7 @@ impl super::CodingAttemptStore {
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         validate_group_initialization_journal(journal)?;
         guard.validate_identity(
+            self,
             &journal.project_id,
             &journal.issue_id,
             &journal.lock_work_item_id,
@@ -226,6 +242,66 @@ impl super::CodingAttemptStore {
             write_json(&provider_path, &journal.provider_config)?;
         }
         Ok(journal.attempt.clone())
+    }
+
+    pub fn validate_materialized_group_initialization_attempt(
+        &self,
+        journal: &CodingGroupInitializationJournal,
+        guard: &WorkItemAttemptCreationGuard,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        validate_group_initialization_journal(journal)?;
+        guard.validate_identity(
+            self,
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.lock_work_item_id,
+        )?;
+        let attempt_path =
+            self.attempt_path(&journal.project_id, &journal.issue_id, &journal.attempt.id);
+        if !super::path_is_regular_file(&attempt_path)? {
+            return Err(incomplete_group_attempt(
+                &journal.attempt.id,
+                "persisted attempt is missing during bound replay",
+            ));
+        }
+        let persisted_attempt: CodingExecutionAttempt = read_json(&attempt_path)?;
+        if persisted_attempt != journal.attempt {
+            return Err(incomplete_group_attempt(
+                &journal.attempt.id,
+                "persisted attempt differs from initialization journal",
+            ));
+        }
+        let active_attempts = super::list_json_records::<CodingExecutionAttempt>(
+            &self.coding_attempts_root(&journal.project_id, &journal.issue_id),
+        )?
+        .into_iter()
+        .filter(|attempt| attempt.status.is_active())
+        .collect::<Vec<_>>();
+        if active_attempts.len() != 1 || active_attempts[0].id != journal.attempt.id {
+            return Err(incomplete_group_attempt(
+                &journal.attempt.id,
+                "another active attempt exists during bound replay",
+            ));
+        }
+        let provider_path = self.role_provider_config_path(
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.attempt.id,
+        );
+        if !super::path_is_regular_file(&provider_path)? {
+            return Err(incomplete_group_attempt(
+                &journal.attempt.id,
+                "provider config is missing during bound replay",
+            ));
+        }
+        let provider_config: CodingRoleProviderConfigSnapshot = read_json(&provider_path)?;
+        if provider_config != journal.provider_config {
+            return Err(incomplete_group_attempt(
+                &journal.attempt.id,
+                "provider config differs from initialization journal",
+            ));
+        }
+        Ok(persisted_attempt)
     }
 
     pub fn ensure_group_initialization_plan_binding(

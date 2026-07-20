@@ -1,4 +1,4 @@
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease() {
     let root = tempdir().expect("root");
     let repo = git_repo();

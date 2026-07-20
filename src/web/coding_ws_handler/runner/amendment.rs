@@ -16,18 +16,21 @@ pub(crate) fn spawn_plan_amendment_runner_reserved(
     reservation: CodingRunReservation,
 ) -> Result<mpsc::Sender<CodingRunnerCommand>, CodingWorkspaceEngineError> {
     let (command_tx, command_rx) = mpsc::channel(32);
-    let registry_run_id = reservation.activate(command_tx.clone()).ok_or_else(|| {
-        CodingWorkspaceEngineError::ProviderStream(
-            "plan_amendment_runner_reservation_lost".to_string(),
-        )
-    })?;
+    let registration = reservation
+        .activate_cancellable(command_tx.clone())
+        .ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream(
+                "plan_amendment_runner_reservation_lost".to_string(),
+            )
+        })?;
     spawn_coding_runner_task(CodingRunnerTask {
         state,
         coding_store,
         event_tx,
         attempt,
         command_rx,
-        registry_run_id,
+        registry_run_id: registration.run_id,
+        cancellation: registration.cancellation,
         start_rx: None,
         probe: None,
         #[cfg(test)]

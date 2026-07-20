@@ -88,7 +88,8 @@ pub async fn create_coding_attempt(
 
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let creation_guard = coding_store
-        .acquire_work_item_attempt_creation(&project_id, &issue_id, &work_item.id)
+        .acquire_work_item_attempt_creation_async(&project_id, &issue_id, &work_item.id)
+        .await
         .map_err(product_store_api_error)?;
     let active_attempts = coding_store
         .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
@@ -109,14 +110,16 @@ pub async fn create_coding_attempt(
         ));
     }
     if let Some(active_attempt) = active_attempts.into_iter().next() {
-        lifecycle
-            .bind_issue_worktree_lock_to_attempt(
-                &project_id,
-                &issue_id,
-                &work_item.id,
-                &active_attempt.id,
-            )
-            .map_err(product_store_api_error)?;
+        if active_attempt.scope == CodingAttemptScope::WorkItem {
+            lifecycle
+                .bind_issue_worktree_lock_to_attempt(
+                    &project_id,
+                    &issue_id,
+                    &work_item.id,
+                    &active_attempt.id,
+                )
+                .map_err(product_store_api_error)?;
+        }
         return Err(ApiError::runtime(
             "coding_attempt_active",
             "work item already has an active coding attempt",
@@ -575,7 +578,11 @@ pub(crate) async fn delete_coding_attempt(
     {
         Some(
             coding_store
-                .acquire_group_initialization_arbitration(&attempt.project_id, &attempt.issue_id)
+                .acquire_group_initialization_arbitration_async(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                )
+                .await
                 .map_err(product_store_api_error)?,
         )
     } else {

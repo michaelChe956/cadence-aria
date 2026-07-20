@@ -12,6 +12,7 @@ impl CodingWorkspaceEngine {
             _git_service: git_service,
             provider: None,
             event_tx,
+            cancellation: CancellationToken::new(),
         }
     }
 
@@ -26,7 +27,13 @@ impl CodingWorkspaceEngine {
             _git_service: git_service,
             provider: Some(provider),
             event_tx,
+            cancellation: CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     pub(crate) fn provider_resume_session_id_for_attempt(
