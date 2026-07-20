@@ -61,6 +61,7 @@ export function mockPlanRepairWs(
     cancelPlanAmendment: vi.fn(() => true),
     sendHumanConfirm: vi.fn(() => true),
     connectionStatus: "connected",
+    sessionSnapshotGeneration: 1,
     ...overrides,
   } as unknown as PlanRepairWsApi;
   vi.mocked(useWorkspaceWs).mockReturnValue(api);

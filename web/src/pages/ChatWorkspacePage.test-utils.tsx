@@ -41,6 +41,7 @@ export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     isReconnecting: false,
     reconnectAttemptCount: 0,
     retryNow: vi.fn(),
+    sessionSnapshotGeneration: 0,
     ...overrides,
   };
   vi.mocked(useWorkspaceWs).mockReturnValue(api);

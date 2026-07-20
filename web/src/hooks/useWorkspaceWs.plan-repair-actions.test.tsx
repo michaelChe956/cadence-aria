@@ -93,6 +93,25 @@ describe("useWorkspaceWs plan repair actions", () => {
       socketB.receive(sessionState("workspace_session_repair_B"));
     });
     expect(harness.api.connectionStatus).toBe("connected");
+    expect(harness.api.sessionSnapshotGeneration).toBe(1);
+
+    act(() => {
+      socketB.receive(sessionState("workspace_session_repair_B"));
+    });
+    expect(harness.api.sessionSnapshotGeneration).toBe(2);
+
+    act(() => {
+      harness.ws.receive(sessionState("workspace_session_repair_A", "revision"));
+      harness.ws.receive({
+        type: "protocol_error",
+        code: "PLAN_AMENDMENT_CONFIRMATION_FAILED",
+        message: "late A conflict",
+      });
+    });
+    expect(useWorkspaceStore.getState().sessionId).toBe("workspace_session_repair_B");
+    expect(useWorkspaceStore.getState().stage).toBe("human_confirm");
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+    expect(harness.api.sessionSnapshotGeneration).toBe(2);
 
     socketB.sent.length = 0;
     let staleSend = true;
@@ -104,12 +123,12 @@ describe("useWorkspaceWs plan repair actions", () => {
   });
 });
 
-function sessionState(sessionId: string) {
+function sessionState(sessionId: string, stage = "human_confirm") {
   return {
     type: "session_state",
     session_id: sessionId,
     workspace_type: "work_item",
-    stage: "human_confirm",
+    stage,
     superpowers_enabled: false,
     openspec_enabled: false,
     messages: [],

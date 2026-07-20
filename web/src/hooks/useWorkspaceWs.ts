@@ -56,6 +56,10 @@ export function useWorkspaceWs(sessionId: string | null) {
   });
   const lastMessageAtRef = useRef(Date.now());
   const [closeCode, setCloseCode] = useState<number | undefined>();
+  const [sessionSnapshot, setSessionSnapshot] = useState({
+    sessionId: null as string | null,
+    generation: 0,
+  });
   const workspaceConnectionStatus = useWorkspaceStore((state) => state.connectionStatus);
   const workspaceSessionId = useWorkspaceStore((state) => state.sessionId);
   const connectionStatus =
@@ -184,9 +188,18 @@ export function useWorkspaceWs(sessionId: string | null) {
     };
 
     ws.onmessage = (event) => {
+      if (wsRef.current !== ws || socketSessionIdRef.current !== sessionId) return;
       lastMessageAtRef.current = Date.now();
       try {
         const msg = JSON.parse(event.data) as WsServerMessage;
+        if (msg.type === "session_state") {
+          if (msg.session_id !== sessionId) return;
+          setSessionSnapshot((current) =>
+            current.sessionId === sessionId
+              ? { sessionId, generation: current.generation + 1 }
+              : { sessionId, generation: 1 },
+          );
+        }
         handleMessage(msg);
       } catch {
         // ignore malformed messages
@@ -652,6 +665,8 @@ export function useWorkspaceWs(sessionId: string | null) {
     isReconnecting,
     reconnectAttemptCount,
     retryNow,
+    sessionSnapshotGeneration:
+      sessionSnapshot.sessionId === sessionId ? sessionSnapshot.generation : 0,
   };
 }
 

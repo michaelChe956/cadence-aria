@@ -33,21 +33,23 @@ import {
 } from "./CodingWorkspaceControls";
 import { CodingWorkspaceGroupProgress } from "./CodingWorkspaceGroupProgress";
 import { PrepareExecutionPlanPanel, StatusBadge } from "./CodingWorkspaceReports";
+import { planRepairActionGenerationKey } from "./plan-repair-action-generation";
 
 type CodingWorkspaceDrawer = "providers" | "runs";
 type PendingRepairAction = {
   action: Exclude<PlanRepairAction, "open_workspace">;
   childSessionId: string;
   amendmentId: string;
-  baselineRepair: PlanRepairSessionState;
+  repairGenerationKey: string;
   baselineWorkspaceStage: string;
+  baselineSessionSnapshotGeneration: number;
 };
 type ScopedRepairActionError = Omit<PendingRepairAction, "action"> & {
   message: string;
 };
 type RepairActionScope = Pick<
   PendingRepairAction,
-  "childSessionId" | "amendmentId" | "baselineRepair"
+  "childSessionId" | "amendmentId" | "repairGenerationKey"
 >;
 
 export function CodingWorkspacePage({
@@ -192,6 +194,26 @@ export function CodingWorkspacePage({
     );
   }, [planRepairWorkspaceSessionId, planRepairWorkspaceStage]);
 
+  useEffect(() => {
+    const snapshotGeneration = planRepairApi.sessionSnapshotGeneration;
+    const pending = pendingRepairActionRef.current;
+    if (
+      pending &&
+      planRepairWorkspaceSessionId === pending.childSessionId &&
+      snapshotGeneration > pending.baselineSessionSnapshotGeneration
+    ) {
+      pendingRepairActionRef.current = null;
+      setPendingRepairAction(null);
+    }
+    setRepairActionError((current) =>
+      current &&
+      planRepairWorkspaceSessionId === current.childSessionId &&
+      snapshotGeneration > current.baselineSessionSnapshotGeneration
+        ? null
+        : current,
+    );
+  }, [planRepairApi.sessionSnapshotGeneration, planRepairWorkspaceSessionId]);
+
   function isCurrentDeleteRequest(requestAddressKey: string, requestGeneration: number) {
     return (
       mountedRef.current &&
@@ -257,8 +279,9 @@ export function CodingWorkspacePage({
       action,
       childSessionId: activeRepair.childSessionId,
       amendmentId,
-      baselineRepair: activeRepair,
+      repairGenerationKey: planRepairActionGenerationKey(activeRepair),
       baselineWorkspaceStage: planRepairWorkspaceStage,
+      baselineSessionSnapshotGeneration: planRepairApi.sessionSnapshotGeneration,
     };
     pendingRepairActionRef.current = pending;
     setPendingRepairAction(pending);
@@ -295,8 +318,9 @@ export function CodingWorkspacePage({
     setRepairActionError({
       childSessionId: activeRepair.childSessionId,
       amendmentId,
-      baselineRepair: activeRepair,
+      repairGenerationKey: planRepairActionGenerationKey(activeRepair),
       baselineWorkspaceStage: planRepairWorkspaceStage,
+      baselineSessionSnapshotGeneration: planRepairApi.sessionSnapshotGeneration,
       message: "Plan Repair 操作发送失败，请检查 Child Workspace 连接。",
     });
   }
@@ -579,7 +603,7 @@ function repairScopeMatches(
       repair &&
       scope.childSessionId === repair.childSessionId &&
       scope.amendmentId === repair.amendment?.id &&
-      scope.baselineRepair === repair,
+      scope.repairGenerationKey === planRepairActionGenerationKey(repair),
   );
 }
 

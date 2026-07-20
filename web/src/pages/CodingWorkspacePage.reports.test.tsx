@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   confirmWorkItemExecutionPlan,
   deleteCodingAttempt,
@@ -77,6 +77,9 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 describe("CodingWorkspacePage reports and history", () => {
   installCodingWorkspacePageTestHooks();
+  beforeEach(() => {
+    mockPlanRepairWs();
+  });
 
   it("keeps provider settings and role history out of the default chat layout", () => {
     mockCodingWs();
