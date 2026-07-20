@@ -251,12 +251,14 @@ async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
     let first_run_id = state
         .coding_runs
-        .insert(&attempt_key, first_runner_tx)
-        .expect("first runner");
+        .insert_cancellable(&attempt_key, first_runner_tx)
+        .expect("first runner")
+        .run_id();
     let second_run_id = state
         .coding_runs
-        .insert(&attempt_key, second_runner_tx)
-        .expect("second runner");
+        .insert_cancellable(&attempt_key, second_runner_tx)
+        .expect("second runner")
+        .run_id();
 
     let abort_app = app.clone();
     let abort_uri = scoped_attempt_uri(&attempt_id, "/abort");

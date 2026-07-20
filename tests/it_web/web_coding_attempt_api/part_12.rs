@@ -150,3 +150,89 @@ async fn single_does_not_bind_unfinished_group_attempt_before_group_retry() {
         Some(journal.attempt.id.as_str())
     );
 }
+
+#[tokio::test]
+async fn delete_reconciles_worktree_created_before_journal_phase_advance() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
+    let (create_status, created) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::OK, "{created}");
+    let attempt_id = assert_global_attempt_id(&created);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", &attempt_id)
+        .expect("attempt");
+    let before_head = String::from_utf8_lossy(
+        &Command::new("git")
+            .args(["rev-parse", &attempt.base_branch])
+            .current_dir(repo.path())
+            .output()
+            .expect("base head")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    let worktree = repo
+        .path()
+        .join(".worktrees/aria-work-items")
+        .join(&attempt.work_item_id)
+        .join(format!("attempt-{}", attempt.attempt_no));
+    let journal = store
+        .prepare_coding_git_operation(
+            &attempt,
+            PrepareCodingGitOperationInput {
+                kind: CodingGitOperationKind::WorktreePrepare,
+                repo_path: repo.path().to_path_buf(),
+                worktree_path: worktree.clone(),
+                branch_name: attempt.branch_name.clone(),
+                base_branch: attempt.base_branch.clone(),
+                before_head,
+                remote: None,
+                commit_message: None,
+            },
+        )
+        .expect("prepare journal");
+    let git = GitWorkspaceService::new();
+    git.create_branch(repo.path(), &attempt.branch_name, &attempt.base_branch)
+        .await
+        .expect("branch");
+    store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::BranchCreated,
+            None,
+        )
+        .expect("branch phase");
+    git.create_worktree(repo.path(), &attempt.branch_name, &worktree)
+        .await
+        .expect("worktree side effect");
+
+    let (delete_status, delete) = request_json(
+        app,
+        Method::DELETE,
+        &scoped_attempt_uri(&attempt_id, ""),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(delete_status, StatusCode::NO_CONTENT, "{delete}");
+    assert!(!worktree.exists());
+    assert!(!branch_exists(repo.path(), &attempt.branch_name));
+    assert!(
+        store
+            .get_attempt("project_0001", "issue_0001", &attempt_id)
+            .is_err()
+    );
+}

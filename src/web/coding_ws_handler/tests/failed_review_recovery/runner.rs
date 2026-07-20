@@ -291,8 +291,9 @@ async fn blocked_review_retry_reservation_rejects_an_old_runner_before_persisten
     let attempt_key = CodingAttemptRunKey::from_attempt(&fixture.attempt);
     let (old_runner_tx, _old_runner_rx) = mpsc::channel(1);
     let old_runner_id = registry
-        .insert(&attempt_key, old_runner_tx)
-        .expect("register old runner");
+        .insert_cancellable(&attempt_key, old_runner_tx)
+        .expect("register old runner")
+        .run_id;
     assert!(registry.try_reserve_attempt(&attempt_key).is_none());
     assert!(
         fixture
@@ -360,8 +361,9 @@ async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner()
     let run_id = reservations
         .pop()
         .expect("winning reservation")
-        .activate(command_tx)
-        .expect("activate winning runner");
+        .activate_cancellable(command_tx)
+        .expect("activate winning runner")
+        .run_id;
     fixture
         .store
         .complete_failed_code_review_recovery_journal(&updated, &gate_id)
@@ -430,8 +432,9 @@ async fn two_repeated_review_retry_sockets_converge_to_one_current_run_and_runne
     let run_id = reservations
         .pop()
         .expect("winning reservation")
-        .activate(command_tx)
-        .expect("activate winning runner");
+        .activate_cancellable(command_tx)
+        .expect("activate winning runner")
+        .run_id;
     let current = fixture
         .store
         .complete_failed_code_review_recovery_journal(&updated, &gate_id)
@@ -722,15 +725,24 @@ fn failed_review_recovery_reservation_is_atomic_and_releasable() {
         .try_reserve_attempt(&attempt_key)
         .expect("reservation after release");
     let (ordinary_tx, _ordinary_rx) = mpsc::channel(1);
-    assert!(registry.insert(&attempt_key, ordinary_tx).is_none());
+    assert!(
+        registry
+            .insert_cancellable(&attempt_key, ordinary_tx)
+            .is_none()
+    );
     assert_eq!(registry.runner_count(&attempt_key), 0);
     let (command_tx, _command_rx) = mpsc::channel(1);
     let run_id = reservation
-        .activate(command_tx)
-        .expect("activate reserved runner");
+        .activate_cancellable(command_tx)
+        .expect("activate reserved runner")
+        .run_id;
     assert_eq!(registry.runner_count(&attempt_key), 1);
     let (late_ordinary_tx, _late_ordinary_rx) = mpsc::channel(1);
-    assert!(registry.insert(&attempt_key, late_ordinary_tx).is_none());
+    assert!(
+        registry
+            .insert_cancellable(&attempt_key, late_ordinary_tx)
+            .is_none()
+    );
     assert_eq!(registry.runner_count(&attempt_key), 1);
     assert!(registry.try_reserve_attempt(&attempt_key).is_none());
     registry.remove(&attempt_key, run_id);

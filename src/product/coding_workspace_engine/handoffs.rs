@@ -108,6 +108,9 @@ impl CodingWorkspaceEngine {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        let current = self
+            .reconcile_coding_git_operation_for_termination(&current)
+            .await?;
         if current.status == CodingAttemptStatus::Aborted {
             return Ok(current);
         }

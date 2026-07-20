@@ -52,12 +52,22 @@ struct CodingRunRegistryInner {
 struct CodingRunEntry {
     command_tx: mpsc::Sender<CodingRunnerCommand>,
     completion_tx: watch::Sender<bool>,
-    cancellation: Option<CancellationToken>,
+    cancellation: CancellationToken,
 }
 
-pub(crate) struct CodingRunRegistration {
+pub struct CodingRunRegistration {
     pub(crate) run_id: u64,
     pub(crate) cancellation: CancellationToken,
+}
+
+impl CodingRunRegistration {
+    pub fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
+    pub fn cancellation(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
 }
 
 pub(crate) struct CodingAttemptMutationLease {
@@ -72,38 +82,6 @@ pub struct CodingRunReservation {
 }
 
 impl CodingRunReservation {
-    pub fn activate(mut self, command_tx: mpsc::Sender<CodingRunnerCommand>) -> Option<u64> {
-        let mut inner = self
-            .registry
-            .inner
-            .lock()
-            .expect("coding run registry lock");
-        if inner.retired_attempts.contains(&self.attempt_key)
-            || inner.reservations.get(&self.attempt_key) != Some(&self.reservation_id)
-        {
-            return None;
-        }
-        inner.reservations.remove(&self.attempt_key);
-        let (completion_tx, _completion_rx) = watch::channel(false);
-        inner
-            .runs
-            .entry(self.attempt_key.clone())
-            .or_default()
-            .insert(
-                self.reservation_id,
-                CodingRunEntry {
-                    command_tx,
-                    completion_tx,
-                    cancellation: None,
-                },
-            );
-        inner
-            .exclusive_runs
-            .insert(self.attempt_key.clone(), self.reservation_id);
-        self.released = true;
-        Some(self.reservation_id)
-    }
-
     pub(crate) fn activate_cancellable(
         mut self,
         command_tx: mpsc::Sender<CodingRunnerCommand>,
@@ -130,7 +108,7 @@ impl CodingRunReservation {
                 CodingRunEntry {
                     command_tx,
                     completion_tx,
-                    cancellation: Some(cancellation.clone()),
+                    cancellation: cancellation.clone(),
                 },
             );
         inner
@@ -160,33 +138,7 @@ impl Drop for CodingRunReservation {
 }
 
 impl CodingRunRegistry {
-    pub fn insert(
-        &self,
-        attempt_key: &CodingAttemptRunKey,
-        command_tx: mpsc::Sender<CodingRunnerCommand>,
-    ) -> Option<u64> {
-        let mut inner = self.inner.lock().expect("coding run registry lock");
-        if inner.retired_attempts.contains(attempt_key)
-            || inner.reservations.contains_key(attempt_key)
-            || inner.exclusive_runs.contains_key(attempt_key)
-        {
-            return None;
-        }
-        inner.next_run_id += 1;
-        let run_id = inner.next_run_id;
-        let (completion_tx, _completion_rx) = watch::channel(false);
-        inner.runs.entry(attempt_key.clone()).or_default().insert(
-            run_id,
-            CodingRunEntry {
-                command_tx,
-                completion_tx,
-                cancellation: None,
-            },
-        );
-        Some(run_id)
-    }
-
-    pub(crate) fn insert_cancellable(
+    pub fn insert_cancellable(
         &self,
         attempt_key: &CodingAttemptRunKey,
         command_tx: mpsc::Sender<CodingRunnerCommand>,
@@ -207,7 +159,7 @@ impl CodingRunRegistry {
             CodingRunEntry {
                 command_tx,
                 completion_tx,
-                cancellation: Some(cancellation.clone()),
+                cancellation: cancellation.clone(),
             },
         );
         Some(CodingRunRegistration {
@@ -255,17 +207,12 @@ impl CodingRunRegistry {
         };
         let mut sent = 0;
         for (_, _, cancellation, _) in &runners {
-            if let Some(cancellation) = cancellation {
-                cancellation.cancel();
-                sent += 1;
-            }
+            cancellation.cancel();
+            sent += 1;
         }
-        for (run_id, sender, cancellation, _) in &runners {
-            if cancellation.is_some() {
-                continue;
-            }
+        for (run_id, sender, _, _) in &runners {
             match sender.try_send(CodingRunnerCommand::AbortAttempt) {
-                Ok(()) => sent += 1,
+                Ok(()) => {}
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     self.remove(attempt_key, *run_id);
                 }
@@ -401,9 +348,17 @@ mod tests {
         let (second_tx, mut second_rx) = mpsc::channel(1);
         let (other_tx, mut other_rx) = mpsc::channel(1);
 
-        let first_run_id = registry.insert(&attempt, first_tx).expect("first runner");
-        let second_run_id = registry.insert(&attempt, second_tx).expect("second runner");
-        registry.insert(&other, other_tx).expect("other runner");
+        let first_run_id = registry
+            .insert_cancellable(&attempt, first_tx)
+            .expect("first runner")
+            .run_id;
+        let second_run_id = registry
+            .insert_cancellable(&attempt, second_tx)
+            .expect("second runner")
+            .run_id;
+        registry
+            .insert_cancellable(&other, other_tx)
+            .expect("other runner");
 
         assert_eq!(registry.runner_count(&attempt), 2);
         let registry_for_abort = registry.clone();
@@ -440,8 +395,8 @@ mod tests {
 
         assert_eq!(registry.abort_attempt(&attempt).await, 0);
         let (late_tx, _late_rx) = mpsc::channel(1);
-        assert!(reservation.activate(late_tx.clone()).is_none());
-        assert!(registry.insert(&attempt, late_tx).is_none());
+        assert!(reservation.activate_cancellable(late_tx.clone()).is_none());
+        assert!(registry.insert_cancellable(&attempt, late_tx).is_none());
         assert!(registry.try_reserve_attempt(&attempt).is_none());
         assert!(!registry.attempt_is_reserved_or_running(&attempt));
     }
@@ -456,7 +411,7 @@ mod tests {
         );
         let (command_tx, command_rx) = mpsc::channel(1);
         registry
-            .insert(&attempt, command_tx)
+            .insert_cancellable(&attempt, command_tx)
             .expect("closed receiver runner");
         drop(command_rx);
 
@@ -467,7 +422,7 @@ mod tests {
         .await
         .expect("abort must not wait forever after command receiver closes");
 
-        assert_eq!(sent, 0);
+        assert_eq!(sent, 1);
         assert_eq!(registry.runner_count(&attempt), 0);
     }
 
@@ -533,8 +488,13 @@ mod tests {
         let second = CodingAttemptRunKey::new("project_0001", "issue_0002", "coding_attempt_0001");
         let (first_tx, mut first_rx) = mpsc::channel(1);
         let (second_tx, mut second_rx) = mpsc::channel(1);
-        registry.insert(&first, first_tx).expect("first runner");
-        let second_run_id = registry.insert(&second, second_tx).expect("second runner");
+        registry
+            .insert_cancellable(&first, first_tx)
+            .expect("first runner");
+        let second_run_id = registry
+            .insert_cancellable(&second, second_tx)
+            .expect("second runner")
+            .run_id;
 
         let registry_for_abort = registry.clone();
         let second_for_abort = second.clone();

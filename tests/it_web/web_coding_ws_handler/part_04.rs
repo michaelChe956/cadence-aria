@@ -323,12 +323,14 @@ async fn coding_ws_abort_attempt_aborts_all_registered_runners() {
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
     let first_run_id = state
         .coding_runs
-        .insert(&attempt_key, first_runner_tx)
-        .expect("first runner");
+        .insert_cancellable(&attempt_key, first_runner_tx)
+        .expect("first runner")
+        .run_id();
     let second_run_id = state
         .coding_runs
-        .insert(&attempt_key, second_runner_tx)
-        .expect("second runner");
+        .insert_cancellable(&attempt_key, second_runner_tx)
+        .expect("second runner")
+        .run_id();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {

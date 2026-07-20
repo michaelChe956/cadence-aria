@@ -26,7 +26,8 @@ use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::web::app::build_web_router;
 use crate::web::coding_ws_handler::delivery_ack::register_plan_amendment_socket_write;
 use crate::web::coding_ws_handler::runner::{
-    spawn_coding_runner, spawn_coding_runner_panicking_after_registration,
+    CodingRunnerStartProbe, spawn_coding_runner, spawn_coding_runner_panicking_after_registration,
+    spawn_coding_runner_with_start_probe,
 };
 use crate::web::coding_ws_handler::socket::abort::abort_attempt_while_draining_events;
 use crate::web::coding_ws_handler::{CodingWsOutMessage, OutboundEventReceiver, send_coding_event};
@@ -100,14 +101,55 @@ async fn spawned_runner_panic_removes_registry_registration() {
 }
 
 #[tokio::test]
+async fn runner_cancellation_waits_for_business_future_cleanup_before_registry_remove() {
+    let (tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+    let state = WebAppState::new(
+        tmp.path().to_path_buf(),
+        WebRuntime::new_fake(tmp.path().to_path_buf()),
+    );
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let (event_tx, _event_rx) = mpsc::channel(1);
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (provider_entry_tx, provider_entry_rx) = tokio::sync::oneshot::channel();
+    let (_continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+    let _command_tx = spawn_coding_runner_with_start_probe(
+        state.clone(),
+        CodingAttemptStore::new(app_paths),
+        event_tx,
+        attempt,
+        CodingRunnerStartProbe {
+            events: Arc::clone(&events),
+            provider_entry_tx,
+            continue_rx,
+        },
+    );
+    provider_entry_rx.await.expect("runner reached start probe");
+
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        state.coding_runs.abort_attempt(&attempt_key),
+    )
+    .await
+    .expect("cooperative cancellation must converge");
+
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
+    assert_eq!(
+        events.lock().expect("runner events").as_slice(),
+        ["provider_entry", "cancelled_before_provider"],
+        "registry remove must happen only after the business future observes cancellation"
+    );
+}
+
+#[tokio::test]
 async fn abort_drains_full_event_queue_until_runner_removes_registration() {
     let registry = CodingRunRegistry::default();
     let attempt_key =
         CodingAttemptRunKey::new("project_0001", "issue_0001", "coding_attempt_backpressure");
     let (command_tx, mut command_rx) = mpsc::channel(1);
     let run_id = registry
-        .insert(&attempt_key, command_tx)
-        .expect("backpressured runner");
+        .insert_cancellable(&attempt_key, command_tx)
+        .expect("backpressured runner")
+        .run_id;
     let (event_tx, event_rx) = mpsc::channel(1);
     let mut event_rx = OutboundEventReceiver::new(event_rx);
     let runner_registry = registry.clone();
@@ -348,7 +390,7 @@ async fn http_delete_completes_when_command_receiver_is_closed() {
     let (command_tx, command_rx) = mpsc::channel(1);
     state
         .coding_runs
-        .insert(&attempt_key, command_tx)
+        .insert_cancellable(&attempt_key, command_tx)
         .expect("closed receiver registration");
     drop(command_rx);
 

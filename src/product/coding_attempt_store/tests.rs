@@ -13,6 +13,7 @@ use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 mod attempt_creation_concurrency;
 mod failed_review_recovery;
 mod failed_review_recovery_rollback;
+mod git_operation;
 mod group_uniqueness;
 mod plan_repair;
 mod unit_run_execution_context;

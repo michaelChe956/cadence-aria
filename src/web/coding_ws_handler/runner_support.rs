@@ -68,19 +68,27 @@ pub(super) async fn handle_pending_runner_commands(
                 let updated = engine
                     .handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
                     .await?;
-                emit_current_session_state(event_tx, coding_store, &updated).await?;
+                emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &updated,
+                    engine.cancellation_token(),
+                )
+                .await?;
                 return Ok(true);
             }
             CodingRunnerCommand::ProviderSelect { role, provider } => {
                 let (updated, changed_role, changed_provider) =
                     update_provider_selection(coding_store, attempt, &role, provider)?;
-                let _ = event_tx
+                let _ = engine
+                    .event_tx
                     .send(CodingWsOutMessage::CodingProviderConfigUpdated {
                         role: changed_role,
                         provider: changed_provider,
                     })
                     .await;
-                let _ = event_tx
+                let _ = engine
+                    .event_tx
                     .send(build_coding_session_state(coding_store, updated)?)
                     .await;
             }

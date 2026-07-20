@@ -54,18 +54,23 @@ pub(super) fn spawn_coding_runner_task(task: CodingRunnerTask) {
             panic!("coding runner panic cleanup probe");
         }
         let engine_cancellation = cancellation.clone();
+        let business = run_coding_runner_task_body(
+            state,
+            coding_store,
+            event_tx,
+            attempt,
+            command_rx,
+            engine_cancellation,
+            start_rx,
+            probe,
+        );
+        tokio::pin!(business);
         tokio::select! {
-            _ = cancellation.cancelled() => {}
-            _ = run_coding_runner_task_body(
-                state,
-                coding_store,
-                event_tx,
-                attempt,
-                command_rx,
-                engine_cancellation,
-                start_rx,
-                probe,
-            ) => {}
+            biased;
+            _ = &mut business => {}
+            _ = cancellation.cancelled() => {
+                business.await;
+            }
         }
     });
 }
@@ -81,16 +86,29 @@ async fn run_coding_runner_task_body(
     start_rx: Option<oneshot::Receiver<()>>,
     probe: Option<CodingRunnerStartProbe>,
 ) {
-    if let Some(start_rx) = start_rx
-        && start_rx.await.is_err()
-    {
-        return;
+    if let Some(start_rx) = start_rx {
+        tokio::select! {
+            result = start_rx => {
+                if result.is_err() {
+                    return;
+                }
+            }
+            _ = cancellation.cancelled() => return,
+        }
     }
     if let Some(probe) = probe {
         record_runner_start_event(Some(&probe.events), "provider_entry");
         let _ = probe.provider_entry_tx.send(());
-        if probe.continue_rx.await.is_err() {
-            return;
+        tokio::select! {
+            result = probe.continue_rx => {
+                if result.is_err() {
+                    return;
+                }
+            }
+            _ = cancellation.cancelled() => {
+                record_runner_start_event(Some(&probe.events), "cancelled_before_provider");
+                return;
+            }
         }
     }
     let engine = CodingWorkspaceEngine::with_provider(
@@ -99,7 +117,7 @@ async fn run_coding_runner_task_body(
         state.provider_adapter.clone(),
         event_tx.clone(),
     )
-    .with_cancellation(cancellation);
+    .with_cancellation(cancellation.clone());
     let result = execute_start_coding_flow(
         &state,
         &coding_store,
@@ -109,6 +127,9 @@ async fn run_coding_runner_task_body(
         &attempt,
     )
     .await;
+    if cancellation.is_cancelled() {
+        return;
+    }
     if let Err(error) = result
         && !matches!(error, CodingWorkspaceEngineError::Aborted)
     {
@@ -118,7 +139,8 @@ async fn run_coding_runner_task_body(
             && !should_emit_coding_runner_protocol_error(&latest_attempt.status)
         {
             if let Err(snapshot_error) =
-                emit_current_session_state(&event_tx, &coding_store, &latest_attempt).await
+                emit_current_session_state(&event_tx, &coding_store, &latest_attempt, &cancellation)
+                    .await
             {
                 tracing::warn!(
                     attempt_id = attempt.id.as_str(),
@@ -139,12 +161,18 @@ async fn run_coding_runner_task_body(
                 }
                 _ => "coding_start_failed".to_string(),
             };
-            let _ = event_tx
-                .send(CodingWsOutMessage::CodingProtocolError {
-                    code,
-                    message: error.to_string(),
-                })
-                .await;
+            let event = CodingWsOutMessage::CodingProtocolError {
+                code,
+                message: error.to_string(),
+            };
+            let permit = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return,
+                permit = event_tx.reserve() => permit,
+            };
+            if let Ok(permit) = permit {
+                permit.send(event);
+            }
         }
     }
 }

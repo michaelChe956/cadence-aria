@@ -1,10 +1,11 @@
 use super::*;
 
 mod execution;
+mod execution_types;
 mod plan;
 mod report;
 
-use execution::{ProviderTestingExecutionInput, ProviderTestingExecutionOutcome};
+use execution_types::{ProviderTestingExecutionInput, ProviderTestingExecutionOutcome};
 use plan::{ProviderTestingPlanInput, ProviderTestingPlanOutcome, ProviderTestingPlanPhase};
 use report::ProviderTestingReportInput;
 

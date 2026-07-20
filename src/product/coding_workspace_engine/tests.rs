@@ -308,6 +308,7 @@ fn seed_group_attempt_fixture(
 mod coder_resume_recovery;
 mod gate_coder_feedback;
 mod gate_rework;
+mod git_operation_reconcile;
 mod group_completion_authority;
 mod group_terminal;
 mod parser_prompt;

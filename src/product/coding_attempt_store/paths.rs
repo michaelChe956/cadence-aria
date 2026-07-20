@@ -45,6 +45,16 @@ impl super::CodingAttemptStore {
             .join("work-item-handoff.json")
     }
 
+    pub(crate) fn coding_git_operation_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("git-operation.json")
+    }
+
     pub(crate) fn role_provider_config_path(
         &self,
         project_id: &str,

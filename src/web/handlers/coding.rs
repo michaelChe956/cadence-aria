@@ -574,6 +574,10 @@ pub(crate) async fn delete_coding_attempt(
     let attempt = coding_store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    let attempt = coding_workspace_engine_with_dummy_events(coding_store.clone())
+        .reconcile_coding_git_operation_for_termination(&attempt)
+        .await
+        .map_err(coding_workspace_api_error)?;
     let _group_initialization_guard = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup)
     {
         Some(

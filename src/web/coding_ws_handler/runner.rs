@@ -31,7 +31,9 @@ pub(crate) use amendment::spawn_plan_amendment_runner_reserved;
 pub(crate) use start::CodingRunnerStartProbe;
 use start::record_runner_start_event;
 #[cfg(test)]
-pub(crate) use start::spawn_coding_runner_panicking_after_registration;
+pub(crate) use start::{
+    spawn_coding_runner_panicking_after_registration, spawn_coding_runner_with_start_probe,
+};
 use task::{CodingRunnerTask, spawn_coding_runner_task};
 
 pub(crate) fn spawn_coding_runner(
@@ -235,7 +237,13 @@ async fn handle_internal_review_flow_decision(
         | CodeReviewFlowDecision::OpenOperationalGate
         | CodeReviewFlowDecision::StopForHumanTriage => current.clone(),
     };
-    emit_current_session_state(event_tx, coding_store, &current).await
+    emit_current_session_state(
+        event_tx,
+        coding_store,
+        &current,
+        engine.cancellation_token(),
+    )
+    .await
 }
 
 pub(crate) async fn execute_start_coding_flow(
@@ -259,6 +267,7 @@ pub(crate) async fn execute_start_coding_flow(
     }
     coding_store.ensure_provider_run_allowed(&current)?;
     'pipeline: loop {
+        engine.ensure_not_cancelled()?;
         refresh_runtime_history(&current)?;
         ensure_work_item_execution_plan_confirmed(&app_paths, &current)?;
 
@@ -266,6 +275,7 @@ pub(crate) async fn execute_start_coding_flow(
             current = engine
                 .start_attempt(&current.project_id, &current.issue_id, &current.id)
                 .await?;
+            engine.ensure_not_cancelled()?;
             if handle_pending_runner_commands(
                 &mut command_rx,
                 coding_store,
@@ -280,10 +290,12 @@ pub(crate) async fn execute_start_coding_flow(
         }
 
         if matches!(current.stage, CodingExecutionStage::WorktreePrepare) {
+            engine.ensure_not_cancelled()?;
             let repo_path = repository_path_for_attempt(&app_paths, &current)?;
             current = engine
                 .execute_worktree_prepare(&current, &repo_path)
                 .await?;
+            engine.ensure_not_cancelled()?;
             if handle_pending_runner_commands(
                 &mut command_rx,
                 coding_store,
@@ -354,12 +366,24 @@ pub(crate) async fn execute_start_coding_flow(
             .await?
             {
                 current = paused;
-                return emit_current_session_state(event_tx, coding_store, &current).await;
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
             }
             if plan_defect_decision
                 .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
             {
-                return emit_current_session_state(event_tx, coding_store, &current).await;
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
             }
         }
 
@@ -515,17 +539,34 @@ pub(crate) async fn execute_start_coding_flow(
                     .await?
                     {
                         current = paused;
-                        return emit_current_session_state(event_tx, coding_store, &current).await;
+                        return emit_current_session_state(
+                            event_tx,
+                            coding_store,
+                            &current,
+                            engine.cancellation_token(),
+                        )
+                        .await;
                     }
                     if plan_defect_decision
                         .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
                     {
-                        return emit_current_session_state(event_tx, coding_store, &current).await;
+                        return emit_current_session_state(
+                            event_tx,
+                            coding_store,
+                            &current,
+                            engine.cancellation_token(),
+                        )
+                        .await;
                     }
                     match current.status {
                         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman => {
-                            return emit_current_session_state(event_tx, coding_store, &current)
-                                .await;
+                            return emit_current_session_state(
+                                event_tx,
+                                coding_store,
+                                &current,
+                                engine.cancellation_token(),
+                            )
+                            .await;
                         }
                         _ => continue 'pipeline,
                     }
@@ -557,14 +598,26 @@ pub(crate) async fn execute_start_coding_flow(
                             &reviewer_projection,
                         )
                         .await?;
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
+                    return emit_current_session_state(
+                        event_tx,
+                        coding_store,
+                        &current,
+                        engine.cancellation_token(),
+                    )
+                    .await;
                 }
                 CodeReviewFlowDecision::RetryVerification
                 | CodeReviewFlowDecision::StartStoryAmendment
                 | CodeReviewFlowDecision::StartDesignAmendment
                 | CodeReviewFlowDecision::OpenOperationalGate
                 | CodeReviewFlowDecision::StopForHumanTriage => {
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
+                    return emit_current_session_state(
+                        event_tx,
+                        coding_store,
+                        &current,
+                        engine.cancellation_token(),
+                    )
+                    .await;
                 }
                 CodeReviewFlowDecision::ContinueAfterApprove => {
                     current = coding_store.update_attempt_stage(
@@ -581,7 +634,15 @@ pub(crate) async fn execute_start_coding_flow(
             | CodingExecutionStage::Testing
             | CodingExecutionStage::CodeReview => continue 'pipeline,
             CodingExecutionStage::ReviewRequest => {}
-            _ => return emit_current_session_state(event_tx, coding_store, &current).await,
+            _ => {
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
+            }
         }
 
         if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
@@ -591,13 +652,25 @@ pub(crate) async fn execute_start_coding_flow(
                 .complete_group_unit_after_code_review(&current)
                 .await?;
             refresh_runtime_history(&current)?;
-            emit_current_session_state(event_tx, coding_store, &current).await?;
+            emit_current_session_state(
+                event_tx,
+                coding_store,
+                &current,
+                engine.cancellation_token(),
+            )
+            .await?;
             if current.stage == CodingExecutionStage::PrepareContext {
                 continue 'pipeline;
             }
         }
         if current.stage != CodingExecutionStage::ReviewRequest {
-            return emit_current_session_state(event_tx, coding_store, &current).await;
+            return emit_current_session_state(
+                event_tx,
+                coding_store,
+                &current,
+                engine.cancellation_token(),
+            )
+            .await;
         }
 
         {
@@ -618,13 +691,25 @@ pub(crate) async fn execute_start_coding_flow(
                 return Ok(());
             }
             if review_request.push_status != crate::product::coding_models::PushStatus::Pushed {
-                return emit_current_session_state(event_tx, coding_store, &current).await;
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
             }
             if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItem {
                 current = engine
                     .complete_attempt_after_review_request(&current)
                     .await?;
-                return emit_current_session_state(event_tx, coding_store, &current).await;
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
             }
         }
 

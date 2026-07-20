@@ -7,10 +7,12 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
-    CodingAttemptStore, CreateChoiceGateInput, CreateCodingAttemptInput,
-    CreateCodingExecutionUnitInput,
+    CodingAttemptStore, CodingGitOperationKind, CodingGitOperationPhase, CreateChoiceGateInput,
+    CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
     CreateGroupCodingAttemptInput,
+    PrepareCodingGitOperationInput,
 };
+use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
 use cadence_aria::product::work_item_contract::DependencyContractEdge;
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
@@ -702,12 +704,14 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
     let first_run_id = state
         .coding_runs
-        .insert(&attempt_key, first_runner_tx)
-        .expect("first runner");
+        .insert_cancellable(&attempt_key, first_runner_tx)
+        .expect("first runner")
+        .run_id();
     let second_run_id = state
         .coding_runs
-        .insert(&attempt_key, second_runner_tx)
-        .expect("second runner");
+        .insert_cancellable(&attempt_key, second_runner_tx)
+        .expect("second runner")
+        .run_id();
 
     let delete_app = app.clone();
     let delete_uri = scoped_attempt_uri(&attempt_id, "");

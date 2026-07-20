@@ -60,3 +60,32 @@ pub(crate) fn spawn_coding_runner_panicking_after_registration(
     });
     panic_entered_rx
 }
+
+#[cfg(test)]
+pub(crate) fn spawn_coding_runner_with_start_probe(
+    state: WebAppState,
+    coding_store: CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    attempt: CodingExecutionAttempt,
+    probe: CodingRunnerStartProbe,
+) -> mpsc::Sender<crate::product::coding_workspace_runner::CodingRunnerCommand> {
+    let (command_tx, command_rx) = mpsc::channel(1);
+    let registry_attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let registration = state
+        .coding_runs
+        .insert_cancellable(&registry_attempt_key, command_tx.clone())
+        .expect("start probe runner registration");
+    spawn_coding_runner_task(CodingRunnerTask {
+        state,
+        coding_store,
+        event_tx,
+        attempt,
+        command_rx,
+        registry_run_id: registration.run_id,
+        cancellation: registration.cancellation,
+        start_rx: None,
+        probe: Some(probe),
+        panic_after_registration: None,
+    });
+    command_tx
+}

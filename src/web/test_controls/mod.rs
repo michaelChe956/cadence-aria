@@ -15,6 +15,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::{Notify, mpsc};
 
+pub use crate::product::git_workspace_service::{
+    GitCommandPause, pause_next_git_command_after_exit,
+};
 pub use fixtures::{
     CodingRoleRunFixtureRequest, seed_coding_role_run_fixture, seed_large_workspace_fixture,
 };

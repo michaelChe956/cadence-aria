@@ -501,7 +501,12 @@ impl CodingWorkspaceEngine {
             .map_err(|_| {
                 ProductStoreError::Io("plan_amendment_delivery_send_failed".to_string())
             })?;
-        socket_write.wait_or_channel_closed(&self.event_tx).await?;
+        tokio::select! {
+            result = socket_write.wait_or_channel_closed(self.event_tx.raw_sender()) => result?,
+            _ = self.cancellation.cancelled() => {
+                return Err(CodingWorkspaceEngineError::Aborted);
+            }
+        }
         self.store.mark_plan_amendment_delivery_delivered(
             attempt,
             &manifest.id,

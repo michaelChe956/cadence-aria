@@ -730,12 +730,13 @@ async fn scoped_abort_notifies_only_target_issue_runner_for_legacy_duplicate() {
     let (second_tx, mut second_rx) = mpsc::channel(1);
     state
         .coding_runs
-        .insert(&first_key, first_tx)
+        .insert_cancellable(&first_key, first_tx)
         .expect("first runner");
     let second_run_id = state
         .coding_runs
-        .insert(&second_key, second_tx)
-        .expect("second runner");
+        .insert_cancellable(&second_key, second_tx)
+        .expect("second runner")
+        .run_id();
     let app = build_web_router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");

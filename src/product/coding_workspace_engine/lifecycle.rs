@@ -7,12 +7,13 @@ impl CodingWorkspaceEngine {
         git_service: GitWorkspaceService,
         event_tx: mpsc::Sender<CodingWsOutMessage>,
     ) -> Self {
+        let cancellation = CancellationToken::new();
         Self {
             store,
             _git_service: git_service,
             provider: None,
-            event_tx,
-            cancellation: CancellationToken::new(),
+            event_tx: CancellableCodingEventSender::new(event_tx, cancellation.clone()),
+            cancellation,
         }
     }
 
@@ -22,16 +23,22 @@ impl CodingWorkspaceEngine {
         provider: Arc<dyn ProviderAdapter + Send + Sync>,
         event_tx: mpsc::Sender<CodingWsOutMessage>,
     ) -> Self {
+        let cancellation = CancellationToken::new();
         Self {
             store,
             _git_service: git_service,
             provider: Some(provider),
-            event_tx,
-            cancellation: CancellationToken::new(),
+            event_tx: CancellableCodingEventSender::new(event_tx, cancellation.clone()),
+            cancellation,
         }
     }
 
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.event_tx = CancellableCodingEventSender::new(
+            self.event_tx.raw_sender().clone(),
+            cancellation.clone(),
+        );
+        self._git_service = self._git_service.with_cancellation(cancellation.clone());
         self.cancellation = cancellation;
         self
     }
@@ -178,18 +185,86 @@ impl CodingWorkspaceEngine {
         repo_path: &Path,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let worktree_path = worktree_path_for_attempt(repo_path, attempt);
-        self._git_service
-            .create_branch(repo_path, &attempt.branch_name, &attempt.base_branch)
+        let before_head = self
+            ._git_service
+            .git_ref_head(repo_path, &attempt.base_branch)
             .await?;
-        self._git_service
-            .create_worktree(repo_path, &attempt.branch_name, &worktree_path)
-            .await?;
-        let updated = self.store.update_attempt_worktree_path(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            worktree_path,
+        let mut journal = self.store.prepare_coding_git_operation(
+            attempt,
+            crate::product::coding_attempt_store::PrepareCodingGitOperationInput {
+                kind: crate::product::coding_attempt_store::CodingGitOperationKind::WorktreePrepare,
+                repo_path: repo_path.to_path_buf(),
+                worktree_path,
+                branch_name: attempt.branch_name.clone(),
+                base_branch: attempt.base_branch.clone(),
+                before_head,
+                remote: None,
+                commit_message: None,
+            },
         )?;
+        if journal.phase == crate::product::coding_attempt_store::CodingGitOperationPhase::Before {
+            let branch_result = self
+                ._git_service
+                .create_branch(repo_path, &journal.branch_name, &journal.base_branch)
+                .await;
+            if matches!(branch_result, Err(GitWorkspaceError::Cancelled { .. })) {
+                self.compensate_cancelled_worktree_prepare(attempt, &journal)
+                    .await?;
+                return Err(CodingWorkspaceEngineError::Aborted);
+            }
+            branch_result?;
+            journal = self.store.advance_coding_git_operation(
+                attempt,
+                &journal,
+                crate::product::coding_attempt_store::CodingGitOperationPhase::BranchCreated,
+                None,
+            )?;
+        }
+        if journal.phase
+            == crate::product::coding_attempt_store::CodingGitOperationPhase::BranchCreated
+        {
+            let worktree_result = self
+                ._git_service
+                .create_worktree(repo_path, &journal.branch_name, &journal.worktree_path)
+                .await;
+            if matches!(worktree_result, Err(GitWorkspaceError::Cancelled { .. })) {
+                self.compensate_cancelled_worktree_prepare(attempt, &journal)
+                    .await?;
+                return Err(CodingWorkspaceEngineError::Aborted);
+            }
+            worktree_result?;
+            journal = self.store.advance_coding_git_operation(
+                attempt,
+                &journal,
+                crate::product::coding_attempt_store::CodingGitOperationPhase::WorktreeCreated,
+                None,
+            )?;
+        }
+        if journal.phase
+            == crate::product::coding_attempt_store::CodingGitOperationPhase::Compensated
+        {
+            return Err(CodingWorkspaceEngineError::Aborted);
+        }
+        let updated = if journal.phase
+            == crate::product::coding_attempt_store::CodingGitOperationPhase::WorktreeCreated
+        {
+            let updated = self.store.update_attempt_worktree_path(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                journal.worktree_path.clone(),
+            )?;
+            self.store.advance_coding_git_operation(
+                &updated,
+                &journal,
+                crate::product::coding_attempt_store::CodingGitOperationPhase::Completed,
+                None,
+            )?;
+            updated
+        } else {
+            self.store
+                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        };
         if let Some(node_id) = self.active_worktree_prepare_node_id(
             &attempt.project_id,
             &attempt.issue_id,
@@ -216,5 +291,52 @@ impl CodingWorkspaceEngine {
                 .await;
         }
         Ok(updated)
+    }
+
+    pub(crate) async fn compensate_cancelled_worktree_prepare(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        journal: &crate::product::coding_attempt_store::CodingGitOperationJournal,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let git = GitWorkspaceService::new();
+        match git
+            .git_worktree_branch(&journal.repo_path, &journal.worktree_path)
+            .await?
+        {
+            Some(branch) if branch == journal.branch_name => {
+                git.remove_worktree(&journal.repo_path, &journal.worktree_path)
+                    .await?;
+            }
+            Some(branch) => {
+                return Err(GitWorkspaceError::UnsafePath(format!(
+                    "worktree {} belongs to unexpected branch {branch}",
+                    journal.worktree_path.display()
+                ))
+                .into());
+            }
+            None => {}
+        }
+        git.prune_worktrees(&journal.repo_path).await?;
+        if let Some(head) = git
+            .git_local_branch_head(&journal.repo_path, &journal.branch_name)
+            .await?
+        {
+            if head != journal.before_head {
+                return Err(GitWorkspaceError::UnsafePath(format!(
+                    "branch {} moved from expected head {} to {head}",
+                    journal.branch_name, journal.before_head
+                ))
+                .into());
+            }
+            git.delete_local_branch(&journal.repo_path, &journal.branch_name)
+                .await?;
+        }
+        self.store.advance_coding_git_operation(
+            attempt,
+            journal,
+            crate::product::coding_attempt_store::CodingGitOperationPhase::Compensated,
+            None,
+        )?;
+        Ok(())
     }
 }

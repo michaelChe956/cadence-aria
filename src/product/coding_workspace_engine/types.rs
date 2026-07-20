@@ -143,6 +143,57 @@ pub(crate) enum CodingPromptMode {
     DeltaOnly,
 }
 
+#[derive(Clone)]
+pub(crate) struct CancellableCodingEventSender {
+    sender: mpsc::Sender<CodingWsOutMessage>,
+    cancellation: CancellationToken,
+}
+
+impl CancellableCodingEventSender {
+    pub(crate) fn new(
+        sender: mpsc::Sender<CodingWsOutMessage>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            sender,
+            cancellation,
+        }
+    }
+
+    pub(crate) async fn send(
+        &self,
+        event: CodingWsOutMessage,
+    ) -> Result<(), mpsc::error::SendError<CodingWsOutMessage>> {
+        let permit = tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => {
+                return Err(mpsc::error::SendError(event));
+            }
+            permit = self.sender.reserve() => permit,
+        };
+        match permit {
+            Ok(permit) => {
+                permit.send(event);
+                Ok(())
+            }
+            Err(_) => Err(mpsc::error::SendError(event)),
+        }
+    }
+
+    pub(crate) fn raw_sender(&self) -> &mpsc::Sender<CodingWsOutMessage> {
+        &self.sender
+    }
+}
+
+impl std::fmt::Debug for CancellableCodingEventSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancellableCodingEventSender")
+            .field("sender", &self.sender)
+            .field("cancelled", &self.cancellation.is_cancelled())
+            .finish()
+    }
+}
+
 impl CodingPromptMode {
     pub(crate) fn event_detail(self) -> &'static str {
         match self {
@@ -157,8 +208,21 @@ pub struct CodingWorkspaceEngine {
     pub(crate) store: CodingAttemptStore,
     pub(crate) _git_service: GitWorkspaceService,
     pub(crate) provider: Option<Arc<dyn ProviderAdapter + Send + Sync>>,
-    pub(crate) event_tx: mpsc::Sender<CodingWsOutMessage>,
+    pub(crate) event_tx: CancellableCodingEventSender,
     pub(crate) cancellation: CancellationToken,
+}
+
+impl CodingWorkspaceEngine {
+    pub(crate) fn ensure_not_cancelled(&self) -> Result<(), CodingWorkspaceEngineError> {
+        if self.cancellation.is_cancelled() {
+            return Err(CodingWorkspaceEngineError::Aborted);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancellation
+    }
 }
 
 impl std::fmt::Debug for CodingWorkspaceEngine {

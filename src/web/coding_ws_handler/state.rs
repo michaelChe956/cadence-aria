@@ -288,9 +288,20 @@ pub(crate) async fn emit_current_session_state(
     event_tx: &mpsc::Sender<CodingWsOutMessage>,
     coding_store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<(), CodingWorkspaceEngineError> {
     let current = coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let snapshot = build_coding_session_state(coding_store, current)?;
-    let _ = event_tx.send(snapshot).await;
+    let permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(CodingWorkspaceEngineError::Aborted);
+        }
+        permit = event_tx.reserve() => permit,
+    };
+    let permit = permit.map_err(|_| {
+        CodingWorkspaceEngineError::ProviderStream("coding_event_channel_closed".to_string())
+    })?;
+    permit.send(snapshot);
     Ok(())
 }

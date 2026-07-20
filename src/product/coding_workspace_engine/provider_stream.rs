@@ -1,69 +1,8 @@
 use super::*;
 
+mod persistence;
+
 impl CodingWorkspaceEngine {
-    pub(crate) fn record_role_run_event(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        role_run: Option<&CodingRoleRun>,
-        event_type: CodingRoleRunEventType,
-        payload: serde_json::Value,
-    ) {
-        let Some(role_run) = role_run else {
-            return;
-        };
-        if let Err(error) = self
-            .store
-            .append_role_run_event(attempt, role_run, event_type, payload)
-        {
-            tracing::warn!(
-                role_run_id = role_run.id.as_str(),
-                event_type = ?event_type,
-                error = %error,
-                "failed to persist coding role run event"
-            );
-        }
-    }
-
-    fn record_provider_start_required(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        role_run: Option<&CodingRoleRun>,
-        payload: serde_json::Value,
-    ) -> Result<(), ProductStoreError> {
-        let Some(role_run) = role_run else {
-            return Ok(());
-        };
-        self.store
-            .append_role_run_event(
-                attempt,
-                role_run,
-                CodingRoleRunEventType::ProviderStart,
-                payload,
-            )
-            .map(|_| ())
-    }
-
-    pub(crate) fn unresolved_provider_choice_error(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        role_run: Option<&CodingRoleRun>,
-        phase: &str,
-        open_choice_ids: &[String],
-    ) -> CodingWorkspaceEngineError {
-        self.record_role_run_event(
-            attempt,
-            role_run,
-            CodingRoleRunEventType::ProviderFailed,
-            json!({
-                "phase": phase,
-                "code": "provider_choice_unresolved",
-                "message": "provider continued before required user choice was resolved",
-                "choice_ids": open_choice_ids
-            }),
-        );
-        CodingWorkspaceEngineError::ProviderStream("provider_choice_unresolved".to_string())
-    }
-
     pub(crate) async fn run_provider_stream_to_completion(
         &self,
         run: CodingProviderStreamRun<'_>,
@@ -102,6 +41,7 @@ impl CodingWorkspaceEngine {
             );
             let start_result = if let Some(duration) = timeout {
                 tokio::select! {
+                    biased;
                     result = provider.start(active_input.clone(), cancel.clone()) => result,
                     _ = tokio::time::sleep(duration) => {
                         cancel.cancel();
@@ -121,9 +61,22 @@ impl CodingWorkspaceEngine {
                                 .to_string(),
                         ));
                     }
+                    _ = self.cancellation.cancelled() => {
+                        cancel.cancel();
+                        self.persist_provider_cancellation(attempt, role_run, "provider_start")?;
+                        return Err(CodingWorkspaceEngineError::Aborted);
+                    }
                 }
             } else {
-                provider.start(active_input.clone(), cancel.clone()).await
+                tokio::select! {
+                    biased;
+                    result = provider.start(active_input.clone(), cancel.clone()) => result,
+                    _ = self.cancellation.cancelled() => {
+                        cancel.cancel();
+                        self.persist_provider_cancellation(attempt, role_run, "provider_start")?;
+                        return Err(CodingWorkspaceEngineError::Aborted);
+                    }
+                }
             };
             let mut session = match start_result {
                 Ok(session) => {
@@ -194,6 +147,13 @@ impl CodingWorkspaceEngine {
             tokio::pin!(timeout);
             loop {
                 tokio::select! {
+                    biased;
+                    _ = self.cancellation.cancelled() => {
+                        let _ = session.commands.try_send(ProviderCommand::Abort);
+                        cancel.cancel();
+                        self.persist_provider_cancellation(attempt, role_run, "provider_stream")?;
+                        return Err(CodingWorkspaceEngineError::Aborted);
+                    }
                     _ = &mut timeout => {
                         cancel.cancel();
                         self.record_role_run_event(
@@ -219,7 +179,7 @@ impl CodingWorkspaceEngine {
                         };
                         match command {
                             CodingRunnerCommand::AbortAttempt => {
-                                let _ = session.commands.send(ProviderCommand::Abort).await;
+                                let _ = session.commands.try_send(ProviderCommand::Abort);
                                 cancel.cancel();
                                 let _ = self
                                     .event_tx
@@ -239,6 +199,11 @@ impl CodingWorkspaceEngine {
                                         "reason": "abort_attempt"
                                     }),
                                 );
+                                self.persist_provider_cancellation(
+                                    attempt,
+                                    role_run,
+                                    "provider_command",
+                                )?;
                                 return Err(CodingWorkspaceEngineError::Aborted);
                             }
                             CodingRunnerCommand::ChoiceResponse {
@@ -258,16 +223,17 @@ impl CodingWorkspaceEngine {
                                         .await;
                                     continue;
                                 }
-                                if session
-                                    .commands
-                                    .send(ProviderCommand::ChoiceResponse {
+                                if send_provider_command_with_cancellation(
+                                    &session.commands,
+                                    ProviderCommand::ChoiceResponse {
                                         id: id.clone(),
                                         selected_option_ids: selected_option_ids.clone(),
                                         free_text: free_text.clone(),
                                         answers: vec![],
-                                    })
-                                    .await
-                                    .is_ok()
+                                    },
+                                    &self.cancellation,
+                                )
+                                .await
                                 {
                                     let ack_selected_option_ids = selected_option_ids.clone();
                                     let ack_free_text = free_text.clone();
@@ -306,7 +272,11 @@ impl CodingWorkspaceEngine {
                                 }
                             }
                             command => {
-                                if !forward_runner_command_to_provider(command, &session.commands).await {
+                                if !forward_runner_command_to_provider(
+                                    command,
+                                    &session.commands,
+                                    &self.cancellation,
+                                ).await {
                                     commands_open = false;
                                 }
                             }
@@ -668,7 +638,15 @@ impl CodingWorkspaceEngine {
         provider_role: CodingProviderRole,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let cancel = self.cancellation.child_token();
-        let mut stream = provider.run_streaming(input, cancel.clone()).await?;
+        let mut stream = tokio::select! {
+            biased;
+            result = provider.run_streaming(input, cancel.clone()) => result?,
+            _ = self.cancellation.cancelled() => {
+                cancel.cancel();
+                self.persist_provider_cancellation(attempt, role_run, "legacy_provider_start")?;
+                return Err(CodingWorkspaceEngineError::Aborted);
+            }
+        };
         if let Err(error) = self.record_provider_start_required(
             attempt,
             role_run,
@@ -684,7 +662,19 @@ impl CodingWorkspaceEngine {
             return self.fail_provider_stream(attempt, node_id, message).await;
         }
         let mut full_output = String::new();
-        while let Some(chunk) = stream.recv().await {
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = self.cancellation.cancelled() => {
+                    cancel.cancel();
+                    self.persist_provider_cancellation(attempt, role_run, "legacy_provider_stream")?;
+                    return Err(CodingWorkspaceEngineError::Aborted);
+                }
+                chunk = stream.recv() => chunk,
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
             match chunk {
                 StreamChunk::Text(content) => {
                     let content_for_event = content.clone();

@@ -1,33 +1,5 @@
+use super::execution_types::*;
 use super::*;
-
-pub(crate) enum ProviderTestingExecutionOutcome {
-    EarlyReport(Box<TestingReport>),
-    Completed(ProviderTestingExecutionPhase),
-}
-
-pub(crate) struct ProviderTestingExecutionPhase {
-    pub(crate) full_output: String,
-    pub(crate) step_results: Vec<TestingStepResult>,
-    pub(crate) unplanned_commands: Vec<TestCommand>,
-    pub(crate) unplanned_evidence: Vec<TestingUnplannedEvidence>,
-    pub(crate) context_warnings: Vec<String>,
-    pub(crate) blocked_summary: Option<String>,
-    pub(crate) blocked_reason_code: Option<String>,
-    pub(crate) chat_entry_sequence: usize,
-}
-
-pub(crate) struct ProviderTestingExecutionInput<'a> {
-    pub(crate) attempt: CodingExecutionAttempt,
-    pub(crate) node: CodingTimelineNode,
-    pub(crate) role_run: CodingRoleRun,
-    pub(crate) provider: &'a dyn StreamingProviderAdapter,
-    pub(crate) worktree_path: PathBuf,
-    pub(crate) tester_provider: ProviderName,
-    pub(crate) plan: TestPlan,
-    pub(crate) chat_entry_sequence: usize,
-    pub(crate) options: &'a TesterAgentOptions,
-    pub(crate) command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
-}
 
 impl CodingWorkspaceEngine {
     pub(crate) async fn run_provider_testing_execution_phase(
@@ -101,7 +73,17 @@ impl CodingWorkspaceEngine {
         };
         let cancel = self.cancellation.child_token();
         let start_result = tokio::select! {
+            biased;
             result = provider.start(input, cancel.clone()) => result,
+            _ = self.cancellation.cancelled() => {
+                cancel.cancel();
+                self.persist_provider_cancellation(
+                    &attempt,
+                    Some(&role_run),
+                    "execute_test_plan_start",
+                )?;
+                return Err(CodingWorkspaceEngineError::Aborted);
+            }
             _ = tokio::time::sleep(options.timeout) => {
                 cancel.cancel();
                 self.record_role_run_event(
@@ -226,6 +208,17 @@ impl CodingWorkspaceEngine {
 
         loop {
             tokio::select! {
+                biased;
+                _ = self.cancellation.cancelled() => {
+                    let _ = session.commands.try_send(ProviderCommand::Abort);
+                    cancel.cancel();
+                    self.persist_provider_cancellation(
+                        &attempt,
+                        Some(&role_run),
+                        "execute_test_plan",
+                    )?;
+                    return Err(CodingWorkspaceEngineError::Aborted);
+                }
                 _ = &mut timeout => {
                     cancel.cancel();
                     self.record_role_run_event(
@@ -247,7 +240,7 @@ impl CodingWorkspaceEngine {
                     };
                     match command {
                         CodingRunnerCommand::AbortAttempt => {
-                            let _ = session.commands.send(ProviderCommand::Abort).await;
+                            let _ = session.commands.try_send(ProviderCommand::Abort);
                             cancel.cancel();
                             let _ = self
                                 .event_tx
@@ -268,6 +261,11 @@ impl CodingWorkspaceEngine {
                                     "phase": "execute_test_plan"
                                 }),
                             );
+                            self.persist_provider_cancellation(
+                                &attempt,
+                                Some(&role_run),
+                                "execute_test_plan_command",
+                            )?;
                             return Err(CodingWorkspaceEngineError::Aborted);
                         }
                         CodingRunnerCommand::ChoiceResponse {
@@ -287,16 +285,17 @@ impl CodingWorkspaceEngine {
                                     .await;
                                 continue;
                             }
-                            if session
-                                .commands
-                                .send(ProviderCommand::ChoiceResponse {
+                            if send_provider_command_with_cancellation(
+                                &session.commands,
+                                ProviderCommand::ChoiceResponse {
                                     id: id.clone(),
                                     selected_option_ids: selected_option_ids.clone(),
                                     free_text: free_text.clone(),
                                     answers: vec![],
-                                })
-                                .await
-                                .is_ok()
+                                },
+                                &self.cancellation,
+                            )
+                            .await
                             {
                                 let ack_selected_option_ids = selected_option_ids.clone();
                                 let ack_free_text = free_text.clone();
@@ -335,7 +334,11 @@ impl CodingWorkspaceEngine {
                             }
                         }
                         command => {
-                            if !forward_runner_command_to_provider(command, &session.commands).await {
+                            if !forward_runner_command_to_provider(
+                                command,
+                                &session.commands,
+                                &self.cancellation,
+                            ).await {
                                 commands_open = false;
                             }
                         }

@@ -446,3 +446,76 @@ Focused 验证：
 - 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
 - Story Spec 与 Design Spec Workspace 不受影响：本轮只修改 Coding Attempt 创建/Group initialization、runner cancellation、Coding HTTP/WS Abort/Delete 与 Issue Shared Worktree lease 链路；未改产物 Workspace 共用的 timeline/chat/artifact version 前端恢复路径。
 - Round 5 代码、测试、设计、计划与本报告使用一个新原子提交；不 amend，不 push，提交后 worktree 必须 clean。
+
+## Round 6 最终修复（2026-07-21）
+
+### 1. Runner 协作式取消与 provider 终态
+
+- runner 固定 pin 同一个业务 future；CancellationToken 触发后不再 drop 业务 future，而是继续等待它完成自身 cleanup，再由 registration guard 移除 registry entry。
+- outbound event、stage gate、provider start/stream 与 provider command send 均增加 token-aware cancellation 边界，取消统一返回 `CodingWorkspaceEngineError::Aborted`。
+- modern provider、legacy provider 与 provider-driven testing 均使用 Engine parent token 的 child token；取消时 adapter/process 可观察 token，而不依赖上层 future 被动销毁。
+- provider start/stream 取消会追加 `Aborted` role-run event，并把仍为 `Running` 的 role run 持久化为 `Aborted`。
+- 为满足单文件 800 行约束，provider event/cancellation 持久化辅助方法移入 `provider_stream/persistence.rs`；testing execution 数据结构移入 `execution_types.rs`，状态机行为不变。
+
+### 2. 真正可取消的 async flock
+
+- `ExclusiveFileLock::acquire_async` 改为 `LOCK_NB` 尝试加锁与 Tokio async backoff，不再使用不可取消的 `spawn_blocking` flock waiter。
+- 每轮失败尝试后只等待可取消的 Tokio sleep；contender future 被 drop/abort 时立即 drop lock file 并停止重试，不会在 holder 后续释放时迟到取得锁并继续业务。
+- current-thread heartbeat、永久 holder 取消 contender 与多 contender 回归覆盖 runtime 可调度、无 busy-loop 和取消后无迟到业务。
+
+### 3. Git command 生命周期与 durable journal
+
+- Git CLI 统一使用 `kill_on_drop(true)` 与独立 process group；timeout/cancel 显式 kill 后 wait/reap，stdout/stderr 使用独立 drain task，避免子进程或 pipe task 遗留。
+- Attempt 级 Git journal 使用严格 identity、canonical path 与相邻 phase 单调推进，不提供历史 serde 兼容：
+  - Worktree：`Before → BranchCreated → WorktreeCreated → Completed | Compensated`。
+  - Review：`Before → CommitStarted → CommitCreated → PushStarted → Completed | Compensated`。
+- `Completed` 保存 commit SHA、push status、remote kind 与 review request ID，使远端已成功更新时以权威事实收口，而不是伪回滚。
+- branch/worktree-add 命令完成边界取消后探测并删除新 worktree/branch；commit 完成边界取消后校验 parent/message，再 `git reset --mixed before_head`，恢复 HEAD 且保留文件内容。
+- push 完成边界取消后探测 remote ref：远端已更新则持久化 `Completed`、ReviewRequest 与 Attempt；远端未更新或被拒绝则 mixed reset 并记录 `Compensated`。正常 push 失败仍记录 `Completed + PushStatus::Failed`。
+- `handle_abort` 在写 Attempt=`Aborted` 前 reconcile；HTTP Delete 在 repository/workspace cleanup 前再次 reconcile，覆盖运行时取消后进程已完成、但内存控制流尚未收口的窗口。
+
+### 4. Registry legacy API 与测试控制点收口
+
+- 删除 legacy `CodingRunRegistry::insert` 与 `CodingRunReservation::activate`；entry cancellation token 改为 required，所有 production/reserved runner 都通过同一 registration 路径取得 token。
+- Abort 固定先 cancel token，再使用无等待 `try_send` 发送兼容提示；full command channel 不阻塞，closed receiver 按 run ID 移除，最终等待 registration guard completion。
+- Git 命令完成暂停器支持并行 registration，并以 `cwd + command_prefix` 精确匹配。全组回归曾复现不同临时仓库的 branch/worktree 命令抢占彼此 pause；加入 cwd scope 后同组连续两次 7/7 通过。
+- 暂停器作为 production-compiled test-control 直接调用 seam 存在于 Git service 子模块，并通过 `src/web/test_controls` re-export；默认没有任何 registration，且没有新增 route。
+
+### 5. RED → GREEN
+
+| 场景 | RED | GREEN |
+| --- | --- | --- |
+| runner token cancellation | outer select drop 业务 future，cleanup probe 不执行或 registry 过早归零 | 继续 await 同一业务 future，cleanup 完成后 registration guard 才 remove |
+| provider cancellation | parent token 不稳定传播，role run 可残留 `Running` | child token 传播到 adapter/process，event 与 role run 权威持久化 `Aborted` |
+| async flock contender | `spawn_blocking` waiter 无法取消，holder 释放后迟到进入业务 | `LOCK_NB + async backoff` 随 future drop 停止，无迟到业务 |
+| branch/worktree-add cancellation | Git 命令完成后取消留下 branch/worktree 副作用 | 探测真实 Git 状态并补偿，journal=`Compensated` |
+| commit cancellation | 新 commit 留在 HEAD，或 hard reset 丢失文件内容 | 校验 commit 身份后 mixed reset，HEAD 恢复且工作区内容保留 |
+| successful push cancellation | 已更新 remote 仍被当作本地失败回滚 | remote ref 证明成功后 journal/ReviewRequest/Attempt=`Completed` |
+| rejected push cancellation | 本地 commit 与未完成 journal 遗留 | remote 未更新，mixed reset 并 journal=`Compensated` |
+| Abort/Delete 二次 reconcile | durable terminal cleanup 可越过已完成 Git 副作用 | terminal mutation 前重放 journal 并收敛 Git/Store 权威状态 |
+| full registry channel | awaited command send 阻塞 Abort | token-first + `try_send`，full/closed channel 均有界完成 |
+| 并行 Git pause | 仅按参数前缀匹配，不同临时仓库互相抢占 pause | 同时匹配 cwd 与参数前缀，连续两轮 7 项并行回归全绿 |
+| all-target registry fixture | integration fixture 仍调用已删除的 legacy `insert`，clippy 编译失败 | 8 处调用迁移到 `insert_cancellable` 与 registration accessor，相关 4 条 HTTP/WS integration 各 1 passed |
+
+### 6. Focused 验证
+
+- provider start persistence 与 parent cancellation：3 passed。
+- Git journal/store 与高层 cancellation/reconcile：`git_operation` 9 passed；`git_operation_reconcile` 7 passed，修复 pause scope 后连续运行两次均通过。
+- Review request integration：4 passed；worktree prepare integration：3 passed。
+- async file lock：3 passed；runner cleanup：9 passed。
+- failed-review recovery：42 passed；coding run registry：6 passed。
+- legacy registry integration fixture 迁移：4 条受影响 HTTP/WS 用例各 1 passed。
+
+### 7. 最终门禁与边界
+
+- `cargo fmt --check`：PASS。
+- `cargo check --locked`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，0 warnings。首轮 all-target 编译发现 8 处 legacy registry fixture，迁移后 fresh clippy 通过。
+- `cargo test --locked`：PASS，exit 0；lib 1237 passed，`it_core` 143 passed，`it_interactive` 43 passed，`it_product` 221 passed，`it_web` 280 passed、12 ignored，doc-test 1 passed，其余 target 无失败。
+- `cd web && pnpm tsc -b`：PASS。
+- `git diff --check`：PASS。
+- 42 个修改/新增 Rust、TS 文件全部不超过 800 行；最大为 `src/product/coding_workspace_engine/testing_provider/execution.rs` 799 行，其次为 `src/product/git_workspace_service.rs` 789 行。
+- `src/web/app.rs` 与 lockfiles 无 diff；源码新增行没有 route 注册或 `/api/`、`/ws/` 路径；Git pause seam 默认无 registration，只能通过直接持有公开 test-control API 配置。
+- Story Spec、Design Spec 与 Work Item 产物 Workspace 共用的 timeline/chat/artifact version 恢复链路未修改。本轮 Work Item 影响仅限 Coding Attempt runner、Git workspace/review 与 Issue Shared Worktree 终止收口。
+- 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
+- 提交策略：Round 6 代码、测试、设计、计划与本报告使用一个新原子提交；不 amend，不 push，提交后 worktree 必须 clean。

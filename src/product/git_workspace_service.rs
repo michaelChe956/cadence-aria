@@ -3,10 +3,17 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use command_group::AsyncCommandGroup;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 use crate::product::coding_models::{PushStatus, RemoteKind};
+
+mod reconcile;
+mod test_pause;
+
+pub use test_pause::{GitCommandPause, pause_next_git_command_after_exit};
 
 const SAFE_WORKTREE_PREFIXES: &[&str] = &["aria-work-items", "aria-issues"];
 const SAFE_BRANCH_PREFIXES: &[&str] = &["aria/work-items/", "aria/issues/"];
@@ -23,6 +30,8 @@ pub enum GitWorkspaceError {
     },
     #[error("git_workspace_timeout: git {args} in {cwd}")]
     Timeout { args: String, cwd: String },
+    #[error("git_workspace_cancelled: git {args} in {cwd}")]
+    Cancelled { args: String, cwd: String },
     #[error("git_workspace_unsafe_path: {0}")]
     UnsafePath(String),
     #[error("git_workspace_parse: {0}")]
@@ -65,13 +74,20 @@ pub struct DiffStat {
 #[derive(Debug, Clone)]
 pub struct GitWorkspaceService {
     command_timeout: Duration,
+    cancellation: CancellationToken,
 }
 
 impl GitWorkspaceService {
     pub fn new() -> Self {
         Self {
             command_timeout: Duration::from_secs(30),
+            cancellation: CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     pub async fn create_branch(
@@ -80,7 +96,7 @@ impl GitWorkspaceService {
         branch_name: &str,
         base_branch: &str,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         ensure_safe_aria_branch_name(branch_name)?;
         let ref_name = format!("refs/heads/{branch_name}");
         let exists = self
@@ -100,7 +116,7 @@ impl GitWorkspaceService {
         branch_name: &str,
         worktree_path: &Path,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         ensure_safe_aria_branch_name(branch_name)?;
         ensure_safe_worktree_path(repo_path, worktree_path)?;
 
@@ -132,7 +148,7 @@ impl GitWorkspaceService {
         repo_path: &Path,
         worktree_path: &Path,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         ensure_safe_worktree_path(repo_path, worktree_path)?;
         if !worktree_path.exists() {
             return Ok(());
@@ -144,7 +160,7 @@ impl GitWorkspaceService {
     }
 
     pub async fn prune_worktrees(&self, repo_path: &Path) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         self.run_git(repo_path, &["worktree", "prune"])
             .await
             .map(|_| ())
@@ -155,7 +171,7 @@ impl GitWorkspaceService {
         repo_path: &Path,
         branch_name: &str,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         ensure_safe_aria_branch_name(branch_name)?;
         let ref_name = format!("refs/heads/{branch_name}");
         let exists = self
@@ -173,7 +189,7 @@ impl GitWorkspaceService {
         &self,
         worktree_path: &Path,
     ) -> Result<Vec<FileStatus>, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self
             .run_git(worktree_path, &["status", "--porcelain"])
             .await?;
@@ -186,7 +202,7 @@ impl GitWorkspaceService {
     }
 
     pub async fn git_add_all(&self, worktree_path: &Path) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         self.run_git(worktree_path, &["add", "-A"])
             .await
             .map(|_| ())
@@ -196,7 +212,7 @@ impl GitWorkspaceService {
         &self,
         worktree_path: &Path,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         self.run_git(worktree_path, &["add", "-A"]).await?;
         let output = self
             .run_git(worktree_path, &["diff", "--cached", "--name-only", "-z"])
@@ -214,7 +230,7 @@ impl GitWorkspaceService {
         &self,
         worktree_path: &Path,
     ) -> Result<bool, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self
             .run_git(worktree_path, &["diff", "--cached", "--name-only", "-z"])
             .await?;
@@ -226,7 +242,7 @@ impl GitWorkspaceService {
         worktree_path: &Path,
         message: &str,
     ) -> Result<CommitResult, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         self.run_git(worktree_path, &["commit", "-m", message])
             .await?;
         let rev = self.run_git(worktree_path, &["rev-parse", "HEAD"]).await?;
@@ -239,7 +255,7 @@ impl GitWorkspaceService {
         &self,
         worktree_path: &Path,
     ) -> Result<String, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let rev = self.run_git(worktree_path, &["rev-parse", "HEAD"]).await?;
         Ok(rev.stdout.trim().to_string())
     }
@@ -250,7 +266,7 @@ impl GitWorkspaceService {
         remote: &str,
         branch: &str,
     ) -> Result<PushResult, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self
             .run_git_allow_failure(worktree_path, &["push", remote, branch])
             .await?;
@@ -271,7 +287,7 @@ impl GitWorkspaceService {
         &self,
         repo_path: &Path,
     ) -> Result<RemoteKind, GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         let output = self
             .run_git_allow_failure(repo_path, &["remote", "get-url", "origin"])
             .await?;
@@ -295,7 +311,7 @@ impl GitWorkspaceService {
         worktree_path: &Path,
         base_branch: &str,
     ) -> Result<DiffStat, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self
             .run_git(worktree_path, &["diff", "--numstat", base_branch])
             .await?;
@@ -320,7 +336,7 @@ impl GitWorkspaceService {
         worktree_path: &Path,
         base_branch: &str,
     ) -> Result<String, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self.run_git(worktree_path, &["diff", base_branch]).await?;
         let mut diff = output.stdout;
         let untracked = self
@@ -411,27 +427,83 @@ impl GitWorkspaceService {
         command
             .args(args)
             .current_dir(cwd)
+            .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let output = timeout(self.command_timeout, command.output())
-            .await
-            .map_err(|_| GitWorkspaceError::Timeout {
-                args: args.join(" "),
-                cwd: cwd.display().to_string(),
-            })?
-            .map_err(|error| {
-                GitWorkspaceError::Io(format!(
-                    "git {} in {}: {error}",
-                    args.join(" "),
-                    cwd.display()
-                ))
-            })?;
+        let args_display = args.join(" ");
+        let cwd_display = cwd.display().to_string();
+        let mut child = command.group_spawn().map_err(|error| {
+            GitWorkspaceError::Io(format!("git {args_display} in {cwd_display}: {error}"))
+        })?;
+        let stdout = child.inner().stdout.take().ok_or_else(|| {
+            GitWorkspaceError::Io(format!(
+                "git {args_display} in {cwd_display}: stdout pipe missing"
+            ))
+        })?;
+        let stderr = child.inner().stderr.take().ok_or_else(|| {
+            GitWorkspaceError::Io(format!(
+                "git {args_display} in {cwd_display}: stderr pipe missing"
+            ))
+        })?;
+        let stdout_task = tokio::spawn(read_pipe(stdout));
+        let stderr_task = tokio::spawn(read_pipe(stderr));
+
+        enum Completion {
+            Exited(std::io::Result<std::process::ExitStatus>),
+            TimedOut,
+            Cancelled,
+        }
+
+        let completion = tokio::select! {
+            biased;
+            status = child.wait() => Completion::Exited(status),
+            _ = tokio::time::sleep(self.command_timeout) => Completion::TimedOut,
+            _ = self.cancellation.cancelled() => Completion::Cancelled,
+        };
+        let status = match completion {
+            Completion::Exited(status) => status.map_err(|error| {
+                GitWorkspaceError::Io(format!("wait git {args_display} in {cwd_display}: {error}"))
+            })?,
+            Completion::TimedOut => {
+                terminate_git_child(&mut child).await;
+                let _ = join_pipe(stdout_task).await;
+                let _ = join_pipe(stderr_task).await;
+                return Err(GitWorkspaceError::Timeout {
+                    args: args_display,
+                    cwd: cwd_display,
+                });
+            }
+            Completion::Cancelled => {
+                terminate_git_child(&mut child).await;
+                let _ = join_pipe(stdout_task).await;
+                let _ = join_pipe(stderr_task).await;
+                return Err(GitWorkspaceError::Cancelled {
+                    args: args_display,
+                    cwd: cwd_display,
+                });
+            }
+        };
+        let stdout = join_pipe(stdout_task).await?;
+        let stderr = join_pipe(stderr_task).await?;
+        test_pause::pause_git_command_after_exit_if_configured(cwd, &args_display).await;
+        if self.cancellation.is_cancelled() {
+            return Err(GitWorkspaceError::Cancelled {
+                args: args_display,
+                cwd: cwd_display,
+            });
+        }
         Ok(GitCommandOutput {
-            status_success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            status_success: status.success(),
+            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
         })
+    }
+
+    async fn ensure_git_repo(&self, path: &Path) -> Result<(), GitWorkspaceError> {
+        self.run_git(path, &["rev-parse", "--show-toplevel"])
+            .await
+            .map(|_| ())
     }
 }
 
@@ -447,26 +519,34 @@ struct GitCommandOutput {
     stderr: String,
 }
 
-async fn ensure_git_repo(path: &Path) -> Result<(), GitWorkspaceError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|error| {
-            GitWorkspaceError::Io(format!("git rev-parse in {}: {error}", path.display()))
-        })?;
-    if !output.status.success() {
-        return Err(GitWorkspaceError::CommandFailed {
-            args: "rev-parse --show-toplevel".to_string(),
-            cwd: path.display().to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
+async fn read_pipe<R>(mut pipe: R) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes).await?;
+    Ok(bytes)
+}
+
+async fn join_pipe(
+    task: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> Result<Vec<u8>, GitWorkspaceError> {
+    task.await
+        .map_err(|error| GitWorkspaceError::Io(format!("join git output reader: {error}")))?
+        .map_err(|error| GitWorkspaceError::Io(format!("read git output: {error}")))
+}
+
+async fn terminate_git_child(child: &mut command_group::AsyncGroupChild) {
+    #[cfg(unix)]
+    if let Some(pgid) = child.id() {
+        // SAFETY: pgid is the process-group id returned for this spawned Git command.
+        unsafe {
+            let _ = libc::killpg(pgid as i32, libc::SIGKILL);
+        }
     }
-    Ok(())
+    let _ = child.start_kill();
+    let _ = child.inner().start_kill();
+    let _ = child.wait().await;
 }
 
 fn ensure_safe_worktree_path(
@@ -612,4 +692,98 @@ fn parse_numstat_count(value: Option<&str>, line: &str) -> Result<u32, GitWorksp
     value
         .parse::<u32>()
         .map_err(|error| GitWorkspaceError::Parse(format!("{value}: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+    use std::time::Duration;
+
+    use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{GitWorkspaceError, GitWorkspaceService};
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = StdCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_git_commit_is_killed_reaped_and_never_commits_late() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git(repo, &["init"]);
+        git(repo, &["config", "user.email", "test@example.com"]);
+        git(repo, &["config", "user.name", "Test User"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-m", "base"]);
+        let before = StdCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("read before head")
+            .stdout;
+
+        fs::write(repo.join("README.md"), "changed\n").expect("write change");
+        git(repo, &["add", "README.md"]);
+        let entered = repo.join("hook-entered");
+        let release = repo.join("hook-release");
+        let hook = repo.join(".git/hooks/pre-commit");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\n",
+                entered.display(),
+                release.display()
+            ),
+        )
+        .expect("write hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod hook");
+
+        let cancellation = CancellationToken::new();
+        let service = GitWorkspaceService::new().with_cancellation(cancellation.clone());
+        let commit = tokio::spawn({
+            let repo = repo.to_path_buf();
+            async move { service.git_commit(&repo, "cancelled commit").await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !entered.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pre-commit hook entered");
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(500), commit)
+            .await
+            .expect("cancelled git commit must be reaped")
+            .expect("git commit task");
+        assert!(matches!(result, Err(GitWorkspaceError::Cancelled { .. })));
+
+        fs::write(&release, "release\n").expect("release hook if process survived");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let after = StdCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("read after head")
+            .stdout;
+        assert_eq!(
+            before, after,
+            "cancelled git process committed after return"
+        );
+    }
 }

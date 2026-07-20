@@ -547,8 +547,9 @@ async fn failed_review_recovery_journal_records_activation_before_retry_node_exi
 
     let (command_tx, _command_rx) = mpsc::channel(1);
     let run_id = reservation
-        .activate(command_tx)
-        .expect("activate reserved runner");
+        .activate_cancellable(command_tx)
+        .expect("activate reserved runner")
+        .run_id;
     fixture
         .store
         .complete_failed_code_review_recovery_journal(&updated, &gate_id)

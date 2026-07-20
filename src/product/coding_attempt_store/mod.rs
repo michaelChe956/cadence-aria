@@ -9,6 +9,7 @@ mod attempt;
 mod attempt_creation;
 mod context;
 mod gate;
+mod git_operation;
 mod group;
 mod group_initialization;
 mod group_terminal;
@@ -31,6 +32,7 @@ mod utils;
 #[cfg(test)]
 pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
 pub use attempt_creation::WorkItemAttemptCreationGuard;
+pub use git_operation::*;
 pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;

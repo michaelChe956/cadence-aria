@@ -23,8 +23,9 @@ use crate::cross_cutting::streaming_provider::{
 };
 use crate::cross_cutting::worktree::{scope_allows_path, validate_write_path};
 use crate::product::coding_attempt_store::{
-    CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput,
-    CreateQualityBypassAuditInput,
+    CodingAttemptStore, CodingGitOperationJournal, CodingGitOperationKind, CodingGitOperationPhase,
+    CompleteReviewGitOperationInput, CreateBlockedGateInput, CreateChoiceGateInput,
+    CreateQualityBypassAuditInput, PrepareCodingGitOperationInput,
 };
 use crate::product::coding_evaluation_context::{
     EvaluationContextRole, build_evaluation_context_pack, build_tester_execution_context_pack,
@@ -69,6 +70,7 @@ mod code_review;
 mod coding;
 mod failed_review_recovery;
 mod gates;
+mod git_operation;
 mod group;
 mod group_completion;
 mod handoffs;
