@@ -225,6 +225,17 @@ async fn assert_completion_preflight_is_zero_write(
         })
         .collect::<Result<Vec<_>, _>>()
         .expect("handoffs before");
+    let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+    let lineage = revision_store
+        .get_plan_lineage(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            "work_item_plan_0001",
+        )
+        .expect("lineage");
+    let revision_handoffs_before = revision_store
+        .list_handoff_revisions(&lineage, "work_item_0001")
+        .expect("revision handoffs before");
     let error = fixture
         .engine
         .complete_group_unit_after_code_review(&fixture.attempt)
@@ -286,6 +297,12 @@ async fn assert_completion_preflight_is_zero_write(
             .collect::<Result<Vec<_>, _>>()
             .expect("handoffs after"),
         handoffs_before
+    );
+    assert_eq!(
+        revision_store
+            .list_handoff_revisions(&lineage, "work_item_0001")
+            .expect("revision handoffs after"),
+        revision_handoffs_before
     );
     assert_eq!(
         git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]).trim(),

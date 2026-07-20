@@ -306,6 +306,7 @@ fn runtime_handoff_fixture(
                     CodingExecutionUnitStatus::NeedsRevalidation
                 }
                 CodingUnitRunStatus::Stale => CodingExecutionUnitStatus::Stale,
+                CodingUnitRunStatus::Pending => CodingExecutionUnitStatus::Pending,
                 _ => panic!("unsupported fixture waiting status"),
             },
         ),
@@ -410,14 +411,16 @@ fn runtime_handoff_fixture(
             )
             .expect("registration run");
     }
+    seed_runtime_source_handoff_runs(&store, &attempt);
 
-    let previous_handoff = handoff(
+    let mut previous_handoff = handoff(
         "handoff_revision_0001",
         &["registration_contract"],
         &[("registration_contract", old_capabilities.as_slice())],
         "contract_hash_v1",
     );
-    let next_handoff = handoff(
+    previous_handoff.created_at = "2026-07-22T00:00:00Z".to_string();
+    let mut next_handoff = handoff(
         "handoff_revision_0002",
         &["registration_contract"],
         &[("registration_contract", next_capabilities.as_slice())],
@@ -427,6 +430,7 @@ fn runtime_handoff_fixture(
             RuntimeContractChange::BreakingChange => "contract_hash_v3",
         },
     );
+    next_handoff.created_at = "2026-07-20T00:00:00Z".to_string();
     revision_store
         .put_handoff_revision(&lineage, &previous_handoff)
         .expect("previous handoff");
@@ -554,7 +558,7 @@ fn put_runtime_revision(
 }
 
 #[tokio::test]
-async fn coding_runtime_handoff_resumes_original_consumer_revision_with_new_handoff() {
+async fn coding_runtime_handoff_revalidates_original_consumer_revision_with_new_handoff() {
     let fixture = runtime_handoff_fixture(
         RuntimeContractChange::CompatibleExtension,
         CodingUnitRunStatus::AwaitingAmendment,
@@ -566,19 +570,22 @@ async fn coding_runtime_handoff_resumes_original_consumer_revision_with_new_hand
         .await
         .unwrap();
 
-    assert_eq!(result.resumed_units, vec!["wi_registration"]);
+    assert_eq!(result.revalidation_units, vec!["wi_registration"]);
     let runs = fixture
         .store
         .list_unit_runs_by_logical_id(&fixture.attempt, "wi_registration")
         .unwrap();
-    let resumed = runs.last().unwrap();
-    assert_eq!(resumed.execution_no, 2);
-    assert_eq!(resumed.work_item_revision_id, "work_item_revision_wi02_v1");
+    let revalidation = runs.last().unwrap();
+    assert_eq!(revalidation.execution_no, 2);
     assert_eq!(
-        resumed.resolved_handoff_revision_ids,
+        revalidation.work_item_revision_id,
+        "work_item_revision_wi02_v1"
+    );
+    assert_eq!(
+        revalidation.resolved_handoff_revision_ids,
         vec!["handoff_revision_0002"]
     );
-    assert_eq!(resumed.status, CodingUnitRunStatus::Pending);
+    assert_eq!(revalidation.status, CodingUnitRunStatus::NeedsRevalidation);
     assert!(
         fixture
             .store
@@ -709,6 +716,8 @@ async fn coding_runtime_handoff_releases_conditional_consumer_only_after_changed
     );
     previous.logical_work_item_id = "wi_registration".to_string();
     previous.work_item_revision_id = "work_item_revision_wi02_v1".to_string();
+    previous.coding_unit_run_id = "coding_unit_run_registration_0001".to_string();
+    previous.commit_sha = "commit_registration_v1".to_string();
     let mut next = handoff(
         "handoff_revision_registration_0002",
         &["registration_contract"],
@@ -720,6 +729,22 @@ async fn coding_runtime_handoff_releases_conditional_consumer_only_after_changed
     );
     next.logical_work_item_id = "wi_registration".to_string();
     next.work_item_revision_id = "work_item_revision_wi02_v1".to_string();
+    let mut next_run = fixture
+        .store
+        .list_unit_runs_by_logical_id(&fixture.attempt, "wi_registration")
+        .unwrap()
+        .into_iter()
+        .find(|run| run.id == "coding_unit_run_registration_0001")
+        .unwrap();
+    next_run.id = "coding_unit_run_registration_0002".to_string();
+    next_run.execution_no = 3;
+    next_run.completion_commit = Some("commit_registration_v2".to_string());
+    fixture
+        .store
+        .create_coding_unit_run(&fixture.attempt, &next_run)
+        .unwrap();
+    next.coding_unit_run_id = next_run.id;
+    next.commit_sha = next_run.completion_commit.unwrap();
     revision_store
         .put_handoff_revision(&lineage, &previous)
         .unwrap();
@@ -764,3 +789,5 @@ async fn coding_runtime_handoff_releases_conditional_consumer_only_after_changed
 }
 
 include!("runtime_handoff_history.rs");
+include!("runtime_handoff_replay.rs");
+include!("runtime_handoff_multi_input.rs");

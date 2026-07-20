@@ -11,6 +11,12 @@ use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use super::locking::with_exclusive_lock;
 use super::unit_run::amendment_unit_run_id;
 
+enum PlaceholderRunResolution {
+    Resolved(CodingUnitRun),
+    AdvancedReplay(CodingUnitRun),
+    DifferentTuple,
+}
+
 impl super::CodingAttemptStore {
     pub fn start_pending_coding_unit_run(
         &self,
@@ -88,12 +94,23 @@ impl super::CodingAttemptStore {
         )?;
         let runs = self.list_coding_unit_runs(&current, &unit.id)?;
         let placeholder_id = amendment_unit_run_id(&unit.id, amendment_id);
-        let resolved =
+        let placeholder_resolution =
             if let Some((path, _)) = self.find_unit_run_by_id(&current, &placeholder_id)? {
-                with_exclusive_lock(&path, || {
+                Some(with_exclusive_lock(&path, || {
                     resolve_placeholder_run(&path, &unit, resolved_handoff_revision_ids, &status)
-                })?
+                })?)
             } else {
+                None
+            };
+        let update_unit;
+        let resolved = match placeholder_resolution {
+            Some(PlaceholderRunResolution::Resolved(run)) => {
+                update_unit = true;
+                run
+            }
+            Some(PlaceholderRunResolution::AdvancedReplay(run)) => return Ok(run),
+            placeholder_resolution => {
+                update_unit = placeholder_resolution.is_none();
                 let run_id = runtime_handoff_unit_run_id(
                     &current.id,
                     amendment_id,
@@ -151,25 +168,28 @@ impl super::CodingAttemptStore {
                     updated_at: String::new(),
                 };
                 self.load_or_create_coding_unit_run(&current, &run)?
-            };
-        unit.status = unit_status(&status);
-        unit.started_at = None;
-        unit.completed_at = None;
-        unit.summary = Some(format!(
-            "Runtime Handoff {} resolved after Plan Amendment {}",
-            resolved_handoff_revision_ids.join(","),
-            amendment_id
-        ));
-        unit.updated_at = Utc::now().to_rfc3339();
-        write_json(
-            &self.coding_unit_path(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-                &unit.id,
-            ),
-            &unit,
-        )?;
+            }
+        };
+        if update_unit {
+            unit.status = unit_status(&status);
+            unit.started_at = None;
+            unit.completed_at = None;
+            unit.summary = Some(format!(
+                "Runtime Handoff {} resolved after Plan Amendment {}",
+                resolved_handoff_revision_ids.join(","),
+                amendment_id
+            ));
+            unit.updated_at = Utc::now().to_rfc3339();
+            write_json(
+                &self.coding_unit_path(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    &unit.id,
+                ),
+                &unit,
+            )?;
+        }
         Ok(resolved)
     }
 
@@ -228,32 +248,42 @@ fn resolve_placeholder_run(
     unit: &crate::product::coding_models::CodingExecutionUnit,
     resolved_handoff_revision_ids: &[String],
     status: &CodingUnitRunStatus,
-) -> Result<CodingUnitRun, ProductStoreError> {
+) -> Result<PlaceholderRunResolution, ProductStoreError> {
     let mut run: CodingUnitRun = read_json(path)?;
-    let can_resolve = matches!(
+    if run.unit_id != unit.id || run.work_item_revision_id != unit.work_item_revision_id {
+        return Err(identity_mismatch(&run.id));
+    }
+    if run.resolved_handoff_revision_ids == resolved_handoff_revision_ids {
+        if matches!(run.status, CodingUnitRunStatus::Running) && run.completion_commit.is_none()
+            || matches!(run.status, CodingUnitRunStatus::Completed)
+                && run.completion_commit.is_some()
+        {
+            return Ok(PlaceholderRunResolution::AdvancedReplay(run));
+        }
+        if &run.status == status && run.completion_commit.is_none() {
+            return Ok(PlaceholderRunResolution::Resolved(run));
+        }
+        return Err(identity_mismatch(&run.id));
+    }
+    if !run.resolved_handoff_revision_ids.is_empty() {
+        return Ok(PlaceholderRunResolution::DifferentTuple);
+    }
+    if !matches!(
         run.status,
         CodingUnitRunStatus::AwaitingAmendment
             | CodingUnitRunStatus::NeedsRevalidation
             | CodingUnitRunStatus::Pending
             | CodingUnitRunStatus::Stale
-    ) && run.completion_commit.is_none()
-        && run.unit_id == unit.id
-        && run.work_item_revision_id == unit.work_item_revision_id
-        && (run.resolved_handoff_revision_ids.is_empty()
-            || run.resolved_handoff_revision_ids == resolved_handoff_revision_ids);
-    if !can_resolve
+    ) || run.completion_commit.is_some()
         || (run.status == CodingUnitRunStatus::Stale && status != &CodingUnitRunStatus::Stale)
     {
         return Err(identity_mismatch(&run.id));
-    }
-    if run.resolved_handoff_revision_ids == resolved_handoff_revision_ids && &run.status == status {
-        return Ok(run);
     }
     run.resolved_handoff_revision_ids = resolved_handoff_revision_ids.to_vec();
     run.status = status.clone();
     run.updated_at = Utc::now().to_rfc3339();
     write_json(path, &run)?;
-    Ok(run)
+    Ok(PlaceholderRunResolution::Resolved(run))
 }
 
 fn unit_status(status: &CodingUnitRunStatus) -> CodingExecutionUnitStatus {

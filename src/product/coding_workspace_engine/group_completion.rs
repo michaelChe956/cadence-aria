@@ -28,6 +28,7 @@ struct GroupUnitCompletionFacts {
     provided_contracts: Vec<String>,
     provided_capabilities: std::collections::BTreeMap<String, Vec<String>>,
     handoff_contract_hash: String,
+    previous_handoff: Option<HandoffRevision>,
     mode: GroupUnitCompletionMode,
 }
 
@@ -90,7 +91,13 @@ impl CodingWorkspaceEngine {
             &completed_run,
             &legacy_handoff,
         )?;
-        self.apply_completed_handoff(&attempt, &handoff).await?;
+        let transition = self.authoritative_handoff_transition(
+            &attempt,
+            facts.previous_handoff.clone(),
+            handoff,
+        )?;
+        self.apply_authoritative_handoff_transition(&attempt, transition)
+            .await?;
         if facts.active.status == CodingExecutionUnitStatus::Completed {
             self.advance_to_next_group_unit(&attempt).await
         } else {
@@ -287,7 +294,7 @@ impl CodingWorkspaceEngine {
             )));
         }
         let handoff_contract = group_handoff_contract_facts(&revision)?;
-        let facts = GroupUnitCompletionFacts {
+        let mut facts = GroupUnitCompletionFacts {
             handoff_id: format!("handoff_revision_{}", run.id),
             active,
             run,
@@ -297,9 +304,11 @@ impl CodingWorkspaceEngine {
             provided_contracts: handoff_contract.provided_contracts,
             provided_capabilities: handoff_contract.provided_capabilities,
             handoff_contract_hash: handoff_contract.contract_hash,
+            previous_handoff: None,
             mode,
         };
-        self.preflight_existing_group_handoff(attempt, &facts, recovering_cleared_active)?;
+        facts.previous_handoff =
+            self.preflight_existing_group_handoff(attempt, &facts, recovering_cleared_active)?;
         Ok(facts)
     }
 
@@ -335,7 +344,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         facts: &GroupUnitCompletionFacts,
         require_existing: bool,
-    ) -> Result<(), CodingWorkspaceEngineError> {
+    ) -> Result<Option<HandoffRevision>, CodingWorkspaceEngineError> {
         if require_existing
             && facts.active.latest_handoff_revision_id.as_deref() != Some(facts.handoff_id.as_str())
         {
@@ -344,6 +353,7 @@ impl CodingWorkspaceEngine {
         let revision_store = WorkItemRevisionStore::new(self.store.paths());
         let pointer_is_current =
             facts.active.latest_handoff_revision_id.as_deref() == Some(facts.handoff_id.as_str());
+        let mut captured_previous = None;
         if let Some(previous_id) = facts
             .active
             .latest_handoff_revision_id
@@ -365,6 +375,13 @@ impl CodingWorkspaceEngine {
             if previous.coding_unit_run_id == facts.run.id {
                 return Err(group_handoff_revision_conflict(&facts.handoff_id));
             }
+            let previous_run = self
+                .authoritative_handoff_run(attempt, &previous)
+                .map_err(|_| group_handoff_revision_conflict(&facts.handoff_id))?;
+            if previous_run.execution_no >= facts.run.execution_no {
+                return Err(group_handoff_revision_conflict(&facts.handoff_id));
+            }
+            captured_previous = Some(previous);
         }
         let existing = match revision_store.get_handoff_revision(
             &facts.lineage,
@@ -382,7 +399,7 @@ impl CodingWorkspaceEngine {
             if require_existing || pointer_is_current {
                 return Err(group_handoff_revision_conflict(&facts.handoff_id));
             }
-            return Ok(());
+            return Ok(captured_previous);
         };
         let GroupUnitCompletionMode::CompletedRetry { completion_commit } = &facts.mode else {
             return Err(group_handoff_revision_conflict(&facts.handoff_id));
@@ -406,7 +423,20 @@ impl CodingWorkspaceEngine {
         if existing != expected {
             return Err(group_handoff_revision_conflict(&facts.handoff_id));
         }
-        Ok(())
+        let next_run = self
+            .authoritative_handoff_run(attempt, &existing)
+            .map_err(|_| group_handoff_revision_conflict(&facts.handoff_id))?;
+        if pointer_is_current {
+            return self
+                .authoritative_previous_handoff_for_run(
+                    attempt,
+                    &facts.lineage,
+                    &existing,
+                    &next_run,
+                )
+                .map_err(|_| group_handoff_revision_conflict(&facts.handoff_id));
+        }
+        Ok(captured_previous)
     }
 
     async fn commit_current_group_unit_changes(

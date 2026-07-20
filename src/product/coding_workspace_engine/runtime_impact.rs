@@ -15,6 +15,7 @@ use crate::product::work_item_contract::{
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
+use super::runtime_handoff_authority::AuthoritativeHandoffTransition;
 use super::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +36,12 @@ pub struct RuntimeHandoffImpactResult {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RuntimeHandoffImpactPropagator;
+
+struct RuntimeHandoffState<'a> {
+    execution: &'a PlanExecutionState,
+    latest_statuses: &'a BTreeMap<String, CodingUnitRunStatus>,
+    authoritative_handoffs: &'a BTreeMap<String, HandoffRevision>,
+}
 
 #[derive(Serialize)]
 struct HandoffContractHashInput<'a> {
@@ -127,13 +134,18 @@ impl RuntimeHandoffImpactPropagator {
                 })
                 .collect(),
         };
+        let latest_statuses = BTreeMap::new();
+        let authoritative_handoffs = BTreeMap::new();
         self.apply_with_runtime_state(
             None,
             next_handoff,
             manifest,
             graph,
-            &execution,
-            &BTreeMap::new(),
+            &RuntimeHandoffState {
+                execution: &execution,
+                latest_statuses: &latest_statuses,
+                authoritative_handoffs: &authoritative_handoffs,
+            },
         )
     }
 
@@ -143,16 +155,23 @@ impl RuntimeHandoffImpactPropagator {
         next: &HandoffRevision,
         manifest: &PlanAmendmentManifest,
         graph: &DependencyContractGraph,
-        execution: &PlanExecutionState,
-        latest_statuses: &BTreeMap<String, CodingUnitRunStatus>,
+        runtime: &RuntimeHandoffState<'_>,
     ) -> Result<RuntimeHandoffImpactResult, CodingWorkspaceEngineError> {
         let delta_kind = compare_handoff_revisions(previous, next);
         if delta_kind == HandoffDeltaKind::Unchanged {
             let mut resumed_units = direct_consumers(graph, &next.logical_work_item_id)
-                .filter(|edge| edge_requirements_are_satisfied(edge, next))
+                .filter(|edge| {
+                    incoming_edges_are_satisfied(
+                        graph,
+                        &edge.to,
+                        next,
+                        runtime.authoritative_handoffs,
+                    )
+                })
                 .map(|edge| edge.to.clone())
                 .filter(|logical_id| {
-                    latest_statuses.get(logical_id) == Some(&CodingUnitRunStatus::AwaitingAmendment)
+                    runtime.latest_statuses.get(logical_id)
+                        == Some(&CodingUnitRunStatus::AwaitingAmendment)
                 })
                 .collect::<Vec<_>>();
             resumed_units.sort();
@@ -166,7 +185,7 @@ impl RuntimeHandoffImpactPropagator {
 
         let delta = runtime_contract_delta(previous, next, delta_kind.clone());
         let mut report = ContractImpactAnalyzer
-            .analyze_static(graph, &delta, execution)
+            .analyze_static(graph, &delta, runtime.execution)
             .map_err(|error| {
                 CodingWorkspaceEngineError::ProviderStream(format!(
                     "runtime_handoff_impact_analysis_failed: {error:?}"
@@ -183,7 +202,7 @@ impl RuntimeHandoffImpactPropagator {
             next,
             manifest,
             &report,
-            latest_statuses,
+            runtime.latest_statuses,
             delta_kind,
             graph,
         ))
@@ -198,7 +217,7 @@ impl CodingWorkspaceEngine {
     ) -> Result<RuntimeHandoffImpactResult, CodingWorkspaceEngineError> {
         let current = self.store.validate_attempt_lineage(attempt)?;
         let binding = self.store.get_plan_binding(&current)?;
-        let Some(amendment_id) = binding.applied_amendment_ids.last() else {
+        let Some(_) = binding.applied_amendment_ids.last() else {
             return Ok(RuntimeHandoffImpactResult::default());
         };
         let revision_store = WorkItemRevisionStore::new(self.store.paths());
@@ -207,13 +226,6 @@ impl CodingWorkspaceEngine {
             &current.issue_id,
             &binding.plan_id,
         )?;
-        let manifest = revision_store.get_amendment_manifest(&lineage, amendment_id)?;
-        if binding.bound_plan_revision_id != manifest.new_plan_revision_id {
-            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
-                "runtime_handoff_plan_binding_mismatch: {}",
-                current.id
-            )));
-        }
         let persisted = revision_store.get_handoff_revision(
             &lineage,
             &next_handoff.logical_work_item_id,
@@ -225,15 +237,61 @@ impl CodingWorkspaceEngine {
                 next_handoff.id
             )));
         }
-        let previous = revision_store
-            .list_handoff_revisions(&lineage, &next_handoff.logical_work_item_id)?
-            .into_iter()
-            .filter(|handoff| handoff.id != next_handoff.id)
-            .max_by(|left, right| {
-                left.created_at
-                    .cmp(&right.created_at)
-                    .then_with(|| left.id.cmp(&right.id))
-            });
+        let next_run = self.authoritative_handoff_run(&current, next_handoff)?;
+        let previous = self.authoritative_previous_handoff_for_run(
+            &current,
+            &lineage,
+            next_handoff,
+            &next_run,
+        )?;
+        let transition =
+            self.authoritative_handoff_transition(&current, previous, next_handoff.clone())?;
+        self.apply_authoritative_handoff_transition(&current, transition)
+            .await
+    }
+
+    pub(super) async fn apply_authoritative_handoff_transition(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        transition: AuthoritativeHandoffTransition,
+    ) -> Result<RuntimeHandoffImpactResult, CodingWorkspaceEngineError> {
+        let current = self.store.validate_attempt_lineage(attempt)?;
+        let binding = self.store.get_plan_binding(&current)?;
+        let Some(amendment_id) = binding.applied_amendment_ids.last() else {
+            return Ok(RuntimeHandoffImpactResult::default());
+        };
+        let revision_store = WorkItemRevisionStore::new(self.store.paths());
+        let lineage = revision_store.get_plan_lineage(
+            &current.project_id,
+            &current.issue_id,
+            &binding.plan_id,
+        )?;
+        for handoff in transition
+            .previous
+            .iter()
+            .chain(std::iter::once(&transition.next))
+        {
+            let persisted = revision_store.get_handoff_revision(
+                &lineage,
+                &handoff.logical_work_item_id,
+                &handoff.id,
+            )?;
+            if persisted != *handoff {
+                return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "runtime_handoff_revision_mismatch: {}",
+                    handoff.id
+                )));
+            }
+        }
+        let transition =
+            self.authoritative_handoff_transition(&current, transition.previous, transition.next)?;
+        let manifest = revision_store.get_amendment_manifest(&lineage, amendment_id)?;
+        if binding.bound_plan_revision_id != manifest.new_plan_revision_id {
+            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                "runtime_handoff_plan_binding_mismatch: {}",
+                current.id
+            )));
+        }
         let plan_revision = revision_store.get_plan_revision(
             &current.project_id,
             &current.issue_id,
@@ -255,17 +313,61 @@ impl CodingWorkspaceEngine {
             contracts,
             edges: graph_revision.edges,
         };
+        let authoritative_handoffs = self.runtime_authoritative_handoffs(&current, &lineage)?;
         let (execution, latest_statuses) = self.runtime_handoff_execution_state(&current)?;
         let result = RuntimeHandoffImpactPropagator.apply_with_runtime_state(
-            previous.as_ref(),
-            next_handoff,
+            transition.previous.as_ref(),
+            &transition.next,
             &manifest,
             &graph,
-            &execution,
-            &latest_statuses,
+            &RuntimeHandoffState {
+                execution: &execution,
+                latest_statuses: &latest_statuses,
+                authoritative_handoffs: &authoritative_handoffs,
+            },
         )?;
-        self.persist_runtime_handoff_impact(&current, &manifest, next_handoff, &result)?;
+        self.persist_runtime_handoff_impact(
+            &current,
+            &manifest,
+            &transition.next,
+            &graph,
+            &authoritative_handoffs,
+            &result,
+        )?;
         Ok(result)
+    }
+
+    fn runtime_authoritative_handoffs(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        lineage: &crate::product::models::WorkItemPlanLineage,
+    ) -> Result<BTreeMap<String, HandoffRevision>, CodingWorkspaceEngineError> {
+        let revision_store = WorkItemRevisionStore::new(self.store.paths());
+        let mut handoffs = BTreeMap::new();
+        for unit in
+            self.store
+                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        {
+            let Some(handoff_id) = unit.latest_handoff_revision_id.as_deref() else {
+                continue;
+            };
+            let handoff = revision_store.get_handoff_revision(
+                lineage,
+                &unit.logical_work_item_id,
+                handoff_id,
+            )?;
+            self.authoritative_handoff_run(attempt, &handoff)?;
+            if handoffs
+                .insert(unit.logical_work_item_id.clone(), handoff)
+                .is_some()
+            {
+                return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "runtime_handoff_unit_ambiguous: {}",
+                    unit.logical_work_item_id
+                )));
+            }
+        }
+        Ok(handoffs)
     }
 
     fn runtime_handoff_execution_state(
@@ -315,6 +417,8 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
         next_handoff: &HandoffRevision,
+        graph: &DependencyContractGraph,
+        authoritative_handoffs: &BTreeMap<String, HandoffRevision>,
         result: &RuntimeHandoffImpactResult,
     ) -> Result<(), CodingWorkspaceEngineError> {
         for (logical_ids, status) in [
@@ -330,8 +434,14 @@ impl CodingWorkspaceEngine {
             ),
         ] {
             for logical_id in logical_ids {
-                let resolved_handoff_revision_ids =
-                    self.runtime_resolved_handoff_revision_ids(attempt, logical_id, next_handoff)?;
+                let resolved_handoff_revision_ids = self.runtime_resolved_handoff_revision_ids(
+                    attempt,
+                    logical_id,
+                    next_handoff,
+                    graph,
+                    authoritative_handoffs,
+                    status != CodingUnitRunStatus::Stale,
+                )?;
                 self.store.resolve_runtime_handoff_unit_run(
                     attempt,
                     &manifest.id,
@@ -349,24 +459,33 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         logical_work_item_id: &str,
         next_handoff: &HandoffRevision,
+        graph: &DependencyContractGraph,
+        authoritative_handoffs: &BTreeMap<String, HandoffRevision>,
+        require_capabilities: bool,
     ) -> Result<Vec<String>, CodingWorkspaceEngineError> {
         let units =
             self.store
                 .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let unit = unique_runtime_unit(&units, logical_work_item_id)?;
-        let mut resolved = unit
-            .dependency_logical_work_item_ids
+        unique_runtime_unit(&units, logical_work_item_id)?;
+        let mut resolved = graph
+            .edges
             .iter()
-            .map(|dependency_id| {
-                if dependency_id == &next_handoff.logical_work_item_id {
-                    return Ok(next_handoff.id.clone());
+            .filter(|edge| edge.to == logical_work_item_id)
+            .map(|edge| {
+                let handoff = if edge.from == next_handoff.logical_work_item_id {
+                    next_handoff
+                } else {
+                    authoritative_handoffs.get(&edge.from).ok_or_else(|| {
+                        CodingWorkspaceEngineError::WorkItemHandoffMissing(edge.from.clone())
+                    })?
+                };
+                if require_capabilities && !edge_requirements_are_satisfied(edge, handoff) {
+                    return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                        "runtime_handoff_dependency_unsatisfied: {}->{}",
+                        edge.from, edge.to
+                    )));
                 }
-                unique_runtime_unit(&units, dependency_id)?
-                    .latest_handoff_revision_id
-                    .clone()
-                    .ok_or_else(|| {
-                        CodingWorkspaceEngineError::WorkItemHandoffMissing(dependency_id.clone())
-                    })
+                Ok(handoff.id.clone())
             })
             .collect::<Result<Vec<_>, _>>()?;
         resolved.sort();
@@ -411,13 +530,13 @@ fn classify_runtime_impact(
         HandoffDeltaKind::Unchanged => unreachable!("unchanged returns before impact analysis"),
         HandoffDeltaKind::CompatibleExtension => {
             for logical_id in direct {
-                if matches!(
+                if explicit_revalidation.contains(&logical_id) {
+                    result.revalidation_units.push(logical_id);
+                } else if matches!(
                     latest_statuses.get(&logical_id),
                     Some(CodingUnitRunStatus::AwaitingAmendment | CodingUnitRunStatus::Pending)
                 ) {
                     result.resumed_units.push(logical_id);
-                } else if explicit_revalidation.contains(&logical_id) {
-                    result.revalidation_units.push(logical_id);
                 } else {
                     result.conditional_units_released.push(logical_id);
                 }
@@ -534,6 +653,28 @@ fn edge_requirements_are_satisfied(
     edge.required_contracts
         .iter()
         .all(|required| requirement_is_satisfied(required, handoff))
+}
+
+fn incoming_edges_are_satisfied(
+    graph: &DependencyContractGraph,
+    consumer: &str,
+    next: &HandoffRevision,
+    authoritative_handoffs: &BTreeMap<String, HandoffRevision>,
+) -> bool {
+    graph
+        .edges
+        .iter()
+        .filter(|edge| edge.to == consumer)
+        .all(|edge| {
+            let handoff = if edge.from == next.logical_work_item_id {
+                next
+            } else if let Some(handoff) = authoritative_handoffs.get(&edge.from) {
+                handoff
+            } else {
+                return false;
+            };
+            edge_requirements_are_satisfied(edge, handoff)
+        })
 }
 
 fn requirement_is_satisfied(

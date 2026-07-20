@@ -84,6 +84,7 @@ mod reports;
 mod review_parser;
 mod reviewer_context;
 mod rework;
+mod runtime_handoff_authority;
 mod runtime_impact;
 mod testing;
 mod testing_parser;
