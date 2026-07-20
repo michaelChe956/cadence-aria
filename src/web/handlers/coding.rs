@@ -87,15 +87,37 @@ pub async fn create_coding_attempt(
     }
 
     let coding_store = CodingAttemptStore::new(app_paths.clone());
-    if coding_store
-        .get_active_attempt(&project_id, &issue_id, &work_item.id)
+    let active_attempts = coding_store
+        .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
         .map_err(product_store_api_error)?
-        .is_some()
-    {
+        .into_iter()
+        .filter(|attempt| attempt.status.is_active())
+        .collect::<Vec<_>>();
+    if active_attempts.len() > 1 {
+        return Err(ApiError::runtime(
+            "coding_attempt_ambiguous",
+            "multiple active coding attempts exist for this work item",
+            json!({
+                "attempt_ids": active_attempts
+                    .iter()
+                    .map(|attempt| attempt.id.as_str())
+                    .collect::<Vec<_>>()
+            }),
+        ));
+    }
+    if let Some(active_attempt) = active_attempts.into_iter().next() {
+        lifecycle
+            .bind_issue_worktree_lock_to_attempt(
+                &project_id,
+                &issue_id,
+                &work_item.id,
+                &active_attempt.id,
+            )
+            .map_err(product_store_api_error)?;
         return Err(ApiError::runtime(
             "coding_attempt_active",
             "work item already has an active coding attempt",
-            json!({}),
+            json!({ "attempt_id": active_attempt.id }),
         ));
     }
 
@@ -187,6 +209,16 @@ pub async fn create_coding_attempt(
             return Err(product_store_api_error(error));
         }
     };
+    if state
+        .test_controls
+        .consume_coding_attempt_after_persist_before_bind_failure()
+    {
+        return Err(ApiError::runtime(
+            "coding_attempt_bind_interrupted",
+            "coding attempt creation interrupted before worktree lease binding",
+            json!({}),
+        ));
+    }
     if let Err(error) = lifecycle.bind_issue_worktree_lock_to_attempt(
         &project_id,
         &issue_id,

@@ -46,6 +46,7 @@ impl CodingWorkspaceEngine {
         let attempt =
             self.store
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        self.validate_attempt_issue_shared_worktree_lock_if_present(&attempt)?;
         let facts = self.preflight_group_unit_completion(&attempt)?;
         let attempt = match &facts.mode {
             GroupUnitCompletionMode::Running => {

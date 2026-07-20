@@ -159,3 +159,68 @@
 
 - Commit：`050e728`（`fix(plan-repair): close round two recovery races`）。
 - 策略：新原子 fix commit，不 amend `1fba4dc`，不 push；worktree 保留。
+
+## Final Review Important 修复（2026-07-21）
+
+### 1. Group 高层完成入口 owner 预检
+
+- `complete_group_unit_after_code_review` 在读取最新 Attempt 后、结构预检与任何 git/store 写入前校验 Issue Shared Worktree owner。
+- Running 模式不再先创建 completion commit、保存 legacy/canonical handoff、完成 Unit Run 或应用 runtime handoff transition 后才由低层入口发现 owner conflict。
+- CompletedRetry 模式不再绕过低层预检直接启动下一 Unit；owner conflict 下 Attempt、Unit、Unit Run、handoff、git HEAD/status 与 lease 快照全部保持不变。
+
+### 2. Provider failure 高层入口 owner 预检
+
+- `fail_provider_stream` 在所有 stage 分支前统一校验 owner。
+- 非 Coding/CodeReview 的 terminal failure 不再先写 Attempt=Failed 与 timeline=Failed，再由 `handle_attempt_failed` 报 owner conflict。
+- 高层回归测试确认 owner conflict 下 Attempt、timeline、Work Item、lease 与 WebSocket event channel 均无副作用；既有 CodeReview/Coding blocked recovery 行为保持不变。
+
+### 3. Single Attempt persist→bind 崩溃恢复
+
+- 新增默认关闭、一次性消费且无 HTTP route 的 `TestControls` seam，确定性中断 Attempt 持久化之后、Issue Worktree lease bind 之前的窗口。
+- 新进程/新 router 遇到同 Work Item 的唯一 active Attempt 时，在返回 `coding_attempt_active` 409 前，通过 Issue Worktree 文件锁幂等绑定 owner：
+  - owner 已是该 Attempt ID 时直接成功；
+  - owner 仅在具有 `issue_worktree_lease_` 系统 pending lease 前缀时允许绑定；
+  - Work Item 不匹配、其他 owner 或多个 active Attempt 均 fail-closed。
+- 显式枚举 active Attempt；多个 active 时返回 `coding_attempt_ambiguous`，不会任选一条绑定临时 lease。
+- 重启回归确认其他 Work Item 不能抢占 orphan lease、恢复后不存在 active Attempt + temporary owner 组合，并可通过真实 Abort 正常释放 lease。
+- 选择恢复绑定而非 delete+release 回滚：Attempt 唯一性已由跨 Store 文件锁保证，而 lease bind 是单个 Issue Worktree 文件内的原子 RMW；删除 Attempt 与释放 lease 横跨两个 Store，无法提供等价原子性。
+
+### 4. 追加 RED → GREEN
+
+| 场景 | RED | GREEN |
+| --- | --- | --- |
+| Group Running 高层入口 | owner conflict 前已改变 git HEAD、Attempt head、Unit Run、handoff 与 canonical transition 状态 | 高层入口首写前预检，完整状态与 lease 快照零变化 |
+| Group CompletedRetry 高层入口 | 已完成 Unit 的 retry 直接启动下一 Unit，随后 transfer 才报 owner conflict | retry 在 advance 前被高层预检拒绝，下一 Unit/Run/Attempt 不推进 |
+| Provider fail 高层入口 | Attempt 与 timeline 已写 Failed 后才返回 owner conflict | owner 预检先于所有 stage 分支写入，Attempt/timeline/Work Item/lease/event 零变化 |
+| 非 pending owner bind | 任意非 `coding_attempt_` owner 都可被覆盖为 Attempt ID | 只接受同 Attempt owner 或 `issue_worktree_lease_` pending owner |
+| persist→bind 重启 | 同 Work Item 重试返回 409，但 lease owner 仍是 temporary ID，Abort 无法释放 | 返回 409 前绑定唯一 active Attempt，Abort 后 active owner 全部清空 |
+| 多 active 损坏数据 | `get_active_attempt` 任取一条并绑定 lease | 显式检测 ambiguity，lease 不变且 fail-closed |
+
+新增/关键 focused GREEN：
+
+- `group_completion_running_owner_conflict_is_zero_write_at_production_entry`
+- `group_completion_retry_owner_conflict_is_zero_write_at_production_entry`
+- `provider_failure_owner_conflict_is_zero_write_at_production_entry`
+- `attempt_bind_rejects_non_pending_issue_worktree_owner`
+- `retry_reconciles_attempt_persisted_before_lease_bind_after_restart`
+- `retry_does_not_reconcile_ambiguous_active_attempts`
+- Group authority/recovery 模块 20 passed。
+- Provider failure recovery 模块 4 passed。
+- 既有 owner conflict focused 4 passed。
+- LifecycleStore 模块 28 passed。
+- 既有 duplicate create 与 concurrent loser HTTP focused 均通过。
+
+### 5. 最终门禁与边界
+
+- `cargo fmt --check`：PASS。
+- `cargo check --locked`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，0 warnings。
+- `cargo test --locked`：PASS，exit 0；lib 1206 passed，Web integration 272 passed、12 ignored，doc-test 1 passed，其余 integration targets 无失败。
+- `cd web && pnpm tsc -b`：PASS。
+- `git diff --check`：PASS。
+- 本轮 10 个 Rust/测试文件均不超过 800 行；最大为 `src/web/handlers/coding.rs`，724 行。
+- 未修改 `src/web/app.rs`，未新增 `/api/test/*` 路由；failpoint 仅能通过直接持有 `WebAppState.test_controls` 配置，默认关闭并一次性消费。
+- Story Spec 与 Design Spec Workspace 不受影响：本轮只修改 Coding Attempt 创建、Coding Workspace Group/Provider failure 与 Issue Shared Worktree owner 链路；未改共享产物 workspace timeline/chat/artifact 链路。
+- Work Item 影响仅限 Coding Attempt 对 Issue Shared Worktree lease 的校验、绑定、转移和释放，不改变 Work Item 规划、Story/Design 生成或审核流程。
+- 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
+- 提交策略：代码、测试与本报告使用同一个新原子提交；不 amend `050e728`/`6daff5b`，不 push，worktree 保留。

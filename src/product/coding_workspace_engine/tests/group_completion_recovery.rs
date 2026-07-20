@@ -141,6 +141,31 @@ fn snapshot_group_completion_state(
     }
 }
 
+fn lock_group_fixture_with_other_owner(fixture: &GroupCompletionFixture) -> LifecycleStore {
+    let lifecycle = LifecycleStore::new(fixture.store.paths());
+    lifecycle
+        .upsert_issue_shared_worktree(
+            crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput {
+                project_id: fixture.attempt.project_id.clone(),
+                issue_id: fixture.attempt.issue_id.clone(),
+                repository_id: "repository_0001".to_string(),
+                branch_name: fixture.attempt.branch_name.clone(),
+                worktree_path: fixture.worktree.clone(),
+                base_branch: fixture.original_head.clone(),
+            },
+        )
+        .expect("shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            "work_item_0001",
+            "coding_attempt_other",
+        )
+        .expect("conflicting shared worktree owner");
+    lifecycle
+}
+
 fn cleared_active_recovery_fixture() -> (
     GroupCompletionFixture,
     CodingExecutionAttempt,
@@ -148,6 +173,80 @@ fn cleared_active_recovery_fixture() -> (
     HandoffRevision,
 ) {
     cleared_active_recovery_fixture_at_stage(CodingExecutionStage::ReviewRequest)
+}
+
+#[tokio::test]
+async fn group_completion_running_owner_conflict_is_zero_write_at_production_entry() {
+    let fixture = group_completion_fixture(false, true);
+    create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+    let lifecycle = lock_group_fixture_with_other_owner(&fixture);
+    let before = snapshot_group_completion_state(&fixture);
+    let lease_before = lifecycle
+        .get_issue_shared_worktree(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+        .expect("shared worktree before")
+        .expect("shared worktree before");
+
+    let error = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect_err("owner conflict must reject the production completion entry");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::Store(ProductStoreError::Conflict {
+            kind: "issue_worktree_lock_owner",
+            ..
+        })
+    ));
+    assert_eq!(snapshot_group_completion_state(&fixture), before);
+    assert_eq!(
+        lifecycle
+            .get_issue_shared_worktree(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+            .expect("shared worktree after")
+            .expect("shared worktree after"),
+        lease_before
+    );
+}
+
+#[tokio::test]
+async fn group_completion_retry_owner_conflict_is_zero_write_at_production_entry() {
+    let (fixture, partial, _, _) = cleared_active_recovery_fixture();
+    let lifecycle = lock_group_fixture_with_other_owner(&fixture);
+    let before = snapshot_group_completion_state(&fixture);
+    let lease_before = lifecycle
+        .get_issue_shared_worktree(&partial.project_id, &partial.issue_id)
+        .expect("shared worktree before")
+        .expect("shared worktree before");
+
+    let error = fixture
+        .engine
+        .complete_group_unit_after_code_review(&partial)
+        .await
+        .expect_err("owner conflict must reject completed retry before next unit starts");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::Store(ProductStoreError::Conflict {
+            kind: "issue_worktree_lock_owner",
+            ..
+        })
+    ));
+    assert_eq!(snapshot_group_completion_state(&fixture), before);
+    assert_eq!(
+        lifecycle
+            .get_issue_shared_worktree(&partial.project_id, &partial.issue_id)
+            .expect("shared worktree after")
+            .expect("shared worktree after"),
+        lease_before
+    );
 }
 
 fn cleared_active_recovery_fixture_at_stage(

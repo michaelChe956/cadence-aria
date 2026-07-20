@@ -278,6 +278,135 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
 }
 
 #[tokio::test]
+async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some(WORK_ITEM_ID.to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "provider failure owner preflight".to_string(),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("work item");
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: root.path().join("shared-worktree"),
+            base_branch: "HEAD".to_string(),
+        })
+        .expect("shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID, "coding_attempt_other")
+        .expect("conflicting owner lock");
+
+    let store = CodingAttemptStore::new(paths);
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("attempt");
+    let attempt = store
+        .update_attempt_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt");
+    store
+        .save_timeline_node(
+            &attempt,
+            CodingTimelineNode {
+                id: NODE_ID.to_string(),
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::PrepareContext,
+                title: "准备上下文".to_string(),
+                status: CodingTimelineNodeStatus::Running,
+                agent_role: None,
+                summary: None,
+                started_at: "2026-07-21T00:00:00Z".to_string(),
+                completed_at: None,
+                artifact_refs: Vec::new(),
+            },
+        )
+        .expect("timeline node");
+
+    let attempt_before = store
+        .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("attempt before");
+    let timeline_before = store
+        .get_timeline_nodes(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("timeline before");
+    let work_items_before = lifecycle
+        .list_work_items(PROJECT_ID, ISSUE_ID)
+        .expect("work items before");
+    let lease_before = lifecycle
+        .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+        .expect("lease before")
+        .expect("lease before");
+    let (tx, mut rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .fail_provider_stream::<()>(&attempt, NODE_ID, "provider failed".to_string())
+        .await
+        .expect_err("owner conflict must reject provider failure before writes");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::Store(ProductStoreError::Conflict {
+            kind: "issue_worktree_lock_owner",
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("attempt after"),
+        attempt_before
+    );
+    assert_eq!(
+        store
+            .get_timeline_nodes(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("timeline after"),
+        timeline_before
+    );
+    assert_eq!(
+        lifecycle
+            .list_work_items(PROJECT_ID, ISSUE_ID)
+            .expect("work items after"),
+        work_items_before
+    );
+    assert_eq!(
+        lifecycle
+            .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+            .expect("lease after")
+            .expect("lease after"),
+        lease_before
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn internal_review_blocked_gate_uses_internal_review_retry_action() {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));

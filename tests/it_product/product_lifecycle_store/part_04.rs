@@ -113,3 +113,55 @@ fn wrong_owner_completion_does_not_mutate_worktree_history() {
         Some("coding_attempt_winner")
     );
 }
+
+#[test]
+fn attempt_bind_rejects_non_pending_issue_worktree_owner() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    store
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: PathBuf::from("/tmp/repo/.worktrees/aria-issues/issue_0001"),
+            base_branch: "main".to_string(),
+        })
+        .expect("shared worktree");
+    store
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "unexpected_owner",
+        )
+        .expect("unexpected owner lock");
+    let before = store
+        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .expect("shared worktree before")
+        .expect("shared worktree before");
+
+    let error = store
+        .bind_issue_worktree_lock_to_attempt(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "coding_attempt_expected",
+        )
+        .expect_err("only a pending issue worktree lease may be bound");
+
+    assert!(matches!(
+        error,
+        ProductStoreError::Conflict {
+            kind: "issue_worktree_lock_owner",
+            ..
+        }
+    ));
+    assert_eq!(
+        store
+            .get_issue_shared_worktree("project_0001", "issue_0001")
+            .expect("shared worktree after")
+            .expect("shared worktree after"),
+        before
+    );
+}

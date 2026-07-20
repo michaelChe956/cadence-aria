@@ -91,6 +91,7 @@ impl CodingWorkspaceEngine {
         node_id: &str,
         message: String,
     ) -> Result<T, CodingWorkspaceEngineError> {
+        self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
         if attempt.stage == CodingExecutionStage::CodeReview {
             self.complete_timeline_node(
                 &attempt.project_id,

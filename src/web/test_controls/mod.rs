@@ -55,6 +55,7 @@ struct TestControlsInner {
     permission_timeout: Mutex<Option<Duration>>,
     server_idle_timeout: Mutex<Option<Duration>>,
     coding_attempt_acquire_pause: Mutex<Option<CodingAttemptAcquirePause>>,
+    coding_attempt_persist_failure: Mutex<bool>,
 }
 
 #[derive(Clone, Default)]
@@ -74,6 +75,23 @@ impl CodingAttemptAcquirePause {
 }
 
 impl TestControls {
+    pub fn fail_next_coding_attempt_after_persist_before_bind(&self) {
+        *self
+            .inner
+            .coding_attempt_persist_failure
+            .lock()
+            .expect("coding attempt persist failure lock") = true;
+    }
+
+    pub fn consume_coding_attempt_after_persist_before_bind_failure(&self) -> bool {
+        let mut configured = self
+            .inner
+            .coding_attempt_persist_failure
+            .lock()
+            .expect("coding attempt persist failure lock");
+        std::mem::take(&mut *configured)
+    }
+
     pub fn pause_next_coding_attempt_after_worktree_acquire(&self) -> CodingAttemptAcquirePause {
         let pause = CodingAttemptAcquirePause::default();
         *self

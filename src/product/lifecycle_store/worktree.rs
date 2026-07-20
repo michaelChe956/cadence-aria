@@ -136,7 +136,7 @@ impl LifecycleStore {
             }
             match record.current_lock_owner_id.as_deref() {
                 Some(owner) if owner == attempt_id => return Ok(record),
-                Some(owner) if !owner.starts_with("coding_attempt_") => {}
+                Some(owner) if owner.starts_with("issue_worktree_lease_") => {}
                 _ => return Err(lock_owner_mismatch(issue_id, work_item_id)),
             }
             record.current_lock_owner_id = Some(attempt_id.to_string());
