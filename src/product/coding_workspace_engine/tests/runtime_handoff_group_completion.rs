@@ -40,6 +40,25 @@ async fn coding_runtime_handoff_group_completion_resumes_and_starts_waiting_cons
             },
         )
         .expect("previous handoff");
+    let source = fixture
+        .store
+        .get_active_coding_unit(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("active source lookup")
+        .expect("active source");
+    fixture
+        .store
+        .update_coding_unit_latest_handoff_revision_id(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &source.id,
+            Some("handoff_revision_previous".to_string()),
+        )
+        .expect("previous source handoff pointer");
     let mut amended_plan = revision_store
         .get_plan_revision(
             &fixture.attempt.project_id,
@@ -182,4 +201,104 @@ async fn coding_runtime_handoff_group_completion_resumes_and_starts_waiting_cons
         consumer_run.resolved_handoff_revision_ids,
         vec!["handoff_revision_coding_unit_run_0001"]
     );
+    let source = fixture
+        .store
+        .list_coding_units(
+            &updated.project_id,
+            &updated.issue_id,
+            &updated.id,
+        )
+        .expect("updated units")
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == "work_item_0001")
+        .expect("updated source");
+    assert_eq!(
+        source.latest_handoff_revision_id.as_deref(),
+        Some("handoff_revision_coding_unit_run_0001")
+    );
+}
+
+#[tokio::test]
+async fn coding_runtime_handoff_group_completion_rejects_non_authoritative_previous_pointer() {
+    for case in ["missing", "cross_unit", "current_run_alias"] {
+        let fixture = group_completion_fixture(true, true);
+        create_authoritative_active_run(
+            &fixture,
+            "coding_unit_run_0001",
+            1,
+            CodingUnitRunStatus::Running,
+            None,
+            None,
+        );
+        let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                "work_item_plan_0001",
+            )
+            .expect("lineage");
+        let pointer = "handoff_revision_non_authoritative";
+        if case != "missing" {
+            let logical_work_item_id = if case == "cross_unit" {
+                "work_item_0002"
+            } else {
+                "work_item_0001"
+            };
+            let coding_unit_run_id = if case == "current_run_alias" {
+                "coding_unit_run_0001"
+            } else {
+                "coding_unit_run_other"
+            };
+            revision_store
+                .put_handoff_revision(
+                    &lineage,
+                    &HandoffRevision {
+                        id: pointer.to_string(),
+                        logical_work_item_id: logical_work_item_id.to_string(),
+                        work_item_revision_id: format!(
+                            "work_item_revision_000{}",
+                            if case == "cross_unit" { 2 } else { 1 }
+                        ),
+                        coding_unit_run_id: coding_unit_run_id.to_string(),
+                        provided_contracts: vec![format!(
+                            "contract_work_item_000{}",
+                            if case == "cross_unit" { 2 } else { 1 }
+                        )],
+                        provided_capabilities: std::collections::BTreeMap::new(),
+                        contract_hash: "other_hash".to_string(),
+                        commit_sha: fixture.original_head.clone(),
+                        tests: Vec::new(),
+                        artifacts: Vec::new(),
+                        created_at: "2026-07-18T00:00:00Z".to_string(),
+                    },
+                )
+                .expect("cross-unit handoff");
+        }
+        let source = fixture
+            .store
+            .get_active_coding_unit(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("active source lookup")
+            .expect("active source");
+        fixture
+            .store
+            .update_coding_unit_latest_handoff_revision_id(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &source.id,
+                Some(pointer.to_string()),
+            )
+            .expect("non-authoritative source pointer");
+
+        assert_completion_preflight_is_zero_write(
+            &fixture,
+            "group_completion_handoff_revision_conflict",
+        )
+        .await;
+    }
 }

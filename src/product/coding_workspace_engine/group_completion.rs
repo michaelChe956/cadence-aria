@@ -121,18 +121,6 @@ impl CodingWorkspaceEngine {
             CodingWorkspaceEngineError::CompletionCommitMissing(completed_run.id.clone())
         })?;
         let handoff_id = facts.handoff_id.clone();
-        if facts
-            .active
-            .latest_handoff_revision_id
-            .as_deref()
-            .is_some_and(|existing| existing != handoff_id)
-        {
-            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
-                "group_completion_handoff_pointer_mismatch: {}",
-                facts.active.id
-            )));
-        }
-
         let build_handoff = |created_at: String| {
             build_group_handoff_revision(
                 facts,
@@ -166,13 +154,13 @@ impl CodingWorkspaceEngine {
             }
             Err(error) => return Err(error.into()),
         };
-        if facts.active.latest_handoff_revision_id.is_none() {
+        if facts.active.latest_handoff_revision_id.as_deref() != Some(handoff.id.as_str()) {
             self.store.update_coding_unit_latest_handoff_revision_id(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
                 &facts.active.id,
-                Some(handoff_id),
+                Some(handoff.id.clone()),
             )?;
         }
         Ok(handoff)
@@ -353,15 +341,31 @@ impl CodingWorkspaceEngine {
         {
             return Err(group_handoff_revision_conflict(&facts.handoff_id));
         }
-        if facts
+        let revision_store = WorkItemRevisionStore::new(self.store.paths());
+        let pointer_is_current =
+            facts.active.latest_handoff_revision_id.as_deref() == Some(facts.handoff_id.as_str());
+        if let Some(previous_id) = facts
             .active
             .latest_handoff_revision_id
             .as_deref()
-            .is_some_and(|pointer| pointer != facts.handoff_id)
+            .filter(|pointer| *pointer != facts.handoff_id)
         {
-            return Err(group_handoff_revision_conflict(&facts.handoff_id));
+            let previous = match revision_store.get_handoff_revision(
+                &facts.lineage,
+                &facts.active.logical_work_item_id,
+                previous_id,
+            ) {
+                Ok(previous) => previous,
+                Err(ProductStoreError::NotFound {
+                    kind: "handoff_revision",
+                    ..
+                }) => return Err(group_handoff_revision_conflict(&facts.handoff_id)),
+                Err(error) => return Err(error.into()),
+            };
+            if previous.coding_unit_run_id == facts.run.id {
+                return Err(group_handoff_revision_conflict(&facts.handoff_id));
+            }
         }
-        let revision_store = WorkItemRevisionStore::new(self.store.paths());
         let existing = match revision_store.get_handoff_revision(
             &facts.lineage,
             &facts.active.logical_work_item_id,
@@ -375,7 +379,7 @@ impl CodingWorkspaceEngine {
             Err(error) => return Err(error.into()),
         };
         let Some(existing) = existing else {
-            if require_existing || facts.active.latest_handoff_revision_id.is_some() {
+            if require_existing || pointer_is_current {
                 return Err(group_handoff_revision_conflict(&facts.handoff_id));
             }
             return Ok(());
