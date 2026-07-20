@@ -527,6 +527,21 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
       markSubmittingGateError(message.code as string);
       rejectCodingChoiceRequestFromError(message.message as string);
       break;
+    case "plan_repair_required": {
+      const repair = message as Extract<CodingWsOutMessage, { type: "plan_repair_required" }>;
+      store.setPlanRepairRequired(repair);
+      break;
+    }
+    case "plan_amendment_updated": {
+      const update = message as Extract<CodingWsOutMessage, { type: "plan_amendment_updated" }>;
+      store.setPlanAmendment(update.amendment);
+      if (
+        useCodingWorkspaceStore.getState().activePlanRepair?.amendment === update.amendment
+      ) {
+        store.clearPlanRepairAfterResume(update.amendment.id);
+      }
+      break;
+    }
     case "coding_pong":
       break;
   }

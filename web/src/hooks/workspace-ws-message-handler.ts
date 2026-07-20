@@ -150,7 +150,23 @@ const store = useWorkspaceStore.getState();
     case "artifact_update":
       {
         const version = msg.version as number;
-        if (msg.candidate) {
+        if (msg.plan_amendment_manifest) {
+          const amendment = msg.plan_amendment_manifest as { id?: string };
+          store.appendChatEntry({
+            id: chatEntryId(
+              "artifact_update",
+              `plan_amendment_manifest:${amendment.id ?? String(version)}`,
+            ),
+            type: "artifact_update",
+            role: "system",
+            content: `Plan Amendment 已更新 -> v${version}`,
+            timestamp: new Date().toISOString(),
+            metadata: {
+              version,
+              amendment_id: amendment.id ?? null,
+            },
+          });
+        } else if (msg.candidate) {
           store.setWorkItemPlanCandidate(msg.candidate as WorkItemPlanCandidateDto);
           store.appendChatEntry({
             id: chatEntryId("artifact_update", `candidate:${String(version)}`),

@@ -1,7 +1,9 @@
 import type {
   HumanPresentationRevision,
   NodeDetail,
+  PlanAmendmentManifest,
   PlanProjectionBundle,
+  PlanRepairSessionSnapshot,
   ProjectionValidationReport,
   StructuredOutputDiagnostic,
   WorkItemBatchStatePayload,
@@ -37,7 +39,8 @@ export type WorkspaceArtifact =
   | { plan_projection: PlanProjectionBundle }
   | { work_item_projection: WorkItemProjectionBundle }
   | { work_item_revision_history: WorkItemRevisionHistoryDto }
-  | { projection_validation: ProjectionValidationReport };
+  | { projection_validation: ProjectionValidationReport }
+  | { plan_amendment_manifest: PlanAmendmentManifest };
 
 export type WorkItemPlanProjectionArtifacts = {
   planProjection: PlanProjectionBundle | null;
@@ -328,6 +331,7 @@ export interface WorkspaceWsActions {
     active_run_id?: string | null;
     human_presentation_revisions?: HumanPresentationRevision[];
     recoverable_interrupted_run?: RecoverableInterruptedRun | null;
+    plan_repair?: PlanRepairSessionSnapshot | null;
   }) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   appendBufferedStreamChunk: (content: string, nodeId: string, role: ChatEntryRole) => void;

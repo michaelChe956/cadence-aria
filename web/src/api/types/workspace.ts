@@ -26,6 +26,10 @@ import type {
   WorkItemRevisionHistoryDto,
   SaveHumanPresentationRevisionMessage,
 } from "./work-item-plan";
+import type {
+  PlanAmendmentManifest,
+  PlanRepairSessionSnapshot,
+} from "./coding-plan-repair";
 
 export type WorkspaceMessage = {
   role: string;
@@ -80,6 +84,11 @@ export type ArtifactUpdateMessage =
       type: "artifact_update";
       version: number;
       projection_validation: ProjectionValidationReport;
+    }
+  | {
+      type: "artifact_update";
+      version: number;
+      plan_amendment_manifest: PlanAmendmentManifest;
     };
 
 export type RevertWorkItemMessage = {
@@ -340,6 +349,7 @@ export type WorkspaceStructuredArtifactVersion = ArtifactVersionSummary & {
   work_item_projection?: WorkItemProjectionBundle;
   work_item_revision_history?: WorkItemRevisionHistoryDto;
   projection_validation?: ProjectionValidationReport;
+  plan_amendment_manifest?: PlanAmendmentManifest;
 };
 
 export type ProviderSnapshot = {
@@ -493,7 +503,8 @@ export type WsOutMessage =
         | { plan_projection: PlanProjectionBundle }
         | { work_item_projection: WorkItemProjectionBundle }
         | { work_item_revision_history: WorkItemRevisionHistoryDto }
-        | { projection_validation: ProjectionValidationReport };
+        | { projection_validation: ProjectionValidationReport }
+        | { plan_amendment_manifest: PlanAmendmentManifest };
       providers: WsProviderConfig;
       timeline_nodes: TimelineNode[];
       active_node_id: string | null;
@@ -503,6 +514,7 @@ export type WsOutMessage =
       active_run_id: string | null;
       human_presentation_revisions: HumanPresentationRevision[];
       recoverable_interrupted_run?: RecoverableInterruptedRun | null;
+      plan_repair?: PlanRepairSessionSnapshot | null;
     }
   | { type: "error"; message: string }
   | { type: "protocol_error"; code: string; message: string; context?: unknown }

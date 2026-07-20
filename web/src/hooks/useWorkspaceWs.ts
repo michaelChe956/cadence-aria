@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AuthorDecision,
   HumanConfirmDecision,
+  PlanAmendmentManifest,
+  PlanRepairSessionSnapshot,
   ProviderConfigSnapshot,
   RevisionPath,
   SaveHumanPresentationRevisionMessage,
@@ -10,12 +12,12 @@ import type {
   WorkItemDraftDecision,
   WorkItemGenerationMode,
   WorkItemPlanCompileRecoveryAction,
+  WorkItemRevisionHistoryDto,
   WsInMessage,
 } from "../api/types";
 import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
-import {
-  useWorkspaceStore,
-} from "../state/workspace-ws-store";
+import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useWorkspaceStore, type TimelineNode } from "../state/workspace-ws-store";
 import type { ChoiceAnswerPayload } from "../state/chat-entries";
 import {
   ACTIVE_PROVIDER_STAGES,
@@ -212,6 +214,7 @@ export function useWorkspaceWs(sessionId: string | null) {
       scheduleFlush,
       streamFlushTimeouts: streamFlushTimeoutsRef.current,
     });
+    aggregatePlanRepairChildMessage(msg, sessionId);
   }
 
   const sendJson = useCallback((message: WorkspaceWsSendMessage) => {
@@ -585,4 +588,55 @@ export function useWorkspaceWs(sessionId: string | null) {
     reconnectAttemptCount,
     retryNow,
   };
+}
+
+function aggregatePlanRepairChildMessage(
+  msg: WsServerMessage,
+  sessionId: string | null,
+) {
+  if (!sessionId) {
+    return;
+  }
+  const codingStore = useCodingWorkspaceStore.getState();
+  switch (msg.type) {
+    case "session_state": {
+      const snapshot = msg.plan_repair as PlanRepairSessionSnapshot | null | undefined;
+      if (!snapshot || snapshot.link.child_session_id !== sessionId) {
+        return;
+      }
+      codingStore.updatePlanRepairSession(snapshot);
+      const history = useWorkspaceStore.getState().workItemPlanProjectionArtifacts.history;
+      if (history) {
+        codingStore.setPlanRepairHistory(sessionId, history);
+      }
+      break;
+    }
+    case "timeline_node_created":
+      codingStore.addPlanRepairTimelineNode(sessionId, msg.node as TimelineNode);
+      break;
+    case "timeline_node_updated":
+      codingStore.updatePlanRepairTimelineNode(
+        sessionId,
+        msg.node_id as string,
+        msg.status as TimelineNode["status"],
+        msg.summary as string | null | undefined,
+        msg.completed_at as string | null | undefined,
+      );
+      break;
+    case "artifact_update": {
+      const history = msg.work_item_revision_history as
+        | WorkItemRevisionHistoryDto
+        | undefined;
+      if (history) {
+        codingStore.setPlanRepairHistory(sessionId, history);
+      }
+      const amendment = msg.plan_amendment_manifest as
+        | PlanAmendmentManifest
+        | undefined;
+      if (amendment) {
+        codingStore.setPlanAmendment(amendment, sessionId);
+      }
+      break;
+    }
+  }
 }
