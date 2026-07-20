@@ -6,7 +6,6 @@ async fn web_work_item_plan_repair_recovers_every_fault_point_without_duplicate_
             root.path(),
             PlanRepairFixtureControl {
                 fault_point: Some(fault_point),
-                ..PlanRepairFixtureControl::default()
             },
         )
         .await
@@ -27,9 +26,26 @@ async fn web_work_item_plan_repair_recovers_every_fault_point_without_duplicate_
             .await
             .unwrap_or_else(|error| panic!("recover {fault_point:?}: {error}"));
 
-        assert_eq!(recovered.amendment_ids.len(), 1, "{fault_point:?}");
+        assert_eq!(recovered.repair_request_count, 1, "{fault_point:?}");
+        assert_eq!(
+            recovered.amendment_reference_ids.len(),
+            1,
+            "{fault_point:?}"
+        );
+        assert_eq!(
+            recovered.unique_amendment_reference_ids, 1,
+            "{fault_point:?}"
+        );
         assert!(
-            recovered.amendment_ids[0].starts_with("plan_amendment_"),
+            recovered.amendment_reference_ids[0].starts_with("plan_amendment_"),
+            "{fault_point:?}"
+        );
+        assert_eq!(
+            recovered.amendment_artifact_ids, recovered.amendment_reference_ids,
+            "{fault_point:?}"
+        );
+        assert_eq!(
+            recovered.unique_amendment_artifact_ids, 1,
             "{fault_point:?}"
         );
         assert_eq!(

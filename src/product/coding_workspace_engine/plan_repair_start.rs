@@ -244,12 +244,14 @@ impl CodingWorkspaceEngine {
             .ok_or_else(|| {
                 plan_repair_start_error("Plan Repair child snapshot is missing".to_string())
             })?;
+        let authoritative_request =
+            revision_store.get_repair_request(&plan, &snapshot.request.id)?;
         validate_linked_plan_repair_snapshot(
             &current,
             &snapshot,
             &session_link,
             &request,
-            existing.as_ref(),
+            &authoritative_request,
         )?;
         let reconciliation = self.store.reconcile_linked_plan_repair_pause(&current)?;
         let updated = reconciliation.attempt;
@@ -329,29 +331,22 @@ fn validate_linked_plan_repair_snapshot(
     snapshot: &PlanRepairSessionSnapshotDto,
     session_link: &WorkspaceSessionLink,
     requested: &PlanRepairRequest,
-    existing: Option<&PlanRepairRequest>,
+    authoritative: &PlanRepairRequest,
 ) -> Result<(), CodingWorkspaceEngineError> {
     if snapshot.link != *session_link
+        || snapshot.request != *authoritative
         || snapshot.request.id != session_link.trigger.repair_request_id
-        || snapshot.request.id != requested.id
-        || snapshot.request.fingerprint != requested.fingerprint
-        || snapshot.request.trigger_attempt_id != attempt.id
-        || snapshot.request.trigger_unit_run_id != requested.trigger_unit_run_id
-        || snapshot.request.trigger_unit_run_id != session_link.trigger.unit_run_id
-        || snapshot.request.fingerprint != session_link.trigger.fingerprint
-        || existing.is_some_and(|expected| {
-            snapshot.request.id != expected.id
-                || snapshot.request.trigger_attempt_id != expected.trigger_attempt_id
-                || snapshot.request.trigger_unit_run_id != expected.trigger_unit_run_id
-                || snapshot.request.trigger_review_id != expected.trigger_review_id
-                || snapshot.request.trigger_finding_id != expected.trigger_finding_id
-                || snapshot.request.base_plan_revision_id != expected.base_plan_revision_id
-                || snapshot.request.amendment_id != expected.amendment_id
-                || snapshot.request.fingerprint != expected.fingerprint
-        })
-        || (existing.is_none()
-            && (snapshot.request.trigger_review_id != requested.trigger_review_id
-                || snapshot.request.trigger_finding_id != requested.trigger_finding_id))
+        || authoritative.plan_id != requested.plan_id
+        || authoritative.base_plan_revision_id != requested.base_plan_revision_id
+        || authoritative.fingerprint != requested.fingerprint
+        || authoritative.trigger_attempt_id != attempt.id
+        || requested.trigger_attempt_id != attempt.id
+        || authoritative.trigger_unit_run_id != requested.trigger_unit_run_id
+        || authoritative.trigger_unit_run_id != session_link.trigger.unit_run_id
+        || authoritative.trigger_review_id != session_link.trigger.review_id
+        || authoritative.trigger_finding_id != session_link.trigger.finding_id
+        || authoritative.amendment_id.as_deref() != Some(session_link.trigger.amendment_id.as_str())
+        || authoritative.fingerprint != session_link.trigger.fingerprint
     {
         return Err(plan_repair_start_error(
             "Plan Repair linked snapshot identity mismatch".to_string(),

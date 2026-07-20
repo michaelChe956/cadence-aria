@@ -151,7 +151,89 @@ describe("useWorkspaceWs plan repair actions", () => {
     });
   });
 
-  it("routes linked amendment rejection to the scoped store and allows retry", () => {
+  it.each([
+    {
+      name: "story",
+      target: {
+        entity_id: "story_spec_0001",
+        workspace_type: "story",
+        relation: "story_amendment",
+      } as const,
+      message: "目标 Story 已失效",
+    },
+    {
+      name: "design",
+      target: {
+        entity_id: "design_spec_0001",
+        workspace_type: "design",
+        relation: "design_amendment",
+      } as const,
+      message: "目标 Design 已失效",
+    },
+  ])(
+    "routes $name linked amendment rejection to the scoped store and allows retry",
+    ({ target, message }) => {
+      const harness = renderWorkspaceHook("workspace_session_repair_0001");
+      act(() => {
+        harness.ws.open();
+        harness.ws.receive(sessionState("workspace_session_repair_0001"));
+        harness.api.startLinkedWorkspaceAmendment(target);
+      });
+      expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
+        status: "pending",
+        error: null,
+      });
+
+      act(() => {
+        harness.ws.receive({
+          type: "protocol_error",
+          code: "LINKED_WORKSPACE_AMENDMENT_INVALID",
+          message,
+          context: target,
+        });
+      });
+      expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
+        status: "error",
+        snapshot: null,
+        error: message,
+      });
+
+      act(() => {
+        harness.api.startLinkedWorkspaceAmendment(target);
+      });
+      expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
+        status: "pending",
+        error: null,
+      });
+      expect(useWorkspaceStore.getState().protocolError).toBeNull();
+
+      act(() => {
+        harness.ws.receive({
+          type: "protocol_error",
+          code: "PLAN_AMENDMENT_CONFIRMATION_FAILED",
+          message: "unrelated",
+        });
+      });
+      expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
+        status: "pending",
+        error: null,
+      });
+    },
+  );
+
+  it.each([
+    {
+      name: "missing",
+      context: undefined,
+    },
+    {
+      name: "partial",
+      context: {
+        entity_id: "story_spec_0001",
+        workspace_type: "story",
+      },
+    },
+  ])("keeps a linked amendment pending for $name target context", ({ context }) => {
     const harness = renderWorkspaceHook("workspace_session_repair_0001");
     const target = {
       entity_id: "story_spec_0001",
@@ -162,43 +244,18 @@ describe("useWorkspaceWs plan repair actions", () => {
       harness.ws.open();
       harness.ws.receive(sessionState("workspace_session_repair_0001"));
       harness.api.startLinkedWorkspaceAmendment(target);
-    });
-    expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
-      status: "pending",
-      error: null,
-    });
-
-    act(() => {
       harness.ws.receive({
         type: "protocol_error",
         code: "LINKED_WORKSPACE_AMENDMENT_INVALID",
-        message: "目标 Story 已失效",
+        message: "无法确认目标 identity",
+        context,
       });
     });
+
     expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
-      status: "error",
+      status: "pending",
+      target,
       snapshot: null,
-      error: "目标 Story 已失效",
-    });
-
-    act(() => {
-      harness.api.startLinkedWorkspaceAmendment(target);
-    });
-    expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
-      status: "pending",
-      error: null,
-    });
-    expect(useWorkspaceStore.getState().protocolError).toBeNull();
-
-    act(() => {
-      harness.ws.receive({
-        type: "protocol_error",
-        code: "PLAN_AMENDMENT_CONFIRMATION_FAILED",
-        message: "unrelated",
-      });
-    });
-    expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
-      status: "pending",
       error: null,
     });
   });

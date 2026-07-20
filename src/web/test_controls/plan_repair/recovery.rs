@@ -31,7 +31,7 @@ use crate::product::workspace_engine::{
 };
 use crate::web::coding_ws_handler::delivery_ack::confirm_plan_amendment_socket_write;
 use crate::web::workspace_ws_types::{
-    WorkItemPlanReviewAction, WorkItemPlanReviewComplete, WorkItemPlanReviewScope,
+    ArtifactPayload, WorkItemPlanReviewAction, WorkItemPlanReviewComplete, WorkItemPlanReviewScope,
     WorkItemPlanReviewVerdict,
 };
 
@@ -451,7 +451,7 @@ pub(super) fn persist_completed_core_handoff(
 ) -> Result<HandoffRevision, PlanRepairFixtureError> {
     let paths = fixture_paths(root);
     let store = CodingAttemptStore::new(paths.clone());
-    let revision_store = WorkItemRevisionStore::new(paths);
+    let revision_store = WorkItemRevisionStore::new(paths.clone());
     let attempt = fixture_attempt(&store)?;
     let plan = revision_store
         .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
@@ -575,7 +575,7 @@ pub(super) fn recovered_snapshot(
 ) -> Result<PlanRepairFixtureRecovered, PlanRepairFixtureError> {
     let paths = fixture_paths(root);
     let store = CodingAttemptStore::new(paths.clone());
-    let revision_store = WorkItemRevisionStore::new(paths);
+    let revision_store = WorkItemRevisionStore::new(paths.clone());
     let attempt = fixture_attempt(&store)?;
     let plan = revision_store
         .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
@@ -601,14 +601,33 @@ pub(super) fn recovered_snapshot(
                 .ok_or_else(|| fixture_error("logical active revision is missing"))?,
         );
     }
-    let amendment_ids = revision_store
+    let repair_requests = revision_store
         .list_repair_requests(&plan)
-        .map_err(fixture_error)?
+        .map_err(fixture_error)?;
+    let repair_request_count = repair_requests.len();
+    let mut amendment_reference_ids = repair_requests
         .into_iter()
         .filter_map(|request| request.amendment_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
         .collect::<Vec<_>>();
+    amendment_reference_ids.sort();
+    let unique_amendment_reference_ids = amendment_reference_ids
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .len();
+    let lifecycle = LifecycleStore::new(paths);
+    let repair_link = unique_repair_link(&lifecycle)?;
+    let mut amendment_artifact_ids = lifecycle
+        .list_artifact_versions(&repair_link.child_session_id)
+        .map_err(fixture_error)?
+        .into_iter()
+        .filter_map(|version| match version.payload {
+            ArtifactPayload::PlanAmendmentManifest { manifest } => Some(manifest.id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    amendment_artifact_ids.sort();
+    let unique_amendment_artifact_ids =
+        amendment_artifact_ids.iter().collect::<BTreeSet<_>>().len();
     let mut unit_run_ids = Vec::new();
     for unit in &units {
         unit_run_ids.extend(
@@ -637,7 +656,11 @@ pub(super) fn recovered_snapshot(
         current_resolved_handoff_revision_ids: active_run.resolved_handoff_revision_ids,
         rewritten_logical_work_item_ids: manifest.revised_work_items.keys().cloned().collect(),
         revalidated_logical_work_item_ids: manifest.revalidation_required_units.clone(),
-        amendment_ids,
+        repair_request_count,
+        amendment_reference_ids,
+        unique_amendment_reference_ids,
+        amendment_artifact_ids,
+        unique_amendment_artifact_ids,
         unit_run_ids,
         unique_unit_run_ids,
         handoff_revision_ids,

@@ -41,9 +41,6 @@ impl PlanRepairFaultPoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PlanRepairFixtureControl {
     pub fault_point: Option<PlanRepairFaultPoint>,
-    pub duplicate_plan_defect_finding: bool,
-    pub concurrent_amendment_request: bool,
-    pub dirty_worktree_before_apply: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +60,11 @@ pub struct PlanRepairFixtureRecovered {
     pub current_resolved_handoff_revision_ids: Vec<String>,
     pub rewritten_logical_work_item_ids: Vec<String>,
     pub revalidated_logical_work_item_ids: Vec<String>,
-    pub amendment_ids: Vec<String>,
+    pub repair_request_count: usize,
+    pub amendment_reference_ids: Vec<String>,
+    pub unique_amendment_reference_ids: usize,
+    pub amendment_artifact_ids: Vec<String>,
+    pub unique_amendment_artifact_ids: usize,
     pub unit_run_ids: Vec<String>,
     pub unique_unit_run_ids: usize,
     pub handoff_revision_ids: Vec<String>,
@@ -200,8 +201,34 @@ impl PlanRepairFixtureRuntime {
         seed::replay_plan_defect_finding(&self.root, "code_review_report_0001_finding_0001").await
     }
 
-    pub async fn start_concurrent_plan_defect_finding(&self) -> Result<(), PlanRepairFixtureError> {
-        seed::replay_plan_defect_finding(&self.root, "code_review_report_0001_finding_0002").await
+    pub async fn start_overlapping_plan_defect_findings(
+        &self,
+    ) -> Result<[PlanRepairIdentitySnapshot; 2], PlanRepairFixtureError> {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let start = |finding_id: &'static str| {
+            let root = self.root.clone();
+            let barrier = barrier.clone();
+            tokio::task::spawn_blocking(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| PlanRepairFixtureError {
+                        message: format!("plan_repair_fixture_runtime_failed: {error}"),
+                        fault_point: None,
+                    })?;
+                barrier.wait();
+                runtime.block_on(seed::replay_plan_defect_finding(&root, finding_id))?;
+                recovery::plan_repair_identity(&root)
+            })
+        };
+        let first = start("code_review_report_0001_finding_0001");
+        let second = start("code_review_report_0001_finding_0002");
+        let (first, second) =
+            tokio::try_join!(first, second).map_err(|error| PlanRepairFixtureError {
+                message: format!("plan_repair_fixture_join_failed: {error}"),
+                fault_point: None,
+            })?;
+        Ok([first?, second?])
     }
 
     pub fn plan_repair_identity(

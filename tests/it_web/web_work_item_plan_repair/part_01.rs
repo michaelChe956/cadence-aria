@@ -29,6 +29,10 @@ async fn web_work_item_plan_repair_rewrites_only_upstream_and_resumes_consumer()
         "work_item_revision_wi_registration_0001"
     );
     assert_eq!(
+        recovered.logical_active_revision_ids["wi_unrelated"],
+        "work_item_revision_wi_unrelated_0001"
+    );
+    assert_eq!(
         recovered.current_work_item_revision_id,
         "work_item_revision_wi_registration_0001"
     );
@@ -46,8 +50,15 @@ async fn web_work_item_plan_repair_rewrites_only_upstream_and_resumes_consumer()
             .rewritten_logical_work_item_ids
             .contains(&"wi_unrelated".to_string())
     );
-    assert_eq!(recovered.amendment_ids.len(), 1);
-    assert!(recovered.amendment_ids[0].starts_with("plan_amendment_"));
+    assert_eq!(recovered.repair_request_count, 1);
+    assert_eq!(recovered.amendment_reference_ids.len(), 1);
+    assert_eq!(recovered.unique_amendment_reference_ids, 1);
+    assert!(recovered.amendment_reference_ids[0].starts_with("plan_amendment_"));
+    assert_eq!(
+        recovered.amendment_artifact_ids,
+        recovered.amendment_reference_ids
+    );
+    assert_eq!(recovered.unique_amendment_artifact_ids, 1);
     assert_eq!(
         recovered.handoff_revision_ids,
         vec!["handoff_revision_0001", "handoff_revision_0002"]

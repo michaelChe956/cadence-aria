@@ -117,7 +117,7 @@ function linkedWorkspaceErrorTargetsCurrent(
   current: LinkedWorkspaceAmendmentTarget | null,
 ): boolean {
   if (!current || !context || typeof context !== "object") {
-    return true;
+    return false;
   }
   const target = context as Partial<LinkedWorkspaceAmendmentTarget>;
   if (
@@ -125,7 +125,7 @@ function linkedWorkspaceErrorTargetsCurrent(
     typeof target.workspace_type !== "string" ||
     typeof target.relation !== "string"
   ) {
-    return true;
+    return false;
   }
   return (
     target.entity_id === current.entity_id &&

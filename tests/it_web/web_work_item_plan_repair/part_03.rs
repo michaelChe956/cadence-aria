@@ -26,20 +26,13 @@ async fn web_work_item_plan_repair_concurrent_finding_reuses_active_amendment() 
     let runtime = PlanRepairFixtureRuntime::seed(root.path(), PlanRepairFixtureControl::default())
         .await
         .expect("seed plan repair fixture");
-    runtime
-        .drive_until_review_finds_upstream_contract_invalid()
+    let [first, second] = runtime
+        .start_overlapping_plan_defect_findings()
         .await
-        .expect("route first finding");
-    let first = runtime
-        .plan_repair_identity()
-        .expect("first plan repair identity");
+        .expect("overlapping findings must converge");
 
-    runtime
-        .start_concurrent_plan_defect_finding()
-        .await
-        .expect("concurrent finding must reuse active amendment");
-
-    assert_eq!(runtime.plan_repair_identity().expect("reused identity"), first);
+    assert_eq!(second, first);
+    assert_eq!(runtime.plan_repair_identity().expect("active identity"), first);
     assert_eq!(
         runtime.plan_repair_request_count().expect("request count"),
         1
