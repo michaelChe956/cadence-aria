@@ -18,6 +18,7 @@ import { useUnloadGuard } from "../hooks/useUnloadGuard";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import type { PlanRepairSessionState } from "../state/plan-repair-session";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { CodingArtifactTabs } from "./CodingWorkspaceArtifacts";
 import {
@@ -34,6 +35,20 @@ import { CodingWorkspaceGroupProgress } from "./CodingWorkspaceGroupProgress";
 import { PrepareExecutionPlanPanel, StatusBadge } from "./CodingWorkspaceReports";
 
 type CodingWorkspaceDrawer = "providers" | "runs";
+type PendingRepairAction = {
+  action: Exclude<PlanRepairAction, "open_workspace">;
+  childSessionId: string;
+  amendmentId: string;
+  baselineRepair: PlanRepairSessionState;
+  baselineWorkspaceStage: string;
+};
+type ScopedRepairActionError = Omit<PendingRepairAction, "action"> & {
+  message: string;
+};
+type RepairActionScope = Pick<
+  PendingRepairAction,
+  "childSessionId" | "amendmentId" | "baselineRepair"
+>;
 
 export function CodingWorkspacePage({
   address,
@@ -49,30 +64,52 @@ export function CodingWorkspacePage({
   );
   const planRepairWorkspaceError = useWorkspaceStore((state) => state.error);
   const planRepairProtocolError = useWorkspaceStore((state) => state.protocolError);
+  const planRepairWorkspaceSessionId = useWorkspaceStore((state) => state.sessionId);
+  const planRepairWorkspaceStage = useWorkspaceStore((state) => state.stage);
   const connected = store.connectionStatus === "connected";
   const activeTab = store.activeTab;
   const [activePanel, setActivePanel] = useState<"chat" | "results">("chat");
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
+  const [repairActionError, setRepairActionError] =
+    useState<ScopedRepairActionError | null>(null);
+  const [pendingRepairAction, setPendingRepairAction] =
+    useState<PendingRepairAction | null>(null);
   const [activeDrawer, setActiveDrawer] = useState<CodingWorkspaceDrawer | null>(null);
   const chatListRef = useRef<ChatEntryListHandle | null>(null);
   const addressKey = JSON.stringify([address.projectId, address.issueId, address.attemptId]);
   const addressKeyRef = useRef(addressKey);
   const deleteGenerationRef = useRef(0);
+  const pendingRepairActionRef = useRef<PendingRepairAction | null>(null);
   const mountedRef = useRef(false);
   if (addressKeyRef.current !== addressKey) {
     addressKeyRef.current = addressKey;
     deleteGenerationRef.current += 1;
   }
-  const childWorkspaceError = store.activePlanRepair
+  const childWorkspaceError =
+    store.activePlanRepair &&
+    planRepairWorkspaceSessionId === store.activePlanRepair.childSessionId
     ? planRepairProtocolError
       ? `${planRepairProtocolError.code}: ${planRepairProtocolError.message}`
       : planRepairWorkspaceError
     : null;
+  const activeRepairActionPending = repairScopeMatches(
+    pendingRepairAction,
+    store.activePlanRepair,
+  );
+  const activeRepairActionError = repairScopeMatches(
+    repairActionError,
+    store.activePlanRepair,
+  )
+    ? repairActionError?.message ?? null
+    : null;
   const planRepairActionStatus = store.activePlanRepair
     ? childWorkspaceError ??
-      planError ??
+      activeRepairActionError ??
+      (activeRepairActionPending
+        ? "正在提交 Repair 操作，等待 Child Workspace 响应。"
+        : null) ??
       (planRepairApi.connectionStatus === "connected"
         ? null
         : "Child Workspace 正在连接，Repair 操作暂不可用。")
@@ -106,7 +143,54 @@ export function CodingWorkspacePage({
     setDeleteBusy(false);
     setDeleteError(null);
     setPlanError(null);
+    pendingRepairActionRef.current = null;
+    setPendingRepairAction(null);
+    setRepairActionError(null);
   }, [addressKey]);
+
+  useEffect(() => {
+    const activeRepair = store.activePlanRepair;
+    if (!repairScopeMatches(pendingRepairActionRef.current, activeRepair)) {
+      pendingRepairActionRef.current = null;
+      setPendingRepairAction(null);
+    }
+    setRepairActionError((current) =>
+      repairScopeMatches(current, activeRepair) ? current : null,
+    );
+  }, [store.activePlanRepair]);
+
+  useEffect(() => {
+    const pending = pendingRepairActionRef.current;
+    if (
+      !pending ||
+      planRepairWorkspaceSessionId !== pending.childSessionId ||
+      !planRepairProtocolError ||
+      !protocolErrorMatchesAction(pending.action, planRepairProtocolError.code)
+    ) {
+      return;
+    }
+    pendingRepairActionRef.current = null;
+    setPendingRepairAction(null);
+  }, [planRepairProtocolError, planRepairWorkspaceSessionId]);
+
+  useEffect(() => {
+    const pending = pendingRepairActionRef.current;
+    if (
+      pending &&
+      planRepairWorkspaceSessionId === pending.childSessionId &&
+      planRepairWorkspaceStage !== pending.baselineWorkspaceStage
+    ) {
+      pendingRepairActionRef.current = null;
+      setPendingRepairAction(null);
+    }
+    setRepairActionError((current) =>
+      current &&
+      planRepairWorkspaceSessionId === current.childSessionId &&
+      planRepairWorkspaceStage !== current.baselineWorkspaceStage
+        ? null
+        : current,
+    );
+  }, [planRepairWorkspaceSessionId, planRepairWorkspaceStage]);
 
   function isCurrentDeleteRequest(requestAddressKey: string, requestGeneration: number) {
     return (
@@ -161,10 +245,27 @@ export function CodingWorkspacePage({
   }
 
   function handlePlanRepairAction(action: PlanRepairAction) {
-    const amendmentId = store.activePlanRepair?.amendment?.id;
-    if (!amendmentId) {
-      setPlanError("Plan Repair Amendment 尚未就绪。");
+    if (action === "open_workspace") {
       return;
+    }
+    const activeRepair = store.activePlanRepair;
+    const amendmentId = activeRepair?.amendment?.id;
+    if (!activeRepair || !amendmentId) return;
+    const currentPending = pendingRepairActionRef.current;
+    if (repairScopeMatches(currentPending, activeRepair)) return;
+    const pending: PendingRepairAction = {
+      action,
+      childSessionId: activeRepair.childSessionId,
+      amendmentId,
+      baselineRepair: activeRepair,
+      baselineWorkspaceStage: planRepairWorkspaceStage,
+    };
+    pendingRepairActionRef.current = pending;
+    setPendingRepairAction(pending);
+    if (planRepairWorkspaceSessionId === activeRepair.childSessionId) {
+      const childStore = useWorkspaceStore.getState();
+      childStore.setProtocolError(null);
+      childStore.setError(null);
     }
     let sent = false;
     switch (action) {
@@ -184,10 +285,20 @@ export function CodingWorkspacePage({
       case "cancel":
         sent = planRepairApi.cancelPlanAmendment(amendmentId, "用户取消修订");
         break;
-      case "open_workspace":
-        return;
     }
-    setPlanError(sent ? null : "Plan Repair 操作发送失败，请检查 Child Workspace 连接。");
+    if (sent) {
+      setRepairActionError(null);
+      return;
+    }
+    pendingRepairActionRef.current = null;
+    setPendingRepairAction(null);
+    setRepairActionError({
+      childSessionId: activeRepair.childSessionId,
+      amendmentId,
+      baselineRepair: activeRepair,
+      baselineWorkspaceStage: planRepairWorkspaceStage,
+      message: "Plan Repair 操作发送失败，请检查 Child Workspace 连接。",
+    });
   }
 
   return (
@@ -265,7 +376,11 @@ export function CodingWorkspacePage({
               <PlanRepairCenter
                 state={store.activePlanRepair}
                 onAction={handlePlanRepairAction}
-                actionsDisabled={planRepairApi.connectionStatus !== "connected"}
+                actionsDisabled={
+                  planRepairApi.connectionStatus !== "connected" ||
+                  activeRepairActionPending
+                }
+                actionPending={activeRepairActionPending}
                 actionStatus={planRepairActionStatus}
               />
             </div>
@@ -453,6 +568,28 @@ export function CodingWorkspacePage({
     if (!requestId) return;
     api.respondChoice(requestId, response.selected_option_ids, response.free_text);
   }
+}
+
+function repairScopeMatches(
+  scope: RepairActionScope | null,
+  repair: PlanRepairSessionState | null,
+) {
+  return Boolean(
+    scope &&
+      repair &&
+      scope.childSessionId === repair.childSessionId &&
+      scope.amendmentId === repair.amendment?.id &&
+      scope.baselineRepair === repair,
+  );
+}
+
+function protocolErrorMatchesAction(
+  action: PendingRepairAction["action"],
+  code: string,
+) {
+  if (action === "confirm") return code === "PLAN_AMENDMENT_CONFIRMATION_FAILED";
+  if (action === "cancel") return code === "PLAN_AMENDMENT_CANCEL_FAILED";
+  return true;
 }
 
 function displayCodingStage(stage: string) {

@@ -16,7 +16,8 @@ describe("ImpactPreview", () => {
 
     expect(screen.getByText("WI-01：重新执行")).toBeInTheDocument();
     expect(screen.getByText("WI-02：重新验证")).toBeInTheDocument();
-    expect(screen.getByText("WI-03：不受影响")).toBeInTheDocument();
+    expect(screen.queryByText("WI-03：不受影响")).not.toBeInTheDocument();
+    expect(screen.getByText("WI-03：条件性下游")).toBeInTheDocument();
     expect(screen.getByText("WI-01 → WI-02 · domain_result")).toBeInTheDocument();
   });
 });

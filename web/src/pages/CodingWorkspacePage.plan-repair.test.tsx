@@ -61,7 +61,12 @@ describe("CodingWorkspacePage plan repair", () => {
     expect(window.location.pathname).not.toContain("workspace_session_repair_0001");
   });
 
-  it("sends the four inline repair decisions through the child workspace transport", async () => {
+  it.each([
+    ["confirm", "确认修订并恢复执行"],
+    ["regenerate", "要求重新生成"],
+    ["adjust_scope", "调整修订范围"],
+    ["cancel", "取消修订"],
+  ] as const)("sends the %s repair decision through the child transport", async (action, label) => {
     const repair = repairAwaitingConfirmationFixture();
     mockCodingWs();
     const repairApi = mockPlanRepairWs();
@@ -77,33 +82,101 @@ describe("CodingWorkspacePage plan repair", () => {
       <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "确认修订并恢复执行" }));
-    await userEvent.click(screen.getByRole("button", { name: "要求重新生成" }));
-    await userEvent.click(screen.getByRole("button", { name: "调整修订范围" }));
+    await userEvent.click(screen.getByRole("button", { name: label }));
+
+    if (action === "confirm") {
+      expect(repairApi.confirmPlanAmendment).toHaveBeenCalledWith(repair.amendment?.id);
+    } else if (action === "cancel") {
+      expect(repairApi.cancelPlanAmendment).toHaveBeenCalledWith(
+        repair.amendment?.id,
+        "用户取消修订",
+      );
+    } else {
+      expect(repairApi.sendHumanConfirm).toHaveBeenCalledWith(
+        "request-change",
+        {
+          description:
+            action === "regenerate"
+              ? "要求重新生成 Plan Repair 修订"
+              : "调整 Plan Repair 修订范围",
+        },
+      );
+    }
+  });
+
+  it("sends exactly one mutation until a matching authoritative response arrives", async () => {
+    const repair = repairAwaitingConfirmationFixture();
+    mockCodingWs();
+    const repairApi = mockPlanRepairWs();
+    setChildWorkspaceState(repair.childSessionId);
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "awaiting_plan_amendment",
+      stage: "code_review",
+      activePlanRepair: repair,
+      timelineNodes: repair.timelineNodes,
+    });
+
+    render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+
+    await userEvent.dblClick(
+      screen.getByRole("button", { name: "确认修订并恢复执行" }),
+    );
     await userEvent.click(screen.getByRole("button", { name: "取消修订" }));
+    await userEvent.click(screen.getByRole("button", { name: "要求重新生成" }));
 
     expect(repairApi.confirmPlanAmendment).toHaveBeenCalledTimes(1);
-    expect(repairApi.confirmPlanAmendment).toHaveBeenCalledWith(repair.amendment?.id);
-    expect(repairApi.sendHumanConfirm).toHaveBeenNthCalledWith(
-      1,
-      "request-change",
-      { description: "要求重新生成 Plan Repair 修订" },
+    expect(repairApi.cancelPlanAmendment).not.toHaveBeenCalled();
+    expect(repairApi.sendHumanConfirm).not.toHaveBeenCalled();
+    expect(screen.getByText("正在提交 Repair 操作，等待 Child Workspace 响应。"))
+      .toBeInTheDocument();
+
+    act(() => {
+      useWorkspaceStore.getState().setProtocolError({
+        code: "PLAN_AMENDMENT_CONFIRMATION_FAILED",
+        message: "amendment conflict",
+      });
+    });
+    expect(screen.getByRole("button", { name: "取消修订" })).toBeEnabled();
+  });
+
+  it("does not release an in-flight mutation merely because the socket disconnects", async () => {
+    const repair = repairAwaitingConfirmationFixture();
+    mockCodingWs();
+    const repairApi = mockPlanRepairWs();
+    setChildWorkspaceState(repair.childSessionId);
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "awaiting_plan_amendment",
+      stage: "code_review",
+      activePlanRepair: repair,
+      timelineNodes: repair.timelineNodes,
+    });
+    const view = render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
     );
-    expect(repairApi.sendHumanConfirm).toHaveBeenNthCalledWith(
-      2,
-      "request-change",
-      { description: "调整 Plan Repair 修订范围" },
+
+    await userEvent.click(screen.getByRole("button", { name: "确认修订并恢复执行" }));
+    mockPlanRepairWs({ connectionStatus: "disconnected" });
+    view.rerender(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
     );
-    expect(repairApi.cancelPlanAmendment).toHaveBeenCalledWith(
-      repair.amendment?.id,
-      "用户取消修订",
+    mockPlanRepairWs({ connectionStatus: "connected" });
+    view.rerender(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
     );
+
+    expect(screen.getByRole("button", { name: "取消修订" })).toBeDisabled();
+    expect(repairApi.confirmPlanAmendment).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces child workspace server errors and clears them after recovered state", async () => {
     const repair = repairAwaitingConfirmationFixture();
     mockCodingWs();
     mockPlanRepairWs();
+    setChildWorkspaceState(repair.childSessionId);
     useCodingWorkspaceStore.setState({
       ...readyCodingState(),
       status: "awaiting_plan_amendment",
@@ -218,4 +291,127 @@ describe("CodingWorkspacePage plan repair", () => {
       screen.getByText("Plan Repair 操作发送失败，请检查 Child Workspace 连接。"),
     ).toBeInTheDocument();
   });
+
+  it("scopes child transport state and old errors to the active repair session", async () => {
+    const repairA = repairAwaitingConfirmationFixture();
+    const repairB = repairVariant(repairA, "B");
+    mockCodingWs();
+    const repairApi = mockPlanRepairWs({ connectionStatus: "connecting" });
+    setChildWorkspaceState(repairA.childSessionId);
+    useWorkspaceStore.getState().setProtocolError({
+      code: "PLAN_AMENDMENT_CONFIRMATION_FAILED",
+      message: "A conflict",
+    });
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "awaiting_plan_amendment",
+      stage: "code_review",
+      activePlanRepair: repairB,
+      timelineNodes: repairB.timelineNodes,
+    });
+
+    render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+
+    expect(screen.queryByText(/A conflict/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认修订并恢复执行" }))
+      .toBeDisabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "确认修订并恢复执行" }),
+    );
+    expect(repairApi.confirmPlanAmendment).not.toHaveBeenCalled();
+  });
+
+  it("clears a scoped local action error on a new repair snapshot, switch, or end", async () => {
+    const repairA = repairAwaitingConfirmationFixture();
+    const repairB = repairVariant(repairA, "B");
+    mockCodingWs();
+    mockPlanRepairWs({ confirmPlanAmendment: vi.fn(() => false) });
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "awaiting_plan_amendment",
+      stage: "code_review",
+      activePlanRepair: repairA,
+      timelineNodes: repairA.timelineNodes,
+    });
+    render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "确认修订并恢复执行" }));
+    expect(screen.getByText("Plan Repair 操作发送失败，请检查 Child Workspace 连接。"))
+      .toBeInTheDocument();
+
+    act(() => {
+      useCodingWorkspaceStore.setState({
+        activePlanRepair: {
+          ...repairA,
+          request: { ...repairA.request, updated_at: "2026-07-20T00:10:00Z" },
+        },
+      });
+    });
+    expect(screen.queryByText("Plan Repair 操作发送失败，请检查 Child Workspace 连接。"))
+      .not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "确认修订并恢复执行" }));
+    expect(screen.getByText("Plan Repair 操作发送失败，请检查 Child Workspace 连接。"))
+      .toBeInTheDocument();
+
+    act(() => {
+      useCodingWorkspaceStore.setState({ activePlanRepair: repairB });
+    });
+    expect(screen.queryByText("Plan Repair 操作发送失败，请检查 Child Workspace 连接。"))
+      .not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "确认修订并恢复执行" }));
+    expect(screen.getByText("Plan Repair 操作发送失败，请检查 Child Workspace 连接。"))
+      .toBeInTheDocument();
+
+    act(() => {
+      useCodingWorkspaceStore.setState({ activePlanRepair: null, status: "running" });
+    });
+    expect(screen.queryByText("Plan Repair 操作发送失败，请检查 Child Workspace 连接。"))
+      .not.toBeInTheDocument();
+  });
 });
+
+function setChildWorkspaceState(sessionId: string) {
+  useWorkspaceStore.getState().setSessionState({
+    session_id: sessionId,
+    workspace_type: "work_item",
+    stage: "human_confirm",
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "claude_code", reviewer: "codex" },
+    timeline_nodes: [],
+    active_node_id: null,
+  });
+}
+
+function repairVariant(
+  repair: ReturnType<typeof repairAwaitingConfirmationFixture>,
+  suffix: string,
+) {
+  const amendmentId = `plan_amendment_${suffix}`;
+  const requestId = `plan_repair_request_${suffix}`;
+  return {
+    ...repair,
+    childSessionId: `workspace_session_repair_${suffix}`,
+    request: { ...repair.request, id: requestId, updated_at: `2026-07-20T00:0${suffix.length}:00Z` },
+    amendment: repair.amendment
+      ? { ...repair.amendment, id: amendmentId, repair_request_id: requestId }
+      : null,
+    link: {
+      ...repair.link,
+      id: `workspace_session_link_${suffix}`,
+      child_session_id: `workspace_session_repair_${suffix}`,
+      trigger: {
+        ...repair.link.trigger,
+        repair_request_id: requestId,
+        amendment_id: amendmentId,
+      },
+    },
+  };
+}

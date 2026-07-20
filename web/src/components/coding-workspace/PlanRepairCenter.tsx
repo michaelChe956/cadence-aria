@@ -32,17 +32,20 @@ export function PlanRepairCenter({
   state,
   onAction,
   actionsDisabled = false,
+  actionPending = false,
   actionStatus = null,
 }: {
   state: PlanRepairSessionState;
   onAction?: (action: PlanRepairAction) => void;
   actionsDisabled?: boolean;
+  actionPending?: boolean;
   actionStatus?: string | null;
 }) {
   const [activeTab, setActiveTab] = useState<PlanRepairTab>("summary");
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const canMutate =
     !actionsDisabled &&
+    !actionPending &&
     onAction !== undefined &&
     state.stage === "awaiting_confirmation" &&
     state.amendment !== null;

@@ -64,6 +64,29 @@ describe("PlanRepairCenter", () => {
     },
   );
 
+  it("disables every mutation while an authoritative repair action is pending", () => {
+    render(
+      <PlanRepairCenter
+        state={repairAwaitingConfirmationFixture()}
+        onAction={vi.fn()}
+        actionPending
+        actionStatus="正在提交 Repair 操作，等待 Child Workspace 响应。"
+      />,
+    );
+
+    for (const name of [
+      "确认修订并恢复执行",
+      "要求重新生成",
+      "调整修订范围",
+      "取消修订",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+    expect(
+      screen.getByRole("link", { name: "在完整 Work Item Workspace 中打开" }),
+    ).toHaveAttribute("target", "_blank");
+  });
+
   it("uses semantic tabs with keyboard navigation and shared projection diff rendering", () => {
     render(<PlanRepairCenter state={repairAwaitingConfirmationFixture()} />);
 

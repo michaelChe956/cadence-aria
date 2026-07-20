@@ -3,6 +3,7 @@ import type {
   PlanAmendmentManifest,
   PlanProjectionBundle,
 } from "../../api/types";
+import { classifyPlanRepairImpact } from "./plan-repair-impact-classification";
 
 export function ImpactPreview({
   amendment,
@@ -27,6 +28,7 @@ export function ImpactPreview({
       item.title,
     ]),
   );
+  const classification = classifyPlanRepairImpact(amendment, impact);
   const reexecute = new Set([
     ...impact.direct_stale,
     ...(amendment.resume_target.mode === "reexecute"
@@ -67,17 +69,17 @@ export function ImpactPreview({
         />
         <ImpactColumn
           title="不受影响"
-          items={impact.unaffected}
+          items={classification.unaffected}
           action="不受影响"
           titles={titles}
           tone="safe"
         />
       </div>
-      {impact.conditional_downstream.length > 0 ? (
+      {classification.conditionalOnly.length > 0 ? (
         <section className="rounded-md border border-[var(--aria-line)] bg-white p-4">
           <h4 className="text-sm font-semibold text-[var(--aria-ink)]">条件性下游</h4>
           <ul className="mt-2 space-y-1 text-xs text-[var(--aria-ink-muted)]">
-            {impact.conditional_downstream.map((logicalId) => (
+            {classification.conditionalOnly.map((logicalId) => (
               <li key={logicalId}>{logicalId}：条件性下游</li>
             ))}
           </ul>

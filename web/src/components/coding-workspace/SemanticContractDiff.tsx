@@ -3,6 +3,7 @@ import type {
   PlanAmendmentManifest,
   PlanProjectionBundle,
 } from "../../api/types";
+import { classifyPlanRepairImpact } from "./plan-repair-impact-classification";
 
 export type SemanticContractDiffView = "contract" | "coder" | "reviewer";
 
@@ -178,18 +179,19 @@ function semanticImpactItems(
   projection: PlanProjectionBundle | null,
   impact: ContractImpactReport | null,
 ) {
-  const affected = new Set<string>([
-    ...Object.keys(amendment.revised_work_items),
-    ...amendment.contract_deltas.map((delta) => delta.logical_work_item_id),
-    ...amendment.stale_units,
-    ...amendment.revalidation_required_units,
-    ...Object.keys(amendment.replacement_units),
-    ...Object.values(amendment.replacement_units).flat(),
-    ...(impact?.direct_stale ?? []),
-    ...(impact?.direct_revalidation ?? []),
-    ...(impact?.conditional_downstream ?? []),
-    amendment.resume_target.logical_work_item_id,
-  ]);
+  const affected = new Set(
+    impact
+      ? classifyPlanRepairImpact(amendment, impact).actualAffected
+      : [
+          ...Object.keys(amendment.revised_work_items),
+          ...amendment.contract_deltas.map((delta) => delta.logical_work_item_id),
+          ...amendment.stale_units,
+          ...amendment.revalidation_required_units,
+          ...Object.keys(amendment.replacement_units),
+          ...Object.values(amendment.replacement_units).flat(),
+          amendment.resume_target.logical_work_item_id,
+        ],
+  );
   const ordered = projection?.coder_group_context.ordered_logical_work_item_ids ?? [];
   const logicalIds = [
     ...ordered.filter((logicalId) => affected.has(logicalId)),

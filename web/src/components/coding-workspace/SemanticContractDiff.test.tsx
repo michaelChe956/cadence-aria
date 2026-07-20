@@ -22,10 +22,17 @@ describe("SemanticContractDiff", () => {
 
   it("shows affected coder work items in execution order", () => {
     const state = repairAwaitingConfirmationFixture();
+    const projection = {
+      ...state.projection!,
+      coder_group_context: {
+        ...state.projection!.coder_group_context,
+        ordered_logical_work_item_ids: ["WI-01", "WI-02", "WI-03"],
+      },
+    };
     render(
       <SemanticContractDiff
         amendment={state.amendment}
-        projection={state.projection}
+        projection={projection}
         impact={state.impact}
         view="coder"
       />,
@@ -58,5 +65,6 @@ describe("SemanticContractDiff", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("WI-02")).toBeInTheDocument();
     expect(screen.getByText("AC-API-ERROR")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "WI-03" })).not.toBeInTheDocument();
   });
 });
