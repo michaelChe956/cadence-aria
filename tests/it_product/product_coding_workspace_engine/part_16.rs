@@ -3,6 +3,14 @@ fn create_active_coding_unit_run(
     attempt: &CodingExecutionAttempt,
 ) {
     store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt before group completion");
+    store
         .update_attempt_stage(
             &attempt.project_id,
             &attempt.issue_id,

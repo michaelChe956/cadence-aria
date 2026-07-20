@@ -532,13 +532,15 @@ pub(crate) async fn abort_coding_attempt(
         path.issue_id.as_deref(),
         &path.attempt_id,
     )?;
-    state
-        .coding_runs
-        .abort_attempt(&CodingAttemptRunKey::from_attempt(&attempt))
-        .await;
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    state.coding_runs.abort_attempt(&attempt_key).await;
+    let _mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
+    let current = coding_store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
     let engine = coding_workspace_engine_with_dummy_events(coding_store);
     let aborted = engine
-        .handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .handle_abort(&current.project_id, &current.issue_id, &current.id)
         .await
         .map_err(coding_workspace_api_error)?;
     Ok(Json(coding_attempt_dto(&aborted)))
@@ -557,10 +559,12 @@ pub(crate) async fn delete_coding_attempt(
         path.issue_id.as_deref(),
         &path.attempt_id,
     )?;
-    state
-        .coding_runs
-        .abort_attempt(&CodingAttemptRunKey::from_attempt(&attempt))
-        .await;
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    state.coding_runs.abort_attempt(&attempt_key).await;
+    let _mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
+    let attempt = coding_store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
     let active_work_item_id = attempt
         .current_work_item_id
         .as_deref()

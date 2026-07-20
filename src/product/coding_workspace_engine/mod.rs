@@ -74,6 +74,8 @@ mod group_completion;
 mod handoffs;
 mod internal_pr_review;
 mod lifecycle;
+#[cfg(test)]
+mod mutation_test_pause;
 mod plan_defect;
 mod plan_defect_routing;
 mod plan_repair_start;
@@ -94,6 +96,10 @@ mod tool_format;
 mod types;
 mod ws_event_mapper;
 
+#[cfg(test)]
+pub(crate) use mutation_test_pause::{
+    CodingMutationTestPoint, register_coding_mutation_test_pause,
+};
 #[cfg(test)]
 pub(crate) use plan_repair_start::register_plan_repair_start_snapshot_request_pause;
 

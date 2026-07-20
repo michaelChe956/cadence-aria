@@ -108,6 +108,9 @@ impl CodingWorkspaceEngine {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        if current.status == CodingAttemptStatus::Aborted {
+            return Ok(current);
+        }
         let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
         self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
         self.ensure_issue_shared_worktree_clean(&current, &active_work_item_id)

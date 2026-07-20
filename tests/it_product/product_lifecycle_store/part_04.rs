@@ -165,3 +165,43 @@ fn attempt_bind_rejects_non_pending_issue_worktree_owner() {
         before
     );
 }
+
+#[test]
+fn ownerless_issue_worktree_record_is_not_a_valid_runner_owner() {
+    let root = tempdir().expect("tempdir");
+    let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let before = store
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: PathBuf::from("/tmp/repo/.worktrees/aria-issues/issue_0001"),
+            base_branch: "main".to_string(),
+        })
+        .expect("ownerless shared worktree");
+
+    let error = store
+        .validate_issue_worktree_lock_owner(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "coding_attempt_0001",
+        )
+        .expect_err("ownerless shared worktree must not validate a runner owner");
+
+    assert!(matches!(
+        error,
+        ProductStoreError::Conflict {
+            kind: "issue_worktree_lock_owner",
+            ..
+        }
+    ));
+    assert_eq!(
+        store
+            .get_issue_shared_worktree("project_0001", "issue_0001")
+            .expect("shared worktree after validation")
+            .expect("shared worktree after validation"),
+        before
+    );
+}

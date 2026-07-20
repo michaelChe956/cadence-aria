@@ -56,6 +56,14 @@ struct TestControlsInner {
     server_idle_timeout: Mutex<Option<Duration>>,
     coding_attempt_acquire_pause: Mutex<Option<CodingAttemptAcquirePause>>,
     coding_attempt_persist_failure: Mutex<bool>,
+    group_attempt_initialization_failure: Mutex<Option<GroupAttemptInitializationCheckpoint>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupAttemptInitializationCheckpoint {
+    PersistedBeforeBind,
+    BoundBeforePlanBinding,
+    FirstUnitPersisted,
 }
 
 #[derive(Clone, Default)]
@@ -75,6 +83,33 @@ impl CodingAttemptAcquirePause {
 }
 
 impl TestControls {
+    pub fn fail_next_group_attempt_initialization_at(
+        &self,
+        checkpoint: GroupAttemptInitializationCheckpoint,
+    ) {
+        *self
+            .inner
+            .group_attempt_initialization_failure
+            .lock()
+            .expect("group attempt initialization failure lock") = Some(checkpoint);
+    }
+
+    pub fn consume_group_attempt_initialization_failure(
+        &self,
+        checkpoint: GroupAttemptInitializationCheckpoint,
+    ) -> bool {
+        let mut configured = self
+            .inner
+            .group_attempt_initialization_failure
+            .lock()
+            .expect("group attempt initialization failure lock");
+        if *configured != Some(checkpoint) {
+            return false;
+        }
+        configured.take();
+        true
+    }
+
     pub fn fail_next_coding_attempt_after_persist_before_bind(&self) {
         *self
             .inner

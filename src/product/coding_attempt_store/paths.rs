@@ -96,6 +96,26 @@ impl super::CodingAttemptStore {
             .join("plan-binding.json")
     }
 
+    pub(crate) fn group_initialization_arbitration_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> PathBuf {
+        self.coding_attempts_root(project_id, issue_id)
+            .join("group-initialization-arbitration")
+    }
+
+    pub(crate) fn group_initialization_journal_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> PathBuf {
+        self.coding_attempts_root(project_id, issue_id)
+            .join("group-initializations")
+            .join(format!("{plan_id}.json"))
+    }
+
     pub(crate) fn amendment_applications_root(
         &self,
         project_id: &str,

@@ -48,6 +48,20 @@ impl CodingWorkspaceEngine {
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         self.validate_attempt_issue_shared_worktree_lock_if_present(&attempt)?;
         let facts = self.preflight_group_unit_completion(&attempt)?;
+        #[cfg(test)]
+        crate::product::coding_workspace_engine::mutation_test_pause::pause_coding_mutation_for_test(
+            self.store.paths().root(),
+            match facts.mode {
+                GroupUnitCompletionMode::Running => crate::product::coding_workspace_engine::mutation_test_pause::CodingMutationTestPoint::GroupCompletionRunning,
+                GroupUnitCompletionMode::CompletedRetry { .. } => crate::product::coding_workspace_engine::mutation_test_pause::CodingMutationTestPoint::GroupCompletionCompletedRetry,
+            },
+        )
+        .await;
+        let attempt =
+            self.store
+                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        self.validate_attempt_issue_shared_worktree_lock_if_present(&attempt)?;
+        validate_group_completion_attempt_state(&attempt)?;
         let attempt = match &facts.mode {
             GroupUnitCompletionMode::Running => {
                 self.commit_current_group_unit_changes(&attempt, &facts.active)
@@ -183,12 +197,7 @@ impl CodingWorkspaceEngine {
                 attempt.id.clone(),
             ));
         }
-        if attempt.stage != CodingExecutionStage::ReviewRequest {
-            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
-                "group_completion_stage_not_ready: {}",
-                attempt.id
-            )));
-        }
+        validate_group_completion_attempt_state(attempt)?;
         let (active, recovering_cleared_active) = match self.store.get_active_coding_unit(
             &attempt.project_id,
             &attempt.issue_id,
@@ -512,6 +521,24 @@ impl CodingWorkspaceEngine {
         )?;
         Ok(updated)
     }
+}
+
+fn validate_group_completion_attempt_state(
+    attempt: &CodingExecutionAttempt,
+) -> Result<(), CodingWorkspaceEngineError> {
+    if attempt.stage != CodingExecutionStage::ReviewRequest {
+        return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+            "group_completion_stage_not_ready: {}",
+            attempt.id
+        )));
+    }
+    if attempt.status != CodingAttemptStatus::Running {
+        return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+            "group_completion_status_not_ready: {}",
+            attempt.id
+        )));
+    }
+    Ok(())
 }
 
 fn group_handoff_contract_facts(

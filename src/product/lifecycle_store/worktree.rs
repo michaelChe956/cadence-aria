@@ -160,15 +160,12 @@ impl LifecycleStore {
         let path = self.issue_shared_worktree_path(project_id, issue_id);
         with_exclusive_lock(&path, || {
             let record = read_issue_worktree(&path, project_id, issue_id)?;
-            match record.current_active_work_item_id.as_deref() {
-                None if record.current_lock_owner_id.is_none() => Ok(record),
-                Some(active_id)
-                    if active_id == work_item_id
-                        && record.current_lock_owner_id.as_deref() == Some(owner_id) =>
-                {
-                    Ok(record)
-                }
-                _ => Err(lock_owner_mismatch(issue_id, work_item_id)),
+            if record.current_active_work_item_id.as_deref() == Some(work_item_id)
+                && record.current_lock_owner_id.as_deref() == Some(owner_id)
+            {
+                Ok(record)
+            } else {
+                Err(lock_owner_mismatch(issue_id, work_item_id))
             }
         })
     }

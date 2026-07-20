@@ -551,66 +551,6 @@ async fn rejects_coding_attempt_when_required_dependency_handoff_is_missing() {
 }
 
 #[tokio::test]
-async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
-    let root = tempdir().expect("root");
-    let repo = git_repo();
-    let state = WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    );
-    let app = build_web_router(state.clone());
-    bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
-
-    let (status, first) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let attempt_id = assert_global_attempt_id(&first);
-    let attempt_key = CodingAttemptRunKey::new(
-        "project_0001",
-        "issue_0001",
-        attempt_id.clone(),
-    );
-    let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
-    let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
-    state.coding_runs.insert(&attempt_key, first_runner_tx);
-    state.coding_runs.insert(&attempt_key, second_runner_tx);
-
-    let (status, _body) = request_json(
-        app.clone(),
-        Method::POST,
-        &scoped_attempt_uri(&attempt_id, "/abort"),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        first_runner_rx.recv().await.expect("first runner abort"),
-        CodingRunnerCommand::AbortAttempt
-    );
-    assert_eq!(
-        second_runner_rx.recv().await.expect("second runner abort"),
-        CodingRunnerCommand::AbortAttempt
-    );
-    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
-
-    let (status, second) = request_json(
-        app,
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_global_attempt_id(&second);
-    assert_eq!(second["work_item_id"], "work_item_0002");
-}
-
-#[tokio::test]
 async fn delete_coding_attempt_releases_active_lock_when_clean() {
     let root = tempdir().expect("root");
     let repo = git_repo();
@@ -760,18 +700,20 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
         .expect("mark attempt failed");
     let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
-    state.coding_runs.insert(&attempt_key, first_runner_tx);
-    state.coding_runs.insert(&attempt_key, second_runner_tx);
+    let first_run_id = state
+        .coding_runs
+        .insert(&attempt_key, first_runner_tx)
+        .expect("first runner");
+    let second_run_id = state
+        .coding_runs
+        .insert(&attempt_key, second_runner_tx)
+        .expect("second runner");
 
-    let (status, _body) = request_json(
-        app.clone(),
-        Method::DELETE,
-        &scoped_attempt_uri(&attempt_id, ""),
-        json!({}),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let delete_app = app.clone();
+    let delete_uri = scoped_attempt_uri(&attempt_id, "");
+    let delete_request = tokio::spawn(async move {
+        request_json(delete_app, Method::DELETE, &delete_uri, json!({})).await
+    });
     assert_eq!(
         first_runner_rx.recv().await.expect("first runner abort"),
         CodingRunnerCommand::AbortAttempt
@@ -780,6 +722,19 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
         second_runner_rx.recv().await.expect("second runner abort"),
         CodingRunnerCommand::AbortAttempt
     );
+    tokio::task::yield_now().await;
+    assert!(
+        !delete_request.is_finished(),
+        "HTTP delete returned before runner removal"
+    );
+    state.coding_runs.remove(&attempt_key, first_run_id);
+    assert!(
+        !delete_request.is_finished(),
+        "HTTP delete returned before every runner was removed"
+    );
+    state.coding_runs.remove(&attempt_key, second_run_id);
+    let (status, _body) = delete_request.await.expect("delete request task");
+    assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
     assert!(!worktree_path.exists());
     assert!(

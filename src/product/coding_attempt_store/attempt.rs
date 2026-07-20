@@ -353,6 +353,7 @@ impl super::CodingAttemptStore {
         validate_relative_id(issue_id)?;
         validate_relative_id(attempt_id)?;
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        self.delete_group_initialization_for_attempt(&attempt)?;
         super::remove_file_if_exists(&self.attempt_path(project_id, issue_id, attempt_id))?;
         super::remove_dir_all_if_exists(&self.attempt_dir(project_id, issue_id, attempt_id))?;
         Ok(attempt)

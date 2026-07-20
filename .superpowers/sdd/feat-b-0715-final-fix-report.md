@@ -224,3 +224,76 @@
 - Work Item 影响仅限 Coding Attempt 对 Issue Shared Worktree lease 的校验、绑定、转移和释放，不改变 Work Item 规划、Story/Design 生成或审核流程。
 - 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
 - 提交策略：代码、测试与本报告使用同一个新原子提交；不 amend `050e728`/`6daff5b`，不 push，worktree 保留。
+
+## Round 3 最终修复（2026-07-21）
+
+### 1. Group Attempt journal-first 初始化与重启恢复
+
+- 新增 issue 级跨进程文件仲裁锁，并在任何 Attempt、provider config、plan binding 或 Unit 写入之前持久化初始化 journal。
+- journal 固定 Attempt、provider config、plan revision、plan binding 与有序 Unit 身份，按 `Prepared`、`AttemptPersisted`、`WorktreeBound`、`PlanBindingSaved`、`UnitsMaterialized`、`Completed` 单调推进。
+- 每个阶段使用严格相等校验和幂等 ensure；已有记录身份不一致时 fail-closed，不覆盖或删除权威状态。
+- 明确不兼容历史无 journal Group Attempt：Attempt 已存在但 journal 缺失时拒绝恢复，避免从不完整身份推断并写入。
+- 三个默认关闭、一次性 checkpoint 覆盖 Attempt persist 后、worktree bind 后和 partial units 后的新 Store/router 重启；半初始化失败不再执行跨 Store rollback。
+- 显式删除 Group Attempt 时同步删除匹配 journal，避免合法重新创建被旧初始化身份阻塞。
+- 权威 plan revision/provider 身份漂移重启返回 `coding_group_attempt_incomplete`，并验证整个 `.aria` 树、journal、Attempt、lease、binding 与 Unit 零写不变。
+
+### 2. Runner retirement、Abort/Delete 串行与 ownerless 严格校验
+
+- registry runner entry 保存 command sender 与 `watch` completion signal；`remove` 才标记完成并唤醒 Abort waiter。
+- Attempt Abort 时先写入 retired tombstone、撤销 reservation，再发送 Abort 命令并等待真实 runner `remove`；同步 registry 锁不跨 `.await`。
+- retired Attempt 拒绝 late reservation activation、runner insert 与新 reserve，关闭 Abort 之后旧启动路径重新激活 runner 的窗口。
+- HTTP Abort/Delete 在 runner completion 后获取 Attempt mutation lease并重载 Attempt；WS Abort 复用已持有 lease并等待 runner completion，从而与 durable terminal mutation 串行。
+- `handle_abort` 对已 Aborted Attempt 零写幂等，不再次改变 `updated_at`、`completed_at` 或 timeline。
+- Issue Shared Worktree owner 校验仅接受精确 Work Item + Attempt owner；ownerless 记录不再被视为任意 runner 的合法 owner。
+- dummy runner 测试在收到 Abort 后显式调用 registry `remove`，使测试与生产 completion 语义一致。
+
+### 3. Abort 与旧 durable transition 竞态封闭
+
+- 新增按 `.aria` root 与 transition 类型隔离、默认关闭且一次性消费的 test-only pause seam，触发点位于 owner/status preflight 之后、第一个 durable/Git 写之前。
+- Group completion 在 pause 恢复后重新加载 Attempt，再次要求持久化 `Running + ReviewRequest` 并重验 Issue Shared Worktree owner。
+- Provider failure 在首写前重新加载 Attempt，要求仍处于 active status、stage 未漂移，并重验 owner。
+- 确定性覆盖 Abort 与 Running group completion、CompletedRetry、provider failure 三类竞态；Abort 落盘并返回后，旧 transition 恢复执行均 fail-closed，Git、Attempt、Unit、Run、handoff、timeline、event 与 lease 快照零写。
+
+### 4. RED → GREEN 与最终门禁发现
+
+| 场景 | RED | GREEN |
+| --- | --- | --- |
+| ownerless owner 校验 | ownerless Issue Shared Worktree 记录错误通过 runner owner 校验 | 仅精确 Work Item + Attempt owner 通过 |
+| registry Abort wait | Abort 在 runner `remove` 前提前返回 | completion signal 等待真实 `remove` 后返回 |
+| retired reservation | Abort 后 reservation 未撤销，late activation/insert/reserve 仍成功 | retirement 原子撤销 reservation 并拒绝所有 late 注册路径 |
+| Abort 幂等 | 第二次 Abort 改变 `updated_at`/`completed_at` | 已 Aborted Attempt 零写返回 |
+| Running completion race | Abort 后旧 completion 继续越过终态并报 `work_item_handoff_missing` | pause 恢复后重载状态，旧 transition 在首写前拒绝 |
+| pause seam | 回归测试因缺少 seam 类型/注册函数无法编译 | 三类 durable race 均可确定性暂停并验证零写 |
+| 全量门禁夹具 | 两个旧 Group completion integration fixture 只设置 `ReviewRequest`、Attempt 仍为 `Created`，触发 `group_completion_status_not_ready` | 共享 `create_active_coding_unit_run` 同步持久化 `Running + ReviewRequest`，两个用例分别 1 passed |
+
+### 5. 验证结果
+
+Focused 验证：
+
+- Coding Attempt API Group/Abort 模块累计 43 passed。
+- Group completion authority/recovery 模块累计 22 passed。
+- Provider failure recovery 模块累计 5 passed。
+- Coding run registry 4 passed；LifecycleStore 29 passed；Coding WS handler 53 passed。
+- Abort vs Running completion、Abort vs CompletedRetry、Abort vs provider failure 三条 durable race 均通过。
+- 移动后的 `abort_coding_attempt_releases_issue_shared_worktree_lock` 与 `handle_abort_marks_attempt_aborted_and_closes_active_timeline_node` 分别 1 passed。
+- 全量门禁发现的两个旧 Group completion fixture 用例在最小夹具修正后分别 1 passed。
+
+最终门禁：
+
+- `cargo fmt --check`：PASS。
+- `cargo check --locked`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，0 warnings。
+- `cargo test --locked`：PASS，exit 0；lib、integration 与 doc-test 无失败，Web integration 274 passed、12 ignored，doc-test 1 passed。
+- `cd web && pnpm tsc -b`：PASS。
+- 本轮未修改前端 Rust/TypeScript 之外的 Web UI 代码，因此未重跑 Vitest 与前端 build；仍运行 TypeScript 编译门禁。
+- `git diff --check`：PASS。
+- 26 个改动/新增 Rust、TS 文件全部不超过 800 行；最大为 `tests/it_web/web_coding_ws_handler/part_11.rs`，780 行。
+- 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
+
+### 6. 影响范围与边界
+
+- Story Spec 与 Design Spec Workspace 不受影响：本轮只修改 Coding Attempt Group 初始化、Coding runner registry、Abort/Delete、Issue Shared Worktree owner 校验及 Coding Workspace Engine 的 Group completion/provider failure 链路。
+- 未修改 Story/Design/Work Item 产物 Workspace 共用的 timeline/chat/artifact version 重建与前端聚合链路。
+- Work Item 侧影响仅限 Coding Attempt 对 Issue Shared Worktree lease 的校验、绑定、转移和释放，不改变 Work Item 规划、Story/Design 生成或审核流程。
+- 未新增 HTTP test route；checkpoint 与 mutation pause seam 默认关闭，仅能通过测试代码直接配置。
+- 提交策略：Round 3 代码、测试、设计、计划与本报告使用一个新原子提交；不 amend，不 push，worktree 保留。

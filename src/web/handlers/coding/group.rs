@@ -2,6 +2,7 @@ use super::super::dto::*;
 use super::super::support::*;
 use super::super::*;
 use super::{coding_provider_config_snapshot, group_work_item_execution_order};
+use crate::product::coding_attempt_store::CodingGroupInitializationPhase;
 
 pub async fn create_group_coding_attempt(
     State(state): State<WebAppState>,
@@ -22,16 +23,6 @@ pub async fn create_group_coding_attempt(
     let group_lock_key = format!("work_item_group:{project_id}:{issue_id}:{plan_id}");
     let _group_guard = state.coding_runs.lock_named(&group_lock_key).await;
     let coding_store = CodingAttemptStore::new(app_paths.clone());
-    if let Some(existing) = coding_store
-        .get_attempt_for_work_item_group(&project_id, &issue_id, &plan_id)
-        .map_err(product_store_api_error)?
-    {
-        coding_store
-            .validate_group_attempt_integrity(&existing)
-            .map_err(coding_group_attempt_incomplete_api_error)?;
-        return Ok(Json(coding_attempt_dto(&existing)));
-    }
-
     let all_work_items = lifecycle
         .list_work_items(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
@@ -69,8 +60,6 @@ pub async fn create_group_coding_attempt(
             },
         ));
     }
-    let bound_plan_revision_id = authoritative.plan_revision_id;
-    let unit_bindings = authoritative.units;
 
     let current_work_item = ordered.first().expect("checked non-empty");
     let repository = find_repository(&app_paths, &project_id, &current_work_item.repository_id)?;
@@ -80,7 +69,6 @@ pub async fn create_group_coding_attempt(
             "repository path must point to a git work tree",
         ));
     }
-
     let branch_name = format!("aria/issues/{issue_id}");
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
     let shared_worktree_path = repository
@@ -88,191 +76,174 @@ pub async fn create_group_coding_attempt(
         .join(".worktrees")
         .join("aria-issues")
         .join(&issue_id);
+    let provider_config_snapshot = coding_provider_config_snapshot(
+        &lifecycle,
+        current_work_item,
+        &repository.default_provider_mode,
+        &*state.provider_availability,
+    )?;
+    let initialization_input = CreateGroupCodingAttemptInput {
+        project_id: project_id.clone(),
+        issue_id: issue_id.clone(),
+        plan_id: plan_id.clone(),
+        current_work_item_id: current_work_item.id.clone(),
+        base_branch: base_branch.clone(),
+        branch_name: branch_name.clone(),
+        worktree_path: None,
+        provider_config_snapshot,
+        max_auto_rework: 2,
+    };
+
+    let _initialization_guard = coding_store
+        .acquire_group_initialization_arbitration(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let mut journal = coding_store
+        .prepare_group_initialization(
+            &initialization_input,
+            &authoritative.plan_revision_id,
+            &authoritative.units,
+        )
+        .map_err(group_initialization_api_error)?;
+    if journal.phase == CodingGroupInitializationPhase::Completed {
+        let existing = coding_store
+            .get_attempt(&project_id, &issue_id, &journal.attempt.id)
+            .map_err(coding_group_attempt_incomplete_api_error)?;
+        coding_store
+            .validate_group_attempt_integrity(&existing)
+            .map_err(coding_group_attempt_incomplete_api_error)?;
+        return Ok(Json(coding_attempt_dto(&existing)));
+    }
+
     lifecycle
         .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
             project_id: project_id.clone(),
             issue_id: issue_id.clone(),
             repository_id: repository.id.clone(),
-            branch_name: branch_name.clone(),
+            branch_name,
             worktree_path: shared_worktree_path,
-            base_branch: base_branch.clone(),
+            base_branch,
         })
         .map_err(product_store_api_error)?;
-    let issue_worktree_lease_id = format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple());
-    let issue_worktree_lease = lifecycle
+    let lease_id = format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple());
+    lifecycle
         .try_acquire_issue_worktree_lock(
             &project_id,
             &issue_id,
-            &current_work_item.id,
-            &issue_worktree_lease_id,
+            &journal.lock_work_item_id,
+            &lease_id,
         )
-        .map_err(|error| match error {
-            ProductStoreError::Io(ref msg) if msg.contains("issue_worktree_active") => {
-                ApiError::runtime(
-                    "issue_worktree_active",
-                    "another work item is already active on the issue shared worktree",
-                    json!({}),
-                )
-            }
-            _ => product_store_api_error(error),
-        })?;
+        .map_err(issue_worktree_active_api_error)?;
 
-    let provider_config_snapshot = match coding_provider_config_snapshot(
-        &lifecycle,
-        current_work_item,
-        &repository.default_provider_mode,
-        &*state.provider_availability,
-    ) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            if issue_worktree_lease.acquired {
-                let _ = lifecycle.release_issue_worktree_lock(
-                    &project_id,
-                    &issue_id,
-                    &current_work_item.id,
-                    &issue_worktree_lease.lease_id,
-                );
-            }
-            return Err(error);
-        }
-    };
-    let attempt = match coding_store.create_group_attempt(CreateGroupCodingAttemptInput {
-        project_id: project_id.clone(),
-        issue_id: issue_id.clone(),
-        plan_id: plan_id.clone(),
-        current_work_item_id: current_work_item.id.clone(),
-        base_branch,
-        branch_name,
-        worktree_path: None,
-        provider_config_snapshot,
-        max_auto_rework: 2,
-    }) {
-        Ok(attempt) => attempt,
-        Err(ProductStoreError::Io(message))
-            if message.starts_with("coding_attempt_group_already_exists:") =>
-        {
-            let existing_id = message
-                .strip_prefix("coding_attempt_group_already_exists:")
-                .expect("matched prefix")
-                .trim();
-            let existing = coding_store
-                .get_attempt(&project_id, &issue_id, existing_id)
-                .map_err(product_store_api_error)?;
-            lifecycle
-                .bind_issue_worktree_lock_to_attempt(
-                    &project_id,
-                    &issue_id,
-                    &current_work_item.id,
-                    &existing.id,
-                )
-                .map_err(product_store_api_error)?;
-            coding_store
-                .validate_group_attempt_integrity(&existing)
-                .map_err(coding_group_attempt_incomplete_api_error)?;
-            return Ok(Json(coding_attempt_dto(&existing)));
-        }
-        Err(error) => {
-            let active_attempt_conflict = matches!(
-                &error,
-                ProductStoreError::Io(message)
-                    if message.starts_with("active_coding_attempt_exists:")
-            );
-            if issue_worktree_lease.acquired && !active_attempt_conflict {
-                let _ = lifecycle.release_issue_worktree_lock(
-                    &project_id,
-                    &issue_id,
-                    &current_work_item.id,
-                    &issue_worktree_lease.lease_id,
-                );
-            }
-            return Err(match error {
-                ProductStoreError::Io(message)
-                    if message.starts_with("active_coding_attempt_exists:") =>
-                {
-                    ApiError::runtime(
-                        "issue_worktree_active",
-                        "another work item is already active on the issue shared worktree",
-                        json!({}),
-                    )
-                }
-                other => product_store_api_error(other),
-            });
-        }
-    };
-    if let Err(error) = lifecycle.bind_issue_worktree_lock_to_attempt(
-        &project_id,
-        &issue_id,
-        &current_work_item.id,
-        &attempt.id,
-    ) {
-        let _ = coding_store.delete_attempt(&project_id, &issue_id, &attempt.id);
-        if issue_worktree_lease.acquired {
-            let _ = lifecycle.release_issue_worktree_lock(
-                &project_id,
-                &issue_id,
-                &current_work_item.id,
-                &issue_worktree_lease.lease_id,
-            );
-        }
-        return Err(product_store_api_error(error));
-    }
+    let attempt = coding_store
+        .ensure_group_initialization_attempt(&journal)
+        .map_err(coding_group_attempt_incomplete_api_error)?;
+    journal = coding_store
+        .advance_group_initialization_phase(
+            &journal,
+            CodingGroupInitializationPhase::AttemptPersisted,
+        )
+        .map_err(coding_group_attempt_incomplete_api_error)?;
+    maybe_interrupt_group_initialization(
+        &state,
+        crate::web::test_controls::GroupAttemptInitializationCheckpoint::PersistedBeforeBind,
+    )?;
 
-    if let Err(error) = coding_store.save_plan_binding(
-        &attempt,
-        &CodingAttemptPlanBinding {
-            attempt_id: attempt.id.clone(),
-            plan_id: plan_id.clone(),
-            bound_plan_revision_id,
-            applied_amendment_ids: Vec::new(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-        },
-    ) {
-        rollback_group_attempt_creation(
-            &coding_store,
-            &lifecycle,
+    lifecycle
+        .bind_issue_worktree_lock_to_attempt(
             &project_id,
             &issue_id,
-            &current_work_item.id,
+            &journal.lock_work_item_id,
             &attempt.id,
         )
         .map_err(product_store_api_error)?;
-        return Err(product_store_api_error(error));
-    }
+    journal = coding_store
+        .advance_group_initialization_phase(&journal, CodingGroupInitializationPhase::WorktreeBound)
+        .map_err(coding_group_attempt_incomplete_api_error)?;
+    maybe_interrupt_group_initialization(
+        &state,
+        crate::web::test_controls::GroupAttemptInitializationCheckpoint::BoundBeforePlanBinding,
+    )?;
 
-    for (index, unit_binding) in unit_bindings.into_iter().enumerate() {
-        if let Err(error) = coding_store.create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            plan_id: plan_id.clone(),
-            logical_work_item_id: unit_binding.logical_work_item_id,
-            work_item_revision_id: unit_binding.work_item_revision_id,
-            dependency_logical_work_item_ids: unit_binding.dependency_logical_work_item_ids,
-            order_index: index as u32,
-            status: if index == 0 {
-                CodingExecutionUnitStatus::Running
-            } else {
-                CodingExecutionUnitStatus::Pending
-            },
-        }) {
-            rollback_group_attempt_creation(
-                &coding_store,
-                &lifecycle,
-                &project_id,
-                &issue_id,
-                &current_work_item.id,
-                &attempt.id,
-            )
-            .map_err(product_store_api_error)?;
-            return Err(product_store_api_error(error));
+    coding_store
+        .ensure_group_initialization_plan_binding(&journal)
+        .map_err(coding_group_attempt_incomplete_api_error)?;
+    journal = coding_store
+        .advance_group_initialization_phase(
+            &journal,
+            CodingGroupInitializationPhase::PlanBindingSaved,
+        )
+        .map_err(coding_group_attempt_incomplete_api_error)?;
+    for index in 0..journal.units.len() {
+        coding_store
+            .ensure_group_initialization_unit(&journal, index)
+            .map_err(coding_group_attempt_incomplete_api_error)?;
+        if index == 0 {
+            maybe_interrupt_group_initialization(
+                &state,
+                crate::web::test_controls::GroupAttemptInitializationCheckpoint::FirstUnitPersisted,
+            )?;
         }
     }
+    journal = coding_store
+        .advance_group_initialization_phase(
+            &journal,
+            CodingGroupInitializationPhase::UnitsMaterialized,
+        )
+        .map_err(coding_group_attempt_incomplete_api_error)?;
 
     let persisted_attempt = coding_store
         .get_attempt(&project_id, &issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
-
+    coding_store
+        .validate_group_attempt_integrity(&persisted_attempt)
+        .map_err(coding_group_attempt_incomplete_api_error)?;
+    coding_store
+        .advance_group_initialization_phase(&journal, CodingGroupInitializationPhase::Completed)
+        .map_err(coding_group_attempt_incomplete_api_error)?;
     Ok(Json(coding_attempt_dto(&persisted_attempt)))
+}
+
+fn issue_worktree_active_api_error(error: ProductStoreError) -> ApiError {
+    match error {
+        ProductStoreError::Io(message) if message.contains("issue_worktree_active") => {
+            ApiError::runtime(
+                "issue_worktree_active",
+                "another work item is already active on the issue shared worktree",
+                json!({}),
+            )
+        }
+        other => product_store_api_error(other),
+    }
+}
+
+fn group_initialization_api_error(error: ProductStoreError) -> ApiError {
+    match error {
+        ProductStoreError::Io(message) if message.starts_with("active_coding_attempt_exists:") => {
+            ApiError::runtime(
+                "issue_worktree_active",
+                "another work item is already active on the issue shared worktree",
+                json!({}),
+            )
+        }
+        other => coding_group_attempt_incomplete_api_error(other),
+    }
+}
+
+fn maybe_interrupt_group_initialization(
+    state: &WebAppState,
+    checkpoint: crate::web::test_controls::GroupAttemptInitializationCheckpoint,
+) -> ApiResult<()> {
+    if !state
+        .test_controls
+        .consume_group_attempt_initialization_failure(checkpoint)
+    {
+        return Ok(());
+    }
+    Err(ApiError::runtime(
+        "coding_group_initialization_interrupted",
+        "group coding attempt initialization interrupted",
+        json!({ "checkpoint": format!("{checkpoint:?}") }),
+    ))
 }
 
 fn coding_plan_revision_binding_api_error(error: ProductStoreError) -> ApiError {
@@ -295,17 +266,4 @@ fn coding_group_attempt_incomplete_api_error(error: ProductStoreError) -> ApiErr
     } else {
         product_store_api_error(error)
     }
-}
-
-fn rollback_group_attempt_creation(
-    coding_store: &CodingAttemptStore,
-    lifecycle: &LifecycleStore,
-    project_id: &str,
-    issue_id: &str,
-    lock_work_item_id: &str,
-    attempt_id: &str,
-) -> Result<(), ProductStoreError> {
-    coding_store.delete_attempt(project_id, issue_id, attempt_id)?;
-    lifecycle.release_issue_worktree_lock(project_id, issue_id, lock_work_item_id, attempt_id)?;
-    Ok(())
 }

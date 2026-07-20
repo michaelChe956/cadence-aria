@@ -1,4 +1,304 @@
 #[tokio::test]
+async fn group_initialization_recovers_all_journaled_restart_boundaries() {
+    use cadence_aria::web::test_controls::GroupAttemptInitializationCheckpoint;
+
+    for checkpoint in [
+        GroupAttemptInitializationCheckpoint::PersistedBeforeBind,
+        GroupAttemptInitializationCheckpoint::BoundBeforePlanBinding,
+        GroupAttemptInitializationCheckpoint::FirstUnitPersisted,
+    ] {
+        let root = tempdir().expect("root");
+        let repo = git_repo();
+        let initial_state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        initial_state
+            .test_controls
+            .fail_next_group_attempt_initialization_at(checkpoint);
+        let initial_app = build_web_router(initial_state);
+        bootstrap_confirmed_work_item_plan_group(initial_app.clone(), repo.path()).await;
+        let create_path = "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts";
+
+        let (interrupted_status, interrupted) =
+            request_json(initial_app, Method::POST, create_path, json!({})).await;
+        assert_eq!(
+            interrupted_status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{checkpoint:?}: {interrupted}"
+        );
+        assert_eq!(
+            interrupted["code"],
+            "coding_group_initialization_interrupted",
+            "{checkpoint:?}"
+        );
+
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let interrupted_store = CodingAttemptStore::new(app_paths.clone());
+        let interrupted_attempt = interrupted_store
+            .get_attempt_for_work_item_group(
+                "project_0001",
+                "issue_0001",
+                "work_item_plan_0001",
+            )
+            .expect("interrupted group attempt lookup")
+            .expect("interrupted group attempt");
+
+        let restarted_app = build_web_router(WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        ));
+        let (retry_status, retry) =
+            request_json(restarted_app, Method::POST, create_path, json!({})).await;
+        assert_eq!(retry_status, StatusCode::OK, "{checkpoint:?}: {retry}");
+        assert_eq!(
+            retry["attempt_id"], interrupted_attempt.id,
+            "{checkpoint:?}"
+        );
+        assert_eq!(retry["active_unit_id"], "coding_unit_0001");
+
+        let restarted_store = CodingAttemptStore::new(app_paths.clone());
+        let recovered = restarted_store
+            .get_attempt(
+                "project_0001",
+                "issue_0001",
+                &interrupted_attempt.id,
+            )
+            .expect("recovered attempt");
+        restarted_store
+            .validate_group_attempt_integrity(&recovered)
+            .expect("recovered group integrity");
+        assert_eq!(
+            restarted_store
+                .list_coding_units(
+                    "project_0001",
+                    "issue_0001",
+                    &interrupted_attempt.id,
+                )
+                .expect("recovered units")
+                .len(),
+            2
+        );
+        let shared = LifecycleStore::new(app_paths)
+            .get_issue_shared_worktree("project_0001", "issue_0001")
+            .expect("recovered shared worktree")
+            .expect("recovered shared worktree");
+        assert_eq!(
+            shared.current_active_work_item_id.as_deref(),
+            Some("work_item_0001")
+        );
+        assert_eq!(
+            shared.current_lock_owner_id.as_deref(),
+            Some(interrupted_attempt.id.as_str())
+        );
+    }
+}
+
+#[tokio::test]
+async fn group_initialization_rejects_authoritative_plan_drift_without_writes() {
+    use cadence_aria::product::coding_attempt_store::CodingGroupInitializationPhase;
+    use cadence_aria::web::test_controls::GroupAttemptInitializationCheckpoint;
+
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let initial_state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    initial_state
+        .test_controls
+        .fail_next_group_attempt_initialization_at(
+            GroupAttemptInitializationCheckpoint::PersistedBeforeBind,
+        );
+    let initial_app = build_web_router(initial_state);
+    bootstrap_confirmed_work_item_plan_group(initial_app.clone(), repo.path()).await;
+    let create_path = "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts";
+
+    let (interrupted_status, interrupted) =
+        request_json(initial_app, Method::POST, create_path, json!({})).await;
+    assert_eq!(interrupted_status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        interrupted["code"],
+        "coding_group_initialization_interrupted"
+    );
+
+    let aria_root = root.path().join(".aria");
+    let app_paths = ProductAppPaths::new(aria_root.clone());
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let journal = coding_store
+        .get_group_initialization("project_0001", "issue_0001", "work_item_plan_0001")
+        .expect("interrupted group initialization journal");
+    assert_eq!(
+        journal.phase,
+        CodingGroupInitializationPhase::AttemptPersisted
+    );
+
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
+    let lineage = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .expect("plan lineage");
+    let mut drifted_revision = revision_store
+        .get_plan_revision(
+            "project_0001",
+            "issue_0001",
+            "work_item_plan_0001",
+            "plan_revision_0001",
+        )
+        .expect("initial plan revision");
+    drifted_revision.id = "plan_revision_0002".to_string();
+    drifted_revision.revision_no = 2;
+    drifted_revision.supersedes = Some("plan_revision_0001".to_string());
+    drifted_revision.created_at = "2026-07-21T00:00:00Z".to_string();
+    revision_store
+        .put_plan_revision(&lineage, &drifted_revision)
+        .expect("drifted plan revision");
+    revision_store
+        .set_active_plan_revision(&lineage, &drifted_revision.id)
+        .expect("activate drifted plan revision");
+
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let shared_before = lifecycle
+        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .expect("shared worktree before retry")
+        .expect("shared worktree before retry");
+    let tree_before = snapshot_directory_tree(&aria_root);
+
+    let restarted_app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let (retry_status, retry) =
+        request_json(restarted_app, Method::POST, create_path, json!({})).await;
+
+    assert_eq!(retry_status, StatusCode::BAD_REQUEST, "{retry}");
+    assert_eq!(retry["code"], "coding_group_attempt_incomplete");
+    assert_eq!(snapshot_directory_tree(&aria_root), tree_before);
+    assert_eq!(
+        lifecycle
+            .get_issue_shared_worktree("project_0001", "issue_0001")
+            .expect("shared worktree after retry")
+            .expect("shared worktree after retry"),
+        shared_before
+    );
+    assert_eq!(
+        coding_store
+            .get_group_initialization("project_0001", "issue_0001", "work_item_plan_0001")
+            .expect("journal after retry"),
+        journal
+    );
+    assert!(
+        coding_store
+            .list_coding_units(
+                "project_0001",
+                "issue_0001",
+                &journal.attempt.id,
+            )
+            .expect("units after retry")
+            .is_empty()
+    );
+    assert!(coding_store.get_plan_binding(&journal.attempt).is_err());
+}
+
+fn snapshot_directory_tree(root: &std::path::Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let mut snapshot = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("snapshot directory") {
+            let entry = entry.expect("snapshot entry");
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("snapshot path under root")
+                .to_path_buf();
+            let file_type = entry.file_type().expect("snapshot file type");
+            if file_type.is_dir() {
+                snapshot.insert(relative, None);
+                pending.push(path);
+            } else if file_type.is_file() {
+                snapshot.insert(relative, Some(fs::read(path).expect("snapshot file")));
+            }
+        }
+    }
+    snapshot
+}
+
+#[tokio::test]
+async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state.clone());
+    bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
+
+    let (status, first) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let attempt_id = assert_global_attempt_id(&first);
+    let attempt_key = CodingAttemptRunKey::new(
+        "project_0001",
+        "issue_0001",
+        attempt_id.clone(),
+    );
+    let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
+    let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
+    let first_run_id = state
+        .coding_runs
+        .insert(&attempt_key, first_runner_tx)
+        .expect("first runner");
+    let second_run_id = state
+        .coding_runs
+        .insert(&attempt_key, second_runner_tx)
+        .expect("second runner");
+
+    let abort_app = app.clone();
+    let abort_uri = scoped_attempt_uri(&attempt_id, "/abort");
+    let abort_request = tokio::spawn(async move {
+        request_json(abort_app, Method::POST, &abort_uri, json!({})).await
+    });
+    assert_eq!(
+        first_runner_rx.recv().await.expect("first runner abort"),
+        CodingRunnerCommand::AbortAttempt
+    );
+    assert_eq!(
+        second_runner_rx.recv().await.expect("second runner abort"),
+        CodingRunnerCommand::AbortAttempt
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        !abort_request.is_finished(),
+        "HTTP abort returned before runner removal"
+    );
+    state.coding_runs.remove(&attempt_key, first_run_id);
+    assert!(
+        !abort_request.is_finished(),
+        "HTTP abort returned before every runner was removed"
+    );
+    state.coding_runs.remove(&attempt_key, second_run_id);
+    let (status, _body) = abort_request.await.expect("abort request task");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
+
+    let (status, second) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_global_attempt_id(&second);
+    assert_eq!(second["work_item_id"], "work_item_0002");
+}
+
+#[tokio::test]
 async fn retry_reconciles_attempt_persisted_before_lease_bind_after_restart() {
     let root = tempdir().expect("root");
     let repo = git_repo();

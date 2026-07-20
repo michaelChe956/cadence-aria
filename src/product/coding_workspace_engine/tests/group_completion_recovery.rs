@@ -249,6 +249,90 @@ async fn group_completion_retry_owner_conflict_is_zero_write_at_production_entry
     );
 }
 
+#[tokio::test]
+async fn abort_during_running_group_completion_prewrite_pause_is_stable() {
+    let fixture = group_completion_fixture(false, true);
+    create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+    let (_pause, reached, resume) = register_coding_mutation_test_pause(
+        fixture.store.paths().root(),
+        CodingMutationTestPoint::GroupCompletionRunning,
+    );
+    let store = fixture.store.clone();
+    let attempt = fixture.attempt.clone();
+    let completion = tokio::spawn(async move {
+        let (tx, _rx) = mpsc::channel(8);
+        CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx)
+            .complete_group_unit_after_code_review(&attempt)
+            .await
+    });
+    reached.await.expect("running completion prewrite pause");
+
+    fixture
+        .engine
+        .handle_abort(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .await
+        .expect("abort paused running completion");
+    let after_abort = snapshot_group_completion_state(&fixture);
+    resume.send(()).expect("resume running completion");
+    let error = completion
+        .await
+        .expect("running completion task")
+        .expect_err("aborted running completion must fail closed");
+
+    assert!(
+        error.to_string().contains("group_completion_status_not_ready"),
+        "{error}"
+    );
+    assert_eq!(snapshot_group_completion_state(&fixture), after_abort);
+}
+
+#[tokio::test]
+async fn abort_during_completed_retry_prewrite_pause_is_stable() {
+    let (fixture, partial, _, _) = cleared_active_recovery_fixture();
+    let (_pause, reached, resume) = register_coding_mutation_test_pause(
+        fixture.store.paths().root(),
+        CodingMutationTestPoint::GroupCompletionCompletedRetry,
+    );
+    let store = fixture.store.clone();
+    let retry_attempt = partial.clone();
+    let completion = tokio::spawn(async move {
+        let (tx, _rx) = mpsc::channel(8);
+        CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx)
+            .complete_group_unit_after_code_review(&retry_attempt)
+            .await
+    });
+    reached.await.expect("completed retry prewrite pause");
+
+    fixture
+        .engine
+        .handle_abort(&partial.project_id, &partial.issue_id, &partial.id)
+        .await
+        .expect("abort paused completed retry");
+    let after_abort = snapshot_group_completion_state(&fixture);
+    resume.send(()).expect("resume completed retry");
+    let error = completion
+        .await
+        .expect("completed retry task")
+        .expect_err("aborted completed retry must fail closed");
+
+    assert!(
+        error.to_string().contains("group_completion_status_not_ready"),
+        "{error}"
+    );
+    assert_eq!(snapshot_group_completion_state(&fixture), after_abort);
+}
+
 fn cleared_active_recovery_fixture_at_stage(
     stage: CodingExecutionStage,
 ) -> (

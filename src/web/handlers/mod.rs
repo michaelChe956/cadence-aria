@@ -20,13 +20,13 @@ use crate::cross_cutting::provider_adapter::{
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{
-    CodingAttemptStore, CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
-    CreateGroupCodingAttemptInput, is_group_business_validation_error,
+    CodingAttemptStore, CreateCodingAttemptInput, CreateGroupCodingAttemptInput,
+    is_group_business_validation_error,
 };
 use crate::product::coding_models::{
-    CodingAttemptPlanBinding, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
-    CodingExecutionStage, CodingExecutionUnitStatus, CodingTimelineNode, CodingTimelineNodeStatus,
-    PushStatus, WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
+    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodingExecutionUnitStatus, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus,
+    WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
 };
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::gate_store::GateStore;

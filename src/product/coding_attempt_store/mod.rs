@@ -9,6 +9,7 @@ mod attempt;
 mod context;
 mod gate;
 mod group;
+mod group_initialization;
 mod group_terminal;
 mod group_validation;
 mod inputs;
@@ -28,6 +29,7 @@ mod utils;
 
 #[cfg(test)]
 pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
+pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;
 pub(crate) use recovery::FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE;

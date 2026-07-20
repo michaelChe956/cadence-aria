@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc, watch};
 
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
@@ -39,12 +39,18 @@ impl CodingAttemptRunKey {
 #[derive(Default)]
 struct CodingRunRegistryInner {
     next_run_id: u64,
-    runs: HashMap<CodingAttemptRunKey, HashMap<u64, mpsc::Sender<CodingRunnerCommand>>>,
+    runs: HashMap<CodingAttemptRunKey, HashMap<u64, CodingRunEntry>>,
     reservations: HashMap<CodingAttemptRunKey, u64>,
     exclusive_runs: HashMap<CodingAttemptRunKey, u64>,
+    retired_attempts: HashSet<CodingAttemptRunKey>,
     attempt_guards: HashMap<CodingAttemptRunKey, Arc<AsyncMutex<()>>>,
     attempt_mutation_guards: HashMap<CodingAttemptRunKey, Arc<AsyncMutex<()>>>,
     named_guards: HashMap<String, Arc<AsyncMutex<()>>>,
+}
+
+struct CodingRunEntry {
+    command_tx: mpsc::Sender<CodingRunnerCommand>,
+    completion_tx: watch::Sender<bool>,
 }
 
 pub(crate) struct CodingAttemptMutationLease {
@@ -65,15 +71,24 @@ impl CodingRunReservation {
             .inner
             .lock()
             .expect("coding run registry lock");
-        if inner.reservations.get(&self.attempt_key) != Some(&self.reservation_id) {
+        if inner.retired_attempts.contains(&self.attempt_key)
+            || inner.reservations.get(&self.attempt_key) != Some(&self.reservation_id)
+        {
             return None;
         }
         inner.reservations.remove(&self.attempt_key);
+        let (completion_tx, _completion_rx) = watch::channel(false);
         inner
             .runs
             .entry(self.attempt_key.clone())
             .or_default()
-            .insert(self.reservation_id, command_tx);
+            .insert(
+                self.reservation_id,
+                CodingRunEntry {
+                    command_tx,
+                    completion_tx,
+                },
+            );
         inner
             .exclusive_runs
             .insert(self.attempt_key.clone(), self.reservation_id);
@@ -104,18 +119,22 @@ impl CodingRunRegistry {
         command_tx: mpsc::Sender<CodingRunnerCommand>,
     ) -> Option<u64> {
         let mut inner = self.inner.lock().expect("coding run registry lock");
-        if inner.reservations.contains_key(attempt_key)
+        if inner.retired_attempts.contains(attempt_key)
+            || inner.reservations.contains_key(attempt_key)
             || inner.exclusive_runs.contains_key(attempt_key)
         {
             return None;
         }
         inner.next_run_id += 1;
         let run_id = inner.next_run_id;
-        inner
-            .runs
-            .entry(attempt_key.clone())
-            .or_default()
-            .insert(run_id, command_tx);
+        let (completion_tx, _completion_rx) = watch::channel(false);
+        inner.runs.entry(attempt_key.clone()).or_default().insert(
+            run_id,
+            CodingRunEntry {
+                command_tx,
+                completion_tx,
+            },
+        );
         Some(run_id)
     }
 
@@ -125,7 +144,9 @@ impl CodingRunRegistry {
             inner.exclusive_runs.remove(attempt_key);
         }
         if let Some(runs) = inner.runs.get_mut(attempt_key) {
-            runs.remove(&run_id);
+            if let Some(entry) = runs.remove(&run_id) {
+                entry.completion_tx.send_replace(true);
+            }
             if runs.is_empty() {
                 inner.runs.remove(attempt_key);
             }
@@ -133,19 +154,31 @@ impl CodingRunRegistry {
     }
 
     pub async fn abort_attempt(&self, attempt_key: &CodingAttemptRunKey) -> usize {
-        let senders = {
+        let runners = {
             let mut inner = self.inner.lock().expect("coding run registry lock");
-            inner.exclusive_runs.remove(attempt_key);
+            inner.retired_attempts.insert(attempt_key.clone());
+            inner.reservations.remove(attempt_key);
             inner
                 .runs
-                .remove(attempt_key)
-                .map(|runs| runs.into_values().collect::<Vec<_>>())
+                .get(attempt_key)
+                .map(|runs| {
+                    runs.values()
+                        .map(|entry| (entry.command_tx.clone(), entry.completion_tx.subscribe()))
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default()
         };
         let mut sent = 0;
-        for sender in senders {
+        for (sender, _) in &runners {
             if sender.send(CodingRunnerCommand::AbortAttempt).await.is_ok() {
                 sent += 1;
+            }
+        }
+        for (_, mut completion_rx) in runners {
+            while !*completion_rx.borrow() {
+                if completion_rx.changed().await.is_err() {
+                    break;
+                }
             }
         }
         sent
@@ -166,10 +199,11 @@ impl CodingRunRegistry {
         attempt_key: &CodingAttemptRunKey,
     ) -> Option<CodingRunReservation> {
         let mut inner = self.inner.lock().expect("coding run registry lock");
-        if inner
-            .runs
-            .get(attempt_key)
-            .is_some_and(|runs| !runs.is_empty())
+        if inner.retired_attempts.contains(attempt_key)
+            || inner
+                .runs
+                .get(attempt_key)
+                .is_some_and(|runs| !runs.is_empty())
             || inner.reservations.contains_key(attempt_key)
         {
             return None;
@@ -269,14 +303,15 @@ mod tests {
         let (second_tx, mut second_rx) = mpsc::channel(1);
         let (other_tx, mut other_rx) = mpsc::channel(1);
 
-        registry.insert(&attempt, first_tx).expect("first runner");
-        registry.insert(&attempt, second_tx).expect("second runner");
+        let first_run_id = registry.insert(&attempt, first_tx).expect("first runner");
+        let second_run_id = registry.insert(&attempt, second_tx).expect("second runner");
         registry.insert(&other, other_tx).expect("other runner");
 
         assert_eq!(registry.runner_count(&attempt), 2);
-        assert_eq!(registry.abort_attempt(&attempt).await, 2);
-        assert_eq!(registry.runner_count(&attempt), 0);
-        assert_eq!(registry.runner_count(&other), 1);
+        let registry_for_abort = registry.clone();
+        let attempt_for_abort = attempt.clone();
+        let abort =
+            tokio::spawn(async move { registry_for_abort.abort_attempt(&attempt_for_abort).await });
         assert_eq!(
             first_rx.recv().await.expect("first abort"),
             CodingRunnerCommand::AbortAttempt
@@ -285,7 +320,32 @@ mod tests {
             second_rx.recv().await.expect("second abort"),
             CodingRunnerCommand::AbortAttempt
         );
+        tokio::task::yield_now().await;
+        assert!(!abort.is_finished(), "abort must wait for runner removal");
+        assert_eq!(registry.runner_count(&attempt), 2);
+        registry.remove(&attempt, first_run_id);
+        assert!(!abort.is_finished(), "abort must wait for every runner");
+        registry.remove(&attempt, second_run_id);
+        assert_eq!(abort.await.expect("abort task"), 2);
+        assert_eq!(registry.runner_count(&attempt), 0);
+        assert_eq!(registry.runner_count(&other), 1);
         assert!(other_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn abort_retires_attempt_and_revokes_pending_reservation() {
+        let registry = CodingRunRegistry::default();
+        let attempt = CodingAttemptRunKey::new("project_0001", "issue_0001", "coding_attempt_0001");
+        let reservation = registry
+            .try_reserve_attempt(&attempt)
+            .expect("pending reservation");
+
+        assert_eq!(registry.abort_attempt(&attempt).await, 0);
+        let (late_tx, _late_rx) = mpsc::channel(1);
+        assert!(reservation.activate(late_tx.clone()).is_none());
+        assert!(registry.insert(&attempt, late_tx).is_none());
+        assert!(registry.try_reserve_attempt(&attempt).is_none());
+        assert!(!registry.attempt_is_reserved_or_running(&attempt));
     }
 
     #[test]
@@ -315,15 +375,26 @@ mod tests {
         let (first_tx, mut first_rx) = mpsc::channel(1);
         let (second_tx, mut second_rx) = mpsc::channel(1);
         registry.insert(&first, first_tx).expect("first runner");
-        registry.insert(&second, second_tx).expect("second runner");
+        let second_run_id = registry.insert(&second, second_tx).expect("second runner");
 
-        assert_eq!(registry.abort_attempt(&second).await, 1);
-        assert_eq!(registry.runner_count(&first), 1);
-        assert_eq!(registry.runner_count(&second), 0);
-        assert!(first_rx.try_recv().is_err());
+        let registry_for_abort = registry.clone();
+        let second_for_abort = second.clone();
+        let abort =
+            tokio::spawn(async move { registry_for_abort.abort_attempt(&second_for_abort).await });
         assert_eq!(
             second_rx.recv().await.expect("second abort"),
             CodingRunnerCommand::AbortAttempt
         );
+        tokio::task::yield_now().await;
+        assert!(
+            !abort.is_finished(),
+            "abort must wait for exact runner removal"
+        );
+        assert_eq!(registry.runner_count(&first), 1);
+        assert_eq!(registry.runner_count(&second), 1);
+        assert!(first_rx.try_recv().is_err());
+        registry.remove(&second, second_run_id);
+        assert_eq!(abort.await.expect("abort task"), 1);
+        assert_eq!(registry.runner_count(&second), 0);
     }
 }

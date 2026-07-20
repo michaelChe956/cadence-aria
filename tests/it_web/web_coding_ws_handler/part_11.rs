@@ -732,7 +732,7 @@ async fn scoped_abort_notifies_only_target_issue_runner_for_legacy_duplicate() {
         .coding_runs
         .insert(&first_key, first_tx)
         .expect("first runner");
-    state
+    let second_run_id = state
         .coding_runs
         .insert(&second_key, second_tx)
         .expect("second runner");
@@ -756,6 +756,8 @@ async fn scoped_abort_notifies_only_target_issue_runner_for_legacy_duplicate() {
     );
     assert!(first_rx.try_recv().is_err());
     assert_eq!(state.coding_runs.runner_count(&first_key), 1);
+    assert_eq!(state.coding_runs.runner_count(&second_key), 1);
+    state.coding_runs.remove(&second_key, second_run_id);
     assert_eq!(state.coding_runs.runner_count(&second_key), 0);
     timeout(Duration::from_secs(1), async {
         loop {

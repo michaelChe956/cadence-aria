@@ -92,6 +92,23 @@ impl CodingWorkspaceEngine {
         message: String,
     ) -> Result<T, CodingWorkspaceEngineError> {
         self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
+        #[cfg(test)]
+        crate::product::coding_workspace_engine::mutation_test_pause::pause_coding_mutation_for_test(
+            self.store.paths().root(),
+            crate::product::coding_workspace_engine::mutation_test_pause::CodingMutationTestPoint::ProviderFailure,
+        )
+        .await;
+        let current =
+            self.store
+                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        if !current.status.is_active() || current.stage != attempt.stage {
+            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                "provider_failure_attempt_state_changed: {}",
+                attempt.id
+            )));
+        }
+        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+        let attempt = &current;
         if attempt.stage == CodingExecutionStage::CodeReview {
             self.complete_timeline_node(
                 &attempt.project_id,

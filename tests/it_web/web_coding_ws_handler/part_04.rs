@@ -321,8 +321,14 @@ async fn coding_ws_abort_attempt_aborts_all_registered_runners() {
     );
     let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
-    state.coding_runs.insert(&attempt_key, first_runner_tx);
-    state.coding_runs.insert(&attempt_key, second_runner_tx);
+    let first_run_id = state
+        .coding_runs
+        .insert(&attempt_key, first_runner_tx)
+        .expect("first runner");
+    let second_run_id = state
+        .coding_runs
+        .insert(&attempt_key, second_runner_tx)
+        .expect("second runner");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -349,6 +355,10 @@ async fn coding_ws_abort_attempt_aborts_all_registered_runners() {
             .expect("second runner abort"),
         CodingRunnerCommand::AbortAttempt
     );
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 2);
+    state.coding_runs.remove(&attempt_key, first_run_id);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 1);
+    state.coding_runs.remove(&attempt_key, second_run_id);
     assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
 
     ws.close(None).await.expect("close ws");

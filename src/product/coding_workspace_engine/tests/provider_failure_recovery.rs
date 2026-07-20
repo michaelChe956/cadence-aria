@@ -407,6 +407,140 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
 }
 
 #[tokio::test]
+async fn abort_during_provider_failure_prewrite_pause_is_stable() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("attempt");
+    let attempt = store
+        .update_attempt_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt");
+    let attempt = store
+        .update_attempt_stage(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("code review stage");
+    store
+        .save_timeline_node(
+            &attempt,
+            CodingTimelineNode {
+                id: NODE_ID.to_string(),
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                title: "代码审查".to_string(),
+                status: CodingTimelineNodeStatus::Running,
+                agent_role: Some(CodingAgentRole::Reviewer),
+                summary: None,
+                started_at: "2026-07-21T00:00:00Z".to_string(),
+                completed_at: None,
+                artifact_refs: Vec::new(),
+            },
+        )
+        .expect("timeline node");
+    store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some(NODE_ID.to_string()),
+        )
+        .expect("role run");
+    let (_pause, reached, resume) = register_coding_mutation_test_pause(
+        store.paths().root(),
+        CodingMutationTestPoint::ProviderFailure,
+    );
+    let failure_store = store.clone();
+    let failure_attempt = attempt.clone();
+    let failure = tokio::spawn(async move {
+        let (tx, _rx) = mpsc::channel(8);
+        CodingWorkspaceEngine::new(failure_store, GitWorkspaceService::new(), tx)
+            .fail_provider_stream::<()>(
+                &failure_attempt,
+                NODE_ID,
+                "provider interrupted".to_string(),
+            )
+            .await
+    });
+    reached.await.expect("provider failure prewrite pause");
+
+    let (tx, _rx) = mpsc::channel(8);
+    CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .handle_abort(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .await
+        .expect("abort paused provider failure");
+    let attempt_after_abort = store
+        .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("attempt after abort");
+    let timeline_after_abort = store
+        .get_timeline_nodes(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("timeline after abort");
+    let runs_after_abort = store
+        .list_role_runs(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("runs after abort");
+    let gates_after_abort = store
+        .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .expect("gates after abort");
+    resume.send(()).expect("resume provider failure");
+    let error = failure
+        .await
+        .expect("provider failure task")
+        .expect_err("aborted provider failure must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("provider_failure_attempt_state_changed")
+    );
+    assert_eq!(
+        store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("attempt after stale failure"),
+        attempt_after_abort
+    );
+    assert_eq!(
+        store
+            .get_timeline_nodes(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("timeline after stale failure"),
+        timeline_after_abort
+    );
+    assert_eq!(
+        store
+            .list_role_runs(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("runs after stale failure"),
+        runs_after_abort
+    );
+    assert_eq!(
+        store
+            .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("gates after stale failure"),
+        gates_after_abort
+    );
+}
+
+#[tokio::test]
 async fn internal_review_blocked_gate_uses_internal_review_retry_action() {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
