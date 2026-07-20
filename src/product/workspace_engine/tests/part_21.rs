@@ -364,6 +364,25 @@ async fn plan_repair_refresh_restores_awaiting_confirmation_state() {
     .await
         .unwrap();
 
+    lifecycle.save_artifact_versions(&child.id, &[]).unwrap();
+    let (recovery_tx, mut recovery_rx) = mpsc::channel(16);
+    let mut restored = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(tmp.path().join("repair-checkpoints"))),
+        lifecycle.clone(),
+        recovery_tx,
+        WorkspaceSession::from_record(lifecycle.get_workspace_session(&child.id).unwrap()),
+    );
+    restored
+        .ensure_plan_repair_manifest_artifact()
+        .await
+        .unwrap();
+    assert!(matches!(
+        recovery_rx.try_recv().unwrap(),
+        EngineEvent::ArtifactUpdate {
+            payload: ArtifactPayload::PlanAmendmentManifest { .. },
+            ..
+        }
+    ));
     let restored = plan_repair_restarted_child_engine(
         &tmp,
         &lifecycle,
@@ -583,4 +602,74 @@ async fn plan_repair_cancel_fails_closed_after_plan_published() {
         .timeline_nodes
         .iter()
         .any(|node| node.node_type == TimelineNodeType::PlanAmendmentCancelled));
+}
+
+#[tokio::test]
+async fn plan_repair_awaiting_confirmation_persists_broadcasts_and_recovers_manifest_artifact() {
+    let (tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
+    let child = parent
+        .start_plan_repair(plan_repair_fixture(
+            "plan_repair_request_manifest",
+            "fingerprint_manifest_artifact",
+        ))
+        .await
+        .unwrap();
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
+        .unwrap();
+    let request = revision_store
+        .get_repair_request(&plan, "plan_repair_request_manifest")
+        .unwrap();
+    let amendment_id = request.amendment_id.clone().unwrap();
+    let package = plan_repair_awaiting_package(&request.id, &amendment_id);
+    let expected_manifest = package.amendment.clone();
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut child_engine = WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(tmp.path().join("repair-checkpoints"))),
+        lifecycle.clone(),
+        event_tx,
+        WorkspaceSession::from_record(child.clone()),
+    );
+
+    plan_repair_enter_awaiting(&mut child_engine, &revision_store, &plan, package)
+        .await
+        .unwrap();
+
+    let mut broadcast_manifest = None;
+    while let Ok(event) = event_rx.try_recv() {
+        if let EngineEvent::ArtifactUpdate {
+            payload: ArtifactPayload::PlanAmendmentManifest { manifest },
+            ..
+        } = event
+        {
+            broadcast_manifest = Some(*manifest);
+        }
+    }
+    assert_eq!(broadcast_manifest.as_ref(), Some(&expected_manifest));
+    assert!(lifecycle
+        .list_artifact_versions(&child.id)
+        .unwrap()
+        .iter()
+        .any(|version| matches!(
+            &version.payload,
+            ArtifactPayload::PlanAmendmentManifest { manifest }
+                if manifest.as_ref() == &expected_manifest
+        )));
+
+    let restored = plan_repair_restarted_child_engine(
+        &tmp,
+        &lifecycle,
+        lifecycle.get_workspace_session(&child.id).unwrap(),
+    );
+    let WsOutMessage::SessionState {
+        artifact_versions, ..
+    } = restored.build_session_state()
+    else {
+        panic!("expected session state");
+    };
+    assert!(artifact_versions.iter().any(|version| matches!(
+        &version.payload,
+        ArtifactPayload::PlanAmendmentManifest { manifest }
+            if manifest.as_ref() == &expected_manifest
+    )));
 }

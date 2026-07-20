@@ -1,6 +1,9 @@
 import { act } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { PlanRepairSessionSnapshot } from "../api/types";
+import type {
+  PlanAmendmentManifest,
+  PlanRepairSessionSnapshot,
+} from "../api/types";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import {
   installWorkspaceWsTestHooks,
@@ -107,6 +110,59 @@ describe("useWorkspaceWs plan repair projection", () => {
     });
   });
 
+  it.each([
+    ["link id", (value: PlanRepairSessionSnapshot) => ({
+      ...value,
+      link: { ...value.link, id: "workspace_session_link_collision" },
+    })],
+    ["trigger", (value: PlanRepairSessionSnapshot) => ({
+      ...value,
+      link: {
+        ...value.link,
+        trigger: { ...value.link.trigger, unit_run_id: "unit_run_collision" },
+      },
+    })],
+    ["return context", (value: PlanRepairSessionSnapshot) => ({
+      ...value,
+      link: {
+        ...value.link,
+        return_context: {
+          ...value.link.return_context,
+          original_route: "/workbench/projects/collision",
+        },
+      },
+    })],
+  ])("fails closed for %s collisions before applying child artifacts", (_name, mutate) => {
+    const current = childRepairSnapshot();
+    setActiveRepair(current);
+    const harness = renderWorkspaceHook(current.link.child_session_id);
+
+    act(() => {
+      harness.ws.receive(workspaceSessionState(mutate(current)));
+      harness.ws.receive({
+        type: "artifact_update",
+        version: 3,
+        work_item_revision_history: {
+          entries: [
+            {
+              kind: "unit_run",
+              id: "unit_run_collision",
+              logical_work_item_id: "work_item_0001",
+              related_revision_id: "work_item_revision_0001",
+              summary: "stale child artifact",
+              created_at: "2026-07-18T00:06:00Z",
+            },
+          ],
+        },
+      });
+    });
+
+    expect(useCodingWorkspaceStore.getState().activePlanRepair).toMatchObject({
+      link: current.link,
+      history: null,
+    });
+  });
+
   it("keeps an out-of-order timeline event when a later snapshot omits it", () => {
     const current = childRepairSnapshot({
       stage: "triaging",
@@ -119,7 +175,10 @@ describe("useWorkspaceWs plan repair projection", () => {
     });
     setActiveRepair(current);
     const harness = renderWorkspaceHook(current.link.child_session_id);
-    const node = childRepairSnapshot().timeline_nodes[0];
+    const node = {
+      ...childRepairSnapshot().timeline_nodes[0],
+      started_at: "2026-07-18T00:07:00Z",
+    };
     const laterSnapshot = childRepairSnapshot({
       stage: "authoring_revision",
       request: {
@@ -138,6 +197,33 @@ describe("useWorkspaceWs plan repair projection", () => {
       stage: "authoring_revision",
       timelineNodes: [expect.objectContaining({ id: "plan_repair_node_0001" })],
     });
+  });
+
+  it("restores the manifest from authoritative child artifact versions", () => {
+    const current = childRepairSnapshot();
+    const manifest = amendmentManifest();
+    setActiveRepair(current);
+    const harness = renderWorkspaceHook(current.link.child_session_id);
+
+    act(() => {
+      harness.ws.receive(workspaceSessionState(current, [
+        {
+          version: 4,
+          plan_amendment_manifest: manifest,
+          generated_by: "fake",
+          reviewed_by: null,
+          review_verdict: null,
+          confirmed_by: null,
+          is_current: true,
+          created_at: manifest.created_at,
+          source_node_id: "plan_repair_node_0001",
+        },
+      ]));
+    });
+
+    expect(useCodingWorkspaceStore.getState().activePlanRepair?.amendment).toEqual(
+      manifest,
+    );
   });
 });
 
@@ -242,7 +328,32 @@ function childRepairSnapshot(
   };
 }
 
-function workspaceSessionState(planRepair: PlanRepairSessionSnapshot) {
+function amendmentManifest(): PlanAmendmentManifest {
+  return {
+    id: "plan_amendment_0001",
+    repair_request_id: "plan_repair_request_0001",
+    previous_plan_revision_id: "plan_revision_0001",
+    new_plan_revision_id: "plan_revision_0002",
+    revised_work_items: {},
+    superseded_revisions: [],
+    dependency_graph_changes: [],
+    contract_deltas: [],
+    unaffected_units: [],
+    revalidation_required_units: ["unit_run_0001"],
+    stale_units: [],
+    replacement_units: {},
+    resume_target: {
+      logical_work_item_id: "work_item_0001",
+      mode: "revalidate",
+    },
+    created_at: "2026-07-18T00:06:00Z",
+  };
+}
+
+function workspaceSessionState(
+  planRepair: PlanRepairSessionSnapshot,
+  artifactVersions: unknown[] = [],
+) {
   return {
     type: "session_state",
     session_id: planRepair.link.child_session_id,
@@ -256,7 +367,7 @@ function workspaceSessionState(planRepair: PlanRepairSessionSnapshot) {
     providers: { author: "fake", reviewer: "fake" },
     timeline_nodes: planRepair.timeline_nodes,
     active_node_id: planRepair.timeline_nodes[0]?.node_id ?? null,
-    artifact_versions: [],
+    artifact_versions: artifactVersions,
     artifact_version_summaries: [],
     timeline_node_details: {},
     timeline_node_summaries: {},

@@ -420,6 +420,7 @@ impl WorkspaceEngine {
                             | ArtifactPayload::WorkItemProjection { .. }
                             | ArtifactPayload::WorkItemRevisionHistory { .. }
                             | ArtifactPayload::ProjectionValidation { .. }
+                            | ArtifactPayload::PlanAmendmentManifest { .. }
                     )
                 })
                 .cloned()

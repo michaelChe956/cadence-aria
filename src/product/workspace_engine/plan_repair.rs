@@ -305,6 +305,7 @@ impl WorkspaceEngine {
                 && snapshot.plan_review.as_ref() == Some(&package.plan_review)
                 && snapshot.package_identity.as_ref() == Some(&package.package_identity)
             {
+                self.ensure_plan_repair_manifest_artifact().await?;
                 return Ok(());
             }
             return Err(PlanRepairError::InvalidRepairTarget(
@@ -335,7 +336,8 @@ impl WorkspaceEngine {
             ));
         }
         let journal = awaiting_confirmation_transition(self, snapshot, package);
-        self.commit_plan_repair_transition(journal)
+        self.commit_plan_repair_transition(journal)?;
+        self.ensure_plan_repair_manifest_artifact().await
     }
 
     pub async fn confirm_plan_amendment(

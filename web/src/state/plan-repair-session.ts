@@ -22,7 +22,14 @@ export type PlanRepairRequiredInput = {
   session_link: WorkspaceSessionLink | null;
 };
 
+export type PlanRepairIdentitySource = Pick<
+  PlanRepairSessionSnapshot,
+  "request" | "link"
+>;
+
 type PlanRepairStoreSlice = {
+  projectId: string | null;
+  issueId: string | null;
   attemptId: string | null;
   status: CodingAttemptStatus | null;
   timelineNodes: CodingTimelineNode[];
@@ -33,13 +40,14 @@ export function planRepairRequiredStateUpdate(
   state: PlanRepairStoreSlice,
   message: PlanRepairRequiredInput,
 ): Partial<PlanRepairStoreSlice> {
-  if (!state.attemptId) {
+  if (!state.projectId || !state.issueId || !state.attemptId) {
     return {};
   }
   const activePlanRepair = repairSessionFromRequired(
     message,
     state.attemptId,
     state.activePlanRepair,
+    repairParentRoute(state.projectId, state.issueId, state.attemptId),
   );
   if (activePlanRepair === state.activePlanRepair) {
     return {};
@@ -59,7 +67,7 @@ export function planRepairSnapshotStateUpdate(
     snapshot,
     state.attemptId,
   );
-  if (activePlanRepair === state.activePlanRepair || !activePlanRepair) {
+  if (activePlanRepair === state.activePlanRepair) {
     return {};
   }
   return {
@@ -67,14 +75,14 @@ export function planRepairSnapshotStateUpdate(
     timelineNodes: replaceRepairTimelineNodes(
       state.timelineNodes,
       state.activePlanRepair?.timelineNodes ?? [],
-      activePlanRepair.timelineNodes,
+      activePlanRepair?.timelineNodes ?? [],
     ),
   };
 }
 
 export function planRepairTimelineNodeAddedStateUpdate(
   state: PlanRepairStoreSlice,
-  childSessionId: string,
+  source: PlanRepairIdentitySource,
   node: TimelineNode,
 ): Partial<PlanRepairStoreSlice> {
   if (!state.attemptId) {
@@ -82,7 +90,7 @@ export function planRepairTimelineNodeAddedStateUpdate(
   }
   const activePlanRepair = addRepairTimelineNode(
     state.activePlanRepair,
-    childSessionId,
+    source,
     node,
     state.attemptId,
   );
@@ -100,7 +108,7 @@ export function planRepairTimelineNodeAddedStateUpdate(
 
 export function planRepairTimelineNodeUpdatedStateUpdate(
   state: PlanRepairStoreSlice,
-  childSessionId: string,
+  source: PlanRepairIdentitySource,
   nodeId: string,
   status: TimelineNode["status"],
   summary?: string | null,
@@ -108,11 +116,12 @@ export function planRepairTimelineNodeUpdatedStateUpdate(
 ): Partial<PlanRepairStoreSlice> {
   const activePlanRepair = updateRepairTimelineNode(
     state.activePlanRepair,
-    childSessionId,
+    source,
     nodeId,
     status,
     summary,
     completedAt,
+    state.attemptId,
   );
   if (activePlanRepair === state.activePlanRepair || !activePlanRepair) {
     return {};
@@ -128,13 +137,14 @@ export function planRepairTimelineNodeUpdatedStateUpdate(
 
 export function planRepairHistoryStateUpdate(
   state: PlanRepairStoreSlice,
-  childSessionId: string,
+  source: PlanRepairIdentitySource,
   history: WorkItemRevisionHistoryDto,
 ): Partial<PlanRepairStoreSlice> {
   const activePlanRepair = setRepairHistory(
     state.activePlanRepair,
-    childSessionId,
+    source,
     history,
+    state.attemptId,
   );
   return activePlanRepair === state.activePlanRepair ? {} : { activePlanRepair };
 }
@@ -142,12 +152,13 @@ export function planRepairHistoryStateUpdate(
 export function planRepairAmendmentStateUpdate(
   state: PlanRepairStoreSlice,
   amendment: PlanAmendmentManifest,
-  childSessionId?: string,
+  source?: PlanRepairIdentitySource,
 ): Partial<PlanRepairStoreSlice> {
   const activePlanRepair = setRepairAmendment(
     state.activePlanRepair,
     amendment,
-    childSessionId,
+    source,
+    state.attemptId,
   );
   return activePlanRepair === state.activePlanRepair ? {} : { activePlanRepair };
 }
@@ -172,28 +183,79 @@ export function planRepairResumeStateUpdate(
 export function repairSessionFromSnapshot(
   snapshot: PlanRepairSessionSnapshot,
   attemptId: string,
+  expectedRoute: string,
   history: WorkItemRevisionHistoryDto | null = null,
 ): PlanRepairSessionState | null {
-  if (!snapshotBelongsToAttempt(snapshot, attemptId)) {
+  if (
+    !snapshotBelongsToAttempt(snapshot, attemptId, expectedRoute) ||
+    isTerminalRepairRequest(snapshot.request)
+  ) {
     return null;
   }
   return normalizedRepairSession(snapshot, attemptId, history);
+}
+
+export function reconcileParentPlanRepair(
+  current: PlanRepairSessionState | null,
+  snapshot: PlanRepairSessionSnapshot | null | undefined,
+  attemptId: string,
+  attemptStatus: CodingAttemptStatus,
+  expectedRoute: string,
+): PlanRepairSessionState | null {
+  const validCurrent =
+    current && snapshotBelongsToAttempt(current, attemptId, expectedRoute)
+      ? current
+      : null;
+  if (!snapshot) {
+    return isPlanRepairBlockedAttempt(attemptStatus) ? validCurrent : null;
+  }
+  if (!snapshotBelongsToAttempt(snapshot, attemptId, expectedRoute)) {
+    return validCurrent;
+  }
+  if (!validCurrent) {
+    return repairSessionFromSnapshot(snapshot, attemptId, expectedRoute);
+  }
+  if (!sameRepairDurableIdentity(validCurrent, snapshot)) {
+    return validCurrent;
+  }
+  if (isOlderRequest(snapshot.request, validCurrent.request)) {
+    return validCurrent;
+  }
+  if (isTerminalRepairRequest(snapshot.request)) {
+    return null;
+  }
+  return reconcileRepairSession(validCurrent, snapshot, attemptId);
+}
+
+function isPlanRepairBlockedAttempt(status: CodingAttemptStatus) {
+  return (
+    status === "awaiting_plan_amendment" ||
+    status === "applying_plan_amendment" ||
+    status === "amendment_apply_failed"
+  );
 }
 
 export function repairSessionFromRequired(
   message: PlanRepairRequiredInput,
   attemptId: string,
   current: PlanRepairSessionState | null,
+  expectedRoute: string,
 ): PlanRepairSessionState | null {
   const link = message.session_link;
-  if (!link || !requestAndLinkBelongToAttempt(message.request, link, attemptId)) {
+  if (
+    !link ||
+    !requestAndLinkBelongToAttempt(message.request, link, attemptId, expectedRoute)
+  ) {
     return current;
   }
-  if (
-    current &&
-    current.request.id === message.request.id &&
-    current.childSessionId === link.child_session_id
-  ) {
+  if (isTerminalRepairRequest(message.request)) {
+    return current;
+  }
+  const nextIdentity = { request: message.request, link };
+  if (current) {
+    if (!sameRepairDurableIdentity(current, nextIdentity)) {
+      return current;
+    }
     if (isOlderRequest(message.request, current.request)) {
       return current;
     }
@@ -230,34 +292,31 @@ export function updateRepairSessionSnapshot(
 ): PlanRepairSessionState | null {
   if (
     !current ||
-    snapshot.link.child_session_id !== current.childSessionId ||
-    snapshot.request.id !== current.request.id ||
-    isOlderRequest(snapshot.request, current.request) ||
-    !snapshotBelongsToAttempt(snapshot, attemptId)
+    !snapshotBelongsToAttempt(
+      snapshot,
+      attemptId,
+      current.link.return_context.original_route,
+    ) ||
+    !sameRepairDurableIdentity(current, snapshot)
   ) {
     return current;
   }
-  const next = normalizedRepairSession(snapshot, attemptId, current.history);
-  return {
-    ...next,
-    childTimelineNodes: current.childTimelineNodes.reduce(
-      (nodes, node) => upsertById(nodes, node, "node_id"),
-      next.childTimelineNodes,
-    ),
-    timelineNodes: current.timelineNodes.reduce(
-      (nodes, node) => upsertById(nodes, node, "id"),
-      next.timelineNodes,
-    ),
-  };
+  if (isOlderRequest(snapshot.request, current.request)) {
+    return current;
+  }
+  if (isTerminalRepairRequest(snapshot.request)) {
+    return null;
+  }
+  return reconcileRepairSession(current, snapshot, attemptId);
 }
 
 export function addRepairTimelineNode(
   current: PlanRepairSessionState | null,
-  childSessionId: string,
+  source: PlanRepairIdentitySource,
   node: TimelineNode,
   attemptId: string,
 ): PlanRepairSessionState | null {
-  if (!current || current.childSessionId !== childSessionId) {
+  if (!current || !repairSourceMatchesCurrent(current, source, attemptId)) {
     return current;
   }
   return {
@@ -273,13 +332,18 @@ export function addRepairTimelineNode(
 
 export function updateRepairTimelineNode(
   current: PlanRepairSessionState | null,
-  childSessionId: string,
+  source: PlanRepairIdentitySource,
   nodeId: string,
   status: TimelineNode["status"],
   summary?: string | null,
   completedAt?: string | null,
+  attemptId?: string | null,
 ): PlanRepairSessionState | null {
-  if (!current || current.childSessionId !== childSessionId) {
+  if (
+    !attemptId ||
+    !current ||
+    !repairSourceMatchesCurrent(current, source, attemptId)
+  ) {
     return current;
   }
   const existing = current.childTimelineNodes.find((node) => node.node_id === nodeId);
@@ -315,16 +379,17 @@ export function updateRepairTimelineNode(
 export function setRepairAmendment(
   current: PlanRepairSessionState | null,
   amendment: PlanAmendmentManifest,
-  childSessionId?: string,
+  source: PlanRepairIdentitySource | undefined,
+  attemptId: string | null,
 ): PlanRepairSessionState | null {
   if (
+    !attemptId ||
     !current ||
-    (childSessionId !== undefined && current.childSessionId !== childSessionId) ||
+    (source !== undefined && !repairSourceMatchesCurrent(current, source, attemptId)) ||
     amendment.repair_request_id !== current.request.id ||
     amendment.previous_plan_revision_id !== current.request.base_plan_revision_id ||
-    (current.request.amendment_id !== null && current.request.amendment_id !== amendment.id) ||
-    (current.link.trigger.amendment_id !== "" &&
-      current.link.trigger.amendment_id !== amendment.id)
+    current.request.amendment_id !== amendment.id ||
+    current.link.trigger.amendment_id !== amendment.id
   ) {
     return current;
   }
@@ -333,10 +398,15 @@ export function setRepairAmendment(
 
 export function setRepairHistory(
   current: PlanRepairSessionState | null,
-  childSessionId: string,
+  source: PlanRepairIdentitySource,
   history: WorkItemRevisionHistoryDto,
+  attemptId: string | null,
 ): PlanRepairSessionState | null {
-  if (!current || current.childSessionId !== childSessionId) {
+  if (
+    !attemptId ||
+    !current ||
+    !repairSourceMatchesCurrent(current, source, attemptId)
+  ) {
     return current;
   }
   return { ...current, history };
@@ -349,10 +419,16 @@ export function repairMatchesAmendment(
   if (!current) {
     return false;
   }
+  const durableAmendmentId = current.request.amendment_id;
   return (
-    current.amendment?.id === amendmentId ||
-    current.request.amendment_id === amendmentId ||
-    current.link.trigger.amendment_id === amendmentId
+    durableAmendmentId !== null &&
+    durableAmendmentId !== "" &&
+    amendmentId === durableAmendmentId &&
+    current.link.trigger.amendment_id === durableAmendmentId &&
+    current.amendment?.id === durableAmendmentId &&
+    current.amendment.repair_request_id === current.request.id &&
+    current.amendment.previous_plan_revision_id ===
+      current.request.base_plan_revision_id
   );
 }
 
@@ -392,26 +468,185 @@ function normalizedRepairSession(
   };
 }
 
-function snapshotBelongsToAttempt(snapshot: PlanRepairSessionSnapshot, attemptId: string) {
-  return requestAndLinkBelongToAttempt(snapshot.request, snapshot.link, attemptId);
+function snapshotBelongsToAttempt(
+  snapshot: PlanRepairIdentitySource,
+  attemptId: string,
+  expectedRoute: string,
+) {
+  return requestAndLinkBelongToAttempt(
+    snapshot.request,
+    snapshot.link,
+    attemptId,
+    expectedRoute,
+  );
 }
 
 function requestAndLinkBelongToAttempt(
   request: PlanRepairRequest,
   link: WorkspaceSessionLink,
   attemptId: string,
+  expectedRoute: string,
 ) {
+  const amendmentId = request.amendment_id;
   return (
     link.relation === "plan_repair" &&
+    link.id !== "" &&
+    link.child_session_id !== "" &&
+    request.id !== "" &&
+    request.plan_id !== "" &&
+    request.fingerprint !== "" &&
+    request.base_plan_revision_id !== "" &&
+    amendmentId !== null &&
+    amendmentId !== "" &&
     request.trigger_attempt_id === attemptId &&
     link.parent_session_id === attemptId &&
     link.trigger.attempt_id === attemptId &&
     link.return_context.original_attempt_id === attemptId &&
+    link.trigger.unit_run_id === request.trigger_unit_run_id &&
+    link.return_context.original_unit_run_id === request.trigger_unit_run_id &&
+    link.trigger.review_id === request.trigger_review_id &&
+    link.trigger.finding_id === request.trigger_finding_id &&
+    link.return_context.timeline_anchor_id === request.trigger_finding_id &&
     link.trigger.repair_request_id === request.id &&
     link.trigger.fingerprint === request.fingerprint &&
     link.trigger.base_plan_revision_id === request.base_plan_revision_id &&
-    (request.amendment_id === null || link.trigger.amendment_id === request.amendment_id)
+    link.trigger.amendment_id === amendmentId &&
+    link.return_context.original_route === expectedRoute
   );
+}
+
+export function repairSourceMatchesCurrent(
+  current: PlanRepairSessionState | null,
+  source: PlanRepairIdentitySource,
+  attemptId: string,
+) {
+  return (
+    current !== null &&
+    snapshotBelongsToAttempt(
+      source,
+      attemptId,
+      current.link.return_context.original_route,
+    ) &&
+    sameRepairDurableIdentity(current, source)
+  );
+}
+
+function sameRepairDurableIdentity(
+  left: PlanRepairIdentitySource,
+  right: PlanRepairIdentitySource,
+) {
+  return (
+    left.request.id === right.request.id &&
+    left.request.plan_id === right.request.plan_id &&
+    left.request.base_plan_revision_id === right.request.base_plan_revision_id &&
+    left.request.trigger_attempt_id === right.request.trigger_attempt_id &&
+    left.request.trigger_unit_run_id === right.request.trigger_unit_run_id &&
+    left.request.trigger_review_id === right.request.trigger_review_id &&
+    left.request.trigger_finding_id === right.request.trigger_finding_id &&
+    left.request.amendment_id === right.request.amendment_id &&
+    left.request.fingerprint === right.request.fingerprint &&
+    left.link.id === right.link.id &&
+    left.link.relation === right.link.relation &&
+    left.link.parent_session_id === right.link.parent_session_id &&
+    left.link.child_session_id === right.link.child_session_id &&
+    left.link.trigger.attempt_id === right.link.trigger.attempt_id &&
+    left.link.trigger.unit_run_id === right.link.trigger.unit_run_id &&
+    left.link.trigger.review_id === right.link.trigger.review_id &&
+    left.link.trigger.finding_id === right.link.trigger.finding_id &&
+    left.link.trigger.repair_request_id === right.link.trigger.repair_request_id &&
+    left.link.trigger.amendment_id === right.link.trigger.amendment_id &&
+    left.link.trigger.fingerprint === right.link.trigger.fingerprint &&
+    left.link.trigger.base_plan_revision_id === right.link.trigger.base_plan_revision_id &&
+    left.link.return_context.original_attempt_id ===
+      right.link.return_context.original_attempt_id &&
+    left.link.return_context.original_unit_run_id ===
+      right.link.return_context.original_unit_run_id &&
+    left.link.return_context.timeline_anchor_id ===
+      right.link.return_context.timeline_anchor_id &&
+    left.link.return_context.original_route ===
+      right.link.return_context.original_route
+  );
+}
+
+function repairParentRoute(projectId: string, issueId: string, attemptId: string) {
+  return `/workbench/projects/${projectId}/issues/${issueId}/coding/${attemptId}`;
+}
+
+function reconcileRepairSession(
+  current: PlanRepairSessionState,
+  snapshot: PlanRepairSessionSnapshot,
+  attemptId: string,
+): PlanRepairSessionState {
+  const equalVersion = snapshot.request.updated_at === current.request.updated_at;
+  const childTimelineNodes = reconcileChildTimelineNodes(
+    current.childTimelineNodes,
+    snapshot.timeline_nodes,
+    snapshot.request.updated_at,
+  );
+  const stage =
+    equalVersion && stageOrder(snapshot.stage) < stageOrder(current.stage)
+      ? current.stage
+      : snapshot.stage;
+  return {
+    ...snapshot,
+    stage,
+    projection: snapshot.projection ?? current.projection,
+    amendment: snapshot.amendment ?? current.amendment,
+    validation: snapshot.validation ?? current.validation,
+    impact: snapshot.impact ?? current.impact,
+    plan_review: snapshot.plan_review ?? current.plan_review,
+    package_identity: snapshot.package_identity ?? current.package_identity,
+    candidate_package_artifact_id:
+      snapshot.candidate_package_artifact_id ?? current.candidate_package_artifact_id,
+    impact_scope_review: snapshot.impact_scope_review ?? current.impact_scope_review,
+    error: snapshot.error ?? current.error,
+    childSessionId: snapshot.link.child_session_id,
+    childTimelineNodes,
+    timelineNodes: childTimelineNodes.map((node) => codingTimelineNode(node, attemptId)),
+    history: current.history,
+  };
+}
+
+function reconcileChildTimelineNodes(
+  current: TimelineNode[],
+  snapshot: TimelineNode[],
+  snapshotWatermark: string,
+) {
+  const snapshotIds = new Set(snapshot.map((node) => node.node_id));
+  return [
+    ...snapshot,
+    ...current.filter(
+      (node) =>
+        !snapshotIds.has(node.node_id) &&
+        isLiveTimelineNode(node) &&
+        node.started_at > snapshotWatermark,
+    ),
+  ];
+}
+
+function isLiveTimelineNode(node: TimelineNode) {
+  return node.status === "active" || node.status === "paused";
+}
+
+function isTerminalRepairRequest(request: PlanRepairRequest) {
+  return ["applied", "cancelled", "failed"].includes(request.status);
+}
+
+function stageOrder(stage: PlanRepairSessionState["stage"]) {
+  return [
+    "triaging",
+    "authoring_revision",
+    "validating_contract",
+    "generating_projections",
+    "plan_review",
+    "awaiting_confirmation",
+    "published",
+    "amendment_conflict",
+    "applying_amendment",
+    "amendment_apply_failed",
+    "completed",
+    "failed",
+  ].indexOf(stage);
 }
 
 function isOlderRequest(next: PlanRepairRequest, current: PlanRepairRequest) {

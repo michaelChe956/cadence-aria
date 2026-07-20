@@ -106,6 +106,70 @@ async fn plan_repair_refresh_fails_closed_on_snapshot_identity_mismatch() {
 }
 
 #[tokio::test]
+async fn plan_repair_refresh_fails_closed_on_link_return_identity_mismatch() {
+    type LinkMutation = fn(&mut crate::product::models::WorkspaceSessionLink);
+    let cases: [(&str, LinkMutation); 5] = [
+        ("parent", |link| {
+            link.parent_session_id = "coding_attempt_wrong".to_string();
+        }),
+        ("return_attempt", |link| {
+            link.return_context.original_attempt_id = "coding_attempt_wrong".to_string();
+        }),
+        ("return_unit", |link| {
+            link.return_context.original_unit_run_id = "coding_unit_run_wrong".to_string();
+        }),
+        ("timeline_anchor", |link| {
+            link.return_context.timeline_anchor_id = "finding_wrong".to_string();
+        }),
+        ("return_route", |link| {
+            link.return_context.original_route = "/wrong-route".to_string();
+        }),
+    ];
+    for (case, mutate) in cases {
+        let (tmp, lifecycle, _revision_store, mut parent) = plan_repair_parent_engine();
+        let child = parent
+            .start_plan_repair(plan_repair_fixture(
+                "plan_repair_request_0001",
+                &format!("fingerprint_refresh_link_{case}"),
+            ))
+            .await
+            .unwrap();
+        let mut snapshot = lifecycle
+            .load_plan_repair_session_state("project_0001", "issue_0001", &child.id)
+            .unwrap()
+            .unwrap();
+        mutate(&mut snapshot.link);
+        let link_path = lifecycle
+            .app_paths()
+            .issue_lifecycle_root("project_0001", "issue_0001")
+            .join("workspace-session-links")
+            .join(format!("{}.json", snapshot.link.id));
+        std::fs::write(
+            link_path,
+            serde_json::to_vec_pretty(&snapshot.link).unwrap(),
+        )
+        .unwrap();
+        let snapshot_path = lifecycle
+            .workspace_timeline_root_for_issue_session(
+                "project_0001",
+                "issue_0001",
+                &child.id,
+            )
+            .unwrap()
+            .join("plan_repair_session_state.json");
+        std::fs::write(
+            snapshot_path,
+            serde_json::to_vec_pretty(&snapshot).unwrap(),
+        )
+        .unwrap();
+
+        let restored = plan_repair_restarted_child_engine(&tmp, &lifecycle, child);
+
+        plan_repair_assert_failed_recovery(&restored, "identity");
+    }
+}
+
+#[tokio::test]
 async fn plan_repair_cancelled_replay_is_idempotent_without_state_writes() {
     let (tmp, lifecycle, revision_store, mut parent) = plan_repair_parent_engine();
     let child = parent

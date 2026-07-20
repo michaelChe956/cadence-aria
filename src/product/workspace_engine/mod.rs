@@ -87,6 +87,7 @@ mod parsers;
 mod plan_outline;
 mod plan_projection;
 mod plan_repair;
+mod plan_repair_artifacts;
 mod plan_repair_recovery;
 mod plan_repair_review;
 mod plan_repair_transaction;

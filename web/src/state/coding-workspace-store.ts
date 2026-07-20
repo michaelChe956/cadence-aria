@@ -38,7 +38,8 @@ import {
   planRepairSnapshotStateUpdate,
   planRepairTimelineNodeAddedStateUpdate,
   planRepairTimelineNodeUpdatedStateUpdate,
-  repairSessionFromSnapshot,
+  reconcileParentPlanRepair,
+  type PlanRepairIdentitySource,
   type PlanRepairRequiredInput,
   type PlanRepairSessionState,
 } from "./plan-repair-session";
@@ -146,19 +147,25 @@ export interface CodingWorkspaceActions {
   setActiveTab: (tab: CodingArtifactTab, lockedByUser?: boolean) => void;
   setPlanRepairRequired: (message: PlanRepairRequiredInput) => void;
   updatePlanRepairSession: (snapshot: PlanRepairSessionSnapshot) => void;
-  addPlanRepairTimelineNode: (childSessionId: string, node: WorkspaceTimelineNode) => void;
+  addPlanRepairTimelineNode: (
+    source: PlanRepairIdentitySource,
+    node: WorkspaceTimelineNode,
+  ) => void;
   updatePlanRepairTimelineNode: (
-    childSessionId: string,
+    source: PlanRepairIdentitySource,
     nodeId: string,
     status: WorkspaceTimelineNode["status"],
     summary?: string | null,
     completedAt?: string | null,
   ) => void;
   setPlanRepairHistory: (
-    childSessionId: string,
+    source: PlanRepairIdentitySource,
     history: WorkItemRevisionHistoryDto,
   ) => void;
-  setPlanAmendment: (amendment: PlanAmendmentManifest, childSessionId?: string) => void;
+  setPlanAmendment: (
+    amendment: PlanAmendmentManifest,
+    source?: PlanRepairIdentitySource,
+  ) => void;
   clearPlanRepairAfterResume: (amendmentId: string) => void;
   reset: () => void;
 }
@@ -207,7 +214,6 @@ const initialState: CodingWorkspaceState = {
   activePlanRepair: null,
   requireExecutionPlanConfirm: false,
 };
-
 export const useCodingWorkspaceStore = create<
   CodingWorkspaceState & CodingWorkspaceActions
 >((set, get) => ({
@@ -215,9 +221,13 @@ export const useCodingWorkspaceStore = create<
 
   setSessionState: (snapshot) =>
     set((prev) => {
-      const activePlanRepair = snapshot.linked_plan_repair
-        ? repairSessionFromSnapshot(snapshot.linked_plan_repair, snapshot.attempt_id)
-        : null;
+      const activePlanRepair = reconcileParentPlanRepair(
+        prev.activePlanRepair,
+        snapshot.linked_plan_repair,
+        snapshot.attempt_id,
+        snapshot.status,
+        `/workbench/projects/${snapshot.project_id}/issues/${snapshot.issue_id}/coding/${snapshot.attempt_id}`,
+      );
       const timelineNodes = mergeRepairTimelineNodes(
         snapshot.timeline_nodes,
         activePlanRepair?.timelineNodes ?? [],
@@ -443,15 +453,14 @@ export const useCodingWorkspaceStore = create<
 
   setPlanRepairRequired: (message) =>
     set((state) => planRepairRequiredStateUpdate(state, message)),
-
   updatePlanRepairSession: (snapshot) =>
     set((state) => planRepairSnapshotStateUpdate(state, snapshot)),
 
-  addPlanRepairTimelineNode: (childSessionId, node) =>
-    set((state) => planRepairTimelineNodeAddedStateUpdate(state, childSessionId, node)),
+  addPlanRepairTimelineNode: (source, node) =>
+    set((state) => planRepairTimelineNodeAddedStateUpdate(state, source, node)),
 
   updatePlanRepairTimelineNode: (
-    childSessionId,
+    source,
     nodeId,
     status,
     summary,
@@ -460,7 +469,7 @@ export const useCodingWorkspaceStore = create<
     set((state) =>
       planRepairTimelineNodeUpdatedStateUpdate(
         state,
-        childSessionId,
+        source,
         nodeId,
         status,
         summary,
@@ -468,11 +477,11 @@ export const useCodingWorkspaceStore = create<
       ),
     ),
 
-  setPlanRepairHistory: (childSessionId, history) =>
-    set((state) => planRepairHistoryStateUpdate(state, childSessionId, history)),
+  setPlanRepairHistory: (source, history) =>
+    set((state) => planRepairHistoryStateUpdate(state, source, history)),
 
-  setPlanAmendment: (amendment, childSessionId) =>
-    set((state) => planRepairAmendmentStateUpdate(state, amendment, childSessionId)),
+  setPlanAmendment: (amendment, source) =>
+    set((state) => planRepairAmendmentStateUpdate(state, amendment, source)),
 
   clearPlanRepairAfterResume: (amendmentId) =>
     set((state) => planRepairResumeStateUpdate(state, amendmentId)),

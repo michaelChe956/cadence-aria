@@ -123,7 +123,16 @@ pub(crate) async fn handle_workspace_socket(
     )));
 
     let (session_state, restored_choice_request) = {
-        let engine = engine.lock().await;
+        let mut engine = engine.lock().await;
+        if let Err(error) = engine.ensure_plan_repair_artifacts().await {
+            let err = WsOutMessage::Error {
+                message: format!("plan repair artifact bootstrap failed: {error:?}"),
+            };
+            if let Ok(json) = serde_json::to_string(&err) {
+                let _ = ws_sender.send(Message::Text(json.into())).await;
+            }
+            return;
+        }
         (
             engine.build_session_state(),
             engine.pending_author_choice_request_message(),

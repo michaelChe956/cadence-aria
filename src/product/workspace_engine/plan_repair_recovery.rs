@@ -209,8 +209,13 @@ fn validate_refresh_identity(
         .amendment_id
         .as_deref()
         .ok_or_else(|| "plan repair snapshot identity mismatch: amendment missing".to_string())?;
+    let expected_route = format!(
+        "/workbench/projects/{}/issues/{}/coding/{}",
+        session.project_id, session.issue_id, request.trigger_attempt_id
+    );
     if session.workspace_type != WorkspaceType::WorkItemPlan
         || session.entity_id != request.plan_id
+        || link.parent_session_id != request.trigger_attempt_id
         || link.child_session_id != session.session_id
         || link.id != format!("workspace_session_link_{amendment_id}")
         || link.child_session_id != format!("workspace_session_{amendment_id}")
@@ -223,6 +228,10 @@ fn validate_refresh_identity(
         || link.trigger.unit_run_id != request.trigger_unit_run_id
         || link.trigger.review_id != request.trigger_review_id
         || link.trigger.finding_id != request.trigger_finding_id
+        || link.return_context.original_attempt_id != request.trigger_attempt_id
+        || link.return_context.original_unit_run_id != request.trigger_unit_run_id
+        || link.return_context.timeline_anchor_id != request.trigger_finding_id
+        || link.return_context.original_route != expected_route
     {
         return Err("plan repair snapshot identity mismatch".to_string());
     }
