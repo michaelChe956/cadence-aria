@@ -3,6 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import { deleteCodingAttempt } from "../api/client";
 import type { CodingAttemptAddress } from "../api/types";
 import { CodingTimeline } from "../components/coding-workspace/CodingTimeline";
+import {
+  PlanRepairCenter,
+  type PlanRepairAction,
+} from "../components/coding-workspace/PlanRepairCenter";
 import { CodingProviderConfigPanel } from "../components/coding-workspace/CodingProviderConfigPanel";
 import { RoleRunHistoryPanel } from "../components/coding-workspace/RoleRunHistoryPanel";
 import {
@@ -11,8 +15,10 @@ import {
 } from "../components/chat-workspace/ChatEntryList";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
+import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { CodingArtifactTabs } from "./CodingWorkspaceArtifacts";
 import {
   ACTIVE_ATTEMPT_STATUSES,
@@ -38,6 +44,11 @@ export function CodingWorkspacePage({
 }) {
   const api = useCodingWorkspaceWs(address);
   const store = useCodingWorkspaceStore();
+  const planRepairApi = useWorkspaceWs(
+    store.activePlanRepair?.childSessionId ?? null,
+  );
+  const planRepairWorkspaceError = useWorkspaceStore((state) => state.error);
+  const planRepairProtocolError = useWorkspaceStore((state) => state.protocolError);
   const connected = store.connectionStatus === "connected";
   const activeTab = store.activeTab;
   const [activePanel, setActivePanel] = useState<"chat" | "results">("chat");
@@ -54,7 +65,19 @@ export function CodingWorkspacePage({
     addressKeyRef.current = addressKey;
     deleteGenerationRef.current += 1;
   }
-  const pageError = planError ?? deleteError;
+  const childWorkspaceError = store.activePlanRepair
+    ? planRepairProtocolError
+      ? `${planRepairProtocolError.code}: ${planRepairProtocolError.message}`
+      : planRepairWorkspaceError
+    : null;
+  const planRepairActionStatus = store.activePlanRepair
+    ? childWorkspaceError ??
+      planError ??
+      (planRepairApi.connectionStatus === "connected"
+        ? null
+        : "Child Workspace 正在连接，Repair 操作暂不可用。")
+    : null;
+  const pageError = store.activePlanRepair ? deleteError : planError ?? deleteError;
   const providerSummary = store.roleProviderConfigSnapshot
     ? `Coder ${store.roleProviderConfigSnapshot.coder} · Reviewer ${store.roleProviderConfigSnapshot.code_reviewer}`
     : "provider pending";
@@ -137,6 +160,36 @@ export function CodingWorkspacePage({
     }
   }
 
+  function handlePlanRepairAction(action: PlanRepairAction) {
+    const amendmentId = store.activePlanRepair?.amendment?.id;
+    if (!amendmentId) {
+      setPlanError("Plan Repair Amendment 尚未就绪。");
+      return;
+    }
+    let sent = false;
+    switch (action) {
+      case "confirm":
+        sent = planRepairApi.confirmPlanAmendment(amendmentId);
+        break;
+      case "regenerate":
+        sent = planRepairApi.sendHumanConfirm("request-change", {
+          description: "要求重新生成 Plan Repair 修订",
+        });
+        break;
+      case "adjust_scope":
+        sent = planRepairApi.sendHumanConfirm("request-change", {
+          description: "调整 Plan Repair 修订范围",
+        });
+        break;
+      case "cancel":
+        sent = planRepairApi.cancelPlanAmendment(amendmentId, "用户取消修订");
+        break;
+      case "open_workspace":
+        return;
+    }
+    setPlanError(sent ? null : "Plan Repair 操作发送失败，请检查 Child Workspace 连接。");
+  }
+
   return (
     <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]">
       <div className="flex h-11 min-w-0 shrink-0 items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-3">
@@ -204,10 +257,22 @@ export function CodingWorkspacePage({
           activeNodeId={store.activeNodeId}
           selectedNodeId={store.selectedNodeId}
           onSelectNode={handleSelectTimelineNode}
+          planRepair={store.activePlanRepair}
         />
         <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-[var(--aria-panel)]">
-          <CodingPanelTabs activePanel={activePanel} onSelectPanel={setActivePanel} />
-          {activePanel === "results" ? (
+          {store.activePlanRepair ? (
+            <div className="row-span-2 min-h-0 min-w-0 overflow-hidden">
+              <PlanRepairCenter
+                state={store.activePlanRepair}
+                onAction={handlePlanRepairAction}
+                actionsDisabled={planRepairApi.connectionStatus !== "connected"}
+                actionStatus={planRepairActionStatus}
+              />
+            </div>
+          ) : (
+            <CodingPanelTabs activePanel={activePanel} onSelectPanel={setActivePanel} />
+          )}
+          {store.activePlanRepair ? null : activePanel === "results" ? (
             <CodingArtifactTabs
               address={address}
               activeTab={activeTab}

@@ -336,9 +336,36 @@ export function useWorkspaceWs(sessionId: string | null) {
 
   const sendHumanConfirm = useCallback(
     (decision: HumanConfirmDecision, payload?: unknown) => {
-      if (sendJson({ type: "human_confirm", decision, payload: payload ?? null })) {
+      const sent = sendJson({ type: "human_confirm", decision, payload: payload ?? null });
+      if (sent) {
         useWorkspaceStore.getState().resolveGateEntry(decision);
       }
+      return sent;
+    },
+    [sendJson],
+  );
+
+  const confirmPlanAmendment = useCallback(
+    (amendmentId: string) => {
+      const id = amendmentId.trim();
+      return id
+        ? sendJson({ type: "confirm_plan_amendment", amendment_id: id })
+        : false;
+    },
+    [sendJson],
+  );
+
+  const cancelPlanAmendment = useCallback(
+    (amendmentId: string, reason?: string | null) => {
+      const id = amendmentId.trim();
+      const trimmedReason = reason?.trim() ?? "";
+      return id
+        ? sendJson({
+            type: "cancel_plan_amendment",
+            amendment_id: id,
+            reason: trimmedReason || null,
+          })
+        : false;
     },
     [sendJson],
   );
@@ -580,6 +607,8 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendWorkItemPlanCompileRecoveryAction,
     sendHumanPresentationRevision,
     sendHumanConfirm,
+    confirmPlanAmendment,
+    cancelPlanAmendment,
     sendHello,
     sendPing,
     startGeneration,

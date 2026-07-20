@@ -1,9 +1,12 @@
 import { beforeEach, vi } from "vitest";
 import type { WorkItemExecutionPlan } from "../api/types";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
+import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useWorkspaceStore } from "../state/workspace-ws-store";
 
 type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
+type PlanRepairWsApi = ReturnType<typeof useWorkspaceWs>;
 
 export const CODING_ATTEMPT_ADDRESS = {
   projectId: "project_0001",
@@ -47,6 +50,20 @@ export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
     ...overrides,
   };
   vi.mocked(useCodingWorkspaceWs).mockReturnValue(api);
+  return api;
+}
+
+export function mockPlanRepairWs(
+  overrides: Partial<PlanRepairWsApi> = {},
+) {
+  const api = {
+    confirmPlanAmendment: vi.fn(() => true),
+    cancelPlanAmendment: vi.fn(() => true),
+    sendHumanConfirm: vi.fn(() => true),
+    connectionStatus: "connected",
+    ...overrides,
+  } as unknown as PlanRepairWsApi;
+  vi.mocked(useWorkspaceWs).mockReturnValue(api);
   return api;
 }
 
@@ -99,6 +116,7 @@ export function installCodingWorkspacePageTestHooks() {
       value: vi.fn(),
     });
     useCodingWorkspaceStore.getState().reset();
+    useWorkspaceStore.getState().reset();
     vi.clearAllMocks();
   });
 }

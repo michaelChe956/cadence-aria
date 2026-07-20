@@ -161,6 +161,12 @@ export type WsInMessage =
     }
   | SaveHumanPresentationRevisionMessage
   | { type: "human_confirm"; decision: HumanConfirmDecision; payload?: unknown }
+  | { type: "confirm_plan_amendment"; amendment_id: string }
+  | {
+      type: "cancel_plan_amendment";
+      amendment_id: string;
+      reason?: string | null;
+    }
   | { type: "abort" }
   | { type: "hello"; session_id: string; last_seen_node_id?: string | null }
   | { type: "ping" };

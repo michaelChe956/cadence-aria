@@ -507,6 +507,30 @@ describe("workspace ws store content entries", () => {
     expect(useWorkspaceStore.getState().protocolError).toBeNull();
   });
 
+  it("clears workspace and protocol errors when a recovered session state arrives", () => {
+    const store = useWorkspaceStore.getState();
+    store.setError("Child Workspace 执行失败");
+    store.setProtocolError({
+      code: "PLAN_AMENDMENT_CONFIRMATION_FAILED",
+      message: "amendment conflict",
+    });
+
+    store.setSessionState({
+      session_id: "workspace_session_repair_0001",
+      workspace_type: "work_item",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: [],
+      active_node_id: null,
+    });
+
+    expect(useWorkspaceStore.getState().error).toBeNull();
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+  });
+
   it("stores and clears provider locked snapshots", () => {
     const store = useWorkspaceStore.getState();
 

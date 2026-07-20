@@ -9,6 +9,7 @@ import {
 } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { repairAwaitingConfirmationFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
   CODING_ATTEMPT_ADDRESS,
@@ -16,6 +17,7 @@ import {
   executionPlan,
   installCodingWorkspacePageTestHooks,
   mockCodingWs,
+  mockPlanRepairWs,
   readyCodingState,
 } from "./CodingWorkspacePage.test-utils";
 
@@ -28,6 +30,10 @@ vi.mock("../api/client", () => ({
 
 vi.mock("../hooks/useCodingWorkspaceWs", () => ({
   useCodingWorkspaceWs: vi.fn(),
+}));
+
+vi.mock("../hooks/useWorkspaceWs", () => ({
+  useWorkspaceWs: vi.fn(),
 }));
 
 vi.mock("../hooks/useUnloadGuard", () => ({
@@ -457,5 +463,43 @@ describe("CodingWorkspacePage reports and history", () => {
     await userEvent.click(screen.getByRole("button", { name: /Code Reviewer #1/ }));
 
     expect(useCodingWorkspaceStore.getState().selectedNodeId).toBe("coding_node_0004");
+  });
+
+  it("restores the unified plan repair timeline from visible projections", () => {
+    const repair = repairAwaitingConfirmationFixture();
+    mockCodingWs();
+    mockPlanRepairWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "awaiting_plan_amendment",
+      stage: "code_review",
+      activePlanRepair: repair,
+      timelineNodes: [
+        {
+          id: "coding_node_review_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "code_review",
+          title: "Code Review",
+          status: "completed",
+          agent_role: "reviewer",
+          summary: "发现计划契约缺陷",
+          started_at: "2026-07-20T00:00:00Z",
+          completed_at: "2026-07-20T00:00:30Z",
+          artifact_refs: [],
+        },
+        ...repair.timelineNodes,
+      ],
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("group", { name: "Plan Repair Timeline" }))
+      .toHaveTextContent("等待一次性确认");
+    expect(screen.getAllByText("修订 Work Item Contract")).toHaveLength(1);
   });
 });

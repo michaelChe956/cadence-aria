@@ -204,6 +204,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         pendingReviewDecision: null,
         pendingReviewerSummary: null,
         error: null,
+        protocolError: null,
         activeRunId: state.active_run_id ?? null,
         recoverableInterruptedRun: state.recoverable_interrupted_run ?? null,
       };
@@ -773,7 +774,6 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
   clearExecutionEvents: () => set({ executionEvents: [] }),
 
   setError: (error) => set({ error }),
-
   clearStreaming: () => set({ streamingContent: "", streamBuffers: {}, activeStreamEntryId: null }),
 
   selectNodeDetail: (nodeId) => {

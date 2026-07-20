@@ -751,4 +751,5 @@ describe("CodingWorkspacePage gate panels", () => {
     expect(tabs).toHaveTextContent("missing_design_spec");
     expect(tabs).toHaveTextContent("provider-raw/testing/execute_test_plan_0001.txt");
   });
+
 });
