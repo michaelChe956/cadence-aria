@@ -1,8 +1,12 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { repairAwaitingConfirmationFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
+import {
+  linkedWorkspaceAmendmentSnapshotFixture,
+  repairAwaitingConfirmationFixture,
+} from "../components/coding-workspace/plan-repair-test-fixtures";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
@@ -137,6 +141,61 @@ describe("CodingWorkspacePage plan repair", () => {
     });
     expect(repairApi.sendHumanConfirm).not.toHaveBeenCalled();
     expect(window.location.pathname).toContain("/coding/coding_attempt_0001");
+  });
+
+  it("shows a scoped linked rejection and allows a successful retry", async () => {
+    const repair = repairAwaitingConfirmationFixture();
+    mockCodingWs();
+    const startLinkedWorkspaceAmendment = vi.fn(() => true);
+    mockPlanRepairWs({ startLinkedWorkspaceAmendment });
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "awaiting_plan_amendment",
+      stage: "code_review",
+      workItemExecutionPlan: executionPlan(),
+      activePlanRepair: repair,
+      timelineNodes: repair.timelineNodes,
+    });
+    const linkedStore = useLinkedWorkspaceAmendmentStore.getState();
+    linkedStore.reset(repair.childSessionId);
+    linkedStore.begin({
+      entity_id: "story_spec_0001",
+      workspace_type: "story",
+      relation: "story_amendment",
+    });
+    linkedStore.fail("目标 Story 已失效");
+
+    render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "调整修订范围" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("目标 Story 已失效");
+    expect(screen.getByRole("button", { name: "发起关联修订" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "发起关联修订" }));
+    expect(startLinkedWorkspaceAmendment).toHaveBeenCalledWith({
+      entity_id: "story_spec_0001",
+      workspace_type: "story",
+      relation: "story_amendment",
+    });
+
+    act(() => {
+      useLinkedWorkspaceAmendmentStore.getState().begin({
+        entity_id: "story_spec_0001",
+        workspace_type: "story",
+        relation: "story_amendment",
+      });
+    });
+    expect(screen.getByRole("button", { name: "发起关联修订" })).toBeDisabled();
+
+    act(() => {
+      useLinkedWorkspaceAmendmentStore
+        .getState()
+        .consume(linkedWorkspaceAmendmentSnapshotFixture());
+    });
+    expect(
+      screen.getByRole("link", { name: "打开已创建的 Story Workspace" }),
+    ).toBeInTheDocument();
   });
 
   it("sends exactly one mutation until a matching authoritative response arrives", async () => {

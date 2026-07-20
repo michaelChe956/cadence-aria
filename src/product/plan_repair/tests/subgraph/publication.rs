@@ -250,6 +250,28 @@ fn plan_repair_subgraph_prepare_replaces_old_bindings_and_persists_new_logical_i
         prepared.manifest.replacement_units["wi_core"],
         vec!["wi_core_finalize", "wi_core_prepare"]
     );
+    assert_eq!(
+        prepared
+            .manifest
+            .revised_work_items
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["wi_registration"]
+    );
+    assert!(
+        !prepared
+            .manifest
+            .replacement_units
+            .contains_key("wi_registration")
+    );
+    assert!(
+        prepared
+            .manifest
+            .revised_work_items
+            .keys()
+            .all(|logical_id| !prepared.manifest.replacement_units.contains_key(logical_id))
+    );
     engine.persist_candidate(&prepared).unwrap();
     assert!(
         fixture
@@ -262,6 +284,109 @@ fn plan_repair_subgraph_prepare_replaces_old_bindings_and_persists_new_logical_i
             .store
             .get_logical_work_item(&fixture.plan, "wi_core_finalize")
             .is_ok()
+    );
+}
+
+#[test]
+fn plan_repair_subgraph_merge_keeps_sources_only_in_replacement_units() {
+    let mut fixture = plan_repair_engine_fixture();
+    fixture.plan = fixture
+        .store
+        .release_active_amendment(&fixture.plan, "plan_amendment_0001")
+        .unwrap();
+    fixture.plan = fixture
+        .store
+        .acquire_active_amendment(&fixture.plan, "plan_amendment_merge_0001")
+        .unwrap();
+    let request = PlanRepairRequest {
+        id: "plan_repair_request_merge_0001".to_string(),
+        plan_id: fixture.plan.id.clone(),
+        base_plan_revision_id: "plan_revision_0001".to_string(),
+        trigger_attempt_id: "coding_attempt_0001".to_string(),
+        trigger_unit_run_id: "coding_unit_run_0001".to_string(),
+        trigger_review_id: Some("code_review_0001".to_string()),
+        trigger_finding_id: "finding_merge_0001".to_string(),
+        amendment_id: Some("plan_amendment_merge_0001".to_string()),
+        defect_class: PlanDefectClass::DependencyGraphInvalid,
+        reason_code: "dependency_graph_invalid".to_string(),
+        repair_target: RepairTarget {
+            kind: RepairTargetKind::Subgraph,
+            logical_work_item_ids: vec!["wi_core".to_string(), "wi_registration".to_string()],
+            work_item_revision_ids: vec![
+                "work_item_revision_wi_core_0001".to_string(),
+                "work_item_revision_wi_registration_0001".to_string(),
+            ],
+        },
+        contract_refs: vec!["contract.workflow".to_string()],
+        capability_refs: vec!["finalization_failure".to_string()],
+        evidence: vec![],
+        fingerprint: "fingerprint_merge_0001".to_string(),
+        status: PlanRepairRequestStatus::InProgress,
+        created_at: "2026-07-18T00:00:02Z".to_string(),
+        updated_at: "2026-07-18T00:00:02Z".to_string(),
+    };
+    fixture
+        .store
+        .put_repair_request(&fixture.plan, &request)
+        .unwrap();
+    let mut merged = split_contract(
+        "wi_core_registration",
+        None,
+        "contract.registration",
+        "registration_ready",
+    );
+    merged.handoff_contract.provided_contract_refs.clear();
+    let draft = WorkItemDraftRevision {
+        id: "work_item_draft_revision_wi_core_registration_0001".to_string(),
+        logical_work_item_id: "wi_core_registration".to_string(),
+        revision_no: 1,
+        supersedes: None,
+        revision_reason: PlanRevisionReason::SubgraphReplan,
+        canonical_contract_candidate: merged.clone(),
+        trigger_repair_request_id: Some(request.id.clone()),
+        created_at: "2026-07-18T00:00:03Z".to_string(),
+    };
+    let engine = PlanRepairEngine::new(fixture.store.clone(), fixture.plan.clone())
+        .with_candidate_drafts(vec![draft])
+        .with_subgraph_replan_request(SubgraphReplanRequest {
+            plan_id: fixture.plan.id.clone(),
+            base_plan_revision_id: request.base_plan_revision_id.clone(),
+            repair_request_id: request.id.clone(),
+            changed_logical_work_item_ids: vec![
+                "wi_core".to_string(),
+                "wi_registration".to_string(),
+            ],
+            replacement_contracts: vec![merged],
+            replacement_mapping: BTreeMap::from([
+                (
+                    "wi_core".to_string(),
+                    vec!["wi_core_registration".to_string()],
+                ),
+                (
+                    "wi_registration".to_string(),
+                    vec!["wi_core_registration".to_string()],
+                ),
+            ]),
+            story_spec_refs_changed: false,
+            design_spec_refs_changed: false,
+        })
+        .with_created_at("2026-07-18T00:00:03Z");
+
+    let prepared = engine.prepare_amendment(&request).unwrap();
+
+    assert!(prepared.manifest.revised_work_items.is_empty());
+    assert_eq!(
+        prepared.manifest.replacement_units,
+        BTreeMap::from([
+            (
+                "wi_core".to_string(),
+                vec!["wi_core_registration".to_string()],
+            ),
+            (
+                "wi_registration".to_string(),
+                vec!["wi_core_registration".to_string()],
+            ),
+        ])
     );
 }
 

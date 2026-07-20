@@ -124,6 +124,7 @@ export type LinkedWorkspaceAmendmentTarget = {
 
 export type LinkedWorkspaceSessionSnapshot = {
   link: WorkspaceSessionLink;
+  entity_id: string;
   workspace_type: "story" | "design" | "work_item" | "work_item_plan";
   artifact_version_id: number | null;
   timeline_nodes: TimelineNode[];

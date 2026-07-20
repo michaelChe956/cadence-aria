@@ -232,6 +232,7 @@ pub fn restore_linked_workspace_snapshot(
     }
     Ok(LinkedWorkspaceSessionSnapshot {
         link,
+        entity_id: child.entity_id,
         workspace_type: child.workspace_type,
         artifact_version_id: current_versions.first().copied(),
         selected_timeline_node_id: active_timeline_node_id(&timeline_nodes),

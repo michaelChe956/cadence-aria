@@ -215,6 +215,8 @@ export function linkedWorkspaceAmendmentSnapshotFixture(
         original_route: `/workbench/workspace/${repair.childSessionId}`,
       },
     },
+    entity_id:
+      workspaceType === "story" ? "story_spec_0001" : "design_spec_0001",
     workspace_type: workspaceType,
     artifact_version_id: null,
     timeline_nodes: [],

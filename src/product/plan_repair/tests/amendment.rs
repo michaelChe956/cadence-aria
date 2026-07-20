@@ -192,6 +192,15 @@ fn plan_repair_publish_is_exact_replay_and_keeps_active_amendment_lock() {
         Some(prepared.next_plan_revision.id.as_str())
     );
     assert_eq!(
+        fixture
+            .store
+            .get_logical_work_item(&plan, "wi_core")
+            .unwrap()
+            .active_revision_id
+            .as_deref(),
+        Some(prepared.revised_work_items[0].id.as_str())
+    );
+    assert_eq!(
         plan.active_amendment_id.as_deref(),
         Some(prepared.manifest.id.as_str())
     );
@@ -249,30 +258,47 @@ fn plan_repair_publish_recovers_each_journal_phase_without_releasing_lock_or_wri
             PlanAmendmentPublicationCheckpoint::JournalPreparing,
             PlanAmendmentPublicationPhase::Preparing,
             "plan_revision_0001",
+            "work_item_revision_wi_core_0001",
         ),
         (
             PlanAmendmentPublicationCheckpoint::FirstArtifactsWritten,
             PlanAmendmentPublicationPhase::Preparing,
             "plan_revision_0001",
+            "work_item_revision_wi_core_0001",
         ),
         (
             PlanAmendmentPublicationCheckpoint::JournalPrepared,
             PlanAmendmentPublicationPhase::Prepared,
             "plan_revision_0001",
+            "work_item_revision_wi_core_0001",
+        ),
+        (
+            PlanAmendmentPublicationCheckpoint::FirstActiveWorkItemRevisionPublished,
+            PlanAmendmentPublicationPhase::Prepared,
+            "plan_revision_0001",
+            "work_item_revision_wi_core_0002",
+        ),
+        (
+            PlanAmendmentPublicationCheckpoint::JournalWorkItemsPublished,
+            PlanAmendmentPublicationPhase::WorkItemsPublished,
+            "plan_revision_0001",
+            "work_item_revision_wi_core_0002",
         ),
         (
             PlanAmendmentPublicationCheckpoint::ActivePlanRevisionPublished,
-            PlanAmendmentPublicationPhase::Prepared,
+            PlanAmendmentPublicationPhase::WorkItemsPublished,
             "plan_revision_0002",
+            "work_item_revision_wi_core_0002",
         ),
         (
             PlanAmendmentPublicationCheckpoint::JournalPlanPublished,
             PlanAmendmentPublicationPhase::PlanPublished,
             "plan_revision_0002",
+            "work_item_revision_wi_core_0002",
         ),
     ];
 
-    for (checkpoint, failed_phase, failed_active_revision) in cases {
+    for (checkpoint, failed_phase, failed_active_revision, failed_work_item_revision) in cases {
         let fixture = plan_repair_engine_fixture();
         let prepared = fixture.engine.prepare_amendment(&fixture.request).unwrap();
         fixture.engine.persist_candidate(&prepared).unwrap();
@@ -313,6 +339,15 @@ fn plan_repair_publish_recovers_each_journal_phase_without_releasing_lock_or_wri
             Some(failed_active_revision)
         );
         assert_eq!(
+            fixture
+                .store
+                .get_logical_work_item(&failed_plan, "wi_core")
+                .unwrap()
+                .active_revision_id
+                .as_deref(),
+            Some(failed_work_item_revision)
+        );
+        assert_eq!(
             failed_plan.active_amendment_id.as_deref(),
             Some(prepared.manifest.id.as_str())
         );
@@ -348,6 +383,15 @@ fn plan_repair_publish_recovers_each_journal_phase_without_releasing_lock_or_wri
         assert_eq!(
             recovered_plan.active_revision_id.as_deref(),
             Some(prepared.next_plan_revision.id.as_str())
+        );
+        assert_eq!(
+            fixture
+                .store
+                .get_logical_work_item(&recovered_plan, "wi_core")
+                .unwrap()
+                .active_revision_id
+                .as_deref(),
+            Some(prepared.revised_work_items[0].id.as_str())
         );
         assert_eq!(
             recovered_plan.active_amendment_id.as_deref(),

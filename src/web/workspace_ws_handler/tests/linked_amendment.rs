@@ -41,6 +41,7 @@ fn snapshot() -> LinkedWorkspaceSessionSnapshot {
             },
             created_at: "2026-07-20T00:00:00Z".to_string(),
         },
+        entity_id: "story_spec_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         artifact_version_id: Some(2),
         timeline_nodes: Vec::new(),
@@ -89,6 +90,7 @@ fn workspace_session_link_upgrade_response_preserves_shared_recovery_binding() {
     };
     let value = serde_json::to_value(&message).unwrap();
     assert_eq!(value["type"], "linked_workspace_amendment_created");
+    assert_eq!(value["snapshot"]["entity_id"], "story_spec_0001");
     assert_eq!(value["snapshot"]["workspace_type"], "story");
     assert_eq!(value["snapshot"]["artifact_version_id"], 2);
     assert_eq!(

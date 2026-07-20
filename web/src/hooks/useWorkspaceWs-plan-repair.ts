@@ -29,6 +29,16 @@ export function aggregatePlanRepairChildMessage(
     useLinkedWorkspaceAmendmentStore.getState().consume(msg.snapshot);
     return;
   }
+  if (
+    msg.type === "protocol_error" &&
+    msg.code === "LINKED_WORKSPACE_AMENDMENT_INVALID"
+  ) {
+    const linkedStore = useLinkedWorkspaceAmendmentStore.getState();
+    if (linkedStore.status === "pending") {
+      linkedStore.fail(msg.message);
+    }
+    return;
+  }
   const codingStore = useCodingWorkspaceStore.getState();
   switch (msg.type) {
     case "session_state": {

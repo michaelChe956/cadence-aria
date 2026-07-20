@@ -209,6 +209,38 @@ async fn coding_amendment_supersedes_only_active_replacement_source_runs() {
 }
 
 #[tokio::test]
+async fn coding_amendment_rejects_revised_unit_reused_as_replacement_source() {
+    let fixture = amendment_fixture().await;
+    prepare_application_phase(
+        &fixture,
+        CodingAmendmentApplicationPhase::PlanBindingWritten,
+    );
+    let mut manifest = fixture.manifest.clone();
+    manifest
+        .unaffected_units
+        .retain(|logical_id| logical_id != "work_item_0003");
+    manifest.replacement_units.insert(
+        "work_item_0001".to_string(),
+        vec!["work_item_0003".to_string()],
+    );
+
+    let error = fixture
+        .store
+        .materialize_unit_runs_from_manifest(
+            &fixture.attempt,
+            &manifest,
+            fixture.attempt.head_commit.as_deref(),
+        )
+        .expect_err("revised and replacement-source partitions must be disjoint");
+
+    assert!(
+        error
+            .to_string()
+            .contains("coding_amendment_replacement_source")
+    );
+}
+
+#[tokio::test]
 async fn coding_amendment_await_handoff_keeps_attempt_provider_blocked() {
     let fixture = amendment_fixture().await;
     let mut manifest = fixture.manifest.clone();

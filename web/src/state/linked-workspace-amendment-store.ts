@@ -71,6 +71,9 @@ function linkedWorkspaceSnapshotError(
   state: LinkedWorkspaceAmendmentState,
   snapshot: LinkedWorkspaceSessionSnapshot,
 ): string | null {
+  if (state.status !== "pending" || !state.target) {
+    return "当前没有等待中的关联修订请求，拒绝关联修订响应。";
+  }
   const parentSessionId = state.parentSessionId;
   if (!parentSessionId) {
     return "缺少当前 Repair Child Session，拒绝关联修订响应。";
@@ -89,9 +92,9 @@ function linkedWorkspaceSnapshotError(
     return "关联修订关系与 Workspace 类型不匹配。";
   }
   if (
-    state.target &&
-    (state.target.relation !== snapshot.link.relation ||
-      state.target.workspace_type !== snapshot.workspace_type)
+    state.target.relation !== snapshot.link.relation ||
+    state.target.workspace_type !== snapshot.workspace_type ||
+    state.target.entity_id !== snapshot.entity_id
   ) {
     return "关联修订响应与当前请求目标不匹配。";
   }
@@ -117,6 +120,7 @@ function linkedWorkspaceIdentityIsComplete(
 ): boolean {
   const { link } = snapshot;
   return [
+    snapshot.entity_id,
     link.id,
     link.parent_session_id,
     link.child_session_id,

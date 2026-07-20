@@ -191,6 +191,48 @@ fn plan_repair_subgraph_input_expansion_does_not_return_an_invalid_publication_g
 }
 
 #[test]
+fn plan_repair_subgraph_uses_replacement_typed_inputs_at_the_input_boundary() {
+    let mut graph = chain_graph(&["wi_a", "wi_b"]);
+    graph
+        .contracts
+        .get_mut("wi_a")
+        .unwrap()
+        .output_contracts
+        .push(PromisedOutputContract {
+            contract_id: "contract_wi_a_v2".to_string(),
+            capabilities: vec!["capability_contract_wi_a_v2".to_string()],
+        });
+    graph
+        .contracts
+        .get_mut("wi_a")
+        .unwrap()
+        .handoff_contract
+        .provided_contract_refs = vec!["contract_wi_a_v2".to_string()];
+    let mut replacement =
+        chain_contract("wi_b1", Some(("wi_a", "contract_wi_a_v2")), "contract_wi_b");
+    replacement.handoff_contract.provided_contract_refs.clear();
+
+    let result = SubgraphReplanner::default()
+        .analyze(
+            &graph,
+            &request(
+                &["wi_b"],
+                vec![replacement],
+                BTreeMap::from([("wi_b".to_string(), vec!["wi_b1".to_string()])]),
+            ),
+        )
+        .unwrap();
+
+    assert_eq!(result.affected_logical_work_items, vec!["wi_b"]);
+    assert_eq!(result.input_boundary, vec!["wi_a"]);
+    assert_eq!(result.readiness, SubgraphReplanReadiness::PublicationReady);
+    assert_eq!(
+        result.rebuilt_graph.unwrap().edges,
+        vec![required_edge("wi_a", "wi_b1", "contract_wi_a_v2")]
+    );
+}
+
+#[test]
 fn plan_repair_subgraph_merge_preserves_many_to_one_replacement_mapping() {
     let merged = chain_contract("wi_bc", Some(("wi_a", "contract_wi_a")), "contract_wi_c");
     let result = SubgraphReplanner::default()

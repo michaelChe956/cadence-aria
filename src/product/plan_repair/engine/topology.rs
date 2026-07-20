@@ -343,7 +343,9 @@ impl PlanRepairEngine {
                     &next.canonical_contract,
                 ));
             }
-            if let [replacement_id] = replacements.as_slice() {
+            if let [replacement_id] = replacements.as_slice()
+                && replacement_id == old_id
+            {
                 let next = &compiled_replacements
                     .get(replacement_id)
                     .expect("replacement was compiled")
@@ -394,6 +396,12 @@ impl PlanRepairEngine {
             .store
             .get_dependency_graph_revision(&plan, &base_revision.dependency_graph_revision_id)
             .map_err(PlanRepairError::Store)?;
+        let replacement_units = subgraph_replan
+            .replacement_mapping
+            .iter()
+            .filter(|(source, replacements)| replacements.as_slice() != [source.as_str()])
+            .map(|(source, replacements)| (source.clone(), replacements.clone()))
+            .collect();
         let manifest = PlanAmendmentManifest {
             id: amendment_id,
             repair_request_id: request.id.clone(),
@@ -409,7 +417,7 @@ impl PlanRepairEngine {
             unaffected_units: impact_report.unaffected.clone(),
             revalidation_required_units: impact_report.direct_revalidation.clone(),
             stale_units: impact_report.direct_stale.clone(),
-            replacement_units: subgraph_replan.replacement_mapping.clone(),
+            replacement_units,
             resume_target,
             created_at: self.created_at.clone(),
         };
@@ -459,11 +467,22 @@ impl PlanRepairEngine {
             .subgraph_replan
             .as_ref()
             .ok_or_else(|| invalid_target("subgraph amendment is missing publication readiness"))?;
+        let mut manifest_mapping = prepared.manifest.replacement_units.clone();
+        for logical_id in prepared.manifest.revised_work_items.keys() {
+            if manifest_mapping
+                .insert(logical_id.clone(), vec![logical_id.clone()])
+                .is_some()
+            {
+                return Err(invalid_target(
+                    "subgraph manifest revised and replacement partitions overlap",
+                ));
+            }
+        }
         if result.readiness != SubgraphReplanReadiness::PublicationReady
             || result.dependency_graph_revision.as_ref()
                 != Some(&prepared.dependency_graph_revision)
             || result.base_plan_revision_id != prepared.base_plan_revision_id
-            || result.replacement_mapping != prepared.manifest.replacement_units
+            || result.replacement_mapping != manifest_mapping
             || !prepared.validation_report.contract_validation.is_valid()
         {
             return Err(invalid_target(

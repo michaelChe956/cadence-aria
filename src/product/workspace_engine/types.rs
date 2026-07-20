@@ -52,6 +52,7 @@ pub struct LinkedWorkspaceAmendmentTarget {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinkedWorkspaceSessionSnapshot {
     pub link: crate::product::models::WorkspaceSessionLink,
+    pub entity_id: String,
     pub workspace_type: WorkspaceType,
     pub artifact_version_id: Option<u32>,
     pub timeline_nodes: Vec<TimelineNode>,

@@ -705,6 +705,11 @@ fn validate_manifest_partitions(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let replacement_sources = manifest
+        .replacement_units
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     if stale.len() != manifest.stale_units.len()
         || revalidation.len() != manifest.revalidation_required_units.len()
         || unaffected.len() != manifest.unaffected_units.len()
@@ -712,6 +717,7 @@ fn validate_manifest_partitions(
         || !stale.is_disjoint(&unaffected)
         || !revalidation.is_disjoint(&unaffected)
         || !revised.is_disjoint(&unaffected)
+        || !revised.is_disjoint(&replacement_sources)
         || stale
             .iter()
             .chain(revalidation.iter())

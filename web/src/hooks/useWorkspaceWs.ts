@@ -426,6 +426,13 @@ export function useWorkspaceWs(sessionId: string | null) {
       });
       const store = useLinkedWorkspaceAmendmentStore.getState();
       if (sent) {
+        const workspaceStore = useWorkspaceStore.getState();
+        if (
+          workspaceStore.protocolError?.code ===
+          "LINKED_WORKSPACE_AMENDMENT_INVALID"
+        ) {
+          workspaceStore.setProtocolError(null);
+        }
         store.begin(normalizedTarget);
       } else {
         store.fail("关联修订请求发送失败，请检查 Child Workspace 连接。");

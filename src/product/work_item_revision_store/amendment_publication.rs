@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase, WorkItemPlanLineage,
+    LogicalWorkItem, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
+    WorkItemPlanLineage,
 };
 
 use super::{
@@ -38,6 +39,8 @@ pub(crate) enum PlanAmendmentPublicationCheckpoint {
     JournalPreparing,
     FirstArtifactsWritten,
     JournalPrepared,
+    FirstActiveWorkItemRevisionPublished,
+    JournalWorkItemsPublished,
     ActivePlanRevisionPublished,
     JournalPlanPublished,
 }
@@ -387,6 +390,38 @@ impl WorkItemRevisionStore {
             )?;
         }
         if phase == PlanAmendmentPublicationPhase::Prepared {
+            for (index, item) in snapshot.work_items.iter().enumerate() {
+                self.publish_active_amendment_work_item_revision(
+                    &current,
+                    &item.logical_work_item,
+                    &item.work_item_revision.id,
+                    &journal.updated_at,
+                )?;
+                #[cfg(test)]
+                if index == 0 {
+                    maybe_fail_plan_amendment_publication(
+                        self,
+                        journal,
+                        PlanAmendmentPublicationCheckpoint::FirstActiveWorkItemRevisionPublished,
+                    )?;
+                }
+                #[cfg(not(test))]
+                let _ = index;
+            }
+            let work_items_published = self.advance_plan_amendment_publication(
+                &current,
+                &journal.id,
+                PlanAmendmentPublicationPhase::WorkItemsPublished,
+            )?;
+            phase = work_items_published.phase;
+            #[cfg(test)]
+            maybe_fail_plan_amendment_publication(
+                self,
+                journal,
+                PlanAmendmentPublicationCheckpoint::JournalWorkItemsPublished,
+            )?;
+        }
+        if phase == PlanAmendmentPublicationPhase::WorkItemsPublished {
             current = self.publish_active_plan_amendment_revision(
                 &current,
                 &journal.amendment_id,
@@ -411,19 +446,74 @@ impl WorkItemRevisionStore {
                 journal,
                 PlanAmendmentPublicationCheckpoint::JournalPlanPublished,
             )?;
+            self.validate_published_plan_amendment(&current, snapshot)?;
             return Ok(published);
         }
-        if current.active_revision_id.as_deref() != Some(journal.new_plan_revision_id.as_str()) {
+        self.validate_published_plan_amendment(&current, snapshot)?;
+        let published = self.advance_plan_amendment_publication(
+            &current,
+            &journal.id,
+            PlanAmendmentPublicationPhase::PlanPublished,
+        )?;
+        self.validate_published_plan_amendment(&current, snapshot)?;
+        Ok(published)
+    }
+
+    fn publish_active_amendment_work_item_revision(
+        &self,
+        plan: &WorkItemPlanLineage,
+        expected: &LogicalWorkItem,
+        next_revision_id: &str,
+        updated_at: &str,
+    ) -> Result<LogicalWorkItem, ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(next_revision_id)?;
+        if expected.plan_id != plan.id {
+            return Err(identity_mismatch("logical_work_item", &expected.id));
+        }
+        let revision = self.get_work_item_revision(plan, &expected.id, next_revision_id)?;
+        if revision.logical_work_item_id != expected.id {
+            return Err(identity_mismatch("active_work_item_revision", &expected.id));
+        }
+        let path =
+            self.logical_work_item_path(&plan.project_id, &plan.issue_id, &plan.id, &expected.id);
+        with_exclusive_lock(&path, || {
+            let mut stored = self.get_logical_work_item(plan, &expected.id)?;
+            if stored.plan_id != expected.plan_id || stored.id != expected.id {
+                return Err(identity_mismatch("active_work_item_revision", &expected.id));
+            }
+            match stored.active_revision_id.as_deref() {
+                Some(active) if active == next_revision_id => return Ok(stored),
+                active if active == expected.active_revision_id.as_deref() => {}
+                _ => {
+                    return Err(identity_mismatch("active_work_item_revision", &expected.id));
+                }
+            }
+            stored.active_revision_id = Some(next_revision_id.to_string());
+            stored.updated_at = updated_at.to_string();
+            write_json(&path, &stored)?;
+            Ok(stored)
+        })
+    }
+
+    fn validate_published_plan_amendment(
+        &self,
+        plan: &WorkItemPlanLineage,
+        snapshot: &crate::product::models::PlanAmendmentPublicationSnapshot,
+    ) -> Result<(), ProductStoreError> {
+        if plan.active_revision_id.as_deref() != Some(snapshot.plan_revision.id.as_str()) {
             return Err(identity_mismatch(
                 "active_work_item_plan_revision",
                 &plan.id,
             ));
         }
-        self.advance_plan_amendment_publication(
-            &current,
-            &journal.id,
-            PlanAmendmentPublicationPhase::PlanPublished,
-        )
+        for (logical_id, revision_id) in &snapshot.plan_revision.work_item_bindings {
+            let logical = self.get_logical_work_item(plan, logical_id)?;
+            if logical.active_revision_id.as_deref() != Some(revision_id.as_str()) {
+                return Err(identity_mismatch("active_work_item_revision", logical_id));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -510,7 +600,8 @@ impl PlanAmendmentPublicationPhase {
         match self {
             Self::Preparing => 0,
             Self::Prepared => 1,
-            Self::PlanPublished => 2,
+            Self::WorkItemsPublished => 2,
+            Self::PlanPublished => 3,
         }
     }
 }

@@ -108,6 +108,8 @@ impl SubgraphReplanner {
         let mapping_complete = validated.mapping_keys == affected;
         let source_refs_changed =
             request.story_spec_refs_changed || request.design_spec_refs_changed;
+        let mut input_boundary = boundary_nodes(&boundary.input_edges, |edge| &edge.from);
+        let mut output_boundary = boundary_nodes(&boundary.output_edges, |edge| &edge.to);
         let (readiness, rebuilt_graph) = if mapping_complete && !source_refs_changed {
             let graph = rebuild_typed_graph(
                 graph,
@@ -115,14 +117,28 @@ impl SubgraphReplanner {
                 &request.replacement_mapping,
                 &validated.replacements,
             )?;
+            let replacement_affected = affected
+                .iter()
+                .flat_map(|logical_id| {
+                    request
+                        .replacement_mapping
+                        .get(logical_id)
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                })
+                .collect::<BTreeSet<_>>();
+            let rebuilt_boundary = boundaries(&graph, &replacement_affected);
+            input_boundary = boundary_nodes(&rebuilt_boundary.input_edges, |edge| &edge.from);
+            output_boundary = boundary_nodes(&rebuilt_boundary.output_edges, |edge| &edge.to);
             (SubgraphReplanReadiness::PublicationReady, Some(graph))
         } else {
             (SubgraphReplanReadiness::ScopeAnalysis, None)
         };
 
         Ok(SubgraphReplanAnalysis {
-            input_boundary: boundary_nodes(&boundary.input_edges, |edge| &edge.from),
-            output_boundary: boundary_nodes(&boundary.output_edges, |edge| &edge.to),
+            input_boundary,
+            output_boundary,
             affected_logical_work_items: affected.into_iter().collect(),
             replacement_mapping: normalized_mapping(&request.replacement_mapping),
             readiness,
@@ -278,13 +294,6 @@ fn input_boundary_status(
         .any(|input| !input_contract_satisfied(provider, input))
     {
         return Ok(BoundaryStatus::Unsatisfied);
-    }
-    for required in &edge.required_contracts {
-        if !inputs.iter().any(|input| {
-            input.contract_id == required.contract_id && input_contract_satisfied(provider, input)
-        }) {
-            return Ok(BoundaryStatus::Unsatisfied);
-        }
     }
     Ok(BoundaryStatus::Satisfied)
 }

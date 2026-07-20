@@ -175,6 +175,7 @@ pub struct PlanAmendmentConfirmation {
 pub enum PlanAmendmentPublicationPhase {
     Preparing,
     Prepared,
+    WorkItemsPublished,
     PlanPublished,
 }
 

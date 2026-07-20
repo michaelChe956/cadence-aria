@@ -253,6 +253,7 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
         )
         .unwrap();
 
+        assert_eq!(restored.entity_id, entity_id);
         assert_eq!(restored.workspace_type, workspace_type);
         assert_eq!(restored.artifact_version_id, Some(7));
         assert_eq!(restored.timeline_nodes, timeline_nodes);
@@ -346,6 +347,7 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
         &link,
     )
     .unwrap();
+    assert_eq!(restored.entity_id, "work_item_0001");
     assert_eq!(restored.workspace_type, WorkspaceType::WorkItem);
     assert_eq!(restored.artifact_version_id, Some(7));
     assert_eq!(restored.timeline_nodes, timeline_nodes);
