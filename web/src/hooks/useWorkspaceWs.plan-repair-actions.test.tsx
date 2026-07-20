@@ -203,6 +203,39 @@ describe("useWorkspaceWs plan repair actions", () => {
     });
   });
 
+  it("ignores a stale linked amendment rejection after the pending target changes", () => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    const staleTarget = {
+      entity_id: "story_spec_0001",
+      workspace_type: "story",
+      relation: "story_amendment",
+    } as const;
+    const currentTarget = {
+      entity_id: "design_spec_0001",
+      workspace_type: "design",
+      relation: "design_amendment",
+    } as const;
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(sessionState("workspace_session_repair_0001"));
+      harness.api.startLinkedWorkspaceAmendment(staleTarget);
+      harness.api.startLinkedWorkspaceAmendment(currentTarget);
+      harness.ws.receive({
+        type: "protocol_error",
+        code: "LINKED_WORKSPACE_AMENDMENT_INVALID",
+        message: "旧 Story 目标已失效",
+        context: staleTarget,
+      });
+    });
+
+    expect(useLinkedWorkspaceAmendmentStore.getState()).toMatchObject({
+      status: "pending",
+      target: currentTarget,
+      snapshot: null,
+      error: null,
+    });
+  });
+
   it("keeps socket sends and readiness isolated when the child session changes", () => {
     const harness = renderWorkspaceHook("workspace_session_repair_A");
     let staleApi = harness.api;

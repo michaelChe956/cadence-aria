@@ -1,4 +1,5 @@
 import type {
+  LinkedWorkspaceAmendmentTarget,
   PlanAmendmentManifest,
   PlanRepairSessionSnapshot,
   WorkItemRevisionHistoryDto,
@@ -34,7 +35,10 @@ export function aggregatePlanRepairChildMessage(
     msg.code === "LINKED_WORKSPACE_AMENDMENT_INVALID"
   ) {
     const linkedStore = useLinkedWorkspaceAmendmentStore.getState();
-    if (linkedStore.status === "pending") {
+    if (
+      linkedStore.status === "pending" &&
+      linkedWorkspaceErrorTargetsCurrent(msg.context, linkedStore.target)
+    ) {
       linkedStore.fail(msg.message);
     }
     return;
@@ -106,6 +110,28 @@ export function aggregatePlanRepairChildMessage(
       break;
     }
   }
+}
+
+function linkedWorkspaceErrorTargetsCurrent(
+  context: unknown,
+  current: LinkedWorkspaceAmendmentTarget | null,
+): boolean {
+  if (!current || !context || typeof context !== "object") {
+    return true;
+  }
+  const target = context as Partial<LinkedWorkspaceAmendmentTarget>;
+  if (
+    typeof target.entity_id !== "string" ||
+    typeof target.workspace_type !== "string" ||
+    typeof target.relation !== "string"
+  ) {
+    return true;
+  }
+  return (
+    target.entity_id === current.entity_id &&
+    target.workspace_type === current.workspace_type &&
+    target.relation === current.relation
+  );
 }
 
 function planRepairSourceForMessage(

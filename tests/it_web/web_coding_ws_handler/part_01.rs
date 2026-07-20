@@ -47,7 +47,8 @@ use cadence_aria::web::coding_ws_handler::{
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::{CodingAttemptRunKey, WebAppState};
 use cadence_aria::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot,
+    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot, WorkItemHistoryEntryDto,
+    WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;

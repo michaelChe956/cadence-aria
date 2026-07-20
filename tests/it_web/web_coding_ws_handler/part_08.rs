@@ -119,7 +119,7 @@ fn app_with_group_full_chain_attempt_fixture(
             validator_findings: Vec::new(),
         })
         .expect("create work item plan");
-    lifecycle
+    let plan_session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
@@ -132,6 +132,7 @@ fn app_with_group_full_chain_attempt_fixture(
             openspec_enabled: true,
         })
         .expect("create work item plan session");
+    seed_group_revision_history_fixture(&lifecycle, &plan_session.id);
 
     let store = CodingAttemptStore::new(app_paths);
     let attempt = create_legacy_group_coding_attempt_fixture(

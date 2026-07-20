@@ -95,6 +95,8 @@ mod web_work_item_plan_confirm;
 mod web_work_item_plan_mode;
 #[path = "it_web/web_work_item_plan_outline.rs"]
 mod web_work_item_plan_outline;
+#[path = "it_web/web_work_item_plan_repair.rs"]
+mod web_work_item_plan_repair;
 #[path = "it_web/web_work_item_plan_revert.rs"]
 mod web_work_item_plan_revert;
 #[path = "it_web/web_work_item_plan_review.rs"]

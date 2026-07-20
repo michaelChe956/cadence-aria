@@ -1,5 +1,6 @@
 mod fixtures;
 mod git;
+mod plan_repair;
 mod provider;
 mod socket;
 
@@ -16,6 +17,10 @@ use tokio::sync::mpsc;
 
 pub use fixtures::{
     CodingRoleRunFixtureRequest, seed_coding_role_run_fixture, seed_large_workspace_fixture,
+};
+pub use plan_repair::{
+    PlanRepairFaultPoint, PlanRepairFixtureControl, PlanRepairFixtureError,
+    PlanRepairFixtureRecovered, PlanRepairFixtureRuntime, PlanRepairFixtureWaiting,
 };
 pub use provider::{
     PermissionFixtureRequest, PermissionTimeoutRequest, TestControlledFakeStreamingProvider,
