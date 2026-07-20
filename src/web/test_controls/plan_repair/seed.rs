@@ -411,7 +411,7 @@ pub(super) async fn replay_plan_defect_finding(
             &attempt,
             "code_review_report_0001",
             finding_id,
-            &upstream_contract_finding(),
+            &upstream_contract_finding(finding_id),
             &registration_bundle.reviewer_projection,
         )
         .await
@@ -494,7 +494,7 @@ struct SeedRunState<'a> {
     completion_commit: Option<&'a str>,
 }
 
-fn upstream_contract_finding() -> ReviewFinding {
+fn upstream_contract_finding(finding_id: &str) -> ReviewFinding {
     ReviewFinding {
         severity: FindingSeverity::Error,
         file_path: Some("src/registration.rs".to_string()),
@@ -505,7 +505,7 @@ fn upstream_contract_finding() -> ReviewFinding {
         evidence: vec!["src/registration.rs:1".to_string()],
         plan_defect_evidence: vec![PlanDefectEvidence {
             kind: "review_finding".to_string(),
-            source_ref: "code_review_report_0001#finding_0001".to_string(),
+            source_ref: format!("code_review_report_0001#{finding_id}"),
             message: "finalization_failure capability is missing".to_string(),
         }],
         related_requirements: Vec::new(),

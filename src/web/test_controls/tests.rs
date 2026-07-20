@@ -19,6 +19,8 @@ use super::{
     WorkspaceSocketControl, create_large_workspace_fixture, test_controls_enabled,
 };
 
+mod plan_repair_consistency;
+
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]

@@ -198,7 +198,15 @@ impl PlanRepairFixtureRuntime {
     }
 
     pub async fn replay_duplicate_plan_defect_finding(&self) -> Result<(), PlanRepairFixtureError> {
-        seed::replay_plan_defect_finding(&self.root, "code_review_report_0001_finding_0001").await
+        self.replay_plan_defect_finding("code_review_report_0001_finding_0001")
+            .await
+    }
+
+    pub(crate) async fn replay_plan_defect_finding(
+        &self,
+        finding_id: &str,
+    ) -> Result<(), PlanRepairFixtureError> {
+        seed::replay_plan_defect_finding(&self.root, finding_id).await
     }
 
     pub async fn start_overlapping_plan_defect_findings(

@@ -15,6 +15,11 @@ use crate::product::workspace_engine::{
     canonical_plan_repair_parent_session,
 };
 
+#[cfg(test)]
+mod test_pause;
+#[cfg(test)]
+pub(crate) use test_pause::register_plan_repair_start_consistency_pause;
+
 impl CodingWorkspaceEngine {
     pub(crate) async fn start_plan_repair_from_review(
         &self,
@@ -226,33 +231,41 @@ impl CodingWorkspaceEngine {
             workspace_tx,
             WorkspaceSession::from_record(parent),
         );
-        let recovery_arbitration = self.store.acquire_failed_code_review_recovery_arbitration(
-            &current.project_id,
-            &current.issue_id,
-            &current.id,
-        )?;
-        self.store
-            .ensure_plan_repair_can_win_recovery_arbitration(&current)?;
-        let child = workspace_engine
-            .start_plan_repair(request.clone())
-            .await
-            .map_err(|error| plan_repair_start_error(format!("{error:?}")))?;
-        drop(recovery_arbitration);
-        let session_link = lifecycle.get_session_link(&child.id)?;
-        let snapshot = lifecycle
-            .load_plan_repair_session_state(&current.project_id, &current.issue_id, &child.id)?
-            .ok_or_else(|| {
-                plan_repair_start_error("Plan Repair child snapshot is missing".to_string())
-            })?;
-        let authoritative_request =
-            revision_store.get_repair_request(&plan, &snapshot.request.id)?;
-        validate_linked_plan_repair_snapshot(
-            &current,
-            &snapshot,
-            &session_link,
-            &request,
-            &authoritative_request,
-        )?;
+        let (session_link, snapshot) = {
+            let _recovery_arbitration =
+                self.store.acquire_failed_code_review_recovery_arbitration(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                )?;
+            self.store
+                .ensure_plan_repair_can_win_recovery_arbitration(&current)?;
+            let child = workspace_engine
+                .start_plan_repair(request.clone())
+                .await
+                .map_err(|error| plan_repair_start_error(format!("{error:?}")))?;
+            let session_link = lifecycle.get_session_link(&child.id)?;
+            let snapshot = lifecycle
+                .load_plan_repair_session_state(&current.project_id, &current.issue_id, &child.id)?
+                .ok_or_else(|| {
+                    plan_repair_start_error("Plan Repair child snapshot is missing".to_string())
+                })?;
+            let authoritative_request =
+                revision_store.get_repair_request(&plan, &snapshot.request.id)?;
+            validate_linked_plan_repair_snapshot(
+                &current,
+                &snapshot,
+                &session_link,
+                &request,
+                &authoritative_request,
+            )?;
+            (session_link, snapshot)
+        };
+        #[cfg(test)]
+        test_pause::maybe_pause_plan_repair_start_consistency_read(
+            self.store.paths().root(),
+            &request.trigger_finding_id,
+        );
         let reconciliation = self.store.reconcile_linked_plan_repair_pause(&current)?;
         let updated = reconciliation.attempt;
         if reconciliation.timeline_created {
