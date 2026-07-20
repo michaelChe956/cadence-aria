@@ -88,3 +88,9 @@ P6 Task 3: complete (commits 00e7860..7586481, review approved after two fix wav
   Decision: Story/Design upgrades are explicit canonical Repair Child operations with durable semantic-link uniqueness, persisted identity recovery, real target validation, typed WebSocket/client consumption and an inline adjust-scope selector that preserves the five root actions and Coding route.
   Minor: linked amendment protocol errors currently use pending-state serialization but do not additionally compare the backend target context; current single-pending socket flow is safe, and final review should triage adding defensive stale-target context matching.
   Cross-task dependency: Task 4 owns non-E2E fault/recovery fixtures, schema-v2 fixtures and final gates; browser/E2E execution remains user-owned.
+P6 Task 4: complete (commits 98000bf..b09de47, review approved after three fix waves)
+  Decision: duplicate and genuinely overlapping same-semantic findings converge to one authoritative Request, Amendment and Repair Child; stale base revision remains the typed AmendmentConflict path.
+  Decision: Workspace start plus Link, Snapshot and authoritative Request reads and identity validation share one failed-review arbitration view; pause reconciliation and event delivery remain outside the guard to avoid flock re-entry.
+  Decision: recovery evidence verifies all nine durable fault points, raw Request/Amendment/Manifest uniqueness, unrelated active revision stability, Story/Design/WorkItem recovery, and real production Runner paths for four roles across Codex, ClaudeCode and Fake scripted adapters.
+  Decision: linked protocol errors fail closed unless the complete Story/Design target context matches the pending identity; Work Item repair stays on its Plan Repair Child path.
+  Verification boundary: browser E2E/Playwright and real external Provider CLIs were intentionally not run per user instruction; browser acceptance remains user-owned.
