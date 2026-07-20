@@ -82,6 +82,8 @@ fn validate_candidate_package(
         || value.plan_projection_bundle.plan_revision_id != value.new_plan_revision_id
         || value.validation_report.plan_revision_id != value.new_plan_revision_id
         || value.validation_report.plan_projection_bundle_id != value.plan_projection_bundle.id
+        || (value.request.repair_target.kind == crate::product::models::RepairTargetKind::Subgraph)
+            != value.subgraph_replan.is_some()
         || value.candidate_package_fingerprint.trim().is_empty()
     {
         return Err(identity_mismatch(

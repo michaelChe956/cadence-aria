@@ -98,14 +98,14 @@ pub async fn create_group_coding_attempt(
             base_branch: base_branch.clone(),
         })
         .map_err(product_store_api_error)?;
-    let already_locked_by_current = lifecycle
-        .get_issue_shared_worktree(&project_id, &issue_id)
-        .map_err(product_store_api_error)?
-        .and_then(|record| record.current_active_work_item_id)
-        .as_deref()
-        == Some(current_work_item.id.as_str());
-    let _lock = lifecycle
-        .try_acquire_issue_worktree_lock(&project_id, &issue_id, &current_work_item.id)
+    let issue_worktree_lease_id = format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple());
+    let issue_worktree_lease = lifecycle
+        .try_acquire_issue_worktree_lock(
+            &project_id,
+            &issue_id,
+            &current_work_item.id,
+            &issue_worktree_lease_id,
+        )
         .map_err(|error| match error {
             ProductStoreError::Io(ref msg) if msg.contains("issue_worktree_active") => {
                 ApiError::runtime(
@@ -117,12 +117,25 @@ pub async fn create_group_coding_attempt(
             _ => product_store_api_error(error),
         })?;
 
-    let provider_config_snapshot = coding_provider_config_snapshot(
+    let provider_config_snapshot = match coding_provider_config_snapshot(
         &lifecycle,
         current_work_item,
         &repository.default_provider_mode,
         &*state.provider_availability,
-    )?;
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            if issue_worktree_lease.acquired {
+                let _ = lifecycle.release_issue_worktree_lock(
+                    &project_id,
+                    &issue_id,
+                    &current_work_item.id,
+                    &issue_worktree_lease.lease_id,
+                );
+            }
+            return Err(error);
+        }
+    };
     let attempt = match coding_store.create_group_attempt(CreateGroupCodingAttemptInput {
         project_id: project_id.clone(),
         issue_id: issue_id.clone(),
@@ -138,13 +151,6 @@ pub async fn create_group_coding_attempt(
         Err(ProductStoreError::Io(message))
             if message.starts_with("coding_attempt_group_already_exists:") =>
         {
-            if !already_locked_by_current {
-                let _ = lifecycle.release_issue_worktree_lock(
-                    &project_id,
-                    &issue_id,
-                    &current_work_item.id,
-                );
-            }
             let existing_id = message
                 .strip_prefix("coding_attempt_group_already_exists:")
                 .expect("matched prefix")
@@ -152,17 +158,31 @@ pub async fn create_group_coding_attempt(
             let existing = coding_store
                 .get_attempt(&project_id, &issue_id, existing_id)
                 .map_err(product_store_api_error)?;
+            lifecycle
+                .bind_issue_worktree_lock_to_attempt(
+                    &project_id,
+                    &issue_id,
+                    &current_work_item.id,
+                    &existing.id,
+                )
+                .map_err(product_store_api_error)?;
             coding_store
                 .validate_group_attempt_integrity(&existing)
                 .map_err(coding_group_attempt_incomplete_api_error)?;
             return Ok(Json(coding_attempt_dto(&existing)));
         }
         Err(error) => {
-            if !already_locked_by_current {
+            let active_attempt_conflict = matches!(
+                &error,
+                ProductStoreError::Io(message)
+                    if message.starts_with("active_coding_attempt_exists:")
+            );
+            if issue_worktree_lease.acquired && !active_attempt_conflict {
                 let _ = lifecycle.release_issue_worktree_lock(
                     &project_id,
                     &issue_id,
                     &current_work_item.id,
+                    &issue_worktree_lease.lease_id,
                 );
             }
             return Err(match error {
@@ -179,6 +199,23 @@ pub async fn create_group_coding_attempt(
             });
         }
     };
+    if let Err(error) = lifecycle.bind_issue_worktree_lock_to_attempt(
+        &project_id,
+        &issue_id,
+        &current_work_item.id,
+        &attempt.id,
+    ) {
+        let _ = coding_store.delete_attempt(&project_id, &issue_id, &attempt.id);
+        if issue_worktree_lease.acquired {
+            let _ = lifecycle.release_issue_worktree_lock(
+                &project_id,
+                &issue_id,
+                &current_work_item.id,
+                &issue_worktree_lease.lease_id,
+            );
+        }
+        return Err(product_store_api_error(error));
+    }
 
     if let Err(error) = coding_store.save_plan_binding(
         &attempt,
@@ -197,7 +234,6 @@ pub async fn create_group_coding_attempt(
             &issue_id,
             &current_work_item.id,
             &attempt.id,
-            already_locked_by_current,
         )
         .map_err(product_store_api_error)?;
         return Err(product_store_api_error(error));
@@ -226,7 +262,6 @@ pub async fn create_group_coding_attempt(
                 &issue_id,
                 &current_work_item.id,
                 &attempt.id,
-                already_locked_by_current,
             )
             .map_err(product_store_api_error)?;
             return Err(product_store_api_error(error));
@@ -269,11 +304,8 @@ fn rollback_group_attempt_creation(
     issue_id: &str,
     lock_work_item_id: &str,
     attempt_id: &str,
-    already_locked_by_current: bool,
 ) -> Result<(), ProductStoreError> {
     coding_store.delete_attempt(project_id, issue_id, attempt_id)?;
-    if !already_locked_by_current {
-        lifecycle.release_issue_worktree_lock(project_id, issue_id, lock_work_item_id)?;
-    }
+    lifecycle.release_issue_worktree_lock(project_id, issue_id, lock_work_item_id, attempt_id)?;
     Ok(())
 }

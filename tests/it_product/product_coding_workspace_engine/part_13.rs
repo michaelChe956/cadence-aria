@@ -174,7 +174,12 @@ fn group_attempt_waiting_for_final_confirm_with_scoped_work_items() -> (
         })
         .expect("upsert shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0002",
+            &attempt.id,
+        )
         .expect("acquire shared worktree lock");
     store
         .save_timeline_node(&attempt, CodingTimelineNode {
@@ -232,7 +237,12 @@ async fn completing_group_unit_moves_issue_shared_lock_to_next_unit() {
         })
         .expect("upsert shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            &attempt.id,
+        )
         .expect("acquire shared lock for first unit");
 
     engine
@@ -363,7 +373,12 @@ async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit(
         })
         .expect("upsert shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            &attempt.id,
+        )
         .expect("acquire shared lock for first unit");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::with_provider(
@@ -687,7 +702,12 @@ async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
         })
         .expect("upsert shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0002",
+            &attempt.id,
+        )
         .expect("acquire shared worktree lock");
     store
         .save_timeline_node(&attempt, CodingTimelineNode {

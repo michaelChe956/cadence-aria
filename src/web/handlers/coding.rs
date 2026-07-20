@@ -116,8 +116,14 @@ pub async fn create_coding_attempt(
             base_branch: base_branch.clone(),
         })
         .map_err(product_store_api_error)?;
-    let _ = lifecycle
-        .try_acquire_issue_worktree_lock(&project_id, &issue_id, &work_item_id)
+    let issue_worktree_lease_id = format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple());
+    let issue_worktree_lease = lifecycle
+        .try_acquire_issue_worktree_lock(
+            &project_id,
+            &issue_id,
+            &work_item_id,
+            &issue_worktree_lease_id,
+        )
         .map_err(|error| match error {
             ProductStoreError::Io(ref msg) if msg.contains("issue_worktree_active") => {
                 ApiError::runtime(
@@ -128,14 +134,31 @@ pub async fn create_coding_attempt(
             }
             _ => product_store_api_error(error),
         })?;
+    state
+        .test_controls
+        .pause_coding_attempt_after_worktree_acquire_if_configured()
+        .await;
 
-    let provider_config_snapshot = coding_provider_config_snapshot(
+    let provider_config_snapshot = match coding_provider_config_snapshot(
         &lifecycle,
         work_item,
         &repository.default_provider_mode,
         &*state.provider_availability,
-    )?;
-    let attempt_result = coding_store.create_attempt(CreateCodingAttemptInput {
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            if issue_worktree_lease.acquired {
+                let _ = lifecycle.release_issue_worktree_lock(
+                    &project_id,
+                    &issue_id,
+                    &work_item_id,
+                    &issue_worktree_lease.lease_id,
+                );
+            }
+            return Err(error);
+        }
+    };
+    let attempt = match coding_store.create_attempt(CreateCodingAttemptInput {
         project_id: project_id.clone(),
         issue_id: issue_id.clone(),
         work_item_id: work_item.id.clone(),
@@ -144,12 +167,43 @@ pub async fn create_coding_attempt(
         worktree_path: None,
         provider_config_snapshot,
         max_auto_rework: 2,
-    });
-
-    if attempt_result.is_err() {
-        let _ = lifecycle.release_issue_worktree_lock(&project_id, &issue_id, &work_item_id);
+    }) {
+        Ok(attempt) => attempt,
+        Err(
+            error @ ProductStoreError::Conflict {
+                kind: "active_coding_attempt",
+                ..
+            },
+        ) => return Err(product_store_api_error(error)),
+        Err(error) => {
+            if issue_worktree_lease.acquired {
+                let _ = lifecycle.release_issue_worktree_lock(
+                    &project_id,
+                    &issue_id,
+                    &work_item_id,
+                    &issue_worktree_lease.lease_id,
+                );
+            }
+            return Err(product_store_api_error(error));
+        }
+    };
+    if let Err(error) = lifecycle.bind_issue_worktree_lock_to_attempt(
+        &project_id,
+        &issue_id,
+        &work_item_id,
+        &attempt.id,
+    ) {
+        let _ = coding_store.delete_attempt(&project_id, &issue_id, &attempt.id);
+        if issue_worktree_lease.acquired {
+            let _ = lifecycle.release_issue_worktree_lock(
+                &project_id,
+                &issue_id,
+                &work_item_id,
+                &issue_worktree_lease.lease_id,
+            );
+        }
+        return Err(product_store_api_error(error));
     }
-    let attempt = attempt_result.map_err(product_store_api_error)?;
 
     let _ = save_work_item_execution_plan_for_attempt(
         &coding_store,

@@ -726,7 +726,12 @@ fn group_attempt_waiting_for_final_confirm() -> (
         })
         .expect("upsert shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0002",
+            &attempt.id,
+        )
         .expect("acquire shared worktree lock");
     store
         .save_timeline_node(&attempt, CodingTimelineNode {

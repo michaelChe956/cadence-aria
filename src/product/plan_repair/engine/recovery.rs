@@ -85,8 +85,8 @@ impl PlanRepairEngine {
             contract_deltas: candidate.minimum_manifest.contract_deltas.clone(),
             impact_report: candidate.impact_report.clone(),
             manifest: candidate.minimum_manifest.clone(),
+            subgraph_replan: candidate.subgraph_replan.clone(),
             candidate_package: candidate,
-            subgraph_replan: None,
         })
     }
 }

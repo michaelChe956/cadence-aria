@@ -27,7 +27,12 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID)
+        .try_acquire_issue_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            WORK_ITEM_ID,
+            "issue_worktree_lease_provider_failure",
+        )
         .expect("shared worktree lock");
 
     let store = CodingAttemptStore::new(paths);
@@ -48,6 +53,9 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
             max_auto_rework: 2,
         })
         .expect("group attempt");
+    lifecycle
+        .bind_issue_worktree_lock_to_attempt(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID, &attempt.id)
+        .expect("bind shared worktree lock");
     let active_unit = store
         .create_coding_unit(CreateCodingExecutionUnitInput {
             attempt_id: attempt.id.clone(),

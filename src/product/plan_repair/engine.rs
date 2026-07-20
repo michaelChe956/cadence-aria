@@ -414,14 +414,17 @@ impl PlanRepairEngine {
                 ),
             });
         }
-        let canonical_package = build_plan_repair_candidate_package(
+        let canonical_package = super::build_plan_repair_candidate_package_with_subgraph(
             &plan,
             &prepared.candidate_package.request,
             &prepared.manifest,
             &prepared.plan_projection_bundle,
             &prepared.work_item_projection_bundles,
             &prepared.validation_report,
-            &prepared.impact_report,
+            super::PlanRepairCandidatePackageReadiness {
+                impact: &prepared.impact_report,
+                subgraph_replan: prepared.subgraph_replan.as_ref(),
+            },
         )?;
         if canonical_package != prepared.candidate_package {
             return Err(invalid_target(

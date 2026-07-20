@@ -273,6 +273,10 @@ fn plan_repair_subgraph_prepare_replaces_old_bindings_and_persists_new_logical_i
             .all(|logical_id| !prepared.manifest.replacement_units.contains_key(logical_id))
     );
     engine.persist_candidate(&prepared).unwrap();
+    let recovered = PlanRepairEngine::new(fixture.store.clone(), fixture.plan.clone())
+        .load_prepared_amendment(&prepared.candidate_package.id)
+        .unwrap();
+    assert_eq!(recovered.subgraph_replan, prepared.subgraph_replan);
     assert!(
         fixture
             .store

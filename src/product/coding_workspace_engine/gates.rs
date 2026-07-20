@@ -353,15 +353,44 @@ impl CodingWorkspaceEngine {
         project_id: &str,
         issue_id: &str,
         work_item_id: &str,
+        owner_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
         let shared = match lifecycle.get_issue_shared_worktree(project_id, issue_id)? {
             Some(shared) => shared,
             None => return Ok(()),
         };
-        if shared.current_active_work_item_id.as_deref() == Some(work_item_id) {
-            lifecycle.release_issue_worktree_lock(project_id, issue_id, work_item_id)?;
+        if shared.current_active_work_item_id.is_some() || shared.current_lock_owner_id.is_some() {
+            lifecycle.release_issue_worktree_lock(project_id, issue_id, work_item_id, owner_id)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn validate_attempt_issue_shared_worktree_lock_if_present(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let Some(shared) =
+            lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+        else {
+            return Ok(());
+        };
+        let work_item_id = attempt
+            .current_work_item_id
+            .as_deref()
+            .or_else(|| {
+                (attempt.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup)
+                    .then_some(shared.current_active_work_item_id.as_deref())
+                    .flatten()
+            })
+            .unwrap_or(&attempt.work_item_id);
+        lifecycle.validate_issue_worktree_lock_owner(
+            &attempt.project_id,
+            &attempt.issue_id,
+            work_item_id,
+            &attempt.id,
+        )?;
         Ok(())
     }
 
@@ -370,13 +399,19 @@ impl CodingWorkspaceEngine {
         project_id: &str,
         issue_id: &str,
         work_item_id: &str,
+        owner_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
         if lifecycle
             .get_issue_shared_worktree(project_id, issue_id)?
             .is_some()
         {
-            lifecycle.mark_issue_worktree_completed_item(project_id, issue_id, work_item_id)?;
+            lifecycle.mark_issue_worktree_completed_item(
+                project_id,
+                issue_id,
+                work_item_id,
+                owner_id,
+            )?;
         }
         Ok(())
     }
@@ -397,6 +432,7 @@ impl CodingWorkspaceEngine {
                 project_id,
                 issue_id,
                 work_item_id,
+                attempt_id,
             ),
             Err(CodingWorkspaceEngineError::SharedWorktreeDirtyManualGate(_)) => Ok(()),
             Err(error) => Err(error),

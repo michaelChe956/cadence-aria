@@ -8,6 +8,14 @@ pub mod work_item_revision;
 pub mod workspace;
 pub mod workspace_link;
 
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(deserializer)
+}
+
 #[cfg(test)]
 pub mod tests;
 

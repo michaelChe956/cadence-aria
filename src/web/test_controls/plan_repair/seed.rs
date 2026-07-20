@@ -488,6 +488,14 @@ pub(super) async fn replay_plan_defect_finding(
     root: &Path,
     finding_id: &str,
 ) -> Result<(), PlanRepairFixtureError> {
+    start_plan_repair_finding(root, finding_id, upstream_contract_finding(finding_id)).await
+}
+
+pub(super) async fn start_plan_repair_finding(
+    root: &Path,
+    finding_id: &str,
+    finding: ReviewFinding,
+) -> Result<(), PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
         .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
@@ -516,7 +524,7 @@ pub(super) async fn replay_plan_defect_finding(
             &attempt,
             "code_review_report_0001",
             finding_id,
-            &upstream_contract_finding(finding_id),
+            &finding,
             &registration_bundle.reviewer_projection,
         )
         .await
@@ -651,11 +659,18 @@ pub(super) fn registration_contract() -> CanonicalWorkItemContract {
         }],
         "contract.registration",
         &["registration_ready"],
-        vec![BlockerRule {
-            reason_code: "upstream_contract_invalid".to_string(),
-            route: BlockerRoute::PlanRepairUpstream,
-            target_contract_refs: vec!["contract.workflow".to_string()],
-        }],
+        vec![
+            BlockerRule {
+                reason_code: "upstream_contract_invalid".to_string(),
+                route: BlockerRoute::PlanRepairUpstream,
+                target_contract_refs: vec!["contract.workflow".to_string()],
+            },
+            BlockerRule {
+                reason_code: "dependency_graph_invalid".to_string(),
+                route: BlockerRoute::SubgraphReplan,
+                target_contract_refs: vec!["contract.workflow".to_string()],
+            },
+        ],
     );
     contract.handoff_contract.provided_contract_refs.clear();
     contract
@@ -716,7 +731,7 @@ fn contract(
     }
 }
 
-fn status_name(status: &CodingAttemptStatus) -> &'static str {
+pub(super) fn status_name(status: &CodingAttemptStatus) -> &'static str {
     match status {
         CodingAttemptStatus::Created => "created",
         CodingAttemptStatus::Running => "running",

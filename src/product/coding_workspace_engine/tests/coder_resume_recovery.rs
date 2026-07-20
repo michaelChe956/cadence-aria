@@ -228,7 +228,12 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_coder_resume",
+        )
         .expect("shared worktree lock");
 
     let store = CodingAttemptStore::new(paths);
@@ -249,6 +254,14 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
             max_auto_rework: 2,
         })
         .expect("group attempt");
+    lifecycle
+        .bind_issue_worktree_lock_to_attempt(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("bind shared worktree lock");
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let attempt = store
         .update_attempt_status(

@@ -14,7 +14,10 @@ use crate::product::work_item_projection::{
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
-use super::{ContractDelta, ContractImpactReport, ImpactExplanationPath, PlanRepairError};
+use super::{
+    ContractDelta, ContractImpactReport, ImpactExplanationPath, PlanRepairError,
+    SubgraphReplanReadiness, SubgraphReplanResult,
+};
 
 #[derive(Serialize)]
 struct CandidatePackageFingerprintInput {
@@ -24,6 +27,7 @@ struct CandidatePackageFingerprintInput {
     work_item_projections: Vec<WorkItemProjectionBundle>,
     validation: PlanValidationReportArtifact,
     impact: ContractImpactReport,
+    subgraph_replan: Option<SubgraphReplanResult>,
 }
 
 #[derive(Serialize)]
@@ -53,6 +57,26 @@ pub fn candidate_package_fingerprint(
     validation: &PlanValidationReportArtifact,
     impact: &ContractImpactReport,
 ) -> Result<String, PlanRepairError> {
+    candidate_package_fingerprint_with_subgraph(
+        request,
+        manifest,
+        plan_projection,
+        work_item_projections,
+        validation,
+        impact,
+        None,
+    )
+}
+
+pub(crate) fn candidate_package_fingerprint_with_subgraph(
+    request: &PlanRepairRequest,
+    manifest: &PlanAmendmentManifest,
+    plan_projection: &PlanProjectionBundle,
+    work_item_projections: &[WorkItemProjectionBundle],
+    validation: &PlanValidationReportArtifact,
+    impact: &ContractImpactReport,
+    subgraph_replan: Option<&SubgraphReplanResult>,
+) -> Result<String, PlanRepairError> {
     validate_plan_projection_payload_hashes(plan_projection)?;
     let work_item_projections =
         canonical_work_item_projection_bundles(plan_projection, work_item_projections)?;
@@ -63,6 +87,7 @@ pub fn candidate_package_fingerprint(
         work_item_projections,
         validation: normalized_validation(validation)?,
         impact: normalized_impact(impact)?,
+        subgraph_replan: subgraph_replan.cloned(),
     };
     let bytes = serde_json::to_vec(&input).map_err(|error| {
         PlanRepairError::InvalidRepairTarget(format!(
@@ -220,6 +245,38 @@ pub fn build_plan_repair_candidate_package(
     validation: &PlanValidationReportArtifact,
     impact: &ContractImpactReport,
 ) -> Result<PlanRepairCandidatePackageArtifact, PlanRepairError> {
+    build_plan_repair_candidate_package_with_subgraph(
+        plan,
+        request,
+        manifest,
+        plan_projection,
+        work_item_projections,
+        validation,
+        PlanRepairCandidatePackageReadiness {
+            impact,
+            subgraph_replan: None,
+        },
+    )
+}
+
+pub(crate) struct PlanRepairCandidatePackageReadiness<'a> {
+    pub impact: &'a ContractImpactReport,
+    pub subgraph_replan: Option<&'a SubgraphReplanResult>,
+}
+
+pub(crate) fn build_plan_repair_candidate_package_with_subgraph(
+    plan: &WorkItemPlanLineage,
+    request: &PlanRepairRequest,
+    manifest: &PlanAmendmentManifest,
+    plan_projection: &PlanProjectionBundle,
+    work_item_projections: &[WorkItemProjectionBundle],
+    validation: &PlanValidationReportArtifact,
+    readiness: PlanRepairCandidatePackageReadiness<'_>,
+) -> Result<PlanRepairCandidatePackageArtifact, PlanRepairError> {
+    let PlanRepairCandidatePackageReadiness {
+        impact,
+        subgraph_replan,
+    } = readiness;
     if request.plan_id != plan.id
         || request.status != PlanRepairRequestStatus::InProgress
         || request.amendment_id.as_deref() != Some(manifest.id.as_str())
@@ -234,14 +291,16 @@ pub fn build_plan_repair_candidate_package(
             "candidate package identity does not match request and prepared artifacts",
         ));
     }
+    validate_candidate_subgraph(request, manifest, validation, subgraph_replan)?;
     let bundles = canonical_work_item_projection_bundles(plan_projection, work_item_projections)?;
-    let fingerprint = candidate_package_fingerprint(
+    let fingerprint = candidate_package_fingerprint_with_subgraph(
         request,
         manifest,
         plan_projection,
         &bundles,
         validation,
         impact,
+        subgraph_replan,
     )?;
     Ok(PlanRepairCandidatePackageArtifact {
         id: format!("plan_repair_candidate_package_{}", manifest.id),
@@ -258,6 +317,7 @@ pub fn build_plan_repair_candidate_package(
         work_item_projection_bundles: bundles,
         validation_report: validation.clone(),
         impact_report: impact.clone(),
+        subgraph_replan: subgraph_replan.cloned(),
         candidate_package_fingerprint: fingerprint,
         created_at: manifest.created_at.clone(),
     })
@@ -290,15 +350,19 @@ pub fn load_plan_repair_candidate_package(
                 .map_err(PlanRepairError::Store)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let canonical = build_plan_repair_candidate_package(
+    let canonical = build_plan_repair_candidate_package_with_subgraph(
         plan,
         &artifact.request,
         &artifact.minimum_manifest,
         &stored_projection,
         &stored_bundles,
         &stored_validation,
-        &artifact.impact_report,
+        PlanRepairCandidatePackageReadiness {
+            impact: &artifact.impact_report,
+            subgraph_replan: artifact.subgraph_replan.as_ref(),
+        },
     )?;
+    validate_persisted_subgraph(store, plan, &artifact)?;
     if !candidate_request_binding_matches(&artifact.request, &request)
         || artifact.plan_projection_bundle != stored_projection
         || artifact.work_item_projection_bundles != stored_bundles
@@ -310,6 +374,85 @@ pub fn load_plan_repair_candidate_package(
         ));
     }
     Ok(artifact)
+}
+
+fn validate_candidate_subgraph(
+    request: &PlanRepairRequest,
+    manifest: &PlanAmendmentManifest,
+    validation: &PlanValidationReportArtifact,
+    subgraph_replan: Option<&SubgraphReplanResult>,
+) -> Result<(), PlanRepairError> {
+    if request.repair_target.kind != crate::product::models::RepairTargetKind::Subgraph {
+        return if subgraph_replan.is_none() {
+            Ok(())
+        } else {
+            Err(invalid_package(
+                "non-subgraph candidate cannot carry subgraph publication readiness",
+            ))
+        };
+    }
+    let result = subgraph_replan.ok_or_else(|| {
+        invalid_package("subgraph candidate is missing durable publication readiness")
+    })?;
+    let mut manifest_mapping = manifest.replacement_units.clone();
+    for logical_id in manifest.revised_work_items.keys() {
+        if manifest_mapping
+            .insert(logical_id.clone(), vec![logical_id.clone()])
+            .is_some()
+        {
+            return Err(invalid_package(
+                "subgraph manifest revised and replacement partitions overlap",
+            ));
+        }
+    }
+    if result.readiness != SubgraphReplanReadiness::PublicationReady
+        || result.base_plan_revision_id != manifest.previous_plan_revision_id
+        || result.replacement_mapping != manifest_mapping
+        || result.dependency_graph_revision.is_none()
+        || !validation.contract_validation.is_valid()
+    {
+        return Err(invalid_package(
+            "subgraph candidate is not publication ready",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_persisted_subgraph(
+    store: &WorkItemRevisionStore,
+    plan: &WorkItemPlanLineage,
+    artifact: &PlanRepairCandidatePackageArtifact,
+) -> Result<(), PlanRepairError> {
+    let Some(result) = artifact.subgraph_replan.as_ref() else {
+        return Ok(());
+    };
+    let base_revision = store
+        .get_plan_revision(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+            &artifact.base_plan_revision_id,
+        )
+        .map_err(PlanRepairError::Store)?;
+    let next_revision = store
+        .get_plan_revision(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+            &artifact.new_plan_revision_id,
+        )
+        .map_err(PlanRepairError::Store)?;
+    let next_graph = store
+        .get_dependency_graph_revision(plan, &next_revision.dependency_graph_revision_id)
+        .map_err(PlanRepairError::Store)?;
+    if base_revision.dependency_graph_revision_id != result.base_dependency_graph_revision_id
+        || result.dependency_graph_revision.as_ref() != Some(&next_graph)
+    {
+        return Err(invalid_package(
+            "persisted subgraph readiness differs from authoritative graph revisions",
+        ));
+    }
+    Ok(())
 }
 
 pub fn candidate_request_binding_matches(

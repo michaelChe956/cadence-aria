@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 pub use fixtures::{
     CodingRoleRunFixtureRequest, seed_coding_role_run_fixture, seed_large_workspace_fixture,
@@ -54,6 +54,48 @@ struct TestControlsInner {
     review_fixture_sessions: Mutex<HashMap<String, VecDeque<ReviewFixture>>>,
     permission_timeout: Mutex<Option<Duration>>,
     server_idle_timeout: Mutex<Option<Duration>>,
+    coding_attempt_acquire_pause: Mutex<Option<CodingAttemptAcquirePause>>,
+}
+
+#[derive(Clone, Default)]
+pub struct CodingAttemptAcquirePause {
+    entered: Arc<Notify>,
+    released: Arc<Notify>,
+}
+
+impl CodingAttemptAcquirePause {
+    pub async fn wait_until_paused(&self) {
+        self.entered.notified().await;
+    }
+
+    pub fn resume(&self) {
+        self.released.notify_one();
+    }
+}
+
+impl TestControls {
+    pub fn pause_next_coding_attempt_after_worktree_acquire(&self) -> CodingAttemptAcquirePause {
+        let pause = CodingAttemptAcquirePause::default();
+        *self
+            .inner
+            .coding_attempt_acquire_pause
+            .lock()
+            .expect("coding attempt acquire pause lock") = Some(pause.clone());
+        pause
+    }
+
+    pub async fn pause_coding_attempt_after_worktree_acquire_if_configured(&self) {
+        let pause = self
+            .inner
+            .coding_attempt_acquire_pause
+            .lock()
+            .expect("coding attempt acquire pause lock")
+            .take();
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause.released.notified().await;
+        }
+    }
 }
 
 pub fn test_controls_enabled() -> bool {

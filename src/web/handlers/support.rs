@@ -299,7 +299,7 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             kind: "active_coding_attempt",
             id,
         } => ApiError::runtime(
-            "active_coding_attempt_exists",
+            "coding_attempt_active",
             "an active coding attempt already exists for this work item",
             json!({"attempt_id": id}),
         ),
@@ -458,5 +458,17 @@ mod tests {
         assert_eq!(config.author_status_code, "provider_fallback");
         assert_eq!(config.reviewer_provider, ProviderName::ClaudeCode);
         assert_eq!(config.reviewer_status_code, "provider_available");
+    }
+
+    #[test]
+    fn active_coding_attempt_conflict_uses_stable_http_contract() {
+        let error = product_store_api_error(ProductStoreError::Conflict {
+            kind: "active_coding_attempt",
+            id: "coding_attempt_winner".to_string(),
+        });
+
+        assert_eq!(error.code, "coding_attempt_active");
+        assert_eq!(error.details["attempt_id"], "coding_attempt_winner");
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
     }
 }

@@ -241,14 +241,17 @@ fn validate_review_attestation(
         &attestation.candidate_package_artifact_id,
     )?;
     let prepared_candidate_package =
-        crate::product::plan_repair::build_plan_repair_candidate_package(
+        crate::product::plan_repair::build_plan_repair_candidate_package_with_subgraph(
             plan,
             &candidate_package.request,
             &prepared.manifest,
             &prepared.plan_projection_bundle,
             &prepared.work_item_projection_bundles,
             &prepared.validation_report,
-            &prepared.impact_report,
+            crate::product::plan_repair::PlanRepairCandidatePackageReadiness {
+                impact: &prepared.impact_report,
+                subgraph_replan: prepared.subgraph_replan.as_ref(),
+            },
         )?;
     let candidate_package_fingerprint = &candidate_package.candidate_package_fingerprint;
     let review = &attestation.review;

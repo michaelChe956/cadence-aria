@@ -116,7 +116,7 @@ pub(super) async fn start_stale_base_plan_repair(root: &Path) -> Result<(), Plan
     let mut request = unique_repair_request(&revision_store, &plan)
         .map_err(|error| PlanRepairError::InvalidRepairTarget(error.to_string()))?;
     request.base_plan_revision_id = "plan_revision_0000".to_string();
-    let lifecycle = LifecycleStore::new(paths);
+    let lifecycle = LifecycleStore::new(fixture_paths(root));
     let amendment_id = request.amendment_id.as_deref().ok_or_else(|| {
         PlanRepairError::InvalidRepairTarget("repair request amendment is missing".to_string())
     })?;
@@ -245,6 +245,23 @@ pub(super) async fn prepare_review_and_awaiting(
         .with_created_at(CREATED_AT);
     let prepared = engine.prepare_amendment(&request).map_err(fixture_error)?;
     engine.persist_candidate(&prepared).map_err(fixture_error)?;
+    enter_prepared_awaiting(root, revision_store, plan, request, prepared).await
+}
+
+pub(super) async fn enter_prepared_awaiting(
+    root: &Path,
+    revision_store: WorkItemRevisionStore,
+    plan: crate::product::models::WorkItemPlanLineage,
+    request: PlanRepairRequest,
+    prepared: PreparedPlanAmendment,
+) -> Result<
+    (
+        PreparedPlanAmendment,
+        PlanRepairReviewAttestation,
+        WorkspaceEngine,
+    ),
+    PlanRepairFixtureError,
+> {
     let review = passing_review();
     let attestation = PlanRepairReviewAttestation {
         id: format!(
@@ -272,7 +289,7 @@ pub(super) async fn prepare_review_and_awaiting(
         .put_plan_repair_review_attestation(&plan, &attestation)
         .map_err(fixture_error)?;
 
-    let lifecycle = LifecycleStore::new(paths);
+    let lifecycle = LifecycleStore::new(fixture_paths(root));
     let link = unique_repair_link(&lifecycle)?;
     let mut snapshot = lifecycle
         .load_plan_repair_session_state(PROJECT_ID, ISSUE_ID, &link.child_session_id)

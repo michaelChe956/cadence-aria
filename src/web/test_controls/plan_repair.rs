@@ -9,6 +9,7 @@ mod linked_workspace;
 mod provider_matrix;
 mod recovery;
 mod seed;
+mod topology;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -182,6 +183,25 @@ impl PlanRepairFixtureRuntime {
     ) -> Result<PlanRepairIdentitySnapshot, PlanRepairFixtureError> {
         recovery::ensure_review_is_routed(&self.root).await?;
         let _ = recovery::prepare_review_and_awaiting(&self.root).await?;
+        let identity = recovery::plan_repair_identity(&self.root)?;
+        let store = crate::product::coding_attempt_store::CodingAttemptStore::new(
+            seed::fixture_paths(&self.root),
+        );
+        let attempt = recovery::fixture_attempt(&store)?;
+        crate::web::workspace_ws_handler::refresh_coding_runtime_revision_history(
+            &store.paths(),
+            &attempt,
+            Some(&identity.child_session_id),
+        )
+        .map_err(recovery::fixture_error)?;
+        Ok(identity)
+    }
+
+    pub async fn drive_topology_until_awaiting_confirmation(
+        &self,
+    ) -> Result<PlanRepairIdentitySnapshot, PlanRepairFixtureError> {
+        topology::route_dependency_graph_invalid(&self.root).await?;
+        let _ = topology::prepare_topology_review_and_awaiting(&self.root).await?;
         let identity = recovery::plan_repair_identity(&self.root)?;
         let store = crate::product::coding_attempt_store::CodingAttemptStore::new(
             seed::fixture_paths(&self.root),

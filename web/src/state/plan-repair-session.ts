@@ -654,9 +654,13 @@ function reconcileChildTimelineNodes(
   snapshot: TimelineNode[],
   snapshotWatermark: string,
 ) {
+  const currentById = new Map(current.map((node) => [node.node_id, node]));
   const snapshotIds = new Set(snapshot.map((node) => node.node_id));
   return [
-    ...snapshot,
+    ...snapshot.map((node) => {
+      const currentNode = currentById.get(node.node_id);
+      return currentNode && shouldKeepTimelineNode(currentNode, node) ? currentNode : node;
+    }),
     ...current.filter(
       (node) =>
         !snapshotIds.has(node.node_id) &&

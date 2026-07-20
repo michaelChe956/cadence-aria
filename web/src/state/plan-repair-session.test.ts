@@ -602,6 +602,60 @@ describe("plan repair session aggregation", () => {
       "validating_contract",
     );
   });
+
+  it.each([
+    ["completed", "active"],
+    ["failed", "paused"],
+  ] as const)(
+    "keeps a live %s terminal node when the equal-version snapshot is %s",
+    (terminalStatus, snapshotStatus) => {
+      const store = useCodingWorkspaceStore.getState();
+      const current = snapshot({ timeline_nodes: [] });
+      store.setSessionState(codingSessionState(current));
+      store.addPlanRepairTimelineNode(current, liveTimelineNode());
+      store.updatePlanRepairTimelineNode(
+        current,
+        "plan_repair_node_shared",
+        terminalStatus,
+        "live terminal",
+        "2026-07-18T00:07:30Z",
+      );
+
+      store.updatePlanRepairSession({
+        ...current,
+        timeline_nodes: [
+          liveTimelineNode({
+            status: snapshotStatus,
+            summary: "late equal-version snapshot",
+            completed_at: null,
+          }),
+        ],
+      });
+
+      expect(useCodingWorkspaceStore.getState().activePlanRepair?.timelineNodes).toEqual([
+        expect.objectContaining({ status: terminalStatus, summary: "live terminal" }),
+      ]);
+    },
+  );
+
+  it("keeps a legal live node after the watermark across an equal-version snapshot", () => {
+    const store = useCodingWorkspaceStore.getState();
+    const authoritative = snapshot({
+      request: { ...snapshot().request, updated_at: "2026-07-18T00:08:00Z" },
+      timeline_nodes: [],
+    });
+    store.setSessionState(codingSessionState(authoritative));
+    store.addPlanRepairTimelineNode(
+      authoritative,
+      liveTimelineNode({ node_id: "after_watermark", started_at: "2026-07-18T00:09:00Z" }),
+    );
+
+    store.updatePlanRepairSession(authoritative);
+
+    expect(
+      useCodingWorkspaceStore.getState().activePlanRepair?.timelineNodes.map((node) => node.id),
+    ).toEqual(["after_watermark"]);
+  });
 });
 
 function differentRepairSnapshot(

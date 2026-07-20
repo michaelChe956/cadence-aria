@@ -303,6 +303,23 @@ fn plan_repair_candidate_package_artifact_is_scoped_immutable_and_not_a_final_ma
 }
 
 #[test]
+fn plan_repair_candidate_package_rejects_missing_subgraph_readiness_field() {
+    let fixture = plan_repair_engine_fixture();
+    let prepared = fixture.engine.prepare_amendment(&fixture.request).unwrap();
+    let mut artifact = serde_json::to_value(&prepared.candidate_package).unwrap();
+
+    artifact.as_object_mut().unwrap().remove("subgraph_replan");
+
+    assert!(
+        serde_json::from_value::<crate::product::models::PlanRepairCandidatePackageArtifact>(
+            artifact,
+        )
+        .is_err(),
+        "candidate package must not accept the pre-readiness schema"
+    );
+}
+
+#[test]
 fn contract_impact_multi_delta_stale_takes_precedence_over_revalidation() {
     let mut provider_a_before = canonical_contract_fixture("wi_provider_a");
     provider_a_before.input_contracts.clear();

@@ -283,9 +283,22 @@ async fn final_confirm_releases_issue_shared_worktree_lock() {
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_final_confirm",
+        )
         .expect("lock");
     let (store, attempt) = final_confirm_attempt(paths.clone(), "work_item_0001");
+    lifecycle
+        .bind_issue_worktree_lock_to_attempt(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("bind lock to attempt");
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
 
@@ -321,9 +334,22 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_failed_attempt",
+        )
         .expect("lock");
     let (store, attempt) = failed_attempt(paths.clone(), "work_item_0001");
+    lifecycle
+        .bind_issue_worktree_lock_to_attempt(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("bind lock to attempt");
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
 
@@ -358,9 +384,22 @@ async fn dirty_shared_worktree_blocks_lock_release_and_next_work_item() {
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_dirty_attempt",
+        )
         .expect("lock");
     let (store, attempt) = dirty_failed_attempt(paths.clone(), "work_item_0001");
+    lifecycle
+        .bind_issue_worktree_lock_to_attempt(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("bind lock to attempt");
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
 

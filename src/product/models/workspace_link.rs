@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::product::plan_repair::ContractImpactReport;
+use crate::product::plan_repair::{ContractImpactReport, SubgraphReplanResult};
 use crate::web::workspace_ws_types::TimelineNode;
 use crate::web::workspace_ws_types::WorkItemPlanReviewComplete;
 
@@ -119,6 +119,8 @@ pub struct PlanRepairCandidatePackageArtifact {
     pub work_item_projection_bundles: Vec<WorkItemProjectionBundle>,
     pub validation_report: PlanValidationReportArtifact,
     pub impact_report: ContractImpactReport,
+    #[serde(deserialize_with = "super::deserialize_required_option")]
+    pub subgraph_replan: Option<SubgraphReplanResult>,
     pub candidate_package_fingerprint: String,
     pub created_at: String,
 }

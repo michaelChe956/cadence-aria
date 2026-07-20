@@ -21,8 +21,7 @@ use super::{
 };
 use crate::product::plan_repair::{
     ContractImpactReport, PlanRepairError, PlanRepairRequest, RepairTargetKind,
-    SubgraphReplanReadiness, build_plan_repair_candidate_package,
-    canonical_work_item_projection_bundles, compute_contract_delta,
+    SubgraphReplanReadiness, canonical_work_item_projection_bundles, compute_contract_delta,
 };
 
 impl PlanRepairEngine {
@@ -421,14 +420,17 @@ impl PlanRepairEngine {
             resume_target,
             created_at: self.created_at.clone(),
         };
-        let candidate_package = build_plan_repair_candidate_package(
+        let candidate_package = super::super::build_plan_repair_candidate_package_with_subgraph(
             &plan,
             request,
             &manifest,
             &plan_projection_bundle,
             &work_item_projection_bundles,
             &validation_report,
-            &impact_report,
+            super::super::PlanRepairCandidatePackageReadiness {
+                impact: &impact_report,
+                subgraph_replan: Some(&subgraph_replan),
+            },
         )?;
 
         Ok(PreparedPlanAmendment {

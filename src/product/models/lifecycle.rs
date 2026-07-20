@@ -210,6 +210,8 @@ pub struct IssueSharedWorktree {
     pub base_branch: String,
     pub status: IssueSharedWorktreeStatus,
     pub current_active_work_item_id: Option<String>,
+    #[serde(deserialize_with = "super::deserialize_required_option")]
+    pub current_lock_owner_id: Option<String>,
     pub last_completed_work_item_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,

@@ -11,6 +11,8 @@ impl CodingWorkspaceEngine {
             return Ok(attempt.clone());
         }
 
+        self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
+
         let active = self
             .store
             .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
@@ -82,6 +84,7 @@ impl CodingWorkspaceEngine {
                     &attempt.issue_id,
                     &current_work_item_id,
                     &next.logical_work_item_id,
+                    &attempt.id,
                 )?;
             }
             return Ok(updated);

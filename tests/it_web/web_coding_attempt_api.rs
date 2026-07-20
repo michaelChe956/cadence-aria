@@ -6,3 +6,4 @@ include!("web_coding_attempt_api/part_05.rs");
 include!("web_coding_attempt_api/part_06.rs");
 include!("web_coding_attempt_api/part_07.rs");
 include!("web_coding_attempt_api/part_08.rs");
+include!("web_coding_attempt_api/part_09.rs");

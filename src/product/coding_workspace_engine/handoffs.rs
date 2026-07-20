@@ -33,6 +33,7 @@ impl CodingWorkspaceEngine {
                 attempt_id.to_string(),
             ));
         }
+        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
         match current.scope {
             CodingAttemptScope::WorkItemGroup => {
                 self.run_group_completion_gates(&current).await?;
@@ -57,6 +58,7 @@ impl CodingWorkspaceEngine {
                 project_id,
                 issue_id,
                 &current_work_item_id,
+                &updated.id,
             )?;
         } else {
             let current_work_item_id = self.active_work_item_id_for_attempt(&updated);
@@ -70,6 +72,7 @@ impl CodingWorkspaceEngine {
                 project_id,
                 issue_id,
                 current_work_item_id,
+                &updated.id,
             )?;
         }
         if let Some(node_id) =
@@ -106,6 +109,7 @@ impl CodingWorkspaceEngine {
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
+        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
         self.ensure_issue_shared_worktree_clean(&current, &active_work_item_id)
             .await?;
 
@@ -119,6 +123,7 @@ impl CodingWorkspaceEngine {
             project_id,
             issue_id,
             &active_work_item_id,
+            attempt_id,
         )?;
         if let Some(node_id) = self.active_timeline_node_id(project_id, issue_id, attempt_id)? {
             let completed_at = Utc::now().to_rfc3339();
@@ -151,6 +156,7 @@ impl CodingWorkspaceEngine {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
+        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
         let updated = if current.status != CodingAttemptStatus::Failed {
             self.store.update_attempt_status(
                 project_id,
@@ -171,6 +177,7 @@ impl CodingWorkspaceEngine {
             project_id,
             issue_id,
             self.active_work_item_id_for_attempt(&updated),
+            &updated.id,
         )?;
         Ok(updated)
     }
@@ -183,6 +190,7 @@ impl CodingWorkspaceEngine {
     ) -> Result<(), CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
+        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
         if current.status.is_active() {
             self.store.update_attempt_status(
                 project_id,
@@ -195,6 +203,7 @@ impl CodingWorkspaceEngine {
             project_id,
             issue_id,
             &active_work_item_id,
+            attempt_id,
         )?;
         Ok(())
     }
@@ -501,6 +510,7 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
         self.generate_and_save_work_item_handoff_if_missing(attempt)
             .await?;
         self.run_completion_gates(attempt).await?;
@@ -521,6 +531,7 @@ impl CodingWorkspaceEngine {
             &attempt.project_id,
             &attempt.issue_id,
             self.active_work_item_id_for_attempt(attempt),
+            &attempt.id,
         )?;
         let node = self.create_completed_final_confirm_timeline_node(&completed)?;
         let _ = self
@@ -534,6 +545,7 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
         self.generate_and_save_work_item_handoff_if_missing(attempt)
             .await?;
         self.run_completion_gates(attempt).await?;
@@ -548,6 +560,7 @@ impl CodingWorkspaceEngine {
             &completed.project_id,
             &completed.issue_id,
             self.active_work_item_id_for_attempt(&completed),
+            &completed.id,
         )?;
         Ok(completed)
     }
@@ -561,6 +574,7 @@ impl CodingWorkspaceEngine {
                 attempt.id.clone(),
             ));
         }
+        self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
         self.run_group_completion_gates(attempt).await?;
         let completed = self.store.update_attempt_status(
             &attempt.project_id,
@@ -574,6 +588,7 @@ impl CodingWorkspaceEngine {
             &attempt.project_id,
             &attempt.issue_id,
             &current_work_item_id,
+            &attempt.id,
         )?;
         Ok(completed)
     }
@@ -605,6 +620,7 @@ impl CodingWorkspaceEngine {
                     &attempt.project_id,
                     &attempt.issue_id,
                     &unit.logical_work_item_id,
+                    &attempt.id,
                 )?;
             }
         }
