@@ -67,3 +67,8 @@ P5 Task 4: complete (commits 1bf8955..1a2de10, review approved after four fix wa
   Decision: Amendment Journal persists the authoritative materialization-time Attempt HEAD; Completed replay accepts only controlled runtime evolution and never regresses a progressed Attempt stage.
   Decision: delivery is socket-write-confirmed at-least-once with a stable event ID; writer abort, receiver drop, channel close and outstanding permits all converge to Pending/non-runnable failure and release arbitration for same-event recovery.
   Cross-task dependency: Task 5 owns Handoff Revision resolution and runtime impact propagation; P6 owns client ACK/dedup and Repair Session UI consumption.
+P5 Task 5: complete (commits 30306f8..4b0ca81, review approved after four fix waves)
+  Decision: runtime propagation compares the exact authoritative old/new Handoff transition; both Handoffs bind to the current Attempt, logical Unit, latest Completed UnitRun and completion commit, while historical/orphan/alias replays fail closed before writes.
+  Decision: Runtime UnitRun materialization uses the fixed Attempt/Amendment/logical item/Work Item Revision/resolved Handoff tuple; only the latest execution may synchronize ExecutionUnit state, and older tuple replay is a stable zero-write no-op without mutating Completed runs.
+  Decision: stable Handoff contract hash includes only sorted/deduplicated provided contracts and capabilities; explicit revalidation precedes resume, and Unchanged multi-input resume requires every incoming edge capability to be satisfied.
+  Cross-task dependency: P6 consumes the shared real UnitRun/HandoffRevision History artifacts and linked Repair Session state; client ACK/dedup and inline Repair UI remain P6 scope.
