@@ -18,7 +18,7 @@ use crate::product::workspace_engine::{
 #[cfg(test)]
 mod test_pause;
 #[cfg(test)]
-pub(crate) use test_pause::register_plan_repair_start_consistency_pause;
+pub(crate) use test_pause::register_plan_repair_start_snapshot_request_pause;
 
 impl CodingWorkspaceEngine {
     pub(crate) async fn start_plan_repair_from_review(
@@ -250,6 +250,11 @@ impl CodingWorkspaceEngine {
                 .ok_or_else(|| {
                     plan_repair_start_error("Plan Repair child snapshot is missing".to_string())
                 })?;
+            #[cfg(test)]
+            test_pause::maybe_pause_plan_repair_start_snapshot_request_boundary(
+                self.store.paths().root(),
+                &request.trigger_finding_id,
+            );
             let authoritative_request =
                 revision_store.get_repair_request(&plan, &snapshot.request.id)?;
             validate_linked_plan_repair_snapshot(
@@ -261,11 +266,6 @@ impl CodingWorkspaceEngine {
             )?;
             (session_link, snapshot)
         };
-        #[cfg(test)]
-        test_pause::maybe_pause_plan_repair_start_consistency_read(
-            self.store.paths().root(),
-            &request.trigger_finding_id,
-        );
         let reconciliation = self.store.reconcile_linked_plan_repair_pause(&current)?;
         let updated = reconciliation.attempt;
         if reconciliation.timeline_created {

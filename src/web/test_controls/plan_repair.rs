@@ -245,6 +245,13 @@ impl PlanRepairFixtureRuntime {
         recovery::plan_repair_identity(&self.root)
     }
 
+    #[cfg(test)]
+    pub(crate) fn authoritative_plan_repair_request(
+        &self,
+    ) -> Result<crate::product::models::PlanRepairRequest, PlanRepairFixtureError> {
+        recovery::authoritative_plan_repair_request(&self.root)
+    }
+
     pub async fn start_stale_base_plan_repair(
         &self,
     ) -> Result<(), crate::product::plan_repair::PlanRepairError> {

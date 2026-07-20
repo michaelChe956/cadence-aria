@@ -95,7 +95,7 @@ mod types;
 mod ws_event_mapper;
 
 #[cfg(test)]
-pub(crate) use plan_repair_start::register_plan_repair_start_consistency_pause;
+pub(crate) use plan_repair_start::register_plan_repair_start_snapshot_request_pause;
 
 pub(crate) struct CoderOutputChatEntryInput<'a> {
     pub(crate) attempt: &'a CodingExecutionAttempt,

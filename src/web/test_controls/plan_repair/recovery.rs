@@ -96,6 +96,17 @@ pub(super) fn plan_repair_identity(
     })
 }
 
+#[cfg(test)]
+pub(super) fn authoritative_plan_repair_request(
+    root: &Path,
+) -> Result<PlanRepairRequest, PlanRepairFixtureError> {
+    let revision_store = WorkItemRevisionStore::new(fixture_paths(root));
+    let plan = revision_store
+        .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .map_err(fixture_error)?;
+    unique_repair_request(&revision_store, &plan)
+}
+
 pub(super) async fn start_stale_base_plan_repair(root: &Path) -> Result<(), PlanRepairError> {
     let paths = fixture_paths(root);
     let revision_store = WorkItemRevisionStore::new(paths.clone());

@@ -3,46 +3,46 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
 #[derive(Clone)]
-struct PlanRepairStartConsistencyPause {
+struct PlanRepairStartSnapshotRequestPause {
     root: PathBuf,
     finding_id: String,
     reached_tx: mpsc::SyncSender<()>,
     release: Arc<(Mutex<bool>, Condvar)>,
 }
 
-pub(crate) struct PlanRepairStartConsistencyPauseGuard {
+pub(crate) struct PlanRepairStartSnapshotRequestPauseGuard {
     root: PathBuf,
     finding_id: String,
     reached_rx: mpsc::Receiver<()>,
     release: Arc<(Mutex<bool>, Condvar)>,
 }
 
-static PLAN_REPAIR_START_CONSISTENCY_PAUSE: OnceLock<
-    Mutex<Option<PlanRepairStartConsistencyPause>>,
+static PLAN_REPAIR_START_SNAPSHOT_REQUEST_PAUSE: OnceLock<
+    Mutex<Option<PlanRepairStartSnapshotRequestPause>>,
 > = OnceLock::new();
 
-pub(crate) fn register_plan_repair_start_consistency_pause(
+pub(crate) fn register_plan_repair_start_snapshot_request_pause(
     root: PathBuf,
     finding_id: impl Into<String>,
-) -> PlanRepairStartConsistencyPauseGuard {
+) -> PlanRepairStartSnapshotRequestPauseGuard {
     let finding_id = finding_id.into();
     let (reached_tx, reached_rx) = mpsc::sync_channel(1);
     let release = Arc::new((Mutex::new(false), Condvar::new()));
-    let pause = PlanRepairStartConsistencyPause {
+    let pause = PlanRepairStartSnapshotRequestPause {
         root: root.clone(),
         finding_id: finding_id.clone(),
         reached_tx,
         release: release.clone(),
     };
-    let previous = consistency_pause()
+    let previous = snapshot_request_pause()
         .lock()
-        .expect("plan repair start consistency pause lock")
+        .expect("plan repair start snapshot/request pause lock")
         .replace(pause);
     assert!(
         previous.is_none(),
         "plan repair start pause already registered"
     );
-    PlanRepairStartConsistencyPauseGuard {
+    PlanRepairStartSnapshotRequestPauseGuard {
         root,
         finding_id,
         reached_rx,
@@ -50,7 +50,7 @@ pub(crate) fn register_plan_repair_start_consistency_pause(
     }
 }
 
-impl PlanRepairStartConsistencyPauseGuard {
+impl PlanRepairStartSnapshotRequestPauseGuard {
     pub(crate) fn wait_until_reached(&self, timeout: Duration) -> bool {
         self.reached_rx.recv_timeout(timeout).is_ok()
     }
@@ -64,12 +64,12 @@ impl PlanRepairStartConsistencyPauseGuard {
     }
 }
 
-impl Drop for PlanRepairStartConsistencyPauseGuard {
+impl Drop for PlanRepairStartSnapshotRequestPauseGuard {
     fn drop(&mut self) {
         self.release();
-        let mut registered = consistency_pause()
+        let mut registered = snapshot_request_pause()
             .lock()
-            .expect("plan repair start consistency pause lock");
+            .expect("plan repair start snapshot/request pause lock");
         if registered
             .as_ref()
             .is_some_and(|pause| pause.root == self.root && pause.finding_id == self.finding_id)
@@ -79,10 +79,13 @@ impl Drop for PlanRepairStartConsistencyPauseGuard {
     }
 }
 
-pub(super) fn maybe_pause_plan_repair_start_consistency_read(root: &Path, finding_id: &str) {
-    let pause = consistency_pause()
+pub(super) fn maybe_pause_plan_repair_start_snapshot_request_boundary(
+    root: &Path,
+    finding_id: &str,
+) {
+    let pause = snapshot_request_pause()
         .lock()
-        .expect("plan repair start consistency pause lock")
+        .expect("plan repair start snapshot/request pause lock")
         .as_ref()
         .filter(|pause| pause.root == root && pause.finding_id == finding_id)
         .cloned();
@@ -101,6 +104,6 @@ pub(super) fn maybe_pause_plan_repair_start_consistency_read(root: &Path, findin
     }
 }
 
-fn consistency_pause() -> &'static Mutex<Option<PlanRepairStartConsistencyPause>> {
-    PLAN_REPAIR_START_CONSISTENCY_PAUSE.get_or_init(|| Mutex::new(None))
+fn snapshot_request_pause() -> &'static Mutex<Option<PlanRepairStartSnapshotRequestPause>> {
+    PLAN_REPAIR_START_SNAPSHOT_REQUEST_PAUSE.get_or_init(|| Mutex::new(None))
 }
