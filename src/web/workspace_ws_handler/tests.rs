@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 mod human_presentation;
 #[path = "tests/interrupted_run_recovery.rs"]
 mod interrupted_run_recovery;
+#[path = "tests/linked_amendment.rs"]
+mod linked_amendment;
 #[path = "tests/projection_artifact_batch.rs"]
 mod projection_artifact_batch;
 

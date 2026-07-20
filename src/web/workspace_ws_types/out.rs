@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::product::models::{
     HumanPresentationRevision, NodeDetail, PlanRepairSessionSnapshotDto, WorkspaceType,
 };
+use crate::product::workspace_engine::LinkedWorkspaceSessionSnapshot;
 
 use super::artifact::ArtifactPayload;
 use super::artifact_version::{ArtifactVersion, ArtifactVersionSummary};
@@ -111,6 +112,9 @@ pub enum WsOutMessage {
     HumanPresentationRevisionSaveFailed {
         source_projection_bundle_id: String,
         message: String,
+    },
+    LinkedWorkspaceAmendmentCreated {
+        snapshot: LinkedWorkspaceSessionSnapshot,
     },
     SessionState {
         session_id: String,

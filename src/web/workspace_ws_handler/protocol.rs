@@ -46,6 +46,7 @@ pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceSta
                 WsInMessage::Abort
                     | WsInMessage::PermissionResponse { .. }
                     | WsInMessage::ChoiceResponse { .. }
+                    | WsInMessage::StartLinkedWorkspaceAmendment { .. }
             )
         }
         WorkspaceStage::AuthorConfirm => {
@@ -75,6 +76,7 @@ pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceSta
             WsInMessage::HumanConfirm { .. }
                 | WsInMessage::ConfirmPlanAmendment { .. }
                 | WsInMessage::CancelPlanAmendment { .. }
+                | WsInMessage::StartLinkedWorkspaceAmendment { .. }
                 | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
                 | WsInMessage::RequestRevision { .. }
                 | WsInMessage::Confirm
@@ -124,6 +126,7 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::HumanConfirm { .. } => "human_confirm",
         WsInMessage::ConfirmPlanAmendment { .. } => "confirm_plan_amendment",
         WsInMessage::CancelPlanAmendment { .. } => "cancel_plan_amendment",
+        WsInMessage::StartLinkedWorkspaceAmendment { .. } => "start_linked_workspace_amendment",
         WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::Abort => "abort",
         WsInMessage::Ping => "ping",

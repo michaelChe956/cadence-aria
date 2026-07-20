@@ -4,6 +4,7 @@ mod fingerprint;
 mod impact;
 mod model;
 mod package_fingerprint;
+mod subgraph;
 
 pub use crate::product::models::{
     ContractDeltaKind, DependencyGraphChange, DependencyGraphChangeKind, PlanAmendmentConfirmation,
@@ -16,6 +17,7 @@ pub use fingerprint::plan_defect_fingerprint;
 pub use impact::*;
 pub use model::*;
 pub use package_fingerprint::*;
+pub use subgraph::*;
 
 #[cfg(test)]
 mod tests;

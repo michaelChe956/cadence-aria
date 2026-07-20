@@ -729,6 +729,22 @@ pub(crate) async fn handle_workspace_inbound_message(
             )
             .await;
         }
+        WsInMessage::StartLinkedWorkspaceAmendment { target } => {
+            let target_for_context = target.clone();
+            let result = {
+                let engine = engine.lock().await;
+                engine.start_linked_workspace_amendment(target)
+            };
+            let message = match result {
+                Ok(snapshot) => WsOutMessage::LinkedWorkspaceAmendmentCreated { snapshot },
+                Err(error) => WsOutMessage::ProtocolError {
+                    code: "LINKED_WORKSPACE_AMENDMENT_INVALID".to_string(),
+                    message: format!("{error:?}"),
+                    context: serde_json::to_value(target_for_context).ok(),
+                },
+            };
+            let _ = send_json_outbound(&outbound_tx, &message).await;
+        }
         WsInMessage::RevertWorkItem {
             work_item_id,
             feedback,

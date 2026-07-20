@@ -93,6 +93,19 @@ impl PlanRepairEngine {
         self
     }
 
+    pub fn replan_subgraph(
+        &self,
+        graph: &DependencyContractGraph,
+        request: &super::SubgraphReplanRequest,
+    ) -> Result<super::SubgraphReplanResult, PlanRepairError> {
+        if request.plan_id != self.plan.id {
+            return Err(invalid_target(
+                "subgraph replan request does not belong to this plan lineage",
+            ));
+        }
+        super::SubgraphReplanner::default().replan(graph, request)
+    }
+
     pub fn prepare_amendment(
         &self,
         request: &PlanRepairRequest,

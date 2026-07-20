@@ -41,6 +41,24 @@ impl WorkspaceStage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkedWorkspaceAmendmentTarget {
+    pub entity_id: String,
+    pub workspace_type: WorkspaceType,
+    pub relation: crate::product::models::WorkspaceSessionRelation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LinkedWorkspaceSessionSnapshot {
+    pub link: crate::product::models::WorkspaceSessionLink,
+    pub workspace_type: WorkspaceType,
+    pub artifact_version_id: Option<u32>,
+    pub timeline_nodes: Vec<TimelineNode>,
+    pub selected_timeline_node_id: Option<String>,
+    pub human_confirm_state: WorkspaceSessionStatus,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionMessage {
     pub id: String,

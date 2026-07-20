@@ -666,8 +666,9 @@ pub(crate) fn linked_child_session(
         .filter(|link| {
             link.id == expected_link_id
                 || link.child_session_id == expected_child_id
-                || link.trigger.repair_request_id == request.id
-                || link.trigger.amendment_id == amendment_id
+                || (link.relation == WorkspaceSessionRelation::PlanRepair
+                    && (link.trigger.repair_request_id == request.id
+                        || link.trigger.amendment_id == amendment_id))
         });
     let Some(link) = candidates.next() else {
         return Ok(None);

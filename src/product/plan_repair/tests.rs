@@ -17,6 +17,7 @@ use super::{
 mod amendment;
 mod review;
 mod review_fix;
+mod subgraph;
 
 fn repair_request_json() -> serde_json::Value {
     json!({

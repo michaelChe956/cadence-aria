@@ -82,6 +82,7 @@ mod human_presentation;
 mod interrupted_run_recovery;
 mod lifecycle;
 mod lifecycle_recovery;
+mod linked_workspace_amendment;
 mod mappings;
 mod parsers;
 mod plan_outline;
@@ -105,16 +106,18 @@ pub use human_presentation::{
     HumanPresentationScope, SaveHumanPresentationRevision, save_human_presentation_revision,
 };
 pub use interrupted_run_recovery::{InterruptedRunRecoveryError, InterruptedRunRecoveryOutcome};
+pub use linked_workspace_amendment::restore_linked_workspace_snapshot;
 pub use plan_projection::{
     CompiledWorkItemRevision, InitialPlanCompileOutcome, WorkspaceEngineError,
     compile_plan_projection_bundle, compile_work_item_revision, plan_projection_input,
     publish_initial_plan_revision,
 };
 pub use types::{
-    ArtifactUpdateEvent, AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError,
-    ReviewDecisionOutcome, SessionMessage, WorkItemBatchDecisionOutcome,
-    WorkItemDraftDecisionOutcome, WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome,
-    WorkspaceConfirmOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    ArtifactUpdateEvent, AuthorDecisionOutcome, EngineEvent, LinkedWorkspaceAmendmentTarget,
+    LinkedWorkspaceSessionSnapshot, PendingAuthorChoiceError, ReviewDecisionOutcome,
+    SessionMessage, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,
+    WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome, WorkspaceConfirmOutcome,
+    WorkspaceEngine, WorkspaceSession, WorkspaceStage,
 };
 
 pub(crate) use artifact_constraints::*;

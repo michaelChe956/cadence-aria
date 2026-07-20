@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::product::models::ProviderName;
+use crate::product::workspace_engine::LinkedWorkspaceAmendmentTarget;
 
 use super::common::{ChoiceAnswer, ProviderConfigSnapshot, StructuredFeedback};
 
@@ -98,6 +99,9 @@ pub enum WsInMessage {
     CancelPlanAmendment {
         amendment_id: String,
         reason: Option<String>,
+    },
+    StartLinkedWorkspaceAmendment {
+        target: LinkedWorkspaceAmendmentTarget,
     },
     RevertWorkItem {
         work_item_id: String,
