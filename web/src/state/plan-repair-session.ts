@@ -14,6 +14,7 @@ export type PlanRepairSessionState = Omit<PlanRepairSessionSnapshot, "timeline_n
   childSessionId: string;
   childTimelineNodes: TimelineNode[];
   timelineNodes: CodingTimelineNode[];
+  timelineWatermark: string;
   history: WorkItemRevisionHistoryDto | null;
 };
 
@@ -263,6 +264,10 @@ export function repairSessionFromRequired(
       ...current,
       request: message.request,
       link,
+      timelineWatermark: maxTimestamp(
+        current.timelineWatermark,
+        message.request.updated_at,
+      ),
     };
   }
   return {
@@ -281,6 +286,7 @@ export function repairSessionFromRequired(
     childSessionId: link.child_session_id,
     childTimelineNodes: [],
     timelineNodes: [],
+    timelineWatermark: message.request.updated_at,
     history: null,
   };
 }
@@ -319,6 +325,15 @@ export function addRepairTimelineNode(
   if (!current || !repairSourceMatchesCurrent(current, source, attemptId)) {
     return current;
   }
+  const existing = current.childTimelineNodes.find(
+    (candidate) => candidate.node_id === node.node_id,
+  );
+  if (
+    (!existing && timelineNodeTimestamp(node) <= current.timelineWatermark) ||
+    (existing && shouldKeepTimelineNode(existing, node))
+  ) {
+    return current;
+  }
   return {
     ...current,
     childTimelineNodes: upsertById(current.childTimelineNodes, node, "node_id"),
@@ -348,6 +363,9 @@ export function updateRepairTimelineNode(
   }
   const existing = current.childTimelineNodes.find((node) => node.node_id === nodeId);
   if (!existing) {
+    return current;
+  }
+  if (isTerminalTimelineStatus(existing.status) && status !== existing.status) {
     return current;
   }
   const childTimelineNodes = current.childTimelineNodes.map((node) =>
@@ -464,6 +482,7 @@ function normalizedRepairSession(
     childSessionId: snapshot.link.child_session_id,
     childTimelineNodes: snapshot.timeline_nodes,
     timelineNodes: snapshot.timeline_nodes.map((node) => codingTimelineNode(node, attemptId)),
+    timelineWatermark: snapshot.request.updated_at,
     history,
   };
 }
@@ -603,8 +622,31 @@ function reconcileRepairSession(
     childSessionId: snapshot.link.child_session_id,
     childTimelineNodes,
     timelineNodes: childTimelineNodes.map((node) => codingTimelineNode(node, attemptId)),
+    timelineWatermark: maxTimestamp(
+      current.timelineWatermark,
+      snapshot.request.updated_at,
+    ),
     history: current.history,
   };
+}
+
+function shouldKeepTimelineNode(current: TimelineNode, next: TimelineNode) {
+  if (isTerminalTimelineStatus(current.status) && next.status !== current.status) {
+    return true;
+  }
+  return timelineNodeTimestamp(next) < timelineNodeTimestamp(current);
+}
+
+function isTerminalTimelineStatus(status: TimelineNode["status"]) {
+  return status === "completed" || status === "failed" || status === "skipped";
+}
+
+function timelineNodeTimestamp(node: TimelineNode) {
+  return node.completed_at ?? node.started_at;
+}
+
+function maxTimestamp(left: string, right: string) {
+  return left >= right ? left : right;
 }
 
 function reconcileChildTimelineNodes(

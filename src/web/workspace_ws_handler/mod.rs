@@ -51,6 +51,7 @@ pub(crate) use crate::web::workspace_ws_types::{
 
 mod decisions;
 mod mapping;
+mod plan_repair_activation;
 mod protocol;
 mod run;
 mod socket;
@@ -63,6 +64,7 @@ pub use socket::workspace_ws;
 
 pub(crate) use decisions::*;
 pub(crate) use mapping::*;
+pub(crate) use plan_repair_activation::*;
 pub(crate) use protocol::*;
 pub(crate) use run::*;
 pub(crate) use socket::{OutboundControl, send_json_outbound};

@@ -434,6 +434,96 @@ describe("plan repair session aggregation", () => {
     ]);
   });
 
+  it("does not let a late active create regress a terminal plan repair snapshot", () => {
+      const store = useCodingWorkspaceStore.getState();
+      const base = snapshot();
+      const authoritative = snapshot({
+        request: { ...base.request, updated_at: "2026-07-18T00:08:00Z" },
+        timeline_nodes: [
+          liveTimelineNode({
+            status: "completed",
+            summary: "权威完成",
+            completed_at: "2026-07-18T00:07:30Z",
+          }),
+        ],
+      });
+      store.setSessionState(codingSessionState(authoritative));
+
+      store.addPlanRepairTimelineNode(
+        authoritative,
+        liveTimelineNode({
+          status: "active",
+          summary: "迟到运行中",
+          started_at: "2026-07-18T00:04:00Z",
+          completed_at: null,
+        }),
+      );
+
+      expect(useCodingWorkspaceStore.getState().activePlanRepair?.timelineNodes).toEqual([
+        expect.objectContaining({ status: "completed", summary: "权威完成" }),
+      ]);
+  });
+
+  it("does not let a late paused update regress a failed plan repair snapshot", () => {
+      const store = useCodingWorkspaceStore.getState();
+      const base = snapshot();
+      const authoritative = snapshot({
+        request: { ...base.request, updated_at: "2026-07-18T00:08:00Z" },
+        timeline_nodes: [
+          liveTimelineNode({
+            status: "failed",
+            summary: "权威失败",
+            completed_at: "2026-07-18T00:07:30Z",
+          }),
+        ],
+      });
+      store.setSessionState(codingSessionState(authoritative));
+
+      store.updatePlanRepairTimelineNode(
+        authoritative,
+        "plan_repair_node_0001",
+        "paused",
+        "迟到暂停",
+        null,
+      );
+
+      expect(useCodingWorkspaceStore.getState().activePlanRepair?.timelineNodes).toEqual([
+        expect.objectContaining({ status: "failed", summary: "权威失败" }),
+      ]);
+  });
+
+  it.each(["story_amendment", "design_amendment"] as const)(
+    "keeps %s child timelines outside the coding plan repair aggregator",
+    (relation) => {
+      const linked = snapshot({
+        link: { ...snapshot().link, relation },
+      });
+
+      useCodingWorkspaceStore.getState().setSessionState(codingSessionState(linked));
+
+      expect(useCodingWorkspaceStore.getState().activePlanRepair).toBeNull();
+    },
+  );
+
+  it("rejects a late unknown create at or below the authoritative snapshot watermark", () => {
+    const store = useCodingWorkspaceStore.getState();
+    const authoritative = snapshot({
+      request: { ...snapshot().request, updated_at: "2026-07-18T00:08:00Z" },
+      timeline_nodes: [],
+    });
+    store.setSessionState(codingSessionState(authoritative));
+
+    store.addPlanRepairTimelineNode(
+      authoritative,
+      liveTimelineNode({
+        node_id: "late_unknown",
+        started_at: "2026-07-18T00:04:00Z",
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().activePlanRepair?.timelineNodes).toEqual([]);
+  });
+
   it("drops an omitted old live node but keeps one newer than the snapshot watermark", () => {
     const store = useCodingWorkspaceStore.getState();
     const current = snapshot({ timeline_nodes: [] });

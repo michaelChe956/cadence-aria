@@ -14,6 +14,8 @@ mod human_presentation;
 mod interrupted_run_recovery;
 #[path = "tests/linked_amendment.rs"]
 mod linked_amendment;
+#[path = "tests/plan_repair_activation.rs"]
+mod plan_repair_activation;
 #[path = "tests/projection_artifact_batch.rs"]
 mod projection_artifact_batch;
 
@@ -457,6 +459,10 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
     };
     let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
         engine,
         run_context,
         outbound_tx,
@@ -573,6 +579,10 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
     };
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
         engine,
         run_context,
         outbound_tx,

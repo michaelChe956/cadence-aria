@@ -195,7 +195,7 @@ pub(super) async fn publish_then_attempt_dirty_worktree_apply(
     })
 }
 
-async fn ensure_review_is_routed(root: &Path) -> Result<(), PlanRepairFixtureError> {
+pub(super) async fn ensure_review_is_routed(root: &Path) -> Result<(), PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = fixture_attempt(&store)?;
     if matches!(

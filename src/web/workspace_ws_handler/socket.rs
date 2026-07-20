@@ -240,6 +240,7 @@ pub(crate) async fn handle_workspace_socket(
         session_record: session_record.clone(),
     };
     let inbound_context = WorkspaceInboundContext {
+        app_state: state.clone(),
         engine: engine.clone(),
         run_context: run_context.clone(),
         outbound_tx: outbound_tx.clone(),

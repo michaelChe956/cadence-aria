@@ -1,18 +1,50 @@
 use super::*;
 
 pub(crate) async fn handle_plan_amendment_confirmation_from_handler(
+    app_state: WebAppState,
     engine: Arc<Mutex<WorkspaceEngine>>,
     outbound_tx: mpsc::Sender<OutboundControl>,
     amendment_id: String,
 ) {
     let result = {
         let mut engine = engine.lock().await;
-        engine.confirm_plan_amendment(&amendment_id).await
+        engine
+            .confirm_and_publish_plan_amendment(&amendment_id, "workspace_user")
+            .await
+            .map(|_| {
+                engine.plan_repair_session_state().map(|snapshot| {
+                    (
+                        engine.session().project_id.clone(),
+                        engine.session().issue_id.clone(),
+                        snapshot.request.trigger_attempt_id.clone(),
+                    )
+                })
+            })
     };
     match result {
-        Ok(_) => {
+        Ok(Some((project_id, issue_id, attempt_id))) => {
+            if let Err(error) =
+                activate_published_plan_amendment(&app_state, &project_id, &issue_id, &attempt_id)
+                    .await
+            {
+                let message = WsOutMessage::ProtocolError {
+                    code: "PLAN_AMENDMENT_ACTIVATION_FAILED".to_string(),
+                    message: format!("{error:?}"),
+                    context: Some(serde_json::json!({ "amendment_id": amendment_id })),
+                };
+                let _ = send_json_outbound(&outbound_tx, &message).await;
+                return;
+            }
             let state = engine.lock().await.build_session_state();
             let _ = send_json_outbound(&outbound_tx, &state).await;
+        }
+        Ok(None) => {
+            let message = WsOutMessage::ProtocolError {
+                code: "PLAN_AMENDMENT_CONFIRMATION_FAILED".to_string(),
+                message: "published plan amendment state is missing".to_string(),
+                context: Some(serde_json::json!({ "amendment_id": amendment_id })),
+            };
+            let _ = send_json_outbound(&outbound_tx, &message).await;
         }
         Err(error) => {
             let message = WsOutMessage::ProtocolError {

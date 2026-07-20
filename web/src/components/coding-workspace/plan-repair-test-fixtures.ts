@@ -183,6 +183,7 @@ export function repairAwaitingConfirmationFixture(): PlanRepairSessionState {
         artifact_refs: [projection.id],
       },
     ],
+    timelineWatermark: "2026-07-20T00:05:00Z",
     history: {
       entries: [
         {

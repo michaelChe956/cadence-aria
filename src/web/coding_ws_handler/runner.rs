@@ -24,6 +24,9 @@ use super::{
     ensure_work_item_execution_plan_confirmed, repository_path_for_attempt,
 };
 
+mod amendment;
+pub(crate) use amendment::spawn_plan_amendment_runner_reserved;
+
 pub(crate) struct CodingRunnerStartProbe {
     pub(crate) events: Arc<Mutex<Vec<&'static str>>>,
     pub(crate) provider_entry_tx: oneshot::Sender<()>,

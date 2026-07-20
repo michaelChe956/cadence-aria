@@ -295,6 +295,14 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "coding attempt matches multiple issues",
             json!({"attempt_id": id}),
         ),
+        ProductStoreError::Conflict {
+            kind: "active_coding_attempt",
+            id,
+        } => ApiError::runtime(
+            "active_coding_attempt_exists",
+            "an active coding attempt already exists for this work item",
+            json!({"attempt_id": id}),
+        ),
         ProductStoreError::IdentityMismatch {
             kind: "coding_attempt",
             id,

@@ -33,6 +33,7 @@ use super::{
 };
 
 mod publication;
+mod recovery;
 mod subgraph;
 mod topology;
 

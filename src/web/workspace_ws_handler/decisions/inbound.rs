@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceInboundContext {
+    pub(crate) app_state: WebAppState,
     pub(crate) engine: Arc<Mutex<WorkspaceEngine>>,
     pub(crate) run_context: ProviderRunContext,
     pub(crate) outbound_tx: mpsc::Sender<OutboundControl>,
@@ -37,6 +38,7 @@ pub(crate) async fn handle_workspace_inbound_message(
     in_msg: WsInMessage,
 ) {
     let WorkspaceInboundContext {
+        app_state,
         engine,
         run_context,
         outbound_tx,
@@ -711,6 +713,7 @@ pub(crate) async fn handle_workspace_inbound_message(
         }
         WsInMessage::ConfirmPlanAmendment { amendment_id } => {
             handle_plan_amendment_confirmation_from_handler(
+                app_state.clone(),
                 engine.clone(),
                 outbound_tx.clone(),
                 amendment_id,

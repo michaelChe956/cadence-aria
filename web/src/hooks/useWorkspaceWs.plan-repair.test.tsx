@@ -26,7 +26,10 @@ describe("useWorkspaceWs plan repair projection", () => {
       },
       timeline_nodes: [],
     });
-    const node = current.timeline_nodes[0];
+    const node = {
+      ...current.timeline_nodes[0],
+      started_at: "2026-07-18T00:06:30Z",
+    };
 
     act(() => {
       harness.ws.receive(workspaceSessionState(updated));
@@ -235,6 +238,7 @@ function setActiveRepair(current: PlanRepairSessionSnapshot) {
       childSessionId: current.link.child_session_id,
       childTimelineNodes: current.timeline_nodes,
       timelineNodes: [],
+      timelineWatermark: current.request.updated_at,
       history: null,
     },
   } as never);

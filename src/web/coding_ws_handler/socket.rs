@@ -84,13 +84,18 @@ async fn handle_coding_socket(
     let attempt_project_id = attempt.project_id.clone();
     let attempt_issue_id = attempt.issue_id.clone();
     let attempt_id = attempt.id.clone();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let (event_tx, event_rx) = mpsc::channel(1024);
+    let socket_token = state
+        .coding_sockets
+        .register(&attempt_key, event_tx.clone());
     if let Ok(snapshot) = build_coding_session_state(&coding_store, attempt)
         && !send_coding_json(&mut socket_tx, &snapshot).await
     {
+        state.coding_sockets.remove(&attempt_key, socket_token);
         return;
     }
 
-    let (event_tx, event_rx) = mpsc::channel(1024);
     let mut event_rx = OutboundEventReceiver::new(event_rx);
     let mut runner_started = false;
     let mut runner_command_tx: Option<mpsc::Sender<CodingRunnerCommand>> = None;
@@ -679,6 +684,7 @@ async fn handle_coding_socket(
             }
         }
     }
+    state.coding_sockets.remove(&attempt_key, socket_token);
 }
 
 pub fn is_coding_ws_message_allowed(

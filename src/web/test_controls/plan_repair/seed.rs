@@ -15,16 +15,22 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
+use crate::product::json_store::{ProductStoreError, write_json};
 use crate::product::lifecycle_store::{
-    CreateDesignSpecInput, CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
+    CreateDesignSpecInput, CreateIssueWorkItemPlanInput, CreateStorySpecInput,
+    CreateWorkspaceSessionInput, LifecycleStore,
 };
 use crate::product::models::{
-    DependencyGraphRevision, HandoffRevision, LogicalWorkItem, PlanDefectClass, PlanDefectEvidence,
-    PlanDefectRoute, PlanRevisionReason, ProviderName, RepairTarget, RepairTargetKind,
-    WorkItemDraftRevision, WorkItemPlanLineage, WorkItemPlanRevision, WorkspaceType,
+    DependencyGraphRevision, HandoffRevision, IssuePhase, IssueRecord, IssueStatus,
+    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem, PlanDefectClass,
+    PlanDefectEvidence, PlanDefectRoute, PlanRevisionReason, ProviderName, RepairTarget,
+    RepairTargetKind, WorkItemDraftRevision, WorkItemPlanLineage, WorkItemPlanRevision,
+    WorkspaceType,
 };
 use crate::product::plan_repair::PlanDefectConfidence;
 use crate::product::product_data_schema::ensure_product_data_schema;
+use crate::product::project_store::{CreateProjectInput, ProjectStore};
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, ContractCompatibilityPolicy,
     DependencyContractEdge, HandoffContract, PromisedOutputContract, RequiredDependencyContract,
@@ -34,7 +40,10 @@ use crate::product::work_item_revision_store::{
     InitialWorkItemPublicationIds, WorkItemRevisionStore,
 };
 use crate::product::workspace_engine::compile_work_item_revision;
-use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+use crate::web::workspace_ws_types::{
+    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot, ReviewVerdictType,
+    WorkItemRevisionHistoryDto,
+};
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_plan_0001";
@@ -55,6 +64,59 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
     {
         return Ok(());
     }
+
+    let project_store = ProjectStore::new(paths.clone());
+    match project_store.get(PROJECT_ID) {
+        Ok(_) => {}
+        Err(ProductStoreError::NotFound { .. }) => {
+            let project = project_store
+                .create(CreateProjectInput {
+                    name: "Plan Repair fixture project".to_string(),
+                    description: None,
+                })
+                .map_err(fixture_error)?;
+            if project.id != PROJECT_ID {
+                return Err(fixture_error("fixture project id is not deterministic"));
+            }
+        }
+        Err(error) => return Err(fixture_error(error)),
+    }
+    let repository_store = RepositoryStore::new(paths.clone());
+    if repository_store
+        .list(PROJECT_ID)
+        .map_err(fixture_error)?
+        .is_empty()
+    {
+        let repository = repository_store
+            .create(CreateRepositoryInput {
+                project_id: PROJECT_ID.to_string(),
+                name: "Plan Repair fixture repository".to_string(),
+                path: worktree.clone(),
+                default_policy_preset: Some("manual-write".to_string()),
+                default_provider_mode: Some("fake".to_string()),
+            })
+            .map_err(fixture_error)?;
+        if repository.id != "repository_0001" {
+            return Err(fixture_error("fixture repository id is not deterministic"));
+        }
+    }
+    write_json(
+        &paths.issue_root(PROJECT_ID, ISSUE_ID).join("issue.json"),
+        &IssueRecord {
+            id: ISSUE_ID.to_string(),
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            title: "Plan Repair fixture issue".to_string(),
+            description: None,
+            change_id: "plan-repair-fixture".to_string(),
+            phase: IssuePhase::Development,
+            status: IssueStatus::InProgress,
+            active_binding_id: None,
+            created_at: CREATED_AT.to_string(),
+            updated_at: CREATED_AT.to_string(),
+        },
+    )
+    .map_err(fixture_error)?;
 
     let lifecycle = LifecycleStore::new(paths.clone());
     let story = lifecycle
@@ -78,6 +140,28 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             "fixture specification ids are not deterministic",
         ));
     }
+    lifecycle
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some(PLAN_ID.to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            source_story_spec_ids: vec![story.id.clone()],
+            source_design_spec_ids: vec![design.id.clone()],
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: true,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Confirmed,
+            work_item_ids: Vec::new(),
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .map_err(fixture_error)?;
 
     let mut attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -337,7 +421,8 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
     attempt.status = CodingAttemptStatus::Running;
     attempt.stage = CodingExecutionStage::CodeReview;
     store.save_coding_attempt(&attempt).map_err(fixture_error)?;
-    LifecycleStore::new(paths)
+    let lifecycle = LifecycleStore::new(paths);
+    let base_plan_session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
@@ -349,6 +434,26 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             superpowers_enabled: true,
             openspec_enabled: true,
         })
+        .map_err(fixture_error)?;
+    lifecycle
+        .save_artifact_versions(
+            &base_plan_session.id,
+            &[ArtifactVersion {
+                version: 1,
+                payload: ArtifactPayload::WorkItemRevisionHistory {
+                    history: Box::new(WorkItemRevisionHistoryDto {
+                        entries: Vec::new(),
+                    }),
+                },
+                generated_by: ProviderName::Codex,
+                reviewed_by: Some(ProviderName::ClaudeCode),
+                review_verdict: Some(ReviewVerdictType::Pass),
+                confirmed_by: Some("fixture_user".to_string()),
+                is_current: true,
+                created_at: CREATED_AT.to_string(),
+                source_node_id: "plan_repair_fixture_history".to_string(),
+            }],
+        )
         .map_err(fixture_error)?;
     Ok(())
 }

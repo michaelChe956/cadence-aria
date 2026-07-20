@@ -133,6 +133,10 @@ async fn human_presentation_save_handler_acknowledges_success_and_returns_recove
     };
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(8);
     let context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
         engine,
         run_context,
         outbound_tx,

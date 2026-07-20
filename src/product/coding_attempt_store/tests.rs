@@ -10,6 +10,7 @@ use crate::product::coding_models::{
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
+mod attempt_creation_concurrency;
 mod failed_review_recovery;
 mod failed_review_recovery_rollback;
 mod group_uniqueness;

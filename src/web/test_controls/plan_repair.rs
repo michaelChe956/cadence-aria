@@ -177,6 +177,25 @@ impl PlanRepairFixtureRuntime {
         seed::route_upstream_contract_invalid(&self.root).await
     }
 
+    pub async fn drive_until_awaiting_confirmation(
+        &self,
+    ) -> Result<PlanRepairIdentitySnapshot, PlanRepairFixtureError> {
+        recovery::ensure_review_is_routed(&self.root).await?;
+        let _ = recovery::prepare_review_and_awaiting(&self.root).await?;
+        let identity = recovery::plan_repair_identity(&self.root)?;
+        let store = crate::product::coding_attempt_store::CodingAttemptStore::new(
+            seed::fixture_paths(&self.root),
+        );
+        let attempt = recovery::fixture_attempt(&store)?;
+        crate::web::workspace_ws_handler::refresh_coding_runtime_revision_history(
+            &store.paths(),
+            &attempt,
+            Some(&identity.child_session_id),
+        )
+        .map_err(recovery::fixture_error)?;
+        Ok(identity)
+    }
+
     pub async fn confirm_publish_apply_and_resume(
         &self,
     ) -> Result<PlanRepairFixtureRecovered, PlanRepairFixtureError> {
