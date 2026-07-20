@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
@@ -11,11 +12,27 @@ use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
 use crate::web::provider_availability::host_real_workflow_ready;
 use crate::web::state::WebAppState;
+use crate::web::workspace_ws_handler::refresh_coding_runtime_revision_history;
 
 use super::{
     CodingWsOutMessage, build_coding_session_state, emit_current_session_state,
     update_provider_selection,
 };
+
+pub(super) fn refresh_runtime_revision_history(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<(), CodingWorkspaceEngineError> {
+    if attempt.scope != crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
+        return Ok(());
+    }
+    refresh_coding_runtime_revision_history(app_paths, attempt).map_err(|error| {
+        CodingWorkspaceEngineError::ProviderStream(format!(
+            "runtime_revision_history_refresh_failed: {error}"
+        ))
+    })?;
+    Ok(())
+}
 
 pub(super) async fn handle_pending_runner_commands(
     command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,

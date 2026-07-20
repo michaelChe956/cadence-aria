@@ -84,6 +84,7 @@ mod reports;
 mod review_parser;
 mod reviewer_context;
 mod rework;
+mod runtime_impact;
 mod testing;
 mod testing_parser;
 mod testing_provider;
@@ -103,6 +104,10 @@ pub(crate) struct CoderOutputChatEntryInput<'a> {
     pub(crate) plan_defect_route: Option<&'a str>,
 }
 
+pub use runtime_impact::{
+    HandoffDeltaKind, RuntimeHandoffImpactPropagator, RuntimeHandoffImpactResult,
+    compare_handoff_revisions,
+};
 pub use testing_parser::{
     testing_report_has_execution_evidence, testing_report_needs_blocked_gate,
 };

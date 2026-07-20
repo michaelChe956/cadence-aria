@@ -309,7 +309,7 @@ impl super::CodingAttemptStore {
         })
     }
 
-    fn authoritative_unit(
+    pub(super) fn authoritative_unit(
         &self,
         attempt: &CodingExecutionAttempt,
         unit_id: &str,

@@ -1,8 +1,122 @@
 use super::*;
+use crate::product::coding_attempt_store::CodingAttemptStore;
+use crate::product::coding_models::CodingExecutionAttempt;
 use crate::web::workspace_ws_types::ArtifactPayload;
+use crate::web::workspace_ws_types::{
+    WorkItemHistoryEntryDto, WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
+};
 
 pub(crate) fn ws_artifact_update(version: u32, payload: ArtifactPayload) -> WsOutMessage {
     WsOutMessage::ArtifactUpdate { version, payload }
+}
+
+pub(crate) fn refresh_coding_runtime_revision_history(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<WorkItemRevisionHistoryDto, String> {
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let binding = coding_store
+        .get_plan_binding(attempt)
+        .map_err(|error| format!("load coding plan binding failed: {error}"))?;
+    let revision_store =
+        crate::product::work_item_revision_store::WorkItemRevisionStore::new(app_paths.clone());
+    let lineage = revision_store
+        .get_plan_lineage(&attempt.project_id, &attempt.issue_id, &binding.plan_id)
+        .map_err(|error| format!("load plan lineage failed: {error}"))?;
+    let mut runtime_entries = Vec::new();
+    let units = coding_store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(|error| format!("list coding units failed: {error}"))?;
+    for unit in &units {
+        for run in coding_store
+            .list_coding_unit_runs(attempt, &unit.id)
+            .map_err(|error| format!("list coding unit runs failed: {error}"))?
+        {
+            runtime_entries.push(WorkItemHistoryEntryDto {
+                kind: WorkItemHistoryEntryKind::UnitRun,
+                id: run.id,
+                logical_work_item_id: unit.logical_work_item_id.clone(),
+                related_revision_id: Some(run.work_item_revision_id),
+                summary: format!("UnitRun #{} ({:?})", run.execution_no, run.status),
+                created_at: run.created_at,
+            });
+        }
+        for handoff in revision_store
+            .list_handoff_revisions(&lineage, &unit.logical_work_item_id)
+            .map_err(|error| format!("list handoff revisions failed: {error}"))?
+        {
+            runtime_entries.push(WorkItemHistoryEntryDto {
+                kind: WorkItemHistoryEntryKind::HandoffRevision,
+                id: handoff.id,
+                logical_work_item_id: unit.logical_work_item_id.clone(),
+                related_revision_id: Some(handoff.work_item_revision_id),
+                summary: format!("Handoff at commit {}", handoff.commit_sha),
+                created_at: handoff.created_at,
+            });
+        }
+    }
+    runtime_entries.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let mut sessions = lifecycle
+        .list_workspace_sessions(&attempt.project_id, &attempt.issue_id)
+        .map_err(|error| format!("list workspace sessions failed: {error}"))?
+        .into_iter()
+        .filter(|session| {
+            session.workspace_type == WorkspaceType::WorkItemPlan
+                && session.entity_id == binding.plan_id
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let base_history = sessions
+        .iter()
+        .rev()
+        .find_map(|session| {
+            lifecycle
+                .list_artifact_versions(&session.id)
+                .ok()?
+                .into_iter()
+                .rev()
+                .find_map(|version| match version.payload {
+                    ArtifactPayload::WorkItemRevisionHistory { history } => Some(*history),
+                    _ => None,
+                })
+        })
+        .unwrap_or(WorkItemRevisionHistoryDto {
+            entries: Vec::new(),
+        });
+    let history = base_history.merge_runtime_entries(runtime_entries);
+    for session in sessions {
+        let mut versions = lifecycle
+            .list_artifact_versions(&session.id)
+            .map_err(|error| format!("list session artifacts failed: {error}"))?;
+        let mut changed = false;
+        for version in &mut versions {
+            if matches!(
+                version.payload,
+                ArtifactPayload::WorkItemRevisionHistory { .. }
+            ) {
+                version.payload = ArtifactPayload::WorkItemRevisionHistory {
+                    history: Box::new(history.clone()),
+                };
+                changed = true;
+            }
+        }
+        if changed {
+            lifecycle
+                .save_artifact_versions(&session.id, &versions)
+                .map_err(|error| format!("save runtime history artifact failed: {error}"))?;
+        }
+    }
+    Ok(history)
 }
 
 pub(crate) fn map_revision_path(

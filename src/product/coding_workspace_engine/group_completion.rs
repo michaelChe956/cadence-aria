@@ -8,8 +8,8 @@ use crate::product::models::{
 };
 use crate::product::work_item_projection::renderer_for;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
-use serde::Serialize;
-use sha2::{Digest, Sha256};
+
+use super::runtime_impact::stable_handoff_contract_hash;
 
 #[derive(Debug, Clone)]
 enum GroupUnitCompletionMode {
@@ -29,12 +29,6 @@ struct GroupUnitCompletionFacts {
     provided_capabilities: std::collections::BTreeMap<String, Vec<String>>,
     handoff_contract_hash: String,
     mode: GroupUnitCompletionMode,
-}
-
-#[derive(Serialize)]
-struct HandoffContractHashInput<'a> {
-    provided_contracts: &'a [String],
-    provided_capabilities: &'a std::collections::BTreeMap<String, Vec<String>>,
 }
 
 struct GroupHandoffContractFacts {
@@ -90,12 +84,13 @@ impl CodingWorkspaceEngine {
             .ok_or_else(|| {
                 CodingWorkspaceEngineError::WorkItemHandoffMissing(facts.active.id.clone())
             })?;
-        self.publish_group_unit_handoff_revision(
+        let handoff = self.publish_group_unit_handoff_revision(
             &attempt,
             &facts,
             &completed_run,
             &legacy_handoff,
         )?;
+        self.apply_completed_handoff(&attempt, &handoff).await?;
         if facts.active.status == CodingExecutionUnitStatus::Completed {
             self.advance_to_next_group_unit(&attempt).await
         } else {
@@ -110,7 +105,7 @@ impl CodingWorkspaceEngine {
         facts: &GroupUnitCompletionFacts,
         completed_run: &CodingUnitRun,
         legacy_handoff: &WorkItemHandoff,
-    ) -> Result<(), CodingWorkspaceEngineError> {
+    ) -> Result<HandoffRevision, CodingWorkspaceEngineError> {
         if completed_run.id != facts.run.id
             || completed_run.unit_id != facts.active.id
             || completed_run.work_item_revision_id != facts.revision.id
@@ -148,7 +143,7 @@ impl CodingWorkspaceEngine {
             )
         };
         let revision_store = WorkItemRevisionStore::new(self.store.paths());
-        match revision_store.get_handoff_revision(
+        let handoff = match revision_store.get_handoff_revision(
             &facts.lineage,
             &facts.active.logical_work_item_id,
             &handoff_id,
@@ -159,18 +154,18 @@ impl CodingWorkspaceEngine {
                         "group_completion_handoff_revision_mismatch: {handoff_id}"
                     )));
                 }
+                existing
             }
             Err(ProductStoreError::NotFound {
                 kind: "handoff_revision",
                 ..
             }) => {
-                revision_store.put_handoff_revision(
-                    &facts.lineage,
-                    &build_handoff(Utc::now().to_rfc3339()),
-                )?;
+                let handoff = build_handoff(Utc::now().to_rfc3339());
+                revision_store.put_handoff_revision(&facts.lineage, &handoff)?;
+                handoff
             }
             Err(error) => return Err(error.into()),
-        }
+        };
         if facts.active.latest_handoff_revision_id.is_none() {
             self.store.update_coding_unit_latest_handoff_revision_id(
                 &attempt.project_id,
@@ -180,7 +175,7 @@ impl CodingWorkspaceEngine {
                 Some(handoff_id),
             )?;
         }
-        Ok(())
+        Ok(handoff)
     }
 
     fn preflight_group_unit_completion(
@@ -508,16 +503,7 @@ fn group_handoff_contract_facts(
         capabilities.sort();
         capabilities.dedup();
     }
-    let bytes = serde_json::to_vec(&HandoffContractHashInput {
-        provided_contracts: &provided_contracts,
-        provided_capabilities: &provided_capabilities,
-    })
-    .map_err(|error| {
-        CodingWorkspaceEngineError::ProviderStream(format!(
-            "group_handoff_contract_hash_failed: {error}"
-        ))
-    })?;
-    let contract_hash = hex::encode(Sha256::digest(bytes));
+    let contract_hash = stable_handoff_contract_hash(&provided_contracts, &provided_capabilities)?;
     Ok(GroupHandoffContractFacts {
         provided_contracts,
         provided_capabilities,

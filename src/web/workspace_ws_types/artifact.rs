@@ -133,6 +133,27 @@ pub struct WorkItemRevisionHistoryDto {
     pub entries: Vec<WorkItemHistoryEntryDto>,
 }
 
+impl WorkItemRevisionHistoryDto {
+    pub fn merge_runtime_entries(
+        mut self,
+        runtime_entries: impl IntoIterator<Item = WorkItemHistoryEntryDto>,
+    ) -> Self {
+        self.entries.retain(|entry| {
+            !matches!(
+                entry.kind,
+                WorkItemHistoryEntryKind::UnitRun | WorkItemHistoryEntryKind::HandoffRevision
+            )
+        });
+        self.entries.extend(runtime_entries);
+        self.entries.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemPlanOutlineCandidateDto {
