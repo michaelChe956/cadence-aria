@@ -6,6 +6,7 @@ mod amendment_arbitration;
 mod amendment_delivery;
 mod amendment_recovery;
 mod attempt;
+mod attempt_creation;
 mod context;
 mod gate;
 mod group;
@@ -29,6 +30,7 @@ mod utils;
 
 #[cfg(test)]
 pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
+pub use attempt_creation::WorkItemAttemptCreationGuard;
 pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;

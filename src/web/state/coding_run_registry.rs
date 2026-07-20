@@ -162,19 +162,27 @@ impl CodingRunRegistry {
                 .runs
                 .get(attempt_key)
                 .map(|runs| {
-                    runs.values()
-                        .map(|entry| (entry.command_tx.clone(), entry.completion_tx.subscribe()))
+                    runs.iter()
+                        .map(|(run_id, entry)| {
+                            (
+                                *run_id,
+                                entry.command_tx.clone(),
+                                entry.completion_tx.subscribe(),
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
         };
         let mut sent = 0;
-        for (sender, _) in &runners {
+        for (run_id, sender, _) in &runners {
             if sender.send(CodingRunnerCommand::AbortAttempt).await.is_ok() {
                 sent += 1;
+            } else {
+                self.remove(attempt_key, *run_id);
             }
         }
-        for (_, mut completion_rx) in runners {
+        for (_, _, mut completion_rx) in runners {
             while !*completion_rx.borrow() {
                 if completion_rx.changed().await.is_err() {
                     break;
@@ -346,6 +354,31 @@ mod tests {
         assert!(registry.insert(&attempt, late_tx).is_none());
         assert!(registry.try_reserve_attempt(&attempt).is_none());
         assert!(!registry.attempt_is_reserved_or_running(&attempt));
+    }
+
+    #[tokio::test]
+    async fn abort_completes_when_command_receiver_is_closed() {
+        let registry = CodingRunRegistry::default();
+        let attempt = CodingAttemptRunKey::new(
+            "project_0001",
+            "issue_0001",
+            "coding_attempt_closed_receiver",
+        );
+        let (command_tx, command_rx) = mpsc::channel(1);
+        registry
+            .insert(&attempt, command_tx)
+            .expect("closed receiver runner");
+        drop(command_rx);
+
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            registry.abort_attempt(&attempt),
+        )
+        .await
+        .expect("abort must not wait forever after command receiver closes");
+
+        assert_eq!(sent, 0);
+        assert_eq!(registry.runner_count(&attempt), 0);
     }
 
     #[test]

@@ -97,6 +97,9 @@ pub async fn create_group_coding_attempt(
     let _initialization_guard = coding_store
         .acquire_group_initialization_arbitration(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
+    let creation_guard = coding_store
+        .acquire_work_item_attempt_creation(&project_id, &issue_id, &current_work_item.id)
+        .map_err(product_store_api_error)?;
     let mut journal = coding_store
         .prepare_group_initialization(
             &initialization_input,
@@ -124,18 +127,34 @@ pub async fn create_group_coding_attempt(
             base_branch,
         })
         .map_err(product_store_api_error)?;
-    let lease_id = format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple());
-    lifecycle
+    let worktree_lease = lifecycle
         .try_acquire_issue_worktree_lock(
             &project_id,
             &issue_id,
             &journal.lock_work_item_id,
-            &lease_id,
+            &journal.worktree_lease_id,
         )
         .map_err(issue_worktree_active_api_error)?;
+    let replay_already_bound = journal
+        .phase
+        .has_reached(CodingGroupInitializationPhase::WorktreeBound)
+        && worktree_lease.worktree.current_lock_owner_id.as_deref()
+            == Some(journal.attempt.id.as_str());
+    if !worktree_lease.acquired && !replay_already_bound {
+        return Err(coding_group_attempt_incomplete_api_error(
+            ProductStoreError::IdentityMismatch {
+                kind: "coding_group_worktree_lease",
+                id: journal.attempt.id.clone(),
+            },
+        ));
+    }
+    state
+        .test_controls
+        .pause_group_attempt_after_worktree_acquire_if_configured()
+        .await;
 
     let attempt = coding_store
-        .ensure_group_initialization_attempt(&journal)
+        .ensure_group_initialization_attempt(&journal, &creation_guard)
         .map_err(coding_group_attempt_incomplete_api_error)?;
     journal = coding_store
         .advance_group_initialization_phase(

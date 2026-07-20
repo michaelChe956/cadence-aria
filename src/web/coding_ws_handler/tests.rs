@@ -31,6 +31,7 @@ use super::{
 mod code_review_router;
 mod failed_review_recovery;
 mod plan_repair;
+mod runner_cleanup;
 
 #[test]
 fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {

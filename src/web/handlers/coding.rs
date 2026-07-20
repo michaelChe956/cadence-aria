@@ -87,6 +87,9 @@ pub async fn create_coding_attempt(
     }
 
     let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let creation_guard = coding_store
+        .acquire_work_item_attempt_creation(&project_id, &issue_id, &work_item.id)
+        .map_err(product_store_api_error)?;
     let active_attempts = coding_store
         .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
         .map_err(product_store_api_error)?
@@ -180,16 +183,19 @@ pub async fn create_coding_attempt(
             return Err(error);
         }
     };
-    let attempt = match coding_store.create_attempt(CreateCodingAttemptInput {
-        project_id: project_id.clone(),
-        issue_id: issue_id.clone(),
-        work_item_id: work_item.id.clone(),
-        base_branch,
-        branch_name,
-        worktree_path: None,
-        provider_config_snapshot,
-        max_auto_rework: 2,
-    }) {
+    let attempt = match coding_store.create_attempt_with_guard(
+        CreateCodingAttemptInput {
+            project_id: project_id.clone(),
+            issue_id: issue_id.clone(),
+            work_item_id: work_item.id.clone(),
+            base_branch,
+            branch_name,
+            worktree_path: None,
+            provider_config_snapshot,
+            max_auto_rework: 2,
+        },
+        &creation_guard,
+    ) {
         Ok(attempt) => attempt,
         Err(
             error @ ProductStoreError::Conflict {
@@ -565,6 +571,16 @@ pub(crate) async fn delete_coding_attempt(
     let attempt = coding_store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    let _group_initialization_guard = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup)
+    {
+        Some(
+            coding_store
+                .acquire_group_initialization_arbitration(&attempt.project_id, &attempt.issue_id)
+                .map_err(product_store_api_error)?,
+        )
+    } else {
+        None
+    };
     let active_work_item_id = attempt
         .current_work_item_id
         .as_deref()

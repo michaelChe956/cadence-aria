@@ -105,6 +105,17 @@ impl super::CodingAttemptStore {
             .join("group-initialization-arbitration")
     }
 
+    pub(crate) fn work_item_attempt_creation_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+    ) -> PathBuf {
+        self.coding_attempts_root(project_id, issue_id)
+            .join("work-item-attempt-locks")
+            .join(work_item_id)
+    }
+
     pub(crate) fn group_initialization_journal_path(
         &self,
         project_id: &str,

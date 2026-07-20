@@ -12,6 +12,8 @@ use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
+use self::abort::abort_attempt_while_draining_events;
+use super::delivery_ack::fail_plan_amendment_socket_write;
 use super::outbound::{
     OutboundEventReceiver, flush_queued_coding_events, send_coding_event, send_coding_json,
 };
@@ -23,6 +25,7 @@ use super::{
     update_provider_selection,
 };
 
+pub(crate) mod abort;
 mod admission;
 pub(crate) use admission::{CodingMessageAdmission, coding_message_admission};
 #[cfg(test)]
@@ -99,7 +102,7 @@ async fn handle_coding_socket(
     let mut event_rx = OutboundEventReceiver::new(event_rx);
     let mut runner_started = false;
     let mut runner_command_tx: Option<mpsc::Sender<CodingRunnerCommand>> = None;
-    loop {
+    'socket: loop {
         tokio::select! {
             event = event_rx.recv() => {
                 let Some(event) = event else {
@@ -304,12 +307,24 @@ async fn handle_coding_socket(
                             &current_attempt.id,
                         )
                         .unwrap_or_default();
-                    let aborted_runners = state
-                        .coding_runs
-                        .abort_attempt(&CodingAttemptRunKey::from_attempt(&current_attempt))
-                        .await;
+                    let abort_result = abort_attempt_while_draining_events(
+                        &state.coding_runs,
+                        &CodingAttemptRunKey::from_attempt(&current_attempt),
+                        &mut event_rx,
+                    )
+                    .await;
                     runner_command_tx = None;
                     runner_started = false;
+                    for (index, event) in abort_result.events.iter().enumerate() {
+                        if !send_coding_event(&mut socket_tx, event).await {
+                            for remaining in &abort_result.events[index + 1..] {
+                                fail_plan_amendment_socket_write(remaining);
+                            }
+                            drop(mutation_lease);
+                            break 'socket;
+                        }
+                    }
+                    let aborted_runners = abort_result.aborted_runners;
                     if aborted_runners > 0 && !open_gates.is_empty() {
                         drop(mutation_lease);
                         continue;

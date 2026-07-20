@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -25,13 +25,14 @@ use super::{
 };
 
 mod amendment;
+mod registration;
+mod start;
 pub(crate) use amendment::spawn_plan_amendment_runner_reserved;
-
-pub(crate) struct CodingRunnerStartProbe {
-    pub(crate) events: Arc<Mutex<Vec<&'static str>>>,
-    pub(crate) provider_entry_tx: oneshot::Sender<()>,
-    pub(crate) continue_rx: oneshot::Receiver<()>,
-}
+use registration::CodingRunnerRegistrationGuard;
+pub(crate) use start::CodingRunnerStartProbe;
+use start::record_runner_start_event;
+#[cfg(test)]
+pub(crate) use start::spawn_coding_runner_panicking_after_registration;
 
 struct CodingRunnerTask {
     state: WebAppState,
@@ -42,6 +43,8 @@ struct CodingRunnerTask {
     registry_run_id: u64,
     start_rx: Option<oneshot::Receiver<()>>,
     probe: Option<CodingRunnerStartProbe>,
+    #[cfg(test)]
+    panic_after_registration: Option<oneshot::Sender<()>>,
 }
 
 pub(crate) fn spawn_coding_runner(
@@ -64,6 +67,8 @@ pub(crate) fn spawn_coding_runner(
         registry_run_id,
         start_rx: None,
         probe: None,
+        #[cfg(test)]
+        panic_after_registration: None,
     });
     Some(command_tx)
 }
@@ -132,6 +137,8 @@ fn spawn_coding_runner_reserved_inner(
         registry_run_id,
         start_rx: Some(start_rx),
         probe,
+        #[cfg(test)]
+        panic_after_registration: None,
     });
     record_runner_start_event(probe_events.as_ref(), "task_created");
     if let Err(error) =
@@ -167,21 +174,31 @@ fn spawn_coding_runner_task(task: CodingRunnerTask) {
         registry_run_id,
         start_rx,
         probe,
+        #[cfg(test)]
+        panic_after_registration,
     } = task;
     let registry_attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     let coding_runs = state.coding_runs.clone();
     tokio::spawn(async move {
+        let _registration_guard = CodingRunnerRegistrationGuard::new(
+            coding_runs.clone(),
+            registry_attempt_key.clone(),
+            registry_run_id,
+        );
+        #[cfg(test)]
+        if let Some(panic_entered_tx) = panic_after_registration {
+            let _ = panic_entered_tx.send(());
+            panic!("coding runner panic cleanup probe");
+        }
         if let Some(start_rx) = start_rx
             && start_rx.await.is_err()
         {
-            coding_runs.remove(&registry_attempt_key, registry_run_id);
             return;
         }
         if let Some(probe) = probe {
             record_runner_start_event(Some(&probe.events), "provider_entry");
             let _ = probe.provider_entry_tx.send(());
             if probe.continue_rx.await.is_err() {
-                coding_runs.remove(&registry_attempt_key, registry_run_id);
                 return;
             }
         }
@@ -238,17 +255,7 @@ fn spawn_coding_runner_task(task: CodingRunnerTask) {
                     .await;
             }
         }
-        coding_runs.remove(&registry_attempt_key, registry_run_id);
     });
-}
-
-fn record_runner_start_event(events: Option<&Arc<Mutex<Vec<&'static str>>>>, event: &'static str) {
-    if let Some(events) = events {
-        events
-            .lock()
-            .expect("coding runner start events")
-            .push(event);
-    }
 }
 
 pub(crate) fn should_resume_runner_after_gate_response(

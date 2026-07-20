@@ -1,4 +1,4 @@
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease() {
     let root = tempdir().expect("root");
     let repo = git_repo();
@@ -13,7 +13,7 @@ async fn concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease()
     bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
 
     let paused_app = app.clone();
-    let paused_request = tokio::spawn(async move {
+    let mut paused_request = tokio::spawn(async move {
         request_json(
             paused_app,
             Method::POST,
@@ -29,24 +29,44 @@ async fn concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease()
     .await
     .expect("first request did not pause after worktree acquire");
 
-    let (winner_status, winner) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
-        json!({}),
+    let competing_app = app.clone();
+    let mut competing_request = tokio::spawn(async move {
+        request_json(
+            competing_app,
+            Method::POST,
+            "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+            json!({}),
+        )
+        .await
+    });
+    let early_competitor = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        &mut competing_request,
     )
     .await;
-    assert_eq!(winner_status, StatusCode::OK);
-    let winner_attempt_id = assert_global_attempt_id(&winner);
+    if let Ok(result) = early_competitor {
+        acquire_pause.resume();
+        panic!("competing request bypassed paused creation: {result:?}");
+    }
 
     acquire_pause.resume();
-    let (loser_status, loser) = tokio::time::timeout(
+    let (winner_status, winner) = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        paused_request,
+        &mut paused_request,
     )
     .await
     .expect("paused request did not finish")
     .expect("paused request task");
+    assert_eq!(winner_status, StatusCode::OK);
+    let winner_attempt_id = assert_global_attempt_id(&winner);
+
+    let (loser_status, loser) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        &mut competing_request,
+    )
+    .await
+    .expect("competing request did not finish")
+    .expect("competing request task");
     assert_eq!(loser_status, StatusCode::CONFLICT);
     assert_eq!(loser["code"], "coding_attempt_active");
 

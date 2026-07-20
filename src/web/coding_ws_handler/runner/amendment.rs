@@ -30,6 +30,8 @@ pub(crate) fn spawn_plan_amendment_runner_reserved(
         registry_run_id,
         start_rx: None,
         probe: None,
+        #[cfg(test)]
+        panic_after_registration: None,
     });
     Ok(command_tx)
 }

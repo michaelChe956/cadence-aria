@@ -11,7 +11,9 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 
 use super::group_validation::AuthoritativeCodingUnitBinding;
 use super::locking::ExclusiveFileLock;
-use super::{CreateGroupCodingAttemptInput, incomplete_group_attempt};
+use super::{
+    CreateGroupCodingAttemptInput, WorkItemAttemptCreationGuard, incomplete_group_attempt,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +37,10 @@ impl CodingGroupInitializationPhase {
             Self::Completed => 5,
         }
     }
+
+    pub fn has_reached(self, phase: Self) -> bool {
+        self.order() >= phase.order()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +50,7 @@ pub struct CodingGroupInitializationJournal {
     pub issue_id: String,
     pub plan_id: String,
     pub lock_work_item_id: String,
+    pub worktree_lease_id: String,
     pub attempt: CodingExecutionAttempt,
     pub provider_config: CodingRoleProviderConfigSnapshot,
     pub plan_binding: CodingAttemptPlanBinding,
@@ -159,8 +166,20 @@ impl super::CodingAttemptStore {
     pub fn ensure_group_initialization_attempt(
         &self,
         journal: &CodingGroupInitializationJournal,
+        guard: &WorkItemAttemptCreationGuard,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         validate_group_initialization_journal(journal)?;
+        guard.validate_identity(
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.lock_work_item_id,
+        )?;
+        let active_attempts = super::list_json_records::<CodingExecutionAttempt>(
+            &self.coding_attempts_root(&journal.project_id, &journal.issue_id),
+        )?
+        .into_iter()
+        .filter(|attempt| attempt.status.is_active())
+        .collect::<Vec<_>>();
         let attempt_path =
             self.attempt_path(&journal.project_id, &journal.issue_id, &journal.attempt.id);
         if super::path_is_regular_file(&attempt_path)? {
@@ -171,7 +190,22 @@ impl super::CodingAttemptStore {
                     "persisted attempt differs from initialization journal",
                 ));
             }
+            if active_attempts.len() != 1 || active_attempts[0].id != journal.attempt.id {
+                return Err(incomplete_group_attempt(
+                    &journal.attempt.id,
+                    "another active attempt exists during initialization replay",
+                ));
+            }
         } else {
+            if let Some(active) = active_attempts.first() {
+                return Err(incomplete_group_attempt(
+                    &journal.attempt.id,
+                    &format!(
+                        "active attempt {} differs from initialization journal",
+                        active.id
+                    ),
+                ));
+            }
             write_json(&attempt_path, &journal.attempt)?;
         }
 
@@ -387,6 +421,7 @@ impl super::CodingAttemptStore {
             issue_id: input.issue_id.clone(),
             plan_id: input.plan_id.clone(),
             lock_work_item_id: input.current_work_item_id.clone(),
+            worktree_lease_id: format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple()),
             provider_config: CodingRoleProviderConfigSnapshot::from(
                 &input.provider_config_snapshot,
             ),
@@ -451,6 +486,7 @@ fn validate_group_initialization_journal(
         journal.issue_id.as_str(),
         journal.plan_id.as_str(),
         journal.lock_work_item_id.as_str(),
+        journal.worktree_lease_id.as_str(),
         journal.attempt.id.as_str(),
         journal.plan_binding.bound_plan_revision_id.as_str(),
     ] {
@@ -532,6 +568,7 @@ fn same_group_initialization_identity(
         && left.issue_id == right.issue_id
         && left.plan_id == right.plan_id
         && left.lock_work_item_id == right.lock_work_item_id
+        && left.worktree_lease_id == right.worktree_lease_id
         && left.attempt == right.attempt
         && left.provider_config == right.provider_config
         && left.plan_binding == right.plan_binding

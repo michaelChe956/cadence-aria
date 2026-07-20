@@ -13,6 +13,7 @@ use crate::product::json_store::{
 use crate::product::models::{ProviderConversationRef, WorkItemExecutionPlanStatus};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
+use super::WorkItemAttemptCreationGuard;
 use super::locking::with_exclusive_lock;
 
 impl super::CodingAttemptStore {
@@ -20,82 +21,86 @@ impl super::CodingAttemptStore {
         &self,
         input: CreateCodingAttemptInput,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let guard = self.acquire_work_item_attempt_creation(
+            &input.project_id,
+            &input.issue_id,
+            &input.work_item_id,
+        )?;
+        self.create_attempt_with_guard(input, &guard)
+    }
+
+    pub(crate) fn create_attempt_with_guard(
+        &self,
+        input: CreateCodingAttemptInput,
+        guard: &WorkItemAttemptCreationGuard,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.work_item_id)?;
         super::validate_max_auto_rework(input.max_auto_rework)?;
+        guard.validate_identity(&input.project_id, &input.issue_id, &input.work_item_id)?;
 
-        let lock_target = self
-            .coding_attempts_root(&input.project_id, &input.issue_id)
-            .join("work-item-attempt-locks")
-            .join(&input.work_item_id);
-        with_exclusive_lock(&lock_target, || {
-            if let Some(active) =
-                self.get_active_attempt(&input.project_id, &input.issue_id, &input.work_item_id)?
-            {
-                return Err(ProductStoreError::Conflict {
-                    kind: "active_coding_attempt",
-                    id: active.id,
-                });
+        if let Some(active) =
+            self.get_active_attempt(&input.project_id, &input.issue_id, &input.work_item_id)?
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "active_coding_attempt",
+                id: active.id,
+            });
+        }
+
+        let id = self.allocate_coding_attempt_id();
+        let attempt_no = self
+            .list_attempts_for_work_item(&input.project_id, &input.issue_id, &input.work_item_id)?
+            .iter()
+            .map(|attempt| attempt.attempt_no)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let now = Utc::now().to_rfc3339();
+        let current_work_item_id = input.work_item_id.clone();
+        let attempt = CodingExecutionAttempt {
+            id: id.clone(),
+            project_id: input.project_id,
+            issue_id: input.issue_id,
+            work_item_id: input.work_item_id,
+            attempt_no,
+            scope: CodingAttemptScope::WorkItem,
+            status: CodingAttemptStatus::Created,
+            stage: CodingExecutionStage::PrepareContext,
+            base_branch: input.base_branch,
+            branch_name: input.branch_name,
+            worktree_path: input.worktree_path,
+            provider_config_snapshot: input.provider_config_snapshot,
+            rework_count: 0,
+            max_auto_rework: input.max_auto_rework,
+            work_item_group_id: None,
+            current_work_item_id: Some(current_work_item_id),
+            active_unit_id: None,
+            head_commit: None,
+            pushed_remote: None,
+            review_request_id: None,
+            provider_conversations: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            completed_at: None,
+        };
+
+        let attempt_path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &id);
+        write_json(&attempt_path, &attempt)?;
+        let provider_config_path =
+            self.role_provider_config_path(&attempt.project_id, &attempt.issue_id, &id);
+        if let Err(error) = write_json(
+            &provider_config_path,
+            &CodingRoleProviderConfigSnapshot::from(&attempt.provider_config_snapshot),
+        ) {
+            let _ = std::fs::remove_file(&attempt_path);
+            if let Some(parent) = provider_config_path.parent() {
+                let _ = std::fs::remove_dir(parent);
             }
-
-            let id = self.allocate_coding_attempt_id();
-            let attempt_no = self
-                .list_attempts_for_work_item(
-                    &input.project_id,
-                    &input.issue_id,
-                    &input.work_item_id,
-                )?
-                .iter()
-                .map(|attempt| attempt.attempt_no)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let now = Utc::now().to_rfc3339();
-            let current_work_item_id = input.work_item_id.clone();
-            let attempt = CodingExecutionAttempt {
-                id: id.clone(),
-                project_id: input.project_id,
-                issue_id: input.issue_id,
-                work_item_id: input.work_item_id,
-                attempt_no,
-                scope: CodingAttemptScope::WorkItem,
-                status: CodingAttemptStatus::Created,
-                stage: CodingExecutionStage::PrepareContext,
-                base_branch: input.base_branch,
-                branch_name: input.branch_name,
-                worktree_path: input.worktree_path,
-                provider_config_snapshot: input.provider_config_snapshot,
-                rework_count: 0,
-                max_auto_rework: input.max_auto_rework,
-                work_item_group_id: None,
-                current_work_item_id: Some(current_work_item_id),
-                active_unit_id: None,
-                head_commit: None,
-                pushed_remote: None,
-                review_request_id: None,
-                provider_conversations: Vec::new(),
-                created_at: now.clone(),
-                updated_at: now,
-                completed_at: None,
-            };
-
-            let attempt_path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &id);
-            write_json(&attempt_path, &attempt)?;
-            let provider_config_path =
-                self.role_provider_config_path(&attempt.project_id, &attempt.issue_id, &id);
-            if let Err(error) = write_json(
-                &provider_config_path,
-                &CodingRoleProviderConfigSnapshot::from(&attempt.provider_config_snapshot),
-            ) {
-                let _ = std::fs::remove_file(&attempt_path);
-                if let Some(parent) = provider_config_path.parent() {
-                    let _ = std::fs::remove_dir(parent);
-                }
-                return Err(error);
-            }
-            Ok(attempt)
-        })
+            return Err(error);
+        }
+        Ok(attempt)
     }
 
     pub fn save_coding_attempt(

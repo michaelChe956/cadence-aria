@@ -297,3 +297,78 @@ Focused 验证：
 - Work Item 侧影响仅限 Coding Attempt 对 Issue Shared Worktree lease 的校验、绑定、转移和释放，不改变 Work Item 规划、Story/Design 生成或审核流程。
 - 未新增 HTTP test route；checkpoint 与 mutation pause seam 默认关闭，仅能通过测试代码直接配置。
 - 提交策略：Round 3 代码、测试、设计、计划与本报告使用一个新原子提交；不 amend，不 push，worktree 保留。
+
+## Round 4 最终修复（2026-07-21）
+
+### 1. Finding 核验与 Single/Group 创建仲裁
+
+- 核验确认 Single 与 Group 创建此前只在各自路径内收敛，Group initialization arbitration 不能阻止 Single 对同一 Work Item 交错创建；两个独立 `WebAppState`/`CodingAttemptStore` 可越过彼此的 active 检查和 Lifecycle lease 窗口。
+- 新增带 project/issue/work-item identity 的 `WorkItemAttemptCreationGuard`，底层复用跨进程 `work-item-attempt-locks/{work_item_id}` 文件锁。
+- Single handler 在任何 Issue Shared Worktree lease 操作前取得 guard，并持有到 Attempt、provider config 与 lease bind 完成；`create_attempt` 保留自锁兼容入口，handler 使用 guard-aware 入口并再次校验 active Attempt。
+- Group handler 固定使用 `initialization arbitration → Work Item creation guard → Lifecycle lease` 顺序，并将 creation guard 持有到 Attempt、provider config、plan binding、Unit 与 journal 全部完成。
+- Group ensure 只接受 journal Attempt 精确存在且它是唯一 active Attempt，或在没有任何 active Attempt 时首次写入；其他 active Attempt 均返回 `coding_group_attempt_incomplete`，不覆盖、不清理、不猜测。
+
+### 2. Required `worktree_lease_id` 与 replay fail-closed
+
+- `CodingGroupInitializationJournal.worktree_lease_id` 为 required `String` 字段，没有 `serde(default)` 或 Optional 兼容层；缺字段的旧 journal 直接反序列化失败，明确不兼容旧 Schema。
+- 首次 prepare 生成并持久化固定 lease ID，后续重启 replay 必须复用同一 ID，identity equality 也包含该字段。
+- `try_acquire_issue_worktree_lock` 返回 `acquired=false` 时，仅当 journal phase 已达到 `WorktreeBound` 且当前 owner 精确等于 journal Attempt ID，才视为已绑定 replay。
+- 其他 temporary lease、其他 Attempt owner、ownerless 或 phase 尚未到 `WorktreeBound` 的 owner 状态全部 fail-closed，不写 Attempt、provider config、binding 或 Unit。
+
+### 3. Runner 必达清理与 WebSocket backpressure
+
+- spawned runner future 首行创建 `CodingRunnerRegistrationGuard`；guard Drop 同步执行 registry `remove`，覆盖正常返回、所有早退、panic unwind 与 task cancellation。
+- registry Abort 快照新增 run ID；command receiver 已关闭时立即按 run ID remove，再等待其余 completion receiver，避免永远等待一个已不存在的 runner。
+- 新增 `abort_attempt_while_draining_events`：等待 Abort completion 时使用 `tokio::select!` 持续 drain outbound event queue，按接收顺序缓存事件，解除 runner send 与 Abort waiter 之间的满队列死锁。
+- Abort 完成后复用 `send_coding_event` 顺序写出缓存事件并结算 ACK；socket 写失败时显式标记剩余缓存事件 delivery failure，再退出 socket。
+- panic seam 与 runner start probe 拆分到 `runner/start.rs`，RAII 类型位于 `runner/registration.rs`，使 `runner.rs` 保持在 800 行上限内。
+
+### 4. Group replay/Delete 串行与锁序无环证明
+
+- Group Delete 顺序固定为：等待 runner completion → Attempt mutation lease → 重载 Attempt → Group initialization arbitration → Lifecycle/Git cleanup → journal 与 Attempt 目录删除。
+- Delete 持有 initialization arbitration 到 `delete_attempt` 返回；Group replay 从 prepare 到 `Completed` 也持有同一 arbitration，因此 replay 与 Delete 在线性化点串行，不再由 Delete 越过半初始化 replay。
+- 创建锁序为 `Group initialization arbitration → Work Item creation guard → Lifecycle Issue Shared Worktree 文件锁`；Single 从 Work Item creation guard 开始，不获取 Group arbitration。
+- 终止锁序为 `runner completion → Attempt mutation lease → Group initialization arbitration（仅 Group Delete）→ Lifecycle/Git/store cleanup`。
+- 创建/replay 不获取 Attempt mutation lease；Abort/Delete 不获取 Work Item creation guard；没有路径在持有 Lifecycle 文件锁后反向获取 creation guard；registry mutex 只做同步快照/更新且不跨 `.await`。因此锁图不存在反向边或环。
+
+### 5. RED → GREEN 与全量门禁发现
+
+| 场景 | RED | GREEN |
+| --- | --- | --- |
+| Group → Single 创建 | Group 在 lease 后暂停时 Single 可独立创建，两个路径均可能返回 200 | Single 等待同一 Work Item guard；Group 200，Single `coding_attempt_active` 409 |
+| Single → Group 创建 | Single 在 lease 后暂停时 Group 可写 journal/进入错误 owner 路径 | Group 等待同一 guard；Single 200，Group typed conflict |
+| spawned runner panic | runner panic 后 registry count 不归零，Abort completion 永久缺失 | registration guard Drop 必达 remove，timeout 内 count=0 |
+| closed command receiver | Abort send 失败后仍等待 completion watch | send 失败按 run ID 立即 remove，Abort 有界返回 |
+| 满 outbound queue | runner 第二次 send 与 Abort 等待 completion 互相阻塞 | Abort helper 持续 drain，按序返回两个事件并完成 remove |
+| Group replay/Delete | Delete 越过暂停 replay，立即产生 owner conflict 500 | Delete 保持 pending；replay 200 后 Delete 204，所有初始化状态清除 |
+| 既有并发 HTTP 测试 | 新 creation guard 使旧单线程 Tokio 测试在同步文件锁处形成测试等待环 | 改为 2-thread runtime，竞争请求异步保持 pending，先恢复首请求后验证 200/409 与 lease owner |
+
+关键 focused GREEN：
+
+- Single/Group 双向创建交错：2 passed。
+- 跨 Store Single 创建串行：1 passed。
+- Group initialization restart：2 passed；Single persist→bind restart：1 passed。
+- runner panic cleanup 与容量 1 backpressure：2 passed；closed receiver Abort：1 passed。
+- Coding run registry：5 passed；Coding WS Abort：3 passed。
+- Group retry/Delete arbitration：1 passed。
+- 修正后的 `concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease`：1 passed。
+
+### 6. Round 4 最终门禁与审计
+
+- `cargo fmt --check`：PASS。
+- `cargo check --locked`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，0 warnings。
+- `cargo test --locked`：PASS，exit 0；lib target 运行 1213 tests，Web integration 277 passed、12 ignored，doc-test 1 passed，所有 target 均无失败。
+- `cd web && pnpm tsc -b`：PASS。
+- 本轮无前端 TypeScript/React 行为改动，因此未运行 Vitest 与前端 build。
+- `git diff --check`：PASS。
+- 20 个修改/新增 Rust、TS 文件全部不超过 800 行；最大为 `src/web/coding_ws_handler/runner.rs`，恰好 800 行；`socket.rs` 为 779 行。
+- `src/web/app.rs` 无 diff；未新增 `/api/test/*` 或其他默认生产 route。新增 pause/panic seam 只能通过直接持有 `WebAppState.test_controls` 或 `cfg(test)` 调用，默认关闭、一次性消费。
+- 未发现 TODO、FIXME、TBD 或 placeholder；unstaged 与新增文件均已逐项审阅。
+- 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
+
+### 7. 影响范围与提交边界
+
+- Story Spec 与 Design Spec Workspace 不受影响：本轮只修改 Coding Attempt 创建、Group initialization、Coding runner registry、Coding WebSocket Abort 与 Group Delete 路径。
+- 未修改 Story/Design/Work Item 产物 Workspace 共用的 timeline、chat entry、artifact version 或前端聚合链路；Work Item 影响限于 Coding Attempt 的创建唯一性与 Issue Shared Worktree owner 生命周期。
+- Round 4 代码、测试、设计、计划与本报告使用一个新原子提交；不 amend，不 push，提交后保留 worktree 且工作区必须 clean。
