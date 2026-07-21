@@ -584,3 +584,71 @@ Focused 验证：
 - 已知 Minor `test-controls` 生产编译边界仍保留：默认无 route，本轮未扩大到 test-support crate 重构，也未发现适合顺手加入的低风险生产误配 fail-startup 边界。
 - 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
 - 提交策略：Round 7 代码、测试与本报告使用一个新原子提交；不 amend，不 push，提交后 worktree 必须 clean。
+
+## Round 8 最终修复（2026-07-21）
+
+### 1. Unix wait cancel-safety、PGID 身份与非阻塞 Drop
+
+- Unix `ManagedProcessChild` 不再使用声明为 cancellation-unsafe 的 `AsyncGroupChild::wait()`；改为 Tokio `Child::wait()`，让唯一 child owner 可以在 `select!` 取消后继续 await 同一 child，并保持 wait/reap 语义。
+- Unix spawn 继续创建独立 process group；保存 spawn 时 leader PID 作为 PGID。显式 kill 与 Drop 仅在当前 `Child::id()` 仍等于原 PGID 时发送 `killpg`，leader 已被 wait/reap 时不会再向可能复用的 PGID 发信号。
+- Drop 删除最多约 250ms 的同步 sleep/`try_wait` 轮询，只做身份校验后的非阻塞 `killpg` 与 `start_kill`；正常 cancellation/timeout 仍走 async `terminate()` 完成 kill、wait/reap 与输出 drain。
+- Windows 保留 `command-group` Job Object 路径，并新增 `cfg(windows)` 子进程树 Drop 回归源码。
+
+### 2. Tester artifact 原子发布与 ToolResult 取消提交边界
+
+- stdout/stderr 先写入同目录唯一临时文件；阻塞写入必须完整 settle，随后再次检查 `CancellationToken`，只有未取消时才通过 rename 原子发布最终 artifact。
+- 取消或写入失败会清理临时文件及可能存在的最终文件，避免 remove 先于迟到 write 而重新创建 artifact。
+- ToolResult command send 前使用 cancellation-aware permit；取得 permit 后再次检查 token。send 完成后增加第二个 token checkpoint，取消胜出时不再写 tester step、ChatEntry 或 RoleRun ToolResult event。
+- Provider command channel 关闭时 fail closed，并清理本次 ToolCall 已生成的 artifact。
+
+### 3. Push transport ambiguity 与可收敛重试
+
+- `PushResult` 新增 `remote_rejected`；只把 porcelain `[rejected]`、`[remote rejected]` 与 `remote: error:` 分类为明确远端拒绝。
+- push 非零后远端 ref 已等于 commit 时仍收敛 `Pushed`；只有明确 rejection 且远端未更新时才终态 `Failed`。
+- transport/local failure 即使首次远端查询得到旧 ref 或缺失，也保持 `PushStarted` 并返回 `PushIndeterminate`；不写 ReviewRequest 终态、不把 Attempt 错误推进为 Blocked/Failed。
+- Abort 等终态 mutation 遇到不确定 push 会被 durable journal 阻断；取消后的 push 不再执行 mixed reset 或写 `Compensated`。
+- 新增真实本地 Git 回归：client 首次非零、首次查询旧 ref、远端随后更新；下一次 reconcile 收敛为 `Pushed`。
+
+### 4. Windows cfg 收口
+
+- `git_workspace_service/tests.rs` 整体只在 `cfg(all(test, unix))` 编译。
+- `part_19.rs` 三个依赖 Unix shell/权限/receive-pack 的 Git 集成测试逐项使用 `cfg(unix)`。
+- Windows Job Object 回归位于 `process_manager/windows_tests.rs`，模块只在 `cfg(all(test, windows))` 编译，并对 `AsyncGroupChild` 类型与子进程树 Drop 行为建立源码契约。
+- 当前宿主机仅安装 `x86_64-unknown-linux-gnu`；此前 Windows target 检查受限于网络无法下载 `clipboard-win 5.4.1`，因此本轮 Windows 结论限定为 cfg 与源码审计，不宣称已执行 Windows 二进制测试。
+
+### 5. RED → GREEN
+
+| 场景 | RED | GREEN |
+| --- | --- | --- |
+| Unix wait future 取消 | cancellation-unsafe group wait 可被 `select!` drop | Tokio `Child::wait()` cancel-safe；取消后仍可终止并 await 原 child |
+| leader 已 reap / PGID 复用 | 缓存 PGID 的 Drop 仍可能 `killpg` | `Child::id()` 与原 PGID 不匹配时拒绝发组信号 |
+| Drop worker 阻塞 | Drop 同步 sleep/reap 最多约 250ms | Drop 回归证明非阻塞返回，async terminate 负责可靠 reap |
+| artifact settle 时取消 | remove 可能早于迟到 blocking write，最终文件被重建 | 唯一 temp 完整 settle，取消清理 temp/final，不发布 artifact |
+| ToolResult send 后立即取消 | 仍可写 step/chat/RoleRun event | send 后 checkpoint 截断后续 Store/event mutation |
+| push 首查旧 ref、稍后更新 | 负快照立即终态 `Failed`，无法自愈 | journal 保持 `PushStarted`，重试后按远端新 ref 收敛 `Pushed` |
+| Windows all-target 编译 | Unix imports、signals、`/proc` 测试无 cfg | Unix 测试模块/函数隔离，Windows Job Object 测试独立 cfg |
+
+### 6. Focused 验证
+
+- `process_manager`：9 passed，覆盖 wait cancel、PGID 身份、task abort、panic、runtime drop 与非阻塞 Drop。
+- `bounded_command_runner`：9 passed。
+- `tester_cancellation`：3 passed；artifact settle cancellation：1 passed。
+- `git_operation`：13 passed；`git_operation_reconcile`：7 passed。
+- `git_workspace_service`：4 passed，包括 rejection/transport 分类及 Git child cancellation。
+- `it_product push_with_`：3 passed，包括旧 ref 后远端更新并最终收敛。
+
+### 7. 最终门禁与边界
+
+- `cargo fmt --check`：PASS。
+- `cargo check --locked`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，0 warnings；fresh 首轮发现 Unix cfg 分支末尾一个 `needless_return`，最小修复后 clippy 复跑通过。
+- `cargo test --locked`：最终完整复跑 PASS，exit 0；lib 1257 passed，`it_core` 143 passed，`it_interactive` 43 passed，`it_product` 224 passed，`it_web` 280 passed、12 ignored，doc-test 1 passed，其余 target 无失败。
+  - 首次完整运行在两个 bounded runner 临时 shell fixture 上遇到 `Text file busy (os error 26)`；错误发生于 fixture exec、生产逻辑尚未进入。未修改代码立即复跑全部 1257 个 lib 测试通过，随后完整 `cargo test --locked` 复跑 exit 0。仓库历史计划已记录同类“刚写临时脚本后立即 exec”的既有环境瞬态，本轮未加入 sleep 或生产重试掩盖问题。
+- `cd web && pnpm tsc -b`：PASS。
+- `git diff --check`：PASS。
+- 全仓 Rust、TS、TSX 文件均不超过 800 行；最大文件 800 行，本轮关键 `testing_provider/execution.rs` 为 799 行。
+- `src/web/app.rs` 与 lockfiles 无当前 Round 8 diff；新增源码没有 route 注册或 `/api/`、`/ws/` 路径；未新增依赖。
+- Story Spec、Design Spec、Work Item 共用的 Workspace timeline/chat/artifact version 恢复链路没有被本轮修改；完整测试中的 `story_design_work_item_plan_recovery_consistency` 与 `ordinary_work_item_workspace_review_unaffected` 均通过。本轮影响限定为 Coding Tester、共享进程生命周期和 ReviewRequest push 收口。
+- 已知 Minor `test-controls` 生产编译边界继续保留：默认无 route，本轮未扩大其生产可达面。
+- 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
+- 提交策略：Round 8 代码、测试与本报告使用一个新原子提交；不 amend，提交后先生成整分支 Round 9 review package，不在 Review 前 push。

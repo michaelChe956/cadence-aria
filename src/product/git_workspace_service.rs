@@ -36,6 +36,12 @@ pub enum GitWorkspaceError {
     UnsafePath(String),
     #[error("git_workspace_parse: {0}")]
     Parse(String),
+    #[error("git_push_indeterminate: {remote}/{branch} at {commit_sha}")]
+    PushIndeterminate {
+        remote: String,
+        branch: String,
+        commit_sha: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +61,7 @@ pub struct PushResult {
     pub remote: String,
     pub branch: String,
     pub stderr: Option<String>,
+    pub remote_rejected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,11 +282,17 @@ impl GitWorkspaceService {
         } else {
             PushStatus::Failed
         };
+        let stderr = (!output.stderr.trim().is_empty()).then_some(output.stderr);
+        let remote_rejected = !output.status_success
+            && stderr
+                .as_deref()
+                .is_some_and(push_output_is_explicit_remote_rejection);
         Ok(PushResult {
             status,
             remote: remote.to_string(),
             branch: branch.to_string(),
-            stderr: (!output.stderr.trim().is_empty()).then_some(output.stderr),
+            stderr,
+            remote_rejected,
         })
     }
 
@@ -655,6 +668,13 @@ fn should_exclude_from_work_item_commit(path: &str) -> bool {
         || path.ends_with(".pyc")
 }
 
+fn push_output_is_explicit_remote_rejection(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("[remote rejected]")
+        || stderr.contains("[rejected]")
+        || stderr.contains("remote: error:")
+}
+
 fn parse_numstat_line(line: &str) -> Result<DiffFileStat, GitWorkspaceError> {
     let mut parts = line.split('\t');
     let insertions = parse_numstat_count(parts.next(), line)?;
@@ -682,4 +702,6 @@ fn parse_numstat_count(value: Option<&str>, line: &str) -> Result<u32, GitWorksp
 }
 
 #[cfg(test)]
+mod push_tests;
+#[cfg(all(test, unix))]
 mod tests;

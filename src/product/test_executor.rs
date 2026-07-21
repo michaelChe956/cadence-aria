@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -254,24 +254,78 @@ async fn write_test_artifacts(
     stderr: &[u8],
     cancellation: &CancellationToken,
 ) -> Result<(), TestExecutorError> {
-    let write = async {
-        if let Some(parent) = stdout_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+    let parent = stdout_path.parent().ok_or_else(|| {
+        TestExecutorError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "test artifact path has no parent",
+        ))
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    let stdout_temp = artifact_temp_path(stdout_path)?;
+    let stderr_temp = artifact_temp_path(stderr_path)?;
+
+    let result = async {
+        write_file_settled(&stdout_temp, stdout).await?;
+        cancellation_checkpoint(cancellation)?;
+        write_file_settled(&stderr_temp, stderr).await?;
+        cancellation_checkpoint(cancellation)?;
+
+        tokio::fs::rename(&stdout_temp, stdout_path).await?;
+        if let Err(error) = tokio::fs::rename(&stderr_temp, stderr_path).await {
+            let _ = tokio::fs::remove_file(stdout_path).await;
+            return Err(TestExecutorError::Io(error));
         }
-        tokio::fs::write(stdout_path, stdout).await?;
-        tokio::fs::write(stderr_path, stderr).await
-    };
-    let result = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => Err(TestExecutorError::Cancelled),
-        result = write => result.map_err(TestExecutorError::from),
-    };
-    if result.is_err() && cancellation.is_cancelled() {
-        let _ = tokio::fs::remove_file(stdout_path).await;
-        let _ = tokio::fs::remove_file(stderr_path).await;
-        return Err(TestExecutorError::Cancelled);
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&stdout_temp).await;
+        let _ = tokio::fs::remove_file(&stderr_temp).await;
     }
     result
+}
+
+fn artifact_temp_path(destination: &Path) -> Result<PathBuf, TestExecutorError> {
+    let parent = destination.parent().ok_or_else(|| {
+        TestExecutorError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "test artifact path has no parent",
+        ))
+    })?;
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            TestExecutorError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "test artifact filename is not valid UTF-8",
+            ))
+        })?;
+    Ok(parent.join(format!(".{name}.tmp-{}", uuid::Uuid::new_v4().simple())))
+}
+
+async fn write_file_settled(path: &Path, contents: &[u8]) -> Result<(), TestExecutorError> {
+    let path = path.to_path_buf();
+    let contents = contents.to_vec();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        tests::pause_artifact_write_if_configured(&path);
+        std::fs::write(path, contents)
+    })
+    .await
+    .map_err(|error| {
+        TestExecutorError::Io(std::io::Error::other(format!(
+            "test artifact writer task failed: {error}"
+        )))
+    })??;
+    Ok(())
+}
+
+fn cancellation_checkpoint(cancellation: &CancellationToken) -> Result<(), TestExecutorError> {
+    if cancellation.is_cancelled() {
+        return Err(TestExecutorError::Cancelled);
+    }
+    Ok(())
 }
 
 pub async fn run_all_tests(
@@ -320,6 +374,21 @@ pub async fn run_all_tests(
         raw_provider_output_ref: None,
         plan_defect_findings: Vec::new(),
     })
+}
+
+pub(crate) async fn remove_test_command_artifacts(
+    artifact_output_root: &Path,
+    command: &TestCommand,
+) -> Result<(), TestExecutorError> {
+    for artifact_ref in [&command.stdout_ref, &command.stderr_ref] {
+        let path = artifact_output_root.join(artifact_ref);
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(TestExecutorError::Io(error)),
+        }
+    }
+    Ok(())
 }
 
 fn artifact_ref(command_id: &str, stream: &str) -> String {
@@ -540,3 +609,6 @@ fn code_fence_marker(line: &str) -> Option<String> {
 fn is_closing_fence(line: &str, fence: &str) -> bool {
     line.starts_with(fence) && line[fence.len()..].trim().is_empty()
 }
+
+#[cfg(test)]
+mod tests;

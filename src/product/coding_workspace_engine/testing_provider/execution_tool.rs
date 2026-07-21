@@ -49,7 +49,20 @@ impl CodingWorkspaceEngine {
             Err(error) => return Err(error.into()),
             Ok(outcome) => outcome,
         };
+        #[cfg(test)]
+        super::test_pause::pause_tester_tool_commit_if_configured(
+            artifact_output_root,
+            super::test_pause::TesterToolCommitTestPoint::BeforeProviderSend,
+        )
+        .await;
         if cancellation.is_cancelled() {
+            if let Some(command) = outcome.command.as_ref() {
+                crate::product::test_executor::remove_test_command_artifacts(
+                    artifact_output_root,
+                    command,
+                )
+                .await?;
+            }
             self.persist_provider_cancellation(
                 attempt,
                 Some(role_run),
@@ -64,13 +77,40 @@ impl CodingWorkspaceEngine {
             cancellation,
         )
         .await;
-        if !sent && cancellation.is_cancelled() {
+        #[cfg(test)]
+        if sent {
+            super::test_pause::pause_tester_tool_commit_if_configured(
+                artifact_output_root,
+                super::test_pause::TesterToolCommitTestPoint::AfterProviderSend,
+            )
+            .await;
+        }
+        if cancellation.is_cancelled() {
+            if let Some(command) = outcome.command.as_ref() {
+                crate::product::test_executor::remove_test_command_artifacts(
+                    artifact_output_root,
+                    command,
+                )
+                .await?;
+            }
             self.persist_provider_cancellation(
                 attempt,
                 Some(role_run),
                 "execute_test_plan_tool_result",
             )?;
             return Err(CodingWorkspaceEngineError::Aborted);
+        }
+        if !sent {
+            if let Some(command) = outcome.command.as_ref() {
+                crate::product::test_executor::remove_test_command_artifacts(
+                    artifact_output_root,
+                    command,
+                )
+                .await?;
+            }
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "tester_tool_result_channel_closed".to_string(),
+            ));
         }
         Ok(outcome)
     }

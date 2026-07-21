@@ -13,11 +13,12 @@ enum ReviewPushDecision {
 fn review_push_decision<E>(
     expected_commit: &str,
     remote_head: Result<Option<&str>, E>,
+    remote_rejected: bool,
 ) -> ReviewPushDecision {
     match remote_head {
         Ok(Some(remote_commit)) if remote_commit == expected_commit => ReviewPushDecision::Pushed,
-        Ok(_) => ReviewPushDecision::Failed,
-        Err(_) => ReviewPushDecision::Indeterminate,
+        Ok(_) if remote_rejected => ReviewPushDecision::Failed,
+        Ok(_) | Err(_) => ReviewPushDecision::Indeterminate,
     }
 }
 
@@ -44,12 +45,28 @@ impl CodingWorkspaceEngine {
                         .await?;
                 }
                 CodingGitOperationPhase::PushStarted => {
-                    if let Some(completed) = self
+                    let completed = self
                         .reconcile_cancelled_review_push(attempt, &journal)
-                        .await?
-                    {
-                        self.persist_review_request_from_git_journal(attempt, &completed)?;
-                    }
+                        .await?;
+                    let Some(completed) = completed else {
+                        return Err(GitWorkspaceError::PushIndeterminate {
+                            remote: journal.remote.clone().ok_or_else(|| {
+                                ProductStoreError::IdentityMismatch {
+                                    kind: "coding_git_operation",
+                                    id: journal.attempt_id.clone(),
+                                }
+                            })?,
+                            branch: journal.branch_name.clone(),
+                            commit_sha: journal.commit_sha.clone().ok_or_else(|| {
+                                ProductStoreError::IdentityMismatch {
+                                    kind: "coding_git_operation",
+                                    id: journal.attempt_id.clone(),
+                                }
+                            })?,
+                        }
+                        .into());
+                    };
+                    self.persist_review_request_from_git_journal(attempt, &completed)?;
                 }
                 CodingGitOperationPhase::Completed => {
                     self.persist_review_request_from_git_journal(attempt, &journal)?;
@@ -152,6 +169,7 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
         journal: &CodingGitOperationJournal,
+        remote_rejected: bool,
     ) -> Result<CodingGitOperationJournal, CodingWorkspaceEngineError> {
         let remote =
             journal
@@ -173,7 +191,11 @@ impl CodingWorkspaceEngine {
             ._git_service
             .git_remote_branch_head(&journal.worktree_path, remote, &journal.branch_name)
             .await;
-        match review_push_decision(commit_sha, remote_head.as_ref().map(|head| head.as_deref())) {
+        match review_push_decision(
+            commit_sha,
+            remote_head.as_ref().map(|head| head.as_deref()),
+            remote_rejected,
+        ) {
             ReviewPushDecision::Pushed => {
                 self.finish_review_git_operation(attempt, journal, PushStatus::Pushed)
                     .await
@@ -182,9 +204,15 @@ impl CodingWorkspaceEngine {
                 self.finish_review_git_operation(attempt, journal, PushStatus::Failed)
                     .await
             }
-            ReviewPushDecision::Indeterminate => Err(remote_head
-                .expect_err("indeterminate push requires remote query error")
+            ReviewPushDecision::Indeterminate => match remote_head {
+                Err(error) => Err(error.into()),
+                Ok(_) => Err(GitWorkspaceError::PushIndeterminate {
+                    remote: remote.to_string(),
+                    branch: journal.branch_name.clone(),
+                    commit_sha: commit_sha.to_string(),
+                }
                 .into()),
+            },
         }
     }
 
@@ -221,14 +249,6 @@ impl CodingWorkspaceEngine {
                 .await
                 .map(Some);
         }
-        git.git_reset_mixed(&journal.worktree_path, &journal.before_head)
-            .await?;
-        self.store.advance_coding_git_operation(
-            attempt,
-            journal,
-            CodingGitOperationPhase::Compensated,
-            None,
-        )?;
         Ok(None)
     }
 

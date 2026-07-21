@@ -630,7 +630,12 @@ impl CodingWorkspaceEngine {
                             self.finish_review_git_operation(&attempt, &journal, PushStatus::Pushed)
                                 .await?
                         } else {
-                            self.finish_nonzero_review_push(&attempt, &journal).await?
+                            self.finish_nonzero_review_push(
+                                &attempt,
+                                &journal,
+                                push.remote_rejected,
+                            )
+                            .await?
                         };
                     }
                     Err(GitWorkspaceError::Cancelled { .. }) => {

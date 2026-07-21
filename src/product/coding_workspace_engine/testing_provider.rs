@@ -5,6 +5,11 @@ mod execution_tool;
 mod execution_types;
 mod plan;
 mod report;
+#[cfg(test)]
+mod test_pause;
+
+#[cfg(test)]
+pub(crate) use test_pause::{TesterToolCommitTestPoint, register_tester_tool_commit_pause};
 
 use execution_tool::TesterToolExecutionInput;
 

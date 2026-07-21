@@ -343,7 +343,7 @@ async fn cancellation_after_successful_push_exit_records_authoritative_completio
 }
 
 #[tokio::test]
-async fn cancellation_after_rejected_push_exit_compensates_local_commit() {
+async fn cancellation_after_push_exit_keeps_ambiguous_push_started_and_local_commit() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempdir().expect("root");
@@ -413,10 +413,10 @@ async fn cancellation_after_rejected_push_exit_compensates_local_commit() {
 
     let result = execute.await.expect("review request task");
     assert!(matches!(result, Err(CodingWorkspaceEngineError::Aborted)));
-    assert_eq!(
-        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
-        before_head
-    );
+    let committed_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    assert_ne!(committed_head, before_head);
     assert_eq!(
         fs::read_to_string(worktree.join("feature.txt")).expect("preserved feature"),
         "keep after rejected push\n"
@@ -430,17 +430,42 @@ async fn cancellation_after_rejected_push_exit_compensates_local_commit() {
     );
     let authoritative = store
         .get_attempt(&prepared.project_id, &prepared.issue_id, &prepared.id)
-        .expect("attempt after rejected push compensation");
+        .expect("attempt after ambiguous push cancellation");
     let journal = store
         .get_coding_git_operation(&authoritative)
         .expect("journal")
         .expect("review journal");
-    assert_eq!(journal.phase, CodingGitOperationPhase::Compensated);
+    assert_eq!(journal.phase, CodingGitOperationPhase::PushStarted);
+    assert_eq!(journal.commit_sha.as_deref(), Some(committed_head.as_str()));
+    assert_eq!(journal.push_status, None);
     assert!(
         store
             .list_review_requests(&prepared.project_id, &prepared.issue_id, &prepared.id)
             .expect("review requests")
             .is_empty()
+    );
+
+    let (abort_tx, _abort_rx) = tokio::sync::mpsc::channel(8);
+    let abort_error =
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), abort_tx)
+            .handle_abort(&prepared.project_id, &prepared.issue_id, &prepared.id)
+            .await
+            .expect_err("ambiguous push must block terminal abort");
+    assert!(matches!(
+        abort_error,
+        CodingWorkspaceEngineError::Git(GitWorkspaceError::PushIndeterminate { .. })
+    ));
+    let still_running = store
+        .get_attempt(&prepared.project_id, &prepared.issue_id, &prepared.id)
+        .expect("attempt remains retryable");
+    assert_eq!(still_running.status, authoritative.status);
+    assert_eq!(
+        store
+            .get_coding_git_operation(&still_running)
+            .expect("journal after blocked abort")
+            .expect("push journal")
+            .phase,
+        CodingGitOperationPhase::PushStarted
     );
 }
 

@@ -64,6 +64,9 @@ pub(crate) async fn send_provider_command_with_cancellation(
     let Ok(permit) = permit else {
         return false;
     };
+    if cancellation.is_cancelled() {
+        return false;
+    }
     permit.send(command);
     true
 }

@@ -4,11 +4,17 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 
+#[cfg(windows)]
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+
+#[cfg(unix)]
+fn unix_process_group_signal_target(current_child_id: Option<u32>, pgid: i32) -> Option<i32> {
+    (current_child_id == u32::try_from(pgid).ok()).then_some(pgid)
+}
 
 #[derive(Debug)]
 pub struct ManagedProcess {
@@ -19,6 +25,9 @@ pub struct ManagedProcess {
 }
 
 pub struct ManagedProcessChild {
+    #[cfg(unix)]
+    child: tokio::process::Child,
+    #[cfg(windows)]
     child: AsyncGroupChild,
     #[cfg(unix)]
     pgid: Option<i32>,
@@ -36,20 +45,30 @@ impl std::fmt::Debug for ManagedProcessChild {
 impl ManagedProcessChild {
     pub fn spawn(command: &mut Command) -> std::io::Result<Self> {
         command.kill_on_drop(true);
-        let mut group = command.group();
-        group.kill_on_drop(true);
-        let child = group.spawn()?;
         #[cfg(unix)]
-        let pgid = child.id().map(|pid| pid as i32);
-        Ok(Self {
-            child,
-            #[cfg(unix)]
-            pgid,
-        })
+        {
+            command.process_group(0);
+            let child = command.spawn()?;
+            let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
+            Ok(Self { child, pgid })
+        }
+        #[cfg(windows)]
+        {
+            let mut group = command.group();
+            group.kill_on_drop(true);
+            group.spawn().map(|child| Self { child })
+        }
     }
 
     pub fn inner(&mut self) -> &mut tokio::process::Child {
-        self.child.inner()
+        #[cfg(unix)]
+        {
+            &mut self.child
+        }
+        #[cfg(windows)]
+        {
+            self.child.inner()
+        }
     }
 
     pub fn id(&self) -> Option<u32> {
@@ -57,6 +76,16 @@ impl ManagedProcessChild {
     }
 
     pub fn start_kill(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(pgid) = self
+            .pgid
+            .and_then(|pgid| unix_process_group_signal_target(self.child.id(), pgid))
+        {
+            let result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+            if result == 0 {
+                return Ok(());
+            }
+        }
         self.child.start_kill()
     }
 
@@ -81,17 +110,15 @@ impl ManagedProcessChild {
 impl Drop for ManagedProcessChild {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pgid) = self.pgid.take() {
+        if let Some(pgid) = self
+            .pgid
+            .take()
+            .and_then(|pgid| unix_process_group_signal_target(self.child.id(), pgid))
+        {
             unsafe {
                 let _ = libc::killpg(pgid, libc::SIGKILL);
             }
-            let _ = self.child.inner().start_kill();
-            for _ in 0..250 {
-                match self.child.inner().try_wait() {
-                    Ok(Some(_)) | Err(_) => break,
-                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(1)),
-                }
-            }
+            let _ = self.child.start_kill();
         }
     }
 }
@@ -281,3 +308,5 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod drop_tests;
+#[cfg(all(test, windows))]
+mod windows_tests;

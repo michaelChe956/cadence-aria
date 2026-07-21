@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
@@ -111,6 +111,90 @@ async fn spawn_and_wait(fixture: &ProcessTreeFixture) {
     .await
     .expect("spawn process tree");
     process.child.wait().await.expect("wait process tree");
+}
+
+#[test]
+fn process_group_signal_target_rejects_reaped_or_reused_leader() {
+    assert_eq!(
+        super::unix_process_group_signal_target(Some(41), 41),
+        Some(41)
+    );
+    assert_eq!(super::unix_process_group_signal_target(None, 41), None);
+    assert_eq!(super::unix_process_group_signal_target(Some(42), 41), None);
+}
+
+#[tokio::test]
+async fn unix_managed_process_wait_uses_tokio_cancel_safe_child() {
+    let root = tempdir().expect("tempdir");
+    let fixture = process_tree_fixture(root.path());
+    let command = fixture.command.to_string_lossy().to_string();
+    let process = ProcessManager::spawn(
+        &command,
+        &[],
+        root.path(),
+        &BTreeMap::new(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn process tree");
+
+    fn assert_tokio_child(_: &tokio::process::Child) {}
+    assert_tokio_child(&process.child.child);
+}
+
+#[tokio::test]
+async fn cancelled_wait_can_still_terminate_original_group() {
+    let root = tempdir().expect("tempdir");
+    let fixture = process_tree_fixture(root.path());
+    let command = fixture.command.to_string_lossy().to_string();
+    let mut process = ProcessManager::spawn(
+        &command,
+        &[],
+        root.path(),
+        &BTreeMap::new(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn process tree");
+    wait_for_path(&fixture.grandchild_pid).await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), process.child.wait())
+            .await
+            .is_err(),
+        "process wait must still be pending while the process tree is alive"
+    );
+    tokio::time::timeout(Duration::from_millis(500), process.child.terminate())
+        .await
+        .expect("termination after cancelled wait must remain bounded");
+
+    assert_process_tree_stopped(&fixture).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_managed_process_child_is_non_blocking() {
+    let root = tempdir().expect("tempdir");
+    let fixture = process_tree_fixture(root.path());
+    let command = fixture.command.to_string_lossy().to_string();
+    let process = ProcessManager::spawn(
+        &command,
+        &[],
+        root.path(),
+        &BTreeMap::new(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn process tree");
+    wait_for_path(&fixture.grandchild_pid).await;
+
+    let started = Instant::now();
+    drop(process);
+    assert!(
+        started.elapsed() < Duration::from_millis(25),
+        "Drop blocked the current-thread runtime for {:?}",
+        started.elapsed()
+    );
+    assert_process_tree_stopped(&fixture).await;
 }
 
 #[tokio::test]
