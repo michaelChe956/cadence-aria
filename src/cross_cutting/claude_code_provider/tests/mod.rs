@@ -25,19 +25,27 @@ mod streaming;
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn executable_fixture(relative_path: &str) -> PathBuf {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path)
+}
+
+#[test]
+fn executable_fixture_uses_unmodified_checked_in_script() {
+    let relative_path = "tests/fixtures/provider/claude_ask_user_question_fixture.sh";
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    let before = std::fs::metadata(&source).expect("read source fixture metadata");
+
+    let fixture = executable_fixture(relative_path);
+
+    let after = std::fs::metadata(&source).expect("read fixture metadata after lookup");
+    assert_eq!(fixture, source);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::MetadataExt;
 
-        let mut permissions = std::fs::metadata(&path)
-            .unwrap_or_else(|error| panic!("fixture metadata {}: {error}", path.display()))
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions)
-            .unwrap_or_else(|error| panic!("chmod fixture {}: {error}", path.display()));
+        assert_ne!(after.mode() & 0o111, 0);
+        assert_eq!(before.ctime(), after.ctime());
+        assert_eq!(before.ctime_nsec(), after.ctime_nsec());
     }
-    path
 }
 fn streaming_input(
     provider_type: ProviderType,

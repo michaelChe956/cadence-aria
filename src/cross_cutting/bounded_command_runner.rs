@@ -220,6 +220,7 @@ async fn join_reader(
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -234,8 +235,16 @@ mod tests {
     #[cfg(unix)]
     fn write_executable(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write command fixture");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod fixture");
+        let mut fixture = tempfile::NamedTempFile::new_in(dir).expect("create command fixture");
+        fixture
+            .write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
+            .expect("write command fixture");
+        fixture
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o755))
+            .expect("chmod fixture");
+        let file = fixture.persist(&path).expect("publish command fixture");
+        drop(file);
         path
     }
 

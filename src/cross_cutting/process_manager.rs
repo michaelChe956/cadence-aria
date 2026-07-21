@@ -3,6 +3,11 @@ use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[cfg(windows)]
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
@@ -26,11 +31,13 @@ pub struct ManagedProcess {
 
 pub struct ManagedProcessChild {
     #[cfg(unix)]
-    child: tokio::process::Child,
+    child: Option<tokio::process::Child>,
     #[cfg(windows)]
     child: AsyncGroupChild,
     #[cfg(unix)]
     pgid: Option<i32>,
+    #[cfg(all(unix, test))]
+    drop_reaper_spawns: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for ManagedProcessChild {
@@ -50,7 +57,12 @@ impl ManagedProcessChild {
             command.process_group(0);
             let child = command.spawn()?;
             let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
-            Ok(Self { child, pgid })
+            Ok(Self {
+                child: Some(child),
+                pgid,
+                #[cfg(test)]
+                drop_reaper_spawns: Arc::new(AtomicUsize::new(0)),
+            })
         }
         #[cfg(windows)]
         {
@@ -63,7 +75,9 @@ impl ManagedProcessChild {
     pub fn inner(&mut self) -> &mut tokio::process::Child {
         #[cfg(unix)]
         {
-            &mut self.child
+            self.child
+                .as_mut()
+                .expect("managed process child is unavailable")
         }
         #[cfg(windows)]
         {
@@ -72,25 +86,32 @@ impl ManagedProcessChild {
     }
 
     pub fn id(&self) -> Option<u32> {
-        self.child.id()
+        #[cfg(unix)]
+        {
+            self.child.as_ref().and_then(tokio::process::Child::id)
+        }
+        #[cfg(windows)]
+        {
+            self.child.id()
+        }
     }
 
     pub fn start_kill(&mut self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Some(pgid) = self
             .pgid
-            .and_then(|pgid| unix_process_group_signal_target(self.child.id(), pgid))
+            .and_then(|pgid| unix_process_group_signal_target(self.id(), pgid))
         {
             let result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
             if result == 0 {
                 return Ok(());
             }
         }
-        self.child.start_kill()
+        self.inner().start_kill()
     }
 
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
-        let status = self.child.wait().await;
+        let status = self.inner().wait().await;
         if status.is_ok() {
             #[cfg(unix)]
             {
@@ -110,17 +131,50 @@ impl ManagedProcessChild {
 impl Drop for ManagedProcessChild {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pgid) = self
-            .pgid
-            .take()
-            .and_then(|pgid| unix_process_group_signal_target(self.child.id(), pgid))
         {
-            unsafe {
-                let _ = libc::killpg(pgid, libc::SIGKILL);
+            if let Some(pgid) = self
+                .pgid
+                .take()
+                .and_then(|pgid| unix_process_group_signal_target(self.id(), pgid))
+            {
+                unsafe {
+                    let _ = libc::killpg(pgid, libc::SIGKILL);
+                }
             }
-            let _ = self.child.start_kill();
+            if let Some(mut child) = self.child.take() {
+                match child.try_wait() {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => {
+                        let _ = child.start_kill();
+                        reap_child_after_drop(
+                            child,
+                            #[cfg(test)]
+                            Arc::clone(&self.drop_reaper_spawns),
+                        );
+                    }
+                }
+            }
         }
     }
+}
+
+#[cfg(unix)]
+fn reap_child_after_drop(
+    mut child: tokio::process::Child,
+    #[cfg(test)] reaper_spawns: Arc<AtomicUsize>,
+) {
+    #[cfg(test)]
+    reaper_spawns.fetch_add(1, Ordering::Relaxed);
+    let _ = std::thread::Builder::new()
+        .name("aria-process-reaper".to_string())
+        .spawn(move || {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => return,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                }
+            }
+        });
 }
 
 pub struct ProcessManager;

@@ -128,7 +128,7 @@ async fn unix_managed_process_wait_uses_tokio_cancel_safe_child() {
     let root = tempdir().expect("tempdir");
     let fixture = process_tree_fixture(root.path());
     let command = fixture.command.to_string_lossy().to_string();
-    let process = ProcessManager::spawn(
+    let mut process = ProcessManager::spawn(
         &command,
         &[],
         root.path(),
@@ -139,7 +139,32 @@ async fn unix_managed_process_wait_uses_tokio_cancel_safe_child() {
     .expect("spawn process tree");
 
     fn assert_tokio_child(_: &tokio::process::Child) {}
-    assert_tokio_child(&process.child.child);
+    assert_tokio_child(process.child.inner());
+}
+
+#[tokio::test]
+async fn successful_wait_does_not_start_drop_reaper() {
+    let root = tempdir().expect("tempdir");
+    let fixture = process_tree_fixture(root.path());
+    let command = fixture.command.to_string_lossy().to_string();
+    let mut process = ProcessManager::spawn(
+        &command,
+        &[],
+        root.path(),
+        &BTreeMap::new(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn process tree");
+
+    let reaper_spawns = std::sync::Arc::clone(&process.child.drop_reaper_spawns);
+    process.child.wait().await.expect("wait process tree");
+    drop(process);
+
+    assert!(
+        reaper_spawns.load(std::sync::atomic::Ordering::Relaxed) == 0,
+        "a successfully waited child must not be handed to the drop reaper"
+    );
 }
 
 #[tokio::test]
