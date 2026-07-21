@@ -9,18 +9,23 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 use crate::product::models::RepositoryRecord;
 
 mod initializer;
+mod operation;
 mod registration;
 mod types;
 
 pub use initializer::ClaudeRepositoryInitializer;
+pub use operation::RepositoryInitializationOperationStore;
 pub use registration::{
     CadenceSkillsPreparation, ProjectLookup, RepositoryInitializer, RepositoryPersistence,
     RepositoryRegistrationCoordinator,
 };
 pub use types::{
     CadenceSkillsPreparationSummary, RepositoryInitializationCommandSummary,
-    RepositoryInitializationSummary, RepositoryRegistrationError, RepositoryRegistrationInput,
-    RepositoryRegistrationSuccess,
+    RepositoryInitializationOperation, RepositoryInitializationOperationInput,
+    RepositoryInitializationOperationStatus, RepositoryInitializationProgress,
+    RepositoryInitializationStepKind, RepositoryInitializationStepRecord,
+    RepositoryInitializationStepStatus, RepositoryInitializationSummary,
+    RepositoryRegistrationError, RepositoryRegistrationInput, RepositoryRegistrationSuccess,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

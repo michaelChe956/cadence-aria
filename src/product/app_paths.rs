@@ -45,4 +45,9 @@ impl ProductAppPaths {
     pub fn project_provider_defaults_path(&self, project_id: &str) -> PathBuf {
         self.project_root(project_id).join("provider-defaults.json")
     }
+
+    pub fn repository_initializations_root(&self, project_id: &str) -> PathBuf {
+        self.project_root(project_id)
+            .join("repository-initializations")
+    }
 }
