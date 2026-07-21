@@ -1,3 +1,4 @@
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::coding_workspace_engine::CodingExecutionContext;
 use crate::product::test_executor::{TestCommandSpec, infer_test_commands};
@@ -44,6 +45,10 @@ pub fn build_tester_system_prompt(
          Attempt: {}\n\
          Branch: {}\n",
         attempt.project_id, attempt.issue_id, attempt.work_item_id, attempt.id, attempt.branch_name
+    );
+    prompt.push_str(direct_cadence_routing_rules_reference());
+    prompt.push_str(
+        "当前阶段：测试执行与验证证据收集。必调 Skill：using-superpowers → verification-before-completion。只执行现有测试职责，不修改源码或越过 Aria gate。\n",
     );
     if let Some(worktree_path) = attempt.worktree_path.as_ref() {
         prompt.push_str(&format!("Worktree Path: {}\n", worktree_path.display()));
@@ -123,7 +128,9 @@ pub fn build_tester_plan_prompt(
         })
         .unwrap_or_default();
     format!(
-        "CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
+        "{}\
+         当前阶段：测试计划与验证证据准备。必调 Skill：using-superpowers → verification-before-completion。最终 JSON schema 保持不变。\n\
+         CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
          Tester Provider Runtime\n\
          Phase: plan_tests -> execute_test_plan\n\
          Project: {}\n\
@@ -166,6 +173,7 @@ pub fn build_tester_plan_prompt(
          \n\
          CRITICAL: Return ONLY a single JSON object. Do not summarize validation. Do not include markdown.\n\
          END OF INSTRUCTIONS: output JSON only.",
+        direct_cadence_routing_rules_reference(),
         attempt.project_id,
         attempt.issue_id,
         attempt.work_item_id,

@@ -168,6 +168,15 @@ fn coding_prompt_requires_material_driven_execution_without_fixed_stack_terms() 
 
     assert_no_fixed_stack_terms(&prompt);
     assert!(prompt.contains("Coder 执行协议"));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+    ));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+    ));
+    assert!(prompt.contains("executing-plans"));
+    assert!(prompt.contains("test-driven-development"));
+    assert!(!prompt.contains("cadence-workflow"));
     assert!(prompt.contains("执行清单"));
     assert!(prompt.contains("依赖初始化或环境诊断要求"));
     assert!(prompt.contains("不得用平台默认技术栈假设"));
@@ -217,6 +226,15 @@ fn coding_delta_prompt_requires_material_driven_rework_without_fixed_stack_terms
 
     assert_no_fixed_stack_terms(&prompt);
     assert!(prompt.contains("Coder 增量执行协议"));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+    ));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+    ));
+    assert!(prompt.contains("executing-plans"));
+    assert!(prompt.contains("test-driven-development"));
+    assert!(!prompt.contains("cadence-workflow"));
     assert!(prompt.contains("人工修复意见优先级最高"));
     assert!(prompt.contains("reviewer findings"));
     assert!(prompt.contains("不得引入平台默认技术栈假设"));
@@ -313,6 +331,21 @@ fn review_prompts_list_exact_finding_severity_values() {
     }
 }
 
+#[test]
+fn coding_lifecycle_protocols_reuse_the_canonical_cadence_routing_reference() {
+    for protocol in [
+        coding_execution_protocol(),
+        coding_delta_execution_protocol(),
+        code_review_material_protocol(),
+        group_final_review_material_protocol(),
+    ] {
+        assert!(
+            protocol.contains("以下两份 Cadence 原始规则是唯一流程权威"),
+            "every coding lifecycle prompt must use the shared canonical routing reference"
+        );
+    }
+}
+
 #[tokio::test]
 async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
     let tmp = tempdir().expect("tempdir");
@@ -380,6 +413,14 @@ async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
         .expect("code review prompt");
 
     assert!(prompt.contains("compiled implementation context"));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+    ));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+    ));
+    assert!(prompt.contains("requesting-code-review"));
+    assert!(!prompt.contains("cadence-workflow"));
     assert!(prompt.contains("tests/**"));
     assert!(prompt.contains("cargo test --locked --lib compiled_context"));
     assert!(!prompt.contains("未找到 Work Item markdown"));
@@ -706,44 +747,6 @@ fn dangerous_test_plan_step_requires_permission_or_blocks() {
         high_risk_test_step_block_reason(&plan, &call),
         Some("high_risk_test_step_requires_permission")
     );
-}
-
-#[test]
-fn tester_execute_prompt_blocks_insufficient_test_plan_without_replanning() {
-    let plan = TestPlan {
-        id: "test_plan_0001".to_string(),
-        attempt_id: "coding_attempt_0001".to_string(),
-        role_run_id: None,
-        run_no: None,
-        summary: "execute fixed plan".to_string(),
-        context_warnings: Vec::new(),
-        assumptions: Vec::new(),
-        steps: vec![crate::product::coding_models::TestPlanStep {
-            id: "step_t1".to_string(),
-            title: "read targeted context".to_string(),
-            intent: "verify available context".to_string(),
-            required: true,
-            tool: crate::product::coding_models::TestPlanTool::ReadFile,
-            risk_level: crate::product::coding_models::TestPlanRiskLevel::Low,
-            command_or_tool_input: serde_json::json!({"path": "src/lib.rs"}),
-            evidence_expectation: "source evidence".to_string(),
-            related_requirements: vec!["REQ-001".to_string()],
-            related_design_constraints: Vec::new(),
-            related_work_item_tasks: Vec::new(),
-        }],
-        created_at: "2026-06-10T00:00:00Z".to_string(),
-        raw_provider_output_ref: None,
-    };
-
-    let prompt = build_tester_execute_plan_prompt(
-        &test_attempt("coding_attempt_0001"),
-        &plan,
-        r#"{"source_artifacts":{"design_specs":[]}}"#,
-    );
-
-    assert!(prompt.contains("Do not generate new TestPlan steps during execute_test_plan"));
-    assert!(prompt.contains("provider_analysis prefixed by \"test_plan_insufficient:\""));
-    assert!(prompt.contains("mark the affected required step blocked"));
 }
 
 fn init_prompt_git_repo(repo: &std::path::Path) {

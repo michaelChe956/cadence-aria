@@ -207,6 +207,10 @@ fn artifact_retry_prompt_includes_validation_reasons() {
     assert!(prompt.contains("author-decision"));
     assert!(prompt.contains("[REQ-"));
     assert!(prompt.contains("[AC-"));
+    assert!(
+        !prompt.contains("[cadence_original_routing_rules]"),
+        "artifact retry must repair the current artifact instead of reopening the routing lifecycle"
+    );
 }
 
 #[tokio::test]
@@ -371,6 +375,56 @@ fn reviewer_prompt_requires_nonce_sentinel() {
     assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
     assert!(input.prompt.contains("不得使用 Markdown code fence"));
     assert!(!input.prompt.contains("```json"));
+    assert!(input.prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+    ));
+    assert!(input.prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+    ));
+    assert!(input.prompt.contains("当前阶段：候选产物审查"));
+    assert!(input.prompt.contains("必调 Skill：using-superpowers。"));
+    assert!(
+        !input.prompt.contains("requesting-code-review"),
+        "candidate artifact review happens before implementation verification and must not invoke the post-implementation code-review skill"
+    );
+}
+
+#[test]
+fn reviewer_structured_output_repair_does_not_restart_routing() {
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_reviewer_repair_prompt");
+    session.artifact = Some(artifact_payload(
+        "# Story Spec\n\n## 功能需求\n- [REQ-001] Draft.",
+    ));
+    session.reviewer_provider = Some(ProviderName::Codex);
+    let checkpoint_tmp = TempDir::new().expect("checkpoint tempdir");
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+        event_tx,
+        session,
+    );
+    let base_input = engine.build_review_input().expect("review input");
+    let completion = ProviderCompletion::plain("partial structured review", None);
+    let parse_error = ReviewCompletionError::Syntax(StructuredOutputError {
+        code: crate::cross_cutting::structured_output::StructuredOutputErrorCode::MissingEndTag,
+        message: "missing end tag".to_string(),
+        expected_nonce: Some("nonce_0001".to_string()),
+        observed_nonce: None,
+        recoverable_value: Some(serde_json::json!({
+            "verdict": "pass",
+            "summary": "unchanged",
+            "findings": []
+        })),
+    });
+
+    let repair = engine
+        .build_review_repair_input(&base_input, &completion, &parse_error, None)
+        .expect("repair input");
+
+    assert!(repair.prompt.contains("只能修复 JSON 与 ARIA_STRUCTURED_OUTPUT 封装"));
+    assert!(!repair.prompt.contains("[cadence_original_routing_rules]"));
+    assert!(!repair.prompt.contains("当前阶段："));
+    assert!(!repair.prompt.contains("using-superpowers"));
 }
 
 #[test]

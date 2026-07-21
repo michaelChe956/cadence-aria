@@ -131,6 +131,13 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
 
     assert!(prompt.contains("[openspec_contract]"));
     assert!(prompt.contains("[superpowers_contract]"));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+    ));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+    ));
+    assert!(!prompt.contains("cadence-workflow"));
     assert!(prompt.contains("[allowed_outputs]"));
     assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
     assert!(prompt.contains("[forbidden_outputs]"));

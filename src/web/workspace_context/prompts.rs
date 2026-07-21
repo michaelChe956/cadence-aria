@@ -1,3 +1,4 @@
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 use crate::product::models::{ProviderName, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::workspace_engine::{allowed_outputs_for, forbidden_outputs_for};
 
@@ -71,6 +72,14 @@ pub(super) fn constraint_summary_for(session: &WorkspaceSessionRecord) -> String
 }
 
 pub(super) fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> String {
+    let routing = match session.workspace_type {
+        WorkspaceType::Story | WorkspaceType::Design => {
+            "当前阶段：新功能、行为变化或方案讨论的候选产物 author。\n必调 Skill：using-superpowers → brainstorming。\n前置 gate：Aria 现有 author-confirmation/human-confirmation gate 承接人工确认；不得由 Provider 写入 canonical artifact。\n"
+        }
+        WorkspaceType::WorkItem | WorkspaceType::WorkItemPlan => {
+            "当前阶段：已确认 Story/Design 与 OpenSpec 契约后的候选规划。\n必调 Skill：using-superpowers → writing-plans。\n前置 gate：仅在确认范围内规划；Aria daemon 的现有 human-confirmation gate 承接人工确认，Provider 不得写入 canonical artifact。\n"
+        }
+    };
     let base = if session.superpowers_enabled {
         match session.workspace_type {
             WorkspaceType::Story | WorkspaceType::Design => {
@@ -85,10 +94,10 @@ pub(super) fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> Strin
         }
         .to_string()
     } else {
-        "Superpowers 未启用；仍需显式说明假设、风险、待确认项与下一步。".to_string()
+        "当前 provider 环境未启用必调 Superpowers Skill；必须停止并报告，等待 Aria 恢复可用的原生 Skill 环境后再继续。不得以本 prompt 摘要、文本伪造或待确认项替代必调 Skill。".to_string()
     };
 
-    if matches!(
+    let workflow = if matches!(
         session.workspace_type,
         WorkspaceType::Story | WorkspaceType::Design
     ) {
@@ -98,7 +107,9 @@ pub(super) fn workflow_discipline_for(session: &WorkspaceSessionRecord) -> Strin
         )
     } else {
         base
-    }
+    };
+
+    format!("{}\n{}", direct_cadence_routing_rules_reference(), routing) + &workflow
 }
 
 fn structured_interaction_guidance_for(provider: &ProviderName) -> &'static str {

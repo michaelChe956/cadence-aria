@@ -40,6 +40,12 @@ fn failed_review_comments_never_enter_story_design_or_work_item_revision_prompts
                 "{workspace_type:?}"
             );
             assert!(prompt.contains("Reviewer 输出封装失败"));
+            assert!(prompt.contains("agent-routing-kernel.md"), "{workspace_type:?}");
+            assert!(
+                prompt.contains("真实 Provider resume 后的 bounded revision")
+                    || prompt.contains("候选产物 bounded revision"),
+                "{workspace_type:?}"
+            );
         }
     }
 }

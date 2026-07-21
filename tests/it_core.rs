@@ -35,6 +35,8 @@ mod plan_projection;
 mod policy_override_degrade;
 #[path = "it_core/risk_registry_minimal.rs"]
 mod risk_registry_minimal;
+#[path = "it_core/runtime_prompt_routing.rs"]
+mod runtime_prompt_routing;
 #[path = "it_core/runtime_snapshot_schema.rs"]
 mod runtime_snapshot_schema;
 #[path = "it_core/runtime_units.rs"]

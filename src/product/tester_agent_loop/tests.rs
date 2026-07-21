@@ -100,6 +100,14 @@ fn tester_plan_prompt_requires_openspec_superpowers_and_step_bound_tools() {
     assert!(prompt.contains("execute_test_plan"));
     assert!(prompt.contains("[openspec_contract]"));
     assert!(prompt.contains("[superpowers_contract]"));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+    ));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+    ));
+    assert!(prompt.contains("verification-before-completion"));
+    assert!(!prompt.contains("cadence-workflow"));
     assert!(prompt.contains("Story Spec"));
     assert!(prompt.contains("Design Spec"));
     assert!(prompt.contains("Work Item"));
@@ -117,6 +125,15 @@ fn tester_plan_prompt_requires_openspec_superpowers_and_step_bound_tools() {
             .trim_end()
             .ends_with("END OF INSTRUCTIONS: output JSON only.")
     );
+
+    let repair = build_tester_plan_repair_prompt("{bad", "invalid_json");
+    assert!(!repair.contains("[cadence_original_routing_rules]"));
+    assert!(repair.contains("Return ONLY a single JSON object"));
+
+    let execute_repair = build_tester_execute_repair_prompt("{bad", &["step_t1".to_string()]);
+    assert!(!execute_repair.contains("[cadence_original_routing_rules]"));
+    assert!(!execute_repair.contains("当前阶段："));
+    assert!(!execute_repair.contains("using-superpowers"));
 }
 
 #[test]

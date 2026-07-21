@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 
 mod review;
 mod review_context;
@@ -75,10 +76,15 @@ pub(crate) fn structured_output_nonce() -> String {
 
 pub(crate) fn reviewer_output_contract(nonce: &str, schema: &str, intro: &str) -> String {
     format!(
-        "{intro}\
+        "{}\
+         当前阶段：候选产物审查。\n\
+         必调 Skill：using-superpowers。\n\
+         前置 gate：仅只读审核当前材料；Aria 的人工确认与 daemon canonical writeback 边界保持不变。\n\
+         {intro}\
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
          {schema}\n\
-         </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n"
+         </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n",
+        direct_cadence_routing_rules_reference(),
     )
 }
 

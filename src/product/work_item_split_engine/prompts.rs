@@ -1,3 +1,4 @@
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     IssueRecord, LifecycleWorkItemRecord, OutlineContextBlockerResolution, ProviderName,
@@ -33,7 +34,11 @@ const OUTLINE_WRITE_SCOPE_RULES: &str = "\
 fn work_item_plan_runtime_contract(role: &str) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
     format!(
-        "[openspec_contract]\n\
+        "{}\
+         当前阶段：已确认 Story/Design 后的 Work Item Plan 候选规划。\n\
+         必调 Skill：using-superpowers → writing-plans。\n\
+         前置 gate：Aria 的 human-confirmation gate 承接人工确认；Provider 只能输出候选，不能写入 canonical artifact。\n\n\
+         [openspec_contract]\n\
          Role: {role}\n\
          - 必须基于已确认 Story Spec 与 Design Spec 的 requirement/design trace 进行拆分。\n\
          - 必须维护 Story/Design/Work Item 追踪关系，并在任务拆分中保留来源证据。\n\
@@ -54,6 +59,7 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          {allowed_outputs}\n\n\
          [forbidden_outputs]\n\
          {forbidden_outputs}\n\n",
+        direct_cadence_routing_rules_reference(),
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )

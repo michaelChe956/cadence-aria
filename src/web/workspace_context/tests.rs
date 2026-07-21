@@ -63,6 +63,49 @@ fn story_and_design_runtime_contracts_do_not_inherit_work_item_plan_discipline()
 }
 
 #[test]
+fn workspace_author_workflows_directly_reference_cadence_routing_rules() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
+    ] {
+        let workflow = workflow_discipline_for(&workspace_session_record(
+            workspace_type.clone(),
+            ProviderName::Codex,
+        ));
+
+        assert!(
+            workflow.contains(
+                "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+            ),
+            "{workspace_type:?} must directly reference the Cadence routing kernel"
+        );
+        assert!(
+            workflow.contains(
+                "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+            ),
+            "{workspace_type:?} must directly reference the Cadence OpenSpec/Superpowers workflow"
+        );
+        assert!(
+            !workflow.contains("cadence-workflow"),
+            "{workspace_type:?} must not depend on cadence-workflow"
+        );
+    }
+}
+
+#[test]
+fn workspace_author_stops_when_required_superpowers_are_unavailable() {
+    let mut session = workspace_session_record(WorkspaceType::Story, ProviderName::Codex);
+    session.superpowers_enabled = false;
+
+    let workflow = workflow_discipline_for(&session);
+
+    assert!(workflow.contains("当前 provider 环境未启用必调 Superpowers Skill；必须停止并报告"));
+    assert!(!workflow.contains("Superpowers 未启用；仍需显式说明假设"));
+}
+
+#[test]
 fn workspace_runtime_contract_includes_codegraph_mcp_reading_guidance() {
     for workspace_type in [
         WorkspaceType::Story,

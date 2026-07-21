@@ -84,6 +84,25 @@ fn context_builder_renders_each_planning_prompt_and_maps_adapter_input() {
         let result = build_provider_context(builder_input(node_id)).expect("context package");
         let contract = execution_contract_for_node(node_id).expect("contract");
 
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("agent-routing-kernel.md"),
+            "{node_id} prompt must directly reference the Cadence routing kernel"
+        );
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("openspec-superpowers-workflow.md"),
+            "{node_id} prompt must directly reference the Cadence OpenSpec/Superpowers workflow"
+        );
+        assert!(
+            !result.adapter_input.prompt.contains("cadence-workflow"),
+            "{node_id} prompt must not depend on cadence-workflow"
+        );
+
         assert_eq!(result.context_package.node_id, node_id);
         assert_eq!(result.context_package.session_id, "session_001");
         assert_eq!(result.context_package.task_id, "task_001");
@@ -345,6 +364,25 @@ fn context_builder_renders_p4_provider_nodes_and_rejects_missing_required_inputs
         let result = build_provider_context(p4_builder_input(node_id)).expect("context package");
         let contract = execution_contract_for_node(node_id).expect("contract");
 
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("agent-routing-kernel.md"),
+            "{node_id} prompt must directly reference the Cadence routing kernel"
+        );
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("openspec-superpowers-workflow.md"),
+            "{node_id} prompt must directly reference the Cadence OpenSpec/Superpowers workflow"
+        );
+        assert!(
+            !result.adapter_input.prompt.contains("cadence-workflow"),
+            "{node_id} prompt must not depend on cadence-workflow"
+        );
+
         assert_eq!(result.context_package.node_id, node_id);
         assert_eq!(result.context_package.provider_type, contract.provider_type);
         assert_eq!(result.adapter_input.provider_type, contract.provider_type);
@@ -545,7 +583,7 @@ fn prompt_renderer_reports_missing_variable() {
     );
 }
 
-fn builder_input(node_id: &str) -> ProviderContextBuilderInput {
+pub(super) fn builder_input(node_id: &str) -> ProviderContextBuilderInput {
     ProviderContextBuilderInput {
         session_id: "session_001".to_string(),
         task_id: "task_001".to_string(),
@@ -567,7 +605,7 @@ fn builder_input(node_id: &str) -> ProviderContextBuilderInput {
     }
 }
 
-fn p4_builder_input(node_id: &str) -> ProviderContextBuilderInput {
+pub(super) fn p4_builder_input(node_id: &str) -> ProviderContextBuilderInput {
     ProviderContextBuilderInput {
         session_id: "session_001".to_string(),
         task_id: "task_001".to_string(),
