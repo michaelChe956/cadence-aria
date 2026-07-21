@@ -64,7 +64,7 @@ async fn review_request_blocks_when_only_runtime_artifacts_changed() {
 }
 
 #[tokio::test]
-async fn execute_review_request_blocks_attempt_when_push_fails() {
+async fn execute_review_request_keeps_push_started_when_failed_push_cannot_query_remote() {
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     init_repo(&repo);
@@ -88,29 +88,46 @@ async fn execute_review_request_blocks_attempt_when_push_fails() {
     let worktree = prepared.worktree_path.as_ref().expect("worktree path");
     fs::write(worktree.join("src.txt"), "hello\npush failure\n").expect("modify file");
 
-    let review_request = engine
+    let error = engine
         .execute_review_request(&prepared, "missing", "feat: implement work item")
         .await
-        .expect("execute review request");
+        .expect_err("unknown remote state must fail closed");
 
-    assert_eq!(review_request.push_status, PushStatus::Failed);
+    assert!(error.to_string().contains("ls-remote --heads missing"));
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
     assert_eq!(updated.stage, CodingExecutionStage::ReviewRequest);
+    assert!(
+        store
+            .list_review_requests("project_0001", "issue_0001", &attempt.id)
+            .expect("review requests")
+            .is_empty()
+    );
+    let journal = store
+        .get_coding_git_operation(&updated)
+        .expect("journal")
+        .expect("push journal");
+    assert_eq!(
+        journal.phase,
+        cadence_aria::product::coding_attempt_store::CodingGitOperationPhase::PushStarted
+    );
+    assert_eq!(journal.push_status, None);
 
-    let _node = rx.recv().await.expect("review request node");
-    let _request = rx.recv().await.expect("review request update");
-    match rx.recv().await.expect("review request node update") {
-        CodingWsOutMessage::CodingTimelineNodeUpdated {
-            status, summary, ..
-        } => {
-            assert_eq!(status, CodingTimelineNodeStatus::Failed);
-            assert_eq!(summary.as_deref(), Some("review request 推送失败"));
-        }
-        other => panic!("expected review request node update, got {other:?}"),
-    }
+    let retry_error = engine
+        .execute_review_request(&updated, "missing", "feat: implement work item")
+        .await
+        .expect_err("indeterminate push remains retryable and fail closed");
+    assert!(retry_error.to_string().contains("ls-remote --heads missing"));
+    assert_eq!(
+        store
+            .get_coding_git_operation(&updated)
+            .expect("retry journal")
+            .expect("retry push journal"),
+        journal
+    );
+    assert!(rx.try_recv().is_ok(), "review request node must be emitted");
 }
 
 #[tokio::test]

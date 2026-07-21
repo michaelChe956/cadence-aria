@@ -450,13 +450,17 @@ impl CodingWorkspaceEngine {
                                 &attempt.issue_id,
                                 &attempt.id,
                             );
-                            let outcome =
-                                execute_tester_tool_call_with_context(
-                                    &call,
-                                    worktree_path.clone(),
-                                    artifact_output_root,
-                                    Some(&context_loader),
-                                )
+                            let outcome = self
+                                .execute_and_send_tester_tool_call(TesterToolExecutionInput {
+                                    attempt: &attempt,
+                                    role_run: &role_run,
+                                    call: &call,
+                                    worktree_path: &worktree_path,
+                                    artifact_output_root: &artifact_output_root,
+                                    context_loader: &context_loader,
+                                    provider_commands: &session.commands,
+                                    cancellation: &cancel,
+                                })
                                 .await?;
                             let command_result = outcome.command.clone();
                             let result = outcome.result;
@@ -474,10 +478,6 @@ impl CodingWorkspaceEngine {
                             );
                             let is_error = result.is_error;
                             let result_for_event = result.clone();
-                            let _ = session
-                                .commands
-                                .send(ProviderCommand::ToolResult(result.clone()))
-                                .await;
                             let _ = self
                                 .event_tx
                                 .send(CodingWsOutMessage::CodingExecutionEvent {

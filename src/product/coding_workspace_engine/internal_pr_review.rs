@@ -626,9 +626,12 @@ impl CodingWorkspaceEngine {
                     .await
                 {
                     Ok(push) => {
-                        journal = self
-                            .finish_review_git_operation(&attempt, &journal, push.status)
-                            .await?;
+                        journal = if push.status == PushStatus::Pushed {
+                            self.finish_review_git_operation(&attempt, &journal, PushStatus::Pushed)
+                                .await?
+                        } else {
+                            self.finish_nonzero_review_push(&attempt, &journal).await?
+                        };
                     }
                     Err(GitWorkspaceError::Cancelled { .. }) => {
                         let Some(completed) = self

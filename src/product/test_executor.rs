@@ -1,12 +1,15 @@
+use std::collections::BTreeMap;
 use std::path::{Component, Path};
 use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::Value;
 use thiserror::Error;
-use tokio::process::Command;
-use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
+use crate::cross_cutting::bounded_command_runner::{
+    BoundedCommandError, BoundedCommandRequest, TokioBoundedCommandRunner,
+};
 use crate::product::coding_models::{
     TestCommand, TestCommandStatus, TestingOverallStatus, TestingReport,
 };
@@ -25,6 +28,8 @@ pub enum TestExecutorError {
     EmptyCommand,
     #[error("invalid test command id: {0}")]
     InvalidCommandId(String),
+    #[error("test command cancelled")]
+    Cancelled,
     #[error("test executor io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -137,11 +142,27 @@ pub async fn execute_test_command(
     worktree_path: impl AsRef<Path>,
     artifact_output_root: impl AsRef<Path>,
 ) -> Result<TestCommand, TestExecutorError> {
+    execute_test_command_with_cancellation(
+        spec,
+        worktree_path,
+        artifact_output_root,
+        CancellationToken::new(),
+    )
+    .await
+}
+
+pub async fn execute_test_command_with_cancellation(
+    spec: &TestCommandSpec,
+    worktree_path: impl AsRef<Path>,
+    artifact_output_root: impl AsRef<Path>,
+    cancellation: CancellationToken,
+) -> Result<TestCommand, TestExecutorError> {
     execute_test_command_with_timeout(
         spec,
         worktree_path,
         artifact_output_root,
         DEFAULT_TEST_TIMEOUT,
+        cancellation,
     )
     .await
 }
@@ -151,6 +172,7 @@ async fn execute_test_command_with_timeout(
     worktree_path: impl AsRef<Path>,
     artifact_output_root: impl AsRef<Path>,
     timeout_duration: Duration,
+    cancellation: CancellationToken,
 ) -> Result<TestCommand, TestExecutorError> {
     if spec.command.is_empty() {
         return Err(TestExecutorError::EmptyCommand);
@@ -159,57 +181,97 @@ async fn execute_test_command_with_timeout(
     let worktree_path = worktree_path.as_ref();
     let artifact_output_root = artifact_output_root.as_ref();
     let started = std::time::Instant::now();
+    let result = TokioBoundedCommandRunner
+        .run_inherited(BoundedCommandRequest {
+            executable: spec.command[0].clone(),
+            argv: spec.command[1..].to_vec(),
+            working_dir: worktree_path.to_path_buf(),
+            timeout: timeout_duration,
+            cancellation: cancellation.clone(),
+            environment: BTreeMap::new(),
+            stdout_limit: usize::MAX,
+            stderr_limit: usize::MAX,
+        })
+        .await
+        .map_err(test_command_runner_error)?;
+    if result.cancelled || cancellation.is_cancelled() {
+        return Err(TestExecutorError::Cancelled);
+    }
+
     let stdout_ref = artifact_ref(&spec.id, "stdout");
     let stderr_ref = artifact_ref(&spec.id, "stderr");
     let stdout_path = artifact_output_root.join(&stdout_ref);
     let stderr_path = artifact_output_root.join(&stderr_ref);
-    if let Some(parent) = stdout_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    let (stdout, stderr, status) = if result.timed_out {
+        ("", "test command timed out", TestCommandStatus::TimedOut)
+    } else if result.exit_code == Some(0) {
+        (
+            result.stdout.as_str(),
+            result.stderr.as_str(),
+            TestCommandStatus::Passed,
+        )
+    } else {
+        (
+            result.stdout.as_str(),
+            result.stderr.as_str(),
+            TestCommandStatus::Failed,
+        )
+    };
+    write_test_artifacts(
+        &stdout_path,
+        &stderr_path,
+        stdout.as_bytes(),
+        stderr.as_bytes(),
+        &cancellation,
+    )
+    .await?;
 
-    let mut command = Command::new(&spec.command[0]);
-    command
-        .args(&spec.command[1..])
-        .current_dir(worktree_path)
-        .kill_on_drop(true);
-    let result = timeout(timeout_duration, command.output()).await;
-    let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    Ok(TestCommand {
+        command: spec.command.clone(),
+        cwd: worktree_path.to_path_buf(),
+        exit_code: result.exit_code,
+        duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        stdout_ref,
+        stderr_ref,
+        status,
+    })
+}
 
-    match result {
-        Ok(output_result) => {
-            let output = output_result?;
-            tokio::fs::write(&stdout_path, &output.stdout).await?;
-            tokio::fs::write(&stderr_path, &output.stderr).await?;
-            let exit_code = output.status.code();
-            let status = if output.status.success() {
-                TestCommandStatus::Passed
-            } else {
-                TestCommandStatus::Failed
-            };
-            Ok(TestCommand {
-                command: spec.command.clone(),
-                cwd: worktree_path.to_path_buf(),
-                exit_code,
-                duration_ms,
-                stdout_ref,
-                stderr_ref,
-                status,
-            })
+fn test_command_runner_error(error: BoundedCommandError) -> TestExecutorError {
+    let (kind, message) = match error {
+        BoundedCommandError::CommandMissing { details, .. } => {
+            (std::io::ErrorKind::NotFound, details)
         }
-        Err(_) => {
-            tokio::fs::write(&stdout_path, b"").await?;
-            tokio::fs::write(&stderr_path, b"test command timed out").await?;
-            Ok(TestCommand {
-                command: spec.command.clone(),
-                cwd: worktree_path.to_path_buf(),
-                exit_code: None,
-                duration_ms,
-                stdout_ref,
-                stderr_ref,
-                status: TestCommandStatus::TimedOut,
-            })
+        BoundedCommandError::Io { details } => (std::io::ErrorKind::Other, details),
+    };
+    TestExecutorError::Io(std::io::Error::new(kind, message))
+}
+
+async fn write_test_artifacts(
+    stdout_path: &Path,
+    stderr_path: &Path,
+    stdout: &[u8],
+    stderr: &[u8],
+    cancellation: &CancellationToken,
+) -> Result<(), TestExecutorError> {
+    let write = async {
+        if let Some(parent) = stdout_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
+        tokio::fs::write(stdout_path, stdout).await?;
+        tokio::fs::write(stderr_path, stderr).await
+    };
+    let result = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(TestExecutorError::Cancelled),
+        result = write => result.map_err(TestExecutorError::from),
+    };
+    if result.is_err() && cancellation.is_cancelled() {
+        let _ = tokio::fs::remove_file(stdout_path).await;
+        let _ = tokio::fs::remove_file(stderr_path).await;
+        return Err(TestExecutorError::Cancelled);
     }
+    result
 }
 
 pub async fn run_all_tests(

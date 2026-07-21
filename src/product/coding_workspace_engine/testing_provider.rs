@@ -1,9 +1,12 @@
 use super::*;
 
 mod execution;
+mod execution_tool;
 mod execution_types;
 mod plan;
 mod report;
+
+use execution_tool::TesterToolExecutionInput;
 
 use execution_types::{ProviderTestingExecutionInput, ProviderTestingExecutionOutcome};
 use plan::{ProviderTestingPlanInput, ProviderTestingPlanOutcome, ProviderTestingPlanPhase};

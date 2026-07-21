@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
@@ -15,7 +15,85 @@ pub struct ManagedProcess {
     pub stdin: ChildStdin,
     pub stdout: ChildStdout,
     pub stderr: ChildStderr,
-    pub child: AsyncGroupChild,
+    pub child: ManagedProcessChild,
+}
+
+pub struct ManagedProcessChild {
+    child: AsyncGroupChild,
+    #[cfg(unix)]
+    pgid: Option<i32>,
+}
+
+impl std::fmt::Debug for ManagedProcessChild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManagedProcessChild")
+            .field("id", &self.id())
+            .finish()
+    }
+}
+
+impl ManagedProcessChild {
+    pub fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        command.kill_on_drop(true);
+        let mut group = command.group();
+        group.kill_on_drop(true);
+        let child = group.spawn()?;
+        #[cfg(unix)]
+        let pgid = child.id().map(|pid| pid as i32);
+        Ok(Self {
+            child,
+            #[cfg(unix)]
+            pgid,
+        })
+    }
+
+    pub fn inner(&mut self) -> &mut tokio::process::Child {
+        self.child.inner()
+    }
+
+    pub fn id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    pub fn start_kill(&mut self) -> std::io::Result<()> {
+        self.child.start_kill()
+    }
+
+    pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        let status = self.child.wait().await;
+        if status.is_ok() {
+            #[cfg(unix)]
+            {
+                self.pgid = None;
+            }
+        }
+        status
+    }
+
+    pub async fn terminate(&mut self) {
+        let _ = self.start_kill();
+        let _ = self.inner().start_kill();
+        let _ = self.wait().await;
+    }
+}
+
+impl Drop for ManagedProcessChild {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid.take() {
+            unsafe {
+                let _ = libc::killpg(pgid, libc::SIGKILL);
+            }
+            let _ = self.child.inner().start_kill();
+            for _ in 0..250 {
+                match self.child.inner().try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(1)),
+                }
+            }
+        }
+    }
 }
 
 pub struct ProcessManager;
@@ -64,8 +142,7 @@ impl ProcessManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = command_builder
-            .group_spawn()
+        let mut child = ManagedProcessChild::spawn(&mut command_builder)
             .map_err(|error| map_spawn_error(command, error))?;
 
         let stdin = child.inner().stdin.take().ok_or_else(missing_stdin_pipe)?;
@@ -201,3 +278,6 @@ mod tests {
         assert!(status.success());
     }
 }
+
+#[cfg(all(test, unix))]
+mod drop_tests;

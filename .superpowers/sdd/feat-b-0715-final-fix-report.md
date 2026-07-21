@@ -519,3 +519,68 @@ Focused 验证：
 - Story Spec、Design Spec 与 Work Item 产物 Workspace 共用的 timeline/chat/artifact version 恢复链路未修改。本轮 Work Item 影响仅限 Coding Attempt runner、Git workspace/review 与 Issue Shared Worktree 终止收口。
 - 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
 - 提交策略：Round 6 代码、测试、设计、计划与本报告使用一个新原子提交；不 amend，不 push，提交后 worktree 必须 clean。
+
+## Round 7 最终修复（2026-07-21）
+
+### 1. Tester ToolCall cancellation 贯穿
+
+- `CancellationToken` 贯穿 `testing provider → tester_agent_loop → test_executor`；Provider ToolCall 执行不再使用不可取消的 `Command::output()`。
+- `TestExecutor` 复用 `TokioBoundedCommandRunner` 的继承宿主环境入口，继续保留既有命令 PATH/环境语义，同时获得 process group、timeout/cancel select、kill/wait/reap 与 stdout/stderr drain。
+- `TestExecutorError::Cancelled` 为明确取消结果；取消期间不创建 stdout/stderr artifact，artifact 写入边界再次与 token 仲裁，并清理可能的部分文件。
+- Tester ToolResult 发送改为 cancellation-aware reserve/send；取消先胜时不发送 Provider ToolResult、不持久化 ToolResult event/chat，并通过既有 `persist_provider_cancellation` 将 RoleRun 与事件收敛为 `Aborted`。
+- 为保持单文件上限，ToolCall 执行与发送仲裁迁入 `testing_provider/execution_tool.rs`；`execution.rs` 保持 799 行。
+
+### 2. 统一 process-group 异常 Drop 边界
+
+- 新增共享 `ManagedProcessChild`，由 ProcessManager、Bounded runner、Claude、Codex 与 Git 共用，不再由 Git/Provider 各自维护重复的异常终止实现。
+- 所有命令同时启用 Tokio child `kill_on_drop(true)`；Windows 使用 `command.group().kill_on_drop(true).spawn()`，保证 Job Object handle Drop 时终止整个 job。
+- Unix 保存 spawn 时 PGID：正常 `wait()` 成功后 disarm；future abort、panic unwind 或 runtime drop 时同步 `killpg(SIGKILL)`，并同步轮询 `try_wait()` 回收直接 child，避免 leader zombie 与孙进程迟到副作用。
+- timeout/cancellation 仍显式调用共享 `terminate()`，完成 group kill、wait/reap 与输出 pipe drain；正常退出继续使用 command-group 的 group wait。
+- Git 单文件中的测试迁移到 `git_workspace_service/tests.rs`，生产文件由 789 行降至 685 行。
+
+### 3. Push 非零后的远端权威三态
+
+- 新增纯决策：remote ref 等于 commit → `Pushed`；remote ref 明确不同或不存在 → verified `Failed`；remote query error → `Indeterminate`。
+- `git push` 非零后不再立即写 `Completed + Failed`，而是先执行 `ls-remote` 权威回查：
+  - remote 已更新到当前 commit：完成 journal，ReviewRequest=`Pushed`。
+  - remote 明确未更新：完成 journal，ReviewRequest=`Failed`，维持既有 Attempt Blocked 策略。
+  - remote 无法查询：返回错误且 journal 保持 `PushStarted`，不创建 ReviewRequest，不写 Attempt review identity；重复调用继续 fail-closed，可在外部状态恢复后重试。
+- 本地 receive-pack wrapper 真实证明“远端已接受、客户端进程非零”的场景，避免仅用 mock 推断远端权威结果。
+
+### 4. RED → GREEN
+
+| 场景 | RED | GREEN |
+| --- | --- | --- |
+| provider tester cancellation | Engine 等长命令完成后才返回，且写入 `tester-late` | 取消有界返回 `Aborted`，RoleRun=`Aborted`，无 late file/ToolResult/artifact |
+| HTTP Abort/Delete tester | Abort 超过 250ms，Delete 可被真实 tester 命令拖住 | 两条 HTTP 路径均有界完成，registry=0，无 Store artifact/recreation |
+| ProcessManager task abort | future drop 后 leader/孙进程存活或成为 zombie | Unix Drop killpg 并回收 leader，父孙 PID 消失且无 late marker |
+| ProcessManager panic/runtime drop | unwind 或 current-thread runtime drop 遗留进程树 | panic 与 runtime drop 均收敛，无 zombie/迟到副作用 |
+| Git hook future abort | 只杀直接 git child，pre-commit hook/孙进程继续 | 共享 PGID Drop guard 杀整组，HEAD 不变且无 late marker |
+| push nonzero + remote updated | 直接 `Completed + Failed`，durable 状态错误 | remote ref 等于 commit，ReviewRequest/journal=`Pushed` |
+| push nonzero + remote absent | 未区分是否完成远端验证 | remote 明确缺失后 ReviewRequest/journal=`Failed` |
+| push nonzero + remote query error | 错误写终态 Failed，后续不再查询 | journal 保持 `PushStarted`、无 ReviewRequest，重复调用 fail-closed |
+| strict clippy | ToolCall helper 9 参数触发 `too_many_arguments` | 使用 `TesterToolExecutionInput` 上下文对象，未放宽 lint |
+
+### 5. Focused 验证
+
+- Tester cancellation：Engine 1 passed；HTTP Abort/Delete 2 passed。
+- Tester/TestExecutor 兼容：tester loop lib 11 passed、integration 4 passed；TestExecutor integration 12 passed。
+- Process Drop：task abort、task panic、current-thread runtime drop 3 passed；Bounded runner 9 passed。
+- Git 异常终止：显式 cancellation 与 future abort hook 2 passed。
+- Push 三态：纯决策 3 passed；missing remote、verified rejection、nonzero-but-remote-updated 各 1 passed；既有 Git journal cancellation/reconcile 7 passed。
+
+### 6. 最终门禁与边界
+
+- `cargo fmt --check`：PASS。
+- `cargo check --locked`：PASS。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：PASS，0 warnings；首轮发现 helper 参数过多，改为上下文对象后 fresh clippy 通过。
+- `cargo test --locked`：PASS，exit 0；lib 1247 passed，`it_product` 223 passed，`it_web` 280 passed、12 ignored，doc-test 1 passed，其他 target 无失败。
+  - 提交前 fresh 首次运行曾在 `claude_provider_classifies_missing_end_nonce` 启动临时 fixture 时遇到一次 `Text file busy (os error 26)`；未修改代码即定向复跑通过，随后完整 `cargo test --locked` 复跑 exit 0，判定为不可复现的执行环境瞬态。
+- `cd web && pnpm tsc -b`：PASS。
+- `git diff --check`：PASS。
+- 21 个修改/新增 Rust 与 integration source 文件全部不超过 800 行；最大为 `src/product/coding_workspace_engine/testing_provider/execution.rs`，799 行。
+- `src/web/app.rs` 与 lockfiles 无 diff；新增源码没有 route 注册或 `/api/`、`/ws/` 路径；未新增依赖。
+- Story Spec、Design Spec 与 Work Item 产物 Workspace 共用的 timeline/chat/artifact version 恢复链路未修改；本轮 Work Item 影响限于 Coding Tester 命令、共享进程生命周期与 ReviewRequest push 收口。
+- 已知 Minor `test-controls` 生产编译边界仍保留：默认无 route，本轮未扩大到 test-support crate 重构，也未发现适合顺手加入的低风险生产误配 fail-startup 边界。
+- 明确未运行：E2E、Playwright、browser、真实 Provider、网络 CLI。
+- 提交策略：Round 7 代码、测试与本报告使用一个新原子提交；不 amend，不 push，提交后 worktree 必须 clean。

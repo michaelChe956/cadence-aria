@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::process_manager::{ManagedProcess, ProcessManager};
+use crate::cross_cutting::process_manager::{ManagedProcess, ManagedProcessChild, ProcessManager};
 use crate::protocol::provider_errors::ProviderErrorCode;
 
 #[derive(Debug, Clone)]
@@ -51,22 +51,40 @@ pub trait BoundedCommandRunner: Send + Sync {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TokioBoundedCommandRunner;
 
-#[async_trait::async_trait]
-impl BoundedCommandRunner for TokioBoundedCommandRunner {
-    async fn run(
+impl TokioBoundedCommandRunner {
+    pub async fn run_inherited(
         &self,
         request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        self.run_with_environment(request, true).await
+    }
+
+    async fn run_with_environment(
+        &self,
+        request: BoundedCommandRequest,
+        inherit_environment: bool,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
         let started = Instant::now();
         let argv = request.argv.iter().map(String::as_str).collect::<Vec<_>>();
-        let process = ProcessManager::spawn_isolated(
-            &request.executable,
-            &argv,
-            &request.working_dir,
-            &request.environment,
-            request.cancellation.clone(),
-        )
-        .await
+        let process = if inherit_environment {
+            ProcessManager::spawn(
+                &request.executable,
+                &argv,
+                &request.working_dir,
+                &request.environment,
+                request.cancellation.clone(),
+            )
+            .await
+        } else {
+            ProcessManager::spawn_isolated(
+                &request.executable,
+                &argv,
+                &request.working_dir,
+                &request.environment,
+                request.cancellation.clone(),
+            )
+            .await
+        }
         .map_err(|error| {
             if error.code == ProviderErrorCode::ProviderCommandMissing {
                 BoundedCommandError::CommandMissing {
@@ -81,6 +99,16 @@ impl BoundedCommandRunner for TokioBoundedCommandRunner {
         })?;
 
         run_spawned_process(process, request, started).await
+    }
+}
+
+#[async_trait::async_trait]
+impl BoundedCommandRunner for TokioBoundedCommandRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        self.run_with_environment(request, false).await
     }
 }
 
@@ -147,16 +175,8 @@ async fn run_spawned_process(
     })
 }
 
-async fn terminate_process(child: &mut command_group::AsyncGroupChild) {
-    #[cfg(unix)]
-    if let Some(pgid) = child.id() {
-        unsafe {
-            let _ = libc::killpg(pgid as i32, libc::SIGKILL);
-        }
-    }
-    let _ = child.start_kill();
-    let _ = child.inner().start_kill();
-    let _ = child.wait().await;
+async fn terminate_process(child: &mut ManagedProcessChild) {
+    child.terminate().await;
 }
 
 struct LimitedOutput {

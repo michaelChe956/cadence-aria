@@ -3,11 +3,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use command_group::AsyncCommandGroup;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+use crate::cross_cutting::process_manager::ManagedProcessChild;
 use crate::product::coding_models::{PushStatus, RemoteKind};
 
 mod reconcile;
@@ -433,7 +433,7 @@ impl GitWorkspaceService {
             .stderr(Stdio::piped());
         let args_display = args.join(" ");
         let cwd_display = cwd.display().to_string();
-        let mut child = command.group_spawn().map_err(|error| {
+        let mut child = ManagedProcessChild::spawn(&mut command).map_err(|error| {
             GitWorkspaceError::Io(format!("git {args_display} in {cwd_display}: {error}"))
         })?;
         let stdout = child.inner().stdout.take().ok_or_else(|| {
@@ -466,7 +466,7 @@ impl GitWorkspaceService {
                 GitWorkspaceError::Io(format!("wait git {args_display} in {cwd_display}: {error}"))
             })?,
             Completion::TimedOut => {
-                terminate_git_child(&mut child).await;
+                child.terminate().await;
                 let _ = join_pipe(stdout_task).await;
                 let _ = join_pipe(stderr_task).await;
                 return Err(GitWorkspaceError::Timeout {
@@ -475,7 +475,7 @@ impl GitWorkspaceService {
                 });
             }
             Completion::Cancelled => {
-                terminate_git_child(&mut child).await;
+                child.terminate().await;
                 let _ = join_pipe(stdout_task).await;
                 let _ = join_pipe(stderr_task).await;
                 return Err(GitWorkspaceError::Cancelled {
@@ -534,19 +534,6 @@ async fn join_pipe(
     task.await
         .map_err(|error| GitWorkspaceError::Io(format!("join git output reader: {error}")))?
         .map_err(|error| GitWorkspaceError::Io(format!("read git output: {error}")))
-}
-
-async fn terminate_git_child(child: &mut command_group::AsyncGroupChild) {
-    #[cfg(unix)]
-    if let Some(pgid) = child.id() {
-        // SAFETY: pgid is the process-group id returned for this spawned Git command.
-        unsafe {
-            let _ = libc::killpg(pgid as i32, libc::SIGKILL);
-        }
-    }
-    let _ = child.start_kill();
-    let _ = child.inner().start_kill();
-    let _ = child.wait().await;
 }
 
 fn ensure_safe_worktree_path(
@@ -695,95 +682,4 @@ fn parse_numstat_count(value: Option<&str>, line: &str) -> Result<u32, GitWorksp
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
-    use std::process::Command as StdCommand;
-    use std::time::Duration;
-
-    use tempfile::tempdir;
-    use tokio_util::sync::CancellationToken;
-
-    use super::{GitWorkspaceError, GitWorkspaceService};
-
-    fn git(repo: &Path, args: &[&str]) {
-        let output = StdCommand::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .expect("run git fixture command");
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[tokio::test]
-    async fn cancelled_git_commit_is_killed_reaped_and_never_commits_late() {
-        let tmp = tempdir().expect("tempdir");
-        let repo = tmp.path();
-        git(repo, &["init"]);
-        git(repo, &["config", "user.email", "test@example.com"]);
-        git(repo, &["config", "user.name", "Test User"]);
-        fs::write(repo.join("README.md"), "base\n").expect("write base");
-        git(repo, &["add", "README.md"]);
-        git(repo, &["commit", "-m", "base"]);
-        let before = StdCommand::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo)
-            .output()
-            .expect("read before head")
-            .stdout;
-
-        fs::write(repo.join("README.md"), "changed\n").expect("write change");
-        git(repo, &["add", "README.md"]);
-        let entered = repo.join("hook-entered");
-        let release = repo.join("hook-release");
-        let hook = repo.join(".git/hooks/pre-commit");
-        fs::write(
-            &hook,
-            format!(
-                "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\n",
-                entered.display(),
-                release.display()
-            ),
-        )
-        .expect("write hook");
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod hook");
-
-        let cancellation = CancellationToken::new();
-        let service = GitWorkspaceService::new().with_cancellation(cancellation.clone());
-        let commit = tokio::spawn({
-            let repo = repo.to_path_buf();
-            async move { service.git_commit(&repo, "cancelled commit").await }
-        });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !entered.exists() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("pre-commit hook entered");
-        cancellation.cancel();
-        let result = tokio::time::timeout(Duration::from_millis(500), commit)
-            .await
-            .expect("cancelled git commit must be reaped")
-            .expect("git commit task");
-        assert!(matches!(result, Err(GitWorkspaceError::Cancelled { .. })));
-
-        fs::write(&release, "release\n").expect("release hook if process survived");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let after = StdCommand::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo)
-            .output()
-            .expect("read after head")
-            .stdout;
-        assert_eq!(
-            before, after,
-            "cancelled git process committed after return"
-        );
-    }
-}
+mod tests;

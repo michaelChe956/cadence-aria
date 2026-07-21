@@ -322,6 +322,7 @@ mod provider_start_persistence;
 mod runtime_handoff_compatibility;
 mod runtime_handoff_delta;
 mod runtime_handoff_impact;
+mod tester_cancellation;
 mod tester_repair_plan_defect;
 
 #[tokio::test]

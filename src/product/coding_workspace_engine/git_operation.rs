@@ -1,5 +1,26 @@
 use super::*;
 
+#[cfg(test)]
+mod push_decision_tests;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewPushDecision {
+    Pushed,
+    Failed,
+    Indeterminate,
+}
+
+fn review_push_decision<E>(
+    expected_commit: &str,
+    remote_head: Result<Option<&str>, E>,
+) -> ReviewPushDecision {
+    match remote_head {
+        Ok(Some(remote_commit)) if remote_commit == expected_commit => ReviewPushDecision::Pushed,
+        Ok(_) => ReviewPushDecision::Failed,
+        Err(_) => ReviewPushDecision::Indeterminate,
+    }
+}
+
 impl CodingWorkspaceEngine {
     pub(crate) async fn reconcile_coding_git_operation_for_termination(
         &self,
@@ -125,6 +146,46 @@ impl CodingWorkspaceEngine {
                 },
             )
             .map_err(Into::into)
+    }
+
+    pub(crate) async fn finish_nonzero_review_push(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        journal: &CodingGitOperationJournal,
+    ) -> Result<CodingGitOperationJournal, CodingWorkspaceEngineError> {
+        let remote =
+            journal
+                .remote
+                .as_deref()
+                .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                    kind: "coding_git_operation",
+                    id: journal.attempt_id.clone(),
+                })?;
+        let commit_sha =
+            journal
+                .commit_sha
+                .as_deref()
+                .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                    kind: "coding_git_operation",
+                    id: journal.attempt_id.clone(),
+                })?;
+        let remote_head = self
+            ._git_service
+            .git_remote_branch_head(&journal.worktree_path, remote, &journal.branch_name)
+            .await;
+        match review_push_decision(commit_sha, remote_head.as_ref().map(|head| head.as_deref())) {
+            ReviewPushDecision::Pushed => {
+                self.finish_review_git_operation(attempt, journal, PushStatus::Pushed)
+                    .await
+            }
+            ReviewPushDecision::Failed => {
+                self.finish_review_git_operation(attempt, journal, PushStatus::Failed)
+                    .await
+            }
+            ReviewPushDecision::Indeterminate => Err(remote_head
+                .expect_err("indeterminate push requires remote query error")
+                .into()),
+        }
     }
 
     pub(crate) async fn reconcile_cancelled_review_push(
