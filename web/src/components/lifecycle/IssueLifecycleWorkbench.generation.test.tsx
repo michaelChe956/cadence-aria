@@ -198,8 +198,8 @@ describe("IssueLifecycleWorkbench generation actions", () => {
       expect.anything(),
     );
     await waitFor(() =>
-      expect(useLifecycleWorkbenchStore.getState().focusedEntityId).toBe(
-        "design_spec_0002",
+      expect(useLifecycleWorkbenchStore.getState().focusedEntityKey).toBe(
+        "design_spec:issue_0001:design_spec_0002",
       ),
     );
   });

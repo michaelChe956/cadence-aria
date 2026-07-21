@@ -1,4 +1,5 @@
 include!("web_coding_ws_handler/part_01.rs");
+include!("web_coding_ws_handler/fixtures.rs");
 include!("web_coding_ws_handler/part_02.rs");
 include!("web_coding_ws_handler/part_03.rs");
 include!("web_coding_ws_handler/part_04.rs");
@@ -8,3 +9,8 @@ include!("web_coding_ws_handler/part_07.rs");
 include!("web_coding_ws_handler/part_08.rs");
 include!("web_coding_ws_handler/part_09.rs");
 include!("web_coding_ws_handler/part_10.rs");
+include!("web_coding_ws_handler/part_11.rs");
+include!("web_coding_ws_handler/part_12.rs");
+include!("web_coding_ws_handler/part_13.rs");
+include!("web_coding_ws_handler/part_14.rs");
+include!("web_coding_ws_handler/part_15.rs");

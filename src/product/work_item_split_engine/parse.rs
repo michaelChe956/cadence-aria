@@ -16,9 +16,9 @@ use crate::web::types::GenerateWorkItemsRequest;
 use super::WorkItemSplitEngine;
 use super::prompts::build_work_item_draft_prompt;
 use super::types::{
-    ProviderOutput, WorkItemDraftInvocation, WorkItemSplitProviderOutput, parse_confidence,
-    parse_fallback_policy, parse_safety, parse_verification_scope, parse_work_item_kind,
-    product_store_api_error,
+    ProviderOutput, ProviderWorkItemDraftInput, WorkItemDraftInvocation,
+    WorkItemSplitProviderOutput, parse_confidence, parse_fallback_policy, parse_safety,
+    parse_verification_scope, parse_work_item_kind, product_store_api_error,
 };
 
 impl WorkItemSplitEngine {
@@ -204,14 +204,32 @@ pub fn parse_work_item_draft_output(value: serde_json::Value) -> ApiResult<WorkI
         ));
     }
 
-    let draft_value = value.get("draft").cloned().unwrap_or(value);
-    serde_json::from_value(draft_value).map_err(|error| {
+    let output: ProviderWorkItemDraftInput = serde_json::from_value(value).map_err(|error| {
         ApiError::runtime(
             "work_item_draft_parse_error",
             format!("failed to parse WorkItemDraftCandidate output: {error}"),
             json!({}),
         )
-    })
+    })?;
+    let candidate: WorkItemDraftCandidate = output.into_candidate().into();
+    let contract_logical_work_item_id = &candidate
+        .canonical_contract_candidate
+        .identity
+        .logical_work_item_id;
+    if candidate.logical_work_item_id != *contract_logical_work_item_id {
+        return Err(ApiError::validation_with_details(
+            "work_item_draft_identity_mismatch",
+            format!(
+                "draft logical_work_item_id {} does not match canonical contract identity {}",
+                candidate.logical_work_item_id, contract_logical_work_item_id
+            ),
+            json!({
+                "logical_work_item_id": candidate.logical_work_item_id,
+                "canonical_logical_work_item_id": contract_logical_work_item_id,
+            }),
+        ));
+    }
+    Ok(candidate)
 }
 
 fn forbidden_work_item_draft_field(value: &serde_json::Value) -> Option<String> {
@@ -235,7 +253,8 @@ fn forbidden_work_item_draft_field(value: &serde_json::Value) -> Option<String> 
 fn is_forbidden_work_item_draft_key(key: &str) -> bool {
     matches!(
         key,
-        "work_item_id"
+        "implementation_context"
+            | "work_item_id"
             | "draft_id"
             | "status"
             | "generated_from_node_id"

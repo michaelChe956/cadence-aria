@@ -38,16 +38,19 @@ pub(crate) async fn await_stage_gate(
     let mut deadline = Instant::now() + Duration::from_secs(STAGE_GATE_COUNTDOWN_SECONDS);
     let expires_at = stage_gate_expires_at();
     let mut gate = coding_store.create_stage_gate(
-        &current.id,
+        &current,
         stage.clone(),
         role,
         expires_at,
         provider_snapshot,
     )?;
-    emit_stage_gate(event_tx, coding_store, &current, &gate).await?;
+    emit_stage_gate(engine, event_tx, coding_store, &current, &gate).await?;
 
     loop {
         tokio::select! {
+            _ = engine.cancellation_token().cancelled() => {
+                return Err(CodingWorkspaceEngineError::Aborted);
+            }
             _ = tokio::time::sleep_until(deadline) => {
                 let _ = coding_store.update_stage_gate_status(
                     &current.project_id,
@@ -57,12 +60,17 @@ pub(crate) async fn await_stage_gate(
                     CodingStageGateStatus::Expired,
                 )?;
                 let snapshot = build_coding_session_state(coding_store, current.clone())?;
-                let _ = event_tx.send(snapshot).await;
+                send_event(engine, event_tx, snapshot).await?;
                 return Ok(Some(current));
             }
             command = command_rx.recv() => {
                 let Some(command) = command else {
-                    tokio::time::sleep_until(deadline).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => {}
+                        _ = engine.cancellation_token().cancelled() => {
+                            return Err(CodingWorkspaceEngineError::Aborted);
+                        }
+                    }
                     let _ = coding_store.update_stage_gate_status(
                         &current.project_id,
                         &current.issue_id,
@@ -71,7 +79,7 @@ pub(crate) async fn await_stage_gate(
                         CodingStageGateStatus::Expired,
                     )?;
                     let snapshot = build_coding_session_state(coding_store, current.clone())?;
-                    let _ = event_tx.send(snapshot).await;
+                    send_event(engine, event_tx, snapshot).await?;
                     return Ok(Some(current));
                 };
                 match command {
@@ -86,16 +94,15 @@ pub(crate) async fn await_stage_gate(
                             CodingStageGateStatus::Confirmed,
                         )?;
                         let snapshot = build_coding_session_state(coding_store, current.clone())?;
-                        let _ = event_tx.send(snapshot).await;
+                        send_event(engine, event_tx, snapshot).await?;
                         return Ok(Some(current));
                     }
                     CodingRunnerCommand::StageGateConfirm { .. } => {
-                        let _ = event_tx
-                            .send(CodingWsOutMessage::CodingProtocolError {
+                        send_event(engine, event_tx, CodingWsOutMessage::CodingProtocolError {
                                 code: "coding_stage_gate_mismatch".to_string(),
                                 message: "stage gate confirm did not match the open stage gate".to_string(),
                             })
-                            .await;
+                            .await?;
                     }
                     CodingRunnerCommand::PermissionResponse { .. }
                     | CodingRunnerCommand::ChoiceResponse { .. } => {}
@@ -109,12 +116,11 @@ pub(crate) async fn await_stage_gate(
                             ) {
                                 Ok(result) => result,
                                 Err(error) => {
-                                    let _ = event_tx
-                                        .send(CodingWsOutMessage::CodingProtocolError {
+                                    send_event(engine, event_tx, CodingWsOutMessage::CodingProtocolError {
                                             code: "coding_provider_select_failed".to_string(),
                                             message: error.to_string(),
                                         })
-                                        .await;
+                                        .await?;
                                     continue;
                                 }
                             };
@@ -135,13 +141,12 @@ pub(crate) async fn await_stage_gate(
                             stage_gate_expires_at(),
                             provider_snapshot,
                         )?;
-                        let _ = event_tx
-                            .send(CodingWsOutMessage::CodingProviderConfigUpdated {
+                        send_event(engine, event_tx, CodingWsOutMessage::CodingProviderConfigUpdated {
                                 role: changed_role,
                                 provider: changed_provider,
                             })
-                            .await;
-                        emit_stage_gate(event_tx, coding_store, &current, &gate).await?;
+                            .await?;
+                        emit_stage_gate(engine, event_tx, coding_store, &current, &gate).await?;
                     }
                     CodingRunnerCommand::AbortAttempt => {
                         let _ = coding_store.update_stage_gate_status(
@@ -155,7 +160,10 @@ pub(crate) async fn await_stage_gate(
                             .handle_abort(&current.project_id, &current.issue_id, &current.id)
                             .await?;
                         crate::web::coding_ws_handler::state::emit_current_session_state(
-                            event_tx, coding_store, &updated,
+                            event_tx,
+                            coding_store,
+                            &updated,
+                            engine.cancellation_token(),
                         )
                         .await?;
                         return Ok(None);
@@ -167,18 +175,41 @@ pub(crate) async fn await_stage_gate(
 }
 
 pub(crate) async fn emit_stage_gate(
+    engine: &CodingWorkspaceEngine,
     event_tx: &mpsc::Sender<CodingWsOutMessage>,
     coding_store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
     gate: &CodingStageGateState,
 ) -> Result<(), CodingWorkspaceEngineError> {
-    let _ = event_tx
-        .send(CodingWsOutMessage::CodingGateRequired {
+    send_event(
+        engine,
+        event_tx,
+        CodingWsOutMessage::CodingGateRequired {
             gate: stage_gate_required(gate.clone()),
-        })
-        .await;
+        },
+    )
+    .await?;
     let snapshot = build_coding_session_state(coding_store, attempt.clone())?;
-    let _ = event_tx.send(snapshot).await;
+    send_event(engine, event_tx, snapshot).await?;
+    Ok(())
+}
+
+async fn send_event(
+    engine: &CodingWorkspaceEngine,
+    event_tx: &mpsc::Sender<CodingWsOutMessage>,
+    event: CodingWsOutMessage,
+) -> Result<(), CodingWorkspaceEngineError> {
+    let permit = tokio::select! {
+        biased;
+        _ = engine.cancellation_token().cancelled() => {
+            return Err(CodingWorkspaceEngineError::Aborted);
+        }
+        permit = event_tx.reserve() => permit,
+    };
+    let permit = permit.map_err(|_| {
+        CodingWorkspaceEngineError::ProviderStream("coding_event_channel_closed".to_string())
+    })?;
+    permit.send(event);
     Ok(())
 }
 

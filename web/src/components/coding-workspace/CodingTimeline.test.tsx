@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { CodingTimelineNode } from "../../api/types";
 import { CodingTimeline } from "./CodingTimeline";
+import { repairAwaitingConfirmationFixture } from "./plan-repair-test-fixtures";
 
 describe("CodingTimeline", () => {
   it("labels internal_pr_review stage as GroupFinalReview", () => {
@@ -23,6 +24,30 @@ describe("CodingTimeline", () => {
     const timeline = screen.getByTestId("coding-timeline");
     expect(timeline).toHaveTextContent("GroupFinalReview");
     expect(timeline).not.toHaveTextContent("Internal PR Review");
+  });
+
+  it("places recovered repair projections in one child session group", () => {
+    const repair = repairAwaitingConfirmationFixture();
+    render(
+      <CodingTimeline
+        nodes={[
+          timelineNode({
+            id: "coding_node_review_0001",
+            stage: "code_review",
+            title: "Code Review",
+          }),
+          ...repair.timelineNodes,
+        ]}
+        activeNodeId="plan_repair_node_confirm_0001"
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        planRepair={repair}
+      />,
+    );
+
+    expect(screen.getAllByText("修订 Work Item Contract")).toHaveLength(1);
+    expect(screen.getByRole("group", { name: "Plan Repair Timeline" }))
+      .toBeInTheDocument();
   });
 });
 

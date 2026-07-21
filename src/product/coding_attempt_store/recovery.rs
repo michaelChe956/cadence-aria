@@ -5,16 +5,25 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::product::coding_models::{
-    CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole, CodingRoleRun,
-    CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole,
+    CodingRoleRun, CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
+
+use super::locking::{ExclusiveFileLock, with_exclusive_lock};
 
 pub(crate) const FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE: &str =
     "failed-code-review-recovery.json";
 const FAILED_CODE_REVIEW_RECOVERIES_DIR: &str = "failed-code-review-recoveries";
 const COMPLETED_FAILED_CODE_REVIEW_RECOVERIES_DIR: &str = "completed";
+const FAILED_CODE_REVIEW_RECOVERY_ARBITRATION_TARGET: &str =
+    "failed-code-review-recovery-arbitration";
+
+pub(crate) struct FailedCodeReviewRecoveryArbitrationGuard {
+    _lock: ExclusiveFileLock,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +60,92 @@ impl FailedCodeReviewRecoveryJournal {
 }
 
 impl super::CodingAttemptStore {
+    pub(crate) fn acquire_failed_code_review_recovery_arbitration(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<FailedCodeReviewRecoveryArbitrationGuard, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(attempt_id)?;
+        let target = self
+            .attempt_dir(project_id, issue_id, attempt_id)
+            .join(FAILED_CODE_REVIEW_RECOVERY_ARBITRATION_TARGET);
+        Ok(FailedCodeReviewRecoveryArbitrationGuard {
+            _lock: ExclusiveFileLock::acquire(&target)?,
+        })
+    }
+
+    pub(crate) fn ensure_plan_repair_can_win_recovery_arbitration(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        let Some(journal) = self.get_failed_code_review_recovery_journal(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?
+        else {
+            return Ok(());
+        };
+        if !journal.is_completed() {
+            return Ok(());
+        }
+        let Some(retry_role_run_id) = journal.retry_role_run_id.as_deref() else {
+            return Err(recovery_state_changed());
+        };
+        let retry = self.get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            retry_role_run_id,
+        )?;
+        let Some(node_id) = retry.node_id.as_deref() else {
+            return Err(recovery_state_changed());
+        };
+        if retry.attempt_id != journal.attempt_id
+            || retry.stage != CodingExecutionStage::CodeReview
+            || retry.role != CodingProviderRole::CodeReviewer
+            || retry.trigger != CodingRoleRunTrigger::RetryReview
+            || retry.supersedes_run_id.as_deref()
+                != Some(journal.expected_stale_role_run_id.as_str())
+            || !matches!(
+                retry.status,
+                CodingRoleRunStatus::Running
+                    | CodingRoleRunStatus::Completed
+                    | CodingRoleRunStatus::Blocked
+            )
+        {
+            return Err(recovery_state_changed());
+        }
+        let matching_nodes = self
+            .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .filter(|node| {
+                node.id == node_id
+                    && node.attempt_id == attempt.id
+                    && node.stage == CodingExecutionStage::CodeReview
+            })
+            .count();
+        let provider_started = self
+            .list_role_run_events(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                retry_role_run_id,
+            )?
+            .iter()
+            .any(|event| {
+                event.event_type == CodingRoleRunEventType::ProviderStart
+                    && event.node_id.as_deref() == Some(node_id)
+            });
+        if matching_nodes != 1 || !provider_started {
+            return Err(recovery_state_changed());
+        }
+        self.archive_completed_failed_code_review_recovery_journal(&journal)
+    }
+
     fn failed_code_review_recovery_journal_path(
         &self,
         project_id: &str,
@@ -169,44 +264,151 @@ impl super::CodingAttemptStore {
         validate_relative_id(gate_id)?;
         validate_relative_id(failed_node_id)?;
         validate_relative_id(stale_role_run_id)?;
-        if let Some(existing) = self.get_failed_code_review_recovery_journal(
+        let _arbitration = self.acquire_failed_code_review_recovery_arbitration(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-        )? {
-            if existing.expected_gate_id == gate_id
-                && existing.expected_failed_node_id == failed_node_id
-                && existing.expected_stale_role_run_id == stale_role_run_id
-            {
-                return Ok(existing);
+        )?;
+        let attempt_path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        let journal_path = self.failed_code_review_recovery_journal_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        with_exclusive_lock(&attempt_path, || {
+            let current = self.validate_attempt_lineage(attempt)?;
+            if self.plan_amendment_blocks_failed_review_recovery(&current)? {
+                return Err(ProductStoreError::Io(
+                    "plan_amendment_blocks_provider_run".to_string(),
+                ));
             }
-            if !existing.is_completed() {
+            with_exclusive_lock(&journal_path, || {
+                if let Some(existing) = self.get_failed_code_review_recovery_journal(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                )? {
+                    if existing.expected_gate_id == gate_id
+                        && existing.expected_failed_node_id == failed_node_id
+                        && existing.expected_stale_role_run_id == stale_role_run_id
+                    {
+                        return Ok(existing);
+                    }
+                    if !existing.is_completed() {
+                        return Err(recovery_state_changed());
+                    }
+                    self.archive_completed_failed_code_review_recovery_journal(&existing)?;
+                }
+
+                let now = Utc::now().to_rfc3339();
+                let journal = FailedCodeReviewRecoveryJournal {
+                    attempt_id: current.id.clone(),
+                    project_id: current.project_id.clone(),
+                    issue_id: current.issue_id.clone(),
+                    expected_gate_id: gate_id.to_string(),
+                    expected_failed_node_id: failed_node_id.to_string(),
+                    expected_stale_role_run_id: stale_role_run_id.to_string(),
+                    recovery_key: format!(
+                        "failed_code_review_recovery:{}:{gate_id}:{stale_role_run_id}",
+                        current.id
+                    ),
+                    retry_role_run_id: None,
+                    phase: FailedCodeReviewRecoveryPhase::Prepared,
+                    runner_started_at: None,
+                    completed_at: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                self.save_failed_code_review_recovery_journal(&journal)?;
+                Ok(journal)
+            })
+        })
+    }
+
+    pub(crate) fn rollback_failed_code_review_recovery_for_plan_amendment_locked(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        let Some(journal) = self.get_failed_code_review_recovery_journal(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?
+        else {
+            return Ok(());
+        };
+        if journal.is_completed() {
+            return Err(recovery_state_changed());
+        }
+        let role_runs = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let matching_retries = role_runs
+            .iter()
+            .filter(|run| run.reason_code.as_deref() == Some(journal.recovery_key.as_str()))
+            .collect::<Vec<_>>();
+        if matching_retries.len() > 1 {
+            return Err(recovery_state_changed());
+        }
+        let matching_retry = matching_retries.into_iter().next();
+        let retry = if let Some(retry_role_run_id) = journal.retry_role_run_id.as_deref() {
+            let retry = role_runs.iter().find(|run| run.id == retry_role_run_id);
+            if retry.is_some_and(|run| {
+                run.reason_code.as_deref() != Some(journal.recovery_key.as_str())
+            }) || matching_retry.is_some_and(|run| run.id != retry_role_run_id)
+            {
                 return Err(recovery_state_changed());
             }
-            self.archive_completed_failed_code_review_recovery_journal(&existing)?;
-        }
-
-        let now = Utc::now().to_rfc3339();
-        let journal = FailedCodeReviewRecoveryJournal {
-            attempt_id: attempt.id.clone(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            expected_gate_id: gate_id.to_string(),
-            expected_failed_node_id: failed_node_id.to_string(),
-            expected_stale_role_run_id: stale_role_run_id.to_string(),
-            recovery_key: format!(
-                "failed_code_review_recovery:{}:{gate_id}:{stale_role_run_id}",
-                attempt.id
-            ),
-            retry_role_run_id: None,
-            phase: FailedCodeReviewRecoveryPhase::Prepared,
-            runner_started_at: None,
-            completed_at: None,
-            created_at: now.clone(),
-            updated_at: now,
+            retry
+        } else {
+            matching_retry
         };
-        self.save_failed_code_review_recovery_journal(&journal)?;
-        Ok(journal)
+        if let Some(retry) = retry.as_ref() {
+            validate_retry_role_run(retry, &journal)?;
+        }
+        let retry_role_run_id = retry
+            .map(|run| run.id.as_str())
+            .or(journal.retry_role_run_id.as_deref());
+        if let Some(retry_role_run_id) = retry_role_run_id {
+            let mut stale = self.get_role_run(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &journal.expected_stale_role_run_id,
+            )?;
+            validate_stale_role_run(&stale, &journal, retry_role_run_id)?;
+            stale.status = CodingRoleRunStatus::Failed;
+            stale.superseded_by_run_id = None;
+            if stale.completed_at.is_none() {
+                stale.completed_at = Some(Utc::now().to_rfc3339());
+            }
+            self.save_role_run(&attempt.project_id, &attempt.issue_id, &stale)?;
+        }
+        if let Some(retry) = retry {
+            super::remove_file_if_exists(&self.role_run_path(
+                &attempt.project_id,
+                &attempt.issue_id,
+                retry,
+            ))?;
+        }
+        let resolved_gate_path = self
+            .blocked_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("resolved")
+            .join(format!("{}.json", journal.expected_gate_id));
+        if journal.phase >= FailedCodeReviewRecoveryPhase::GateResolved
+            || super::path_is_regular_file(&resolved_gate_path)?
+        {
+            self.reopen_failed_code_review_gate_for_plan_repair(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &journal.expected_gate_id,
+            )?;
+        }
+        let path = self.failed_code_review_recovery_journal_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        super::remove_file_if_exists(&path)
     }
 
     pub fn advance_failed_code_review_recovery_journal(
@@ -215,6 +417,17 @@ impl super::CodingAttemptStore {
         phase: FailedCodeReviewRecoveryPhase,
         retry_role_run_id: Option<&str>,
     ) -> Result<FailedCodeReviewRecoveryJournal, ProductStoreError> {
+        let _arbitration = self.acquire_failed_code_review_recovery_arbitration(
+            &expected.project_id,
+            &expected.issue_id,
+            &expected.attempt_id,
+        )?;
+        let attempt = self.get_attempt(
+            &expected.project_id,
+            &expected.issue_id,
+            &expected.attempt_id,
+        )?;
+        self.ensure_failed_review_recovery_write_allowed(&attempt)?;
         let Some(mut current) = self.get_failed_code_review_recovery_journal(
             &expected.project_id,
             &expected.issue_id,
@@ -248,7 +461,14 @@ impl super::CodingAttemptStore {
         attempt: &CodingExecutionAttempt,
         journal: &FailedCodeReviewRecoveryJournal,
     ) -> Result<CodingRoleRun, ProductStoreError> {
-        ensure_journal_attempt(journal, attempt)?;
+        let _arbitration = self.acquire_failed_code_review_recovery_arbitration(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let attempt = self.validate_attempt_lineage(attempt)?;
+        self.ensure_failed_review_recovery_write_allowed(&attempt)?;
+        ensure_journal_attempt(journal, &attempt)?;
         let existing = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         let mut matching = existing
             .iter()
@@ -340,6 +560,10 @@ impl super::CodingAttemptStore {
         gate_id: &str,
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(gate_id)?;
+        let _arbitration =
+            self.acquire_failed_code_review_recovery_arbitration(project_id, issue_id, attempt_id)?;
+        let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        self.ensure_failed_review_recovery_write_allowed(&attempt)?;
         let root = self.blocked_gates_root(project_id, issue_id, attempt_id);
         if super::path_is_regular_file(&root.join(format!("{gate_id}.json")))? {
             self.resolve_blocked_gate(project_id, issue_id, attempt_id, gate_id)?;
@@ -356,11 +580,17 @@ impl super::CodingAttemptStore {
 
     pub fn complete_failed_code_review_recovery_journal(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         gate_id: &str,
     ) -> Result<FailedCodeReviewRecoveryJournal, ProductStoreError> {
         validate_relative_id(gate_id)?;
-        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let _arbitration = self.acquire_failed_code_review_recovery_arbitration(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let attempt = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        self.ensure_failed_review_recovery_write_allowed(&attempt)?;
         let Some(mut journal) = self.get_failed_code_review_recovery_journal(
             &attempt.project_id,
             &attempt.issue_id,
@@ -404,6 +634,64 @@ impl super::CodingAttemptStore {
         journal.updated_at = now;
         self.save_failed_code_review_recovery_journal(&journal)?;
         Ok(journal)
+    }
+
+    pub(crate) fn reopen_failed_review_attempt_running(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let _arbitration = self.acquire_failed_code_review_recovery_arbitration(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let current = self.validate_attempt_lineage(attempt)?;
+        self.ensure_failed_review_recovery_write_allowed(&current)?;
+        match current.status {
+            CodingAttemptStatus::Blocked => self.update_attempt_status(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                CodingAttemptStatus::Running,
+            ),
+            CodingAttemptStatus::Running => Ok(current),
+            _ => Err(recovery_state_changed()),
+        }
+    }
+
+    fn ensure_failed_review_recovery_write_allowed(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        if self.plan_amendment_blocks_failed_review_recovery(attempt)? {
+            return Err(ProductStoreError::Io(
+                "plan_amendment_blocks_provider_run".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn plan_amendment_blocks_failed_review_recovery(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<bool, ProductStoreError> {
+        if matches!(
+            attempt.status,
+            CodingAttemptStatus::AwaitingPlanAmendment
+                | CodingAttemptStatus::ApplyingPlanAmendment
+                | CodingAttemptStatus::AmendmentApplyFailed
+        ) {
+            return Ok(true);
+        }
+        let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+            return Ok(false);
+        };
+        let plan = WorkItemRevisionStore::new(self.paths()).get_plan_lineage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            plan_id,
+        )?;
+        Ok(plan.active_amendment_id.is_some())
     }
 
     fn save_failed_code_review_recovery_journal(

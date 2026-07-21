@@ -7,39 +7,68 @@ pub(crate) fn format_tool_call_input(input: &serde_json::Value) -> String {
 pub(crate) async fn forward_runner_command_to_provider(
     command: CodingRunnerCommand,
     provider_commands: &mpsc::Sender<ProviderCommand>,
+    cancellation: &CancellationToken,
 ) -> bool {
     match command {
         CodingRunnerCommand::PermissionResponse {
             id,
             approved,
             reason,
-        } => provider_commands
-            .send(ProviderCommand::PermissionResponse {
-                id,
-                approved,
-                reason,
-            })
+        } => {
+            send_provider_command_with_cancellation(
+                provider_commands,
+                ProviderCommand::PermissionResponse {
+                    id,
+                    approved,
+                    reason,
+                },
+                cancellation,
+            )
             .await
-            .is_ok(),
+        }
         CodingRunnerCommand::ChoiceResponse {
             id,
             selected_option_ids,
             free_text,
-        } => provider_commands
-            .send(ProviderCommand::ChoiceResponse {
-                id,
-                selected_option_ids,
-                free_text,
-                answers: vec![],
-            })
+        } => {
+            send_provider_command_with_cancellation(
+                provider_commands,
+                ProviderCommand::ChoiceResponse {
+                    id,
+                    selected_option_ids,
+                    free_text,
+                    answers: vec![],
+                },
+                cancellation,
+            )
             .await
-            .is_ok(),
+        }
         CodingRunnerCommand::AbortAttempt => {
-            provider_commands.send(ProviderCommand::Abort).await.is_ok()
+            provider_commands.try_send(ProviderCommand::Abort).is_ok()
         }
         CodingRunnerCommand::ProviderSelect { .. }
         | CodingRunnerCommand::StageGateConfirm { .. } => true,
     }
+}
+
+pub(crate) async fn send_provider_command_with_cancellation(
+    provider_commands: &mpsc::Sender<ProviderCommand>,
+    command: ProviderCommand,
+    cancellation: &CancellationToken,
+) -> bool {
+    let permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return false,
+        permit = provider_commands.reserve() => permit,
+    };
+    let Ok(permit) = permit else {
+        return false;
+    };
+    if cancellation.is_cancelled() {
+        return false;
+    }
+    permit.send(command);
+    true
 }
 
 pub(crate) fn extract_tool_command(input: &serde_json::Value) -> Option<String> {

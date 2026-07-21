@@ -64,7 +64,7 @@ async fn review_request_blocks_when_only_runtime_artifacts_changed() {
 }
 
 #[tokio::test]
-async fn execute_review_request_blocks_attempt_when_push_fails() {
+async fn execute_review_request_keeps_push_started_when_failed_push_cannot_query_remote() {
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     init_repo(&repo);
@@ -88,29 +88,46 @@ async fn execute_review_request_blocks_attempt_when_push_fails() {
     let worktree = prepared.worktree_path.as_ref().expect("worktree path");
     fs::write(worktree.join("src.txt"), "hello\npush failure\n").expect("modify file");
 
-    let review_request = engine
+    let error = engine
         .execute_review_request(&prepared, "missing", "feat: implement work item")
         .await
-        .expect("execute review request");
+        .expect_err("unknown remote state must fail closed");
 
-    assert_eq!(review_request.push_status, PushStatus::Failed);
+    assert!(error.to_string().contains("ls-remote --heads missing"));
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
     assert_eq!(updated.stage, CodingExecutionStage::ReviewRequest);
+    assert!(
+        store
+            .list_review_requests("project_0001", "issue_0001", &attempt.id)
+            .expect("review requests")
+            .is_empty()
+    );
+    let journal = store
+        .get_coding_git_operation(&updated)
+        .expect("journal")
+        .expect("push journal");
+    assert_eq!(
+        journal.phase,
+        cadence_aria::product::coding_attempt_store::CodingGitOperationPhase::PushStarted
+    );
+    assert_eq!(journal.push_status, None);
 
-    let _node = rx.recv().await.expect("review request node");
-    let _request = rx.recv().await.expect("review request update");
-    match rx.recv().await.expect("review request node update") {
-        CodingWsOutMessage::CodingTimelineNodeUpdated {
-            status, summary, ..
-        } => {
-            assert_eq!(status, CodingTimelineNodeStatus::Failed);
-            assert_eq!(summary.as_deref(), Some("review request 推送失败"));
-        }
-        other => panic!("expected review request node update, got {other:?}"),
-    }
+    let retry_error = engine
+        .execute_review_request(&updated, "missing", "feat: implement work item")
+        .await
+        .expect_err("indeterminate push remains retryable and fail closed");
+    assert!(retry_error.to_string().contains("ls-remote --heads missing"));
+    assert_eq!(
+        store
+            .get_coding_git_operation(&updated)
+            .expect("retry journal")
+            .expect("retry push journal"),
+        journal
+    );
+    assert!(rx.try_recv().is_ok(), "review request node must be emitted");
 }
 
 #[tokio::test]
@@ -139,6 +156,7 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
             max_auto_rework: 2,
         })
         .expect("create group attempt");
+    seed_authoritative_group_final_review_fixture(&store, &attempt);
     store
         .update_attempt_status(
             "project_0001",
@@ -157,7 +175,7 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
         .expect("review request stage");
     let request = sample_review_request(&attempt.id);
     store
-        .save_review_request(&request)
+        .save_review_request(&attempt, &request)
         .expect("save review request");
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -300,6 +318,7 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
             max_auto_rework: 2,
         })
         .expect("create group attempt");
+    seed_authoritative_group_final_review_fixture(&store, &attempt);
     store
         .update_attempt_status(
             "project_0001",
@@ -318,7 +337,7 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
         .expect("review request stage");
     let request = sample_review_request(&attempt.id);
     store
-        .save_review_request(&request)
+        .save_review_request(&attempt, &request)
         .expect("save review request");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -351,10 +370,10 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
         .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
         .expect("open blocked gates");
     assert_eq!(gates.len(), 1);
-    assert_eq!(gates[0].title, "GroupFinalReview blocked");
+    assert_eq!(gates[0].title, "Internal review requires human triage");
     assert_eq!(
         gates[0].reason_code.as_deref(),
-        Some("group_final_review_blocked")
+        Some("internal_review_human_triage")
     );
 }
 
@@ -388,6 +407,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
             max_auto_rework: 2,
         })
         .expect("create group attempt");
+    seed_authoritative_group_final_review_fixture(&store, &attempt);
     store
         .update_role_provider_config_snapshot(
             "project_0001",
@@ -422,7 +442,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
         .expect("review request stage");
     let request = sample_review_request(&attempt.id);
     store
-        .save_review_request(&request)
+        .save_review_request(&attempt, &request)
         .expect("save review request");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
@@ -524,7 +544,7 @@ async fn handle_final_confirm_completes_waiting_attempt_and_timeline_node() {
         )
         .expect("set head commit");
     store
-        .save_timeline_node(CodingTimelineNode {
+        .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::FinalConfirm,
@@ -572,77 +592,6 @@ async fn handle_final_confirm_completes_waiting_attempt_and_timeline_node() {
             assert!(completed_at.is_some());
         }
         other => panic!("expected final confirm timeline update, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn handle_abort_marks_attempt_aborted_and_closes_active_timeline_node() {
-    let root = tempdir().expect("root");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_attempt(create_input())
-        .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
-    store
-        .update_attempt_stage(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingExecutionStage::Testing,
-        )
-        .expect("testing stage");
-    store
-        .save_timeline_node(CodingTimelineNode {
-            id: "coding_node_0001".to_string(),
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            title: "执行测试".to_string(),
-            status: CodingTimelineNodeStatus::Running,
-            agent_role: Some(CodingAgentRole::Tester),
-            summary: None,
-            started_at: "2026-05-23T00:00:00Z".to_string(),
-            completed_at: None,
-            artifact_refs: Vec::new(),
-        })
-        .expect("save testing node");
-    let (tx, mut rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-
-    let updated = engine
-        .handle_abort("project_0001", "issue_0001", &attempt.id)
-        .await
-        .expect("handle abort");
-
-    assert_eq!(updated.status, CodingAttemptStatus::Aborted);
-    assert_eq!(updated.stage, CodingExecutionStage::Testing);
-    assert!(updated.completed_at.is_some());
-    let nodes = store
-        .get_timeline_nodes("project_0001", "issue_0001", &attempt.id)
-        .expect("timeline nodes");
-    assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
-    assert_eq!(nodes[0].summary.as_deref(), Some("用户已中止"));
-    assert!(nodes[0].completed_at.is_some());
-
-    match rx.recv().await.expect("abort timeline update") {
-        CodingWsOutMessage::CodingTimelineNodeUpdated {
-            node_id,
-            status,
-            summary,
-            completed_at,
-        } => {
-            assert_eq!(node_id, "coding_node_0001");
-            assert_eq!(status, CodingTimelineNodeStatus::Failed);
-            assert_eq!(summary.as_deref(), Some("用户已中止"));
-            assert!(completed_at.is_some());
-        }
-        other => panic!("expected abort timeline update, got {other:?}"),
     }
 }
 

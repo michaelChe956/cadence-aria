@@ -1,14 +1,22 @@
 import { useEffect, useState } from "react";
 import type {
+  HumanPresentationRevision,
+  PlanProjectionBundle,
+  ProjectionValidationReport,
+  SaveHumanPresentationRevisionMessage,
   WorkItemPlanArtifactPayload,
   WorkItemPlanArtifactVersion,
+  WorkItemProjectionBundle,
+  WorkItemRevisionHistoryDto,
 } from "../../api/types";
+import type { HumanPresentationSaveState } from "../../state/workspace-ws-store-types";
 import {
   WorkItemPlanArtifactTabContent,
   groupWorkItemPlanArtifactVersions,
   type WorkItemPlanArtifactTab,
-  workItemPlanArtifactLabel,
 } from "./WorkItemPlanArtifactContent";
+import { WorkItemProjectionTabs } from "./WorkItemProjectionTabs";
+import { workItemPlanArtifactLabel } from "./work-item-plan-projection-artifacts";
 
 export interface WorkItemPlanArtifactPanelProps {
   artifact: WorkItemPlanArtifactPayload | null;
@@ -17,6 +25,14 @@ export interface WorkItemPlanArtifactPanelProps {
   onSelectVersion?: (version: number | null) => void;
   activeNodeType?: string | null;
   readonly?: boolean;
+  planProjection?: PlanProjectionBundle | null;
+  workItemProjections?: WorkItemProjectionBundle[];
+  projectionHistory?: WorkItemRevisionHistoryDto | null;
+  projectionValidation?: ProjectionValidationReport | null;
+  missingWorkItemProjectionRefs?: string[];
+  humanPresentationRevisions?: Record<string, HumanPresentationRevision>;
+  humanPresentationSaveStates?: Record<string, HumanPresentationSaveState>;
+  onSaveHumanPresentation?: (message: SaveHumanPresentationRevisionMessage) => void;
   className?: string;
 }
 
@@ -26,6 +42,14 @@ export function WorkItemPlanArtifactPanel({
   selectedVersion = null,
   onSelectVersion,
   readonly = false,
+  planProjection = null,
+  workItemProjections = [],
+  projectionHistory = null,
+  projectionValidation = null,
+  missingWorkItemProjectionRefs = [],
+  humanPresentationRevisions = {},
+  humanPresentationSaveStates = {},
+  onSaveHumanPresentation = () => undefined,
   className = "",
 }: WorkItemPlanArtifactPanelProps) {
   const [activeTab, setActiveTab] = useState<WorkItemPlanArtifactTab>(() =>
@@ -76,7 +100,9 @@ export function WorkItemPlanArtifactPanel({
           selectedVersion={selectedVersion}
           onSelectVersion={onSelectVersion}
         />
-        <WorkItemPlanTabs activeTab={activeTab} onSelectTab={setActiveTab} />
+        {planProjection ? null : (
+          <WorkItemPlanTabs activeTab={activeTab} onSelectTab={setActiveTab} />
+        )}
       </section>
 
       {readonly ? (
@@ -85,13 +111,53 @@ export function WorkItemPlanArtifactPanel({
         </div>
       ) : null}
 
-      <WorkItemPlanArtifactTabContent
-        artifact={artifact}
-        activeTab={activeTab}
-        versions={versions}
-        selectedVersion={selectedVersion}
-      />
+      {planProjection ? (
+        missingWorkItemProjectionRefs.length > 0 ? (
+          <IncompleteProjectionArtifacts
+            missingRefs={missingWorkItemProjectionRefs}
+          />
+        ) : (
+          <WorkItemProjectionTabs
+            planProjection={planProjection}
+            workItemProjections={workItemProjections}
+            history={projectionHistory}
+            validation={projectionValidation}
+            presentations={humanPresentationRevisions}
+            presentationSaveStates={humanPresentationSaveStates}
+            editable={!readonly}
+            onSavePresentation={onSaveHumanPresentation}
+          />
+        )
+      ) : (
+        <WorkItemPlanArtifactTabContent
+          artifact={artifact}
+          activeTab={activeTab}
+          versions={versions}
+          selectedVersion={selectedVersion}
+        />
+      )}
     </div>
+  );
+}
+
+function IncompleteProjectionArtifacts({ missingRefs }: { missingRefs: string[] }) {
+  return (
+    <section
+      role="alert"
+      className="rounded-md border border-amber-300 bg-amber-50 p-4 text-amber-950"
+    >
+      <h3 className="text-sm font-semibold">Projection artifacts 不完整</h3>
+      <p className="mt-1 text-xs leading-5">
+        当前 Plan Projection 引用的 Work Item bundle 未全部恢复，已停止渲染投影视图。
+      </p>
+      <ul className="mt-3 space-y-1 font-mono text-xs">
+        {missingRefs.map((projectionRef) => (
+          <li key={projectionRef} className="break-all">
+            {projectionRef}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -263,6 +329,14 @@ function artifactStatusMessage(
         return `Compile 已提交，生成 ${artifact.payload.work_item_ids.length} 个 Work Item、${artifact.payload.verification_plan_ids.length} 个 Verification Plan、${artifact.payload.child_session_ids.length} 个 child session。`;
       }
       return `Compile ${artifact.payload.status}，Work Item 尚未确认完成。`;
+    case "plan_projection":
+      return `Plan Projection ${artifact.payload.plan_revision_id} 已发布。`;
+    case "work_item_projection":
+      return `Work Item Projection ${artifact.payload.work_item_revision_id} 已发布。`;
+    case "work_item_revision_history":
+      return `Revision History 已恢复 ${artifact.payload.entries.length} 条记录。`;
+    case "projection_validation":
+      return `Projection Validation 包含 ${artifact.payload.findings.length} 条 finding。`;
     case "context_blocker":
       return "缺少上下文，Work Item Plan 暂时无法继续。";
     default:
@@ -280,6 +354,10 @@ function defaultArtifactTab(artifact: WorkItemPlanArtifactPayload): WorkItemPlan
     case "context_blocker":
       return "review";
     case "compile_report":
+    case "plan_projection":
+    case "work_item_projection":
+    case "work_item_revision_history":
+    case "projection_validation":
       return "overview";
     default:
       return "overview";

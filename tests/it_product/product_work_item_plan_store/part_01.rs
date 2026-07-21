@@ -8,11 +8,12 @@ use cadence_aria::product::models::{
     DesignContextCapabilities, IssueWorkItemPlan, IssueWorkItemPlanOptions,
     IssueWorkItemPlanStatus, OutlineContextBlockerResolution, OutlineContextIndex,
     WorkItemBatchRecord, WorkItemBatchStatus, WorkItemDraftCandidate, WorkItemDraftRecord,
-    WorkItemDraftStatus, WorkItemDraftSupersedeReason, WorkItemGenerationMode, WorkItemKind,
-    WorkItemOutline, WorkItemOutlineDependencyEdge, WorkItemOutlineSessionFit, WorkItemPlanCommitState,
-    WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction, WorkItemPlanDraftActiveIndex,
-    WorkItemPlanOutline, WorkspaceType,
+    WorkItemDraftStatus, WorkItemDraftSupersedeReason, WorkItemDraftVerificationPlan,
+    WorkItemGenerationMode, WorkItemKind, WorkItemOutline, WorkItemOutlineDependencyEdge,
+    WorkItemOutlineSessionFit, WorkItemPlanCommitState, WorkItemPlanCompileStatus,
+    WorkItemPlanCompileTransaction, WorkItemPlanDraftActiveIndex, WorkItemPlanOutline, WorkspaceType,
 };
+use cadence_aria::product::work_item_contract::CanonicalWorkItemContract;
 use cadence_aria::product::work_item_plan_store::{
     WorkItemPlanStore, compact_outline_context_index, copy_draft_for_current_round,
     mark_downstream_superseded, mark_draft_active, mark_draft_record_superseded, next_batch_id,
@@ -31,6 +32,7 @@ fn work_item_plan_models_roundtrip() {
         strategy_summary: "按后端、前端和验收拆分".to_string(),
         work_item_outlines: vec![WorkItemOutline {
             outline_id: "outline_001".to_string(),
+            logical_work_item_id: "wi_001".to_string(),
             title: "实现后端 store".to_string(),
             kind: WorkItemKind::Backend,
             goal: "持久化 draft record".to_string(),
@@ -71,19 +73,7 @@ fn work_item_plan_models_roundtrip() {
         attempt_index: 1,
         outline_version_ref: "artifact://outline/1".to_string(),
         generation_mode: WorkItemGenerationMode::Serial,
-        candidate: WorkItemDraftCandidate {
-            outline_id: "outline_001".to_string(),
-            title: "实现后端 store".to_string(),
-            kind: WorkItemKind::Backend,
-            goal: "持久化 draft record".to_string(),
-            implementation_context: "复用 json_store 原子写".to_string(),
-            exclusive_write_scopes: vec!["src/product".to_string()],
-            forbidden_write_scopes: vec!["web".to_string()],
-            depends_on_outline_ids: vec![],
-            required_handoff_from_outline_ids: vec![],
-            handoff_summary: "store 可供编译阶段读取".to_string(),
-            verification_plan: serde_json::json!({"commands": ["cargo test --locked"]}),
-        },
+        candidate: sample_draft_candidate("outline_001"),
         status: WorkItemDraftStatus::Draft,
         active: true,
         superseded_by_draft_id: None,
@@ -617,19 +607,7 @@ fn sample_draft_record(draft_id: &str, generation_round_id: &str) -> WorkItemDra
         attempt_index: 1,
         outline_version_ref: "artifact://outline/1".to_string(),
         generation_mode: WorkItemGenerationMode::Serial,
-        candidate: WorkItemDraftCandidate {
-            outline_id: "outline_001".to_string(),
-            title: "实现后端 store".to_string(),
-            kind: WorkItemKind::Backend,
-            goal: "持久化 draft record".to_string(),
-            implementation_context: "复用 json_store 原子写".to_string(),
-            exclusive_write_scopes: vec!["src/product".to_string()],
-            forbidden_write_scopes: vec!["web".to_string()],
-            depends_on_outline_ids: vec![],
-            required_handoff_from_outline_ids: vec![],
-            handoff_summary: "store 可供编译阶段读取".to_string(),
-            verification_plan: serde_json::json!({"commands": ["cargo test --locked"]}),
-        },
+        candidate: sample_draft_candidate("outline_001"),
         status: WorkItemDraftStatus::Draft,
         active: true,
         superseded_by_draft_id: None,
@@ -648,8 +626,72 @@ fn sample_draft_record(draft_id: &str, generation_round_id: &str) -> WorkItemDra
 fn sample_draft_record_for_outline(draft_id: &str, outline_id: &str) -> WorkItemDraftRecord {
     let mut record = sample_draft_record(draft_id, "round_001");
     record.outline_id = outline_id.to_string();
-    record.candidate.outline_id = outline_id.to_string();
+    record.candidate = sample_draft_candidate(outline_id);
     record
+}
+
+fn sample_draft_candidate(outline_id: &str) -> WorkItemDraftCandidate {
+    let logical_work_item_id = format!(
+        "wi_{}",
+        outline_id.strip_prefix("outline_").unwrap_or(outline_id)
+    );
+    let contract: CanonicalWorkItemContract = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "identity": {
+            "logical_work_item_id": logical_work_item_id,
+            "title": format!("item {outline_id}"),
+            "kind": "backend"
+        },
+        "goal": { "summary": "持久化 draft record" },
+        "non_goals": [],
+        "input_contracts": [],
+        "output_contracts": [{
+            "contract_id": format!("contract.{logical_work_item_id}.output"),
+            "capabilities": ["stored"]
+        }],
+        "tasks": [{
+            "task_id": format!("task.{logical_work_item_id}.1"),
+            "statement": "Persist the canonical draft",
+            "requirement_refs": ["REQ-STORE-001"],
+            "done_when_refs": ["AC-STORE-001"]
+        }],
+        "write_policy": {
+            "exclusive_scopes": ["src/product"],
+            "forbidden_scopes": ["web"]
+        },
+        "acceptance_criteria": [{
+            "criterion_id": "AC-STORE-001",
+            "statement": "Draft persists",
+            "required_evidence": ["non_zero_test_execution"]
+        }],
+        "verification_checks": [{
+            "check_id": "check_store",
+            "command": "cargo test --locked --test it_product",
+            "manual_instruction": null,
+            "required": true,
+            "non_zero_test_execution_required": true
+        }],
+        "handoff_contract": {
+            "required_fields": ["commit_sha"],
+            "provided_contract_refs": [format!("contract.{logical_work_item_id}.output")],
+            "reviewer_check_refs": ["AC-STORE-001"]
+        },
+        "blocker_rules": [],
+        "design_traceability": [{
+            "source_type": "design_spec",
+            "source_id": "design_1",
+            "requirement_id": "REQ-STORE-001"
+        }]
+    }))
+    .expect("canonical draft fixture");
+    WorkItemDraftCandidate {
+        outline_id: outline_id.to_string(),
+        logical_work_item_id,
+        verification_plan: WorkItemDraftVerificationPlan {
+            checks: contract.verification_checks.clone(),
+        },
+        canonical_contract_candidate: contract,
+    }
 }
 
 fn sample_dependency_outline() -> WorkItemPlanOutline {
@@ -684,6 +726,7 @@ fn sample_dependency_outline() -> WorkItemPlanOutline {
 fn sample_outline(outline_id: &str, kind: WorkItemKind) -> WorkItemOutline {
     WorkItemOutline {
         outline_id: outline_id.to_string(),
+        logical_work_item_id: format!("wi_{outline_id}"),
         title: format!("item {outline_id}"),
         kind,
         goal: "goal".to_string(),

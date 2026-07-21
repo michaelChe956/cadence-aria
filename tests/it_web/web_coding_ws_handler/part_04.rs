@@ -314,14 +314,23 @@ async fn coding_ws_abort_attempt_aborts_all_registered_runners() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let (app, state) = app_with_running_testing_attempt_and_state(root.path());
+    let attempt_key = CodingAttemptRunKey::new(
+        "project_0001",
+        "issue_0001",
+        "coding_attempt_0001",
+    );
     let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
-    state
+    let first_run_id = state
         .coding_runs
-        .insert("coding_attempt_0001".to_string(), first_runner_tx);
-    state
+        .insert_cancellable(&attempt_key, first_runner_tx)
+        .expect("first runner")
+        .run_id();
+    let second_run_id = state
         .coding_runs
-        .insert("coding_attempt_0001".to_string(), second_runner_tx);
+        .insert_cancellable(&attempt_key, second_runner_tx)
+        .expect("second runner")
+        .run_id();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -348,7 +357,11 @@ async fn coding_ws_abort_attempt_aborts_all_registered_runners() {
             .expect("second runner abort"),
         CodingRunnerCommand::AbortAttempt
     );
-    assert_eq!(state.coding_runs.runner_count("coding_attempt_0001"), 0);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 2);
+    state.coding_runs.remove(&attempt_key, first_run_id);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 1);
+    state.coding_runs.remove(&attempt_key, second_run_id);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
 
     ws.close(None).await.expect("close ws");
     server.abort();
@@ -379,8 +392,9 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
         })
         .expect("create work item");
     let store = CodingAttemptStore::new(app_paths);
-    store
-        .create_attempt(CreateCodingAttemptInput {
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -393,8 +407,8 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
     build_web_router(WebAppState::new(
         root_path.to_path_buf(),
         WebRuntime::new_fake(root_path.to_path_buf()),
@@ -509,8 +523,10 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
     lifecycle
         .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)
         .expect("confirm workspace session");
-    CodingAttemptStore::new(app_paths)
-        .create_attempt(CreateCodingAttemptInput {
+    let store = CodingAttemptStore::new(app_paths);
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -523,8 +539,8 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
     build_web_router(WebAppState::new(
         root_path.to_path_buf(),
         WebRuntime::new_fake(root_path.to_path_buf()),
@@ -578,8 +594,10 @@ fn app_with_full_chain_attempt_and_provider(
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
-    CodingAttemptStore::new(app_paths)
-        .create_attempt(CreateCodingAttemptInput {
+    let store = CodingAttemptStore::new(app_paths);
+    create_legacy_coding_attempt_fixture(
+        &store,
+        CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             work_item_id: "work_item_0001".to_string(),
@@ -592,8 +610,8 @@ fn app_with_full_chain_attempt_and_provider(
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create attempt");
+        },
+    );
 
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::Fake, provider);

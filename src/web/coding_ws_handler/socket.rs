@@ -1,7 +1,6 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, State};
 use axum::response::IntoResponse;
-use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
@@ -11,15 +10,22 @@ use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::state::WebAppState;
+use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
+use self::abort::abort_attempt_while_draining_events;
+use super::delivery_ack::fail_plan_amendment_socket_write;
+use super::outbound::{
+    OutboundEventReceiver, flush_queued_coding_events, send_coding_event, send_coding_json,
+};
 use super::{
-    CodingWsInMessage, CodingWsOutMessage, build_coding_session_state, confirm_open_stage_gate,
-    context_note_chat_entry, provider_selection_targets_current_running_stage,
-    should_resume_runner_after_gate_response, spawn_coding_runner, spawn_coding_runner_reserved,
-    update_provider_permission_mode, update_provider_selection,
+    CodingWsInMessage, CodingWsOutMessage, build_coding_session_state,
+    coding_attempt_lookup_protocol_error, confirm_open_stage_gate, context_note_chat_entry,
+    provider_selection_targets_current_running_stage, should_resume_runner_after_gate_response,
+    spawn_coding_runner, spawn_coding_runner_reserved, update_provider_permission_mode,
+    update_provider_selection,
 };
 
+pub(crate) mod abort;
 mod admission;
 pub(crate) use admission::{CodingMessageAdmission, coding_message_admission};
 #[cfg(test)]
@@ -33,51 +39,76 @@ pub(crate) use preparation::{
 #[cfg(test)]
 pub(crate) use preparation::{CodingRecoveryPreparationProbe, prepare_coding_message_with_probe};
 
-pub(crate) type CodingWsSender = SplitSink<WebSocket, Message>;
-
 pub async fn coding_ws(
     ws: WebSocketUpgrade,
     AxumPath(attempt_id): AxumPath<String>,
     State(state): State<WebAppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_coding_socket(socket, attempt_id, state))
+    ws.on_upgrade(move |socket| handle_coding_socket(socket, None, attempt_id, state))
         .into_response()
 }
 
-async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebAppState) {
+pub async fn scoped_coding_ws(
+    ws: WebSocketUpgrade,
+    AxumPath((project_id, issue_id, attempt_id)): AxumPath<(String, String, String)>,
+    State(state): State<WebAppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| {
+        handle_coding_socket(socket, Some((project_id, issue_id)), attempt_id, state)
+    })
+    .into_response()
+}
+
+async fn handle_coding_socket(
+    socket: WebSocket,
+    scope: Option<(String, String)>,
+    attempt_id: String,
+    state: WebAppState,
+) {
     let (mut socket_tx, mut socket_rx) = socket.split();
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
     let coding_store = CodingAttemptStore::new(app_paths);
-    let attempt = match coding_store.get_attempt_by_id(&attempt_id) {
+    let attempt_result = match scope.as_ref() {
+        Some((project_id, issue_id)) => coding_store.get_attempt(project_id, issue_id, &attempt_id),
+        None => coding_store.get_attempt_by_id(&attempt_id),
+    };
+    let attempt = match attempt_result {
         Ok(attempt) => attempt,
         Err(error) => {
+            let (code, message) = coding_attempt_lookup_protocol_error(&error);
             let _ = send_coding_json(
                 &mut socket_tx,
-                &CodingWsOutMessage::CodingProtocolError {
-                    code: "coding_attempt_not_found".to_string(),
-                    message: format!("coding attempt not found: {error}"),
-                },
+                &CodingWsOutMessage::CodingProtocolError { code, message },
             )
             .await;
             return;
         }
     };
+    let attempt_project_id = attempt.project_id.clone();
+    let attempt_issue_id = attempt.issue_id.clone();
+    let attempt_id = attempt.id.clone();
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let (event_tx, event_rx) = mpsc::channel(1024);
+    let socket_token = state
+        .coding_sockets
+        .register(&attempt_key, event_tx.clone());
     if let Ok(snapshot) = build_coding_session_state(&coding_store, attempt)
         && !send_coding_json(&mut socket_tx, &snapshot).await
     {
+        state.coding_sockets.remove(&attempt_key, socket_token);
         return;
     }
 
-    let (event_tx, mut event_rx) = mpsc::channel(1024);
+    let mut event_rx = OutboundEventReceiver::new(event_rx);
     let mut runner_started = false;
     let mut runner_command_tx: Option<mpsc::Sender<CodingRunnerCommand>> = None;
-    loop {
+    'socket: loop {
         tokio::select! {
             event = event_rx.recv() => {
                 let Some(event) = event else {
                     continue;
                 };
-                if !send_coding_json(&mut socket_tx, &event).await {
+                if !send_coding_event(&mut socket_tx, &event).await {
                     break;
                 }
             }
@@ -105,7 +136,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                     &coding_store,
                     &state.coding_runs,
                     &event_tx,
-                    &attempt_id,
+                    (&attempt_project_id, &attempt_issue_id, &attempt_id),
                     &inbound,
                 )
                 .await {
@@ -264,29 +295,35 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         }
                     };
                     drop(mutation_lease);
-                    while let Ok(event) = event_rx.try_recv() {
-                        if !send_coding_json(&mut socket_tx, &event).await {
-                            break;
-                        }
-                    }
+                    flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
                 } else if inbound == CodingWsInMessage::AbortAttempt {
-                    let open_gates = coding_store
-                        .list_open_stage_gates(
-                            &current_attempt.project_id,
-                            &current_attempt.issue_id,
-                            &current_attempt.id,
-                        )
-                        .unwrap_or_default();
-                    let aborted_runners = state.coding_runs.abort_attempt(&current_attempt.id).await;
+                    let attempt_key = CodingAttemptRunKey::from_attempt(&current_attempt);
+                    drop(mutation_lease);
+                    let abort_result = abort_attempt_while_draining_events(
+                        &state.coding_runs,
+                        &attempt_key,
+                        &mut event_rx,
+                    )
+                    .await;
+                    tracing::debug!(
+                        aborted_runners = abort_result.aborted_runners,
+                        attempt_id = current_attempt.id.as_str(),
+                        "coding runners stopped before durable websocket abort"
+                    );
                     runner_command_tx = None;
                     runner_started = false;
-                    if aborted_runners > 0 && !open_gates.is_empty() {
-                        drop(mutation_lease);
-                        continue;
+                    for (index, event) in abort_result.events.iter().enumerate() {
+                        if !send_coding_event(&mut socket_tx, event).await {
+                            for remaining in &abort_result.events[index + 1..] {
+                                fail_plan_amendment_socket_write(remaining);
+                            }
+                            break 'socket;
+                        }
                     }
+                    let mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
                         GitWorkspaceService::new(),
@@ -315,11 +352,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         }
                     };
                     drop(mutation_lease);
-                    while let Ok(event) = event_rx.try_recv() {
-                        if !send_coding_json(&mut socket_tx, &event).await {
-                            break;
-                        }
-                    }
+                    flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
@@ -360,11 +393,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         }
                     };
                     drop(mutation_lease);
-                    while let Ok(event) = event_rx.try_recv() {
-                        if !send_coding_json(&mut socket_tx, &event).await {
-                            break;
-                        }
-                    }
+                    flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
@@ -611,7 +640,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                         .await;
                     }
                 } else if let CodingWsInMessage::ContextNote { content } = inbound {
-                    let note = match coding_store.create_context_note(&current_attempt.id, content)
+                    let note = match coding_store.create_context_note(&current_attempt, content)
                     {
                         Ok(note) => note,
                         Err(error) => {
@@ -643,7 +672,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
                             continue;
                         }
                     };
-                    let _ = coding_store.save_chat_entry(&entry);
+                    let _ = coding_store.save_chat_entry(&current_attempt, &entry);
                     drop(mutation_lease);
                     if !send_coding_json(
                         &mut socket_tx,
@@ -665,16 +694,7 @@ async fn handle_coding_socket(socket: WebSocket, attempt_id: String, state: WebA
             }
         }
     }
-}
-
-pub(crate) async fn send_coding_json(
-    socket: &mut CodingWsSender,
-    message: &CodingWsOutMessage,
-) -> bool {
-    match serde_json::to_string(message) {
-        Ok(json) => socket.send(Message::Text(json.into())).await.is_ok(),
-        Err(_) => false,
-    }
+    state.coding_sockets.remove(&attempt_key, socket_token);
 }
 
 pub fn is_coding_ws_message_allowed(

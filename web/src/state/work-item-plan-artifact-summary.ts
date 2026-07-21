@@ -75,15 +75,71 @@ export function workItemPlanArtifactUpdateSummary(
     };
   }
 
+  if (artifact.type === "compile_report") {
+    return {
+      content: `Compile Report 已更新 · ${artifact.payload.status}`,
+      metadata: {
+        version,
+        version_label: versionLabel,
+        artifact_type: artifact.type,
+        artifact_label: "Compile Report",
+        object_id: artifact.payload.compile_id,
+        status_label: artifact.payload.status,
+      },
+    };
+  }
+
+  if (artifact.type === "plan_projection") {
+    return {
+      content: `Plan Projection 已发布 · ${artifact.payload.plan_revision_id}`,
+      metadata: {
+        version,
+        version_label: versionLabel,
+        artifact_type: artifact.type,
+        artifact_label: "Plan Projection",
+        object_id: artifact.payload.id,
+        status_label: "published",
+      },
+    };
+  }
+
+  if (artifact.type === "work_item_projection") {
+    return {
+      content: `Work Item Projection 已发布 · ${artifact.payload.work_item_revision_id}`,
+      metadata: {
+        version,
+        version_label: versionLabel,
+        artifact_type: artifact.type,
+        artifact_label: "Work Item Projection",
+        object_id: artifact.payload.id,
+        status_label: "published",
+      },
+    };
+  }
+
+  if (artifact.type === "work_item_revision_history") {
+    return {
+      content: `Revision History 已发布 · ${artifact.payload.entries.length} entries`,
+      metadata: {
+        version,
+        version_label: versionLabel,
+        artifact_type: artifact.type,
+        artifact_label: "Revision History",
+        object_id: "work_item_revision_history",
+        status_label: "published",
+      },
+    };
+  }
+
   return {
-    content: `Compile Report 已更新 · ${artifact.payload.status}`,
+    content: `Projection Validation 已发布 · ${artifact.payload.findings.length} findings`,
     metadata: {
       version,
       version_label: versionLabel,
       artifact_type: artifact.type,
-      artifact_label: "Compile Report",
-      object_id: artifact.payload.compile_id,
-      status_label: artifact.payload.status,
+      artifact_label: "Projection Validation",
+      object_id: "projection_validation",
+      status_label: artifact.payload.findings.length === 0 ? "valid" : "invalid",
     },
   };
 }

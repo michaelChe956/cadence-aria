@@ -20,6 +20,8 @@ pub(crate) fn build_coding_session_state(
     coding_store: &CodingAttemptStore,
     attempt: CodingExecutionAttempt,
 ) -> Result<CodingWsOutMessage, CodingWorkspaceEngineError> {
+    let reconciliation = coding_store.reconcile_linked_plan_repair_pause(&attempt)?;
+    let attempt = reconciliation.attempt;
     let execution_context = coding_execution_context(&coding_store.paths(), &attempt)?;
     let timeline_nodes =
         coding_store.get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
@@ -88,6 +90,7 @@ pub(crate) fn build_coding_session_state(
         &attempt.id,
     )?;
     let work_item_handoff = coding_store.get_visible_work_item_handoff(&attempt)?;
+    let linked_plan_repair = reconciliation.snapshot;
     let units = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
         coding_store
             .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
@@ -99,6 +102,8 @@ pub(crate) fn build_coding_session_state(
     };
 
     Ok(CodingWsOutMessage::CodingSessionState {
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
         attempt_id: attempt.id.clone(),
         attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
         work_item_group_id: attempt.work_item_group_id.clone(),
@@ -112,8 +117,8 @@ pub(crate) fn build_coding_session_state(
         worktree_path: attempt.worktree_path,
         rework_count: attempt.rework_count,
         max_auto_rework: attempt.max_auto_rework,
-        head_commit: attempt.head_commit,
-        pushed_remote: attempt.pushed_remote,
+        head_commit: Box::new(attempt.head_commit),
+        pushed_remote: Box::new(attempt.pushed_remote),
         role_provider_config_snapshot: Box::new(role_provider_config_snapshot),
         provider_config_snapshot: Box::new(attempt.provider_config_snapshot),
         chat_entries: Box::new(chat_entries),
@@ -130,6 +135,7 @@ pub(crate) fn build_coding_session_state(
         verification_commands: Box::new(execution_context.verification_commands),
         work_item_execution_plan: Box::new(work_item_execution_plan),
         work_item_handoff: Box::new(work_item_handoff),
+        linked_plan_repair: Box::new(linked_plan_repair),
     })
 }
 
@@ -148,6 +154,9 @@ fn blocked_gate_is_actionable_for_attempt(
     match attempt.status {
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman => true,
         CodingAttemptStatus::Running => attempt.stage == CodingExecutionStage::FinalConfirm,
+        CodingAttemptStatus::AwaitingPlanAmendment
+        | CodingAttemptStatus::ApplyingPlanAmendment
+        | CodingAttemptStatus::AmendmentApplyFailed => false,
         CodingAttemptStatus::Created
         | CodingAttemptStatus::Completed
         | CodingAttemptStatus::Failed
@@ -279,9 +288,20 @@ pub(crate) async fn emit_current_session_state(
     event_tx: &mpsc::Sender<CodingWsOutMessage>,
     coding_store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<(), CodingWorkspaceEngineError> {
     let current = coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let snapshot = build_coding_session_state(coding_store, current)?;
-    let _ = event_tx.send(snapshot).await;
+    let permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(CodingWorkspaceEngineError::Aborted);
+        }
+        permit = event_tx.reserve() => permit,
+    };
+    let permit = permit.map_err(|_| {
+        CodingWorkspaceEngineError::ProviderStream("coding_event_channel_closed".to_string())
+    })?;
+    permit.send(snapshot);
     Ok(())
 }

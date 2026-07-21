@@ -41,6 +41,25 @@ impl WorkspaceStage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkedWorkspaceAmendmentTarget {
+    pub entity_id: String,
+    pub workspace_type: WorkspaceType,
+    pub relation: crate::product::models::WorkspaceSessionRelation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LinkedWorkspaceSessionSnapshot {
+    pub link: crate::product::models::WorkspaceSessionLink,
+    pub entity_id: String,
+    pub workspace_type: WorkspaceType,
+    pub artifact_version_id: Option<u32>,
+    pub timeline_nodes: Vec<TimelineNode>,
+    pub selected_timeline_node_id: Option<String>,
+    pub human_confirm_state: WorkspaceSessionStatus,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionMessage {
     pub id: String,
@@ -132,6 +151,12 @@ impl WorkspaceSession {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactUpdateEvent {
+    pub version: u32,
+    pub payload: ArtifactPayload,
+}
+
 pub enum EngineEvent {
     StreamChunk {
         role: String,
@@ -149,6 +174,9 @@ pub enum EngineEvent {
     ArtifactUpdate {
         version: u32,
         payload: ArtifactPayload,
+    },
+    ArtifactBatchUpdate {
+        updates: Vec<ArtifactUpdateEvent>,
     },
     PermissionRequest {
         id: String,
@@ -254,6 +282,15 @@ pub(crate) enum OutlineRevisionCrashPoint {
     Committed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanRepairCrashPoint {
+    TimelinePersisted,
+    SnapshotPersisted,
+    SessionPersisted,
+    RequestPersisted,
+    LockReleased,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceConfirmOutcome {
     WorkItemPlan {
@@ -329,6 +366,8 @@ pub struct WorkspaceEngine {
     pub(crate) work_item_batch_retry_counts: HashMap<String, u32>,
     pub(crate) outline_revision_recovery_error: Option<String>,
     pub(crate) outline_revision_crash_after: Option<OutlineRevisionCrashPoint>,
+    pub(crate) plan_repair_crash_after: Option<PlanRepairCrashPoint>,
+    pub(crate) plan_repair_snapshot: Option<PlanRepairSessionSnapshotDto>,
 }
 
 #[derive(Debug, Clone)]

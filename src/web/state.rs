@@ -16,13 +16,12 @@ use crate::cross_cutting::provider_health::{
 };
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCommand;
-use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
 use crate::web::handlers::RepositoryRegistrationDependencies;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
@@ -34,213 +33,11 @@ pub struct WorkspaceActiveRun {
     pub pending_choice_ids: Arc<AsyncMutex<HashSet<String>>>,
 }
 
-#[derive(Clone, Default)]
-pub struct CodingRunRegistry {
-    inner: Arc<StdMutex<CodingRunRegistryInner>>,
-}
-
-#[derive(Default)]
-struct CodingRunRegistryInner {
-    next_run_id: u64,
-    runs: HashMap<String, HashMap<u64, mpsc::Sender<CodingRunnerCommand>>>,
-    reservations: HashMap<String, u64>,
-    exclusive_runs: HashMap<String, u64>,
-    attempt_guards: HashMap<String, Arc<AsyncMutex<()>>>,
-    attempt_mutation_guards: HashMap<String, Arc<AsyncMutex<()>>>,
-}
-
-pub(crate) struct CodingAttemptMutationLease {
-    _guard: OwnedMutexGuard<()>,
-}
-
-pub struct CodingRunReservation {
-    registry: CodingRunRegistry,
-    attempt_id: String,
-    reservation_id: u64,
-    released: bool,
-}
-
-impl CodingRunReservation {
-    pub fn activate(mut self, command_tx: mpsc::Sender<CodingRunnerCommand>) -> Option<u64> {
-        let mut inner = self
-            .registry
-            .inner
-            .lock()
-            .expect("coding run registry lock");
-        if inner.reservations.get(&self.attempt_id) != Some(&self.reservation_id) {
-            return None;
-        }
-        inner.reservations.remove(&self.attempt_id);
-        inner
-            .runs
-            .entry(self.attempt_id.clone())
-            .or_default()
-            .insert(self.reservation_id, command_tx);
-        inner
-            .exclusive_runs
-            .insert(self.attempt_id.clone(), self.reservation_id);
-        self.released = true;
-        Some(self.reservation_id)
-    }
-
-    pub fn release(mut self) {
-        self.registry
-            .release_reservation(&self.attempt_id, self.reservation_id);
-        self.released = true;
-    }
-}
-
-impl Drop for CodingRunReservation {
-    fn drop(&mut self) {
-        if !self.released {
-            self.registry
-                .release_reservation(&self.attempt_id, self.reservation_id);
-        }
-    }
-}
-
-impl CodingRunRegistry {
-    pub fn insert(
-        &self,
-        attempt_id: String,
-        command_tx: mpsc::Sender<CodingRunnerCommand>,
-    ) -> Option<u64> {
-        let mut inner = self.inner.lock().expect("coding run registry lock");
-        if inner.reservations.contains_key(&attempt_id)
-            || inner.exclusive_runs.contains_key(&attempt_id)
-        {
-            return None;
-        }
-        inner.next_run_id += 1;
-        let run_id = inner.next_run_id;
-        inner
-            .runs
-            .entry(attempt_id)
-            .or_default()
-            .insert(run_id, command_tx);
-        Some(run_id)
-    }
-
-    pub fn remove(&self, attempt_id: &str, run_id: u64) {
-        let mut inner = self.inner.lock().expect("coding run registry lock");
-        if inner.exclusive_runs.get(attempt_id) == Some(&run_id) {
-            inner.exclusive_runs.remove(attempt_id);
-        }
-        if let Some(runs) = inner.runs.get_mut(attempt_id) {
-            runs.remove(&run_id);
-            if runs.is_empty() {
-                inner.runs.remove(attempt_id);
-            }
-        }
-    }
-
-    pub async fn abort_attempt(&self, attempt_id: &str) -> usize {
-        let senders = {
-            let mut inner = self.inner.lock().expect("coding run registry lock");
-            inner.exclusive_runs.remove(attempt_id);
-            inner
-                .runs
-                .remove(attempt_id)
-                .map(|runs| runs.into_values().collect::<Vec<_>>())
-                .unwrap_or_default()
-        };
-        let mut sent = 0;
-        for sender in senders {
-            if sender.send(CodingRunnerCommand::AbortAttempt).await.is_ok() {
-                sent += 1;
-            }
-        }
-        sent
-    }
-
-    pub fn runner_count(&self, attempt_id: &str) -> usize {
-        self.inner
-            .lock()
-            .expect("coding run registry lock")
-            .runs
-            .get(attempt_id)
-            .map(HashMap::len)
-            .unwrap_or(0)
-    }
-
-    pub fn try_reserve_attempt(&self, attempt_id: &str) -> Option<CodingRunReservation> {
-        let mut inner = self.inner.lock().expect("coding run registry lock");
-        if inner
-            .runs
-            .get(attempt_id)
-            .is_some_and(|runs| !runs.is_empty())
-            || inner.reservations.contains_key(attempt_id)
-        {
-            return None;
-        }
-        inner.next_run_id += 1;
-        let reservation_id = inner.next_run_id;
-        inner
-            .reservations
-            .insert(attempt_id.to_string(), reservation_id);
-        Some(CodingRunReservation {
-            registry: self.clone(),
-            attempt_id: attempt_id.to_string(),
-            reservation_id,
-            released: false,
-        })
-    }
-
-    pub async fn lock_attempt(&self, attempt_id: &str) -> OwnedMutexGuard<()> {
-        let guard = {
-            let mut inner = self.inner.lock().expect("coding run registry lock");
-            Arc::clone(
-                inner
-                    .attempt_guards
-                    .entry(attempt_id.to_string())
-                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-            )
-        };
-        guard.lock_owned().await
-    }
-
-    pub(crate) async fn lock_attempt_mutation(
-        &self,
-        attempt_id: &str,
-    ) -> CodingAttemptMutationLease {
-        let guard = {
-            let mut inner = self.inner.lock().expect("coding run registry lock");
-            Arc::clone(
-                inner
-                    .attempt_mutation_guards
-                    .entry(attempt_id.to_string())
-                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-            )
-        };
-        CodingAttemptMutationLease {
-            _guard: guard.lock_owned().await,
-        }
-    }
-
-    pub fn has_active_recovery_reservation(&self, attempt_id: &str) -> bool {
-        self.inner
-            .lock()
-            .expect("coding run registry lock")
-            .reservations
-            .contains_key(attempt_id)
-    }
-
-    pub fn attempt_is_reserved_or_running(&self, attempt_id: &str) -> bool {
-        let inner = self.inner.lock().expect("coding run registry lock");
-        inner.reservations.contains_key(attempt_id)
-            || inner
-                .runs
-                .get(attempt_id)
-                .is_some_and(|runs| !runs.is_empty())
-    }
-
-    fn release_reservation(&self, attempt_id: &str, reservation_id: u64) {
-        let mut inner = self.inner.lock().expect("coding run registry lock");
-        if inner.reservations.get(attempt_id) == Some(&reservation_id) {
-            inner.reservations.remove(attempt_id);
-        }
-    }
-}
+mod coding_run_registry;
+pub(crate) use coding_run_registry::CodingAttemptMutationLease;
+pub use coding_run_registry::{CodingAttemptRunKey, CodingRunRegistry, CodingRunReservation};
+mod coding_socket_registry;
+pub use coding_socket_registry::CodingSocketRegistry;
 
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {
@@ -316,6 +113,7 @@ pub struct WebAppState {
     pub test_controls: TestControls,
     pub workspace_runs: WorkspaceRunRegistry,
     pub coding_runs: CodingRunRegistry,
+    pub coding_sockets: CodingSocketRegistry,
 }
 
 impl WebAppState {
@@ -365,6 +163,7 @@ impl WebAppState {
             test_controls,
             workspace_runs: WorkspaceRunRegistry::default(),
             coding_runs: CodingRunRegistry::default(),
+            coding_sockets: CodingSocketRegistry::default(),
         }
     }
 
@@ -661,38 +460,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[tokio::test]
-    async fn coding_run_registry_aborts_all_runs_for_attempt_and_removes_them() {
-        let registry = CodingRunRegistry::default();
-        let (first_tx, mut first_rx) = mpsc::channel(1);
-        let (second_tx, mut second_rx) = mpsc::channel(1);
-        let (other_tx, mut other_rx) = mpsc::channel(1);
-
-        registry
-            .insert("coding_attempt_0001".to_string(), first_tx)
-            .expect("first runner");
-        registry
-            .insert("coding_attempt_0001".to_string(), second_tx)
-            .expect("second runner");
-        registry
-            .insert("coding_attempt_0002".to_string(), other_tx)
-            .expect("other runner");
-
-        assert_eq!(registry.runner_count("coding_attempt_0001"), 2);
-        assert_eq!(registry.abort_attempt("coding_attempt_0001").await, 2);
-        assert_eq!(registry.runner_count("coding_attempt_0001"), 0);
-        assert_eq!(registry.runner_count("coding_attempt_0002"), 1);
-        assert_eq!(
-            first_rx.recv().await.expect("first abort"),
-            CodingRunnerCommand::AbortAttempt
-        );
-        assert_eq!(
-            second_rx.recv().await.expect("second abort"),
-            CodingRunnerCommand::AbortAttempt
-        );
-        assert!(other_rx.try_recv().is_err());
     }
 
     #[tokio::test]

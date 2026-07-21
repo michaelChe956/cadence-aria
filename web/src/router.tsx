@@ -15,6 +15,7 @@ import { AppShell } from "./app-shell";
 import { ProviderAvailabilityGuard } from "./components/providers/ProviderAvailabilityGuard";
 import { ChatWorkspacePage } from "./pages/ChatWorkspacePage";
 import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
+import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedirect";
 
 function RootRouteComponent() {
   return (
@@ -40,9 +41,9 @@ function WorkbenchRouteComponent() {
   const search = useSearch({ from: "/workbench" });
   const navigate = useNavigate({ from: "/workbench" });
   const syncDrawerFocus = useCallback(
-    (entityId: string | null) => {
+    (entityKey: string | null) => {
       void navigate({
-        search: (prev: WorkbenchSearch) => ({ ...prev, focus: entityId ?? undefined }),
+        search: (prev: WorkbenchSearch) => ({ ...prev, focus: entityKey ?? undefined }),
         replace: true,
       });
     },
@@ -50,13 +51,16 @@ function WorkbenchRouteComponent() {
   );
   return (
     <AppShell
-      focusEntityId={search.focus ?? null}
+      focusEntityKey={search.focus ?? null}
       onDrawerFocusChange={syncDrawerFocus}
       onOpenWorkspace={(sessionId) =>
         void navigate({ to: "/workbench/workspace/$sessionId", params: { sessionId } })
       }
-      onOpenCodingWorkspace={(attemptId) =>
-        void navigate({ to: "/workbench/coding/$attemptId", params: { attemptId } })
+      onOpenCodingWorkspace={({ projectId, issueId, attemptId }) =>
+        void navigate({
+          to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+          params: { projectId, issueId, attemptId },
+        })
       }
     />
   );
@@ -89,11 +93,13 @@ const workspaceRoute = createRoute({
 });
 
 function CodingWorkspaceRouteComponent() {
-  const { attemptId } = useParams({ from: "/workbench/coding/$attemptId" });
+  const { projectId, issueId, attemptId } = useParams({
+    from: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+  });
   const navigate = useNavigate();
   return (
     <CodingWorkspacePage
-      attemptId={attemptId}
+      address={{ projectId, issueId, attemptId }}
       onBack={() => void navigate({ to: "/workbench" })}
     />
   );
@@ -101,8 +107,36 @@ function CodingWorkspaceRouteComponent() {
 
 const codingWorkspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/workbench/coding/$attemptId",
+  path: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
   component: CodingWorkspaceRouteComponent,
+});
+
+function LegacyCodingWorkspaceRouteComponent() {
+  const { attemptId } = useParams({ from: "/workbench/coding/$attemptId" });
+  const navigate = useNavigate();
+  return (
+    <LegacyCodingWorkspaceRedirect
+      attemptId={attemptId}
+      onResolved={({ projectId, issueId, attemptId: resolvedAttemptId }) =>
+        void navigate({
+          to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+          params: {
+            projectId,
+            issueId,
+            attemptId: resolvedAttemptId,
+          },
+          replace: true,
+        })
+      }
+      onBack={() => void navigate({ to: "/workbench" })}
+    />
+  );
+}
+
+const legacyCodingWorkspaceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workbench/coding/$attemptId",
+  component: LegacyCodingWorkspaceRouteComponent,
 });
 
 const routeTree = rootRoute.addChildren([
@@ -110,6 +144,7 @@ const routeTree = rootRoute.addChildren([
   workbenchRoute,
   workspaceRoute,
   codingWorkspaceRoute,
+  legacyCodingWorkspaceRoute,
 ]);
 
 export function createAppRouter(history?: RouterHistory) {

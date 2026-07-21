@@ -11,6 +11,8 @@ impl CodingWorkspaceEngine {
             return Ok(attempt.clone());
         }
 
+        self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
+
         let active = self
             .store
             .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
@@ -38,11 +40,22 @@ impl CodingWorkspaceEngine {
             self.store
                 .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
 
-        if let Some(next) = units
+        let mut next = None;
+        let mut pending_units = units
             .iter()
             .filter(|unit| unit.status == CodingExecutionUnitStatus::Pending)
-            .min_by_key(|unit| unit.order_index)
-        {
+            .collect::<Vec<_>>();
+        pending_units.sort_by_key(|unit| unit.order_index);
+        for candidate in pending_units {
+            if self
+                .store
+                .start_pending_coding_unit_run(attempt, &candidate.id)?
+            {
+                next = Some(candidate);
+                break;
+            }
+        }
+        if let Some(next) = next {
             self.store.update_coding_unit_status(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -55,7 +68,7 @@ impl CodingWorkspaceEngine {
             let mut updated =
                 self.store
                     .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-            updated.current_work_item_id = Some(next.work_item_id.clone());
+            updated.current_work_item_id = Some(next.logical_work_item_id.clone());
             updated.active_unit_id = Some(next.id.clone());
             updated.stage = CodingExecutionStage::PrepareContext;
             updated.status = CodingAttemptStatus::Running;
@@ -70,7 +83,8 @@ impl CodingWorkspaceEngine {
                     &attempt.project_id,
                     &attempt.issue_id,
                     &current_work_item_id,
-                    &next.work_item_id,
+                    &next.logical_work_item_id,
+                    &attempt.id,
                 )?;
             }
             return Ok(updated);

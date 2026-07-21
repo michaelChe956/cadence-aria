@@ -87,7 +87,7 @@ impl CodingWorkspaceEngine {
                 format!(
                     "- Unit: {}\n  Work Item: {}\n  Status: {:?}\n  Completion Commit: {}\n  Handoff Summary: {}\n  Tests Run: {}\n  Risk Notes: {}",
                     unit.id,
-                    unit.work_item_id,
+                    unit.logical_work_item_id,
                     unit.status,
                     completion_commit,
                     handoff.summary,
@@ -210,6 +210,8 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         node_id: &str,
         report: &CodeReviewReport,
+        plan_defect_source: &str,
+        plan_defect_route: &str,
     ) {
         let entry = CodingChatEntry {
             id: format!("{node_id}_code_review_report"),
@@ -225,10 +227,12 @@ impl CodingWorkspaceEngine {
                 "findings_count": report.findings.len(),
                 "role_run_id": report.role_run_id,
                 "run_no": report.run_no,
+                "plan_defect_source": plan_defect_source,
+                "plan_defect_route": plan_defect_route,
             })),
             created_at: Utc::now().to_rfc3339(),
         };
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 
     pub(crate) async fn emit_internal_pr_review_chat_entry(
@@ -236,6 +240,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         node_id: &str,
         review: &InternalPrReview,
+        plan_defect_route: &str,
     ) {
         let entry = CodingChatEntry {
             id: format!("{node_id}_internal_pr_review"),
@@ -252,14 +257,19 @@ impl CodingWorkspaceEngine {
                 "impact_scope": &review.impact_scope,
                 "role_run_id": review.role_run_id,
                 "run_no": review.run_no,
+                "plan_defect_route": plan_defect_route,
             })),
             created_at: Utc::now().to_rfc3339(),
         };
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 
-    pub(crate) async fn save_and_emit_chat_entry(&self, entry: CodingChatEntry) {
-        let _ = self.store.save_chat_entry(&entry);
+    pub(crate) async fn save_and_emit_chat_entry(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        entry: CodingChatEntry,
+    ) {
+        let _ = self.store.save_chat_entry(attempt, &entry);
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingChatEntryCreated { entry })
@@ -293,6 +303,6 @@ impl CodingWorkspaceEngine {
             None,
             metadata,
         );
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 }

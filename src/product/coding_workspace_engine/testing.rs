@@ -28,7 +28,7 @@ impl CodingWorkspaceEngine {
             &attempt.id,
         );
         let report = run_all_tests(&attempt.id, worktree_path, artifact_output_root, specs).await?;
-        self.store.save_testing_report(&report)?;
+        self.store.save_testing_report(&attempt, &report)?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::TestingReportUpdate {
@@ -145,18 +145,21 @@ impl CodingWorkspaceEngine {
                 CodingProviderRole::Tester,
             )?
             .and_then(|run| run.node_id);
-        let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: current.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id,
-            role: Some(CodingProviderRole::Tester),
-            title: "确认 Tester 测试结果".to_string(),
-            description: testing_result_review_description(report),
-            reason_code: Some(TESTING_RESULT_REVIEW_REASON_CODE.to_string()),
-            evidence_refs: vec![format!("{}.json", report.id)],
-            raw_provider_output_ref: report.raw_provider_output_ref.clone(),
-            available_actions: testing_result_review_gate_actions(),
-        })?;
+        let gate = self.store.create_blocked_gate(
+            &current,
+            CreateBlockedGateInput {
+                attempt_id: current.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id,
+                role: Some(CodingProviderRole::Tester),
+                title: "确认 Tester 测试结果".to_string(),
+                description: testing_result_review_description(report),
+                reason_code: Some(TESTING_RESULT_REVIEW_REASON_CODE.to_string()),
+                evidence_refs: vec![format!("{}.json", report.id)],
+                raw_provider_output_ref: report.raw_provider_output_ref.clone(),
+                available_actions: testing_result_review_gate_actions(),
+            },
+        )?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingGateRequired { gate: gate.clone() })
@@ -180,7 +183,7 @@ impl CodingWorkspaceEngine {
         if let Some(role_run) = role_run {
             bind_testing_report_role_run(&mut report, role_run);
         }
-        self.store.save_testing_report(&report)?;
+        self.store.save_testing_report(attempt, &report)?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::TestingReportUpdate {
@@ -210,18 +213,21 @@ impl CodingWorkspaceEngine {
                 self.active_work_item_id_for_attempt(attempt),
             )
             .await?;
-            let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-                attempt_id: attempt.id.clone(),
-                stage: CodingExecutionStage::Testing,
-                node_id: Some(node.id.clone()),
-                role: Some(CodingProviderRole::Tester),
-                title: "Testing blocked".to_string(),
-                description,
-                reason_code: Some(reason_code.clone()),
-                evidence_refs: vec![format!("{}.json", report.id)],
-                raw_provider_output_ref,
-                available_actions: testing_blocked_gate_actions(),
-            })?;
+            let gate = self.store.create_blocked_gate(
+                attempt,
+                CreateBlockedGateInput {
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::Testing,
+                    node_id: Some(node.id.clone()),
+                    role: Some(CodingProviderRole::Tester),
+                    title: "Testing blocked".to_string(),
+                    description,
+                    reason_code: Some(reason_code.clone()),
+                    evidence_refs: vec![format!("{}.json", report.id)],
+                    raw_provider_output_ref,
+                    available_actions: testing_blocked_gate_actions(),
+                },
+            )?;
             let _ = self
                 .event_tx
                 .send(CodingWsOutMessage::CodingGateRequired { gate })

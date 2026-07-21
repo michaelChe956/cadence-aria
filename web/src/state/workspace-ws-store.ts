@@ -6,6 +6,14 @@ import {
   setWorkspaceContentCacheEntry,
 } from "./workspace-content-cache";
 import { refreshPreparedContextAuthorGuidance } from "./workspace-ws-store-guidance";
+import { setProviderSelection } from "./workspace-ws-store-providers";
+import {
+  beginHumanPresentationSave,
+  completeHumanPresentationSave,
+  failHumanPresentationSave,
+  failPendingHumanPresentationSaves,
+  humanPresentationRevisionsFromSession,
+} from "./workspace-ws-store-presentations";
 import {
   buildChatEntries,
   chatEntryId,
@@ -14,14 +22,18 @@ import {
 } from "./workspace-chat-rebuild";
 import {
   detailsForTimelineNodes,
+  emptyWorkItemPlanProjectionArtifacts,
   emptyNodeDetail,
   ensureNodeDetail,
   mergeVisitedStages,
   normalizeTimelineNodeDetails,
   normalizeWorkspaceArtifact,
   STREAMING_STAGES,
+  upsertArtifactVersionSummary,
   upsertEvent,
+  upsertWorkItemPlanArtifactVersion,
   visitedStagesFor,
+  workItemPlanProjectionArtifactsFromVersions,
   workItemPlanVersionsFromSession,
 } from "./workspace-ws-store-helpers";
 export { chatRoleForTimelineNode } from "./workspace-ws-store-helpers";
@@ -63,14 +75,7 @@ export type {
   WsMessage,
   WsProviderConfig,
 } from "./workspace-ws-store-types";
-import type {
-  ArtifactVersion,
-  TimelineNodeDetail,
-  WorkspaceWsActions,
-  WorkspaceWsState,
-  WsMessage,
-} from "./workspace-ws-store-types";
-
+import type { ArtifactVersion, TimelineNodeDetail, WorkspaceWsActions, WorkspaceWsState, WsMessage } from "./workspace-ws-store-types";
 const initialState: WorkspaceWsState = {
   sessionId: null,
   workspaceType: null,
@@ -85,6 +90,9 @@ const initialState: WorkspaceWsState = {
   workItemPlanCandidate: null,
   workItemPlanArtifact: null,
   workItemPlanArtifactVersions: [],
+  workItemPlanProjectionArtifacts: emptyWorkItemPlanProjectionArtifacts(),
+  humanPresentationRevisions: {},
+  humanPresentationSaveStates: {},
   providers: null,
   connectionStatus: "disconnected",
   streamingContent: "",
@@ -131,9 +139,11 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
       const { artifactMarkdown, workItemPlanCandidate, workItemPlanArtifact } =
         normalizeWorkspaceArtifact(state.artifact);
-      const artifactVersions = state.artifact_version_summaries ?? state.artifact_versions ?? [];
+      const fullArtifactVersions = state.artifact_versions ?? [];
+      const artifactVersions = state.artifact_version_summaries ?? fullArtifactVersions;
       const workItemPlanArtifactVersions = workItemPlanVersionsFromSession(
         artifactVersions,
+        fullArtifactVersions,
         workItemPlanArtifact,
         state.active_node_id ?? null,
         state.providers.author,
@@ -142,6 +152,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const messages = refreshPreparedContextAuthorGuidance(
         state.messages,
         state.providers.author,
+      );
+      const humanPresentationRevisions = humanPresentationRevisionsFromSession(
+        state.human_presentation_revisions,
       );
 
       const nextState: WorkspaceWsState = {
@@ -159,6 +172,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         workItemPlanCandidate,
         workItemPlanArtifact,
         workItemPlanArtifactVersions,
+        workItemPlanProjectionArtifacts:
+          workItemPlanProjectionArtifactsFromVersions(
+            workItemPlanArtifactVersions,
+          ),
+        humanPresentationRevisions,
+        humanPresentationSaveStates: {},
         providers: state.providers,
         streamingContent: "",
         streamBuffers: {},
@@ -185,6 +204,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         pendingReviewDecision: null,
         pendingReviewerSummary: null,
         error: null,
+        protocolError: null,
         activeRunId: state.active_run_id ?? null,
         recoverableInterruptedRun: state.recoverable_interrupted_run ?? null,
       };
@@ -434,9 +454,6 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   setWorkItemPlanArtifact: (artifact, version) =>
     set((prev) => {
-      const existingArtifactVersion = version === undefined
-        ? undefined
-        : prev.artifactVersions.find((artifactVersion) => artifactVersion.version === version);
       const existingWorkItemPlanVersion = version === undefined
         ? undefined
         : prev.workItemPlanArtifactVersions.find(
@@ -445,48 +462,55 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const replacesCurrentArtifact =
         artifact &&
         (version === undefined || existingWorkItemPlanVersion?.is_current !== false);
+      const createdAt = new Date().toISOString();
+      const workItemPlanArtifactVersions =
+        artifact && version !== undefined
+          ? upsertWorkItemPlanArtifactVersion(
+              prev.workItemPlanArtifactVersions,
+              artifact,
+              version,
+              Boolean(replacesCurrentArtifact),
+              {
+                author: prev.providers?.author ?? "fake",
+                reviewer: prev.providers?.reviewer ?? null,
+                activeNodeId: prev.activeNodeId ?? "",
+                createdAt,
+              },
+            )
+          : prev.workItemPlanArtifactVersions;
       return {
         workItemPlanArtifact: replacesCurrentArtifact ? artifact : prev.workItemPlanArtifact,
         workItemPlanCandidate: replacesCurrentArtifact ? null : prev.workItemPlanCandidate,
         artifact: replacesCurrentArtifact ? null : prev.artifact,
         artifactVersions:
           artifact && version !== undefined
-            ? [
-                ...prev.artifactVersions.filter((artifactVersion) => artifactVersion.version !== version),
+            ? upsertArtifactVersionSummary(
+                prev.artifactVersions,
+                version,
+                Boolean(replacesCurrentArtifact),
                 {
-                  version,
-                  generated_by: existingArtifactVersion?.generated_by ?? prev.providers?.author ?? "fake",
-                  reviewed_by: existingArtifactVersion?.reviewed_by ?? null,
-                  review_verdict: existingArtifactVersion?.review_verdict ?? null,
-                  confirmed_by: existingArtifactVersion?.confirmed_by ?? null,
-                  is_current: existingArtifactVersion?.is_current ?? false,
-                  created_at: existingArtifactVersion?.created_at ?? new Date().toISOString(),
-                  source_node_id: existingArtifactVersion?.source_node_id ?? prev.activeNodeId ?? "",
+                  author: prev.providers?.author ?? "fake",
+                  activeNodeId: prev.activeNodeId ?? "",
+                  createdAt,
                 },
-              ].sort((left, right) => left.version - right.version)
+              )
             : prev.artifactVersions,
-        workItemPlanArtifactVersions:
-          artifact && version !== undefined
-            ? [
-                ...prev.workItemPlanArtifactVersions.filter(
-                  (artifactVersion) => artifactVersion.version !== version,
-                ),
-                {
-                  version,
-                  generated_by: existingWorkItemPlanVersion?.generated_by ?? prev.providers?.author ?? "fake",
-                  reviewed_by: existingWorkItemPlanVersion?.reviewed_by ?? prev.providers?.reviewer ?? null,
-                  review_verdict: existingWorkItemPlanVersion?.review_verdict ?? null,
-                  confirmed_by: existingWorkItemPlanVersion?.confirmed_by ?? null,
-                  is_current: existingWorkItemPlanVersion?.is_current ?? false,
-                  created_at: existingWorkItemPlanVersion?.created_at ?? new Date().toISOString(),
-                  source_node_id: existingWorkItemPlanVersion?.source_node_id ?? prev.activeNodeId ?? "",
-                  artifact,
-                },
-              ].sort((left, right) => left.version - right.version)
-            : prev.workItemPlanArtifactVersions,
+        workItemPlanArtifactVersions,
+        workItemPlanProjectionArtifacts:
+          workItemPlanProjectionArtifactsFromVersions(
+            workItemPlanArtifactVersions,
+          ),
       };
     }),
 
+  beginHumanPresentationSave: (sourceProjectionBundleId) =>
+    set((prev) => beginHumanPresentationSave(prev, sourceProjectionBundleId)),
+  completeHumanPresentationSave: (revision) =>
+    set((prev) => completeHumanPresentationSave(prev, revision)),
+  failHumanPresentationSave: (sourceProjectionBundleId, message) =>
+    set((prev) => failHumanPresentationSave(prev, sourceProjectionBundleId, message)),
+  failPendingHumanPresentationSaves: (message) =>
+    set((prev) => failPendingHumanPresentationSaves(prev, message)),
   addTimelineNode: (node) =>
     set((prev) => {
       const retrySourceNodeId = node.retry?.retry_of_node_id ?? null;
@@ -750,7 +774,6 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
   clearExecutionEvents: () => set({ executionEvents: [] }),
 
   setError: (error) => set({ error }),
-
   clearStreaming: () => set({ streamingContent: "", streamBuffers: {}, activeStreamEntryId: null }),
 
   selectNodeDetail: (nodeId) => {
@@ -770,29 +793,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     }),
 
   setProviderSelection: (role, provider) =>
-    set((prev) => {
-      const current = prev.providers ?? { author: "claude_code", reviewer: "codex" };
-      const providers =
-        role === "author"
-          ? { ...current, author: provider }
-          : { ...current, reviewer: provider };
-      const messages =
-        role === "author"
-          ? refreshPreparedContextAuthorGuidance(prev.messages, provider)
-          : prev.messages;
-      const shouldRebuildChatEntries = messages !== prev.messages;
-      const nextState = { ...prev, providers, messages };
-      return {
-        providers,
-        messages,
-        chatEntries: shouldRebuildChatEntries
-          ? buildChatEntries(nextState)
-          : prev.chatEntries,
-      };
-    }),
-
+    set((prev) => setProviderSelection(prev, role, provider)),
   setAcknowledgedAbortedNodes: (nodeIds) =>
     set({ acknowledgedAbortedNodes: Array.from(new Set(nodeIds)) }),
-
   reset: () => set(initialState),
 }));

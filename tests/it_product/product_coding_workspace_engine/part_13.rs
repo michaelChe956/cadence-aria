@@ -77,12 +77,12 @@ fn group_attempt_waiting_for_final_confirm_with_scoped_work_items() -> (
         )
         .expect("save unit1 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             "coding_unit_0001",
-            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0001".to_string()),
         )
         .expect("set unit1 handoff ref");
     store
@@ -123,12 +123,12 @@ fn group_attempt_waiting_for_final_confirm_with_scoped_work_items() -> (
         )
         .expect("save unit2 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             "coding_unit_0002",
-            Some("units/coding_unit_0002/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0002".to_string()),
         )
         .expect("set unit2 handoff ref");
     let attempt = store
@@ -174,10 +174,15 @@ fn group_attempt_waiting_for_final_confirm_with_scoped_work_items() -> (
         })
         .expect("upsert shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0002",
+            &attempt.id,
+        )
         .expect("acquire shared worktree lock");
     store
-        .save_timeline_node(CodingTimelineNode {
+        .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::FinalConfirm,
@@ -232,7 +237,12 @@ async fn completing_group_unit_moves_issue_shared_lock_to_next_unit() {
         })
         .expect("upsert shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            &attempt.id,
+        )
         .expect("acquire shared lock for first unit");
 
     engine
@@ -274,6 +284,8 @@ async fn completing_last_group_unit_enters_review_request_stage() {
 #[tokio::test]
 async fn completing_group_units_saves_distinct_handoffs_per_unit() {
     let (_root, _paths, store, engine, attempt) = group_engine_with_two_units();
+    seed_authoritative_group_terminal_fixture(&store, &attempt);
+    create_active_coding_unit_run(&store, &attempt);
 
     let after_first = engine
         .complete_group_unit_after_code_review(&attempt)
@@ -294,6 +306,7 @@ async fn completing_group_units_saves_distinct_handoffs_per_unit() {
         .expect("attempt handoff")
         .is_none());
 
+    create_active_coding_unit_run(&store, &after_first);
     let after_second = engine
         .complete_group_unit_after_code_review(&after_first)
         .await
@@ -314,12 +327,12 @@ async fn completing_group_units_saves_distinct_handoffs_per_unit() {
     assert_eq!(after_second.stage, CodingExecutionStage::ReviewRequest);
     assert_eq!(unit2_handoff.work_item_id, "work_item_0002");
     assert_eq!(
-        units[0].handoff_ref.as_deref(),
-        Some("units/coding_unit_0001/work-item-handoff.json")
+        units[0].latest_handoff_revision_id.as_deref(),
+        Some("handoff_revision_coding_unit_run_coding_unit_0001")
     );
     assert_eq!(
-        units[1].handoff_ref.as_deref(),
-        Some("units/coding_unit_0002/work-item-handoff.json")
+        units[1].latest_handoff_revision_id.as_deref(),
+        Some("handoff_revision_coding_unit_run_coding_unit_0002")
     );
     assert_ne!(unit1_handoff.work_item_id, unit2_handoff.work_item_id);
 }
@@ -345,6 +358,7 @@ impl cadence_aria::cross_cutting::provider_adapter::ProviderAdapter
 #[tokio::test]
 async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit() {
     let (_root, paths, store, _engine, attempt) = group_engine_with_two_units();
+    seed_authoritative_group_terminal_fixture(&store, &attempt);
     let shared_worktree = paths.root().join("shared-worktree");
     std::fs::create_dir_all(&shared_worktree).expect("create shared worktree");
     let lifecycle = LifecycleStore::new(paths);
@@ -359,7 +373,12 @@ async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit(
         })
         .expect("upsert shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            &attempt.id,
+        )
         .expect("acquire shared lock for first unit");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::with_provider(
@@ -368,6 +387,7 @@ async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit(
         Arc::new(ParseFailingHandoffProvider),
         tx,
     );
+    create_active_coding_unit_run(&store, &attempt);
 
     let updated = engine
         .complete_group_unit_after_code_review(&attempt)
@@ -396,8 +416,8 @@ async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit(
         "Handoff generated from attempt artifacts"
     );
     assert_eq!(
-        units[0].handoff_ref.as_deref(),
-        Some("units/coding_unit_0001/work-item-handoff.json")
+        units[0].latest_handoff_revision_id.as_deref(),
+        Some("handoff_revision_coding_unit_run_coding_unit_0001")
     );
     assert_eq!(units[0].status, CodingExecutionUnitStatus::Completed);
     assert_eq!(units[1].status, CodingExecutionUnitStatus::Running);
@@ -613,12 +633,12 @@ async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
     ] {
         save_minimal_unit_handoff(&store, &attempt, unit_id, work_item_id);
         store
-            .update_coding_unit_handoff_ref(
+            .update_coding_unit_latest_handoff_revision_id(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
                 unit_id,
-                Some(format!("units/{unit_id}/work-item-handoff.json")),
+                Some(format!("handoff_revision_{unit_id}")),
             )
             .expect("set handoff ref");
     }
@@ -633,7 +653,7 @@ async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
         )
         .expect("complete unit2");
     store
-        .save_testing_report(&passed_testing_report_for_plan(
+        .save_testing_report(&attempt, &passed_testing_report_for_plan(
             &attempt.id,
             "testing_report_0001",
             "verification_plan_0001",
@@ -682,10 +702,15 @@ async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
         })
         .expect("upsert shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0002",
+            &attempt.id,
+        )
         .expect("acquire shared worktree lock");
     store
-        .save_timeline_node(CodingTimelineNode {
+        .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id.clone(),
             stage: CodingExecutionStage::FinalConfirm,

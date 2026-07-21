@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
 
-use command_group::AsyncGroupChild;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
@@ -11,7 +10,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::{ApprovalBridge, ChoiceDecision};
-use crate::cross_cutting::process_manager::ProcessManager;
+use crate::cross_cutting::process_manager::{ManagedProcessChild, ProcessManager};
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,

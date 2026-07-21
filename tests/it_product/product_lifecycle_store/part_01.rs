@@ -735,10 +735,15 @@ fn persists_issue_shared_worktree_and_active_lock() {
     assert_eq!(shared.current_active_work_item_id, None);
 
     let locked = store
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_0001",
+        )
         .expect("lock");
     assert_eq!(
-        locked.current_active_work_item_id.as_deref(),
+        locked.worktree.current_active_work_item_id.as_deref(),
         Some("work_item_0001")
     );
 
@@ -752,7 +757,12 @@ fn persists_issue_shared_worktree_and_active_lock() {
     );
 
     let released = store
-        .release_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .release_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_0001",
+        )
         .expect("release");
     assert_eq!(released.current_active_work_item_id, None);
 }

@@ -10,18 +10,30 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { CodingExecutionStage, CodingTimelineNode } from "../../api/types";
+import type { PlanRepairSessionState } from "../../state/plan-repair-session";
+import { PlanRepairTimelineGroup } from "./PlanRepairTimelineGroup";
 
 export function CodingTimeline({
   nodes,
   activeNodeId,
   selectedNodeId,
   onSelectNode,
+  planRepair = null,
 }: {
   nodes: CodingTimelineNode[];
   activeNodeId: string | null;
   selectedNodeId: string | null;
   onSelectNode: (nodeId: string) => void;
+  planRepair?: PlanRepairSessionState | null;
 }) {
+  const repairNodeIds = new Set(
+    planRepair?.timelineNodes.map((node) => node.id) ?? [],
+  );
+  const parentNodes = nodes.filter((node) => !repairNodeIds.has(node.id));
+  const timelineAnchorId = planRepair?.link.return_context.timeline_anchor_id ?? null;
+  const hasTimelineAnchor = parentNodes.some((node) => node.id === timelineAnchorId);
+  const showRepairAtEnd = Boolean(planRepair) && !hasTimelineAnchor;
+
   return (
     <nav
       aria-label="Coding Timeline"
@@ -34,43 +46,60 @@ export function CodingTimeline({
         </div>
       ) : (
         <div className="space-y-2">
-          {nodes.map((node) => {
+          {parentNodes.map((node) => {
             const Icon = iconForStage(node.stage);
             const active = node.id === activeNodeId;
             const selected = node.id === selectedNodeId;
             const title = titleForStage(node);
             return (
-              <button
-                key={node.id}
-                type="button"
-                onClick={() => onSelectNode(node.id)}
-                aria-current={active ? "step" : undefined}
-                className={[
-                  "block w-full rounded-md border bg-white px-3 py-2 text-left transition-colors",
-                  active || selected
-                    ? "border-[var(--aria-primary)] ring-1 ring-[var(--aria-primary)]"
-                    : "border-[var(--aria-line)] hover:border-[var(--aria-primary)]",
-                ].join(" ")}
-              >
-                <div className="flex min-w-0 items-start gap-2">
-                  <Icon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold">{title}</span>
-                      <span className="rounded bg-[var(--aria-panel-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aria-ink-muted)]">
-                        {node.status}
-                      </span>
+              <div key={node.id} className="space-y-2">
+                <button
+                  type="button"
+                  onClick={() => onSelectNode(node.id)}
+                  aria-current={active ? "step" : undefined}
+                  className={[
+                    "block w-full rounded-md border bg-white px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]",
+                    active || selected
+                      ? "border-[var(--aria-primary)] ring-1 ring-[var(--aria-primary)]"
+                      : "border-[var(--aria-line)] hover:border-[var(--aria-primary)]",
+                  ].join(" ")}
+                >
+                  <div className="flex min-w-0 items-start gap-2">
+                    <Icon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center justify-between gap-2">
+                        <span className="truncate text-sm font-semibold">{title}</span>
+                        <span className="rounded bg-[var(--aria-panel-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aria-ink-muted)]">
+                          {node.status}
+                        </span>
+                      </div>
+                      {node.summary ? (
+                        <p className="mt-1 truncate text-xs text-[var(--aria-ink-muted)]">
+                          {node.summary}
+                        </p>
+                      ) : null}
                     </div>
-                    {node.summary ? (
-                      <p className="mt-1 truncate text-xs text-[var(--aria-ink-muted)]">
-                        {node.summary}
-                      </p>
-                    ) : null}
                   </div>
-                </div>
-              </button>
+                </button>
+                {planRepair && node.id === timelineAnchorId ? (
+                  <PlanRepairTimelineGroup
+                    nodes={planRepair.timelineNodes}
+                    activeNodeId={activeNodeId}
+                    selectedNodeId={selectedNodeId}
+                    onSelectNode={onSelectNode}
+                  />
+                ) : null}
+              </div>
             );
           })}
+          {planRepair && showRepairAtEnd ? (
+            <PlanRepairTimelineGroup
+              nodes={planRepair.timelineNodes}
+              activeNodeId={activeNodeId}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={onSelectNode}
+            />
+          ) : null}
         </div>
       )}
     </nav>

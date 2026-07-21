@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AuthorDecision,
   HumanConfirmDecision,
+  LinkedWorkspaceAmendmentTarget,
   ProviderConfigSnapshot,
   RevisionPath,
+  SaveHumanPresentationRevisionMessage,
   WorkspaceProviderName,
   WorkItemBatchDecision,
   WorkItemDraftDecision,
@@ -12,9 +14,8 @@ import type {
   WsInMessage,
 } from "../api/types";
 import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
-import {
-  useWorkspaceStore,
-} from "../state/workspace-ws-store";
+import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
+import { useWorkspaceStore } from "../state/workspace-ws-store";
 import type { ChoiceAnswerPayload } from "../state/chat-entries";
 import {
   ACTIVE_PROVIDER_STAGES,
@@ -23,7 +24,10 @@ import {
   type WsServerMessage,
   wsReadyStateName,
 } from "./workspace-ws-message-handler";
-
+import {
+  aggregatePlanRepairChildMessage,
+  type PlanRepairSourceState,
+} from "./useWorkspaceWs-plan-repair";
 
 type WorkspaceWsSendMessage =
   | WsInMessage
@@ -35,15 +39,36 @@ const STALE_SOCKET_CLOSE_CODE = 4000;
 const SERVER_SILENCE_CHECK_INTERVAL_MS = 15_000;
 const CONNECT_TIMEOUT_MS = 5_000;
 const STREAM_FLUSH_INTERVAL_MS = 80;
+const DISCONNECTED_PRESENTATION_SAVE_ERROR = "连接已断开，请重连后重试";
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
+  const socketSessionIdRef = useRef<string | null>(null);
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamFlushTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const invalidatedPreStageNodeIdsRef = useRef<Set<string>>(new Set());
+  const planRepairSourceRef = useRef<PlanRepairSourceState>({
+    hasSnapshot: false,
+    source: null,
+  });
   const lastMessageAtRef = useRef(Date.now());
   const [closeCode, setCloseCode] = useState<number | undefined>();
-  const connectionStatus = useWorkspaceStore((state) => state.connectionStatus);
+  const [sessionSnapshot, setSessionSnapshot] = useState({
+    sessionId: null as string | null,
+    generation: 0,
+  });
+  const workspaceConnectionStatus = useWorkspaceStore((state) => state.connectionStatus);
+  const workspaceSessionId = useWorkspaceStore((state) => state.sessionId);
+  const connectionStatus =
+    sessionId &&
+    socketSessionIdRef.current === sessionId &&
+    workspaceSessionId === sessionId &&
+    workspaceConnectionStatus === "connected"
+      ? "connected"
+      : workspaceConnectionStatus === "disconnected" ||
+          workspaceConnectionStatus === "error"
+        ? workspaceConnectionStatus
+        : "connecting";
 
   const clearConnectTimeout = useCallback(() => {
     if (connectTimeoutRef.current) {
@@ -64,6 +89,12 @@ export function useWorkspaceWs(sessionId: string | null) {
     useWorkspaceStore.getState().clearAllStreamBuffers();
   }, [clearStreamFlushTimeouts]);
 
+  const failPendingPresentationSaves = useCallback(() => {
+    useWorkspaceStore
+      .getState()
+      .failPendingHumanPresentationSaves(DISCONNECTED_PRESENTATION_SAVE_ERROR);
+  }, []);
+
   const scheduleFlush = useCallback((nodeId: string) => {
     if (streamFlushTimeoutsRef.current[nodeId]) {
       return;
@@ -80,9 +111,15 @@ export function useWorkspaceWs(sessionId: string | null) {
     const current = wsRef.current;
     if (
       current &&
+      socketSessionIdRef.current === sessionId &&
       (current.readyState === WebSocket.CONNECTING || current.readyState === WebSocket.OPEN)
     ) {
       return;
+    }
+    if (current) {
+      wsRef.current = null;
+      socketSessionIdRef.current = null;
+      current.close(1000);
     }
 
     setCloseCode(undefined);
@@ -92,11 +129,14 @@ export function useWorkspaceWs(sessionId: string | null) {
     const url = `${protocol}//${window.location.host}/api/workspace-sessions/${sessionId}/ws`;
     const ws = new WebSocket(url);
     wsRef.current = ws;
+    socketSessionIdRef.current = sessionId;
     clearConnectTimeout();
     connectTimeoutRef.current = setTimeout(() => {
       if (wsRef.current !== ws) return;
       wsRef.current = null;
+      socketSessionIdRef.current = null;
       setCloseCode(1006);
+      failPendingPresentationSaves();
       const store = useWorkspaceStore.getState();
       store.setConnectionStatus("disconnected");
       store.setError("WebSocket 连接超时");
@@ -124,7 +164,9 @@ export function useWorkspaceWs(sessionId: string | null) {
       if (wsRef.current !== ws) return;
       clearConnectTimeout();
       clearPendingStreams();
+      failPendingPresentationSaves();
       wsRef.current = null;
+      socketSessionIdRef.current = null;
       setCloseCode(event.code);
       useWorkspaceStore.getState().setConnectionStatus("disconnected");
     };
@@ -133,23 +175,39 @@ export function useWorkspaceWs(sessionId: string | null) {
       if (wsRef.current !== ws) return;
       clearConnectTimeout();
       clearPendingStreams();
+      failPendingPresentationSaves();
       const store = useWorkspaceStore.getState();
       wsRef.current = null;
+      socketSessionIdRef.current = null;
       setCloseCode(1006);
       store.setConnectionStatus("disconnected");
       store.setError("WebSocket 连接失败");
     };
 
     ws.onmessage = (event) => {
+      if (wsRef.current !== ws || socketSessionIdRef.current !== sessionId) return;
       lastMessageAtRef.current = Date.now();
       try {
         const msg = JSON.parse(event.data) as WsServerMessage;
+        if (msg.type === "session_state") {
+          if (msg.session_id !== sessionId) return;
+          setSessionSnapshot((current) =>
+            current.sessionId === sessionId
+              ? { sessionId, generation: current.generation + 1 }
+              : { sessionId, generation: 1 },
+          );
+        }
         handleMessage(msg);
       } catch {
         // ignore malformed messages
       }
     };
-  }, [clearConnectTimeout, clearPendingStreams, sessionId]);
+  }, [
+    clearConnectTimeout,
+    clearPendingStreams,
+    failPendingPresentationSaves,
+    sessionId,
+  ]);
 
   const {
     isReconnecting,
@@ -159,7 +217,7 @@ export function useWorkspaceWs(sessionId: string | null) {
   } = useWorkspaceWsReconnect({
     enabled:
       Boolean(sessionId) &&
-      connectionStatus === "disconnected" &&
+      workspaceConnectionStatus === "disconnected" &&
       closeCode !== undefined &&
       closeCode !== 1000,
     closeCode,
@@ -167,6 +225,8 @@ export function useWorkspaceWs(sessionId: string | null) {
   });
 
   useEffect(() => {
+    planRepairSourceRef.current = { hasSnapshot: false, source: null };
+    useLinkedWorkspaceAmendmentStore.getState().reset(sessionId);
     if (!sessionId) {
       clearPendingStreams();
       useWorkspaceStore.getState().reset();
@@ -180,15 +240,16 @@ export function useWorkspaceWs(sessionId: string | null) {
       clearPendingStreams();
       const ws = wsRef.current;
       wsRef.current = null;
+      socketSessionIdRef.current = null;
       ws?.close(1000);
     };
   }, [clearConnectTimeout, clearPendingStreams, connect, sessionId]);
 
   useEffect(() => {
-    if (connectionStatus === "connected") {
+    if (workspaceConnectionStatus === "connected") {
       resetReconnect();
     }
-  }, [connectionStatus, resetReconnect]);
+  }, [workspaceConnectionStatus, resetReconnect]);
 
   function handleMessage(msg: WsServerMessage) {
     handleWorkspaceWsMessage(msg, {
@@ -196,16 +257,21 @@ export function useWorkspaceWs(sessionId: string | null) {
       scheduleFlush,
       streamFlushTimeouts: streamFlushTimeoutsRef.current,
     });
+    aggregatePlanRepairChildMessage(msg, sessionId, planRepairSourceRef.current);
   }
 
   const sendJson = useCallback((message: WorkspaceWsSendMessage) => {
     const ws = wsRef.current;
-    if (ws?.readyState !== WebSocket.OPEN) {
+    if (
+      !sessionId ||
+      socketSessionIdRef.current !== sessionId ||
+      ws?.readyState !== WebSocket.OPEN
+    ) {
       return false;
     }
     ws.send(JSON.stringify(message));
     return true;
-  }, []);
+  }, [sessionId]);
 
   const sendContextNote = useCallback(
     (content: string) => {
@@ -267,17 +333,17 @@ export function useWorkspaceWs(sessionId: string | null) {
   }, [sendJson]);
 
   useEffect(() => {
-    if (connectionStatus !== "connected") return;
+    if (workspaceConnectionStatus !== "connected") return;
 
     const interval = window.setInterval(() => {
       sendPing();
     }, PING_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
-  }, [connectionStatus, sendPing]);
+  }, [workspaceConnectionStatus, sendPing]);
 
   useEffect(() => {
-    if (connectionStatus !== "connected") return;
+    if (workspaceConnectionStatus !== "connected") return;
 
     const interval = window.setInterval(() => {
       const ws = wsRef.current;
@@ -292,7 +358,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     }, SERVER_SILENCE_CHECK_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
-  }, [connectionStatus]);
+  }, [workspaceConnectionStatus]);
 
   const sendSelectRevisionPath = useCallback(
     (path: RevisionPath, extraContext?: string) => {
@@ -308,9 +374,70 @@ export function useWorkspaceWs(sessionId: string | null) {
 
   const sendHumanConfirm = useCallback(
     (decision: HumanConfirmDecision, payload?: unknown) => {
-      if (sendJson({ type: "human_confirm", decision, payload: payload ?? null })) {
+      const sent = sendJson({ type: "human_confirm", decision, payload: payload ?? null });
+      if (sent) {
         useWorkspaceStore.getState().resolveGateEntry(decision);
       }
+      return sent;
+    },
+    [sendJson],
+  );
+
+  const confirmPlanAmendment = useCallback(
+    (amendmentId: string) => {
+      const id = amendmentId.trim();
+      return id
+        ? sendJson({ type: "confirm_plan_amendment", amendment_id: id })
+        : false;
+    },
+    [sendJson],
+  );
+
+  const cancelPlanAmendment = useCallback(
+    (amendmentId: string, reason?: string | null) => {
+      const id = amendmentId.trim();
+      const trimmedReason = reason?.trim() ?? "";
+      return id
+        ? sendJson({
+            type: "cancel_plan_amendment",
+            amendment_id: id,
+            reason: trimmedReason || null,
+          })
+        : false;
+    },
+    [sendJson],
+  );
+
+  const startLinkedWorkspaceAmendment = useCallback(
+    (target: LinkedWorkspaceAmendmentTarget) => {
+      const entityId = target.entity_id.trim();
+      const validPair =
+        (target.workspace_type === "story" &&
+          target.relation === "story_amendment") ||
+        (target.workspace_type === "design" &&
+          target.relation === "design_amendment");
+      if (!entityId || !validPair) {
+        return false;
+      }
+      const normalizedTarget = { ...target, entity_id: entityId };
+      const sent = sendJson({
+        type: "start_linked_workspace_amendment",
+        target: normalizedTarget,
+      });
+      const store = useLinkedWorkspaceAmendmentStore.getState();
+      if (sent) {
+        const workspaceStore = useWorkspaceStore.getState();
+        if (
+          workspaceStore.protocolError?.code ===
+          "LINKED_WORKSPACE_AMENDMENT_INVALID"
+        ) {
+          workspaceStore.setProtocolError(null);
+        }
+        store.begin(normalizedTarget);
+      } else {
+        store.fail("关联修订请求发送失败，请检查 Child Workspace 连接。");
+      }
+      return sent;
     },
     [sendJson],
   );
@@ -405,6 +532,22 @@ export function useWorkspaceWs(sessionId: string | null) {
         action,
         reason: trimmedReason ? trimmedReason : null,
       });
+    },
+    [sendJson],
+  );
+
+  const sendHumanPresentationRevision = useCallback(
+    (message: SaveHumanPresentationRevisionMessage) => {
+      const store = useWorkspaceStore.getState();
+      store.beginHumanPresentationSave(message.source_projection_bundle_id);
+      const sent = sendJson(message);
+      if (!sent) {
+        store.failHumanPresentationSave(
+          message.source_projection_bundle_id,
+          "WebSocket 未连接，请重连后重试",
+        );
+      }
+      return sent;
     },
     [sendJson],
   );
@@ -534,7 +677,11 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendWorkItemDraftDecision,
     sendWorkItemBatchDecision,
     sendWorkItemPlanCompileRecoveryAction,
+    sendHumanPresentationRevision,
     sendHumanConfirm,
+    confirmPlanAmendment,
+    cancelPlanAmendment,
+    startLinkedWorkspaceAmendment,
     sendHello,
     sendPing,
     startGeneration,
@@ -551,5 +698,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     isReconnecting,
     reconnectAttemptCount,
     retryNow,
+    sessionSnapshotGeneration:
+      sessionSnapshot.sessionId === sessionId ? sessionSnapshot.generation : 0,
   };
 }

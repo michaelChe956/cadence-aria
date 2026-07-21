@@ -20,8 +20,8 @@ use crate::cross_cutting::provider_adapter::{
 use crate::interactive::models::WebWorkspaceProjection;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{
-    CodingAttemptStore, CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
-    CreateGroupCodingAttemptInput,
+    CodingAttemptStore, CreateCodingAttemptInput, CreateGroupCodingAttemptInput,
+    is_group_business_validation_error,
 };
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
@@ -55,7 +55,6 @@ use crate::product::provider_workspace_runner::{
 };
 use crate::product::repository_store::RepositoryStore;
 use crate::product::runtime_binding_store::RuntimeBindingStore;
-
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
 use crate::web::issue_registry::{CreateIssueInput, IssueRecord, IssueRegistry, IssueStatus};
@@ -82,7 +81,9 @@ mod support;
 mod workspace_session;
 
 #[rustfmt::skip]
-pub use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, create_coding_attempt, create_group_coding_attempt, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
+pub use coding::{create_coding_attempt, create_group_coding_attempt};
+#[rustfmt::skip]
+pub(crate) use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
 pub use health::{health, runtime_info};
 pub use providers::{providers_recheck, providers_status};
 #[rustfmt::skip]

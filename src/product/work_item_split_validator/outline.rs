@@ -1,6 +1,6 @@
 use super::*;
 
-const SINGLE_AGENT_SESSION_CONTEXT_TOKEN_LIMIT: u32 = 20_000;
+const SINGLE_AGENT_SESSION_CONTEXT_TOKEN_HARD_LIMIT: u32 = 50_000;
 
 pub(crate) fn validate_outline_ids(
     outline: &WorkItemPlanOutline,
@@ -8,9 +8,14 @@ pub(crate) fn validate_outline_ids(
 ) {
     let mut seen = HashSet::new();
     let mut duplicated = HashSet::new();
+    let mut seen_logical_ids = HashSet::new();
+    let mut duplicated_logical_ids = HashSet::new();
     for item in &outline.work_item_outlines {
         if !seen.insert(item.outline_id.as_str()) {
             duplicated.insert(item.outline_id.clone());
+        }
+        if !seen_logical_ids.insert(item.logical_work_item_id.as_str()) {
+            duplicated_logical_ids.insert(item.logical_work_item_id.clone());
         }
     }
 
@@ -19,6 +24,13 @@ pub(crate) fn validate_outline_ids(
             "duplicate_outline_id",
             format!("outline id {outline_id} is duplicated"),
             vec![outline_id],
+        ));
+    }
+    for logical_work_item_id in duplicated_logical_ids {
+        findings.push(error(
+            "duplicate_logical_work_item_identity",
+            format!("logical work item identity {logical_work_item_id} is duplicated"),
+            vec![logical_work_item_id],
         ));
     }
 }
@@ -63,11 +75,12 @@ pub(crate) fn validate_outline_traceability_and_scopes(
             ));
         }
         match item.estimated_context_tokens {
-            Some(value) if value > 0 && value < SINGLE_AGENT_SESSION_CONTEXT_TOKEN_LIMIT => {}
+            Some(value)
+                if value > 0 && value <= SINGLE_AGENT_SESSION_CONTEXT_TOKEN_HARD_LIMIT => {}
             Some(0) | None => findings.push(error(
                 "outline_budget_required",
                 format!(
-                    "outline {} must include estimated_context_tokens between 1 and 19999",
+                    "outline {} must include estimated_context_tokens between 1 and 50000",
                     item.outline_id
                 ),
                 vec![item.outline_id.clone()],
@@ -75,7 +88,7 @@ pub(crate) fn validate_outline_traceability_and_scopes(
             Some(value) => findings.push(error(
                 "outline_exceeds_single_session_budget",
                 format!(
-                    "outline {} estimated_context_tokens {} exceeds the single-agent session budget of <20000",
+                    "outline {} estimated_context_tokens {} exceeds the single-agent session budget of <=50000",
                     item.outline_id, value
                 ),
                 vec![item.outline_id.clone()],

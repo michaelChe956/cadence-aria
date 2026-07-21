@@ -23,8 +23,9 @@ use crate::cross_cutting::streaming_provider::{
 };
 use crate::cross_cutting::worktree::{scope_allows_path, validate_write_path};
 use crate::product::coding_attempt_store::{
-    CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput,
-    CreateQualityBypassAuditInput,
+    CodingAttemptStore, CodingGitOperationJournal, CodingGitOperationKind, CodingGitOperationPhase,
+    CompleteReviewGitOperationInput, CreateBlockedGateInput, CreateChoiceGateInput,
+    CreateQualityBypassAuditInput, PrepareCodingGitOperationInput,
 };
 use crate::product::coding_evaluation_context::{
     EvaluationContextRole, build_evaluation_context_pack, build_tester_execution_context_pack,
@@ -51,10 +52,10 @@ use crate::product::models::{
 };
 use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
 use crate::product::tester_agent_loop::{
-    TestContextLoader, TesterAgentOptions, build_plan_based_testing_report,
-    build_tester_execute_repair_prompt, build_tester_plan_prompt, build_tester_plan_repair_prompt,
-    build_testing_report, execute_tester_tool_call_with_context, format_test_plan_chat_summary,
-    format_testing_report_chat_summary, parse_test_plan_payload,
+    ProviderTestExecutionPayload, TestContextLoader, TesterAgentOptions,
+    build_plan_based_testing_report, build_tester_execute_repair_prompt, build_tester_plan_prompt,
+    build_tester_plan_repair_prompt, build_testing_report, execute_tester_tool_call_with_context,
+    format_test_plan_chat_summary, format_testing_report_chat_summary, parse_test_plan_payload,
 };
 use crate::protocol::contracts::ProviderType;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
@@ -64,20 +65,31 @@ use crate::web::workspace_ws_types::{
     WsPermissionRiskLevel,
 };
 
+mod amendment;
 mod code_review;
 mod coding;
 mod failed_review_recovery;
 mod gates;
+mod git_operation;
 mod group;
+mod group_completion;
 mod handoffs;
 mod internal_pr_review;
 mod lifecycle;
+#[cfg(test)]
+mod mutation_test_pause;
+mod plan_defect;
+mod plan_defect_routing;
+mod plan_repair_start;
 mod prompts;
 mod provider_failure;
 mod provider_stream;
 mod reports;
 mod review_parser;
+mod reviewer_context;
 mod rework;
+mod runtime_handoff_authority;
+mod runtime_impact;
 mod testing;
 mod testing_parser;
 mod testing_provider;
@@ -85,6 +97,13 @@ mod timeline;
 mod tool_format;
 mod types;
 mod ws_event_mapper;
+
+#[cfg(test)]
+pub(crate) use mutation_test_pause::{
+    CodingMutationTestPoint, register_coding_mutation_test_pause,
+};
+#[cfg(test)]
+pub(crate) use plan_repair_start::register_plan_repair_start_snapshot_request_pause;
 
 pub(crate) struct CoderOutputChatEntryInput<'a> {
     pub(crate) attempt: &'a CodingExecutionAttempt,
@@ -94,8 +113,13 @@ pub(crate) struct CoderOutputChatEntryInput<'a> {
     pub(crate) full_output: &'a str,
     pub(crate) raw_provider_output_ref: &'a str,
     pub(crate) source: &'a str,
+    pub(crate) plan_defect_route: Option<&'a str>,
 }
 
+pub use runtime_impact::{
+    HandoffDeltaKind, RuntimeHandoffImpactPropagator, RuntimeHandoffImpactResult,
+    compare_handoff_revisions,
+};
 pub use testing_parser::{
     testing_report_has_execution_evidence, testing_report_needs_blocked_gate,
 };
@@ -105,7 +129,11 @@ pub use types::{
 };
 
 pub(crate) fn code_review_report_has_actionable_findings(report: &CodeReviewReport) -> bool {
-    report.findings.iter().any(|finding| {
+    review_findings_have_actionable_findings(&report.findings)
+}
+
+pub(crate) fn review_findings_have_actionable_findings(findings: &[ReviewFinding]) -> bool {
+    findings.iter().any(|finding| {
         matches!(
             finding.severity,
             FindingSeverity::Error | FindingSeverity::Warning
@@ -160,6 +188,12 @@ pub(crate) use failed_review_recovery::{FailedCodeReviewRecovery, recoverable_fa
 pub(crate) use gates::*;
 #[allow(unused_imports)]
 pub(crate) use group::*;
+#[allow(unused_imports)]
+pub(crate) use internal_pr_review::internal_review_blocked_gate_reason;
+#[allow(unused_imports)]
+pub(crate) use plan_defect::*;
+#[allow(unused_imports)]
+pub(crate) use plan_defect_routing::*;
 #[allow(unused_imports)]
 pub(crate) use prompts::*;
 #[allow(unused_imports)]

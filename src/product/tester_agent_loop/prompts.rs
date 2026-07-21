@@ -99,7 +99,9 @@ pub fn build_tester_system_prompt(
         "\n输出要求:\n\
          - 优先调用 run_command 执行测试。\n\
          - 如发现失败，继续收集足够证据并在最终 JSON 中列出 bugs_found。\n\
-         - 最终只输出 JSON：{\"summary\":\"...\",\"bugs_found\":[]}。\n",
+         - 最终只输出 JSON：{\"summary\":\"...\",\"bugs_found\":[],\"plan_defect_findings\":[]}。\n\
+         - plan_defect_findings 使用 canonical 字段 finding_id、severity、defect_class、reason_code、message、evidence、contract_refs、capability_refs、repair_target、recommended_route、confidence。\n\
+         - 普通 implementation defect 不放入 plan_defect_findings；普通输出可省略该数组或使用空数组。\n",
     );
     prompt
 }
@@ -216,7 +218,8 @@ pub fn build_tester_execute_repair_prompt(
          Phase: execute_test_plan_repair\n\
          The previous execute_test_plan output did not provide valid step_results for every required step.\n\
          Missing required steps: {missing_required_steps:?}\n\
-         Return only JSON: {{\"step_results\":[{{\"step_id\":\"...\",\"status\":\"passed|failed|blocked|skipped\",\"evidence_refs\":[\"...\"],\"provider_analysis\":\"...\"}}]}}\n\
+         Return only the canonical ProviderTestExecutionPayload JSON: {{\"step_results\":[{{\"step_id\":\"...\",\"status\":\"passed|failed|blocked|skipped\",\"evidence_refs\":[\"...\"],\"provider_analysis\":\"...\"}}],\"plan_defect_findings\":[]}}\n\
+         plan_defect_findings 使用 canonical 字段 finding_id、severity、defect_class、reason_code、message、evidence、contract_refs、capability_refs、repair_target、recommended_route、confidence；普通 implementation defect 不放入该数组，而是通过 failed/blocked step_results 表达；普通 legacy output 缺少该数组时按空数组处理，不伪造 plan defect。\n\
          Previous output:\n\
          {raw_output}"
     )

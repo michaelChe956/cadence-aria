@@ -1,11 +1,12 @@
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::cross_cutting::provider_adapter::DEFAULT_PROVIDER_TIMEOUT_SECS;
 use crate::cross_cutting::streaming_provider::ProviderToolResult;
-use crate::product::coding_models::{TestCommand, TestPlanStep};
+use crate::product::coding_models::{TestCommand, TestPlanStep, TestingStepResult};
+use crate::product::plan_repair::PlanDefectFinding;
 use crate::product::test_executor::TestExecutorError;
 
 pub const TESTER_TOOL_FAILURE_LIMIT: usize = 3;
@@ -52,4 +53,12 @@ pub(crate) struct ProviderTestPlanPayload {
     #[serde(default)]
     pub(crate) assumptions: Vec<String>,
     pub(crate) steps: Vec<TestPlanStep>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ProviderTestExecutionPayload {
+    #[serde(default)]
+    pub(crate) step_results: Vec<TestingStepResult>,
+    #[serde(default)]
+    pub(crate) plan_defect_findings: Vec<PlanDefectFinding>,
 }

@@ -183,7 +183,7 @@ async fn coder_resume_stall_does_not_retry_non_codex_provider() {
         .expect("update coder provider");
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::Coder,
                 provider: ProviderName::ClaudeCode,
@@ -228,7 +228,12 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_coder_resume",
+        )
         .expect("shared worktree lock");
 
     let store = CodingAttemptStore::new(paths);
@@ -249,17 +254,15 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
             max_auto_rework: 2,
         })
         .expect("group attempt");
-    store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
-            order_index: 0,
-            status: CodingExecutionUnitStatus::Running,
-        })
-        .expect("active coding unit");
+    lifecycle
+        .bind_issue_worktree_lock_to_attempt(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("bind shared worktree lock");
+    seed_group_attempt_fixture(&store, &attempt, true, false);
     let attempt = store
         .update_attempt_status(
             &attempt.project_id,
@@ -355,7 +358,7 @@ fn seed_stale_coder_conversation(
 ) -> CodingExecutionAttempt {
     store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::Coder,
                 provider: ProviderName::Codex,
@@ -399,9 +402,17 @@ fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeRev
             required_action: Some("add validation".to_string()),
             source_stage: CodingExecutionStage::CodeReview,
             evidence: vec!["review-output.log".to_string()],
+            plan_defect_evidence: Vec::new(),
             related_requirements: Vec::new(),
             related_design_constraints: Vec::new(),
             related_work_item_tasks: Vec::new(),
+            defect_class: crate::product::models::PlanDefectClass::ImplementationDefect,
+            reason_code: None,
+            contract_refs: Vec::new(),
+            capability_refs: Vec::new(),
+            repair_target: None,
+            recommended_route: crate::product::models::PlanDefectRoute::CoderRework,
+            confidence: None,
         }],
         tested_evidence_refs: Vec::new(),
         diff_refs: Vec::new(),

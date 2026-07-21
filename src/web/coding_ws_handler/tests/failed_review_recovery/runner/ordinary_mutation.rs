@@ -16,9 +16,9 @@ use crate::web::coding_ws_handler::{
     spawn_coding_runner_reserved_with_probe,
 };
 use crate::web::runtime::WebRuntime;
-use crate::web::state::WebAppState;
+use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
-use super::super::support::{FixtureCase, failed_review_fixture};
+use super::super::support::provider_interrupted_review_fixture;
 use super::wait_for_runner_count;
 
 #[derive(Debug, Clone, Copy)]
@@ -33,10 +33,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
         OrdinaryMutationCase::AbortAttempt,
         OrdinaryMutationCase::ContextNote,
     ] {
-        let fixture = failed_review_fixture(
-            CodingAttemptScope::WorkItemGroup,
-            FixtureCase::BlockedProviderInterrupted,
-        );
+        let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItem).await;
         if matches!(case, OrdinaryMutationCase::AbortAttempt) {
             fs::remove_file(
                 fixture
@@ -53,6 +50,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
             WebRuntime::new_fake(fixture._tmp.path().to_path_buf()),
         );
         let attempt_id = fixture.attempt.id.clone();
+        let attempt_key = CodingAttemptRunKey::from_attempt(&fixture.attempt);
         let gate_id = fixture
             .dirty_gate
             .as_ref()
@@ -70,7 +68,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
             &fixture.store,
             &state.coding_runs,
             &ordinary_event_tx,
-            &attempt_id,
+            ("project_0001", "issue_0001", &attempt_id),
             &ordinary_message,
         )
         .await
@@ -101,7 +99,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
                 &recovery_store,
                 &recovery_registry,
                 &event_tx,
-                &recovery_attempt_id,
+                ("project_0001", "issue_0001", &recovery_attempt_id),
                 &retry_message,
             )
             .await
@@ -137,13 +135,13 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
             OrdinaryMutationCase::ContextNote => {
                 let note = fixture
                     .store
-                    .create_context_note(&current_attempt.id, "ordinary mutation wins".to_string())
+                    .create_context_note(&current_attempt, "ordinary mutation wins".to_string())
                     .expect("ordinary context note mutation");
                 let entry = context_note_chat_entry(&fixture.store, &current_attempt, note)
                     .expect("ordinary context note chat entry");
                 fixture
                     .store
-                    .save_chat_entry(&entry)
+                    .save_chat_entry(&current_attempt, &entry)
                     .expect("persist ordinary context note chat entry");
             }
         }
@@ -159,7 +157,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
                 assert!(
                     !state
                         .coding_runs
-                        .has_active_recovery_reservation(&attempt_id)
+                        .has_active_recovery_reservation(&attempt_key)
                 );
                 assert!(
                     fixture
@@ -178,7 +176,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
                     .expect("aborted attempt");
                 assert_eq!(persisted.status, CodingAttemptStatus::Aborted);
                 assert_eq!(persisted.stage, CodingExecutionStage::CodeReview);
-                assert_eq!(state.coding_runs.runner_count(&attempt_id), 0);
+                assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
                 assert_eq!(
                     fixture
                         .store
@@ -218,9 +216,9 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
                 assert!(
                     !state
                         .coding_runs
-                        .has_active_recovery_reservation(&attempt_id)
+                        .has_active_recovery_reservation(&attempt_key)
                 );
-                assert_eq!(state.coding_runs.runner_count(&attempt_id), 1);
+                assert_eq!(state.coding_runs.runner_count(&attempt_key), 1);
                 let persisted = fixture
                     .store
                     .get_attempt_by_id(&attempt_id)
@@ -267,7 +265,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
                     1
                 );
                 drop(runner_continue_tx);
-                wait_for_runner_count(&state.coding_runs, &attempt_id, 0).await;
+                wait_for_runner_count(&state.coding_runs, &attempt_key, 0).await;
             }
         }
     }

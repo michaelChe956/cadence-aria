@@ -7,7 +7,7 @@ fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
         .expect("create attempt");
 
     let gate = store
-        .create_choice_gate(CreateChoiceGateInput {
+        .create_choice_gate(&attempt, CreateChoiceGateInput {
             attempt_id: attempt.id.clone(),
             choice_id: "choice_0001".to_string(),
             stage: CodingExecutionStage::Coding,
@@ -110,12 +110,20 @@ fn status_and_stage_transitions_reject_invalid_backwards_moves() {
 }
 
 fn create_input(work_item_id: &str) -> CreateCodingAttemptInput {
+    create_input_for("project_0001", "issue_0001", work_item_id)
+}
+
+fn create_input_for(
+    project_id: &str,
+    issue_id: &str,
+    work_item_id: &str,
+) -> CreateCodingAttemptInput {
     CreateCodingAttemptInput {
-        project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
+        project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
         work_item_id: work_item_id.to_string(),
         base_branch: "main".to_string(),
-        branch_name: format!("aria/work-items/{work_item_id}/attempt-1"),
+        branch_name: format!("aria/issues/{issue_id}"),
         worktree_path: None,
         provider_config_snapshot: ProviderConfigSnapshot {
             author: ProviderName::Fake,
@@ -124,6 +132,14 @@ fn create_input(work_item_id: &str) -> CreateCodingAttemptInput {
         },
         max_auto_rework: 2,
     }
+}
+
+fn assert_global_coding_attempt_id(id: &str) {
+    let uuid = id
+        .strip_prefix("coding_attempt_")
+        .expect("coding attempt prefix");
+    assert_eq!(uuid.len(), 32);
+    uuid::Uuid::parse_str(uuid).expect("valid UUID coding attempt id");
 }
 
 fn group_create_input(current_work_item_id: &str) -> CreateGroupCodingAttemptInput {
@@ -173,6 +189,7 @@ fn sample_testing_report(attempt_id: &str) -> TestingReport {
         skipped_required_steps: Vec::new(),
         context_warnings: Vec::new(),
         raw_provider_output_ref: None,
+        plan_defect_findings: Vec::new(),
     }
 }
 
@@ -240,9 +257,17 @@ fn sample_finding() -> ReviewFinding {
         required_action: None,
         source_stage: CodingExecutionStage::CodeReview,
         evidence: Vec::new(),
+        plan_defect_evidence: Vec::new(),
         related_requirements: Vec::new(),
         related_design_constraints: Vec::new(),
         related_work_item_tasks: Vec::new(),
+        defect_class: cadence_aria::product::models::PlanDefectClass::ImplementationDefect,
+        reason_code: None,
+        contract_refs: Vec::new(),
+        capability_refs: Vec::new(),
+        repair_target: None,
+        recommended_route: cadence_aria::product::models::PlanDefectRoute::CoderRework,
+        confidence: None,
     }
 }
 
@@ -417,7 +442,7 @@ fn role_run_event_large_string_payload_is_moved_to_artifact() {
     assert!(preview.len() <= 16_384);
 
     let artifact = store
-        .read_attempt_artifact_text(&attempt.id, event.artifact_ref.as_deref().expect("ref"))
+        .read_attempt_artifact_text(&attempt, event.artifact_ref.as_deref().expect("ref"))
         .expect("artifact text");
     assert_eq!(artifact, long_prompt);
 }
@@ -487,10 +512,10 @@ fn role_run_event_truncates_each_large_payload_field() {
     assert_ne!(stdout_ref, stderr_ref);
 
     let stdout_artifact = store
-        .read_attempt_artifact_text(&attempt.id, stdout_ref)
+        .read_attempt_artifact_text(&attempt, stdout_ref)
         .expect("stdout artifact text");
     let stderr_artifact = store
-        .read_attempt_artifact_text(&attempt.id, stderr_ref)
+        .read_attempt_artifact_text(&attempt, stderr_ref)
         .expect("stderr artifact text");
     assert_eq!(stdout_artifact, long_stdout);
     assert_eq!(stderr_artifact, long_stderr);

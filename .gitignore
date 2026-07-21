@@ -18,3 +18,7 @@ npm/*.tgz
 
 # CodeGraph 本地索引
 .codegraph/
+
+# 本地开发服务日志
+backend.log
+frontend.log

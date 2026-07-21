@@ -16,15 +16,33 @@ import type {
   CodingWsOutMessage,
   ExecutionEvent,
   InternalPrReview,
+  PlanAmendmentManifest,
+  PlanRepairSessionSnapshot,
   ProviderConfigSnapshot,
   ReviewRequest,
   TestingReport,
+  TimelineNode as WorkspaceTimelineNode,
   WorkItemExecutionPlan,
   WorkItemHandoff,
+  WorkItemRevisionHistoryDto,
   WorkspaceProviderName,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "./chat-entries";
 import { codingChatEntryToChatEntry } from "./coding-chat-entry-mapping";
+import {
+  mergeRepairTimelineNodes,
+  planRepairAmendmentStateUpdate,
+  planRepairHistoryStateUpdate,
+  planRepairRequiredStateUpdate,
+  planRepairResumeStateUpdate,
+  planRepairSnapshotStateUpdate,
+  planRepairTimelineNodeAddedStateUpdate,
+  planRepairTimelineNodeUpdatedStateUpdate,
+  reconcileParentPlanRepair,
+  type PlanRepairIdentitySource,
+  type PlanRepairRequiredInput,
+  type PlanRepairSessionState,
+} from "./plan-repair-session";
 
 export type CodingArtifactTab = "diff" | "tests" | "review" | "git" | "logs";
 export type CodingConnectionStatus =
@@ -91,6 +109,7 @@ export interface CodingWorkspaceState {
   tabLockedByUser: boolean;
   workItemExecutionPlan: WorkItemExecutionPlan | null;
   workItemHandoff: WorkItemHandoff | null;
+  activePlanRepair: PlanRepairSessionState | null;
   // 门禁开关唯一来源：work item / snapshot 上的 require_execution_plan_confirm
   requireExecutionPlanConfirm: boolean;
 }
@@ -126,6 +145,28 @@ export interface CodingWorkspaceActions {
   setProtocolError: (error: CodingProtocolError | null) => void;
   setSelectedNode: (nodeId: string | null) => void;
   setActiveTab: (tab: CodingArtifactTab, lockedByUser?: boolean) => void;
+  setPlanRepairRequired: (message: PlanRepairRequiredInput) => void;
+  updatePlanRepairSession: (snapshot: PlanRepairSessionSnapshot) => void;
+  addPlanRepairTimelineNode: (
+    source: PlanRepairIdentitySource,
+    node: WorkspaceTimelineNode,
+  ) => void;
+  updatePlanRepairTimelineNode: (
+    source: PlanRepairIdentitySource,
+    nodeId: string,
+    status: WorkspaceTimelineNode["status"],
+    summary?: string | null,
+    completedAt?: string | null,
+  ) => void;
+  setPlanRepairHistory: (
+    source: PlanRepairIdentitySource,
+    history: WorkItemRevisionHistoryDto,
+  ) => void;
+  setPlanAmendment: (
+    amendment: PlanAmendmentManifest,
+    source?: PlanRepairIdentitySource,
+  ) => void;
+  clearPlanRepairAfterResume: (amendmentId: string) => void;
   reset: () => void;
 }
 
@@ -170,9 +211,9 @@ const initialState: CodingWorkspaceState = {
   tabLockedByUser: false,
   workItemExecutionPlan: null,
   workItemHandoff: null,
+  activePlanRepair: null,
   requireExecutionPlanConfirm: false,
 };
-
 export const useCodingWorkspaceStore = create<
   CodingWorkspaceState & CodingWorkspaceActions
 >((set, get) => ({
@@ -180,14 +221,27 @@ export const useCodingWorkspaceStore = create<
 
   setSessionState: (snapshot) =>
     set((prev) => {
+      const activePlanRepair = reconcileParentPlanRepair(
+        prev.activePlanRepair,
+        snapshot.linked_plan_repair,
+        snapshot.attempt_id,
+        snapshot.status,
+        `/workbench/projects/${snapshot.project_id}/issues/${snapshot.issue_id}/coding/${snapshot.attempt_id}`,
+      );
+      const timelineNodes = mergeRepairTimelineNodes(
+        snapshot.timeline_nodes,
+        activePlanRepair?.timelineNodes ?? [],
+      );
       const selectedNodeId =
         snapshot.active_node_id ??
-        preserveSelectedNode(prev.selectedNodeId, snapshot.timeline_nodes) ??
-        snapshot.timeline_nodes.at(-1)?.id ??
+        preserveSelectedNode(prev.selectedNodeId, timelineNodes) ??
+        timelineNodes.at(-1)?.id ??
         null;
-      const selectedNode = snapshot.timeline_nodes.find((node) => node.id === selectedNodeId);
+      const selectedNode = timelineNodes.find((node) => node.id === selectedNodeId);
       const nextTab = selectedNode ? stageToArtifactTab(selectedNode.stage) : null;
       return {
+        projectId: snapshot.project_id,
+        issueId: snapshot.issue_id,
         attemptId: snapshot.attempt_id,
         attemptScope: snapshot.attempt_scope,
         workItemGroupId: snapshot.work_item_group_id,
@@ -205,7 +259,7 @@ export const useCodingWorkspaceStore = create<
         pushedRemote: snapshot.pushed_remote,
         providerConfigSnapshot: snapshot.provider_config_snapshot,
         roleProviderConfigSnapshot: snapshot.role_provider_config_snapshot,
-        timelineNodes: snapshot.timeline_nodes,
+        timelineNodes,
         activeNodeId: snapshot.active_node_id,
         selectedNodeId,
         chatEntries: mergePendingChoiceEntries(
@@ -220,6 +274,7 @@ export const useCodingWorkspaceStore = create<
         pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
         workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,
         workItemHandoff: snapshot.work_item_handoff ?? null,
+        activePlanRepair,
         requireExecutionPlanConfirm: snapshot.require_execution_plan_confirm ?? false,
         protocolError: null,
         streamingContent: null,
@@ -395,6 +450,41 @@ export const useCodingWorkspaceStore = create<
 
   setActiveTab: (activeTab, lockedByUser = true) =>
     set({ activeTab, tabLockedByUser: lockedByUser }),
+
+  setPlanRepairRequired: (message) =>
+    set((state) => planRepairRequiredStateUpdate(state, message)),
+  updatePlanRepairSession: (snapshot) =>
+    set((state) => planRepairSnapshotStateUpdate(state, snapshot)),
+
+  addPlanRepairTimelineNode: (source, node) =>
+    set((state) => planRepairTimelineNodeAddedStateUpdate(state, source, node)),
+
+  updatePlanRepairTimelineNode: (
+    source,
+    nodeId,
+    status,
+    summary,
+    completedAt,
+  ) =>
+    set((state) =>
+      planRepairTimelineNodeUpdatedStateUpdate(
+        state,
+        source,
+        nodeId,
+        status,
+        summary,
+        completedAt,
+      ),
+    ),
+
+  setPlanRepairHistory: (source, history) =>
+    set((state) => planRepairHistoryStateUpdate(state, source, history)),
+
+  setPlanAmendment: (amendment, source) =>
+    set((state) => planRepairAmendmentStateUpdate(state, amendment, source)),
+
+  clearPlanRepairAfterResume: (amendmentId) =>
+    set((state) => planRepairResumeStateUpdate(state, amendmentId)),
 
   reset: () => set({ ...initialState }),
 }));

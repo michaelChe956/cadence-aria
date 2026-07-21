@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceInboundContext {
+    pub(crate) app_state: WebAppState,
     pub(crate) engine: Arc<Mutex<WorkspaceEngine>>,
     pub(crate) run_context: ProviderRunContext,
     pub(crate) outbound_tx: mpsc::Sender<OutboundControl>,
@@ -37,6 +38,7 @@ pub(crate) async fn handle_workspace_inbound_message(
     in_msg: WsInMessage,
 ) {
     let WorkspaceInboundContext {
+        app_state,
         engine,
         run_context,
         outbound_tx,
@@ -432,6 +434,42 @@ pub(crate) async fn handle_workspace_inbound_message(
                 }
             }
         }
+        WsInMessage::SaveHumanPresentationRevision {
+            source_projection_bundle_id,
+            scope,
+            supersedes,
+            human_summary,
+            why_split,
+            dependency_explanation,
+            risk_explanation,
+            source_refs,
+        } => {
+            let source_projection_bundle_id_for_error = source_projection_bundle_id.clone();
+            let result = {
+                let engine = engine.lock().await;
+                engine.save_human_presentation_revision_command(SaveHumanPresentationRevision {
+                    source_projection_bundle_id,
+                    scope: match scope {
+                        HumanPresentationScopeDto::Plan => HumanPresentationScope::Plan,
+                        HumanPresentationScopeDto::WorkItem => HumanPresentationScope::WorkItem,
+                    },
+                    supersedes,
+                    human_summary,
+                    why_split,
+                    dependency_explanation,
+                    risk_explanation,
+                    source_refs,
+                })
+            };
+            let message = match result {
+                Ok(revision) => WsOutMessage::HumanPresentationRevisionSaved { revision },
+                Err(error) => WsOutMessage::HumanPresentationRevisionSaveFailed {
+                    source_projection_bundle_id: source_projection_bundle_id_for_error,
+                    message: error.to_string(),
+                },
+            };
+            let _ = send_json_outbound(&outbound_tx, &message).await;
+        }
         WsInMessage::Abort => {
             if abort_active_run(&current_run, &workspace_runs, &session_id).await {
                 let _ = send_json_outbound(
@@ -672,6 +710,43 @@ pub(crate) async fn handle_workspace_inbound_message(
                 payload,
             )
             .await;
+        }
+        WsInMessage::ConfirmPlanAmendment { amendment_id } => {
+            handle_plan_amendment_confirmation_from_handler(
+                app_state.clone(),
+                engine.clone(),
+                outbound_tx.clone(),
+                amendment_id,
+            )
+            .await;
+        }
+        WsInMessage::CancelPlanAmendment {
+            amendment_id,
+            reason,
+        } => {
+            handle_plan_amendment_cancel_from_handler(
+                engine.clone(),
+                outbound_tx.clone(),
+                amendment_id,
+                reason,
+            )
+            .await;
+        }
+        WsInMessage::StartLinkedWorkspaceAmendment { target } => {
+            let target_for_context = target.clone();
+            let result = {
+                let engine = engine.lock().await;
+                engine.start_linked_workspace_amendment(target)
+            };
+            let message = match result {
+                Ok(snapshot) => WsOutMessage::LinkedWorkspaceAmendmentCreated { snapshot },
+                Err(error) => WsOutMessage::ProtocolError {
+                    code: "LINKED_WORKSPACE_AMENDMENT_INVALID".to_string(),
+                    message: format!("{error:?}"),
+                    context: serde_json::to_value(target_for_context).ok(),
+                },
+            };
+            let _ = send_json_outbound(&outbound_tx, &message).await;
         }
         WsInMessage::RevertWorkItem {
             work_item_id,

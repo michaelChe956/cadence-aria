@@ -1,4 +1,4 @@
-use super::execution::ProviderTestingExecutionPhase;
+use super::execution_types::ProviderTestingExecutionPhase;
 use super::*;
 
 pub(crate) struct ProviderTestingReportInput<'a> {
@@ -42,12 +42,25 @@ impl CodingWorkspaceEngine {
             mut chat_entry_sequence,
         } = phase;
         let execute_raw_ref = self.store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::Testing,
             "execute_test_plan",
             &full_output,
         )?;
-        for provider_step_result in parse_testing_step_results_from_provider_output(&full_output) {
+        let (execution_payload, mut plan_defect_payload_invalid) =
+            match parse_test_execution_payload_from_provider_output(&full_output) {
+                Ok(payload) => (payload, false),
+                Err(_) => (ProviderTestExecutionPayload::default(), true),
+            };
+        let mut plan_defect_report = ExecutionPlanDefectReport {
+            source: PlanDefectSource::Tester,
+            findings: Vec::new(),
+        };
+        merge_test_execution_plan_defect_findings(
+            &mut plan_defect_report.findings,
+            execution_payload.plan_defect_findings,
+        )?;
+        for provider_step_result in execution_payload.step_results {
             if !step_results
                 .iter()
                 .any(|existing| existing.step_id == provider_step_result.step_id)
@@ -130,15 +143,25 @@ impl CodingWorkspaceEngine {
                 })
                 .await?;
             let repair_raw_ref = self.store.save_provider_raw_output(
-                &attempt.id,
+                &attempt,
                 CodingExecutionStage::Testing,
                 "execute_test_plan_repair",
                 &repair_output,
             )?;
+            let repair_payload =
+                match parse_test_execution_payload_from_provider_output(&repair_output) {
+                    Ok(payload) => payload,
+                    Err(_) => {
+                        plan_defect_payload_invalid = true;
+                        ProviderTestExecutionPayload::default()
+                    }
+                };
+            merge_test_execution_plan_defect_findings(
+                &mut plan_defect_report.findings,
+                repair_payload.plan_defect_findings,
+            )?;
             report_raw_ref = repair_raw_ref;
-            for provider_step_result in
-                parse_testing_step_results_from_provider_output(&repair_output)
-            {
+            for provider_step_result in repair_payload.step_results {
                 if !step_results
                     .iter()
                     .any(|existing| existing.step_id == provider_step_result.step_id)
@@ -162,8 +185,26 @@ impl CodingWorkspaceEngine {
             report.overall_status = TestingOverallStatus::Blocked;
             report.context_warnings.push(summary);
         }
+        report.plan_defect_findings = plan_defect_report.findings.clone();
+        let plan_defect_decision = if plan_defect_payload_invalid {
+            Some(CodeReviewFlowDecision::StopForHumanTriage)
+        } else if plan_defect_report.findings.is_empty() {
+            None
+        } else {
+            let projection = self.reviewer_projection_for_attempt(&attempt)?;
+            Some(execution_plan_defect_flow_decision(
+                &plan_defect_report,
+                &projection,
+            ))
+        };
+        if plan_defect_decision.is_some() {
+            report.overall_status = TestingOverallStatus::Blocked;
+        }
+        let plan_defect_route = plan_defect_decision
+            .map(CodeReviewFlowDecision::label)
+            .map(str::to_string);
         bind_testing_report_role_run(&mut report, &role_run);
-        self.store.save_testing_report(&report)?;
+        self.store.save_testing_report(&attempt, &report)?;
         let entry = tester_chat_entry(
             &attempt,
             &node.id,
@@ -176,9 +217,10 @@ impl CodingWorkspaceEngine {
                 "role_run_id": role_run.id.clone(),
                 "run_no": role_run.run_no,
                 "raw_provider_output_ref": report.raw_provider_output_ref.clone()
+                ,"plan_defect_route": plan_defect_route
             })),
         );
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(&attempt, entry).await;
         self.store.update_role_run_status(
             &attempt.project_id,
             &attempt.issue_id,
@@ -219,7 +261,8 @@ impl CodingWorkspaceEngine {
         if matches!(
             report.overall_status,
             TestingOverallStatus::Failed | TestingOverallStatus::Blocked
-        ) && testing_report_needs_blocked_gate(&report)
+        ) && plan_defect_route.is_none()
+            && testing_report_needs_blocked_gate(&report)
         {
             self.store.update_attempt_status(
                 &attempt.project_id,
@@ -236,23 +279,27 @@ impl CodingWorkspaceEngine {
             .await?;
         }
         if report.overall_status == TestingOverallStatus::Blocked
+            && plan_defect_route.is_none()
             && testing_report_needs_blocked_gate(&report)
         {
-            let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
-                attempt_id: attempt.id.clone(),
-                stage: CodingExecutionStage::Testing,
-                node_id: Some(node.id.clone()),
-                role: Some(CodingProviderRole::Tester),
-                title: "Testing blocked".to_string(),
-                description: "Required testing steps are missing or blocked".to_string(),
-                reason_code: Some(derive_testing_blocked_reason_code(
-                    blocked_reason_code,
-                    &report,
-                )),
-                evidence_refs: vec![format!("{}.json", report.id)],
-                raw_provider_output_ref: Some(report_raw_ref),
-                available_actions: testing_blocked_gate_actions(),
-            })?;
+            let gate = self.store.create_blocked_gate(
+                &attempt,
+                CreateBlockedGateInput {
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::Testing,
+                    node_id: Some(node.id.clone()),
+                    role: Some(CodingProviderRole::Tester),
+                    title: "Testing blocked".to_string(),
+                    description: "Required testing steps are missing or blocked".to_string(),
+                    reason_code: Some(derive_testing_blocked_reason_code(
+                        blocked_reason_code,
+                        &report,
+                    )),
+                    evidence_refs: vec![format!("{}.json", report.id)],
+                    raw_provider_output_ref: Some(report_raw_ref),
+                    available_actions: testing_blocked_gate_actions(),
+                },
+            )?;
             let _ = self
                 .event_tx
                 .send(CodingWsOutMessage::CodingGateRequired { gate })
@@ -267,6 +314,10 @@ impl CodingWorkspaceEngine {
             summary,
         )
         .await?;
+        if plan_defect_decision == Some(CodeReviewFlowDecision::StartPlanRepair) {
+            self.start_plan_repair_from_execution_report(&attempt, &plan_defect_report)
+                .await?;
+        }
         Ok(report)
     }
 }

@@ -2,6 +2,7 @@ import type {
   ApiError,
   ArtifactContentResponse,
   CodingAttempt,
+  CodingAttemptAddress,
   CodingAttemptDiffResponse,
   CodingAttemptSnapshotResponse,
   CreateProductIssueRequest,
@@ -300,7 +301,19 @@ export function createGroupCodingAttempt(
   );
 }
 
+function codingAttemptApiPath(address: CodingAttemptAddress): string {
+  return `/api/projects/${encodeURIComponent(address.projectId)}/issues/${encodeURIComponent(address.issueId)}/coding-attempts/${encodeURIComponent(address.attemptId)}`;
+}
+
 export function getCodingAttemptSnapshot(
+  address: CodingAttemptAddress,
+): Promise<CodingAttemptSnapshotResponse> {
+  return requestJson<CodingAttemptSnapshotResponse>(
+    codingAttemptApiPath(address),
+  );
+}
+
+export function getLegacyCodingAttemptSnapshot(
   attemptId: string,
 ): Promise<CodingAttemptSnapshotResponse> {
   return requestJson<CodingAttemptSnapshotResponse>(
@@ -309,27 +322,29 @@ export function getCodingAttemptSnapshot(
 }
 
 export function getCodingAttemptDiff(
-  attemptId: string,
+  address: CodingAttemptAddress,
 ): Promise<CodingAttemptDiffResponse> {
   return requestJson<CodingAttemptDiffResponse>(
-    `/api/coding-attempts/${encodeURIComponent(attemptId)}/diff`,
+    `${codingAttemptApiPath(address)}/diff`,
   );
 }
 
 export function deleteCodingAttempt(
-  attemptId: string,
+  address: CodingAttemptAddress,
 ): Promise<void> {
   return requestJson<void>(
-    `/api/coding-attempts/${encodeURIComponent(attemptId)}`,
+    codingAttemptApiPath(address),
     {
       method: "DELETE",
     },
   );
 }
 
-export function abortCodingAttempt(attemptId: string): Promise<CodingAttempt> {
+export function abortCodingAttempt(
+  address: CodingAttemptAddress,
+): Promise<CodingAttempt> {
   return requestJson<CodingAttempt>(
-    `/api/coding-attempts/${encodeURIComponent(attemptId)}/abort`,
+    `${codingAttemptApiPath(address)}/abort`,
     {
       method: "POST",
       body: JSON.stringify({}),
@@ -338,19 +353,19 @@ export function abortCodingAttempt(attemptId: string): Promise<CodingAttempt> {
 }
 
 export function getCodingAttemptArtifact(
-  attemptId: string,
+  address: CodingAttemptAddress,
   artifactId: string,
 ): Promise<ArtifactContentResponse> {
   return requestJson<ArtifactContentResponse>(
-    `/api/coding-attempts/${encodeURIComponent(attemptId)}/artifacts/${encodeURIComponent(artifactId)}`,
+    `${codingAttemptApiPath(address)}/artifacts/${encodeURIComponent(artifactId)}`,
   );
 }
 
 export function confirmWorkItemExecutionPlan(
-  attemptId: string,
+  address: CodingAttemptAddress,
 ): Promise<WorkItemExecutionPlan> {
   return requestJson<WorkItemExecutionPlan>(
-    `/api/coding-attempts/${encodeURIComponent(attemptId)}/execution-plan/confirm`,
+    `${codingAttemptApiPath(address)}/execution-plan/confirm`,
     {
       method: "POST",
       body: JSON.stringify({}),
@@ -359,11 +374,11 @@ export function confirmWorkItemExecutionPlan(
 }
 
 export function requestWorkItemExecutionPlanChange(
-  attemptId: string,
+  address: CodingAttemptAddress,
   payload: { note: string },
 ): Promise<WorkItemExecutionPlan> {
   return requestJson<WorkItemExecutionPlan>(
-    `/api/coding-attempts/${encodeURIComponent(attemptId)}/execution-plan/change-request`,
+    `${codingAttemptApiPath(address)}/execution-plan/change-request`,
     {
       method: "POST",
       body: JSON.stringify(payload),

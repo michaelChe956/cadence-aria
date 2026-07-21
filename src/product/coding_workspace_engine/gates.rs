@@ -34,27 +34,30 @@ impl CodingWorkspaceEngine {
         request: ChoiceRequestData,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let source = request.source.as_str().to_string();
-        self.store.create_choice_gate(CreateChoiceGateInput {
-            attempt_id: attempt.id.clone(),
-            choice_id: request.id.clone(),
-            stage,
-            node_id: Some(node_id.to_string()),
-            role,
-            provider: provider.clone(),
-            source: source.clone(),
-            prompt: request.prompt.clone(),
-            options: request
-                .options
-                .iter()
-                .map(|option| CodingChoiceOption {
-                    id: option.id.clone(),
-                    label: option.label.clone(),
-                    description: option.description.clone(),
-                })
-                .collect(),
-            allow_multiple: request.allow_multiple,
-            allow_free_text: request.allow_free_text,
-        })?;
+        self.store.create_choice_gate(
+            attempt,
+            CreateChoiceGateInput {
+                attempt_id: attempt.id.clone(),
+                choice_id: request.id.clone(),
+                stage,
+                node_id: Some(node_id.to_string()),
+                role,
+                provider: provider.clone(),
+                source: source.clone(),
+                prompt: request.prompt.clone(),
+                options: request
+                    .options
+                    .iter()
+                    .map(|option| CodingChoiceOption {
+                        id: option.id.clone(),
+                        label: option.label.clone(),
+                        description: option.description.clone(),
+                    })
+                    .collect(),
+                allow_multiple: request.allow_multiple,
+                allow_free_text: request.allow_free_text,
+            },
+        )?;
         let current =
             self.store
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
@@ -96,16 +99,15 @@ impl CodingWorkspaceEngine {
 
     pub(crate) async fn ensure_issue_shared_worktree_clean(
         &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         work_item_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let shared = match lifecycle.get_issue_shared_worktree(project_id, issue_id)? {
-            Some(shared) => shared,
-            None => return Ok(()),
-        };
+        let shared =
+            match lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)? {
+                Some(shared) => shared,
+                None => return Ok(()),
+            };
         if shared.current_active_work_item_id.as_deref() != Some(work_item_id) {
             return Ok(());
         }
@@ -113,11 +115,25 @@ impl CodingWorkspaceEngine {
         if !worktree_path.exists() {
             return Ok(());
         }
-        let status = self._git_service.git_status(&worktree_path).await?;
+        self.ensure_worktree_clean_with_manual_gate(
+            attempt,
+            &worktree_path,
+            CodingExecutionStage::FinalConfirm,
+        )
+        .await
+    }
+
+    pub(crate) async fn ensure_worktree_clean_with_manual_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        worktree_path: &Path,
+        stage: CodingExecutionStage,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let status = self._git_service.git_status(worktree_path).await?;
         if !status.is_empty() {
-            self.store.create_blocked_gate(CreateBlockedGateInput {
-                attempt_id: attempt_id.to_string(),
-                stage: CodingExecutionStage::FinalConfirm,
+            self.store.create_blocked_gate(attempt, CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage,
                 node_id: None,
                 role: None,
                 title: "Shared worktree has uncommitted changes".to_string(),
@@ -172,13 +188,8 @@ impl CodingWorkspaceEngine {
             ));
         }
 
-        self.ensure_issue_shared_worktree_clean(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &attempt.work_item_id,
-        )
-        .await?;
+        self.ensure_issue_shared_worktree_clean(attempt, &attempt.work_item_id)
+            .await?;
 
         Ok(CompletionGateReport)
     }
@@ -209,7 +220,7 @@ impl CodingWorkspaceEngine {
         for (unit, handoff) in &handoffs {
             let work_item = work_items
                 .iter()
-                .find(|item| item.id == unit.work_item_id)
+                .find(|item| item.id == unit.logical_work_item_id)
                 .ok_or_else(|| {
                     CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone())
                 })?;
@@ -225,15 +236,14 @@ impl CodingWorkspaceEngine {
             .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
             .and_then(|shared| shared.current_active_work_item_id)
             .or_else(|| attempt.current_work_item_id.clone())
-            .or_else(|| handoffs.last().map(|(unit, _)| unit.work_item_id.clone()))
+            .or_else(|| {
+                handoffs
+                    .last()
+                    .map(|(unit, _)| unit.logical_work_item_id.clone())
+            })
             .unwrap_or_else(|| attempt.work_item_id.clone());
-        self.ensure_issue_shared_worktree_clean(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &lock_holder_work_item_id,
-        )
-        .await?;
+        self.ensure_issue_shared_worktree_clean(attempt, &lock_holder_work_item_id)
+            .await?;
 
         Ok(CompletionGateReport)
     }
@@ -343,15 +353,44 @@ impl CodingWorkspaceEngine {
         project_id: &str,
         issue_id: &str,
         work_item_id: &str,
+        owner_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
         let shared = match lifecycle.get_issue_shared_worktree(project_id, issue_id)? {
             Some(shared) => shared,
             None => return Ok(()),
         };
-        if shared.current_active_work_item_id.as_deref() == Some(work_item_id) {
-            lifecycle.release_issue_worktree_lock(project_id, issue_id, work_item_id)?;
+        if shared.current_active_work_item_id.is_some() || shared.current_lock_owner_id.is_some() {
+            lifecycle.release_issue_worktree_lock(project_id, issue_id, work_item_id, owner_id)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn validate_attempt_issue_shared_worktree_lock_if_present(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let Some(shared) =
+            lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+        else {
+            return Ok(());
+        };
+        let work_item_id = attempt
+            .current_work_item_id
+            .as_deref()
+            .or_else(|| {
+                (attempt.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup)
+                    .then_some(shared.current_active_work_item_id.as_deref())
+                    .flatten()
+            })
+            .unwrap_or(&attempt.work_item_id);
+        lifecycle.validate_issue_worktree_lock_owner(
+            &attempt.project_id,
+            &attempt.issue_id,
+            work_item_id,
+            &attempt.id,
+        )?;
         Ok(())
     }
 
@@ -360,13 +399,19 @@ impl CodingWorkspaceEngine {
         project_id: &str,
         issue_id: &str,
         work_item_id: &str,
+        owner_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
         if lifecycle
             .get_issue_shared_worktree(project_id, issue_id)?
             .is_some()
         {
-            lifecycle.mark_issue_worktree_completed_item(project_id, issue_id, work_item_id)?;
+            lifecycle.mark_issue_worktree_completed_item(
+                project_id,
+                issue_id,
+                work_item_id,
+                owner_id,
+            )?;
         }
         Ok(())
     }
@@ -378,14 +423,16 @@ impl CodingWorkspaceEngine {
         attempt_id: &str,
         work_item_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        let attempt = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         match self
-            .ensure_issue_shared_worktree_clean(project_id, issue_id, attempt_id, work_item_id)
+            .ensure_issue_shared_worktree_clean(&attempt, work_item_id)
             .await
         {
             Ok(()) => self.release_issue_shared_worktree_lock_if_holder(
                 project_id,
                 issue_id,
                 work_item_id,
+                attempt_id,
             ),
             Err(CodingWorkspaceEngineError::SharedWorktreeDirtyManualGate(_)) => Ok(()),
             Err(error) => Err(error),
@@ -409,6 +456,13 @@ impl CodingWorkspaceEngine {
         else {
             return Ok(self.store.get_attempt(project_id, issue_id, attempt_id)?);
         };
+        let code_review_provider_interrupted =
+            super::failed_review_recovery::is_code_review_provider_interrupted_gate(&gate);
+        if code_review_provider_interrupted && action_id != "retry_review" {
+            return Err(CodingWorkspaceEngineError::ProviderStream(
+                "coding_failed_review_recovery_action_not_allowed".to_string(),
+            ));
+        }
         let action = gate
             .available_actions
             .iter()
@@ -419,7 +473,7 @@ impl CodingWorkspaceEngine {
                 )
             })?;
         if action.action_type == CodingGateActionType::RetryReview
-            && super::failed_review_recovery::is_code_review_provider_interrupted_gate(&gate)
+            && code_review_provider_interrupted
         {
             return Err(CodingWorkspaceEngineError::ProviderStream(
                 "coding_failed_review_recovery_requires_reservation".to_string(),
@@ -542,9 +596,7 @@ impl CodingWorkspaceEngine {
                 )?
             }
             CodingGateActionType::SendToCoder => {
-                if super::failed_review_recovery::is_code_review_provider_interrupted_gate(&gate) {
-                    self.send_interrupted_code_review_to_coder(&current, extra_context)?
-                } else if is_code_review_blocked_gate(&gate) {
+                if is_code_review_blocked_gate(&gate) {
                     self.send_code_review_feedback_to_coder(&current, extra_context)?
                 } else {
                     self.send_review_limit_feedback_to_coder(&current, extra_context)?
@@ -554,7 +606,7 @@ impl CodingWorkspaceEngine {
                 if let Some(content) = extra_context
                     && !content.trim().is_empty()
                 {
-                    self.store.create_context_note(&current.id, content)?;
+                    self.store.create_context_note(&current, content)?;
                 }
                 let running = if current.status == CodingAttemptStatus::Blocked {
                     self.store.update_attempt_status(
@@ -583,16 +635,18 @@ impl CodingWorkspaceEngine {
                         )
                     })?;
                 self.store
-                    .create_context_note(&current.id, operator_context.clone())?;
-                self.store
-                    .create_quality_bypass_audit(CreateQualityBypassAuditInput {
+                    .create_context_note(&current, operator_context.clone())?;
+                self.store.create_quality_bypass_audit(
+                    &current,
+                    CreateQualityBypassAuditInput {
                         attempt_id: current.id.clone(),
                         gate_id: gate.gate_id.clone(),
                         stage: gate.stage.clone().unwrap_or_else(|| current.stage.clone()),
                         reason_code: gate.reason_code.clone(),
                         skipped_required_steps: self.latest_missing_required_steps(&current)?,
                         operator_context,
-                    })?;
+                    },
+                )?;
                 if current.status == CodingAttemptStatus::Blocked {
                     self.store.update_attempt_status(
                         project_id,

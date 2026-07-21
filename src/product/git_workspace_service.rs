@@ -3,10 +3,17 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
+use crate::cross_cutting::process_manager::ManagedProcessChild;
 use crate::product::coding_models::{PushStatus, RemoteKind};
+
+mod reconcile;
+mod test_pause;
+
+pub use test_pause::{GitCommandPause, pause_next_git_command_after_exit};
 
 const SAFE_WORKTREE_PREFIXES: &[&str] = &["aria-work-items", "aria-issues"];
 const SAFE_BRANCH_PREFIXES: &[&str] = &["aria/work-items/", "aria/issues/"];
@@ -23,10 +30,18 @@ pub enum GitWorkspaceError {
     },
     #[error("git_workspace_timeout: git {args} in {cwd}")]
     Timeout { args: String, cwd: String },
+    #[error("git_workspace_cancelled: git {args} in {cwd}")]
+    Cancelled { args: String, cwd: String },
     #[error("git_workspace_unsafe_path: {0}")]
     UnsafePath(String),
     #[error("git_workspace_parse: {0}")]
     Parse(String),
+    #[error("git_push_indeterminate: {remote}/{branch} at {commit_sha}")]
+    PushIndeterminate {
+        remote: String,
+        branch: String,
+        commit_sha: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +61,7 @@ pub struct PushResult {
     pub remote: String,
     pub branch: String,
     pub stderr: Option<String>,
+    pub remote_rejected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,13 +81,20 @@ pub struct DiffStat {
 #[derive(Debug, Clone)]
 pub struct GitWorkspaceService {
     command_timeout: Duration,
+    cancellation: CancellationToken,
 }
 
 impl GitWorkspaceService {
     pub fn new() -> Self {
         Self {
             command_timeout: Duration::from_secs(30),
+            cancellation: CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     pub async fn create_branch(
@@ -80,7 +103,7 @@ impl GitWorkspaceService {
         branch_name: &str,
         base_branch: &str,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         ensure_safe_aria_branch_name(branch_name)?;
         let ref_name = format!("refs/heads/{branch_name}");
         let exists = self
@@ -100,7 +123,7 @@ impl GitWorkspaceService {
         branch_name: &str,
         worktree_path: &Path,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         ensure_safe_aria_branch_name(branch_name)?;
         ensure_safe_worktree_path(repo_path, worktree_path)?;
 
@@ -132,7 +155,7 @@ impl GitWorkspaceService {
         repo_path: &Path,
         worktree_path: &Path,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         ensure_safe_worktree_path(repo_path, worktree_path)?;
         if !worktree_path.exists() {
             return Ok(());
@@ -144,7 +167,7 @@ impl GitWorkspaceService {
     }
 
     pub async fn prune_worktrees(&self, repo_path: &Path) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         self.run_git(repo_path, &["worktree", "prune"])
             .await
             .map(|_| ())
@@ -155,7 +178,7 @@ impl GitWorkspaceService {
         repo_path: &Path,
         branch_name: &str,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         ensure_safe_aria_branch_name(branch_name)?;
         let ref_name = format!("refs/heads/{branch_name}");
         let exists = self
@@ -173,7 +196,7 @@ impl GitWorkspaceService {
         &self,
         worktree_path: &Path,
     ) -> Result<Vec<FileStatus>, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self
             .run_git(worktree_path, &["status", "--porcelain"])
             .await?;
@@ -186,7 +209,7 @@ impl GitWorkspaceService {
     }
 
     pub async fn git_add_all(&self, worktree_path: &Path) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         self.run_git(worktree_path, &["add", "-A"])
             .await
             .map(|_| ())
@@ -196,7 +219,7 @@ impl GitWorkspaceService {
         &self,
         worktree_path: &Path,
     ) -> Result<(), GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         self.run_git(worktree_path, &["add", "-A"]).await?;
         let output = self
             .run_git(worktree_path, &["diff", "--cached", "--name-only", "-z"])
@@ -214,7 +237,7 @@ impl GitWorkspaceService {
         &self,
         worktree_path: &Path,
     ) -> Result<bool, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self
             .run_git(worktree_path, &["diff", "--cached", "--name-only", "-z"])
             .await?;
@@ -226,7 +249,7 @@ impl GitWorkspaceService {
         worktree_path: &Path,
         message: &str,
     ) -> Result<CommitResult, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         self.run_git(worktree_path, &["commit", "-m", message])
             .await?;
         let rev = self.run_git(worktree_path, &["rev-parse", "HEAD"]).await?;
@@ -239,7 +262,7 @@ impl GitWorkspaceService {
         &self,
         worktree_path: &Path,
     ) -> Result<String, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let rev = self.run_git(worktree_path, &["rev-parse", "HEAD"]).await?;
         Ok(rev.stdout.trim().to_string())
     }
@@ -250,7 +273,7 @@ impl GitWorkspaceService {
         remote: &str,
         branch: &str,
     ) -> Result<PushResult, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self
             .run_git_allow_failure(worktree_path, &["push", remote, branch])
             .await?;
@@ -259,11 +282,17 @@ impl GitWorkspaceService {
         } else {
             PushStatus::Failed
         };
+        let stderr = (!output.stderr.trim().is_empty()).then_some(output.stderr);
+        let remote_rejected = !output.status_success
+            && stderr
+                .as_deref()
+                .is_some_and(push_output_is_explicit_remote_rejection);
         Ok(PushResult {
             status,
             remote: remote.to_string(),
             branch: branch.to_string(),
-            stderr: (!output.stderr.trim().is_empty()).then_some(output.stderr),
+            stderr,
+            remote_rejected,
         })
     }
 
@@ -271,7 +300,7 @@ impl GitWorkspaceService {
         &self,
         repo_path: &Path,
     ) -> Result<RemoteKind, GitWorkspaceError> {
-        ensure_git_repo(repo_path).await?;
+        self.ensure_git_repo(repo_path).await?;
         let output = self
             .run_git_allow_failure(repo_path, &["remote", "get-url", "origin"])
             .await?;
@@ -295,7 +324,7 @@ impl GitWorkspaceService {
         worktree_path: &Path,
         base_branch: &str,
     ) -> Result<DiffStat, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self
             .run_git(worktree_path, &["diff", "--numstat", base_branch])
             .await?;
@@ -320,7 +349,7 @@ impl GitWorkspaceService {
         worktree_path: &Path,
         base_branch: &str,
     ) -> Result<String, GitWorkspaceError> {
-        ensure_git_repo(worktree_path).await?;
+        self.ensure_git_repo(worktree_path).await?;
         let output = self.run_git(worktree_path, &["diff", base_branch]).await?;
         let mut diff = output.stdout;
         let untracked = self
@@ -411,27 +440,83 @@ impl GitWorkspaceService {
         command
             .args(args)
             .current_dir(cwd)
+            .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let output = timeout(self.command_timeout, command.output())
-            .await
-            .map_err(|_| GitWorkspaceError::Timeout {
-                args: args.join(" "),
-                cwd: cwd.display().to_string(),
-            })?
-            .map_err(|error| {
-                GitWorkspaceError::Io(format!(
-                    "git {} in {}: {error}",
-                    args.join(" "),
-                    cwd.display()
-                ))
-            })?;
+        let args_display = args.join(" ");
+        let cwd_display = cwd.display().to_string();
+        let mut child = ManagedProcessChild::spawn(&mut command).map_err(|error| {
+            GitWorkspaceError::Io(format!("git {args_display} in {cwd_display}: {error}"))
+        })?;
+        let stdout = child.inner().stdout.take().ok_or_else(|| {
+            GitWorkspaceError::Io(format!(
+                "git {args_display} in {cwd_display}: stdout pipe missing"
+            ))
+        })?;
+        let stderr = child.inner().stderr.take().ok_or_else(|| {
+            GitWorkspaceError::Io(format!(
+                "git {args_display} in {cwd_display}: stderr pipe missing"
+            ))
+        })?;
+        let stdout_task = tokio::spawn(read_pipe(stdout));
+        let stderr_task = tokio::spawn(read_pipe(stderr));
+
+        enum Completion {
+            Exited(std::io::Result<std::process::ExitStatus>),
+            TimedOut,
+            Cancelled,
+        }
+
+        let completion = tokio::select! {
+            biased;
+            status = child.wait() => Completion::Exited(status),
+            _ = tokio::time::sleep(self.command_timeout) => Completion::TimedOut,
+            _ = self.cancellation.cancelled() => Completion::Cancelled,
+        };
+        let status = match completion {
+            Completion::Exited(status) => status.map_err(|error| {
+                GitWorkspaceError::Io(format!("wait git {args_display} in {cwd_display}: {error}"))
+            })?,
+            Completion::TimedOut => {
+                child.terminate().await;
+                let _ = join_pipe(stdout_task).await;
+                let _ = join_pipe(stderr_task).await;
+                return Err(GitWorkspaceError::Timeout {
+                    args: args_display,
+                    cwd: cwd_display,
+                });
+            }
+            Completion::Cancelled => {
+                child.terminate().await;
+                let _ = join_pipe(stdout_task).await;
+                let _ = join_pipe(stderr_task).await;
+                return Err(GitWorkspaceError::Cancelled {
+                    args: args_display,
+                    cwd: cwd_display,
+                });
+            }
+        };
+        let stdout = join_pipe(stdout_task).await?;
+        let stderr = join_pipe(stderr_task).await?;
+        test_pause::pause_git_command_after_exit_if_configured(cwd, &args_display).await;
+        if self.cancellation.is_cancelled() {
+            return Err(GitWorkspaceError::Cancelled {
+                args: args_display,
+                cwd: cwd_display,
+            });
+        }
         Ok(GitCommandOutput {
-            status_success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            status_success: status.success(),
+            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
         })
+    }
+
+    async fn ensure_git_repo(&self, path: &Path) -> Result<(), GitWorkspaceError> {
+        self.run_git(path, &["rev-parse", "--show-toplevel"])
+            .await
+            .map(|_| ())
     }
 }
 
@@ -447,26 +532,21 @@ struct GitCommandOutput {
     stderr: String,
 }
 
-async fn ensure_git_repo(path: &Path) -> Result<(), GitWorkspaceError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|error| {
-            GitWorkspaceError::Io(format!("git rev-parse in {}: {error}", path.display()))
-        })?;
-    if !output.status.success() {
-        return Err(GitWorkspaceError::CommandFailed {
-            args: "rev-parse --show-toplevel".to_string(),
-            cwd: path.display().to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
-    Ok(())
+async fn read_pipe<R>(mut pipe: R) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes).await?;
+    Ok(bytes)
+}
+
+async fn join_pipe(
+    task: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> Result<Vec<u8>, GitWorkspaceError> {
+    task.await
+        .map_err(|error| GitWorkspaceError::Io(format!("join git output reader: {error}")))?
+        .map_err(|error| GitWorkspaceError::Io(format!("read git output: {error}")))
 }
 
 fn ensure_safe_worktree_path(
@@ -588,6 +668,13 @@ fn should_exclude_from_work_item_commit(path: &str) -> bool {
         || path.ends_with(".pyc")
 }
 
+fn push_output_is_explicit_remote_rejection(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("[remote rejected]")
+        || stderr.contains("[rejected]")
+        || stderr.contains("remote: error:")
+}
+
 fn parse_numstat_line(line: &str) -> Result<DiffFileStat, GitWorkspaceError> {
     let mut parts = line.split('\t');
     let insertions = parse_numstat_count(parts.next(), line)?;
@@ -613,3 +700,8 @@ fn parse_numstat_count(value: Option<&str>, line: &str) -> Result<u32, GitWorksp
         .parse::<u32>()
         .map_err(|error| GitWorkspaceError::Parse(format!("{value}: {error}")))
 }
+
+#[cfg(test)]
+mod push_tests;
+#[cfg(all(test, unix))]
+mod tests;

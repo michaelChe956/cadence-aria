@@ -1,3 +1,4 @@
+use super::coding::CoderExecutionOutcome;
 use super::*;
 
 impl CodingWorkspaceEngine {
@@ -9,9 +10,27 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        let current =
-            self.store
-                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        Ok(self
+            .execute_coder_fix_from_review_outcome(
+                attempt,
+                review_report,
+                context,
+                provider,
+                command_rx,
+            )
+            .await?
+            .attempt)
+    }
+
+    pub(crate) async fn execute_coder_fix_from_review_outcome(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        review_report: &CodeReviewReport,
+        context: &CodingExecutionContext,
+        provider: &dyn StreamingProviderAdapter,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<CoderExecutionOutcome, CodingWorkspaceEngineError> {
+        let current = self.store.ensure_provider_run_allowed(attempt)?;
         let rework_round = current.rework_count + 1;
         if current.rework_count >= current.max_auto_rework {
             let actions = vec![
@@ -19,7 +38,7 @@ impl CodingWorkspaceEngine {
                 coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ];
-            let gate = self.store.create_blocked_gate(CreateBlockedGateInput {
+            let gate = self.store.create_blocked_gate(&current, CreateBlockedGateInput {
                 attempt_id: current.id.clone(),
                 stage: CodingExecutionStage::CodeReview,
                 node_id: None,
@@ -47,6 +66,11 @@ impl CodingWorkspaceEngine {
                     &current.id,
                     CodingAttemptStatus::WaitingForHuman,
                 )
+                .map(|attempt| CoderExecutionOutcome {
+                    attempt,
+                    plan_defect_decision: None,
+                    plan_defect_report: None,
+                })
                 .map_err(CodingWorkspaceEngineError::from);
         }
 
@@ -77,7 +101,7 @@ impl CodingWorkspaceEngine {
             consumed_by_node_id: None,
             consumed_at: None,
         };
-        self.store.save_rework_instruction(&instruction)?;
+        self.store.save_rework_instruction(&current, &instruction)?;
 
         let running = if current.status == CodingAttemptStatus::Running {
             current
@@ -123,17 +147,21 @@ impl CodingWorkspaceEngine {
             &CodingProviderRole::Coder,
             &coder_provider_name,
         );
-        let full_prompt = build_coding_prompt(&updated, context, Some(&instruction), None);
-        let prompt_mode = if resume_provider_session_id.is_some() {
-            CodingPromptMode::DeltaOnly
-        } else {
+        let rendered_context =
+            self.render_coder_unit_run_context(&updated, &coder_provider_name, None)?;
+        let delta_prompt = build_coding_delta_prompt(&updated, context, Some(&instruction), None);
+        let full_prompt = rendered_context
+            .as_ref()
+            .map(|rendered| format!("{}\n\n{}", rendered.text, delta_prompt))
+            .unwrap_or_else(|| build_coding_prompt(&updated, context, Some(&instruction), None));
+        let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
+        } else {
+            CodingPromptMode::DeltaOnly
         };
         let prompt = match prompt_mode {
             CodingPromptMode::FullConversation => full_prompt.clone(),
-            CodingPromptMode::DeltaOnly => {
-                build_coding_delta_prompt(&updated, context, Some(&instruction), None)
-            }
+            CodingPromptMode::DeltaOnly => delta_prompt,
         };
         let _ = self
             .event_tx
@@ -201,8 +229,19 @@ impl CodingWorkspaceEngine {
                 timeout_reason_code: None,
             })
             .await?;
+        let (plan_defect_report, plan_defect_decision) =
+            match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
+                Ok(report) if report.findings.is_empty() => (None, None),
+                Ok(report) => {
+                    let projection = self.reviewer_projection_for_attempt(&updated)?;
+                    let decision = execution_plan_defect_flow_decision(&report, &projection);
+                    (Some(report), Some(decision))
+                }
+                Err(_) => (None, Some(CodeReviewFlowDecision::StopForHumanTriage)),
+            };
+        let plan_defect_route = plan_defect_decision.map(CodeReviewFlowDecision::label);
         let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &updated.id,
+            &updated,
             CodingExecutionStage::Coding,
             "coder_output",
             &full_output,
@@ -240,17 +279,29 @@ impl CodingWorkspaceEngine {
             full_output: &full_output,
             raw_provider_output_ref: &raw_provider_output_ref,
             source: "coding",
+            plan_defect_route,
         })
         .await;
 
-        self.store
-            .update_attempt_stage(
-                &updated.project_id,
-                &updated.issue_id,
-                &updated.id,
-                CodingExecutionStage::CodeReview,
-            )
-            .map_err(CodingWorkspaceEngineError::from)
+        let attempt = if plan_defect_decision
+            .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
+        {
+            updated
+        } else {
+            self.store
+                .update_attempt_stage(
+                    &updated.project_id,
+                    &updated.issue_id,
+                    &updated.id,
+                    CodingExecutionStage::CodeReview,
+                )
+                .map_err(CodingWorkspaceEngineError::from)?
+        };
+        Ok(CoderExecutionOutcome {
+            attempt,
+            plan_defect_decision,
+            plan_defect_report,
+        })
     }
 
     pub fn send_review_limit_feedback_to_coder_for_attempt(
@@ -285,7 +336,7 @@ impl CodingWorkspaceEngine {
             && !content.trim().is_empty()
         {
             self.store
-                .create_context_note(&current.id, content.trim().to_string())?;
+                .create_context_note(current, content.trim().to_string())?;
         }
 
         let review_report = self
@@ -328,7 +379,7 @@ impl CodingWorkspaceEngine {
             consumed_by_node_id: None,
             consumed_at: None,
         };
-        self.store.save_rework_instruction(&instruction)?;
+        self.store.save_rework_instruction(current, &instruction)?;
 
         let running = if current.status == CodingAttemptStatus::Running {
             current.clone()
@@ -378,8 +429,7 @@ impl CodingWorkspaceEngine {
                     "coding_gate_extra_context_required".to_string(),
                 )
             })?;
-        self.store
-            .create_context_note(&current.id, operator_context)?;
+        self.store.create_context_note(current, operator_context)?;
 
         let review_report = self
             .store
@@ -418,7 +468,7 @@ impl CodingWorkspaceEngine {
             consumed_by_node_id: None,
             consumed_at: None,
         };
-        self.store.save_rework_instruction(&instruction)?;
+        self.store.save_rework_instruction(current, &instruction)?;
 
         let running = if current.status == CodingAttemptStatus::Running {
             current.clone()

@@ -218,18 +218,21 @@ async fn blocked_gate_response_is_idempotent_across_reconnects() {
         )
         .expect("blocked");
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Tester),
-            title: "Testing blocked".to_string(),
-            description: "missing required step".to_string(),
-            reason_code: Some("missing_required_steps".to_string()),
-            evidence_refs: vec!["testing_report_0001.json".to_string()],
-            raw_provider_output_ref: None,
-            available_actions: testing_blocked_gate_actions(),
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing blocked".to_string(),
+                description: "missing required step".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec!["testing_report_0001.json".to_string()],
+                raw_provider_output_ref: None,
+                available_actions: testing_blocked_gate_actions(),
+            },
+        )
         .expect("blocked gate");
     assert_eq!(
         store
@@ -321,41 +324,48 @@ async fn manual_continue_persists_quality_bypass_audit_and_injects_reviewer_cont
         )
         .expect("blocked");
     store
-        .save_testing_report(&TestingReport {
-            id: "testing_report_0001".to_string(),
-            attempt_id: attempt.id.clone(),
-            role_run_id: None,
-            run_no: None,
-            commands: Vec::new(),
-            overall_status: TestingOverallStatus::Blocked,
-            provider_claim: None,
-            backend_verified: true,
-            started_at: "2026-06-10T00:00:00Z".to_string(),
-            completed_at: Some("2026-06-10T00:00:01Z".to_string()),
-            plan_id: Some("test_plan_0001".to_string()),
-            plan_summary: Some("unit checks".to_string()),
-            steps: Vec::new(),
-            unplanned_commands: Vec::new(),
-            unplanned_evidence: Vec::new(),
-            missing_required_steps: vec!["unit".to_string()],
-            skipped_required_steps: Vec::new(),
-            context_warnings: Vec::new(),
-            raw_provider_output_ref: None,
-        })
+        .save_testing_report(
+            &attempt,
+            &TestingReport {
+                id: "testing_report_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                role_run_id: None,
+                run_no: None,
+                commands: Vec::new(),
+                overall_status: TestingOverallStatus::Blocked,
+                provider_claim: None,
+                backend_verified: true,
+                started_at: "2026-06-10T00:00:00Z".to_string(),
+                completed_at: Some("2026-06-10T00:00:01Z".to_string()),
+                plan_id: Some("test_plan_0001".to_string()),
+                plan_summary: Some("unit checks".to_string()),
+                steps: Vec::new(),
+                unplanned_commands: Vec::new(),
+                unplanned_evidence: Vec::new(),
+                missing_required_steps: vec!["unit".to_string()],
+                skipped_required_steps: Vec::new(),
+                context_warnings: Vec::new(),
+                raw_provider_output_ref: None,
+                plan_defect_findings: Vec::new(),
+            },
+        )
         .expect("testing report");
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Tester),
-            title: "Testing blocked".to_string(),
-            description: "missing required step".to_string(),
-            reason_code: Some("missing_required_steps".to_string()),
-            evidence_refs: vec!["testing_report_0001.json".to_string()],
-            raw_provider_output_ref: None,
-            available_actions: testing_blocked_gate_actions(),
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing blocked".to_string(),
+                description: "missing required step".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec!["testing_report_0001.json".to_string()],
+                raw_provider_output_ref: None,
+                available_actions: testing_blocked_gate_actions(),
+            },
+        )
         .expect("blocked gate");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -459,53 +469,67 @@ async fn send_to_coder_after_review_limit_uses_latest_code_review_without_qualit
         )
         .expect("blocked");
     store
-        .save_code_review_report(&CodeReviewReport {
-            id: "code_review_report_0001".to_string(),
-            attempt_id: attempt.id.clone(),
-            round: 3,
-            verdict: ReviewVerdict::RequestChanges,
-            findings: vec![ReviewFinding {
-                severity: FindingSeverity::Error,
-                file_path: Some("src/lib.rs".to_string()),
-                line: Some(42),
-                message: "missing validation".to_string(),
-                required_action: Some("add validation".to_string()),
-                source_stage: CodingExecutionStage::CodeReview,
-                evidence: vec!["code_review_0001/findings[0]".to_string()],
-                related_requirements: Vec::new(),
-                related_design_constraints: Vec::new(),
-                related_work_item_tasks: Vec::new(),
-            }],
-            tested_evidence_refs: Vec::new(),
-            diff_refs: vec!["diffs/code_review_0001.patch".to_string()],
-            summary: "reviewer requested validation fix".to_string(),
-            created_at: "2026-06-14T00:00:00Z".to_string(),
-            raw_provider_output_ref: Some(
-                "provider-raw/code_review/code_review_0001.txt".to_string(),
-            ),
-            role_run_id: None,
-            run_no: Some(1),
-        })
+        .save_code_review_report(
+            &attempt,
+            &CodeReviewReport {
+                id: "code_review_report_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                round: 3,
+                verdict: ReviewVerdict::RequestChanges,
+                findings: vec![ReviewFinding {
+                    severity: FindingSeverity::Error,
+                    file_path: Some("src/lib.rs".to_string()),
+                    line: Some(42),
+                    message: "missing validation".to_string(),
+                    required_action: Some("add validation".to_string()),
+                    source_stage: CodingExecutionStage::CodeReview,
+                    evidence: vec!["code_review_0001/findings[0]".to_string()],
+                    plan_defect_evidence: Vec::new(),
+                    related_requirements: Vec::new(),
+                    related_design_constraints: Vec::new(),
+                    related_work_item_tasks: Vec::new(),
+                    defect_class: crate::product::models::PlanDefectClass::ImplementationDefect,
+                    reason_code: None,
+                    contract_refs: Vec::new(),
+                    capability_refs: Vec::new(),
+                    repair_target: None,
+                    recommended_route: crate::product::models::PlanDefectRoute::CoderRework,
+                    confidence: None,
+                }],
+                tested_evidence_refs: Vec::new(),
+                diff_refs: vec!["diffs/code_review_0001.patch".to_string()],
+                summary: "reviewer requested validation fix".to_string(),
+                created_at: "2026-06-14T00:00:00Z".to_string(),
+                raw_provider_output_ref: Some(
+                    "provider-raw/code_review/code_review_0001.txt".to_string(),
+                ),
+                role_run_id: None,
+                run_no: Some(1),
+            },
+        )
         .expect("code review report");
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            node_id: None,
-            role: Some(CodingProviderRole::CodeReviewer),
-            title: "Code Review 修复超上限".to_string(),
-            description: "已达到自动修复上限".to_string(),
-            reason_code: Some("reviewer_rework_limit_reached".to_string()),
-            evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
-            raw_provider_output_ref: Some(
-                "provider-raw/code_review/code_review_0001.txt".to_string(),
-            ),
-            available_actions: vec![
-                coding_gate_action_for_id("provide_context").expect("provide context action"),
-                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
-                coding_gate_action_for_id("abort").expect("abort action"),
-            ],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                node_id: None,
+                role: Some(CodingProviderRole::CodeReviewer),
+                title: "Code Review 修复超上限".to_string(),
+                description: "已达到自动修复上限".to_string(),
+                reason_code: Some("reviewer_rework_limit_reached".to_string()),
+                evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
+                raw_provider_output_ref: Some(
+                    "provider-raw/code_review/code_review_0001.txt".to_string(),
+                ),
+                available_actions: vec![
+                    coding_gate_action_for_id("provide_context").expect("provide context action"),
+                    coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        )
         .expect("blocked gate");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -604,53 +628,67 @@ async fn send_to_coder_after_review_limit_accepts_actionable_blocked_code_review
         )
         .expect("waiting");
     store
-        .save_code_review_report(&CodeReviewReport {
-            id: "code_review_report_0001".to_string(),
-            attempt_id: attempt.id.clone(),
-            round: 3,
-            verdict: ReviewVerdict::Blocked,
-            findings: vec![ReviewFinding {
-                severity: FindingSeverity::Error,
-                file_path: Some("src/lib.rs".to_string()),
-                line: Some(42),
-                message: "missing validation".to_string(),
-                required_action: Some("add validation".to_string()),
-                source_stage: CodingExecutionStage::CodeReview,
-                evidence: vec!["code_review_0001/findings[0]".to_string()],
-                related_requirements: Vec::new(),
-                related_design_constraints: Vec::new(),
-                related_work_item_tasks: Vec::new(),
-            }],
-            tested_evidence_refs: Vec::new(),
-            diff_refs: vec!["diffs/code_review_0001.patch".to_string()],
-            summary: "reviewer blocked on actionable validation fix".to_string(),
-            created_at: "2026-06-14T00:00:00Z".to_string(),
-            raw_provider_output_ref: Some(
-                "provider-raw/code_review/code_review_0001.txt".to_string(),
-            ),
-            role_run_id: None,
-            run_no: Some(1),
-        })
+        .save_code_review_report(
+            &attempt,
+            &CodeReviewReport {
+                id: "code_review_report_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                round: 3,
+                verdict: ReviewVerdict::Blocked,
+                findings: vec![ReviewFinding {
+                    severity: FindingSeverity::Error,
+                    file_path: Some("src/lib.rs".to_string()),
+                    line: Some(42),
+                    message: "missing validation".to_string(),
+                    required_action: Some("add validation".to_string()),
+                    source_stage: CodingExecutionStage::CodeReview,
+                    evidence: vec!["code_review_0001/findings[0]".to_string()],
+                    plan_defect_evidence: Vec::new(),
+                    related_requirements: Vec::new(),
+                    related_design_constraints: Vec::new(),
+                    related_work_item_tasks: Vec::new(),
+                    defect_class: crate::product::models::PlanDefectClass::ImplementationDefect,
+                    reason_code: None,
+                    contract_refs: Vec::new(),
+                    capability_refs: Vec::new(),
+                    repair_target: None,
+                    recommended_route: crate::product::models::PlanDefectRoute::CoderRework,
+                    confidence: None,
+                }],
+                tested_evidence_refs: Vec::new(),
+                diff_refs: vec!["diffs/code_review_0001.patch".to_string()],
+                summary: "reviewer blocked on actionable validation fix".to_string(),
+                created_at: "2026-06-14T00:00:00Z".to_string(),
+                raw_provider_output_ref: Some(
+                    "provider-raw/code_review/code_review_0001.txt".to_string(),
+                ),
+                role_run_id: None,
+                run_no: Some(1),
+            },
+        )
         .expect("code review report");
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            node_id: None,
-            role: Some(CodingProviderRole::CodeReviewer),
-            title: "Code Review 修复超上限".to_string(),
-            description: "已达到自动修复上限".to_string(),
-            reason_code: Some("reviewer_rework_limit_reached".to_string()),
-            evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
-            raw_provider_output_ref: Some(
-                "provider-raw/code_review/code_review_0001.txt".to_string(),
-            ),
-            available_actions: vec![
-                coding_gate_action_for_id("provide_context").expect("provide context action"),
-                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
-                coding_gate_action_for_id("abort").expect("abort action"),
-            ],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                node_id: None,
+                role: Some(CodingProviderRole::CodeReviewer),
+                title: "Code Review 修复超上限".to_string(),
+                description: "已达到自动修复上限".to_string(),
+                reason_code: Some("reviewer_rework_limit_reached".to_string()),
+                evidence_refs: vec!["code_review_0001/findings[0]".to_string()],
+                raw_provider_output_ref: Some(
+                    "provider-raw/code_review/code_review_0001.txt".to_string(),
+                ),
+                available_actions: vec![
+                    coding_gate_action_for_id("provide_context").expect("provide context action"),
+                    coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        )
         .expect("blocked gate");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);

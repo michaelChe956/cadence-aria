@@ -2,7 +2,6 @@ use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
 use crate::product::models::WorkspaceSessionSummaryRecord;
 use crate::web::error::sanitize_repository_api_warnings;
-
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
 ) -> IssueWorkItemPlanDetailDto {
@@ -407,6 +406,8 @@ pub(crate) fn lifecycle_work_item_dto(
 pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {
     CodingAttemptDto {
         attempt_id: attempt.id.clone(),
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
         work_item_id: attempt.work_item_id.clone(),
         attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
         work_item_group_id: attempt.work_item_group_id.clone(),
@@ -432,28 +433,27 @@ pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAtte
         updated_at: attempt.updated_at.clone(),
     }
 }
-
 pub(crate) fn coding_execution_unit_dto(
     unit: &crate::product::coding_models::CodingExecutionUnit,
 ) -> CodingExecutionUnitDto {
     CodingExecutionUnitDto {
         unit_id: unit.id.clone(),
-        work_item_id: unit.work_item_id.clone(),
+        logical_work_item_id: unit.logical_work_item_id.clone(),
+        work_item_revision_id: unit.work_item_revision_id.clone(),
+        dependency_logical_work_item_ids: unit.dependency_logical_work_item_ids.clone(),
         order_index: unit.order_index,
         status: coding_execution_unit_status_text(&unit.status).to_string(),
         summary: unit.summary.clone(),
-        handoff_ref: unit.handoff_ref.clone(),
+        latest_handoff_revision_id: unit.latest_handoff_revision_id.clone(),
         completion_commit: unit.completion_commit.clone(),
     }
 }
-
 pub(crate) fn coding_attempt_scope_text(scope: &CodingAttemptScope) -> &'static str {
     match scope {
         CodingAttemptScope::WorkItem => "work_item",
         CodingAttemptScope::WorkItemGroup => "work_item_group",
     }
 }
-
 pub(crate) fn coding_execution_unit_status_text(
     status: &CodingExecutionUnitStatus,
 ) -> &'static str {
@@ -464,10 +464,14 @@ pub(crate) fn coding_execution_unit_status_text(
         CodingExecutionUnitStatus::Completed => "completed",
         CodingExecutionUnitStatus::Failed => "failed",
         CodingExecutionUnitStatus::Blocked => "blocked",
+        CodingExecutionUnitStatus::BlockedByPlanDefect => "blocked_by_plan_defect",
+        CodingExecutionUnitStatus::AwaitingAmendment => "awaiting_amendment",
+        CodingExecutionUnitStatus::NeedsRevalidation => "needs_revalidation",
+        CodingExecutionUnitStatus::Stale => "stale",
+        CodingExecutionUnitStatus::Superseded => "superseded",
         CodingExecutionUnitStatus::Skipped => "skipped",
     }
 }
-
 pub(crate) fn active_coding_timeline_node_id(nodes: &[CodingTimelineNode]) -> Option<String> {
     nodes
         .last()
@@ -672,7 +676,6 @@ pub(crate) fn work_item_plan_status_text(status: &WorkItemPlanStatus) -> &'stati
         WorkItemPlanStatus::ChangeRequested => "change_requested",
     }
 }
-
 pub(crate) fn work_item_status_text(status: &WorkItemStatus) -> &'static str {
     match status {
         WorkItemStatus::Pending => "pending",
@@ -682,7 +685,6 @@ pub(crate) fn work_item_status_text(status: &WorkItemStatus) -> &'static str {
         WorkItemStatus::Blocked => "blocked",
     }
 }
-
 pub(crate) fn work_item_kind_text(kind: &WorkItemKind) -> &'static str {
     match kind {
         WorkItemKind::Backend => "backend",
@@ -694,7 +696,6 @@ pub(crate) fn work_item_kind_text(kind: &WorkItemKind) -> &'static str {
         WorkItemKind::Other => "other",
     }
 }
-
 pub(crate) fn work_item_execution_plan_status_text(
     status: &WorkItemExecutionPlanStatus,
 ) -> &'static str {
@@ -705,19 +706,20 @@ pub(crate) fn work_item_execution_plan_status_text(
         WorkItemExecutionPlanStatus::ChangeRequested => "change_requested",
     }
 }
-
 pub(crate) fn coding_attempt_status_text(status: &CodingAttemptStatus) -> &'static str {
     match status {
         CodingAttemptStatus::Created => "created",
         CodingAttemptStatus::Running => "running",
         CodingAttemptStatus::WaitingForHuman => "waiting_for_human",
         CodingAttemptStatus::Blocked => "blocked",
+        CodingAttemptStatus::AwaitingPlanAmendment => "awaiting_plan_amendment",
+        CodingAttemptStatus::ApplyingPlanAmendment => "applying_plan_amendment",
+        CodingAttemptStatus::AmendmentApplyFailed => "amendment_apply_failed",
         CodingAttemptStatus::Completed => "completed",
         CodingAttemptStatus::Failed => "failed",
         CodingAttemptStatus::Aborted => "aborted",
     }
 }
-
 pub(crate) fn coding_execution_stage_text(stage: &CodingExecutionStage) -> &'static str {
     match stage {
         CodingExecutionStage::PrepareContext => "prepare_context",
@@ -730,7 +732,6 @@ pub(crate) fn coding_execution_stage_text(stage: &CodingExecutionStage) -> &'sta
         CodingExecutionStage::FinalConfirm => "final_confirm",
     }
 }
-
 pub(crate) fn push_status_text(status: &PushStatus) -> &'static str {
     match status {
         PushStatus::NotPushed => "not_pushed",

@@ -1,9 +1,20 @@
-use crate::product::coding_models::{CodingTimelineNode, CodingTimelineNodeStatus};
+use crate::product::coding_models::{
+    CodingExecutionAttempt, CodingTimelineNode, CodingTimelineNodeStatus,
+};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
-    pub fn save_timeline_node(&self, node: CodingTimelineNode) -> Result<(), ProductStoreError> {
-        let attempt = self.find_attempt_by_id(&node.attempt_id)?;
+    pub fn save_timeline_node(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node: CodingTimelineNode,
+    ) -> Result<(), ProductStoreError> {
+        self.validate_scoped_attempt_record(
+            attempt,
+            &node.attempt_id,
+            "coding_timeline_node",
+            &node.id,
+        )?;
         let path = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("timeline-nodes.json");

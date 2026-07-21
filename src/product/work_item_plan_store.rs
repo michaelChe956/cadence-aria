@@ -449,11 +449,24 @@ fn validate_draft_record(record: &WorkItemDraftRecord) -> Result<(), ProductStor
     validate_optional_id(record.copied_from_draft_id.as_deref())?;
     validate_optional_id(record.review_node_id.as_deref())?;
     validate_relative_id(&record.candidate.outline_id)?;
-    for outline_id in &record.candidate.depends_on_outline_ids {
-        validate_relative_id(outline_id)?;
+    validate_relative_id(&record.candidate.logical_work_item_id)?;
+    if record.candidate.logical_work_item_id
+        != record
+            .candidate
+            .canonical_contract_candidate
+            .identity
+            .logical_work_item_id
+    {
+        return Err(ProductStoreError::Json(
+            "draft logical identity does not match canonical contract".to_string(),
+        ));
     }
-    for outline_id in &record.candidate.required_handoff_from_outline_ids {
-        validate_relative_id(outline_id)?;
+    for input in &record
+        .candidate
+        .canonical_contract_candidate
+        .input_contracts
+    {
+        validate_relative_id(&input.provider_logical_work_item_id)?;
     }
     validate_draft_batch_semantics(record)?;
     Ok(())

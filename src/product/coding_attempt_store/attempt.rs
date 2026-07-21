@@ -1,6 +1,5 @@
-use std::path::Path;
-
 use chrono::Utc;
+use uuid::Uuid;
 
 use crate::product::coding_attempt_store::CreateCodingAttemptInput;
 use crate::product::coding_models::{
@@ -14,26 +13,48 @@ use crate::product::json_store::{
 use crate::product::models::{ProviderConversationRef, WorkItemExecutionPlanStatus};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
+use super::WorkItemAttemptCreationGuard;
+use super::locking::with_exclusive_lock;
+
 impl super::CodingAttemptStore {
     pub fn create_attempt(
         &self,
         input: CreateCodingAttemptInput,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let guard = self.acquire_work_item_attempt_creation(
+            &input.project_id,
+            &input.issue_id,
+            &input.work_item_id,
+        )?;
+        self.create_attempt_with_guard(input, &guard)
+    }
+
+    pub(crate) fn create_attempt_with_guard(
+        &self,
+        input: CreateCodingAttemptInput,
+        guard: &WorkItemAttemptCreationGuard,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.work_item_id)?;
         super::validate_max_auto_rework(input.max_auto_rework)?;
+        guard.validate_identity(
+            self,
+            &input.project_id,
+            &input.issue_id,
+            &input.work_item_id,
+        )?;
 
         if let Some(active) =
             self.get_active_attempt(&input.project_id, &input.issue_id, &input.work_item_id)?
         {
-            return Err(ProductStoreError::Io(format!(
-                "active_coding_attempt_exists: {}",
-                active.id
-            )));
+            return Err(ProductStoreError::Conflict {
+                kind: "active_coding_attempt",
+                id: active.id,
+            });
         }
 
-        let id = self.allocate_coding_attempt_id(&input.project_id, &input.issue_id)?;
+        let id = self.allocate_coding_attempt_id();
         let attempt_no = self
             .list_attempts_for_work_item(&input.project_id, &input.issue_id, &input.work_item_id)?
             .iter()
@@ -70,14 +91,20 @@ impl super::CodingAttemptStore {
             completed_at: None,
         };
 
-        write_json(
-            &self.attempt_path(&attempt.project_id, &attempt.issue_id, &id),
-            &attempt,
-        )?;
-        write_json(
-            &self.role_provider_config_path(&attempt.project_id, &attempt.issue_id, &id),
+        let attempt_path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &id);
+        write_json(&attempt_path, &attempt)?;
+        let provider_config_path =
+            self.role_provider_config_path(&attempt.project_id, &attempt.issue_id, &id);
+        if let Err(error) = write_json(
+            &provider_config_path,
             &CodingRoleProviderConfigSnapshot::from(&attempt.provider_config_snapshot),
-        )?;
+        ) {
+            let _ = std::fs::remove_file(&attempt_path);
+            if let Some(parent) = provider_config_path.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+            return Err(error);
+        }
         Ok(attempt)
     }
 
@@ -99,46 +126,8 @@ impl super::CodingAttemptStore {
         Ok(())
     }
 
-    pub(crate) fn allocate_coding_attempt_id(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-    ) -> Result<String, ProductStoreError> {
-        let sequence_path = self.coding_attempt_sequence_path(project_id, issue_id);
-        let last_sequence = if super::path_is_regular_file(&sequence_path)? {
-            read_json::<u64>(&sequence_path)?
-        } else {
-            max_existing_coding_attempt_sequence(&self.coding_attempts_root(project_id, issue_id))?
-        };
-        let next_sequence = last_sequence + 1;
-        write_json(&sequence_path, &next_sequence)?;
-        Ok(format!("coding_attempt_{next_sequence:04}"))
-    }
-
-    fn record_coding_attempt_sequence_at_least(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        sequence: u64,
-    ) -> Result<(), ProductStoreError> {
-        let sequence_path = self.coding_attempt_sequence_path(project_id, issue_id);
-        let sequence_file_exists = super::path_is_regular_file(&sequence_path)?;
-        let current = if sequence_file_exists {
-            read_json::<u64>(&sequence_path)?
-        } else {
-            max_existing_coding_attempt_sequence(&self.coding_attempts_root(project_id, issue_id))?
-        };
-        let recorded = current.max(sequence);
-        if !sequence_file_exists || recorded > current {
-            write_json(&sequence_path, &recorded)?;
-        }
-        Ok(())
-    }
-
-    fn coding_attempt_sequence_path(&self, project_id: &str, issue_id: &str) -> std::path::PathBuf {
-        self.coding_attempts_root(project_id, issue_id)
-            .join(".meta")
-            .join("coding-attempt-sequence.json")
+    pub(crate) fn allocate_coding_attempt_id(&self) -> String {
+        format!("coding_attempt_{}", Uuid::new_v4().simple())
     }
 
     pub fn get_attempt(
@@ -157,7 +146,17 @@ impl super::CodingAttemptStore {
                 id: attempt_id.to_string(),
             });
         }
-        read_json(&path)
+        let attempt: CodingExecutionAttempt = read_json(&path)?;
+        if attempt.project_id != project_id
+            || attempt.issue_id != issue_id
+            || attempt.id != attempt_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_attempt",
+                id: attempt_id.to_string(),
+            });
+        }
+        Ok(attempt)
     }
 
     pub fn save_work_item_execution_plan(
@@ -364,9 +363,7 @@ impl super::CodingAttemptStore {
         validate_relative_id(issue_id)?;
         validate_relative_id(attempt_id)?;
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if let Some(sequence) = coding_attempt_sequence_from_id(attempt_id) {
-            self.record_coding_attempt_sequence_at_least(project_id, issue_id, sequence)?;
-        }
+        self.delete_group_initialization_for_attempt(&attempt)?;
         super::remove_file_if_exists(&self.attempt_path(project_id, issue_id, attempt_id))?;
         super::remove_dir_all_if_exists(&self.attempt_dir(project_id, issue_id, attempt_id))?;
         Ok(attempt)
@@ -392,27 +389,49 @@ impl super::CodingAttemptStore {
         attempt_id: &str,
         status: CodingAttemptStatus,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let _recovery_arbitration = if status == CodingAttemptStatus::AwaitingPlanAmendment {
+            Some(self.acquire_failed_code_review_recovery_arbitration(
+                project_id, issue_id, attempt_id,
+            )?)
+        } else {
+            None
+        };
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if !valid_status_transition(&attempt.status, &status) {
-            return Err(ProductStoreError::Io(format!(
-                "invalid_coding_attempt_status_transition: {:?} -> {:?}",
-                attempt.status, status
-            )));
-        }
-        let now = Utc::now().to_rfc3339();
-        if matches!(
-            status,
-            CodingAttemptStatus::Completed
-                | CodingAttemptStatus::Failed
-                | CodingAttemptStatus::Aborted
-        ) {
-            attempt.completed_at = Some(now.clone());
-        }
-        attempt.status = status;
-        attempt.updated_at = now;
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            if !valid_status_transition(&attempt.status, &status) {
+                return Err(ProductStoreError::Io(format!(
+                    "invalid_coding_attempt_status_transition: {:?} -> {:?}",
+                    attempt.status, status
+                )));
+            }
+            if attempt.scope == CodingAttemptScope::WorkItemGroup
+                && matches!(
+                    &status,
+                    CodingAttemptStatus::Completed
+                        | CodingAttemptStatus::Failed
+                        | CodingAttemptStatus::Aborted
+                )
+            {
+                return self.update_group_terminal_status_locked(attempt, status);
+            }
+            if status == CodingAttemptStatus::AwaitingPlanAmendment {
+                self.rollback_failed_code_review_recovery_for_plan_amendment_locked(&attempt)?;
+            }
+            let now = Utc::now().to_rfc3339();
+            if matches!(
+                status,
+                CodingAttemptStatus::Completed
+                    | CodingAttemptStatus::Failed
+                    | CodingAttemptStatus::Aborted
+            ) {
+                attempt.completed_at = Some(now.clone());
+            }
+            attempt.status = status;
+            attempt.updated_at = now;
+            write_json(&path, &attempt)?;
+            Ok(attempt)
+        })
     }
 
     pub fn reopen_failed_code_review_attempt(
@@ -421,20 +440,10 @@ impl super::CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
-        let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if attempt.status != CodingAttemptStatus::Failed
-            || attempt.stage != CodingExecutionStage::CodeReview
-        {
-            return Err(ProductStoreError::Io(
-                "coding_failed_review_not_recoverable".to_string(),
-            ));
-        }
-        attempt.status = CodingAttemptStatus::Blocked;
-        attempt.completed_at = None;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        self.get_attempt(project_id, issue_id, attempt_id)?;
+        Err(ProductStoreError::Io(
+            "coding_failed_review_not_recoverable".to_string(),
+        ))
     }
 
     pub fn update_attempt_stage(
@@ -591,27 +600,32 @@ impl super::CodingAttemptStore {
 
     pub fn replace_attempt_provider_conversations(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         provider_conversations: Vec<ProviderConversationRef>,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
-        validate_relative_id(attempt_id)?;
-        let mut attempt = self.find_attempt_by_id(attempt_id)?;
-        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
-        attempt.provider_conversations = provider_conversations;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        self.validate_scoped_attempt_record(attempt, &attempt.id, "coding_attempt", &attempt.id)?;
+        let mut updated = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let path = self.attempt_path(&updated.project_id, &updated.issue_id, &updated.id);
+        updated.provider_conversations = provider_conversations;
+        updated.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &updated)?;
+        Ok(updated)
     }
 
     pub fn read_attempt_artifact_text(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         artifact_ref: &str,
     ) -> Result<String, ProductStoreError> {
         use std::fs;
 
         validate_relative_artifact_ref(artifact_ref)?;
-        let attempt = self.find_attempt_by_id(attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &attempt.id,
+            "coding_attempt_artifact",
+            artifact_ref,
+        )?;
         let path = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join(artifact_ref);
@@ -620,28 +634,10 @@ impl super::CodingAttemptStore {
     }
 }
 
-fn max_existing_coding_attempt_sequence(root: &Path) -> Result<u64, ProductStoreError> {
-    let mut max_sequence = 0;
-    for path in super::json_file_paths(root)? {
-        let Some(file_stem) = path.file_stem().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        let Some(sequence) = file_stem.strip_prefix("coding_attempt_") else {
-            continue;
-        };
-        let Ok(sequence) = sequence.parse::<u64>() else {
-            continue;
-        };
-        max_sequence = max_sequence.max(sequence);
-    }
-    Ok(max_sequence)
-}
-
-fn coding_attempt_sequence_from_id(attempt_id: &str) -> Option<u64> {
-    attempt_id.strip_prefix("coding_attempt_")?.parse().ok()
-}
-
-fn valid_status_transition(current: &CodingAttemptStatus, next: &CodingAttemptStatus) -> bool {
+pub(super) fn valid_status_transition(
+    current: &CodingAttemptStatus,
+    next: &CodingAttemptStatus,
+) -> bool {
     if current == next {
         return true;
     }
@@ -656,6 +652,7 @@ fn valid_status_transition(current: &CodingAttemptStatus, next: &CodingAttemptSt
             next,
             CodingAttemptStatus::WaitingForHuman
                 | CodingAttemptStatus::Blocked
+                | CodingAttemptStatus::AwaitingPlanAmendment
                 | CodingAttemptStatus::Completed
                 | CodingAttemptStatus::Failed
                 | CodingAttemptStatus::Aborted
@@ -671,9 +668,25 @@ fn valid_status_transition(current: &CodingAttemptStatus, next: &CodingAttemptSt
         CodingAttemptStatus::Blocked => {
             matches!(
                 next,
-                CodingAttemptStatus::Running | CodingAttemptStatus::Aborted
+                CodingAttemptStatus::Running
+                    | CodingAttemptStatus::AwaitingPlanAmendment
+                    | CodingAttemptStatus::Aborted
             )
         }
+        CodingAttemptStatus::AwaitingPlanAmendment => matches!(
+            next,
+            CodingAttemptStatus::ApplyingPlanAmendment | CodingAttemptStatus::Aborted
+        ),
+        CodingAttemptStatus::ApplyingPlanAmendment => matches!(
+            next,
+            CodingAttemptStatus::Running
+                | CodingAttemptStatus::AmendmentApplyFailed
+                | CodingAttemptStatus::Aborted
+        ),
+        CodingAttemptStatus::AmendmentApplyFailed => matches!(
+            next,
+            CodingAttemptStatus::ApplyingPlanAmendment | CodingAttemptStatus::Aborted
+        ),
         CodingAttemptStatus::Completed
         | CodingAttemptStatus::Failed
         | CodingAttemptStatus::Aborted => false,

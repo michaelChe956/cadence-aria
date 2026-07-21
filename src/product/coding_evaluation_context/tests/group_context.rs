@@ -325,18 +325,25 @@ fn draft_record(
         attempt_index: 1,
         outline_version_ref: "outline_version_0001".to_string(),
         generation_mode: WorkItemGenerationMode::Serial,
-        candidate: WorkItemDraftCandidate {
-            outline_id: outline_id.to_string(),
-            title: format!("{outline_id} title"),
-            kind: Default::default(),
-            goal: format!("{outline_id} goal"),
-            implementation_context: format!("{outline_id} context"),
-            exclusive_write_scopes: Vec::new(),
-            forbidden_write_scopes: Vec::new(),
-            depends_on_outline_ids: Vec::new(),
-            required_handoff_from_outline_ids: Vec::new(),
-            handoff_summary: format!("{outline_id} handoff"),
-            verification_plan: serde_json::json!({}),
+        candidate: {
+            let logical_work_item_id = format!("wi_{outline_id}");
+            let mut contract = crate::product::work_item_contract::canonical_contract_fixture(
+                &logical_work_item_id,
+            );
+            contract.identity.title = format!("{outline_id} title");
+            contract.identity.kind = "other".to_string();
+            contract.goal.summary = format!("{outline_id} goal");
+            contract.input_contracts.clear();
+            contract.write_policy.exclusive_scopes.clear();
+            contract.write_policy.forbidden_scopes.clear();
+            WorkItemDraftCandidate {
+                outline_id: outline_id.to_string(),
+                logical_work_item_id,
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: contract.verification_checks.clone(),
+                },
+                canonical_contract_candidate: contract,
+            }
         },
         status: WorkItemDraftStatus::Accepted,
         active: true,

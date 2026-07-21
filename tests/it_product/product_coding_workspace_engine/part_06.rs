@@ -118,7 +118,7 @@ async fn code_review_provider_start_failure_marks_attempt_blocked_and_node_faile
             .iter()
             .map(|action| action.action_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["retry_review", "send_to_coder", "abort"]
+        vec!["retry_review"]
     );
     assert_eq!(gate.available_actions[0].label, "重试代码审查");
     let nodes = store

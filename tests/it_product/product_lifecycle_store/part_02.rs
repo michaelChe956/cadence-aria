@@ -13,14 +13,108 @@ fn rejects_lock_when_another_work_item_is_active() {
         })
         .expect("shared worktree");
     store
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0001")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_0001",
+        )
         .expect("first lock");
 
     let error = store
-        .try_acquire_issue_worktree_lock("project_0001", "issue_0001", "work_item_0002")
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0002",
+            "issue_worktree_lease_0002",
+        )
         .expect_err("second lock should fail");
 
     assert!(format!("{error}").contains("issue_worktree_active"));
+}
+
+#[test]
+fn same_work_item_second_store_cannot_release_first_stores_lock() {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let first = LifecycleStore::new(paths.clone());
+    let second = LifecycleStore::new(paths);
+    first
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: PathBuf::from("/tmp/repo/.worktrees/aria-issues/issue_0001"),
+            base_branch: "main".to_string(),
+        })
+        .expect("shared worktree");
+    first
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_first",
+        )
+        .expect("first lock");
+    second
+        .try_acquire_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_second",
+        )
+        .expect("same work item observation");
+
+    let error = second
+        .release_issue_worktree_lock(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "issue_worktree_lease_second",
+        )
+        .expect_err("second store must not release first store lease");
+    assert!(matches!(
+        error,
+        ProductStoreError::Conflict {
+            kind: "issue_worktree_lock_owner",
+            ..
+        }
+    ));
+
+    assert_eq!(
+        first
+            .get_issue_shared_worktree("project_0001", "issue_0001")
+            .expect("reload")
+            .expect("shared worktree")
+            .current_active_work_item_id
+            .as_deref(),
+        Some("work_item_0001")
+    );
+}
+
+#[test]
+fn issue_shared_worktree_rejects_missing_lock_owner_field() {
+    let value = serde_json::json!({
+        "id": "issue_shared_worktree_project_0001_issue_0001",
+        "project_id": "project_0001",
+        "issue_id": "issue_0001",
+        "repository_id": "repository_0001",
+        "branch_name": "aria/issues/issue_0001",
+        "worktree_path": "/tmp/repo/.worktrees/aria-issues/issue_0001",
+        "base_branch": "main",
+        "status": "ready",
+        "current_active_work_item_id": null,
+        "last_completed_work_item_id": null,
+        "created_at": "2026-07-20T00:00:00Z",
+        "updated_at": "2026-07-20T00:00:00Z"
+    });
+
+    assert!(
+        serde_json::from_value::<cadence_aria::product::models::IssueSharedWorktree>(value)
+            .is_err(),
+        "issue shared worktree must not accept the pre-lease-owner schema"
+    );
 }
 
 #[test]
@@ -39,7 +133,12 @@ fn marks_issue_shared_worktree_last_completed_work_item() {
         .expect("shared worktree");
 
     let updated = store
-        .mark_issue_worktree_completed_item("project_0001", "issue_0001", "work_item_0001")
+        .mark_issue_worktree_completed_item(
+            "project_0001",
+            "issue_0001",
+            "work_item_0001",
+            "coding_attempt_0001",
+        )
         .expect("mark completed");
 
     assert_eq!(

@@ -123,39 +123,45 @@ describe("IssueLifecycleWorkbench base workflow", () => {
 
     const view = render(
       <IssueLifecycleWorkbench
-        focusEntityId="story_spec_0001"
+        focusEntityKey="story_spec:issue_0001:story_spec_0001"
         onDrawerFocusChange={onDrawerFocusChange}
       />,
     );
 
     await waitFor(() =>
-      expect(useLifecycleWorkbenchStore.getState().focusedEntityId).toBe(
-        "story_spec_0001",
+      expect(useLifecycleWorkbenchStore.getState().focusedEntityKey).toBe(
+        "story_spec:issue_0001:story_spec_0001",
       ),
     );
     expect(useLifecycleWorkbenchStore.getState().isDrawerOpen).toBe(true);
     await waitFor(() =>
-      expect(onDrawerFocusChange).toHaveBeenCalledWith("story_spec_0001"),
+      expect(onDrawerFocusChange).toHaveBeenCalledWith(
+        "story_spec:issue_0001:story_spec_0001",
+      ),
     );
 
     view.rerender(
       <IssueLifecycleWorkbench
-        focusEntityId={null}
+        focusEntityKey={null}
         onDrawerFocusChange={onDrawerFocusChange}
       />,
     );
 
     await waitFor(() =>
-      expect(useLifecycleWorkbenchStore.getState().focusedEntityId).toBeNull(),
+      expect(useLifecycleWorkbenchStore.getState().focusedEntityKey).toBeNull(),
     );
     expect(useLifecycleWorkbenchStore.getState().isDrawerOpen).toBe(false);
 
     act(() => {
-      useLifecycleWorkbenchStore.getState().openDrawer("design_spec_0001");
+      useLifecycleWorkbenchStore
+        .getState()
+        .openDrawer("design_spec:issue_0001:design_spec_0001");
     });
 
     await waitFor(() =>
-      expect(onDrawerFocusChange).toHaveBeenCalledWith("design_spec_0001"),
+      expect(onDrawerFocusChange).toHaveBeenCalledWith(
+        "design_spec:issue_0001:design_spec_0001",
+      ),
     );
   });
 

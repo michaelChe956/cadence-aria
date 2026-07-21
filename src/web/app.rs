@@ -3,6 +3,8 @@ use axum::routing::{delete, get, post};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::product_data_schema::ensure_product_data_schema;
 use crate::web::coding_ws_handler;
 use crate::web::events::EventHub;
 use crate::web::handlers;
@@ -97,6 +99,30 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-items/{work_item_id}/coding-attempts",
             post(handlers::create_coding_attempt),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}",
+            get(handlers::get_coding_attempt).delete(handlers::delete_coding_attempt),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/diff",
+            get(handlers::coding_attempt_diff),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/abort",
+            post(handlers::abort_coding_attempt),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/execution-plan/confirm",
+            post(handlers::confirm_work_item_execution_plan),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/execution-plan/change-request",
+            post(handlers::request_work_item_execution_plan_change),
+        )
+        .route(
+            "/api/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}/artifacts/{artifact_id}",
+            get(handlers::coding_attempt_artifact_content),
         )
         .route(
             "/api/coding-attempts/{attempt_id}",
@@ -207,6 +233,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route(
             "/ws/coding-attempts/{attempt_id}",
             get(coding_ws_handler::coding_ws),
+        )
+        .route(
+            "/ws/projects/{project_id}/issues/{issue_id}/coding-attempts/{attempt_id}",
+            get(coding_ws_handler::scoped_coding_ws),
         );
 
     let router = if test_controls::test_controls_enabled() {
@@ -268,6 +298,10 @@ pub async fn serve_web(
     host: String,
     port: Option<u16>,
 ) -> anyhow::Result<()> {
+    let product_paths = ProductAppPaths::new(workspace_root.join(".aria"));
+    ensure_product_data_schema(&product_paths)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
     let addr: SocketAddr = format!("{}:{}", host, port.unwrap_or(0)).parse()?;
     let events = EventHub::new();
     let state = WebAppState::with_events(

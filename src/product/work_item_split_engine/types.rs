@@ -6,9 +6,10 @@ use serde_json::json;
 use crate::product::models::{
     IssueWorkItemDependencyEdge, IssueWorkItemPlan, LifecycleWorkItemRecord,
     OutlineContextBlockerResolution, ProviderName, RepositoryProfile, RepositoryProfileConfidence,
-    VerificationFallbackPolicy, VerificationPlan, WorkItemContextBudget, WorkItemKind,
-    WorkItemPlanOutline,
+    VerificationFallbackPolicy, VerificationPlan, WorkItemContextBudget, WorkItemDraftCandidate,
+    WorkItemDraftVerificationPlan, WorkItemKind, WorkItemPlanOutline,
 };
+use crate::product::work_item_contract::CanonicalWorkItemContract;
 use crate::protocol::contracts::ProviderType;
 
 #[derive(Debug, Clone)]
@@ -37,6 +38,48 @@ pub struct OutlineAuthorOutput {
 pub struct WorkItemDraftInvocation {
     pub prompt: String,
     pub sentinel_nonce: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProviderWorkItemDraftOutput {
+    pub(crate) draft: ProviderWorkItemDraftCandidate,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ProviderWorkItemDraftInput {
+    Envelope(ProviderWorkItemDraftOutput),
+    Bare(ProviderWorkItemDraftCandidate),
+}
+
+impl ProviderWorkItemDraftInput {
+    pub(crate) fn into_candidate(self) -> ProviderWorkItemDraftCandidate {
+        match self {
+            Self::Envelope(output) => output.draft,
+            Self::Bare(candidate) => candidate,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProviderWorkItemDraftCandidate {
+    pub(crate) outline_id: String,
+    pub(crate) logical_work_item_id: String,
+    pub(crate) canonical_contract: CanonicalWorkItemContract,
+    pub(crate) verification_plan: WorkItemDraftVerificationPlan,
+}
+
+impl From<ProviderWorkItemDraftCandidate> for WorkItemDraftCandidate {
+    fn from(provider: ProviderWorkItemDraftCandidate) -> Self {
+        Self {
+            outline_id: provider.outline_id,
+            logical_work_item_id: provider.logical_work_item_id,
+            canonical_contract_candidate: provider.canonical_contract,
+            verification_plan: provider.verification_plan,
+        }
+    }
 }
 
 /// 被重做的 WorkItem 规格：旧 id + 用户反馈。

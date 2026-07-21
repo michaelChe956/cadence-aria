@@ -5,10 +5,23 @@ use crate::product::coding_attempt_store::{
     CreateCodingAttemptInput, CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingExecutionUnitStatus, CodingProviderRole, RemoteKind,
+    CodingAttemptPlanBinding, CodingAttemptScope, CodingExecutionUnitStatus, CodingProviderRole,
+    RemoteKind,
 };
-use crate::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
-use crate::product::models::{ProviderConversationRef, ProviderConversationRole};
+use crate::product::lifecycle_store::{
+    CreateIssueWorkItemPlanInput, CreateWorkItemInput, LifecycleStore,
+};
+use crate::product::models::{
+    DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
+    PlanRevisionReason, ProviderConversationRef, ProviderConversationRole, WorkItemPlanLineage,
+    WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
+};
+use crate::product::work_item_contract::{
+    BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract, PromisedOutputContract,
+    WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
+};
+use crate::product::work_item_projection::{WorkItemProjectionCompiler, projection_hashes};
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use std::fs;
 use std::path::Path;
@@ -36,15 +49,281 @@ fn blocked_report_with(missing: Vec<String>, skipped: Vec<String>) -> TestingRep
         skipped_required_steps: skipped,
         context_warnings: Vec::new(),
         raw_provider_output_ref: None,
+        plan_defect_findings: Vec::new(),
+    }
+}
+
+fn seed_group_attempt_fixture(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    initialize_attempt: bool,
+    with_dependency: bool,
+) {
+    let lifecycle = LifecycleStore::new(store.paths());
+    let work_items = [
+        ("work_item_0001", "work_item_revision_0001"),
+        ("work_item_0002", "work_item_revision_0002"),
+        ("work_item_0003", "work_item_revision_0003"),
+    ];
+    for (index, (work_item_id, _)) in work_items.iter().enumerate() {
+        lifecycle
+            .create_work_item(CreateWorkItemInput {
+                id: Some((*work_item_id).to_string()),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                repository_id: "repository_0001".to_string(),
+                title: format!("group work item {}", index + 1),
+                work_item_set_id: Some("work_item_plan_0001".to_string()),
+                sequence_hint: Some(((index + 1) * 10) as u32),
+                plan_status: WorkItemPlanStatus::Confirmed,
+                ..Default::default()
+            })
+            .expect("group work item");
+    }
+    lifecycle
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("work_item_plan_0001".to_string()),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            source_story_spec_ids: Vec::new(),
+            source_design_spec_ids: Vec::new(),
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Confirmed,
+            work_item_ids: work_items
+                .iter()
+                .map(|(work_item_id, _)| (*work_item_id).to_string())
+                .collect(),
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .expect("group plan");
+
+    let revision_store = WorkItemRevisionStore::new(store.paths());
+    let lineage = WorkItemPlanLineage {
+        id: "work_item_plan_0001".to_string(),
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
+        story_spec_refs: Vec::new(),
+        design_spec_refs: Vec::new(),
+        active_revision_id: None,
+        active_amendment_id: None,
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+        updated_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_plan_lineage(&lineage)
+        .expect("plan lineage");
+    let mut plan_bindings = std::collections::BTreeMap::new();
+    for (index, (work_item_id, revision_id)) in work_items.iter().enumerate() {
+        let logical = LogicalWorkItem {
+            id: (*work_item_id).to_string(),
+            plan_id: lineage.id.clone(),
+            title: format!("group work item {}", index + 1),
+            active_revision_id: None,
+            created_at: "2026-07-18T00:00:00Z".to_string(),
+            updated_at: "2026-07-18T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_logical_work_item(&lineage, &logical)
+            .expect("logical work item");
+        let contract = CanonicalWorkItemContract {
+            schema_version: 1,
+            identity: WorkItemContractIdentity {
+                logical_work_item_id: logical.id.clone(),
+                title: logical.title.clone(),
+                kind: "implementation".to_string(),
+            },
+            goal: WorkItemGoal {
+                summary: logical.title.clone(),
+            },
+            non_goals: Vec::new(),
+            input_contracts: Vec::new(),
+            output_contracts: vec![PromisedOutputContract {
+                contract_id: format!("contract_{work_item_id}"),
+                capabilities: vec![format!("capability_{work_item_id}")],
+            }],
+            tasks: Vec::new(),
+            write_policy: WorkItemWritePolicy {
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+            },
+            acceptance_criteria: Vec::new(),
+            verification_checks: Vec::new(),
+            handoff_contract: HandoffContract {
+                required_fields: Vec::new(),
+                provided_contract_refs: vec![format!("contract_{work_item_id}")],
+                reviewer_check_refs: Vec::new(),
+            },
+            blocker_rules: vec![
+                BlockerRule {
+                    reason_code: "current_work_item_contract_invalid".to_string(),
+                    route: BlockerRoute::PlanRepairCurrent,
+                    target_contract_refs: Vec::new(),
+                },
+                BlockerRule {
+                    reason_code: "story_scope_invalid".to_string(),
+                    route: BlockerRoute::StoryAmendment,
+                    target_contract_refs: Vec::new(),
+                },
+                BlockerRule {
+                    reason_code: "design_constraint_invalid".to_string(),
+                    route: BlockerRoute::DesignAmendment,
+                    target_contract_refs: Vec::new(),
+                },
+                BlockerRule {
+                    reason_code: "verification_incomplete".to_string(),
+                    route: BlockerRoute::VerificationRetry,
+                    target_contract_refs: Vec::new(),
+                },
+            ],
+            design_traceability: Vec::new(),
+        };
+        let work_item_revision = WorkItemRevision {
+            id: (*revision_id).to_string(),
+            logical_work_item_id: logical.id.clone(),
+            source_draft_revision_id: format!("draft_revision_{:04}", index + 1),
+            canonical_contract_hash: canonical_contract_hash(&contract).expect("contract hash"),
+            canonical_contract: contract,
+            work_item_projection_bundle_id: format!("projection_bundle_{:04}", index + 1),
+            verification_plan_revision_id: format!("verification_revision_{:04}", index + 1),
+            created_at: "2026-07-18T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_work_item_revision(&lineage, &work_item_revision)
+            .expect("work item revision");
+        let projections = WorkItemProjectionCompiler
+            .compile(
+                &work_item_revision.canonical_contract,
+                &work_item_revision.id,
+            )
+            .expect("work item projections");
+        let hashes = projection_hashes(&projections).expect("projection hashes");
+        revision_store
+            .put_work_item_projection_bundle(
+                &lineage,
+                &WorkItemProjectionBundle {
+                    id: work_item_revision.work_item_projection_bundle_id.clone(),
+                    work_item_revision_id: work_item_revision.id.clone(),
+                    canonical_contract_hash: work_item_revision.canonical_contract_hash.clone(),
+                    projection_schema_version: 1,
+                    compiler_version: "work-item-projection-compiler-v1".to_string(),
+                    human_projection: projections.human,
+                    coder_projection: projections.coder,
+                    reviewer_projection: projections.reviewer,
+                    human_projection_hash: hashes.human,
+                    coder_projection_hash: hashes.coder,
+                    reviewer_projection_hash: hashes.reviewer,
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("work item projection bundle");
+        revision_store
+            .set_active_work_item_revision(&lineage, &logical, None, &work_item_revision.id)
+            .expect("active work item revision");
+        plan_bindings.insert(logical.id, work_item_revision.id);
+    }
+    let graph = DependencyGraphRevision {
+        id: "dependency_graph_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        edges: if with_dependency {
+            vec![crate::product::work_item_contract::DependencyContractEdge {
+                from: "work_item_0001".to_string(),
+                to: "work_item_0002".to_string(),
+                required_contracts: Vec::new(),
+            }]
+        } else {
+            Vec::new()
+        },
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_dependency_graph_revision(&lineage, &graph)
+        .expect("dependency graph");
+    let plan_revision = WorkItemPlanRevision {
+        id: "plan_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        revision_no: 1,
+        supersedes: None,
+        reason: PlanRevisionReason::InitialCompile,
+        work_item_bindings: plan_bindings,
+        dependency_graph_revision_id: graph.id,
+        validation_report_ref: "validation_report_0001".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_plan_revision(&lineage, &plan_revision)
+        .expect("plan revision");
+    revision_store
+        .set_active_plan_revision(&lineage, &plan_revision.id)
+        .expect("active plan revision");
+    if !initialize_attempt {
+        return;
+    }
+    store
+        .save_plan_binding(
+            attempt,
+            &CodingAttemptPlanBinding {
+                attempt_id: attempt.id.clone(),
+                plan_id: lineage.id.clone(),
+                bound_plan_revision_id: plan_revision.id,
+                applied_amendment_ids: Vec::new(),
+                updated_at: "2026-07-18T00:00:00Z".to_string(),
+            },
+        )
+        .expect("attempt plan binding");
+    for (index, (work_item_id, revision_id)) in work_items.iter().enumerate() {
+        store
+            .create_coding_unit(CreateCodingExecutionUnitInput {
+                attempt_id: attempt.id.clone(),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                plan_id: lineage.id.clone(),
+                logical_work_item_id: (*work_item_id).to_string(),
+                work_item_revision_id: (*revision_id).to_string(),
+                dependency_logical_work_item_ids: if with_dependency && index == 1 {
+                    vec!["work_item_0001".to_string()]
+                } else {
+                    Vec::new()
+                },
+                order_index: index as u32,
+                status: if index == 0 {
+                    CodingExecutionUnitStatus::Running
+                } else {
+                    CodingExecutionUnitStatus::Pending
+                },
+            })
+            .expect("coding unit");
     }
 }
 
 mod coder_resume_recovery;
 mod gate_coder_feedback;
 mod gate_rework;
+mod git_operation_reconcile;
+mod group_completion_authority;
+mod group_terminal;
 mod parser_prompt;
+mod plan_amendment;
+mod plan_defect_entrypoints;
 mod provider_driven;
+mod provider_execution_context;
 mod provider_failure_recovery;
+mod provider_rework_context;
+mod provider_start_persistence;
+mod runtime_handoff_compatibility;
+mod runtime_handoff_delta;
+mod runtime_handoff_impact;
+mod tester_cancellation;
+mod tester_repair_plan_defect;
 
 #[tokio::test]
 async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node() {
@@ -69,6 +348,7 @@ async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node(
             max_auto_rework: 2,
         })
         .expect("group attempt");
+    seed_group_attempt_fixture(&store, &attempt, true, false);
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -94,6 +374,98 @@ async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node(
         }
     );
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn coding_plan_repair_partial_group_attempt_cannot_start_coding() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("partial group attempt");
+    seed_group_attempt_fixture(&store, &attempt, false, false);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .start_attempt("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect_err("partial group attempt must not start");
+
+    assert!(
+        error
+            .to_string()
+            .contains("coding_group_attempt_incomplete")
+    );
+    let persisted = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("persisted attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::Created);
+    assert_eq!(persisted.stage, CodingExecutionStage::PrepareContext);
+}
+
+#[tokio::test]
+async fn coding_plan_repair_group_attempt_missing_active_pointer_cannot_start() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+    seed_group_attempt_fixture(&store, &attempt, true, false);
+    attempt = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("complete group attempt");
+    attempt.active_unit_id = None;
+    attempt.current_work_item_id = None;
+    store
+        .save_coding_attempt(&attempt)
+        .expect("corrupt attempt pointers");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .start_attempt("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect_err("missing active pointer must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("coding_group_attempt_incomplete")
+    );
+    let persisted = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("persisted attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::Created);
+    assert_eq!(persisted.stage, CodingExecutionStage::PrepareContext);
 }
 
 #[tokio::test]
@@ -126,21 +498,24 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
         )
         .expect("head commit");
     store
-        .save_review_request(&ReviewRequest {
-            id: "review_request_0001".to_string(),
-            attempt_id: attempt.id.clone(),
-            kind: ReviewRequestKind::GitBranchOnly,
-            remote_kind: RemoteKind::GenericGit,
-            remote: "origin".to_string(),
-            base_branch: attempt.base_branch.clone(),
-            branch_name: attempt.branch_name.clone(),
-            commit_sha: "deadbeef".to_string(),
-            push_status: PushStatus::Pushed,
-            external_url: None,
-            manual_instructions: Vec::new(),
-            created_at: "2026-07-07T00:00:00Z".to_string(),
-            updated_at: "2026-07-07T00:00:00Z".to_string(),
-        })
+        .save_review_request(
+            &attempt,
+            &ReviewRequest {
+                id: "review_request_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                kind: ReviewRequestKind::GitBranchOnly,
+                remote_kind: RemoteKind::GenericGit,
+                remote: "origin".to_string(),
+                base_branch: attempt.base_branch.clone(),
+                branch_name: attempt.branch_name.clone(),
+                commit_sha: "deadbeef".to_string(),
+                push_status: PushStatus::Pushed,
+                external_url: None,
+                manual_instructions: Vec::new(),
+                created_at: "2026-07-07T00:00:00Z".to_string(),
+                updated_at: "2026-07-07T00:00:00Z".to_string(),
+            },
+        )
         .expect("review request");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -165,113 +540,6 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
             .expect("timeline")
             .iter()
             .all(|node| node.stage != CodingExecutionStage::InternalPrReview)
-    );
-}
-
-#[tokio::test]
-async fn group_unit_completion_commits_changes_and_advances_to_next_unit() {
-    let root = tempdir().expect("tempdir");
-    let worktree = root.path().join("worktree");
-    fs::create_dir_all(&worktree).expect("worktree dir");
-    init_test_git_repo(&worktree);
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let lifecycle = LifecycleStore::new(store.paths());
-    for work_item_id in ["work_item_0001", "work_item_0002"] {
-        lifecycle
-            .create_work_item(CreateWorkItemInput {
-                id: Some(work_item_id.to_string()),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                repository_id: "repository_0001".to_string(),
-                title: work_item_id.to_string(),
-                ..Default::default()
-            })
-            .expect("create work item");
-    }
-    let attempt = store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            current_work_item_id: "work_item_0001".to_string(),
-            base_branch: "HEAD~1".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: Some(worktree.clone()),
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Codex,
-                reviewer: Some(ProviderName::ClaudeCode),
-                review_rounds: 1,
-            },
-            max_auto_rework: 2,
-        })
-        .expect("group attempt");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running attempt");
-    let unit1 = store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
-            order_index: 1,
-            status: CodingExecutionUnitStatus::Running,
-        })
-        .expect("unit1");
-    let unit2 = store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
-            order_index: 2,
-            status: CodingExecutionUnitStatus::Pending,
-        })
-        .expect("unit2");
-    fs::write(worktree.join("unit1.txt"), "unit 1 change\n").expect("unit change");
-    let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let attempt = store
-        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("current attempt");
-
-    let updated = engine
-        .complete_group_unit_after_code_review(&attempt)
-        .await
-        .expect("complete unit");
-
-    assert_eq!(
-        updated.current_work_item_id.as_deref(),
-        Some("work_item_0002")
-    );
-    assert_eq!(updated.active_unit_id.as_deref(), Some(unit2.id.as_str()));
-    assert_eq!(updated.stage, CodingExecutionStage::PrepareContext);
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
-    let units = store
-        .list_coding_units(&updated.project_id, &updated.issue_id, &updated.id)
-        .expect("units");
-    let completed_unit = units
-        .iter()
-        .find(|unit| unit.id == unit1.id)
-        .expect("completed unit");
-    assert_eq!(completed_unit.status, CodingExecutionUnitStatus::Completed);
-    let completion_commit = completed_unit
-        .completion_commit
-        .as_deref()
-        .expect("completion commit");
-    assert_eq!(completion_commit.len(), 40);
-    assert_eq!(updated.head_commit.as_deref(), Some(completion_commit));
-    assert_eq!(
-        git_stdout(&worktree, &["status", "--porcelain"]),
-        "",
-        "unit completion should leave no staged or unstaged source changes"
     );
 }
 

@@ -213,6 +213,8 @@ impl WorkspaceEngine {
             work_item_batch_retry_counts: HashMap::new(),
             outline_revision_recovery_error: None,
             outline_revision_crash_after: None,
+            plan_repair_crash_after: None,
+            plan_repair_snapshot: None,
         }
     }
 
@@ -222,6 +224,14 @@ impl WorkspaceEngine {
         event_tx: mpsc::Sender<EngineEvent>,
         mut session: WorkspaceSession,
     ) -> Self {
+        let plan_repair_transition_recovery_error = recover_plan_repair_transition(
+            &lifecycle_store,
+            &session.project_id,
+            &session.issue_id,
+            &session.session_id,
+        )
+        .err()
+        .map(|error| format!("plan repair journal recovery failed: {error:?}"));
         let outline_revision_recovery_error = recover_work_item_plan_outline_revision_transaction(
             &lifecycle_store,
             &session.project_id,
@@ -298,6 +308,31 @@ impl WorkspaceEngine {
         });
         let pending_author_choice =
             recover_pending_author_choice(&session, active_node_id.as_deref(), &timeline_nodes);
+        let mut plan_repair_snapshot = load_plan_repair_snapshot_fail_closed(
+            &lifecycle_store,
+            &session,
+            &mut timeline_nodes,
+            plan_repair_transition_recovery_error,
+        );
+        if let Some(snapshot) = plan_repair_snapshot.as_mut() {
+            snapshot.timeline_nodes = timeline_nodes.clone();
+            session.stage = match snapshot.stage {
+                PlanRepairSessionStage::AwaitingConfirmation
+                | PlanRepairSessionStage::Published
+                | PlanRepairSessionStage::AmendmentConflict
+                | PlanRepairSessionStage::AmendmentApplyFailed => WorkspaceStage::HumanConfirm,
+                PlanRepairSessionStage::Completed | PlanRepairSessionStage::Failed => {
+                    active_node_id = None;
+                    WorkspaceStage::Completed
+                }
+                PlanRepairSessionStage::Triaging
+                | PlanRepairSessionStage::AuthoringRevision
+                | PlanRepairSessionStage::ValidatingContract
+                | PlanRepairSessionStage::GeneratingProjections
+                | PlanRepairSessionStage::PlanReview
+                | PlanRepairSessionStage::ApplyingAmendment => WorkspaceStage::Running,
+            };
+        }
         Self {
             checkpoint_store,
             lifecycle_store: Some(lifecycle_store),
@@ -317,6 +352,8 @@ impl WorkspaceEngine {
             work_item_batch_retry_counts: HashMap::new(),
             outline_revision_recovery_error,
             outline_revision_crash_after: None,
+            plan_repair_crash_after: None,
+            plan_repair_snapshot,
         }
     }
 

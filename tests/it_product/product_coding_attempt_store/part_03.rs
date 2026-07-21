@@ -167,7 +167,9 @@ fn saves_and_loads_group_unit_work_item_handoff() {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -205,4 +207,249 @@ fn saves_and_loads_group_unit_work_item_handoff() {
         .get_work_item_handoff("project_0001", "issue_0001", &attempt.id)
         .expect("attempt handoff")
         .is_none());
+}
+
+#[test]
+fn scoped_writes_target_only_exact_legacy_attempt_identity() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut target = store
+        .create_attempt(create_input("work_item_0001"))
+        .expect("create target attempt");
+    target.id = "coding_attempt_0001".to_string();
+    store
+        .save_coding_attempt(&target)
+        .expect("save legacy target attempt");
+    let mut other = target.clone();
+    other.issue_id = "issue_0002".to_string();
+    store
+        .save_coding_attempt(&other)
+        .expect("save duplicate legacy attempt");
+
+    store
+        .create_stage_gate(
+            &target,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            "2026-07-16T00:00:05Z".to_string(),
+            CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            }),
+        )
+        .expect("target stage gate");
+    store
+        .create_blocked_gate(
+            &target,
+            CreateBlockedGateInput {
+                attempt_id: target.id.clone(),
+                stage: CodingExecutionStage::Coding,
+                node_id: None,
+                role: Some(CodingProviderRole::Coder),
+                title: "target blocked gate".to_string(),
+                description: "target only".to_string(),
+                reason_code: Some("target_only".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: Vec::new(),
+            },
+        )
+        .expect("target blocked gate");
+    store
+        .create_choice_gate(
+            &target,
+            CreateChoiceGateInput {
+                attempt_id: target.id.clone(),
+                choice_id: "choice_0001".to_string(),
+                stage: CodingExecutionStage::Coding,
+                node_id: None,
+                role: CodingProviderRole::Coder,
+                provider: ProviderName::Fake,
+                source: "target".to_string(),
+                prompt: "target choice".to_string(),
+                options: vec![CodingChoiceOption {
+                    id: "yes".to_string(),
+                    label: "Yes".to_string(),
+                    description: None,
+                }],
+                allow_multiple: false,
+                allow_free_text: false,
+            },
+        )
+        .expect("target choice gate");
+    store
+        .create_quality_bypass_audit(
+            &target,
+            CreateQualityBypassAuditInput {
+                attempt_id: target.id.clone(),
+                gate_id: "coding_stage_gate_0001".to_string(),
+                stage: CodingExecutionStage::Coding,
+                reason_code: Some("accepted_risk".to_string()),
+                skipped_required_steps: Vec::new(),
+                operator_context: "target audit".to_string(),
+            },
+        )
+        .expect("target quality audit");
+
+    let raw_ref = store
+        .save_provider_raw_output(
+            &target,
+            CodingExecutionStage::Coding,
+            "coder_output",
+            "target raw output",
+        )
+        .expect("target raw output");
+    store
+        .save_test_plan(
+            &target,
+            &TestPlan {
+                id: "test_plan_0001".to_string(),
+                attempt_id: target.id.clone(),
+                role_run_id: None,
+                run_no: None,
+                summary: "target plan".to_string(),
+                context_warnings: Vec::new(),
+                assumptions: Vec::new(),
+                steps: Vec::new(),
+                created_at: "2026-07-16T00:00:00Z".to_string(),
+                raw_provider_output_ref: Some(raw_ref.clone()),
+            },
+        )
+        .expect("target test plan");
+    store
+        .save_testing_report(&target, &sample_testing_report(&target.id))
+        .expect("target testing report");
+    store
+        .save_code_review_report(&target, &sample_code_review_report(&target.id))
+        .expect("target code review");
+    let review_request = sample_review_request(&target.id);
+    store
+        .save_review_request(&target, &review_request)
+        .expect("target review request");
+    store
+        .save_internal_pr_review(
+            &target,
+            &sample_internal_review(&target.id, &review_request.id),
+        )
+        .expect("target internal review");
+    store
+        .replace_attempt_provider_conversations(
+            &target,
+            vec![ProviderConversationRef {
+                role: ProviderConversationRole::Coder,
+                provider: ProviderName::Fake,
+                provider_session_id: "target-session".to_string(),
+                updated_at: "2026-07-16T00:00:00Z".to_string(),
+                last_node_id: Some("coding_node_0001".to_string()),
+            }],
+        )
+        .expect("target conversation");
+
+    assert_eq!(
+        store
+            .read_attempt_artifact_text(&target, &raw_ref)
+            .expect("target raw output text"),
+        "target raw output"
+    );
+    assert_eq!(
+        store
+            .list_open_stage_gates("project_0001", "issue_0001", &target.id)
+            .expect("target stage gates")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_open_blocked_gates("project_0001", "issue_0001", &target.id)
+            .expect("target blocked gates")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_open_choice_gates("project_0001", "issue_0001", &target.id)
+            .expect("target choice gates")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_quality_bypass_audits("project_0001", "issue_0001", &target.id)
+            .expect("target audits")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_test_plans("project_0001", "issue_0001", &target.id)
+            .expect("target test plans")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_testing_reports("project_0001", "issue_0001", &target.id)
+            .expect("target testing reports")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_code_review_reports("project_0001", "issue_0001", &target.id)
+            .expect("target code reviews")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_review_requests("project_0001", "issue_0001", &target.id)
+            .expect("target review requests")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", &target.id)
+            .expect("target internal reviews")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .list_open_stage_gates("project_0001", "issue_0002", &target.id)
+            .expect("other stage gates")
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_open_blocked_gates("project_0001", "issue_0002", &target.id)
+            .expect("other blocked gates")
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_open_choice_gates("project_0001", "issue_0002", &target.id)
+            .expect("other choice gates")
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_testing_reports("project_0001", "issue_0002", &target.id)
+            .expect("other testing reports")
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_code_review_reports("project_0001", "issue_0002", &target.id)
+            .expect("other code reviews")
+            .is_empty()
+    );
+    assert!(
+        store
+            .get_attempt("project_0001", "issue_0002", &target.id)
+            .expect("other attempt")
+            .provider_conversations
+            .is_empty()
+    );
 }

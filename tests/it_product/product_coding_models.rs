@@ -254,6 +254,7 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         skipped_required_steps: Vec::new(),
         context_warnings: Vec::new(),
         raw_provider_output_ref: None,
+        plan_defect_findings: Vec::new(),
     };
     let finding = ReviewFinding {
         severity: FindingSeverity::Warning,
@@ -263,9 +264,17 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         required_action: Some("添加 n=0 用例".to_string()),
         source_stage: CodingExecutionStage::CodeReview,
         evidence: Vec::new(),
+        plan_defect_evidence: Vec::new(),
         related_requirements: Vec::new(),
         related_design_constraints: Vec::new(),
         related_work_item_tasks: Vec::new(),
+        defect_class: cadence_aria::product::models::PlanDefectClass::ImplementationDefect,
+        reason_code: None,
+        contract_refs: Vec::new(),
+        capability_refs: Vec::new(),
+        repair_target: None,
+        recommended_route: cadence_aria::product::models::PlanDefectRoute::CoderRework,
+        confidence: None,
     };
     let code_review = CodeReviewReport {
         id: "code_review_0001".to_string(),

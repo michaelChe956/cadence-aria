@@ -1,5 +1,40 @@
 use super::*;
 
+mod finalizer;
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum WorkItemPlanCompileFinalizerCheckpoint {
+    PlanSummaryCommitted,
+    FirstChildSessionEnsured,
+    CompileReportPersisted,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkItemPlanCompileFinalizerFailpointKey {
+    project_id: String,
+    issue_id: String,
+    plan_id: String,
+    compile_id: String,
+    checkpoint: WorkItemPlanCompileFinalizerCheckpoint,
+}
+
+#[cfg(test)]
+pub(crate) struct WorkItemPlanCompileFinalizerFailpointGuard {
+    key: WorkItemPlanCompileFinalizerFailpointKey,
+    registration_id: u64,
+}
+
+#[cfg(test)]
+static WORK_ITEM_PLAN_COMPILE_FINALIZER_FAILPOINTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<WorkItemPlanCompileFinalizerFailpointKey, u64>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static NEXT_WORK_ITEM_PLAN_COMPILE_FINALIZER_FAILPOINT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
 pub(crate) fn next_compile_id() -> String {
     format!("compile_{}", chrono::Utc::now().format("%Y%m%d%H%M%S%3f"))
 }
@@ -27,12 +62,8 @@ impl WorkspaceEngine {
         .await;
 
         match self.run_work_item_plan_compile().await {
-            Ok(report) => {
-                let work_item_count = report.work_item_ids.len();
-                self.update_artifact(ArtifactPayload::WorkItemPlanCompileReport {
-                    compile_report: Box::new(report),
-                })
-                .await;
+            Ok(outcome) => {
+                let work_item_count = outcome.work_items.len();
                 self.complete_active_node(Some(format!(
                     "Final Compile 完成，已创建 {work_item_count} 个 Work Item"
                 )))
@@ -117,9 +148,64 @@ impl WorkspaceEngine {
         store.put_compile_transaction(&tx).is_ok()
     }
 
+    #[cfg(test)]
+    pub(crate) fn register_work_item_plan_compile_finalizer_failpoint(
+        &self,
+        compile_id: &str,
+        checkpoint: WorkItemPlanCompileFinalizerCheckpoint,
+    ) -> WorkItemPlanCompileFinalizerFailpointGuard {
+        let key = WorkItemPlanCompileFinalizerFailpointKey {
+            project_id: self.session.project_id.clone(),
+            issue_id: self.session.issue_id.clone(),
+            plan_id: self.session.entity_id.clone(),
+            compile_id: compile_id.to_string(),
+            checkpoint,
+        };
+        let registration_id = NEXT_WORK_ITEM_PLAN_COMPILE_FINALIZER_FAILPOINT_ID
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let previous = work_item_plan_compile_finalizer_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone(), registration_id);
+        assert!(
+            previous.is_none(),
+            "work item plan compile finalizer failpoint already registered"
+        );
+        WorkItemPlanCompileFinalizerFailpointGuard {
+            key,
+            registration_id,
+        }
+    }
+
+    #[cfg(test)]
+    fn maybe_fail_work_item_plan_compile_finalizer(
+        &self,
+        tx: &WorkItemPlanCompileTransaction,
+        checkpoint: WorkItemPlanCompileFinalizerCheckpoint,
+    ) -> Result<(), String> {
+        let key = WorkItemPlanCompileFinalizerFailpointKey {
+            project_id: tx.project_id.clone(),
+            issue_id: tx.issue_id.clone(),
+            plan_id: tx.plan_id.clone(),
+            compile_id: tx.compile_id.clone(),
+            checkpoint,
+        };
+        if work_item_plan_compile_finalizer_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key)
+            .is_some()
+        {
+            return Err(format!(
+                "work_item_plan_compile_finalizer_failpoint:{checkpoint:?}"
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn run_work_item_plan_compile(
         &mut self,
-    ) -> Result<WorkItemPlanCompileReportPayload, String> {
+    ) -> Result<InitialPlanCompileOutcome, String> {
         let lifecycle = self
             .lifecycle_store
             .clone()
@@ -191,7 +277,7 @@ impl WorkspaceEngine {
             .map_err(|error| format!("save compile transaction failed: {error}"))?;
 
         let repository_id = self.work_item_plan_repository_id(&lifecycle, &previous_plan)?;
-        let (mut compiled_plan, work_items, verification_plans) = self
+        let (compiled_plan, work_items, verification_plans) = self
             .project_work_item_plan_drafts_for_compile(
                 &previous_plan,
                 &draft_records,
@@ -248,8 +334,6 @@ impl WorkspaceEngine {
                 &report.findings,
             ));
         }
-        compiled_plan.validator_findings = report.findings.clone();
-
         tx.status = WorkItemPlanCompileStatus::Committing;
         tx.step_cursor = "committing".to_string();
         tx.updated_at = chrono::Utc::now().to_rfc3339();
@@ -257,130 +341,48 @@ impl WorkspaceEngine {
             .put_compile_transaction(&tx)
             .map_err(|error| format!("save committing compile transaction failed: {error}"))?;
 
-        for (work_item, verification_plan) in work_items.iter().zip(verification_plans.iter()) {
-            if !tx.created_work_item_ids.contains(&work_item.id) {
-                lifecycle
-                    .create_work_item(CreateWorkItemInput {
-                        id: Some(work_item.id.clone()),
-                        project_id: work_item.project_id.clone(),
-                        issue_id: work_item.issue_id.clone(),
-                        repository_id: work_item.repository_id.clone(),
-                        story_spec_ids: work_item.story_spec_ids.clone(),
-                        design_spec_ids: work_item.design_spec_ids.clone(),
-                        title: work_item.title.clone(),
-                        work_item_set_id: work_item.work_item_set_id.clone(),
-                        source_work_item_plan_id: work_item.source_work_item_plan_id.clone(),
-                        source_outline_id: work_item.source_outline_id.clone(),
-                        source_draft_id: work_item.source_draft_id.clone(),
-                        planned_implementation_context: work_item
-                            .planned_implementation_context
-                            .clone(),
-                        planned_handoff_summary: work_item.planned_handoff_summary.clone(),
-                        kind: work_item.kind.clone(),
-                        sequence_hint: work_item.sequence_hint,
-                        depends_on: work_item.depends_on.clone(),
-                        exclusive_write_scopes: work_item.exclusive_write_scopes.clone(),
-                        forbidden_write_scopes: work_item.forbidden_write_scopes.clone(),
-                        context_budget: work_item.context_budget.clone(),
-                        required_handoff_from: work_item.required_handoff_from.clone(),
-                        verification_plan_ref: work_item.verification_plan_ref.clone(),
-                        require_execution_plan_confirm: work_item.require_execution_plan_confirm,
-                        plan_status: WorkItemPlanStatus::Confirmed,
-                    })
-                    .map_err(|error| format!("create work item failed: {error}"))?;
-                tx.created_work_item_ids.push(work_item.id.clone());
-            }
-            if !tx
-                .created_verification_plan_ids
-                .contains(&verification_plan.id)
-            {
-                lifecycle
-                    .create_verification_plan(CreateVerificationPlanInput {
-                        id: Some(verification_plan.id.clone()),
-                        project_id: verification_plan.project_id.clone(),
-                        issue_id: verification_plan.issue_id.clone(),
-                        work_item_id: verification_plan.work_item_id.clone(),
-                        repository_profile_ref: verification_plan.repository_profile_ref.clone(),
-                        provider_run_ref: verification_plan.provider_run_ref.clone(),
-                        scope: verification_plan.scope.clone(),
-                        commands: verification_plan.commands.clone(),
-                        manual_checks: verification_plan.manual_checks.clone(),
-                        required_gates: verification_plan.required_gates.clone(),
-                        risk_notes: verification_plan.risk_notes.clone(),
-                        confidence: verification_plan.confidence.clone(),
-                        fallback_policy: verification_plan.fallback_policy.clone(),
-                    })
-                    .map_err(|error| format!("create verification plan failed: {error}"))?;
-                tx.created_verification_plan_ids
-                    .push(verification_plan.id.clone());
-            }
-            let child_session = lifecycle
-                .create_workspace_session(CreateWorkspaceSessionInput {
-                    project_id: project_id.clone(),
-                    issue_id: issue_id.clone(),
-                    entity_id: work_item.id.clone(),
-                    workspace_type: WorkspaceType::WorkItem,
-                    author_provider: self.session.author_provider.clone(),
-                    reviewer_provider: self
-                        .session
-                        .reviewer_provider
-                        .clone()
-                        .unwrap_or(ProviderName::Codex),
-                    review_rounds: self.session.review_rounds,
-                    superpowers_enabled: self.session.superpowers_enabled,
-                    openspec_enabled: self.session.openspec_enabled,
-                })
-                .map_err(|error| format!("create child work item workspace failed: {error}"))?;
-            tx.child_session_ids.push(child_session.id);
-            tx.updated_at = chrono::Utc::now().to_rfc3339();
-            store
-                .put_compile_transaction(&tx)
-                .map_err(|error| format!("save compile step cursor failed: {error}"))?;
-        }
+        let accepted_drafts = draft_records
+            .iter()
+            .map(work_item_draft_revision_from_record)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let outcome = self
+            .compile_initial_plan_revision(&accepted_drafts)
+            .map_err(|error| error.to_string())?;
+        let compiled_by_logical_id = outcome
+            .work_items
+            .iter()
+            .map(|item| (item.work_item_revision.logical_work_item_id.as_str(), item))
+            .collect::<BTreeMap<_, _>>();
+        tx.outline_to_work_item_id = draft_records
+            .iter()
+            .map(|draft| {
+                (
+                    draft.outline_id.clone(),
+                    draft.candidate.logical_work_item_id.clone(),
+                )
+            })
+            .collect();
+        tx.outline_to_verification_plan_id = draft_records
+            .iter()
+            .map(|draft| {
+                let compiled = compiled_by_logical_id
+                    .get(draft.candidate.logical_work_item_id.as_str())
+                    .expect("compiled outcome must contain every accepted draft");
+                (
+                    draft.outline_id.clone(),
+                    compiled.verification_plan_revision.id.clone(),
+                )
+            })
+            .collect();
+        self.finalize_initial_plan_compile(&lifecycle, &store, &mut tx, &outcome)
+            .await?;
 
-        tx.plan_commit_state = WorkItemPlanCommitState::Committed;
-        tx.committed_at = Some(chrono::Utc::now().to_rfc3339());
-        tx.step_cursor = "plan_commit_marker_written".to_string();
-        tx.updated_at = chrono::Utc::now().to_rfc3339();
-        store
-            .put_compile_transaction(&tx)
-            .map_err(|error| format!("save compile committed marker failed: {error}"))?;
-
-        lifecycle
-            .commit_issue_work_item_plan(
-                &project_id,
-                &issue_id,
-                &plan_id,
-                IssueWorkItemPlanUpdate {
-                    work_item_ids: compiled_plan.work_item_ids.clone(),
-                    verification_plan_ids: compiled_plan.verification_plan_ids.clone(),
-                    repository_profile_ref: None,
-                    dependency_graph: compiled_plan.dependency_graph.clone(),
-                    created_from_provider_run: compiled_plan.created_from_provider_run.clone(),
-                    validator_findings: compiled_plan.validator_findings.clone(),
-                },
-            )
-            .map_err(|error| format!("commit issue work item plan failed: {error}"))?;
-
-        tx.status = WorkItemPlanCompileStatus::Committed;
-        tx.step_cursor = "committed".to_string();
-        tx.updated_at = chrono::Utc::now().to_rfc3339();
-        store
-            .put_compile_transaction(&tx)
-            .map_err(|error| format!("save committed compile transaction failed: {error}"))?;
-
-        Ok(WorkItemPlanCompileReportPayload {
-            compile_id,
-            generation_round_id: index.current_generation_round_id,
-            status: WorkItemPlanCompileStatus::Committed,
-            plan_commit_state: WorkItemPlanCommitState::Committed,
-            work_item_ids: compiled_plan.work_item_ids,
-            verification_plan_ids: compiled_plan.verification_plan_ids,
-            child_session_ids: tx.child_session_ids,
-            validator_findings: work_item_split_findings_to_dto(&tx.validator_findings),
-        })
+        Ok(outcome)
     }
+}
 
+impl WorkspaceEngine {
     pub async fn handle_work_item_plan_compile_recovery_action(
         &mut self,
         action: WorkItemPlanCompileRecoveryActionDto,
@@ -409,6 +411,46 @@ impl WorkspaceEngine {
                         "abort_and_rollback is not allowed when plan_commit_state=committed"
                             .to_string(),
                     );
+                }
+                let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+                match revision_store.get_plan_lineage(&tx.project_id, &tx.issue_id, &tx.plan_id) {
+                    Ok(lineage) if lineage.active_revision_id.is_some() => {
+                        return Err(
+                            "abort_and_rollback is not allowed when an active PlanRevision exists; use Continue or HumanTriage"
+                                .to_string(),
+                        );
+                    }
+                    Ok(_) => {
+                        return Err(
+                            "abort_and_rollback is not allowed when an inactive v2 Plan lineage exists; use Continue or HumanTriage"
+                                .to_string(),
+                        );
+                    }
+                    Err(ProductStoreError::NotFound { .. }) => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "check v2 Plan lineage during compile recovery failed: {error}"
+                        ));
+                    }
+                }
+                match revision_store.get_initial_plan_publication_journal(
+                    &tx.project_id,
+                    &tx.issue_id,
+                    &tx.plan_id,
+                    &tx.compile_id,
+                ) {
+                    Ok(journal) => {
+                        return Err(format!(
+                            "abort_and_rollback is not allowed when an initial Plan publication journal exists in phase {:?}; use Continue or HumanTriage",
+                            journal.phase
+                        ));
+                    }
+                    Err(ProductStoreError::NotFound { .. }) => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "check initial Plan publication journal during compile recovery failed: {error}"
+                        ));
+                    }
                 }
 
                 for verification_plan_id in tx.created_verification_plan_ids.clone() {
@@ -463,30 +505,23 @@ impl WorkspaceEngine {
                 Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm)
             }
             WorkItemPlanCompileRecoveryActionDto::Continue => {
-                if tx.plan_commit_state == WorkItemPlanCommitState::Committed {
-                    self.commit_recovered_work_item_plan_after_marker(&lifecycle, &tx)?;
-                    tx.status = WorkItemPlanCompileStatus::Committed;
-                    tx.failure_reason = reason.or(tx.failure_reason);
-                    tx.step_cursor = "committed".to_string();
-                    tx.updated_at = chrono::Utc::now().to_rfc3339();
-                    store.put_compile_transaction(&tx).map_err(|error| {
-                        format!("save continued compile transaction failed: {error}")
-                    })?;
-                    self.complete_active_node(Some(
-                        "Final Compile 已从 committed marker 恢复".to_string(),
-                    ))
+                let outcome = match self
+                    .load_initial_plan_compile_outcome(&tx)
+                    .map_err(|error| error.to_string())?
+                {
+                    Some(outcome) => outcome,
+                    None => self.resume_initial_plan_compile_transaction(&store, &mut tx)?,
+                };
+                tx.failure_reason = reason.or(tx.failure_reason);
+                self.finalize_initial_plan_compile(&lifecycle, &store, &mut tx, &outcome)
+                    .await?;
+                self.complete_active_node(Some(
+                    "Final Compile 已从原 compile transaction 恢复".to_string(),
+                ))
+                .await;
+                self.enter_human_confirm(Some("Final Compile 已提交，等待最终确认".to_string()))
                     .await;
-                    self.enter_human_confirm(Some(
-                        "Final Compile 已提交，等待最终确认".to_string(),
-                    ))
-                    .await;
-                    return Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm);
-                }
-
-                self.complete_active_node(Some("继续 Final Compile".to_string()))
-                    .await;
-                self.enter_work_item_plan_compile().await;
-                Ok(WorkItemPlanCompileRecoveryOutcome::Continue)
+                Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm)
             }
             WorkItemPlanCompileRecoveryActionDto::HumanTriage => {
                 tx.failure_reason = reason.or(tx.failure_reason);
@@ -518,70 +553,6 @@ impl WorkspaceEngine {
             .filter(|tx| tx.status == WorkItemPlanCompileStatus::RecoveryRequired)
             .max_by(|left, right| left.created_at.cmp(&right.created_at))
             .ok_or_else(|| "work item plan compile recovery transaction is missing".to_string())
-    }
-
-    pub(crate) fn commit_recovered_work_item_plan_after_marker(
-        &self,
-        lifecycle: &LifecycleStore,
-        tx: &WorkItemPlanCompileTransaction,
-    ) -> Result<(), String> {
-        let work_items = lifecycle
-            .list_work_items(&tx.project_id, &tx.issue_id)
-            .map_err(|error| format!("list work items during compile recovery failed: {error}"))?;
-        let created_work_item_ids: HashSet<&str> = tx
-            .created_work_item_ids
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let work_items_by_id: HashMap<&str, &LifecycleWorkItemRecord> = work_items
-            .iter()
-            .filter(|item| created_work_item_ids.contains(item.id.as_str()))
-            .map(|item| (item.id.as_str(), item))
-            .collect();
-        for work_item_id in &tx.created_work_item_ids {
-            if !work_items_by_id.contains_key(work_item_id.as_str()) {
-                return Err(format!(
-                    "created work item `{work_item_id}` missing during compile recovery"
-                ));
-            }
-        }
-
-        let dependency_graph = tx
-            .created_work_item_ids
-            .iter()
-            .filter_map(|work_item_id| work_items_by_id.get(work_item_id.as_str()).copied())
-            .flat_map(|work_item| {
-                work_item
-                    .depends_on
-                    .iter()
-                    .cloned()
-                    .map(|from_work_item_id| IssueWorkItemDependencyEdge {
-                        from_work_item_id,
-                        to_work_item_id: work_item.id.clone(),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-
-        lifecycle
-            .commit_issue_work_item_plan(
-                &tx.project_id,
-                &tx.issue_id,
-                &tx.plan_id,
-                IssueWorkItemPlanUpdate {
-                    work_item_ids: tx.created_work_item_ids.clone(),
-                    verification_plan_ids: tx.created_verification_plan_ids.clone(),
-                    repository_profile_ref: None,
-                    dependency_graph,
-                    created_from_provider_run: tx
-                        .previous_plan_snapshot
-                        .created_from_provider_run
-                        .clone(),
-                    validator_findings: tx.validator_findings.clone(),
-                },
-            )
-            .map_err(|error| format!("commit recovered WorkItemPlan failed: {error}"))?;
-        Ok(())
     }
 
     pub(crate) fn accepted_active_draft_records_for_compile(
@@ -622,5 +593,25 @@ impl WorkspaceEngine {
             records.push(record);
         }
         Ok(records)
+    }
+}
+
+#[cfg(test)]
+fn work_item_plan_compile_finalizer_failpoints() -> &'static std::sync::Mutex<
+    std::collections::HashMap<WorkItemPlanCompileFinalizerFailpointKey, u64>,
+> {
+    WORK_ITEM_PLAN_COMPILE_FINALIZER_FAILPOINTS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+impl Drop for WorkItemPlanCompileFinalizerFailpointGuard {
+    fn drop(&mut self) {
+        let mut failpoints = work_item_plan_compile_finalizer_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if failpoints.get(&self.key) == Some(&self.registration_id) {
+            failpoints.remove(&self.key);
+        }
     }
 }

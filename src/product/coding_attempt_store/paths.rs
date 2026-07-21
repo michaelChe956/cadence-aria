@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::product::coding_attempt_store::utils::coding_stage_dir_name;
-use crate::product::coding_models::{CodingExecutionStage, CodingRoleRun};
+use crate::product::coding_models::{CodingExecutionAttempt, CodingExecutionStage, CodingRoleRun};
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
 impl super::CodingAttemptStore {
@@ -45,6 +45,16 @@ impl super::CodingAttemptStore {
             .join("work-item-handoff.json")
     }
 
+    pub(crate) fn coding_git_operation_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("git-operation.json")
+    }
+
     pub(crate) fn role_provider_config_path(
         &self,
         project_id: &str,
@@ -84,6 +94,104 @@ impl super::CodingAttemptStore {
     ) -> PathBuf {
         self.coding_units_root(project_id, issue_id, attempt_id)
             .join(format!("{unit_id}.json"))
+    }
+
+    pub(crate) fn plan_binding_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("plan-binding.json")
+    }
+
+    pub(crate) fn group_initialization_arbitration_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> PathBuf {
+        self.coding_attempts_root(project_id, issue_id)
+            .join("group-initialization-arbitration")
+    }
+
+    pub(crate) fn work_item_attempt_creation_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+    ) -> PathBuf {
+        self.coding_attempts_root(project_id, issue_id)
+            .join("work-item-attempt-locks")
+            .join(work_item_id)
+    }
+
+    pub(crate) fn group_initialization_journal_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> PathBuf {
+        self.coding_attempts_root(project_id, issue_id)
+            .join("group-initializations")
+            .join(format!("{plan_id}.json"))
+    }
+
+    pub(crate) fn amendment_applications_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("amendment-applications")
+    }
+
+    pub(crate) fn amendment_application_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        amendment_id: &str,
+    ) -> PathBuf {
+        self.amendment_applications_root(project_id, issue_id, attempt_id)
+            .join(format!("{amendment_id}.json"))
+    }
+
+    pub(crate) fn amendment_event_delivery_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        amendment_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("amendment-event-deliveries")
+            .join(format!("{amendment_id}.json"))
+    }
+
+    pub(crate) fn coding_unit_runs_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        unit_id: &str,
+    ) -> PathBuf {
+        self.coding_units_root(project_id, issue_id, attempt_id)
+            .join(unit_id)
+            .join("runs")
+    }
+
+    pub(crate) fn coding_unit_run_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        unit_id: &str,
+        unit_run_id: &str,
+    ) -> PathBuf {
+        self.coding_unit_runs_root(project_id, issue_id, attempt_id, unit_id)
+            .join(format!("{unit_run_id}.json"))
     }
 
     pub(crate) fn coding_unit_handoff_path(
@@ -249,7 +357,7 @@ impl super::CodingAttemptStore {
 
     pub fn save_provider_raw_output(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         stage: CodingExecutionStage,
         purpose: &str,
         output: &str,
@@ -257,7 +365,12 @@ impl super::CodingAttemptStore {
         use std::fs;
 
         validate_relative_id(purpose)?;
-        let attempt = self.find_attempt_by_id(attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &attempt.id,
+            "coding_provider_raw_output",
+            purpose,
+        )?;
         let stage_dir_name = coding_stage_dir_name(&stage);
         let raw_root = self
             .provider_raw_output_root(&attempt.project_id, &attempt.issue_id, &attempt.id)

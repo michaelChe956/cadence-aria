@@ -11,6 +11,9 @@ import type {
   WorkspaceReviewFindingSeverity,
 } from "./common";
 import type {
+  HumanPresentationRevision,
+  PlanProjectionBundle,
+  ProjectionValidationReport,
   WorkItemBatchStatePayload,
   WorkItemDraftCandidatePayload,
   WorkItemGenerationMode,
@@ -19,7 +22,15 @@ import type {
   WorkItemPlanCompileReportPayload,
   WorkItemPlanContextBlockerPayload,
   WorkItemPlanOutlineCandidatePayload,
+  WorkItemProjectionBundle,
+  WorkItemRevisionHistoryDto,
+  SaveHumanPresentationRevisionMessage,
 } from "./work-item-plan";
+import type {
+  PlanAmendmentManifest,
+  PlanRepairSessionSnapshot,
+  WorkspaceSessionLink,
+} from "./coding-plan-repair";
 
 export type WorkspaceMessage = {
   role: string;
@@ -62,7 +73,24 @@ export type ArtifactUpdateMessage =
   | { type: "artifact_update"; version: number; context_blocker: WorkItemPlanContextBlockerPayload }
   | { type: "artifact_update"; version: number; draft_candidate: WorkItemDraftCandidatePayload }
   | { type: "artifact_update"; version: number; batch_state: WorkItemBatchStatePayload }
-  | { type: "artifact_update"; version: number; compile_report: WorkItemPlanCompileReportPayload };
+  | { type: "artifact_update"; version: number; compile_report: WorkItemPlanCompileReportPayload }
+  | { type: "artifact_update"; version: number; plan_projection: PlanProjectionBundle }
+  | { type: "artifact_update"; version: number; work_item_projection: WorkItemProjectionBundle }
+  | {
+      type: "artifact_update";
+      version: number;
+      work_item_revision_history: WorkItemRevisionHistoryDto;
+    }
+  | {
+      type: "artifact_update";
+      version: number;
+      projection_validation: ProjectionValidationReport;
+    }
+  | {
+      type: "artifact_update";
+      version: number;
+      plan_amendment_manifest: PlanAmendmentManifest;
+    };
 
 export type RevertWorkItemMessage = {
   type: "revert_work_item";
@@ -86,6 +114,29 @@ export type RecoverableInterruptedRun = {
   failed_node_id: string;
   operation: "review" | "work_item_draft_generation";
   label: string;
+};
+
+export type LinkedWorkspaceAmendmentTarget = {
+  entity_id: string;
+  workspace_type: "story" | "design";
+  relation: "story_amendment" | "design_amendment";
+};
+
+export type LinkedWorkspaceSessionSnapshot = {
+  link: WorkspaceSessionLink;
+  entity_id: string;
+  workspace_type: "story" | "design" | "work_item" | "work_item_plan";
+  artifact_version_id: number | null;
+  timeline_nodes: TimelineNode[];
+  selected_timeline_node_id: string | null;
+  human_confirm_state:
+    | "open"
+    | "running"
+    | "waiting_for_human"
+    | "confirmed"
+    | "change_requested"
+    | "blocked_provider_unavailable"
+    | "terminated";
 };
 
 export type WsInMessage =
@@ -132,7 +183,18 @@ export type WsInMessage =
       action: WorkItemPlanCompileRecoveryAction;
       reason?: string | null;
     }
+  | SaveHumanPresentationRevisionMessage
   | { type: "human_confirm"; decision: HumanConfirmDecision; payload?: unknown }
+  | { type: "confirm_plan_amendment"; amendment_id: string }
+  | {
+      type: "cancel_plan_amendment";
+      amendment_id: string;
+      reason?: string | null;
+    }
+  | {
+      type: "start_linked_workspace_amendment";
+      target: LinkedWorkspaceAmendmentTarget;
+    }
   | { type: "abort" }
   | { type: "hello"; session_id: string; last_seen_node_id?: string | null }
   | { type: "ping" };
@@ -316,6 +378,14 @@ export type ArtifactVersion = {
 
 export type ArtifactVersionSummary = Omit<ArtifactVersion, "markdown"> & { markdown?: string };
 
+export type WorkspaceStructuredArtifactVersion = ArtifactVersionSummary & {
+  plan_projection?: PlanProjectionBundle;
+  work_item_projection?: WorkItemProjectionBundle;
+  work_item_revision_history?: WorkItemRevisionHistoryDto;
+  projection_validation?: ProjectionValidationReport;
+  plan_amendment_manifest?: PlanAmendmentManifest;
+};
+
 export type ProviderSnapshot = {
   name: string;
   model: string;
@@ -439,6 +509,16 @@ export type WsOutMessage =
       structured_output_diagnostic?: StructuredOutputDiagnostic | null;
     }
   | { type: "review_decision_required"; node_id: string; round: number; options: string[] }
+  | { type: "human_presentation_revision_saved"; revision: HumanPresentationRevision }
+  | {
+      type: "human_presentation_revision_save_failed";
+      source_projection_bundle_id: string;
+      message: string;
+    }
+  | {
+      type: "linked_workspace_amendment_created";
+      snapshot: LinkedWorkspaceSessionSnapshot;
+    }
   | {
       type: "session_state";
       session_id: string;
@@ -452,15 +532,27 @@ export type WsOutMessage =
         | string
         | null
         | { markdown: string; diff?: string | null }
-        | { candidate: WorkItemPlanCandidateDto };
+        | { candidate: WorkItemPlanCandidateDto }
+        | { outline_candidate: WorkItemPlanOutlineCandidatePayload }
+        | { context_blocker: WorkItemPlanContextBlockerPayload }
+        | { draft_candidate: WorkItemDraftCandidatePayload }
+        | { batch_state: WorkItemBatchStatePayload }
+        | { compile_report: WorkItemPlanCompileReportPayload }
+        | { plan_projection: PlanProjectionBundle }
+        | { work_item_projection: WorkItemProjectionBundle }
+        | { work_item_revision_history: WorkItemRevisionHistoryDto }
+        | { projection_validation: ProjectionValidationReport }
+        | { plan_amendment_manifest: PlanAmendmentManifest };
       providers: WsProviderConfig;
       timeline_nodes: TimelineNode[];
       active_node_id: string | null;
-      artifact_versions: ArtifactVersion[];
+      artifact_versions: WorkspaceStructuredArtifactVersion[];
       artifact_version_summaries?: ArtifactVersionSummary[];
       timeline_node_details: Record<string, NodeDetail>;
       active_run_id: string | null;
+      human_presentation_revisions: HumanPresentationRevision[];
       recoverable_interrupted_run?: RecoverableInterruptedRun | null;
+      plan_repair?: PlanRepairSessionSnapshot | null;
     }
   | { type: "error"; message: string }
   | { type: "protocol_error"; code: string; message: string; context?: unknown }

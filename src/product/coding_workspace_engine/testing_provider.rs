@@ -1,10 +1,19 @@
 use super::*;
 
 mod execution;
+mod execution_tool;
+mod execution_types;
 mod plan;
 mod report;
+#[cfg(test)]
+mod test_pause;
 
-use execution::{ProviderTestingExecutionInput, ProviderTestingExecutionOutcome};
+#[cfg(test)]
+pub(crate) use test_pause::{TesterToolCommitTestPoint, register_tester_tool_commit_pause};
+
+use execution_tool::TesterToolExecutionInput;
+
+use execution_types::{ProviderTestingExecutionInput, ProviderTestingExecutionOutcome};
 use plan::{ProviderTestingPlanInput, ProviderTestingPlanOutcome, ProviderTestingPlanPhase};
 use report::ProviderTestingReportInput;
 
@@ -41,6 +50,7 @@ impl CodingWorkspaceEngine {
         options: TesterAgentOptions,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<TestingReport, CodingWorkspaceEngineError> {
+        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),

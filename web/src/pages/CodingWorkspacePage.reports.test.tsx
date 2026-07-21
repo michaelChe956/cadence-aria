@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   confirmWorkItemExecutionPlan,
   deleteCodingAttempt,
@@ -9,12 +9,15 @@ import {
 } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { repairAwaitingConfirmationFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
+  CODING_ATTEMPT_ADDRESS,
   DEFAULT_PERMISSION_MODES,
   executionPlan,
   installCodingWorkspacePageTestHooks,
   mockCodingWs,
+  mockPlanRepairWs,
   readyCodingState,
 } from "./CodingWorkspacePage.test-utils";
 
@@ -27,6 +30,10 @@ vi.mock("../api/client", () => ({
 
 vi.mock("../hooks/useCodingWorkspaceWs", () => ({
   useCodingWorkspaceWs: vi.fn(),
+}));
+
+vi.mock("../hooks/useWorkspaceWs", () => ({
+  useWorkspaceWs: vi.fn(),
 }));
 
 vi.mock("../hooks/useUnloadGuard", () => ({
@@ -70,6 +77,9 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 describe("CodingWorkspacePage reports and history", () => {
   installCodingWorkspacePageTestHooks();
+  beforeEach(() => {
+    mockPlanRepairWs();
+  });
 
   it("keeps provider settings and role history out of the default chat layout", () => {
     mockCodingWs();
@@ -122,7 +132,12 @@ describe("CodingWorkspacePage reports and history", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     expect(screen.getByTestId("coding-chat-entry-list")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Provider 设置" })).toBeInTheDocument();
@@ -150,7 +165,12 @@ describe("CodingWorkspacePage reports and history", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
 
@@ -192,7 +212,12 @@ describe("CodingWorkspacePage reports and history", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     const gate = screen.getByTestId("coding-pending-gate");
     expect(gate).toHaveTextContent("review_payload_parse_error");
@@ -252,7 +277,12 @@ describe("CodingWorkspacePage reports and history", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
@@ -286,7 +316,12 @@ describe("CodingWorkspacePage reports and history", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
@@ -326,7 +361,12 @@ describe("CodingWorkspacePage reports and history", () => {
       },
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
@@ -405,7 +445,12 @@ describe("CodingWorkspacePage reports and history", () => {
       ],
     });
 
-    render(<CodingWorkspacePage attemptId="coding_attempt_0001" onBack={vi.fn()} />);
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "角色运行历史" }));
 
@@ -421,5 +466,43 @@ describe("CodingWorkspacePage reports and history", () => {
     await userEvent.click(screen.getByRole("button", { name: /Code Reviewer #1/ }));
 
     expect(useCodingWorkspaceStore.getState().selectedNodeId).toBe("coding_node_0004");
+  });
+
+  it("restores the unified plan repair timeline from visible projections", () => {
+    const repair = repairAwaitingConfirmationFixture();
+    mockCodingWs();
+    mockPlanRepairWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "awaiting_plan_amendment",
+      stage: "code_review",
+      activePlanRepair: repair,
+      timelineNodes: [
+        {
+          id: "coding_node_review_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "code_review",
+          title: "Code Review",
+          status: "completed",
+          agent_role: "reviewer",
+          summary: "发现计划契约缺陷",
+          started_at: "2026-07-20T00:00:00Z",
+          completed_at: "2026-07-20T00:00:30Z",
+          artifact_refs: [],
+        },
+        ...repair.timelineNodes,
+      ],
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("group", { name: "Plan Repair Timeline" }))
+      .toHaveTextContent("等待一次性确认");
+    expect(screen.getAllByText("修订 Work Item Contract")).toHaveLength(1);
   });
 });

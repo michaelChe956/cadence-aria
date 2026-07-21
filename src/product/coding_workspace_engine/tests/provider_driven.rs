@@ -50,7 +50,10 @@ impl StreamingProviderAdapter for ProviderDrivenTestingNoToolCallProvider {
                         "status": "passed",
                         "evidence_refs": ["provider-managed-unit.log"],
                         "provider_analysis": "unit evidence accepted"
-                    }]
+                    }],
+                    "plan_defect_findings": [
+                        super::provider_execution_context::current_plan_defect_finding()
+                    ]
                 })
                 .to_string()
             };
@@ -302,7 +305,7 @@ fn clearing_coder_conversation_preserves_other_roles() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![
                 ProviderConversationRef {
                     role: ProviderConversationRole::Coder,
@@ -348,7 +351,6 @@ async fn testing_without_provider_driven_capability_creates_tester_blocked_gate(
     }];
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-
     let report = engine
         .execute_testing_with_provider(
             &attempt,
@@ -385,7 +387,7 @@ async fn testing_without_provider_driven_capability_creates_tester_blocked_gate(
 }
 
 #[tokio::test]
-async fn real_provider_driven_testing_accepts_final_step_results_without_tool_calls() {
+async fn coding_plan_repair_tester_plan_finding_blocks_provider_driven_testing() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -401,9 +403,22 @@ async fn real_provider_driven_testing_accepts_final_step_results_without_tool_ca
         .await
         .expect("provider-driven testing");
 
-    assert_eq!(report.overall_status, TestingOverallStatus::Passed);
+    assert_eq!(report.overall_status, TestingOverallStatus::Blocked);
     assert!(report.plan_id.is_some());
     assert_eq!(report.steps.len(), 1);
+    assert_eq!(report.plan_defect_findings.len(), 1);
+    assert_eq!(
+        report.plan_defect_findings[0].finding_id,
+        "tester_finding_0001"
+    );
+    assert_eq!(
+        report.plan_defect_findings[0].defect_class,
+        crate::product::models::PlanDefectClass::CurrentWorkItemInvalid
+    );
+    assert_eq!(
+        report.plan_defect_findings[0].evidence[0].source_ref,
+        "provider-managed-unit.log"
+    );
     assert_eq!(report.steps[0].step_id, "unit");
     assert_eq!(
         report.steps[0].evidence_refs,
@@ -411,7 +426,11 @@ async fn real_provider_driven_testing_accepts_final_step_results_without_tool_ca
     );
     assert!(report.commands.is_empty());
     assert!(report.raw_provider_output_ref.is_some());
-
+    let updated = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt");
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::Testing);
     let chat_entries = store
         .list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("chat entries");
@@ -442,6 +461,12 @@ async fn real_provider_driven_testing_accepts_final_step_results_without_tool_ca
                 .and_then(|metadata| metadata.get("phase"))
                 .and_then(|phase| phase.as_str())
                 == Some("testing_result")
+            && entry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("plan_defect_route"))
+                .and_then(|route| route.as_str())
+                == Some("stop_for_human_triage")
     }));
 }
 
@@ -499,7 +524,7 @@ async fn reviewer_driven_rework_increments_rework_count_and_resumes_coder() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let attempt = store
         .replace_attempt_provider_conversations(
-            &attempt.id,
+            &attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::Coder,
                 provider: ProviderName::Codex,
@@ -736,7 +761,9 @@ async fn blocked_code_review_without_structured_findings_accepts_manual_feedback
     drop(root);
 }
 
-fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeReviewReport {
+pub(super) fn review_report_requesting_changes(
+    attempt: &CodingExecutionAttempt,
+) -> CodeReviewReport {
     CodeReviewReport {
         id: "code_review_report_0001".to_string(),
         attempt_id: attempt.id.clone(),
@@ -750,9 +777,17 @@ fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeRev
             required_action: Some("add validation".to_string()),
             source_stage: CodingExecutionStage::CodeReview,
             evidence: vec!["review-output.log".to_string()],
+            plan_defect_evidence: Vec::new(),
             related_requirements: Vec::new(),
             related_design_constraints: Vec::new(),
             related_work_item_tasks: Vec::new(),
+            defect_class: crate::product::models::PlanDefectClass::ImplementationDefect,
+            reason_code: None,
+            contract_refs: Vec::new(),
+            capability_refs: Vec::new(),
+            repair_target: None,
+            recommended_route: crate::product::models::PlanDefectRoute::CoderRework,
+            confidence: None,
         }],
         tested_evidence_refs: Vec::new(),
         diff_refs: Vec::new(),

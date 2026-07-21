@@ -370,6 +370,7 @@ fn valid_outline_author_output() -> Value {
             "work_item_outlines": [
                 {
                     "outline_id": "outline_backend",
+                    "logical_work_item_id": "wi_backend",
                     "title": "后端 API",
                     "kind": "backend",
                     "goal": "实现 API",
@@ -387,6 +388,7 @@ fn valid_outline_author_output() -> Value {
                 },
                 {
                     "outline_id": "outline_frontend",
+                    "logical_work_item_id": "wi_frontend",
                     "title": "前端 UI",
                     "kind": "frontend",
                     "goal": "接入 API",

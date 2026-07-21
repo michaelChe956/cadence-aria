@@ -271,20 +271,21 @@ export function workItemWaitingReason(
 }
 
 export interface LifecycleWorkbenchState {
-  focusedEntityId: string | null;
+  focusedEntityKey: string | null;
   isDrawerOpen: boolean;
 }
 
 export interface LifecycleWorkbenchActions {
-  openDrawer: (entityId: string) => void;
+  openDrawer: (entityKey: string) => void;
   closeDrawer: () => void;
 }
 
 export const useLifecycleWorkbenchStore = create<
   LifecycleWorkbenchState & LifecycleWorkbenchActions
 >((set) => ({
-  focusedEntityId: null,
+  focusedEntityKey: null,
   isDrawerOpen: false,
-  openDrawer: (entityId) => set({ focusedEntityId: entityId, isDrawerOpen: true }),
-  closeDrawer: () => set({ focusedEntityId: null, isDrawerOpen: false }),
+  openDrawer: (entityKey) =>
+    set({ focusedEntityKey: entityKey, isDrawerOpen: true }),
+  closeDrawer: () => set({ focusedEntityKey: null, isDrawerOpen: false }),
 }));

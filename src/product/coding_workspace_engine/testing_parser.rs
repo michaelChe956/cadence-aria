@@ -196,21 +196,52 @@ pub(crate) fn derive_testing_blocked_reason_code(
     "testing_blocked".to_string()
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct ProviderTestingStepResultsPayload {
-    #[serde(default)]
-    pub(crate) step_results: Vec<TestingStepResult>,
+pub(crate) fn parse_test_execution_payload_from_provider_output(
+    output: &str,
+) -> Result<ProviderTestExecutionPayload, CodingWorkspaceEngineError> {
+    let Some(json) = extract_json_object(output) else {
+        return Ok(ProviderTestExecutionPayload::default());
+    };
+    let payload = serde_json::from_str::<ProviderTestExecutionPayload>(json).map_err(|error| {
+        CodingWorkspaceEngineError::ProviderStream(format!(
+            "tester_execution_payload_invalid: {error}"
+        ))
+    })?;
+    for finding in &payload.plan_defect_findings {
+        finding.validate().map_err(|error| {
+            CodingWorkspaceEngineError::ProviderStream(format!(
+                "tester_plan_defect_finding_invalid: {error:?}"
+            ))
+        })?;
+    }
+    Ok(payload)
 }
 
-pub(crate) fn parse_testing_step_results_from_provider_output(
-    output: &str,
-) -> Vec<TestingStepResult> {
-    let Some(json) = extract_json_object(output) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<ProviderTestingStepResultsPayload>(json)
-        .map(|payload| payload.step_results)
-        .unwrap_or_default()
+pub(crate) fn merge_test_execution_plan_defect_findings(
+    retained: &mut Vec<crate::product::plan_repair::PlanDefectFinding>,
+    incoming: Vec<crate::product::plan_repair::PlanDefectFinding>,
+) -> Result<(), CodingWorkspaceEngineError> {
+    for finding in incoming {
+        if let Some(index) = retained
+            .iter()
+            .position(|existing| existing.finding_id == finding.finding_id)
+        {
+            let existing_identity =
+                crate::product::plan_repair::plan_defect_fingerprint("", &retained[index]);
+            let incoming_identity =
+                crate::product::plan_repair::plan_defect_fingerprint("", &finding);
+            if existing_identity != incoming_identity {
+                return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                    "tester_plan_defect_identity_conflict: {}",
+                    finding.finding_id
+                )));
+            }
+            retained[index] = finding;
+        } else {
+            retained.push(finding);
+        }
+    }
+    Ok(())
 }
 
 pub fn testing_report_has_execution_evidence(report: &TestingReport) -> bool {

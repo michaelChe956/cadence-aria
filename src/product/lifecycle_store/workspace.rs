@@ -2,11 +2,13 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
+use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    ProviderConversationRef, WorkspaceMessageRecord, WorkspaceSessionRecord,
-    WorkspaceSessionStatus, WorkspaceSessionSummaryRecord, WorkspaceType,
+    PlanRepairSessionSnapshotDto, ProviderConversationRef, WorkspaceMessageRecord,
+    WorkspaceSessionLink, WorkspaceSessionRecord, WorkspaceSessionStatus,
+    WorkspaceSessionSummaryRecord, WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
@@ -18,16 +20,213 @@ use super::{
 };
 
 impl LifecycleStore {
+    pub fn compare_and_save_plan_repair_session_state(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        expected: &PlanRepairSessionSnapshotDto,
+        next: &PlanRepairSessionSnapshotDto,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(session_id)?;
+        if expected.link.child_session_id != session_id || next.link.child_session_id != session_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "plan_repair_session_state",
+                id: session_id.to_string(),
+            });
+        }
+        let path = self
+            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
+            .join("plan_repair_session_state.json");
+        with_exclusive_lock(&path, || {
+            let stored: PlanRepairSessionSnapshotDto = read_json(&path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "plan_repair_session_state",
+                    id: session_id.to_string(),
+                });
+            }
+            if stored == *next {
+                return Ok(());
+            }
+            write_json(&path, next)
+        })
+    }
+
+    pub fn save_plan_repair_session_state(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        value: &PlanRepairSessionSnapshotDto,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(session_id)?;
+        if value.link.child_session_id != session_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "plan_repair_session_state",
+                id: session_id.to_string(),
+            });
+        }
+        let path = self
+            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
+            .join("plan_repair_session_state.json");
+        write_json(&path, value)
+    }
+
+    pub fn load_plan_repair_session_state(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<Option<PlanRepairSessionSnapshotDto>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(session_id)?;
+        let path = self
+            .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
+            .join("plan_repair_session_state.json");
+        if !path_exists(&path)? {
+            return Ok(None);
+        }
+        let value: PlanRepairSessionSnapshotDto = read_json(&path)?;
+        if value.link.child_session_id != session_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "plan_repair_session_state",
+                id: session_id.to_string(),
+            });
+        }
+        Ok(Some(value))
+    }
+
+    pub fn put_session_link(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        value: &WorkspaceSessionLink,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(&value.id)?;
+        validate_relative_id(&value.parent_session_id)?;
+        validate_relative_id(&value.child_session_id)?;
+        let path = self
+            .paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("workspace-session-links")
+            .join(format!("{}.json", value.id));
+        if path_exists(&path)? {
+            let existing: WorkspaceSessionLink = read_json(&path)?;
+            if existing == *value {
+                return Ok(());
+            }
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "workspace_session_link",
+                id: value.id.clone(),
+            });
+        }
+        write_json(&path, value)
+    }
+
+    pub fn list_session_links(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<WorkspaceSessionLink>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let root = self
+            .paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("workspace-session-links");
+        let mut links = Vec::new();
+        for path in json_file_paths(&root)? {
+            let link: WorkspaceSessionLink = read_json(&path)?;
+            let file_id = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    ProductStoreError::Io(format!(
+                        "invalid workspace session link path: {}",
+                        path.display()
+                    ))
+                })?;
+            if link.id != file_id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "workspace_session_link",
+                    id: file_id.to_string(),
+                });
+            }
+            links.push(link);
+        }
+        links.sort_by(|left, right| {
+            (left.created_at.as_str(), left.id.as_str())
+                .cmp(&(right.created_at.as_str(), right.id.as_str()))
+        });
+        Ok(links)
+    }
+
+    pub fn get_session_link(
+        &self,
+        child_session_id: &str,
+    ) -> Result<WorkspaceSessionLink, ProductStoreError> {
+        let session = self.get_workspace_session(child_session_id)?;
+        let mut matches = self
+            .list_session_links(&session.project_id, &session.issue_id)?
+            .into_iter()
+            .filter(|link| link.child_session_id == child_session_id);
+        let link = matches.next().ok_or_else(|| ProductStoreError::NotFound {
+            kind: "workspace_session_link",
+            id: child_session_id.to_string(),
+        })?;
+        if matches.next().is_some() {
+            return Err(ProductStoreError::Ambiguous {
+                kind: "workspace_session_link",
+                id: child_session_id.to_string(),
+            });
+        }
+        Ok(link)
+    }
+
     pub fn create_workspace_session(
         &self,
         input: CreateWorkspaceSessionInput,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let id = self.next_workspace_session_id()?;
+        self.create_workspace_session_with_id(input, id)
+    }
+
+    pub(crate) fn create_workspace_session_with_id(
+        &self,
+        input: CreateWorkspaceSessionInput,
+        id: String,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.entity_id)?;
+        validate_relative_id(&id)?;
 
         let root = self.workspace_sessions_root(&input.project_id, &input.issue_id);
-        let id = self.next_workspace_session_id()?;
+        let target_path = root.join(format!("{id}.json"));
+        if path_exists(&target_path)? {
+            let existing: WorkspaceSessionRecord = read_json(&target_path)?;
+            if existing.id == id
+                && existing.project_id == input.project_id
+                && existing.issue_id == input.issue_id
+                && existing.entity_id == input.entity_id
+                && existing.workspace_type == input.workspace_type
+            {
+                return Ok(existing);
+            }
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "workspace_session",
+                id,
+            });
+        }
         let now = Utc::now().to_rfc3339();
         let session = WorkspaceSessionRecord {
             id: id.clone(),
@@ -47,7 +246,6 @@ impl LifecycleStore {
             updated_at: now,
         };
 
-        let target_path = root.join(format!("{id}.json"));
         super::ensure_target_absent(&target_path)?;
         write_json(&target_path, &session)?;
         Ok(session)
@@ -147,6 +345,31 @@ impl LifecycleStore {
         session.updated_at = Utc::now().to_rfc3339();
         write_json(&session_path, &session)?;
         Ok(session)
+    }
+
+    pub fn compare_and_update_workspace_session_status(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        status: WorkspaceSessionStatus,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(&expected.id)?;
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        with_exclusive_lock(&session_path, || {
+            let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            if stored.status == status {
+                return Ok(stored);
+            }
+            stored.status = status;
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &stored)?;
+            Ok(stored)
+        })
     }
 
     pub fn update_workspace_session_providers(

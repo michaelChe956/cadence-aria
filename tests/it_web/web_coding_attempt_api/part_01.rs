@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -6,10 +7,15 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
-    CodingAttemptStore, CreateChoiceGateInput, CreateCodingExecutionUnitInput,
+    CodingAttemptStore, CodingGitOperationKind, CodingGitOperationPhase, CreateChoiceGateInput,
+    CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
     CreateGroupCodingAttemptInput,
+    PrepareCodingGitOperationInput,
 };
+use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
+use cadence_aria::product::work_item_contract::DependencyContractEdge;
+use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChoiceOption, CodingExecutionAttempt,
     CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole, CodingTimelineNode,
@@ -22,19 +28,20 @@ use cadence_aria::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore,
 };
 use cadence_aria::product::models::{
-    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName, RepositoryProfileConfidence,
-    VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
-    VerificationFallbackPolicy, VerificationScope, WorkItemKind, WorkItemPlanStatus,
-    WorkItemStatus, WorkspaceSessionStatus, WorkspaceType,
+    DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, PlanRevisionReason,
+    ProviderName, RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
+    VerificationCommandSource, VerificationFallbackPolicy, VerificationScope, WorkItemKind,
+    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus, WorkItemStatus,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
-use cadence_aria::web::state::WebAppState;
+use cadence_aria::web::state::{CodingAttemptRunKey, WebAppState};
+use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
-
 #[tokio::test]
 async fn creates_coding_attempt_for_confirmed_work_item_and_surfaces_latest_attempt() {
     let root = tempdir().expect("root");
@@ -54,7 +61,7 @@ async fn creates_coding_attempt_for_confirmed_work_item_and_surfaces_latest_atte
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+    let attempt_id = assert_global_attempt_id(&attempt);
     assert_eq!(attempt["work_item_id"], "work_item_0001");
     assert_eq!(attempt["attempt_no"], 1);
     assert_eq!(attempt["status"], "created");
@@ -82,7 +89,7 @@ async fn creates_coding_attempt_for_confirmed_work_item_and_surfaces_latest_atte
     assert_eq!(lifecycle["coding_attempts"].as_array().unwrap().len(), 1);
     assert_eq!(
         lifecycle["work_items"][0]["latest_attempt"]["attempt_id"],
-        "coding_attempt_0001"
+        attempt_id
     );
 }
 #[tokio::test]
@@ -105,10 +112,10 @@ async fn creates_coding_attempt_with_confirmed_work_item_workspace_providers() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+    let attempt_id = assert_global_attempt_id(&attempt);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let persisted = store
-        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("persisted attempt");
     assert_eq!(
         persisted.provider_config_snapshot.author,
@@ -119,7 +126,6 @@ async fn creates_coding_attempt_with_confirmed_work_item_workspace_providers() {
         Some(ProviderName::ClaudeCode)
     );
 }
-
 #[tokio::test]
 async fn creates_coding_attempt_falls_back_from_unavailable_default_codex_to_claude_code() {
     let root = tempdir().expect("root");
@@ -146,10 +152,10 @@ async fn creates_coding_attempt_falls_back_from_unavailable_default_codex_to_cla
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+    let attempt_id = assert_global_attempt_id(&attempt);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let persisted = store
-        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("persisted attempt");
     assert_eq!(
         persisted.provider_config_snapshot.author,
@@ -160,7 +166,6 @@ async fn creates_coding_attempt_falls_back_from_unavailable_default_codex_to_cla
         Some(ProviderName::ClaudeCode)
     );
 }
-
 #[tokio::test]
 async fn rejects_coding_attempt_when_work_item_plan_is_not_confirmed() {
     let root = tempdir().expect("root");
@@ -182,7 +187,6 @@ async fn rejects_coding_attempt_when_work_item_plan_is_not_confirmed() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "work_item_plan_not_confirmed");
 }
-
 #[tokio::test]
 async fn rejects_coding_attempt_when_dependency_work_item_is_not_completed() {
     let root = tempdir().expect("root");
@@ -208,7 +212,6 @@ async fn rejects_coding_attempt_when_dependency_work_item_is_not_completed() {
         json!(["work_item_0001"])
     );
 }
-
 #[tokio::test]
 async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
     let root = tempdir().expect("root");
@@ -227,6 +230,7 @@ async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_global_attempt_id(&first);
     assert_eq!(first["branch_name"], "aria/issues/issue_0001");
 
     let (status, body) = request_json(
@@ -239,7 +243,6 @@ async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "issue_worktree_active");
 }
-
 #[tokio::test]
 async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     let root = tempdir().expect("root");
@@ -259,13 +262,13 @@ async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
+    assert_global_attempt_id(&body);
     assert_eq!(body["attempt_scope"], "work_item_group");
     assert_eq!(body["work_item_group_id"], "work_item_plan_0001");
     assert_eq!(body["current_work_item_id"], "work_item_0001");
     assert_eq!(body["active_unit_id"], "coding_unit_0001");
     assert_eq!(body["branch_name"], "aria/issues/issue_0001");
 }
-
 #[tokio::test]
 async fn returns_group_coding_attempt_snapshot_with_units() {
     let root = tempdir().expect("root");
@@ -284,12 +287,12 @@ async fn returns_group_coding_attempt_snapshot_with_units() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
+    let attempt_id = assert_global_attempt_id(&attempt);
 
     let (status, snapshot) = request_json(
         app,
         Method::GET,
-        &format!("/api/coding-attempts/{attempt_id}"),
+        &scoped_attempt_uri(&attempt_id, ""),
         json!({}),
     )
     .await;
@@ -303,7 +306,6 @@ async fn returns_group_coding_attempt_snapshot_with_units() {
     assert_eq!(snapshot["units"][0]["status"], "running");
     assert_eq!(snapshot["units"][1]["status"], "pending");
 }
-
 #[tokio::test]
 async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_level_file() {
     let root = tempdir().expect("root");
@@ -337,7 +339,9 @@ async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_l
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -348,7 +352,9 @@ async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_l
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -402,19 +408,19 @@ async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_l
         )
         .expect("save unit1 handoff");
     store
-        .update_coding_unit_handoff_ref(
+        .update_coding_unit_latest_handoff_revision_id(
             "project_0001",
             "issue_0001",
             &attempt.id,
             "coding_unit_0001",
-            Some("units/coding_unit_0001/work-item-handoff.json".to_string()),
+            Some("handoff_revision_0001".to_string()),
         )
         .expect("set handoff ref");
 
     let (status, snapshot) = request_json(
         app,
         Method::GET,
-        &format!("/api/coding-attempts/{}", attempt.id),
+        &scoped_attempt_uri(&attempt.id, ""),
         json!({}),
     )
     .await;
@@ -457,7 +463,7 @@ async fn rejects_group_coding_attempt_when_single_item_attempt_holds_issue_lock(
     ));
     bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
 
-    let (single_status, _) = request_json(
+    let (single_status, single) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
@@ -465,6 +471,7 @@ async fn rejects_group_coding_attempt_when_single_item_attempt_holds_issue_lock(
     )
     .await;
     assert_eq!(single_status, StatusCode::OK);
+    assert_global_attempt_id(&single);
 
     let (status, body) = request_json(
         app,
@@ -488,31 +495,23 @@ async fn group_coding_attempt_retry_is_not_blocked_after_unit_creation_failure()
     ));
     bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let units_blocker = app_paths
-        .issue_lifecycle_root("project_0001", "issue_0001")
-        .join("coding-attempts")
-        .join("coding_attempt_0001")
-        .join("units");
-    fs::create_dir_all(units_blocker.parent().expect("attempt dir")).expect("attempt dir");
-    fs::write(&units_blocker, "block unit directory creation").expect("units blocker");
+    let invalid_fixture = inject_invalid_group_second_work_item(&app_paths);
 
-    let (first_status, _first_body) = request_json(
+    let (first_status, first_body) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
         json!({}),
     )
     .await;
-    assert_eq!(first_status, StatusCode::INTERNAL_SERVER_ERROR);
-
-    let coding_store = CodingAttemptStore::new(app_paths.clone());
-    assert!(
-        coding_store
-            .list_attempts_for_work_item("project_0001", "issue_0001", "work_item_0001")
-            .expect("list attempts after failed create")
-            .is_empty()
+    assert_eq!(first_status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        first_body["code"],
+        "coding_plan_revision_binding_missing"
     );
-    assert!(!units_blocker.exists());
+
+    assert_group_attempt_creation_rolled_back(&app_paths);
+    restore_group_second_work_item(invalid_fixture);
 
     let (retry_status, retry_body) = request_json(
         app,
@@ -523,7 +522,7 @@ async fn group_coding_attempt_retry_is_not_blocked_after_unit_creation_failure()
     .await;
 
     assert_eq!(retry_status, StatusCode::OK);
-    assert_eq!(retry_body["attempt_id"], "coding_attempt_0002");
+    assert_global_attempt_id(&retry_body);
     assert_eq!(retry_body["active_unit_id"], "coding_unit_0001");
 }
 
@@ -554,64 +553,6 @@ async fn rejects_coding_attempt_when_required_dependency_handoff_is_missing() {
 }
 
 #[tokio::test]
-async fn abort_coding_attempt_releases_issue_shared_worktree_lock() {
-    let root = tempdir().expect("root");
-    let repo = git_repo();
-    let state = WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    );
-    let app = build_web_router(state.clone());
-    bootstrap_two_ready_confirmed_work_items(app.clone(), root.path(), repo.path()).await;
-
-    let (status, first) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let attempt_id = first["attempt_id"].as_str().unwrap();
-    let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
-    let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
-    state
-        .coding_runs
-        .insert(attempt_id.to_string(), first_runner_tx);
-    state
-        .coding_runs
-        .insert(attempt_id.to_string(), second_runner_tx);
-
-    let (status, _body) = request_json(
-        app.clone(),
-        Method::POST,
-        &format!("/api/coding-attempts/{attempt_id}/abort"),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        first_runner_rx.recv().await.expect("first runner abort"),
-        CodingRunnerCommand::AbortAttempt
-    );
-    assert_eq!(
-        second_runner_rx.recv().await.expect("second runner abort"),
-        CodingRunnerCommand::AbortAttempt
-    );
-    assert_eq!(state.coding_runs.runner_count(attempt_id), 0);
-
-    let (status, second) = request_json(
-        app,
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(second["work_item_id"], "work_item_0002");
-}
-
-#[tokio::test]
 async fn delete_coding_attempt_releases_active_lock_when_clean() {
     let root = tempdir().expect("root");
     let repo = git_repo();
@@ -629,18 +570,18 @@ async fn delete_coding_attempt_releases_active_lock_when_clean() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let attempt_id = first["attempt_id"].as_str().unwrap();
+    let attempt_id = assert_global_attempt_id(&first);
 
     let (status, _body) = request_json(
         app.clone(),
         Method::DELETE,
-        &format!("/api/coding-attempts/{}", attempt_id),
+        &scoped_attempt_uri(&attempt_id, ""),
         json!({}),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (status, _second) = request_json(
+    let (status, second) = request_json(
         app,
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
@@ -648,6 +589,7 @@ async fn delete_coding_attempt_releases_active_lock_when_clean() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_global_attempt_id(&second);
 }
 
 #[tokio::test]
@@ -668,14 +610,14 @@ async fn delete_coding_attempt_with_dirty_shared_worktree_still_removes_workspac
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let attempt_id = first["attempt_id"].as_str().unwrap();
+    let attempt_id = assert_global_attempt_id(&first);
     let coding_store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = prepare_attempt_with_worktree(
         &coding_store,
         repo.path(),
         "project_0001",
         "issue_0001",
-        attempt_id,
+        &attempt_id,
     );
     let worktree_path = attempt.worktree_path.expect("attempt worktree path");
     fs::write(worktree_path.join("dirty.txt"), "dirty changes").expect("dirty file");
@@ -683,7 +625,7 @@ async fn delete_coding_attempt_with_dirty_shared_worktree_still_removes_workspac
     let (status, _body) = request_json(
         app.clone(),
         Method::DELETE,
-        &format!("/api/coding-attempts/{}", attempt_id),
+        &scoped_attempt_uri(&attempt_id, ""),
         json!({}),
     )
     .await;
@@ -692,11 +634,11 @@ async fn delete_coding_attempt_with_dirty_shared_worktree_still_removes_workspac
     assert!(!worktree_path.exists());
     assert!(
         coding_store
-            .get_attempt("project_0001", "issue_0001", attempt_id)
+            .get_attempt("project_0001", "issue_0001", &attempt_id)
             .is_err()
     );
 
-    let (status, _second) = request_json(
+    let (status, second) = request_json(
         app,
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
@@ -704,6 +646,7 @@ async fn delete_coding_attempt_with_dirty_shared_worktree_still_removes_workspac
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_global_attempt_id(&second);
 }
 
 #[tokio::test]
@@ -725,14 +668,19 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let attempt_id = first["attempt_id"].as_str().unwrap();
+    let attempt_id = assert_global_attempt_id(&first);
+    let attempt_key = CodingAttemptRunKey::new(
+        "project_0001",
+        "issue_0001",
+        attempt_id.clone(),
+    );
     let coding_store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = prepare_attempt_with_worktree(
         &coding_store,
         repo.path(),
         "project_0001",
         "issue_0001",
-        attempt_id,
+        &attempt_id,
     );
     let worktree_path = attempt.worktree_path.expect("attempt worktree path");
     fs::write(worktree_path.join("dirty.txt"), "dirty changes").expect("dirty file");
@@ -740,7 +688,7 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
         .update_attempt_status(
             "project_0001",
             "issue_0001",
-            attempt_id,
+            &attempt_id,
             CodingAttemptStatus::Running,
         )
         .expect("mark attempt running");
@@ -748,28 +696,28 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
         .update_attempt_status(
             "project_0001",
             "issue_0001",
-            attempt_id,
+            &attempt_id,
             CodingAttemptStatus::Failed,
         )
         .expect("mark attempt failed");
     let (first_runner_tx, mut first_runner_rx) = mpsc::channel(1);
     let (second_runner_tx, mut second_runner_rx) = mpsc::channel(1);
-    state
+    let first_run_id = state
         .coding_runs
-        .insert(attempt_id.to_string(), first_runner_tx);
-    state
+        .insert_cancellable(&attempt_key, first_runner_tx)
+        .expect("first runner")
+        .run_id();
+    let second_run_id = state
         .coding_runs
-        .insert(attempt_id.to_string(), second_runner_tx);
+        .insert_cancellable(&attempt_key, second_runner_tx)
+        .expect("second runner")
+        .run_id();
 
-    let (status, _body) = request_json(
-        app.clone(),
-        Method::DELETE,
-        &format!("/api/coding-attempts/{}", attempt_id),
-        json!({}),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let delete_app = app.clone();
+    let delete_uri = scoped_attempt_uri(&attempt_id, "");
+    let delete_request = tokio::spawn(async move {
+        request_json(delete_app, Method::DELETE, &delete_uri, json!({})).await
+    });
     assert_eq!(
         first_runner_rx.recv().await.expect("first runner abort"),
         CodingRunnerCommand::AbortAttempt
@@ -778,15 +726,28 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
         second_runner_rx.recv().await.expect("second runner abort"),
         CodingRunnerCommand::AbortAttempt
     );
-    assert_eq!(state.coding_runs.runner_count(attempt_id), 0);
+    tokio::task::yield_now().await;
+    assert!(
+        !delete_request.is_finished(),
+        "HTTP delete returned before runner removal"
+    );
+    state.coding_runs.remove(&attempt_key, first_run_id);
+    assert!(
+        !delete_request.is_finished(),
+        "HTTP delete returned before every runner was removed"
+    );
+    state.coding_runs.remove(&attempt_key, second_run_id);
+    let (status, _body) = delete_request.await.expect("delete request task");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
     assert!(!worktree_path.exists());
     assert!(
         coding_store
-            .get_attempt("project_0001", "issue_0001", attempt_id)
+            .get_attempt("project_0001", "issue_0001", &attempt_id)
             .is_err()
     );
 
-    let (status, _second) = request_json(
+    let (status, second) = request_json(
         app,
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
@@ -794,4 +755,5 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_global_attempt_id(&second);
 }

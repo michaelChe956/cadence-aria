@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::streaming_provider::{ProviderToolCall, ProviderToolResult};
 use crate::product::coding_models::TestCommandStatus;
-use crate::product::test_executor::{TestCommandSpec, execute_test_command};
+use crate::product::test_executor::{TestCommandSpec, execute_test_command_with_cancellation};
 
 use super::context_loader::TestContextLoader;
 use super::prompts::tester_allowed_tools;
@@ -18,7 +19,14 @@ pub async fn execute_tester_tool_call(
     worktree_path: impl AsRef<Path>,
     artifact_output_root: impl AsRef<Path>,
 ) -> Result<TesterToolOutcome, TesterAgentError> {
-    execute_tester_tool_call_with_context(call, worktree_path, artifact_output_root, None).await
+    execute_tester_tool_call_with_context(
+        call,
+        worktree_path,
+        artifact_output_root,
+        None,
+        CancellationToken::new(),
+    )
+    .await
 }
 
 pub async fn execute_tester_tool_call_with_context(
@@ -26,6 +34,7 @@ pub async fn execute_tester_tool_call_with_context(
     worktree_path: impl AsRef<Path>,
     artifact_output_root: impl AsRef<Path>,
     context_loader: Option<&TestContextLoader>,
+    cancellation: CancellationToken,
 ) -> Result<TesterToolOutcome, TesterAgentError> {
     let worktree_path = worktree_path.as_ref();
     let artifact_output_root = artifact_output_root.as_ref();
@@ -33,7 +42,9 @@ pub async fn execute_tester_tool_call_with_context(
         return Ok(error_outcome(call, "Tester 不允许修改文件或调用未授权工具"));
     }
     match call.tool_name.as_str() {
-        "run_command" => run_command_tool(call, worktree_path, artifact_output_root).await,
+        "run_command" => {
+            run_command_tool(call, worktree_path, artifact_output_root, cancellation).await
+        }
         "read_file" => Ok(text_tool_outcome(
             call,
             read_file_tool(&call.input, worktree_path),
@@ -71,6 +82,7 @@ async fn run_command_tool(
     call: &ProviderToolCall,
     worktree_path: &Path,
     artifact_output_root: &Path,
+    cancellation: CancellationToken,
 ) -> Result<TesterToolOutcome, TesterAgentError> {
     let command = match command_parts_from_input(&call.input) {
         Ok(command) => command,
@@ -80,7 +92,13 @@ async fn run_command_tool(
         id: command_id_for_tool_call(&call.id),
         command,
     };
-    let command = execute_test_command(&spec, worktree_path, artifact_output_root).await?;
+    let command = execute_test_command_with_cancellation(
+        &spec,
+        worktree_path,
+        artifact_output_root,
+        cancellation,
+    )
+    .await?;
     Ok(TesterToolOutcome {
         result: ProviderToolResult {
             tool_use_id: call.id.clone(),

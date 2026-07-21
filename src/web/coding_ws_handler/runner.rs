@@ -1,42 +1,40 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    ReviewVerdict,
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
 };
-use crate::product::coding_workspace_engine::{
-    CodingWorkspaceEngine, CodingWorkspaceEngineError, code_review_report_has_actionable_findings,
+pub(crate) use crate::product::coding_workspace_engine::{
+    CodeReviewFlowDecision, code_review_flow_decision,
 };
+use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
-use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::web::state::{CodingRunReservation, WebAppState};
+use crate::web::state::{CodingAttemptRunKey, CodingRunReservation, WebAppState};
 
-use super::runner_support::{handle_pending_runner_commands, provider_for};
+use super::runner_support::{
+    handle_pending_runner_commands, provider_for, recover_plan_amendment_if_needed,
+    refresh_runtime_revision_history,
+};
 use super::{
     CodingWsOutMessage, await_stage_gate, coding_execution_context, emit_current_session_state,
     ensure_work_item_execution_plan_confirmed, repository_path_for_attempt,
 };
 
-pub(crate) struct CodingRunnerStartProbe {
-    pub(crate) events: Arc<Mutex<Vec<&'static str>>>,
-    pub(crate) provider_entry_tx: oneshot::Sender<()>,
-    pub(crate) continue_rx: oneshot::Receiver<()>,
-}
-
-struct CodingRunnerTask {
-    state: WebAppState,
-    coding_store: CodingAttemptStore,
-    event_tx: mpsc::Sender<CodingWsOutMessage>,
-    attempt: CodingExecutionAttempt,
-    command_rx: mpsc::Receiver<CodingRunnerCommand>,
-    registry_run_id: u64,
-    start_rx: Option<oneshot::Receiver<()>>,
-    probe: Option<CodingRunnerStartProbe>,
-}
+mod amendment;
+mod registration;
+mod start;
+mod task;
+pub(crate) use amendment::spawn_plan_amendment_runner_reserved;
+pub(crate) use start::CodingRunnerStartProbe;
+use start::record_runner_start_event;
+#[cfg(test)]
+pub(crate) use start::{
+    spawn_coding_runner_panicking_after_registration, spawn_coding_runner_with_start_probe,
+};
+use task::{CodingRunnerTask, spawn_coding_runner_task};
 
 pub(crate) fn spawn_coding_runner(
     state: WebAppState,
@@ -45,19 +43,22 @@ pub(crate) fn spawn_coding_runner(
     attempt: CodingExecutionAttempt,
 ) -> Option<mpsc::Sender<CodingRunnerCommand>> {
     let (command_tx, command_rx) = mpsc::channel(32);
-    let registry_attempt_id = attempt.id.clone();
-    let registry_run_id = state
+    let registry_attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let registration = state
         .coding_runs
-        .insert(registry_attempt_id.clone(), command_tx.clone())?;
+        .insert_cancellable(&registry_attempt_key, command_tx.clone())?;
     spawn_coding_runner_task(CodingRunnerTask {
         state,
         coding_store,
         event_tx,
         attempt,
         command_rx,
-        registry_run_id,
+        registry_run_id: registration.run_id,
+        cancellation: registration.cancellation,
         start_rx: None,
         probe: None,
+        #[cfg(test)]
+        panic_after_registration: None,
     });
     Some(command_tx)
 }
@@ -112,9 +113,13 @@ fn spawn_coding_runner_reserved_inner(
     probe: Option<CodingRunnerStartProbe>,
 ) -> Result<mpsc::Sender<CodingRunnerCommand>, CodingWorkspaceEngineError> {
     let (command_tx, command_rx) = mpsc::channel(32);
-    let registry_run_id = reservation.activate(command_tx.clone()).ok_or_else(|| {
-        CodingWorkspaceEngineError::ProviderStream("coding_recovery_reservation_lost".to_string())
-    })?;
+    let registration = reservation
+        .activate_cancellable(command_tx.clone())
+        .ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream(
+                "coding_recovery_reservation_lost".to_string(),
+            )
+        })?;
     let (start_tx, start_rx) = oneshot::channel();
     let probe_events = probe.as_ref().map(|probe| Arc::clone(&probe.events));
     spawn_coding_runner_task(CodingRunnerTask {
@@ -123,114 +128,35 @@ fn spawn_coding_runner_reserved_inner(
         event_tx,
         attempt: attempt.clone(),
         command_rx,
-        registry_run_id,
+        registry_run_id: registration.run_id,
+        cancellation: registration.cancellation,
         start_rx: Some(start_rx),
         probe,
+        #[cfg(test)]
+        panic_after_registration: None,
     });
     record_runner_start_event(probe_events.as_ref(), "task_created");
     if let Err(error) =
-        coding_store.complete_failed_code_review_recovery_journal(&attempt.id, recovery_gate_id)
+        coding_store.complete_failed_code_review_recovery_journal(&attempt, recovery_gate_id)
     {
-        state.coding_runs.remove(&attempt.id, registry_run_id);
+        state.coding_runs.remove(
+            &CodingAttemptRunKey::from_attempt(&attempt),
+            registration.run_id,
+        );
         drop(start_tx);
         return Err(error.into());
     }
     record_runner_start_event(probe_events.as_ref(), "journal_completed");
     if start_tx.send(()).is_err() {
-        state.coding_runs.remove(&attempt.id, registry_run_id);
+        state.coding_runs.remove(
+            &CodingAttemptRunKey::from_attempt(&attempt),
+            registration.run_id,
+        );
         return Err(CodingWorkspaceEngineError::ProviderStream(
             "coding_recovery_runner_start_failed".to_string(),
         ));
     }
     Ok(command_tx)
-}
-
-fn spawn_coding_runner_task(task: CodingRunnerTask) {
-    let CodingRunnerTask {
-        state,
-        coding_store,
-        event_tx,
-        attempt,
-        command_rx,
-        registry_run_id,
-        start_rx,
-        probe,
-    } = task;
-    let registry_attempt_id = attempt.id.clone();
-    let coding_runs = state.coding_runs.clone();
-    tokio::spawn(async move {
-        if let Some(start_rx) = start_rx
-            && start_rx.await.is_err()
-        {
-            coding_runs.remove(&registry_attempt_id, registry_run_id);
-            return;
-        }
-        if let Some(probe) = probe {
-            record_runner_start_event(Some(&probe.events), "provider_entry");
-            let _ = probe.provider_entry_tx.send(());
-            if probe.continue_rx.await.is_err() {
-                coding_runs.remove(&registry_attempt_id, registry_run_id);
-                return;
-            }
-        }
-        let engine = CodingWorkspaceEngine::with_provider(
-            coding_store.clone(),
-            GitWorkspaceService::new(),
-            state.provider_adapter.clone(),
-            event_tx.clone(),
-        );
-        let result = execute_start_coding_flow(
-            &state,
-            &coding_store,
-            &engine,
-            &event_tx,
-            command_rx,
-            &attempt,
-        )
-        .await;
-        if let Err(error) = result
-            && !matches!(error, CodingWorkspaceEngineError::Aborted)
-        {
-            let latest_attempt =
-                coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id);
-            if let Ok(latest_attempt) = latest_attempt
-                && !should_emit_coding_runner_protocol_error(&latest_attempt.status)
-            {
-                if let Err(snapshot_error) =
-                    emit_current_session_state(&event_tx, &coding_store, &latest_attempt).await
-                {
-                    tracing::warn!(
-                        attempt_id = attempt.id.as_str(),
-                        error = %snapshot_error,
-                        "failed to rebuild recoverable coding session state"
-                    );
-                }
-            } else {
-                let code = match &error {
-                    CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
-                        "work_item_execution_plan_not_confirmed".to_string()
-                    }
-                    _ => "coding_start_failed".to_string(),
-                };
-                let _ = event_tx
-                    .send(CodingWsOutMessage::CodingProtocolError {
-                        code,
-                        message: error.to_string(),
-                    })
-                    .await;
-            }
-        }
-        coding_runs.remove(&registry_attempt_id, registry_run_id);
-    });
-}
-
-fn record_runner_start_event(events: Option<&Arc<Mutex<Vec<&'static str>>>>, event: &'static str) {
-    if let Some(events) = events {
-        events
-            .lock()
-            .expect("coding runner start events")
-            .push(event);
-    }
 }
 
 pub(crate) fn should_resume_runner_after_gate_response(
@@ -260,22 +186,64 @@ pub(crate) fn should_emit_coding_runner_protocol_error(status: &CodingAttemptSta
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodeReviewFlowDecision {
-    RunCoderFix,
-    StopForHumanTriage,
-    ContinueAfterApprove,
+pub(crate) async fn start_plan_repair_for_execution_outcome_if_needed(
+    engine: &CodingWorkspaceEngine,
+    current: &CodingExecutionAttempt,
+    decision: Option<CodeReviewFlowDecision>,
+    report: Option<&crate::product::coding_workspace_engine::ExecutionPlanDefectReport>,
+) -> Result<Option<CodingExecutionAttempt>, CodingWorkspaceEngineError> {
+    if decision != Some(CodeReviewFlowDecision::StartPlanRepair) {
+        return Ok(None);
+    }
+    let report = report.ok_or_else(|| {
+        CodingWorkspaceEngineError::ProviderStream(
+            "plan_repair_execution_report_missing".to_string(),
+        )
+    })?;
+    engine
+        .start_plan_repair_from_execution_report(current, report)
+        .await
+        .map(Some)
 }
 
-pub(crate) fn code_review_flow_decision(report: &CodeReviewReport) -> CodeReviewFlowDecision {
-    match report.verdict {
-        ReviewVerdict::RequestChanges => CodeReviewFlowDecision::RunCoderFix,
-        ReviewVerdict::Blocked if code_review_report_has_actionable_findings(report) => {
-            CodeReviewFlowDecision::RunCoderFix
+async fn handle_internal_review_flow_decision(
+    coding_store: &CodingAttemptStore,
+    engine: &CodingWorkspaceEngine,
+    event_tx: &mpsc::Sender<CodingWsOutMessage>,
+    current: &CodingExecutionAttempt,
+    internal_review: &crate::product::coding_models::InternalPrReview,
+) -> Result<(), CodingWorkspaceEngineError> {
+    let current = match engine
+        .internal_review_flow_decision_for_attempt(current, internal_review)?
+    {
+        CodeReviewFlowDecision::ContinueAfterApprove => {
+            if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
+                engine
+                    .complete_group_attempt_after_final_review(current)
+                    .await?
+            } else {
+                engine.complete_attempt_after_final_rework(current).await?
+            }
         }
-        ReviewVerdict::Blocked => CodeReviewFlowDecision::StopForHumanTriage,
-        ReviewVerdict::Approve => CodeReviewFlowDecision::ContinueAfterApprove,
-    }
+        CodeReviewFlowDecision::StartPlanRepair => {
+            engine
+                .start_plan_repair_from_internal_review(current, internal_review)
+                .await?
+        }
+        CodeReviewFlowDecision::RunCoderFix
+        | CodeReviewFlowDecision::RetryVerification
+        | CodeReviewFlowDecision::StartStoryAmendment
+        | CodeReviewFlowDecision::StartDesignAmendment
+        | CodeReviewFlowDecision::OpenOperationalGate
+        | CodeReviewFlowDecision::StopForHumanTriage => current.clone(),
+    };
+    emit_current_session_state(
+        event_tx,
+        coding_store,
+        &current,
+        engine.cancellation_token(),
+    )
+    .await
 }
 
 pub(crate) async fn execute_start_coding_flow(
@@ -288,15 +256,26 @@ pub(crate) async fn execute_start_coding_flow(
 ) -> Result<(), CodingWorkspaceEngineError> {
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
 
-    let mut current =
-        coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let current = coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let (mut current, current_child_session_id) =
+        recover_plan_amendment_if_needed(engine, &current).await?;
+    let refresh_runtime_history = |attempt: &CodingExecutionAttempt| {
+        refresh_runtime_revision_history(&app_paths, attempt, current_child_session_id.as_deref())
+    };
+    if current_child_session_id.is_some() {
+        refresh_runtime_history(&current)?;
+    }
+    coding_store.ensure_provider_run_allowed(&current)?;
     'pipeline: loop {
+        engine.ensure_not_cancelled()?;
+        refresh_runtime_history(&current)?;
         ensure_work_item_execution_plan_confirmed(&app_paths, &current)?;
 
         if matches!(current.stage, CodingExecutionStage::PrepareContext) {
             current = engine
                 .start_attempt(&current.project_id, &current.issue_id, &current.id)
                 .await?;
+            engine.ensure_not_cancelled()?;
             if handle_pending_runner_commands(
                 &mut command_rx,
                 coding_store,
@@ -311,10 +290,12 @@ pub(crate) async fn execute_start_coding_flow(
         }
 
         if matches!(current.stage, CodingExecutionStage::WorktreePrepare) {
+            engine.ensure_not_cancelled()?;
             let repo_path = repository_path_for_attempt(&app_paths, &current)?;
             current = engine
                 .execute_worktree_prepare(&current, &repo_path)
                 .await?;
+            engine.ensure_not_cancelled()?;
             if handle_pending_runner_commands(
                 &mut command_rx,
                 coding_store,
@@ -353,14 +334,18 @@ pub(crate) async fn execute_start_coding_flow(
                 .coder;
             let author_provider =
                 provider_for(state, &author_provider_name, "coding author provider")?;
-            current = engine
-                .execute_coding_with_commands(
+            let coding_outcome = engine
+                .execute_coding_with_commands_outcome(
                     &current,
                     author_provider.as_ref(),
                     &execution_context,
                     &mut command_rx,
                 )
                 .await?;
+            let plan_defect_decision = coding_outcome.plan_defect_decision;
+            let plan_defect_report = coding_outcome.plan_defect_report;
+            current = coding_outcome.attempt;
+            refresh_runtime_history(&current)?;
             if handle_pending_runner_commands(
                 &mut command_rx,
                 coding_store,
@@ -371,6 +356,34 @@ pub(crate) async fn execute_start_coding_flow(
             .await?
             {
                 return Ok(());
+            }
+            if let Some(paused) = start_plan_repair_for_execution_outcome_if_needed(
+                engine,
+                &current,
+                plan_defect_decision,
+                plan_defect_report.as_ref(),
+            )
+            .await?
+            {
+                current = paused;
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
+            }
+            if plan_defect_decision
+                .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
+            {
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
             }
         }
 
@@ -420,23 +433,14 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            match internal_review.verdict {
-                ReviewVerdict::Approve => {
-                    current = if current.scope
-                        == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
-                    {
-                        engine
-                            .complete_group_attempt_after_final_review(&current)
-                            .await?
-                    } else {
-                        engine.complete_attempt_after_final_rework(&current).await?
-                    };
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
-                ReviewVerdict::RequestChanges | ReviewVerdict::Blocked => {
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
-            }
+            return handle_internal_review_flow_decision(
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+                &internal_review,
+            )
+            .await;
         }
 
         if current.stage.order() <= CodingExecutionStage::CodeReview.order() {
@@ -482,7 +486,8 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            match code_review_flow_decision(&review_report) {
+            let reviewer_projection = engine.reviewer_projection_for_attempt(&current)?;
+            match code_review_flow_decision(&review_report, &reviewer_projection) {
                 CodeReviewFlowDecision::RunCoderFix => {
                     let coder_provider_name = coding_store
                         .get_role_provider_config_snapshot(
@@ -496,8 +501,8 @@ pub(crate) async fn execute_start_coding_flow(
                         &coder_provider_name,
                         "coding coder provider (reviewer feedback fix)",
                     )?;
-                    current = engine
-                        .execute_coder_fix_from_review(
+                    let rework_outcome = engine
+                        .execute_coder_fix_from_review_outcome(
                             &current,
                             &review_report,
                             &execution_context,
@@ -505,6 +510,10 @@ pub(crate) async fn execute_start_coding_flow(
                             &mut command_rx,
                         )
                         .await?;
+                    let plan_defect_decision = rework_outcome.plan_defect_decision;
+                    let plan_defect_report = rework_outcome.plan_defect_report;
+                    current = rework_outcome.attempt;
+                    refresh_runtime_history(&current)?;
                     current = coding_store.get_attempt(
                         &current.project_id,
                         &current.issue_id,
@@ -521,16 +530,94 @@ pub(crate) async fn execute_start_coding_flow(
                     {
                         return Ok(());
                     }
+                    if let Some(paused) = start_plan_repair_for_execution_outcome_if_needed(
+                        engine,
+                        &current,
+                        plan_defect_decision,
+                        plan_defect_report.as_ref(),
+                    )
+                    .await?
+                    {
+                        current = paused;
+                        return emit_current_session_state(
+                            event_tx,
+                            coding_store,
+                            &current,
+                            engine.cancellation_token(),
+                        )
+                        .await;
+                    }
+                    if plan_defect_decision
+                        .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
+                    {
+                        return emit_current_session_state(
+                            event_tx,
+                            coding_store,
+                            &current,
+                            engine.cancellation_token(),
+                        )
+                        .await;
+                    }
                     match current.status {
                         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman => {
-                            return emit_current_session_state(event_tx, coding_store, &current)
-                                .await;
+                            return emit_current_session_state(
+                                event_tx,
+                                coding_store,
+                                &current,
+                                engine.cancellation_token(),
+                            )
+                            .await;
                         }
                         _ => continue 'pipeline,
                     }
                 }
-                CodeReviewFlowDecision::StopForHumanTriage => {
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
+                CodeReviewFlowDecision::StartPlanRepair => {
+                    let (finding_index, finding) = review_report
+                        .findings
+                        .iter()
+                        .enumerate()
+                        .find(|(_, finding)| {
+                            matches!(
+                                finding.defect_class,
+                                crate::product::models::PlanDefectClass::CurrentWorkItemInvalid
+                                    | crate::product::models::PlanDefectClass::UpstreamContractInvalid
+                                    | crate::product::models::PlanDefectClass::DependencyGraphInvalid
+                            )
+                        })
+                        .ok_or_else(|| {
+                            CodingWorkspaceEngineError::ProviderStream(
+                                "plan_repair_finding_missing".to_string(),
+                            )
+                        })?;
+                    current = engine
+                        .start_plan_repair_from_review(
+                            &current,
+                            &review_report.id,
+                            &format!("{}_finding_{:04}", review_report.id, finding_index + 1),
+                            finding,
+                            &reviewer_projection,
+                        )
+                        .await?;
+                    return emit_current_session_state(
+                        event_tx,
+                        coding_store,
+                        &current,
+                        engine.cancellation_token(),
+                    )
+                    .await;
+                }
+                CodeReviewFlowDecision::RetryVerification
+                | CodeReviewFlowDecision::StartStoryAmendment
+                | CodeReviewFlowDecision::StartDesignAmendment
+                | CodeReviewFlowDecision::OpenOperationalGate
+                | CodeReviewFlowDecision::StopForHumanTriage => {
+                    return emit_current_session_state(
+                        event_tx,
+                        coding_store,
+                        &current,
+                        engine.cancellation_token(),
+                    )
+                    .await;
                 }
                 CodeReviewFlowDecision::ContinueAfterApprove => {
                     current = coding_store.update_attempt_stage(
@@ -547,7 +634,15 @@ pub(crate) async fn execute_start_coding_flow(
             | CodingExecutionStage::Testing
             | CodingExecutionStage::CodeReview => continue 'pipeline,
             CodingExecutionStage::ReviewRequest => {}
-            _ => return emit_current_session_state(event_tx, coding_store, &current).await,
+            _ => {
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
+            }
         }
 
         if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
@@ -556,13 +651,26 @@ pub(crate) async fn execute_start_coding_flow(
             current = engine
                 .complete_group_unit_after_code_review(&current)
                 .await?;
-            emit_current_session_state(event_tx, coding_store, &current).await?;
+            refresh_runtime_history(&current)?;
+            emit_current_session_state(
+                event_tx,
+                coding_store,
+                &current,
+                engine.cancellation_token(),
+            )
+            .await?;
             if current.stage == CodingExecutionStage::PrepareContext {
                 continue 'pipeline;
             }
         }
         if current.stage != CodingExecutionStage::ReviewRequest {
-            return emit_current_session_state(event_tx, coding_store, &current).await;
+            return emit_current_session_state(
+                event_tx,
+                coding_store,
+                &current,
+                engine.cancellation_token(),
+            )
+            .await;
         }
 
         {
@@ -583,13 +691,25 @@ pub(crate) async fn execute_start_coding_flow(
                 return Ok(());
             }
             if review_request.push_status != crate::product::coding_models::PushStatus::Pushed {
-                return emit_current_session_state(event_tx, coding_store, &current).await;
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
             }
             if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItem {
                 current = engine
                     .complete_attempt_after_review_request(&current)
                     .await?;
-                return emit_current_session_state(event_tx, coding_store, &current).await;
+                return emit_current_session_state(
+                    event_tx,
+                    coding_store,
+                    &current,
+                    engine.cancellation_token(),
+                )
+                .await;
             }
         }
 
@@ -651,17 +771,14 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            match internal_review.verdict {
-                ReviewVerdict::Approve => {
-                    current = engine
-                        .complete_group_attempt_after_final_review(&current)
-                        .await?;
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
-                ReviewVerdict::RequestChanges | ReviewVerdict::Blocked => {
-                    return emit_current_session_state(event_tx, coding_store, &current).await;
-                }
-            }
+            return handle_internal_review_flow_decision(
+                coding_store,
+                engine,
+                event_tx,
+                &current,
+                &internal_review,
+            )
+            .await;
         }
     }
 }

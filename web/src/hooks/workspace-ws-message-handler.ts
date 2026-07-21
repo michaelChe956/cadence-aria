@@ -1,5 +1,8 @@
 import type {
+  HumanPresentationRevision,
+  PlanProjectionBundle,
   ProviderConfigSnapshot,
+  ProjectionValidationReport,
   WorkspaceProviderName,
   WorkItemBatchStatePayload,
   WorkItemDraftCandidatePayload,
@@ -8,6 +11,9 @@ import type {
   WorkItemPlanCompileReportPayload,
   WorkItemPlanContextBlockerPayload,
   WorkItemPlanOutlineCandidatePayload,
+  WorkItemProjectionBundle,
+  WorkItemRevisionHistoryDto,
+  WsOutMessage,
 } from "../api/types";
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
 import {
@@ -24,10 +30,7 @@ import { stageChangeContent } from "../state/workspace-stage-labels";
 import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
 import { trustedReviewComments } from "../state/workspace-review-trust";
 
-export interface WsServerMessage {
-  type: string;
-  [key: string]: unknown;
-}
+export type WsServerMessage = WsOutMessage & Record<string, unknown>;
 
 export const ACTIVE_PROVIDER_STAGES = new Set(["running", "cross_review", "revision"]);
 
@@ -145,7 +148,23 @@ const store = useWorkspaceStore.getState();
     case "artifact_update":
       {
         const version = msg.version as number;
-        if (msg.candidate) {
+        if (msg.plan_amendment_manifest) {
+          const amendment = msg.plan_amendment_manifest as { id?: string };
+          store.appendChatEntry({
+            id: chatEntryId(
+              "artifact_update",
+              `plan_amendment_manifest:${amendment.id ?? String(version)}`,
+            ),
+            type: "artifact_update",
+            role: "system",
+            content: `Plan Amendment 已更新 -> v${version}`,
+            timestamp: new Date().toISOString(),
+            metadata: {
+              version,
+              amendment_id: amendment.id ?? null,
+            },
+          });
+        } else if (msg.candidate) {
           store.setWorkItemPlanCandidate(msg.candidate as WorkItemPlanCandidateDto);
           store.appendChatEntry({
             id: chatEntryId("artifact_update", `candidate:${String(version)}`),
@@ -339,6 +358,15 @@ const store = useWorkspaceStore.getState();
         options: msg.options as string[],
       });
       break;
+    case "human_presentation_revision_saved":
+      store.completeHumanPresentationSave(msg.revision as HumanPresentationRevision);
+      break;
+    case "human_presentation_revision_save_failed":
+      store.failHumanPresentationSave(
+        msg.source_projection_bundle_id as string,
+        msg.message as string,
+      );
+      break;
     case "error":
       store.setError(msg.message as string);
       store.appendChatEntry({
@@ -478,6 +506,30 @@ function workItemPlanArtifactFromMessage(msg: WsServerMessage): WorkItemPlanArti
     return {
       type: "compile_report",
       payload: msg.compile_report as WorkItemPlanCompileReportPayload,
+    };
+  }
+  if (msg.plan_projection) {
+    return {
+      type: "plan_projection",
+      payload: msg.plan_projection as PlanProjectionBundle,
+    };
+  }
+  if (msg.work_item_projection) {
+    return {
+      type: "work_item_projection",
+      payload: msg.work_item_projection as WorkItemProjectionBundle,
+    };
+  }
+  if (msg.work_item_revision_history) {
+    return {
+      type: "work_item_revision_history",
+      payload: msg.work_item_revision_history as WorkItemRevisionHistoryDto,
+    };
+  }
+  if (msg.projection_validation) {
+    return {
+      type: "projection_validation",
+      payload: msg.projection_validation as ProjectionValidationReport,
     };
   }
   return null;

@@ -1,5 +1,10 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
+use crate::product::models::PlanProjectionBundle;
+
+use super::review_context::{
+    PlanReviewSource, append_review_context_section, load_plan_review_context,
+};
 
 impl WorkspaceEngine {
     pub(crate) fn build_review_input(&self) -> Result<StreamingProviderInput, String> {
@@ -95,6 +100,12 @@ impl WorkspaceEngine {
             self.session.artifact.as_ref()
         {
             return self.build_work_item_plan_outline_review_input(outline_candidate);
+        }
+
+        if let Some(ArtifactPayload::WorkItemPlanProjection { projection }) =
+            self.session.artifact.as_ref()
+        {
+            return self.build_projection_plan_review_input(projection);
         }
 
         let lifecycle = self
@@ -272,6 +283,132 @@ impl WorkspaceEngine {
         })
     }
 
+    fn build_projection_plan_review_input(
+        &self,
+        projection: &PlanProjectionBundle,
+    ) -> Result<StreamingProviderInput, String> {
+        let context =
+            load_plan_review_context(self, projection, PlanReviewSource::for_engine(self))?;
+        let mut prompt = String::from(
+            "请作为 Plan Reviewer 审核当前 Canonical Contract 与 Projection 候选。\n\n## Plan Review Context\n",
+        );
+        append_review_context_section(
+            &mut prompt,
+            "Story / Design Traceability",
+            &context.story_design_traceability,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "Canonical Contract Candidates",
+            &context.canonical_contract_candidates,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "Dependency Contract Graph",
+            &context.dependency_contract_graph,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "PlanProjectionBundle Candidate",
+            &context.plan_projection_bundle_candidate,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "WorkItemProjectionBundle Candidates",
+            &context.work_item_projection_bundle_candidates,
+        )?;
+        append_review_context_section(
+            &mut prompt,
+            "Projection Validation Report",
+            &context.projection_validation_report,
+        )?;
+        append_review_context_section(&mut prompt, "Contract Delta", &context.contract_delta)?;
+        append_review_context_section(&mut prompt, "Impact Analysis", &context.impact_analysis)?;
+        append_review_context_section(&mut prompt, "Repair Evidence", &context.repair_evidence)?;
+        if let Some(fingerprint) = &context.candidate_package_fingerprint {
+            append_review_context_section(
+                &mut prompt,
+                "Candidate Package Fingerprint",
+                fingerprint,
+            )?;
+        }
+        if let Some(proposal) = &context.impact_scope_review {
+            append_review_context_section(
+                &mut prompt,
+                "System Minimum Impact Scope",
+                &proposal.system_minimum_impact_scope,
+            )?;
+            append_review_context_section(
+                &mut prompt,
+                "Proposed Accepted Impact Scope",
+                &proposal.proposed_accepted_impact_scope,
+            )?;
+            append_review_context_section(
+                &mut prompt,
+                "Risk Acceptance Reason",
+                &proposal.risk_acceptance_reason,
+            )?;
+            append_review_context_section(
+                &mut prompt,
+                "Candidate Package Fingerprint",
+                &proposal.candidate_package_fingerprint,
+            )?;
+        }
+        prompt.push_str(
+            "\n审核边界：只审核 Plan Review Context 中的权威契约、依赖图、三 Projection 覆盖与影响范围；不得要求编码执行期差异或复用 Code Reviewer 执行证据。\n",
+        );
+        let generation_round_id = match &context.impact_scope_review {
+            Some(proposal) => proposal.review_generation_round_id.clone(),
+            None => self
+                .work_item_plan_store()?
+                .load_active_index(
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    &self.session.entity_id,
+                )
+                .map_err(|error| format!("load work item plan active index failed: {error}"))?
+                .map(|index| index.current_generation_round_id)
+                .unwrap_or_else(|| projection.plan_revision_id.clone()),
+        };
+        let nonce = structured_output_nonce();
+        let contract = StructuredOutputContract {
+            nonce: nonce.clone(),
+            schema_name: "work_item_plan_review".to_string(),
+        };
+        let schema = format!(
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[]}}"#,
+            generation_round_id
+        );
+        prompt.push_str(&reviewer_output_contract(
+            &nonce,
+            &schema,
+            "\n只能在契约、依赖或 Projection 覆盖影响发布时返回 revise；需要产品判断时返回 needs_human。",
+        ));
+        let working_dir = self
+            .session
+            .repository_path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| std::env::current_dir().map_err(|error| error.to_string()))?;
+        let provider = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        Ok(StreamingProviderInput {
+            provider_type: provider_type_for_name(&provider),
+            role: AdapterRole::Reviewer,
+            prompt,
+            working_dir,
+            workspace_session_id: Some(self.session.session_id.clone()),
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Supervised,
+            structured_output_contract: Some(contract),
+            env_vars: BTreeMap::new(),
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        })
+    }
+
     pub(crate) fn build_work_item_plan_outline_review_input(
         &self,
         outline_candidate: &WorkItemPlanOutlineCandidateDto,
@@ -409,7 +546,8 @@ impl WorkspaceEngine {
 
         prompt.push_str(
             "\n\n审核边界说明：请只检查拆分策略、覆盖 Story/Design、outline 粒度、依赖图、写入边界、上下文缺口补齐假设与 handoff 策略。\
-             每个 outline 必须能由单个 Claude Code 或 Codex coding 会话完成，estimated_context_tokens 必须存在且小于 20k，session_fit 必须为 fits_single_agent_session；缺失、超限或明显跨多任务/Issue 级范围时返回 `revise` 并要求继续拆分。\
+             每个 outline 必须能由单个 Claude Code 或 Codex coding 会话可靠完成。estimated_context_tokens 必须存在：不超过 40k 属正常范围，40001..=50000 必须结合目标内聚性、写入范围、编码、测试、返修与验证判断是否能在单 session 闭环，超过 50k 必须返回 `revise` 并要求拆分。\
+             同时按最大内聚、最少拆分原则检查过度拆分：在不违反用户显式拆分选项、50k 上限、必要中断点、独立回滚/验收边界和上下文代理指标时，目标一致且可以在同一 session 闭环的 outline 必须合并；发现不必要拆分时返回 `revise`。\
              不要要求 author 在 Outline 阶段输出完整 Work Item 正文、完整 verification plan、required_gates 或 repository_profile。\
              如果问题会影响拆分边界，返回 `revise`；如果需要用户做产品/范围判断，返回 `needs_human`。\n",
         );
@@ -431,6 +569,7 @@ impl WorkspaceEngine {
              - `needs_human`：需要用户做产品/范围判断。\n\
              - 每条 finding 如果针对具体 outline，必须填写 `target_outline_id`，且只能引用当前 Outline 中存在的 outline_id。\n\
              - 如果 finding 针对整个 Outline 方案而不是某个具体 outline，可以省略 `target_outline_id`。\n\
+             - 发现不必要拆分时必须给出 severity=must_fix 的 finding；message 必须以 [outline_unnecessary_split] 开头，target_outline_id 引用其中一个现有 outline，evidence 列出全部可合并 outline ID，required_action 明确要求合并。\n\
              - 系统会从 findings[].target_outline_id 推导受影响 outline，不要额外输出 affects_items。\n",
         ));
 
@@ -589,13 +728,27 @@ impl WorkspaceEngine {
             prompt.push_str("(none)\n");
         } else {
             for record in &accepted_drafts {
+                let promised_contracts = record
+                    .candidate
+                    .canonical_contract_candidate
+                    .output_contracts
+                    .iter()
+                    .map(|contract| contract.contract_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 prompt.push_str(&format!(
-                    "- outline_id: {}\n  draft_id: {}\n  title: {}\n  handoff_summary: {}\n  exclusive_write_scopes: [{}]\n",
+                    "- outline_id: {}\n  draft_id: {}\n  logical_work_item_id: {}\n  title: {}\n  output_contracts: {}\n  exclusive_write_scopes: [{}]\n",
                     record.outline_id,
                     record.draft_id,
-                    record.candidate.title,
-                    record.candidate.handoff_summary,
-                    record.candidate.exclusive_write_scopes.join(", ")
+                    record.candidate.logical_work_item_id,
+                    record.candidate.canonical_contract_candidate.identity.title,
+                    promised_contracts,
+                    record
+                        .candidate
+                        .canonical_contract_candidate
+                        .write_policy
+                        .exclusive_scopes
+                        .join(", ")
                 ));
             }
         }

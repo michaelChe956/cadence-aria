@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::product::models::ProviderName;
+use crate::product::workspace_engine::LinkedWorkspaceAmendmentTarget;
 
 use super::common::{ChoiceAnswer, ProviderConfigSnapshot, StructuredFeedback};
 
@@ -78,9 +79,29 @@ pub enum WsInMessage {
         action: WorkItemPlanCompileRecoveryActionDto,
         reason: Option<String>,
     },
+    SaveHumanPresentationRevision {
+        source_projection_bundle_id: String,
+        scope: HumanPresentationScopeDto,
+        supersedes: Option<String>,
+        human_summary: String,
+        why_split: Option<String>,
+        dependency_explanation: Vec<String>,
+        risk_explanation: Vec<String>,
+        source_refs: Vec<String>,
+    },
     HumanConfirm {
         decision: HumanConfirmDecision,
         payload: Option<serde_json::Value>,
+    },
+    ConfirmPlanAmendment {
+        amendment_id: String,
+    },
+    CancelPlanAmendment {
+        amendment_id: String,
+        reason: Option<String>,
+    },
+    StartLinkedWorkspaceAmendment {
+        target: LinkedWorkspaceAmendmentTarget,
     },
     RevertWorkItem {
         work_item_id: String,
@@ -144,4 +165,11 @@ pub enum WorkItemPlanCompileRecoveryActionDto {
     Continue,
     AbortAndRollback,
     HumanTriage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanPresentationScopeDto {
+    Plan,
+    WorkItem,
 }

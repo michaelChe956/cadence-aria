@@ -8,13 +8,15 @@ use crate::product::coding_attempt_store::{
     FailedCodeReviewRecoveryJournal,
 };
 use crate::product::coding_models::{
-    CodingAgentRole, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
-    CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType,
-    CodingGateRequired, CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger,
-    CodingTimelineNode, CodingTimelineNodeStatus,
+    CodingAgentRole, CodingAttemptPlanBinding, CodingAttemptScope, CodingAttemptStatus,
+    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
+    CodingGateActionType, CodingGateRequired, CodingProviderRole, CodingRoleRunStatus,
+    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
+use crate::product::models::WorkItemPlanLineage;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 use super::super::{
     CodingWsOutMessage, build_coding_session_state, seed_compiled_work_item_fixture,
@@ -24,8 +26,6 @@ pub(super) const FAILED_NODE_ID: &str = "coding_node_0009";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FixtureCase {
-    Recoverable,
-    BlockedProviderInterrupted,
     CompletedAttempt,
     AbortedAttempt,
     TestingStage,
@@ -92,8 +92,104 @@ pub(super) fn git_status_porcelain(worktree_path: &std::path::Path) -> String {
     String::from_utf8(output.stdout).expect("git status utf8")
 }
 
-pub(super) fn assert_recovery_gate(scope: CodingAttemptScope) {
-    let fixture = failed_review_fixture(scope, FixtureCase::Recoverable);
+pub(super) async fn provider_interrupted_review_fixture(
+    scope: CodingAttemptScope,
+) -> FailedReviewFixture {
+    let (tmp, app_paths, mut attempt) = seed_compiled_work_item_fixture();
+    let store = CodingAttemptStore::new(app_paths);
+    let worktree_path = attempt.worktree_path.clone().expect("worktree path");
+    fs::create_dir_all(&worktree_path).expect("shared worktree directory");
+    let output = Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .current_dir(&worktree_path)
+        .output()
+        .expect("git init fixture worktree");
+    assert!(output.status.success(), "git init failed: {output:?}");
+    fs::write(worktree_path.join("dirty-review.txt"), "preserve me\n")
+        .expect("dirty worktree fixture");
+
+    attempt.scope = scope.clone();
+    attempt.status = CodingAttemptStatus::Running;
+    attempt.stage = CodingExecutionStage::CodeReview;
+    attempt.completed_at = None;
+    attempt.work_item_group_id = matches!(scope, CodingAttemptScope::WorkItemGroup)
+        .then(|| "work_item_plan_0001".to_string());
+    attempt.active_unit_id = None;
+    store
+        .save_coding_attempt(&attempt)
+        .expect("save running review attempt");
+    if matches!(scope, CodingAttemptScope::WorkItemGroup) {
+        seed_group_plan_facts(&store, &attempt);
+        store
+            .create_coding_unit(CreateCodingExecutionUnitInput {
+                attempt_id: attempt.id.clone(),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                plan_id: "work_item_plan_0001".to_string(),
+                logical_work_item_id: attempt.work_item_id.clone(),
+                work_item_revision_id: "work_item_revision_0001".to_string(),
+                dependency_logical_work_item_ids: Vec::new(),
+                order_index: 0,
+                status: CodingExecutionUnitStatus::Running,
+            })
+            .expect("active coding unit");
+        attempt = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("group attempt with active unit");
+    }
+    store
+        .save_timeline_node(
+            &attempt,
+            CodingTimelineNode {
+                id: FAILED_NODE_ID.to_string(),
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                title: "代码审查".to_string(),
+                status: CodingTimelineNodeStatus::Running,
+                agent_role: Some(CodingAgentRole::Reviewer),
+                summary: None,
+                started_at: "2026-07-12T04:30:00Z".to_string(),
+                completed_at: None,
+                artifact_refs: Vec::new(),
+            },
+        )
+        .expect("running review node");
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some(FAILED_NODE_ID.to_string()),
+        )
+        .expect("running reviewer role run");
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let failure: Result<(), _> = engine
+        .fail_provider_stream_ended(&attempt, FAILED_NODE_ID)
+        .await;
+    assert!(failure.is_err(), "provider interruption must fail the run");
+    let attempt = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("blocked review attempt");
+    let dirty_gate = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("provider interruption gates")
+        .into_iter()
+        .find(|gate| gate.reason_code.as_deref() == Some("code_review_provider_interrupted"));
+
+    FailedReviewFixture {
+        _tmp: tmp,
+        store,
+        attempt,
+        dirty_gate,
+        stale_role_run_id: role_run.id,
+    }
+}
+
+pub(super) async fn assert_recovery_gate(scope: CodingAttemptScope) {
+    let fixture = provider_interrupted_review_fixture(scope).await;
     let dirty_gate = fixture.dirty_gate.clone().expect("dirty gate");
     let attempt_before = fixture
         .store
@@ -232,12 +328,12 @@ pub(super) async fn seed_repeated_interrupted_review(
     let engine =
         CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
     let first_running = engine
-        .recover_failed_code_review_for_attempt(&fixture.attempt.id, &first_gate_id)
+        .recover_failed_code_review_for_attempt(&fixture.attempt, &first_gate_id)
         .await
         .expect("first interrupted review recovery");
     let first_journal = fixture
         .store
-        .complete_failed_code_review_recovery_journal(&first_running.id, &first_gate_id)
+        .complete_failed_code_review_recovery_journal(&first_running, &first_gate_id)
         .expect("complete first recovery journal");
     let first_retry_role_run_id = first_journal
         .retry_role_run_id
@@ -246,19 +342,22 @@ pub(super) async fn seed_repeated_interrupted_review(
     let second_failed_node_id = "coding_node_0010";
     fixture
         .store
-        .save_timeline_node(CodingTimelineNode {
-            id: second_failed_node_id.to_string(),
-            attempt_id: first_running.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            title: "代码审查".to_string(),
-            status: CodingTimelineNodeStatus::Failed,
-            agent_role: Some(CodingAgentRole::Reviewer),
-            summary: Some("second review provider interrupted".to_string()),
-            started_at: "2026-07-12T04:40:00Z".to_string(),
-            completed_at: Some("2026-07-12T04:40:59Z".to_string()),
-            artifact_refs: Vec::new(),
-        })
-        .expect("second failed review node");
+        .save_timeline_node(
+            &first_running,
+            CodingTimelineNode {
+                id: second_failed_node_id.to_string(),
+                attempt_id: first_running.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                title: "代码审查".to_string(),
+                status: CodingTimelineNodeStatus::Running,
+                agent_role: Some(CodingAgentRole::Reviewer),
+                summary: None,
+                started_at: "2026-07-12T04:40:00Z".to_string(),
+                completed_at: None,
+                artifact_refs: Vec::new(),
+            },
+        )
+        .expect("second running review node");
     fixture
         .store
         .attach_role_run_node(
@@ -269,57 +368,45 @@ pub(super) async fn seed_repeated_interrupted_review(
             second_failed_node_id.to_string(),
         )
         .expect("bind first retry reviewer node");
-    fixture
-        .store
-        .update_role_run_status(
-            &first_running.project_id,
-            &first_running.issue_id,
-            &first_running.id,
-            &first_retry_role_run_id,
-            CodingRoleRunStatus::Failed,
-            Some("code_review_provider_interrupted".to_string()),
-        )
-        .expect("fail first retry reviewer");
+    let failure: Result<(), _> = engine
+        .fail_provider_stream_ended(&first_running, second_failed_node_id)
+        .await;
+    assert!(
+        failure.is_err(),
+        "second provider interruption must fail the run"
+    );
     let blocked_attempt = fixture
         .store
-        .update_attempt_status(
+        .get_attempt(
             &first_running.project_id,
             &first_running.issue_id,
             &first_running.id,
-            CodingAttemptStatus::Blocked,
         )
-        .expect("block attempt for second interruption");
+        .expect("blocked attempt after second interruption");
     let second_gate = fixture
         .store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: blocked_attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            node_id: Some(second_failed_node_id.to_string()),
-            role: Some(CodingProviderRole::CodeReviewer),
-            title: "代码审查中断".to_string(),
-            description: "second review provider interrupted".to_string(),
-            reason_code: Some("code_review_provider_interrupted".to_string()),
-            evidence_refs: Vec::new(),
-            raw_provider_output_ref: None,
-            available_actions: vec![
-                CodingGateAction {
-                    action_id: "retry_review".to_string(),
-                    label: "重试代码审查".to_string(),
-                    action_type: CodingGateActionType::RetryReview,
-                },
-                CodingGateAction {
-                    action_id: "send_to_coder".to_string(),
-                    label: "发送给 Coder".to_string(),
-                    action_type: CodingGateActionType::SendToCoder,
-                },
-                CodingGateAction {
-                    action_id: "abort".to_string(),
-                    label: "终止".to_string(),
-                    action_type: CodingGateActionType::Abort,
-                },
-            ],
-        })
+        .list_open_blocked_gates(
+            &blocked_attempt.project_id,
+            &blocked_attempt.issue_id,
+            &blocked_attempt.id,
+        )
+        .expect("second provider interruption gates")
+        .into_iter()
+        .find(|gate| gate.reason_code.as_deref() == Some("code_review_provider_interrupted"))
         .expect("second provider interrupted gate");
+    assert_eq!(
+        fixture
+            .store
+            .open_blocked_gate_node_id(
+                &blocked_attempt.project_id,
+                &blocked_attempt.issue_id,
+                &blocked_attempt.id,
+                &second_gate.gate_id,
+            )
+            .expect("second provider interruption gate node")
+            .as_deref(),
+        Some(second_failed_node_id)
+    );
 
     RepeatedInterruptedReview {
         blocked_attempt,
@@ -351,7 +438,6 @@ pub(super) fn failed_review_fixture(
 
     attempt.scope = scope.clone();
     attempt.status = match case {
-        FixtureCase::BlockedProviderInterrupted => CodingAttemptStatus::Blocked,
         FixtureCase::CompletedAttempt => CodingAttemptStatus::Completed,
         FixtureCase::AbortedAttempt => CodingAttemptStatus::Aborted,
         _ => CodingAttemptStatus::Failed,
@@ -361,17 +447,17 @@ pub(super) fn failed_review_fixture(
     } else {
         CodingExecutionStage::CodeReview
     };
-    attempt.completed_at = (!matches!(
-        case,
-        FixtureCase::MissingCompletedAt | FixtureCase::BlockedProviderInterrupted
-    ))
-    .then(|| "2026-07-12T04:30:59Z".to_string());
+    attempt.completed_at = (!matches!(case, FixtureCase::MissingCompletedAt))
+        .then(|| "2026-07-12T04:30:59Z".to_string());
     attempt.work_item_group_id = matches!(scope, CodingAttemptScope::WorkItemGroup)
         .then(|| "work_item_plan_0001".to_string());
     attempt.active_unit_id = None;
     store
         .save_coding_attempt(&attempt)
         .expect("save historical failed attempt");
+    if matches!(scope, CodingAttemptScope::WorkItemGroup) {
+        seed_group_plan_facts(&store, &attempt);
+    }
 
     if matches!(scope, CodingAttemptScope::WorkItemGroup)
         && !matches!(case, FixtureCase::GroupWithoutActiveUnit)
@@ -387,7 +473,9 @@ pub(super) fn failed_review_fixture(
                 project_id: attempt.project_id.clone(),
                 issue_id: attempt.issue_id.clone(),
                 plan_id: "work_item_plan_0001".to_string(),
-                work_item_id: attempt.work_item_id.clone(),
+                logical_work_item_id: attempt.work_item_id.clone(),
+                work_item_revision_id: "work_item_revision_0001".to_string(),
+                dependency_logical_work_item_ids: Vec::new(),
                 order_index: 0,
                 status: unit_status,
             })
@@ -420,47 +508,56 @@ pub(super) fn failed_review_fixture(
     }
 
     store
-        .save_timeline_node(CodingTimelineNode {
-            id: "coding_node_0008".to_string(),
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            title: "代码审查".to_string(),
-            status: CodingTimelineNodeStatus::Completed,
-            agent_role: Some(CodingAgentRole::Reviewer),
-            summary: Some("older review".to_string()),
-            started_at: "2026-07-12T04:20:00Z".to_string(),
-            completed_at: Some("2026-07-12T04:21:00Z".to_string()),
-            artifact_refs: Vec::new(),
-        })
-        .expect("older review node");
-    store
-        .save_timeline_node(CodingTimelineNode {
-            id: FAILED_NODE_ID.to_string(),
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::CodeReview,
-            title: "代码审查".to_string(),
-            status: CodingTimelineNodeStatus::Failed,
-            agent_role: Some(CodingAgentRole::Reviewer),
-            summary: Some("review interrupted".to_string()),
-            started_at: "2026-07-12T04:30:00Z".to_string(),
-            completed_at: Some("2026-07-12T04:30:59Z".to_string()),
-            artifact_refs: Vec::new(),
-        })
-        .expect("failed review node");
-    if matches!(case, FixtureCase::LatestReviewCompleted) {
-        store
-            .save_timeline_node(CodingTimelineNode {
-                id: "coding_node_0010".to_string(),
+        .save_timeline_node(
+            &attempt,
+            CodingTimelineNode {
+                id: "coding_node_0008".to_string(),
                 attempt_id: attempt.id.clone(),
                 stage: CodingExecutionStage::CodeReview,
                 title: "代码审查".to_string(),
                 status: CodingTimelineNodeStatus::Completed,
                 agent_role: Some(CodingAgentRole::Reviewer),
-                summary: Some("newer review completed".to_string()),
-                started_at: "2026-07-12T04:31:00Z".to_string(),
-                completed_at: Some("2026-07-12T04:32:00Z".to_string()),
+                summary: Some("older review".to_string()),
+                started_at: "2026-07-12T04:20:00Z".to_string(),
+                completed_at: Some("2026-07-12T04:21:00Z".to_string()),
                 artifact_refs: Vec::new(),
-            })
+            },
+        )
+        .expect("older review node");
+    store
+        .save_timeline_node(
+            &attempt,
+            CodingTimelineNode {
+                id: FAILED_NODE_ID.to_string(),
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                title: "代码审查".to_string(),
+                status: CodingTimelineNodeStatus::Failed,
+                agent_role: Some(CodingAgentRole::Reviewer),
+                summary: Some("review interrupted".to_string()),
+                started_at: "2026-07-12T04:30:00Z".to_string(),
+                completed_at: Some("2026-07-12T04:30:59Z".to_string()),
+                artifact_refs: Vec::new(),
+            },
+        )
+        .expect("failed review node");
+    if matches!(case, FixtureCase::LatestReviewCompleted) {
+        store
+            .save_timeline_node(
+                &attempt,
+                CodingTimelineNode {
+                    id: "coding_node_0010".to_string(),
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::CodeReview,
+                    title: "代码审查".to_string(),
+                    status: CodingTimelineNodeStatus::Completed,
+                    agent_role: Some(CodingAgentRole::Reviewer),
+                    summary: Some("newer review completed".to_string()),
+                    started_at: "2026-07-12T04:31:00Z".to_string(),
+                    completed_at: Some("2026-07-12T04:32:00Z".to_string()),
+                    artifact_refs: Vec::new(),
+                },
+            )
             .expect("newer completed review node");
     }
 
@@ -478,10 +575,7 @@ pub(super) fn failed_review_fixture(
             Some(role_node_id.to_string()),
         )
         .expect("stale reviewer role run");
-    if matches!(
-        case,
-        FixtureCase::RoleRunNotRunning | FixtureCase::BlockedProviderInterrupted
-    ) {
+    if matches!(case, FixtureCase::RoleRunNotRunning) {
         store
             .update_role_run_status(
                 &attempt.project_id,
@@ -489,76 +583,32 @@ pub(super) fn failed_review_fixture(
                 &attempt.id,
                 &role_run.id,
                 CodingRoleRunStatus::Failed,
-                Some(
-                    if matches!(case, FixtureCase::BlockedProviderInterrupted) {
-                        "code_review_provider_interrupted"
-                    } else {
-                        "provider_failed"
-                    }
-                    .to_string(),
-                ),
+                Some("provider_failed".to_string()),
             )
             .expect("complete stale role run");
     }
 
     let dirty_gate = (!matches!(case, FixtureCase::MissingDirtyGate)).then(|| {
-        let provider_interrupted = matches!(case, FixtureCase::BlockedProviderInterrupted);
         store
-            .create_blocked_gate(CreateBlockedGateInput {
-                attempt_id: attempt.id.clone(),
-                stage: if provider_interrupted {
-                    CodingExecutionStage::CodeReview
-                } else {
-                    CodingExecutionStage::FinalConfirm
-                },
-                node_id: provider_interrupted.then(|| FAILED_NODE_ID.to_string()),
-                role: provider_interrupted.then_some(CodingProviderRole::CodeReviewer),
-                title: if provider_interrupted {
-                    "代码审查中断".to_string()
-                } else {
-                    "Shared worktree has uncommitted changes".to_string()
-                },
-                description: if provider_interrupted {
-                    "review provider interrupted".to_string()
-                } else {
-                    "Issue shared worktree has uncommitted changes".to_string()
-                },
-                reason_code: Some(
-                    if provider_interrupted {
-                        "code_review_provider_interrupted"
-                    } else {
-                        "shared_worktree_dirty_manual_gate"
-                    }
-                    .to_string(),
-                ),
-                evidence_refs: Vec::new(),
-                raw_provider_output_ref: None,
-                available_actions: if provider_interrupted {
-                    vec![
-                        CodingGateAction {
-                            action_id: "retry_review".to_string(),
-                            label: "重试代码审查".to_string(),
-                            action_type: CodingGateActionType::RetryReview,
-                        },
-                        CodingGateAction {
-                            action_id: "send_to_coder".to_string(),
-                            label: "发送给 Coder".to_string(),
-                            action_type: CodingGateActionType::SendToCoder,
-                        },
-                        CodingGateAction {
-                            action_id: "abort".to_string(),
-                            label: "终止".to_string(),
-                            action_type: CodingGateActionType::Abort,
-                        },
-                    ]
-                } else {
-                    vec![CodingGateAction {
+            .create_blocked_gate(
+                &attempt,
+                CreateBlockedGateInput {
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::FinalConfirm,
+                    node_id: None,
+                    role: None,
+                    title: "Shared worktree has uncommitted changes".to_string(),
+                    description: "Issue shared worktree has uncommitted changes".to_string(),
+                    reason_code: Some("shared_worktree_dirty_manual_gate".to_string()),
+                    evidence_refs: Vec::new(),
+                    raw_provider_output_ref: None,
+                    available_actions: vec![CodingGateAction {
                         action_id: "manual_continue".to_string(),
                         label: "人工继续".to_string(),
                         action_type: CodingGateActionType::ManualContinue,
-                    }]
+                    }],
                 },
-            })
+            )
             .expect("review recovery gate")
     });
 
@@ -569,4 +619,36 @@ pub(super) fn failed_review_fixture(
         dirty_gate,
         stale_role_run_id: role_run.id,
     }
+}
+
+fn seed_group_plan_facts(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
+    let plan_id = attempt
+        .work_item_group_id
+        .as_deref()
+        .expect("group attempt plan id");
+    WorkItemRevisionStore::new(store.paths())
+        .put_plan_lineage(&WorkItemPlanLineage {
+            id: plan_id.to_string(),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            story_spec_refs: Vec::new(),
+            design_spec_refs: Vec::new(),
+            active_revision_id: Some("plan_revision_0001".to_string()),
+            active_amendment_id: None,
+            created_at: "2026-07-12T00:00:00Z".to_string(),
+            updated_at: "2026-07-12T00:00:00Z".to_string(),
+        })
+        .expect("group plan lineage");
+    store
+        .save_plan_binding(
+            attempt,
+            &CodingAttemptPlanBinding {
+                attempt_id: attempt.id.clone(),
+                plan_id: plan_id.to_string(),
+                bound_plan_revision_id: "plan_revision_0001".to_string(),
+                applied_amendment_ids: Vec::new(),
+                updated_at: "2026-07-12T00:00:00Z".to_string(),
+            },
+        )
+        .expect("group plan binding");
 }

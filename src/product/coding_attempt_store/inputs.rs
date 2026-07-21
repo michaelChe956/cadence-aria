@@ -38,7 +38,9 @@ pub struct CreateCodingExecutionUnitInput {
     pub project_id: String,
     pub issue_id: String,
     pub plan_id: String,
-    pub work_item_id: String,
+    pub logical_work_item_id: String,
+    pub work_item_revision_id: String,
+    pub dependency_logical_work_item_ids: Vec<String>,
     pub order_index: u32,
     pub status: CodingExecutionUnitStatus,
 }

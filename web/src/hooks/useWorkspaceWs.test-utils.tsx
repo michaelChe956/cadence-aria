@@ -171,9 +171,10 @@ type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
 
 export function renderWorkspaceHook(sessionId = "session_001") {
   let api: WorkspaceWsApi | undefined;
+  let currentSessionId = sessionId;
 
   function Harness() {
-    api = useWorkspaceWs(sessionId);
+    api = useWorkspaceWs(currentSessionId);
     return null;
   }
 
@@ -188,6 +189,15 @@ export function renderWorkspaceHook(sessionId = "session_001") {
       const ws = MockWebSocket.instances[0];
       if (!ws) throw new Error("websocket not created");
       return ws;
+    },
+    get latestWs() {
+      const ws = MockWebSocket.instances.at(-1);
+      if (!ws) throw new Error("websocket not created");
+      return ws;
+    },
+    switchSession(nextSessionId: string) {
+      currentSessionId = nextSessionId;
+      view.rerender(<Harness />);
     },
   };
 }

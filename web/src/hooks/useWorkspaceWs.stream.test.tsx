@@ -17,7 +17,7 @@ describe("useWorkspaceWs stream reconstruction", () => {
   installWorkspaceWsTestHooks();
 
   it("does not duplicate realtime provider prompt execution event output in chat entry metadata", () => {
-    const harness = renderWorkspaceHook();
+    const harness = renderWorkspaceHook("session_prompt_event");
     const hugePrompt = "[system]\n" + "prompt line\n".repeat(10_000);
 
     act(() => {
@@ -300,7 +300,7 @@ describe("useWorkspaceWs stream reconstruction", () => {
 
   it("keeps work item plan stream chunks when active run arrives before provider stage", () => {
     vi.useFakeTimers();
-    const harness = renderWorkspaceHook();
+    const harness = renderWorkspaceHook("session_work_item_plan_progress");
 
     act(() => {
       harness.ws.receive({
@@ -414,7 +414,7 @@ describe("useWorkspaceWs stream reconstruction", () => {
 
   it("stops appending pre-stage stream chunks after prepare_context invalidates the active run", () => {
     vi.useFakeTimers();
-    const harness = renderWorkspaceHook();
+    const harness = renderWorkspaceHook("session_work_item_plan_progress");
 
     act(() => {
       harness.ws.receive({
@@ -487,7 +487,7 @@ describe("useWorkspaceWs stream reconstruction", () => {
 
   it("rejects stale chunks for an invalidated node after a new run enters running", () => {
     vi.useFakeTimers();
-    const harness = renderWorkspaceHook();
+    const harness = renderWorkspaceHook("session_work_item_plan_progress");
 
     act(() => {
       harness.ws.receive({

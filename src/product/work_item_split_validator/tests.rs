@@ -4,6 +4,153 @@ use crate::product::models::{
     WorkItemOutlineSessionFit,
 };
 
+type VerificationMutation = fn(&mut WorkItemDraftCandidate);
+
+#[test]
+fn work_item_plan_draft_validator_maps_canonical_contract_findings() {
+    let outline = valid_outline();
+    let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    candidate
+        .canonical_contract_candidate
+        .tasks
+        .push(candidate.canonical_contract_candidate.tasks[0].clone());
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.code == "duplicate_task_id")
+        .expect("canonical validator finding must be mapped");
+    assert_eq!(finding.severity, WorkItemSplitFindingSeverity::Error);
+}
+
+#[test]
+fn work_item_plan_draft_validator_rejects_missing_output_provider() {
+    let outline = valid_outline();
+    let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[1]);
+    candidate.canonical_contract_candidate.input_contracts[0].provider_logical_work_item_id =
+        "wi_missing".to_string();
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    assert_has_code(&report, "unknown_provider_logical_work_item");
+}
+
+#[test]
+fn work_item_plan_draft_validator_rejects_verification_plan_full_typed_drift() {
+    let outline = valid_outline();
+    let base = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    let mutations: [(&str, VerificationMutation); 8] = [
+        ("check_id", |candidate| {
+            candidate.verification_plan.checks[0].check_id = "check_drift".to_string();
+        }),
+        ("command", |candidate| {
+            candidate.verification_plan.checks[0].command = Some("cargo check".to_string());
+        }),
+        ("manual_instruction", |candidate| {
+            candidate.verification_plan.checks[0].manual_instruction =
+                Some("manual drift".to_string());
+        }),
+        ("required", |candidate| {
+            candidate.verification_plan.checks[0].required = false;
+        }),
+        ("non_zero", |candidate| {
+            candidate.verification_plan.checks[0].non_zero_test_execution_required = false;
+        }),
+        ("missing", |candidate| {
+            candidate.verification_plan.checks.pop();
+        }),
+        ("extra", |candidate| {
+            let mut extra = candidate.verification_plan.checks[0].clone();
+            extra.check_id = "check_extra".to_string();
+            candidate.verification_plan.checks.push(extra);
+        }),
+        ("order", |candidate| {
+            candidate.verification_plan.checks.swap(0, 1);
+        }),
+    ];
+
+    for (field, mutate) in mutations {
+        let mut candidate = base.clone();
+        mutate(&mut candidate);
+
+        let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+        assert!(
+            has_code(&report, "verification_plan_not_derived_from_contract"),
+            "expected verification drift for {field}, got {:?}",
+            report.findings
+        );
+    }
+}
+
+#[test]
+fn work_item_plan_draft_validator_accepts_clean_canonical_candidate() {
+    let outline = valid_outline();
+    let candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    assert!(
+        !report.has_errors(),
+        "expected clean candidate, got {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn work_item_plan_draft_validator_fails_closed_when_candidate_outline_is_missing() {
+    let outline = valid_outline();
+    let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    candidate.outline_id = "outline_missing".to_string();
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    assert_has_code(&report, "draft_outline_not_found");
+}
+
+#[test]
+fn work_item_plan_draft_validator_fails_closed_on_duplicate_outline_or_logical_identity() {
+    let mut duplicate_outline = valid_outline();
+    duplicate_outline.work_item_outlines[1].outline_id =
+        duplicate_outline.work_item_outlines[0].outline_id.clone();
+    let candidate = canonical_draft_candidate(&duplicate_outline.work_item_outlines[0]);
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &duplicate_outline);
+
+    assert_has_code(&report, "duplicate_outline_id");
+
+    let mut duplicate_logical = valid_outline();
+    duplicate_logical.work_item_outlines[1].logical_work_item_id = duplicate_logical
+        .work_item_outlines[0]
+        .logical_work_item_id
+        .clone();
+    let candidate = canonical_draft_candidate(&duplicate_logical.work_item_outlines[0]);
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &duplicate_logical);
+
+    assert_has_code(&report, "duplicate_logical_work_item_identity");
+}
+
+#[test]
+fn work_item_plan_draft_validator_rejects_candidate_and_outline_identity_mismatch() {
+    let outline = valid_outline();
+    let mut logical_mismatch = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    logical_mismatch.logical_work_item_id = "wi_other".to_string();
+
+    let report = WorkItemDraftLocalValidator::validate(&logical_mismatch, &[], &outline);
+
+    assert_has_code(&report, "draft_logical_identity_mismatch");
+
+    let mut outline_mismatch = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    outline_mismatch.canonical_contract_candidate.identity.title = "Other title".to_string();
+
+    let report = WorkItemDraftLocalValidator::validate(&outline_mismatch, &[], &outline);
+
+    assert_has_code(&report, "draft_outline_identity_mismatch");
+}
+
 #[test]
 fn outline_validator_rejects_duplicate_outline_ids() {
     let mut outline = valid_outline();
@@ -82,7 +229,7 @@ fn outline_validator_requires_single_session_budget() {
     let mut outline = valid_outline();
     outline.work_item_outlines[0].estimated_context_tokens = None;
     outline.work_item_outlines[0].session_fit = None;
-    outline.work_item_outlines[1].estimated_context_tokens = Some(20_000);
+    outline.work_item_outlines[1].estimated_context_tokens = Some(50_001);
     outline.work_item_outlines[1].session_fit = Some(WorkItemOutlineSessionFit::TooLargeMustSplit);
 
     let report = WorkItemPlanOutlineValidator::validate(&outline);
@@ -91,6 +238,22 @@ fn outline_validator_requires_single_session_budget() {
     assert_has_code(&report, "outline_session_fit_required");
     assert_has_code(&report, "outline_exceeds_single_session_budget");
     assert_has_code(&report, "outline_too_large_must_split");
+}
+
+#[test]
+fn outline_validator_accepts_soft_and_hard_session_budget_boundaries() {
+    for value in [40_000, 40_001, 50_000] {
+        let mut outline = valid_outline();
+        outline.work_item_outlines[0].estimated_context_tokens = Some(value);
+
+        let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+        assert!(
+            !has_code(&report, "outline_exceeds_single_session_budget"),
+            "budget {value} should be accepted, got {:?}",
+            report.findings
+        );
+    }
 }
 
 #[test]
@@ -118,11 +281,10 @@ fn outline_validator_detects_dependent_scope_conflict() {
 #[test]
 fn local_validator_allows_valid_single_draft() {
     let outline = valid_outline();
-    let current_outline = outline.work_item_outlines[1].clone();
-    let dependency = valid_draft_candidate("outline_backend", vec![]);
-    let current = valid_draft_candidate("outline_frontend", vec!["outline_backend"]);
+    let dependency = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    let current = canonical_draft_candidate(&outline.work_item_outlines[1]);
 
-    let report = WorkItemDraftLocalValidator::validate(&current, &[dependency], &current_outline);
+    let report = WorkItemDraftLocalValidator::validate(&current, &[dependency], &outline);
 
     assert!(
         !report.has_errors(),
@@ -134,36 +296,40 @@ fn local_validator_allows_valid_single_draft() {
 #[test]
 fn local_validator_blocks_missing_write_scope() {
     let outline = valid_outline();
-    let current_outline = outline.work_item_outlines[0].clone();
-    let mut current = valid_draft_candidate("outline_backend", vec![]);
-    current.exclusive_write_scopes.clear();
+    let mut current = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    current
+        .canonical_contract_candidate
+        .write_policy
+        .exclusive_scopes
+        .clear();
 
-    let report = WorkItemDraftLocalValidator::validate(&current, &[], &current_outline);
+    let report = WorkItemDraftLocalValidator::validate(&current, &[], &outline);
 
     assert_has_code(&report, "write_scope_required");
 }
 
 #[test]
-fn local_validator_blocks_required_gate_missing() {
+fn local_validator_blocks_verification_plan_drift() {
     let outline = valid_outline();
-    let current_outline = outline.work_item_outlines[0].clone();
-    let mut current = valid_draft_candidate("outline_backend", vec![]);
-    current.verification_plan["required_gates"] = serde_json::json!(["cmd_missing"]);
+    let mut current = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    current.verification_plan.checks[0].check_id = "check_missing".to_string();
 
-    let report = WorkItemDraftLocalValidator::validate(&current, &[], &current_outline);
+    let report = WorkItemDraftLocalValidator::validate(&current, &[], &outline);
 
-    assert_has_code(&report, "verification_required_gate_missing");
+    assert_has_code(&report, "verification_plan_not_derived_from_contract");
 }
 
 #[test]
 fn local_validator_blocks_scope_conflict_with_direct_dependency() {
     let outline = valid_outline();
-    let current_outline = outline.work_item_outlines[1].clone();
-    let dependency = valid_draft_candidate("outline_backend", vec![]);
-    let mut current = valid_draft_candidate("outline_frontend", vec!["outline_backend"]);
-    current.exclusive_write_scopes = vec!["src/product/api.rs".to_string()];
+    let dependency = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    let mut current = canonical_draft_candidate(&outline.work_item_outlines[1]);
+    current
+        .canonical_contract_candidate
+        .write_policy
+        .exclusive_scopes = vec!["src/product/api.rs".to_string()];
 
-    let report = WorkItemDraftLocalValidator::validate(&current, &[dependency], &current_outline);
+    let report = WorkItemDraftLocalValidator::validate(&current, &[dependency], &outline);
 
     assert_has_code(&report, "direct_dependency_scope_conflict");
 }
@@ -191,6 +357,7 @@ fn valid_outline() -> WorkItemPlanOutline {
         work_item_outlines: vec![
             WorkItemOutline {
                 outline_id: "outline_backend".to_string(),
+                logical_work_item_id: "wi_backend".to_string(),
                 title: "后端 API".to_string(),
                 kind: WorkItemKind::Backend,
                 goal: "实现 API".to_string(),
@@ -208,6 +375,7 @@ fn valid_outline() -> WorkItemPlanOutline {
             },
             WorkItemOutline {
                 outline_id: "outline_frontend".to_string(),
+                logical_work_item_id: "wi_frontend".to_string(),
                 title: "前端 UI".to_string(),
                 kind: WorkItemKind::Frontend,
                 goal: "接入 API".to_string(),
@@ -234,44 +402,35 @@ fn valid_outline() -> WorkItemPlanOutline {
     }
 }
 
-fn valid_draft_candidate(
-    outline_id: &str,
-    depends_on_outline_ids: Vec<&str>,
-) -> WorkItemDraftCandidate {
+fn canonical_draft_candidate(outline: &WorkItemOutline) -> WorkItemDraftCandidate {
+    let mut contract = crate::product::work_item_contract::canonical_contract_fixture(
+        &outline.logical_work_item_id,
+    );
+    contract.identity.title = outline.title.clone();
+    contract.identity.kind = outline.kind.as_str().to_string();
+    contract.write_policy.exclusive_scopes = outline.exclusive_write_scopes.clone();
+    contract.write_policy.forbidden_scopes = outline.forbidden_write_scopes.clone();
+    if outline.depends_on.is_empty() {
+        contract.input_contracts.clear();
+    } else {
+        contract.input_contracts[0].provider_logical_work_item_id = "wi_backend".to_string();
+    }
+    contract
+        .verification_checks
+        .push(crate::product::work_item_contract::VerificationCheck {
+            check_id: "check_manual".to_string(),
+            command: None,
+            manual_instruction: Some("Inspect the generated contract".to_string()),
+            required: false,
+            non_zero_test_execution_required: false,
+        });
+
     WorkItemDraftCandidate {
-        outline_id: outline_id.to_string(),
-        title: format!("Draft {outline_id}"),
-        kind: WorkItemKind::Backend,
-        goal: "实现局部 work item".to_string(),
-        implementation_context: "实现必要代码并保持 handoff。".to_string(),
-        exclusive_write_scopes: if outline_id == "outline_backend" {
-            vec!["src/product/api.rs".to_string()]
-        } else {
-            vec!["web/src/session.ts".to_string()]
+        outline_id: outline.outline_id.clone(),
+        logical_work_item_id: outline.logical_work_item_id.clone(),
+        verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+            checks: contract.verification_checks.clone(),
         },
-        forbidden_write_scopes: vec![],
-        depends_on_outline_ids: depends_on_outline_ids
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-        required_handoff_from_outline_ids: vec![],
-        handoff_summary: "handoff summary".to_string(),
-        verification_plan: serde_json::json!({
-            "commands": [
-                {
-                    "id": "cmd_test",
-                    "label": "test",
-                    "command": "cargo test --locked --lib api",
-                    "cwd": "",
-                    "purpose": "验证局部 draft",
-                    "required": true,
-                    "timeout_seconds": 120,
-                    "safety": "approved",
-                    "source": "provider"
-                }
-            ],
-            "manual_checks": [],
-            "required_gates": ["cmd_test"]
-        }),
+        canonical_contract_candidate: contract,
     }
 }

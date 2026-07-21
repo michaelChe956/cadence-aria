@@ -1,4 +1,23 @@
 use super::*;
+
+pub(crate) fn internal_review_blocked_gate_reason(
+    decision: CodeReviewFlowDecision,
+    is_group_final_review: bool,
+) -> Option<&'static str> {
+    match decision {
+        CodeReviewFlowDecision::RunCoderFix if is_group_final_review => {
+            Some("group_final_review_blocked")
+        }
+        CodeReviewFlowDecision::RunCoderFix => Some("internal_review_blocked"),
+        CodeReviewFlowDecision::OpenOperationalGate => Some("internal_review_operational_blocker"),
+        CodeReviewFlowDecision::StopForHumanTriage => Some("internal_review_human_triage"),
+        CodeReviewFlowDecision::RetryVerification
+        | CodeReviewFlowDecision::StartPlanRepair
+        | CodeReviewFlowDecision::StartStoryAmendment
+        | CodeReviewFlowDecision::StartDesignAmendment
+        | CodeReviewFlowDecision::ContinueAfterApprove => None,
+    }
+}
 use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
@@ -121,6 +140,7 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
+        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -175,7 +195,12 @@ impl CodingWorkspaceEngine {
             .internal_reviewer;
         let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
         let is_group_final_review = attempt.scope == CodingAttemptScope::WorkItemGroup;
-        let prompt = if is_group_final_review {
+        let prepared_group_context = if is_group_final_review {
+            Some(self.prepare_group_reviewer_context(&attempt, &reviewer)?)
+        } else {
+            None
+        };
+        let legacy_prompt = if is_group_final_review {
             self.build_group_internal_pr_review_prompt(
                 &attempt,
                 &review_request,
@@ -192,6 +217,10 @@ impl CodingWorkspaceEngine {
             )
             .await?
         };
+        let prompt = prepared_group_context
+            .as_ref()
+            .map(|context| format!("{}\n\n{legacy_prompt}", context.prompt_section))
+            .unwrap_or(legacy_prompt);
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -244,7 +273,7 @@ impl CodingWorkspaceEngine {
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::InternalPrReview,
             if is_group_final_review {
                 "group_final_review"
@@ -268,9 +297,20 @@ impl CodingWorkspaceEngine {
             Some(raw_provider_output_ref.clone()),
             &role_run,
         )?;
-        self.store.save_internal_pr_review(&review)?;
-        self.emit_internal_pr_review_chat_entry(&attempt, &node.id, &review)
-            .await;
+        let review_flow_decision = match prepared_group_context.as_ref() {
+            Some(context) => {
+                internal_review_flow_decision_with_bindings(&review, &context.bindings)
+            }
+            None => self.internal_review_flow_decision_for_attempt(&attempt, &review)?,
+        };
+        self.store.save_internal_pr_review(&attempt, &review)?;
+        self.emit_internal_pr_review_chat_entry(
+            &attempt,
+            &node.id,
+            &review,
+            review_flow_decision.label(),
+        )
+        .await;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::InternalPrReviewComplete {
@@ -342,24 +382,31 @@ impl CodingWorkspaceEngine {
             role_run_status,
             reason_code,
         )?;
-        if review.verdict == ReviewVerdict::Blocked {
+        let blocked_gate_reason = (review.verdict == ReviewVerdict::Blocked)
+            .then(|| {
+                internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review)
+            })
+            .flatten();
+        if let Some(blocked_gate_reason) = blocked_gate_reason {
+            let operational = blocked_gate_reason == "internal_review_operational_blocker";
+            let human_triage = blocked_gate_reason == "internal_review_human_triage";
             self.create_review_blocked_gate(ReviewBlockedGateInput {
                 attempt: &attempt,
                 node_id: &node.id,
                 stage: CodingExecutionStage::InternalPrReview,
                 role: CodingProviderRole::InternalReviewer,
-                title: if is_group_final_review {
+                title: if operational {
+                    "Internal review operational blocker"
+                } else if human_triage {
+                    "Internal review requires human triage"
+                } else if is_group_final_review {
                     "GroupFinalReview blocked"
                 } else {
                     "Internal PR review blocked"
                 }
                 .to_string(),
                 description: review.summary.clone(),
-                reason_code: if is_group_final_review {
-                    "group_final_review_blocked"
-                } else {
-                    "internal_review_blocked"
-                },
+                reason_code: blocked_gate_reason,
                 evidence_refs: vec![review.id.clone()],
                 raw_provider_output_ref: Some(raw_provider_output_ref),
             })
@@ -374,12 +421,13 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
+        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
         if attempt.scope != CodingAttemptScope::WorkItemGroup {
             return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
                 attempt.id.clone(),
             ));
         }
-        self.execute_internal_pr_review_with_commands(attempt, provider, command_rx)
+        self.execute_internal_pr_review_with_commands(&attempt, provider, command_rx)
             .await
     }
 
@@ -406,84 +454,211 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
-        self._git_service
-            .git_add_work_item_changes(worktree_path)
-            .await?;
-        let has_staged_changes = self
-            ._git_service
-            .git_has_staged_changes(worktree_path)
-            .await?;
-        let commit_sha = if has_staged_changes {
-            self._git_service
-                .git_commit(worktree_path, commit_message)
-                .await?
-                .commit_sha
-        } else if attempt.head_commit.is_some() {
-            self._git_service.git_current_head(worktree_path).await?
-        } else {
-            let summary =
-                "过滤运行产物后没有可提交的业务变更，请检查上一轮 Coder 是否只修改了运行产物。"
-                    .to_string();
-            self.store.update_attempt_status(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                CodingAttemptStatus::Blocked,
-            )?;
-            self.release_active_lock_if_shared_worktree_clean(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                self.active_work_item_id_for_attempt(&attempt),
-            )
-            .await?;
-            self.complete_timeline_node(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &node.id,
-                CodingTimelineNodeStatus::Blocked,
-                Some(summary.clone()),
-            )
-            .await?;
-            return Err(CodingWorkspaceEngineError::NoReviewableChanges(summary));
+        let existing_journal = self.store.get_coding_git_operation(&attempt)?;
+        let before_head = match existing_journal.as_ref() {
+            Some(journal) if journal.kind == CodingGitOperationKind::ReviewRequest => {
+                journal.before_head.clone()
+            }
+            _ => match self._git_service.git_current_head(worktree_path).await {
+                Ok(head) => head,
+                Err(GitWorkspaceError::Cancelled { .. }) => {
+                    return Err(CodingWorkspaceEngineError::Aborted);
+                }
+                Err(error) => return Err(error.into()),
+            },
         };
-        let push = self
-            ._git_service
-            .git_push(worktree_path, remote, &attempt.branch_name)
-            .await?;
-        let remote_kind = self._git_service.detect_remote_kind(worktree_path).await?;
-        let existing_requests =
-            self.store
-                .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let now = Utc::now().to_rfc3339();
-        let request = ReviewRequest {
-            id: next_sequential_id("review_request", existing_requests.len()),
-            attempt_id: attempt.id.clone(),
-            kind: ReviewRequestKind::GitBranchOnly,
-            remote_kind,
-            remote: remote.to_string(),
-            base_branch: attempt.base_branch.clone(),
-            branch_name: attempt.branch_name.clone(),
-            commit_sha,
-            push_status: push.status,
-            external_url: None,
-            manual_instructions: vec![format!(
-                "基于远端 {remote}/{} 发起代码审查",
-                attempt.branch_name
-            )],
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        self.store.save_review_request(&request)?;
-        self.store.update_attempt_review_request_state(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            request.commit_sha.clone(),
-            remote.to_string(),
-            request.id.clone(),
+        let mut journal = self.store.prepare_coding_git_operation(
+            &attempt,
+            PrepareCodingGitOperationInput {
+                kind: CodingGitOperationKind::ReviewRequest,
+                repo_path: worktree_path.to_path_buf(),
+                worktree_path: worktree_path.to_path_buf(),
+                branch_name: attempt.branch_name.clone(),
+                base_branch: attempt.base_branch.clone(),
+                before_head,
+                remote: Some(remote.to_string()),
+                commit_message: Some(commit_message.to_string()),
+            },
         )?;
+        if journal.phase == CodingGitOperationPhase::Compensated {
+            return Err(CodingWorkspaceEngineError::Aborted);
+        }
+        if journal.phase == CodingGitOperationPhase::Before {
+            let add_result = self
+                ._git_service
+                .git_add_work_item_changes(worktree_path)
+                .await;
+            if matches!(add_result, Err(GitWorkspaceError::Cancelled { .. })) {
+                self.compensate_cancelled_review_commit(&attempt, &journal)
+                    .await?;
+                return Err(CodingWorkspaceEngineError::Aborted);
+            }
+            add_result?;
+            let has_staged_changes = match self
+                ._git_service
+                .git_has_staged_changes(worktree_path)
+                .await
+            {
+                Ok(has_staged_changes) => has_staged_changes,
+                Err(GitWorkspaceError::Cancelled { .. }) => {
+                    self.compensate_cancelled_review_commit(&attempt, &journal)
+                        .await?;
+                    return Err(CodingWorkspaceEngineError::Aborted);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if has_staged_changes || attempt.head_commit.is_some() {
+                journal = self.store.advance_coding_git_operation(
+                    &attempt,
+                    &journal,
+                    CodingGitOperationPhase::CommitStarted,
+                    None,
+                )?;
+            } else {
+                self.store.advance_coding_git_operation(
+                    &attempt,
+                    &journal,
+                    CodingGitOperationPhase::Compensated,
+                    None,
+                )?;
+                let summary =
+                    "过滤运行产物后没有可提交的业务变更，请检查上一轮 Coder 是否只修改了运行产物。"
+                        .to_string();
+                self.store.update_attempt_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingAttemptStatus::Blocked,
+                )?;
+                self.release_active_lock_if_shared_worktree_clean(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    self.active_work_item_id_for_attempt(&attempt),
+                )
+                .await?;
+                self.complete_timeline_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &node.id,
+                    CodingTimelineNodeStatus::Blocked,
+                    Some(summary.clone()),
+                )
+                .await?;
+                return Err(CodingWorkspaceEngineError::NoReviewableChanges(summary));
+            }
+        }
+        if journal.phase == CodingGitOperationPhase::CommitStarted {
+            let current_head = GitWorkspaceService::new()
+                .git_current_head(worktree_path)
+                .await?;
+            let commit_sha = if current_head != journal.before_head {
+                self.confirm_review_commit_identity(&journal, &current_head)
+                    .await?;
+                current_head
+            } else if attempt.head_commit.is_some() {
+                current_head
+            } else {
+                match self
+                    ._git_service
+                    .git_commit(worktree_path, commit_message)
+                    .await
+                {
+                    Ok(commit) => commit.commit_sha,
+                    Err(GitWorkspaceError::Cancelled { .. }) => {
+                        self.compensate_cancelled_review_commit(&attempt, &journal)
+                            .await?;
+                        return Err(CodingWorkspaceEngineError::Aborted);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            journal = self.store.advance_coding_git_operation(
+                &attempt,
+                &journal,
+                CodingGitOperationPhase::CommitCreated,
+                Some(commit_sha),
+            )?;
+        }
+        let push_just_started = if journal.phase == CodingGitOperationPhase::CommitCreated {
+            journal = self.store.advance_coding_git_operation(
+                &attempt,
+                &journal,
+                CodingGitOperationPhase::PushStarted,
+                None,
+            )?;
+            true
+        } else {
+            false
+        };
+        if journal.phase == CodingGitOperationPhase::PushStarted {
+            let commit_sha = journal.commit_sha.as_deref().ok_or_else(|| {
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_git_operation",
+                    id: attempt.id.clone(),
+                }
+            })?;
+            let remote_head = if push_just_started {
+                Ok(None)
+            } else {
+                self._git_service
+                    .git_remote_branch_head(worktree_path, remote, &attempt.branch_name)
+                    .await
+            };
+            if matches!(remote_head.as_ref(), Ok(Some(head)) if head == commit_sha) {
+                journal = self
+                    .finish_review_git_operation(&attempt, &journal, PushStatus::Pushed)
+                    .await?;
+            } else if matches!(remote_head, Err(GitWorkspaceError::Cancelled { .. })) {
+                let Some(completed) = self
+                    .reconcile_cancelled_review_push(&attempt, &journal)
+                    .await?
+                else {
+                    return Err(CodingWorkspaceEngineError::Aborted);
+                };
+                journal = completed;
+            } else {
+                remote_head?;
+                match self
+                    ._git_service
+                    .git_push(worktree_path, remote, &attempt.branch_name)
+                    .await
+                {
+                    Ok(push) => {
+                        journal = if push.status == PushStatus::Pushed {
+                            self.finish_review_git_operation(&attempt, &journal, PushStatus::Pushed)
+                                .await?
+                        } else {
+                            self.finish_nonzero_review_push(
+                                &attempt,
+                                &journal,
+                                push.remote_rejected,
+                            )
+                            .await?
+                        };
+                    }
+                    Err(GitWorkspaceError::Cancelled { .. }) => {
+                        let Some(completed) = self
+                            .reconcile_cancelled_review_push(&attempt, &journal)
+                            .await?
+                        else {
+                            return Err(CodingWorkspaceEngineError::Aborted);
+                        };
+                        journal = completed;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        if journal.phase != CodingGitOperationPhase::Completed {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_git_operation",
+                id: attempt.id.clone(),
+            }
+            .into());
+        }
+        let request = self.persist_review_request_from_git_journal(&attempt, &journal)?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::ReviewRequestUpdate {

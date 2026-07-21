@@ -8,8 +8,16 @@ use crate::web::workspace_ws_types::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "tests/human_presentation.rs"]
+mod human_presentation;
 #[path = "tests/interrupted_run_recovery.rs"]
 mod interrupted_run_recovery;
+#[path = "tests/linked_amendment.rs"]
+mod linked_amendment;
+#[path = "tests/plan_repair_activation.rs"]
+mod plan_repair_activation;
+#[path = "tests/projection_artifact_batch.rs"]
+mod projection_artifact_batch;
 
 fn provider_config() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {
@@ -219,6 +227,45 @@ fn human_confirm_messages_are_only_valid_in_human_confirm() {
 }
 
 #[test]
+fn plan_repair_ws_commands_are_only_valid_in_human_confirm() {
+    let confirm = WsInMessage::ConfirmPlanAmendment {
+        amendment_id: "plan_amendment_0001".to_string(),
+    };
+    let cancel = WsInMessage::CancelPlanAmendment {
+        amendment_id: "plan_amendment_0001".to_string(),
+        reason: Some("用户取消".to_string()),
+    };
+
+    assert_eq!(message_type(&confirm), "confirm_plan_amendment");
+    assert_eq!(message_type(&cancel), "cancel_plan_amendment");
+    assert!(is_message_valid_for_stage(
+        &confirm,
+        &WorkspaceStage::HumanConfirm
+    ));
+    assert!(is_message_valid_for_stage(
+        &cancel,
+        &WorkspaceStage::HumanConfirm
+    ));
+    assert!(!is_message_valid_for_stage(
+        &confirm,
+        &WorkspaceStage::Running
+    ));
+    assert!(!is_message_valid_for_stage(
+        &cancel,
+        &WorkspaceStage::Completed
+    ));
+    assert!(requires_stage_validation(&cancel));
+    assert_eq!(
+        serde_json::from_value::<WsInMessage>(serde_json::to_value(&confirm).unwrap()).unwrap(),
+        confirm
+    );
+    assert_eq!(
+        serde_json::from_value::<WsInMessage>(serde_json::to_value(&cancel).unwrap()).unwrap(),
+        cancel
+    );
+}
+
+#[test]
 fn completed_stage_rejects_business_messages() {
     assert!(!is_message_valid_for_stage(
         &WsInMessage::Abort,
@@ -412,6 +459,10 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
     };
     let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
         engine,
         run_context,
         outbound_tx,
@@ -528,6 +579,10 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
     };
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
         engine,
         run_context,
         outbound_tx,

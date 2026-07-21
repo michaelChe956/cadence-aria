@@ -106,6 +106,10 @@ export function normalizeWorkItemPlanArtifactResponse(
       "draft_candidate",
       "batch_state",
       "compile_report",
+      "plan_projection",
+      "work_item_projection",
+      "work_item_revision_history",
+      "projection_validation",
     ].includes(artifactType)
   ) {
     return artifact as WorkItemPlanArtifactPayload;
@@ -138,6 +142,30 @@ export function normalizeWorkItemPlanArtifactResponse(
     return {
       type: "compile_report",
       payload: artifactRecord.compile_report,
+    } as WorkItemPlanArtifactPayload;
+  }
+  if ("plan_projection" in artifactRecord) {
+    return {
+      type: "plan_projection",
+      payload: artifactRecord.plan_projection,
+    } as WorkItemPlanArtifactPayload;
+  }
+  if ("work_item_projection" in artifactRecord) {
+    return {
+      type: "work_item_projection",
+      payload: artifactRecord.work_item_projection,
+    } as WorkItemPlanArtifactPayload;
+  }
+  if ("work_item_revision_history" in artifactRecord) {
+    return {
+      type: "work_item_revision_history",
+      payload: artifactRecord.work_item_revision_history,
+    } as WorkItemPlanArtifactPayload;
+  }
+  if ("projection_validation" in artifactRecord) {
+    return {
+      type: "projection_validation",
+      payload: artifactRecord.projection_validation,
     } as WorkItemPlanArtifactPayload;
   }
   return null;

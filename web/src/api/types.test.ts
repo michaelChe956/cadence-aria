@@ -3,6 +3,7 @@ import type {
   CodeReviewReport,
   CodingGateRequired,
   CodingAttempt,
+  CodingAttemptAddress,
   CodingAttemptSnapshotResponse,
   CodingWsInMessage,
   CodingWsOutMessage,
@@ -22,6 +23,20 @@ import type {
 } from "./types";
 
 describe("workspace websocket protocol types", () => {
+  it("describes the full coding attempt address", () => {
+    const address: CodingAttemptAddress = {
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+    };
+
+    expect(address).toEqual({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+    });
+  });
+
   it("accepts protocol v2 inbound messages", () => {
     const note: WsInMessage = { type: "context_note", content: "补充上下文" };
     const start: WsInMessage = {
@@ -84,6 +99,8 @@ describe("workspace websocket protocol types", () => {
 
   it("describes coding attempts returned by lifecycle responses", () => {
     const attempt: CodingAttempt = {
+      project_id: "project_0001",
+      issue_id: "issue_0001",
       attempt_id: "coding_attempt_0001",
       work_item_id: "work_item_0001",
       attempt_scope: "work_item",
@@ -192,6 +209,8 @@ describe("workspace websocket protocol types", () => {
 
   it("describes coding attempt snapshots and websocket messages", () => {
     const attempt: CodingAttempt = {
+      project_id: "project_0001",
+      issue_id: "issue_0001",
       attempt_id: "coding_attempt_0001",
       work_item_id: "work_item_0001",
       attempt_scope: "work_item",
@@ -220,11 +239,13 @@ describe("workspace websocket protocol types", () => {
       units: [
         {
           unit_id: "coding_unit_0001",
-          work_item_id: "work_item_0001",
+          logical_work_item_id: "work_item_0001",
+          work_item_revision_id: "work_item_revision_0001",
+          dependency_logical_work_item_ids: [],
           order_index: 0,
           status: "running",
           summary: null,
-          handoff_ref: null,
+          latest_handoff_revision_id: null,
           completion_commit: null,
         },
       ],
@@ -256,6 +277,8 @@ describe("workspace websocket protocol types", () => {
     };
     const outbound: Extract<CodingWsOutMessage, { type: "coding_session_state" }> = {
       type: "coding_session_state",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
       attempt_id: "coding_attempt_0001",
       attempt_scope: "work_item_group",
       work_item_group_id: "work_item_plan_0001",
@@ -291,6 +314,7 @@ describe("workspace websocket protocol types", () => {
       verification_commands: [],
       work_item_execution_plan: null,
       work_item_handoff: null,
+      linked_plan_repair: null,
       require_execution_plan_confirm: false,
       timeline_nodes: snapshot.timeline_nodes,
       role_runs: [

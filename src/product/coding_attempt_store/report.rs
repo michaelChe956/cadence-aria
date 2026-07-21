@@ -1,15 +1,17 @@
 use crate::product::coding_models::{
-    CodeReviewReport, InternalPrReview, ReviewRequest, TestingReport,
+    CodeReviewReport, CodingExecutionAttempt, InternalPrReview, ReviewRequest, TestPlan,
+    TestingReport,
 };
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
     pub fn save_test_plan(
         &self,
-        plan: &crate::product::coding_models::TestPlan,
+        attempt: &CodingExecutionAttempt,
+        plan: &TestPlan,
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(&plan.id)?;
-        let attempt = self.find_attempt_by_id(&plan.attempt_id)?;
+        self.validate_scoped_attempt_record(attempt, &plan.attempt_id, "test_plan", &plan.id)?;
         write_json(
             &self
                 .test_plans_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -23,12 +25,22 @@ impl super::CodingAttemptStore {
         project_id: &str,
         issue_id: &str,
         attempt_id: &str,
-    ) -> Result<Vec<crate::product::coding_models::TestPlan>, ProductStoreError> {
+    ) -> Result<Vec<TestPlan>, ProductStoreError> {
         super::list_json_records(&self.test_plans_root(project_id, issue_id, attempt_id))
     }
 
-    pub fn save_testing_report(&self, report: &TestingReport) -> Result<(), ProductStoreError> {
-        let attempt = self.find_attempt_by_id(&report.attempt_id)?;
+    pub fn save_testing_report(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        report: &TestingReport,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&report.id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &report.attempt_id,
+            "testing_report",
+            &report.id,
+        )?;
         write_json(
             &self
                 .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -69,9 +81,16 @@ impl super::CodingAttemptStore {
 
     pub fn save_code_review_report(
         &self,
+        attempt: &CodingExecutionAttempt,
         report: &CodeReviewReport,
     ) -> Result<(), ProductStoreError> {
-        let attempt = self.find_attempt_by_id(&report.attempt_id)?;
+        validate_relative_id(&report.id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &report.attempt_id,
+            "code_review_report",
+            &report.id,
+        )?;
         write_json(
             &self
                 .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -94,8 +113,18 @@ impl super::CodingAttemptStore {
         )
     }
 
-    pub fn save_review_request(&self, request: &ReviewRequest) -> Result<(), ProductStoreError> {
-        let attempt = self.find_attempt_by_id(&request.attempt_id)?;
+    pub fn save_review_request(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        request: &ReviewRequest,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&request.id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &request.attempt_id,
+            "review_request",
+            &request.id,
+        )?;
         write_json(
             &self
                 .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -136,9 +165,16 @@ impl super::CodingAttemptStore {
 
     pub fn save_internal_pr_review(
         &self,
+        attempt: &CodingExecutionAttempt,
         review: &InternalPrReview,
     ) -> Result<(), ProductStoreError> {
-        let attempt = self.find_attempt_by_id(&review.attempt_id)?;
+        validate_relative_id(&review.id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &review.attempt_id,
+            "internal_pr_review",
+            &review.id,
+        )?;
         write_json(
             &self
                 .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)

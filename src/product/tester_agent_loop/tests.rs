@@ -49,6 +49,46 @@ fn test_attempt() -> CodingExecutionAttempt {
 }
 
 #[test]
+fn coding_plan_repair_provider_test_execution_payload_roundtrip_preserves_plan_defect_findings() {
+    let raw = serde_json::json!({
+        "step_results": [{
+            "step_id": "unit",
+            "status": "blocked",
+            "evidence_refs": ["unit.log"],
+            "command": null,
+            "provider_analysis": "test_plan_insufficient: contract is invalid"
+        }],
+        "plan_defect_findings": [{
+            "finding_id": "tester_finding_0001",
+            "severity": "error",
+            "defect_class": "current_work_item_invalid",
+            "reason_code": "current_work_item_contract_invalid",
+            "message": "the current work item contract is not testable",
+            "evidence": [{
+                "kind": "test_execution",
+                "source_ref": "unit.log",
+                "message": "the required contract cannot be exercised"
+            }],
+            "contract_refs": ["contract.current"],
+            "capability_refs": ["testability"],
+            "repair_target": {
+                "kind": "current_work_item",
+                "logical_work_item_ids": ["work_item_0001"],
+                "work_item_revision_ids": ["work_item_revision_0001"]
+            },
+            "recommended_route": "plan_repair",
+            "confidence": "high"
+        }]
+    });
+
+    let payload: ProviderTestExecutionPayload =
+        serde_json::from_value(raw.clone()).expect("canonical tester execution payload");
+    let roundtrip = serde_json::to_value(payload).expect("serialize tester execution payload");
+
+    assert_eq!(roundtrip, raw);
+}
+
+#[test]
 fn tester_plan_prompt_requires_openspec_superpowers_and_step_bound_tools() {
     let prompt = build_tester_plan_prompt(
         &test_attempt(),

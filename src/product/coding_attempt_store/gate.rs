@@ -7,13 +7,16 @@ use crate::product::coding_attempt_store::{
     CreateBlockedGateInput, CreateChoiceGateInput, CreateQualityBypassAuditInput,
 };
 use crate::product::coding_models::{
-    CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus, CodingExecutionStage,
-    CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
-    CodingRoleProviderConfigSnapshot, CodingStageGateState, CodingStageGateStatus,
+    CodingAttemptStatus, CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus,
+    CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
+    CodingGateKind, CodingGateRequired, CodingProviderRole, CodingRoleProviderConfigSnapshot,
+    CodingStageGateState, CodingStageGateStatus, CodingUnitRun, CodingUnitRunStatus,
     QualityGateBypassAudit,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+
+use super::locking::with_exclusive_lock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,15 +36,143 @@ struct BlockedGateRecord {
 }
 
 impl super::CodingAttemptStore {
+    pub fn ensure_provider_run_allowed(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let authoritative = self.validate_attempt_lineage(attempt)?;
+        let current = match self.reconcile_linked_plan_repair_pause(&authoritative) {
+            Ok(reconciliation) => reconciliation.attempt,
+            Err(_)
+                if matches!(
+                    authoritative.status,
+                    CodingAttemptStatus::AwaitingPlanAmendment
+                        | CodingAttemptStatus::ApplyingPlanAmendment
+                        | CodingAttemptStatus::AmendmentApplyFailed
+                ) =>
+            {
+                return Err(ProductStoreError::Io(
+                    "plan_amendment_blocks_provider_run".to_string(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if matches!(
+            current.status,
+            CodingAttemptStatus::AwaitingPlanAmendment
+                | CodingAttemptStatus::ApplyingPlanAmendment
+                | CodingAttemptStatus::AmendmentApplyFailed
+        ) {
+            return Err(ProductStoreError::Io(
+                "plan_amendment_blocks_provider_run".to_string(),
+            ));
+        }
+        Ok(current)
+    }
+
+    pub fn block_active_unit_run_for_plan_repair(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        increment_plan_repair_count: bool,
+    ) -> Result<CodingUnitRun, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        let active = self.get_active_unit_run(&current)?;
+        self.block_unit_run_for_plan_repair(
+            &current,
+            &active.unit_id,
+            &active.id,
+            increment_plan_repair_count,
+        )
+    }
+
+    pub fn block_unit_run_for_plan_repair(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit_id: &str,
+        unit_run_id: &str,
+        increment_plan_repair_count: bool,
+    ) -> Result<CodingUnitRun, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        if !matches!(
+            current.status,
+            CodingAttemptStatus::Running | CodingAttemptStatus::AwaitingPlanAmendment
+        ) {
+            return Err(ProductStoreError::Io(format!(
+                "plan_repair_invalid_attempt_status: {:?}",
+                current.status
+            )));
+        }
+        validate_relative_id(unit_id)?;
+        validate_relative_id(unit_run_id)?;
+        let latest = self
+            .list_coding_unit_runs(&current, unit_id)?
+            .into_iter()
+            .max_by_key(|run| run.execution_no)
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "coding_unit_run",
+                id: unit_id.to_string(),
+            })?;
+        if latest.id != unit_run_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_unit_run_plan_repair_authority",
+                id: unit_run_id.to_string(),
+            });
+        }
+        let path = self.coding_unit_run_path(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+            unit_id,
+            unit_run_id,
+        );
+        with_exclusive_lock(&path, || {
+            let mut run: CodingUnitRun = read_json(&path)?;
+            if run.id != unit_run_id || run.unit_id != unit_id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_unit_run",
+                    id: unit_run_id.to_string(),
+                });
+            }
+            if run.status == CodingUnitRunStatus::BlockedByPlanDefect {
+                return Ok(run);
+            }
+            if !matches!(
+                run.status,
+                CodingUnitRunStatus::Pending
+                    | CodingUnitRunStatus::Running
+                    | CodingUnitRunStatus::Completed
+                    | CodingUnitRunStatus::Blocked
+            ) {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_unit_run_plan_repair_transition",
+                    id: run.id,
+                });
+            }
+            run.status = CodingUnitRunStatus::BlockedByPlanDefect;
+            if increment_plan_repair_count {
+                run.plan_repair_count = run.plan_repair_count.saturating_add(1);
+            }
+            run.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &run)?;
+            Ok(run)
+        })
+    }
+
     pub fn create_blocked_gate(
         &self,
+        attempt: &CodingExecutionAttempt,
         input: CreateBlockedGateInput,
     ) -> Result<CodingGateRequired, ProductStoreError> {
         validate_relative_id(&input.attempt_id)?;
         if let Some(node_id) = &input.node_id {
             validate_relative_id(node_id)?;
         }
-        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &input.attempt_id,
+            "coding_blocked_gate",
+            &input.attempt_id,
+        )?;
         let gates_root =
             self.blocked_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         if let Some(existing_path) = matching_open_blocked_gate_path(&gates_root, &input)? {
@@ -78,7 +209,7 @@ impl super::CodingAttemptStore {
         };
         let record = BlockedGateRecord {
             gate: gate.clone(),
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             node_id: input.node_id,
             status: BlockedGateStatus::Open,
             created_at: now.clone(),
@@ -152,15 +283,49 @@ impl super::CodingAttemptStore {
         Ok(gate)
     }
 
+    pub(crate) fn reopen_failed_code_review_gate_for_plan_repair(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
+        let open_path = gates_root.join(format!("{gate_id}.json"));
+        if super::path_is_regular_file(&open_path)? {
+            let resolved_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
+            return super::remove_file_if_exists(&resolved_path);
+        }
+        let resolved_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
+        if !super::path_is_regular_file(&resolved_path)? {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_blocked_gate",
+                id: gate_id.to_string(),
+            });
+        }
+        let mut record: BlockedGateRecord = read_json(&resolved_path)?;
+        record.status = BlockedGateStatus::Open;
+        record.updated_at = Utc::now().to_rfc3339();
+        write_json(&open_path, &record)?;
+        super::remove_file_if_exists(&resolved_path)
+    }
+
     pub fn create_choice_gate(
         &self,
+        attempt: &CodingExecutionAttempt,
         input: CreateChoiceGateInput,
     ) -> Result<CodingChoiceGate, ProductStoreError> {
         validate_relative_id(&input.attempt_id)?;
         if let Some(node_id) = &input.node_id {
             validate_relative_id(node_id)?;
         }
-        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &input.attempt_id,
+            "coding_choice_gate",
+            &input.choice_id,
+        )?;
         let gates_root =
             self.choice_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         if let Some(existing_path) = matching_open_choice_gate_path(&gates_root, &input.choice_id)?
@@ -187,7 +352,7 @@ impl super::CodingAttemptStore {
         let gate = CodingChoiceGate {
             gate_id: gate_id.clone(),
             choice_id: input.choice_id,
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             node_id: input.node_id,
             stage: input.stage,
             role: input.role,
@@ -255,17 +420,23 @@ impl super::CodingAttemptStore {
 
     pub fn create_quality_bypass_audit(
         &self,
+        attempt: &CodingExecutionAttempt,
         input: CreateQualityBypassAuditInput,
     ) -> Result<QualityGateBypassAudit, ProductStoreError> {
         validate_relative_id(&input.attempt_id)?;
         validate_relative_id(&input.gate_id)?;
-        let attempt = self.find_attempt_by_id(&input.attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &input.attempt_id,
+            "quality_bypass_audit",
+            &input.gate_id,
+        )?;
         let root =
             self.quality_bypass_audits_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
         let id = next_sequential_id("quality_bypass_audit", super::count_json_files(&root)?);
         let audit = QualityGateBypassAudit {
             id: id.clone(),
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             gate_id: input.gate_id,
             stage: input.stage,
             reason_code: input.reason_code,
@@ -288,13 +459,18 @@ impl super::CodingAttemptStore {
 
     pub fn create_stage_gate(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         stage: CodingExecutionStage,
         role: CodingProviderRole,
         expires_at: String,
         provider_snapshot: CodingRoleProviderConfigSnapshot,
     ) -> Result<CodingStageGateState, ProductStoreError> {
-        let attempt = self.find_attempt_by_id(attempt_id)?;
+        self.validate_scoped_attempt_record(
+            attempt,
+            &attempt.id,
+            "coding_stage_gate",
+            &attempt.id,
+        )?;
         let gates_root = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("stage-gates");
@@ -303,7 +479,7 @@ impl super::CodingAttemptStore {
         let now = Utc::now().to_rfc3339();
         let gate = CodingStageGateState {
             gate_id: gate_id.clone(),
-            attempt_id: attempt.id,
+            attempt_id: attempt.id.clone(),
             stage,
             role,
             expires_at,

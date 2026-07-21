@@ -6,3 +6,8 @@ include!("part_03/part_05.rs");
 include!("part_03/part_06.rs");
 include!("part_03/part_07.rs");
 include!("part_03/part_08.rs");
+include!("part_03/part_09.rs");
+include!("part_03/part_10.rs");
+include!("part_03/part_11.rs");
+include!("part_03/part_12.rs");
+include!("part_03/part_13.rs");

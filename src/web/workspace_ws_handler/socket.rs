@@ -123,7 +123,16 @@ pub(crate) async fn handle_workspace_socket(
     )));
 
     let (session_state, restored_choice_request) = {
-        let engine = engine.lock().await;
+        let mut engine = engine.lock().await;
+        if let Err(error) = engine.ensure_plan_repair_artifacts().await {
+            let err = WsOutMessage::Error {
+                message: format!("plan repair artifact bootstrap failed: {error:?}"),
+            };
+            if let Ok(json) = serde_json::to_string(&err) {
+                let _ = ws_sender.send(Message::Text(json.into())).await;
+            }
+            return;
+        }
         (
             engine.build_session_state(),
             engine.pending_author_choice_request_message(),
@@ -231,6 +240,7 @@ pub(crate) async fn handle_workspace_socket(
         session_record: session_record.clone(),
     };
     let inbound_context = WorkspaceInboundContext {
+        app_state: state.clone(),
         engine: engine.clone(),
         run_context: run_context.clone(),
         outbound_tx: outbound_tx.clone(),
@@ -325,19 +335,28 @@ pub(crate) async fn handle_workspace_socket(
         };
         *last_client_message_at.lock().await = tokio::time::Instant::now();
 
-        let stage_and_type = if requires_stage_validation(&in_msg) {
+        let stage_type_and_cancel_replay = if requires_stage_validation(&in_msg) {
             Some({
                 let engine = engine.lock().await;
+                let completed_cancel_replay = matches!(
+                    &in_msg,
+                    WsInMessage::CancelPlanAmendment { amendment_id, .. }
+                        if engine.current_stage() == WorkspaceStage::Completed
+                            && engine.is_cancelled_plan_amendment_replay(amendment_id)
+                );
                 (
                     engine.current_stage(),
                     engine.session().workspace_type.clone(),
+                    completed_cancel_replay,
                 )
             })
         } else {
             None
         };
-        if let Some((stage, workspace_type)) = stage_and_type.as_ref()
+        if let Some((stage, workspace_type, completed_cancel_replay)) =
+            stage_type_and_cancel_replay.as_ref()
             && !is_message_valid_for_stage(&in_msg, stage)
+            && !completed_cancel_replay
             && !(matches!(in_msg, WsInMessage::RequestRevision { .. })
                 && *stage == WorkspaceStage::AuthorConfirm
                 && *workspace_type == WorkspaceType::WorkItemPlan)

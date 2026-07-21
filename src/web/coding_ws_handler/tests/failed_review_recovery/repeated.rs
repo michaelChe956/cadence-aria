@@ -12,14 +12,11 @@ use crate::web::coding_ws_handler::CodingWsInMessage;
 use crate::web::coding_ws_handler::socket::failed_code_review_recovery_request;
 
 use super::super::{CodingWsOutMessage, build_coding_session_state};
-use super::support::{FixtureCase, failed_review_fixture, seed_repeated_interrupted_review};
+use super::support::{provider_interrupted_review_fixture, seed_repeated_interrupted_review};
 
 #[tokio::test]
 async fn completed_journal_rotates_when_later_review_is_interrupted() {
-    let fixture = failed_review_fixture(
-        CodingAttemptScope::WorkItemGroup,
-        FixtureCase::BlockedProviderInterrupted,
-    );
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
     let repeated = seed_repeated_interrupted_review(&fixture).await;
     let second_gate_id = repeated.second_gate.gate_id.clone();
     let recovery = recoverable_failed_code_review(&fixture.store, &repeated.blocked_attempt)
@@ -53,7 +50,7 @@ async fn completed_journal_rotates_when_later_review_is_interrupted() {
     let engine =
         CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
     let running = engine
-        .recover_failed_code_review_for_attempt(&fixture.attempt.id, &second_gate_id)
+        .recover_failed_code_review_for_attempt(&fixture.attempt, &second_gate_id)
         .await
         .expect("recover second interrupted review");
     assert_eq!(running.status, CodingAttemptStatus::Running);

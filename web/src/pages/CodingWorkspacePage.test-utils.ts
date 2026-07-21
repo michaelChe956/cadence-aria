@@ -1,9 +1,19 @@
 import { beforeEach, vi } from "vitest";
 import type { WorkItemExecutionPlan } from "../api/types";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
+import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
+import { useWorkspaceStore } from "../state/workspace-ws-store";
 
 type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
+type PlanRepairWsApi = ReturnType<typeof useWorkspaceWs>;
+
+export const CODING_ATTEMPT_ADDRESS = {
+  projectId: "project_0001",
+  issueId: "issue_0001",
+  attemptId: "coding_attempt_0001",
+} as const;
 
 export const DEFAULT_PERMISSION_MODES = {
   coder: "supervised",
@@ -11,6 +21,16 @@ export const DEFAULT_PERMISSION_MODES = {
   code_reviewer: "supervised",
   internal_reviewer: "supervised",
 } as const;
+
+export function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
 
 export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   const api: CodingWsApi = {
@@ -34,8 +54,26 @@ export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   return api;
 }
 
+export function mockPlanRepairWs(
+  overrides: Partial<PlanRepairWsApi> = {},
+) {
+  const api = {
+    confirmPlanAmendment: vi.fn(() => true),
+    cancelPlanAmendment: vi.fn(() => true),
+    sendHumanConfirm: vi.fn(() => true),
+    startLinkedWorkspaceAmendment: vi.fn(() => true),
+    connectionStatus: "connected",
+    sessionSnapshotGeneration: 1,
+    ...overrides,
+  } as unknown as PlanRepairWsApi;
+  vi.mocked(useWorkspaceWs).mockReturnValue(api);
+  return api;
+}
+
 export function readyCodingState() {
   return {
+    projectId: "project_0001",
+    issueId: "issue_0001",
     attemptId: "coding_attempt_0001",
     status: "created" as const,
     stage: "prepare_context" as const,
@@ -81,6 +119,8 @@ export function installCodingWorkspacePageTestHooks() {
       value: vi.fn(),
     });
     useCodingWorkspaceStore.getState().reset();
+    useLinkedWorkspaceAmendmentStore.getState().reset(null);
+    useWorkspaceStore.getState().reset();
     vi.clearAllMocks();
   });
 }

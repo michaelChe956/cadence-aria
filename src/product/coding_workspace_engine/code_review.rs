@@ -17,6 +17,7 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<CodeReviewReport, CodingWorkspaceEngineError> {
+        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -64,9 +65,13 @@ impl CodingWorkspaceEngine {
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .code_reviewer;
         let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
-        let prompt = self
-            .build_code_review_prompt(&attempt, worktree_path, retry_diagnostic.as_deref())
-            .await?;
+        let prompt = match self.render_reviewer_unit_run_context(&attempt, &reviewer)? {
+            Some(rendered) => rendered.text,
+            None => {
+                self.build_code_review_prompt(&attempt, worktree_path, retry_diagnostic.as_deref())
+                    .await?
+            }
+        };
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -119,7 +124,7 @@ impl CodingWorkspaceEngine {
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::CodeReview,
             "code_review",
             &full_output,
@@ -138,9 +143,18 @@ impl CodingWorkspaceEngine {
             Some(raw_provider_output_ref.clone()),
             &role_run,
         )?;
-        self.store.save_code_review_report(&report)?;
-        self.emit_code_review_chat_entry(&attempt, &node.id, &report)
-            .await;
+        let plan_defect_source = PlanDefectSource::CodeReviewer;
+        let reviewer_projection = self.reviewer_projection_for_attempt(&attempt)?;
+        let plan_defect_route = code_review_flow_decision(&report, &reviewer_projection);
+        self.store.save_code_review_report(&attempt, &report)?;
+        self.emit_code_review_chat_entry(
+            &attempt,
+            &node.id,
+            &report,
+            plan_defect_source.label(),
+            plan_defect_route.label(),
+        )
+        .await;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodeReviewComplete {

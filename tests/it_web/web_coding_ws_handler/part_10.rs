@@ -15,10 +15,11 @@ async fn coding_ws_hello_and_ping_do_not_wait_for_attempt_recovery_lock() {
     });
 
     let attempt_id = "coding_attempt_0001";
+    let attempt_key = CodingAttemptRunKey::new("project_0001", "issue_0001", attempt_id);
     let url = format!("ws://{addr}/ws/coding-attempts/{attempt_id}");
     let (mut ws, _) = connect_async(url).await.expect("connect ws");
     let _initial = recv_json(&mut ws).await;
-    let attempt_guard = state.coding_runs.lock_attempt(attempt_id).await;
+    let attempt_guard = state.coding_runs.lock_attempt(&attempt_key).await;
 
     send_json(
         &mut ws,

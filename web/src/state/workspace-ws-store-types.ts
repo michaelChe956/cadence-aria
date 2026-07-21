@@ -1,5 +1,10 @@
 import type {
+  HumanPresentationRevision,
   NodeDetail,
+  PlanAmendmentManifest,
+  PlanProjectionBundle,
+  PlanRepairSessionSnapshot,
+  ProjectionValidationReport,
   StructuredOutputDiagnostic,
   WorkItemBatchStatePayload,
   WorkItemDraftCandidatePayload,
@@ -9,6 +14,8 @@ import type {
   WorkItemPlanCompileReportPayload,
   WorkItemPlanContextBlockerPayload,
   WorkItemPlanOutlineCandidatePayload,
+  WorkItemProjectionBundle,
+  WorkItemRevisionHistoryDto,
   WorkspaceProviderName,
 } from "../api/types";
 import type {
@@ -28,7 +35,25 @@ export type WorkspaceArtifact =
   | { context_blocker: WorkItemPlanContextBlockerPayload }
   | { draft_candidate: WorkItemDraftCandidatePayload }
   | { batch_state: WorkItemBatchStatePayload }
-  | { compile_report: WorkItemPlanCompileReportPayload };
+  | { compile_report: WorkItemPlanCompileReportPayload }
+  | { plan_projection: PlanProjectionBundle }
+  | { work_item_projection: WorkItemProjectionBundle }
+  | { work_item_revision_history: WorkItemRevisionHistoryDto }
+  | { projection_validation: ProjectionValidationReport }
+  | { plan_amendment_manifest: PlanAmendmentManifest };
+
+export type WorkItemPlanProjectionArtifacts = {
+  planProjection: PlanProjectionBundle | null;
+  workItemProjections: WorkItemProjectionBundle[];
+  history: WorkItemRevisionHistoryDto | null;
+  validation: ProjectionValidationReport | null;
+  missingWorkItemProjectionRefs: string[];
+};
+
+export type HumanPresentationSaveState = {
+  saving: boolean;
+  error: string | null;
+};
 
 export type WsConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type ProviderStatus =
@@ -195,7 +220,11 @@ export interface ArtifactVersionSummary {
 }
 
 export interface ArtifactVersion extends ArtifactVersionSummary {
-  markdown: string;
+  markdown?: string;
+  plan_projection?: PlanProjectionBundle;
+  work_item_projection?: WorkItemProjectionBundle;
+  work_item_revision_history?: WorkItemRevisionHistoryDto;
+  projection_validation?: ProjectionValidationReport;
 }
 
 export type TimelineNodeDetail = NodeDetail;
@@ -248,6 +277,9 @@ export interface WorkspaceWsState {
   workItemPlanCandidate: WorkItemPlanCandidateDto | null;
   workItemPlanArtifact: WorkItemPlanArtifactPayload | null;
   workItemPlanArtifactVersions: WorkItemPlanArtifactVersion[];
+  workItemPlanProjectionArtifacts: WorkItemPlanProjectionArtifacts;
+  humanPresentationRevisions: Record<string, HumanPresentationRevision>;
+  humanPresentationSaveStates: Record<string, HumanPresentationSaveState>;
   providers: WsProviderConfig | null;
   connectionStatus: WsConnectionStatus;
   streamingContent: string;
@@ -297,7 +329,9 @@ export interface WorkspaceWsActions {
     timeline_node_details?: Record<string, TimelineNodeDetail>;
     timeline_node_summaries?: Record<string, NodeDetailSummary>;
     active_run_id?: string | null;
+    human_presentation_revisions?: HumanPresentationRevision[];
     recoverable_interrupted_run?: RecoverableInterruptedRun | null;
+    plan_repair?: PlanRepairSessionSnapshot | null;
   }) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   appendBufferedStreamChunk: (content: string, nodeId: string, role: ChatEntryRole) => void;
@@ -315,6 +349,10 @@ export interface WorkspaceWsActions {
   setArtifact: (markdown: string, version?: number) => void;
   setWorkItemPlanCandidate: (candidate: WorkItemPlanCandidateDto | null) => void;
   setWorkItemPlanArtifact: (artifact: WorkItemPlanArtifactPayload | null, version?: number) => void;
+  beginHumanPresentationSave: (sourceProjectionBundleId: string) => void;
+  completeHumanPresentationSave: (revision: HumanPresentationRevision) => void;
+  failHumanPresentationSave: (sourceProjectionBundleId: string, message: string) => void;
+  failPendingHumanPresentationSaves: (message: string) => void;
   addTimelineNode: (node: TimelineNode) => void;
   updateTimelineNode: (
     nodeId: string,

@@ -1,7 +1,8 @@
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
-    ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
+    ProviderCompletion, ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter,
+    StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
@@ -10,12 +11,12 @@ use cadence_aria::product::coding_attempt_store::{
 };
 use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
 use cadence_aria::product::coding_models::{
-    CodingAgentRole, CodingAttemptStatus, CodingEntryType, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType, CodingGateKind,
-    CodingGateRequired, CodingProviderPermissionMode, CodingProviderRole,
-    CodingRoleProviderConfigSnapshot, CodingRoleRunEventType, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind,
-    ReviewRequest, ReviewRequestKind, ReviewVerdict, WorkItemExecutionPlan,
+    CodingAgentRole, CodingAttemptPlanBinding, CodingAttemptStatus, CodingEntryType,
+    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
+    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
+    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
+    PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, WorkItemExecutionPlan,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput,
@@ -24,19 +25,30 @@ use cadence_aria::product::lifecycle_store::{
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::WorkItemStatus;
 use cadence_aria::product::models::{
-    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName, WorkItemPlanStatus,
-    WorkspaceSessionStatus, WorkspaceType,
+    DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
+    PlanRevisionReason, ProviderName, WorkItemPlanLineage, WorkItemPlanRevision,
+    WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision, WorkspaceSessionStatus,
+    WorkspaceType,
 };
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use cadence_aria::product::work_item_contract::{
+    BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract,
+    WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
+};
+use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
+use cadence_aria::product::work_item_projection::{
+    WorkItemProjectionCompiler, projection_hashes,
+};
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::coding_ws_handler::{
     CodingWsInMessage, CodingWsOutMessage, is_coding_ws_message_allowed,
 };
 use cadence_aria::web::runtime::WebRuntime;
-use cadence_aria::web::state::WebAppState;
+use cadence_aria::web::state::{CodingAttemptRunKey, WebAppState};
 use cadence_aria::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot,
+    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot, WorkItemHistoryEntryDto,
+    WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -54,6 +66,188 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn create_legacy_coding_attempt_fixture(
+    store: &CodingAttemptStore,
+    input: CreateCodingAttemptInput,
+) -> CodingExecutionAttempt {
+    let attempt = store.create_attempt(input).expect("create attempt");
+    rewrite_as_legacy_coding_attempt_fixture(store, attempt)
+}
+
+fn create_legacy_group_coding_attempt_fixture(
+    store: &CodingAttemptStore,
+    input: CreateGroupCodingAttemptInput,
+) -> CodingExecutionAttempt {
+    let attempt = store
+        .create_group_attempt(input)
+        .expect("create group attempt");
+    rewrite_as_legacy_coding_attempt_fixture(store, attempt)
+}
+
+fn rewrite_as_legacy_coding_attempt_fixture(
+    store: &CodingAttemptStore,
+    mut attempt: CodingExecutionAttempt,
+) -> CodingExecutionAttempt {
+    let generated_id = attempt.id.clone();
+    store
+        .delete_attempt(&attempt.project_id, &attempt.issue_id, &generated_id)
+        .expect("delete generated attempt fixture");
+    attempt.id = "coding_attempt_0001".to_string();
+    store
+        .save_coding_attempt(&attempt)
+        .expect("save legacy attempt fixture");
+    attempt
+}
+
+fn seed_authoritative_group_plan_fixture(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    let revision_store = WorkItemRevisionStore::new(store.paths());
+    let lineage = WorkItemPlanLineage {
+        id: "work_item_plan_0001".to_string(),
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
+        story_spec_refs: Vec::new(),
+        design_spec_refs: Vec::new(),
+        active_revision_id: None,
+        active_amendment_id: None,
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+        updated_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_plan_lineage(&lineage)
+        .expect("plan lineage");
+    let mut bindings = std::collections::BTreeMap::new();
+    for (logical_id, revision_id) in [
+        ("work_item_0001", "work_item_revision_0001"),
+        ("work_item_0002", "work_item_revision_0002"),
+    ] {
+        let logical = LogicalWorkItem {
+            id: logical_id.to_string(),
+            plan_id: lineage.id.clone(),
+            title: logical_id.to_string(),
+            active_revision_id: None,
+            created_at: "2026-07-18T00:00:00Z".to_string(),
+            updated_at: "2026-07-18T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_logical_work_item(&lineage, &logical)
+            .expect("logical work item");
+        let contract = CanonicalWorkItemContract {
+            schema_version: 1,
+            identity: WorkItemContractIdentity {
+                logical_work_item_id: logical.id.clone(),
+                title: logical.title.clone(),
+                kind: "implementation".to_string(),
+            },
+            goal: WorkItemGoal {
+                summary: logical.title.clone(),
+            },
+            non_goals: Vec::new(),
+            input_contracts: Vec::new(),
+            output_contracts: Vec::new(),
+            tasks: Vec::new(),
+            write_policy: WorkItemWritePolicy {
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+            },
+            acceptance_criteria: Vec::new(),
+            verification_checks: Vec::new(),
+            handoff_contract: HandoffContract {
+                required_fields: Vec::new(),
+                provided_contract_refs: Vec::new(),
+                reviewer_check_refs: Vec::new(),
+            },
+            blocker_rules: authoritative_group_blocker_rules_fixture(),
+            design_traceability: Vec::new(),
+        };
+        let revision = WorkItemRevision {
+            id: revision_id.to_string(),
+            logical_work_item_id: logical.id.clone(),
+            source_draft_revision_id: format!("draft_{revision_id}"),
+            canonical_contract_hash: canonical_contract_hash(&contract).expect("contract hash"),
+            canonical_contract: contract,
+            work_item_projection_bundle_id: format!("projection_{revision_id}"),
+            verification_plan_revision_id: format!("verification_{revision_id}"),
+            created_at: "2026-07-18T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_work_item_revision(&lineage, &revision)
+            .expect("work item revision");
+        let projections = WorkItemProjectionCompiler
+            .compile(&revision.canonical_contract, &revision.id)
+            .expect("compile work item projections");
+        let hashes = projection_hashes(&projections).expect("projection hashes");
+        revision_store
+            .put_work_item_projection_bundle(
+                &lineage,
+                &WorkItemProjectionBundle {
+                    id: revision.work_item_projection_bundle_id.clone(),
+                    work_item_revision_id: revision.id.clone(),
+                    canonical_contract_hash: revision.canonical_contract_hash.clone(),
+                    projection_schema_version: 1,
+                    compiler_version: "work-item-projection-compiler-v1".to_string(),
+                    human_projection: projections.human,
+                    coder_projection: projections.coder,
+                    reviewer_projection: projections.reviewer,
+                    human_projection_hash: hashes.human,
+                    coder_projection_hash: hashes.coder,
+                    reviewer_projection_hash: hashes.reviewer,
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("work item projection bundle");
+        revision_store
+            .set_active_work_item_revision(&lineage, &logical, None, revision_id)
+            .expect("active work item revision");
+        bindings.insert(logical.id, revision.id);
+    }
+    let graph = DependencyGraphRevision {
+        id: "dependency_graph_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        edges: vec![cadence_aria::product::work_item_contract::DependencyContractEdge {
+            from: "work_item_0001".to_string(),
+            to: "work_item_0002".to_string(),
+            required_contracts: Vec::new(),
+        }],
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_dependency_graph_revision(&lineage, &graph)
+        .expect("dependency graph");
+    let plan_revision = WorkItemPlanRevision {
+        id: "plan_revision_0001".to_string(),
+        plan_id: lineage.id.clone(),
+        revision_no: 1,
+        supersedes: None,
+        reason: PlanRevisionReason::InitialCompile,
+        work_item_bindings: bindings,
+        dependency_graph_revision_id: graph.id,
+        validation_report_ref: "validation_report_0001".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    revision_store
+        .put_plan_revision(&lineage, &plan_revision)
+        .expect("plan revision");
+    revision_store
+        .set_active_plan_revision(&lineage, &plan_revision.id)
+        .expect("active plan revision");
+    store
+        .save_plan_binding(
+            attempt,
+            &CodingAttemptPlanBinding {
+                attempt_id: attempt.id.clone(),
+                plan_id: lineage.id,
+                bound_plan_revision_id: plan_revision.id,
+                applied_amendment_ids: Vec::new(),
+                updated_at: "2026-07-18T00:00:00Z".to_string(),
+            },
+        )
+        .expect("attempt plan binding");
+}
 
 #[test]
 fn coding_ws_out_messages_serialize_with_coding_message_type_names() {
@@ -534,9 +728,12 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
     let root = tempdir().expect("root");
     let app = app_with_attempt(root.path());
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
     store
         .create_stage_gate(
-            "coding_attempt_0001",
+            &attempt,
             CodingExecutionStage::Testing,
             CodingProviderRole::Tester,
             "2026-05-28T00:00:05Z".to_string(),

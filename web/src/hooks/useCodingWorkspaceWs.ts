@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type {
+  CodingAttemptAddress,
   CodingProviderPermissionMode,
   CodingProviderRole,
   CodingProviderSelectRole,
@@ -18,10 +19,28 @@ interface CodingWsServerMessage {
 
 const STREAM_CHUNK_FLUSH_MS = 50;
 
-export function useCodingWorkspaceWs(attemptId: string | null) {
+export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
+  const projectId = address?.projectId ?? null;
+  const issueId = address?.issueId ?? null;
+  const attemptId = address?.attemptId ?? null;
   const wsRef = useRef<WebSocket | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+
+  useLayoutEffect(() => {
+    const ws = wsRef.current;
+    wsRef.current = null;
+    ws?.close(1000);
+    if (heartbeatTimerRef.current !== null) {
+      window.clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    useCodingWorkspaceStore.getState().reset();
+  }, [attemptId, issueId, projectId]);
 
   const sendJson = useCallback((message: CodingWsInMessage) => {
     const ws = wsRef.current;
@@ -158,10 +177,12 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
   }, [sendJson]);
 
   useEffect(() => {
-    if (!attemptId) {
-      useCodingWorkspaceStore.getState().reset();
+    if (!projectId || !issueId || !attemptId) {
       return;
     }
+    const scopedProjectId = projectId;
+    const scopedIssueId = issueId;
+    const scopedAttemptId = attemptId;
 
     let disposed = false;
     let reconnectAttempt = 0;
@@ -186,7 +207,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       ws.send(
         JSON.stringify({
           type: "coding_hello",
-          attempt_id: attemptId,
+          attempt_id: scopedAttemptId,
           last_seen_node_id: store.activeNodeId ?? store.timelineNodes.at(-1)?.id ?? null,
         }),
       );
@@ -215,7 +236,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       if (disposed) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(
-        `${protocol}//${window.location.host}/ws/coding-attempts/${attemptId}`,
+        `${protocol}//${window.location.host}/ws/projects/${encodeURIComponent(scopedProjectId)}/issues/${encodeURIComponent(scopedIssueId)}/coding-attempts/${encodeURIComponent(scopedAttemptId)}`,
       );
       wsRef.current = ws;
       useCodingWorkspaceStore
@@ -259,6 +280,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       };
 
       ws.onmessage = (event) => {
+        if (disposed || wsRef.current !== ws) return;
         try {
           handleCodingWsMessage(JSON.parse(event.data) as CodingWsServerMessage, streamBatcher);
         } catch {
@@ -278,7 +300,7 @@ export function useCodingWorkspaceWs(attemptId: string | null) {
       wsRef.current = null;
       ws?.close(1000);
     };
-  }, [attemptId]);
+  }, [attemptId, issueId, projectId]);
 
   return {
     startCoding,
@@ -505,6 +527,21 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
       markSubmittingGateError(message.code as string);
       rejectCodingChoiceRequestFromError(message.message as string);
       break;
+    case "plan_repair_required": {
+      const repair = message as Extract<CodingWsOutMessage, { type: "plan_repair_required" }>;
+      store.setPlanRepairRequired(repair);
+      break;
+    }
+    case "plan_amendment_updated": {
+      const update = message as Extract<CodingWsOutMessage, { type: "plan_amendment_updated" }>;
+      store.setPlanAmendment(update.amendment);
+      if (
+        useCodingWorkspaceStore.getState().activePlanRepair?.amendment === update.amendment
+      ) {
+        store.clearPlanRepairAfterResume(update.amendment.id);
+      }
+      break;
+    }
     case "coding_pong":
       break;
   }

@@ -1,18 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
-
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, FailedCodeReviewRecoveryJournal,
     FailedCodeReviewRecoveryPhase,
 };
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingGateRequired, CodingProviderRole, CodingReworkInstruction,
-    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNodeStatus,
+    CodingExecutionUnitStatus, CodingGateRequired, CodingProviderRole, CodingRoleRunStatus,
+    CodingRoleRunTrigger, CodingTimelineNodeStatus,
 };
-use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
 use super::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
@@ -110,136 +107,33 @@ pub(crate) fn recoverable_failed_code_review(
         }));
     }
 
-    if attempt.status != CodingAttemptStatus::Failed
-        || attempt.stage != CodingExecutionStage::CodeReview
-        || attempt.completed_at.is_none()
-    {
-        return Ok(None);
-    }
-    if !attempt_execution_fingerprint_is_valid(coding_store, attempt)? {
-        return Ok(None);
-    }
-
-    let Some(failed_node) = coding_store
-        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        .into_iter()
-        .rev()
-        .find(|node| node.stage == CodingExecutionStage::CodeReview)
-    else {
-        return Ok(None);
-    };
-    if failed_node.status != CodingTimelineNodeStatus::Failed {
-        return Ok(None);
-    }
-
-    let Some(stale_role_run) = coding_store.latest_role_run(
-        &attempt.project_id,
-        &attempt.issue_id,
-        &attempt.id,
-        CodingExecutionStage::CodeReview,
-        CodingProviderRole::CodeReviewer,
-    )?
-    else {
-        return Ok(None);
-    };
-    if stale_role_run.status != CodingRoleRunStatus::Running
-        || stale_role_run.node_id.as_deref() != Some(failed_node.id.as_str())
-    {
-        return Ok(None);
-    }
-
-    let Some(dirty_gate) = coding_store
-        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        .into_iter()
-        .find(|gate| gate.reason_code.as_deref() == Some("shared_worktree_dirty_manual_gate"))
-    else {
-        return Ok(None);
-    };
-
-    Ok(Some(FailedCodeReviewRecovery {
-        gate_id: dirty_gate.gate_id,
-        failed_node_id: failed_node.id,
-        stale_role_run_id: stale_role_run.id,
-    }))
+    Ok(None)
 }
 
 impl CodingWorkspaceEngine {
-    pub(crate) fn send_interrupted_code_review_to_coder(
-        &self,
-        current: &CodingExecutionAttempt,
-        extra_context: Option<String>,
-    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        if current.stage != CodingExecutionStage::CodeReview
-            || current.status != CodingAttemptStatus::Blocked
-        {
-            return Err(CodingWorkspaceEngineError::ProviderStream(
-                "send_to_coder_not_available".to_string(),
-            ));
-        }
-
-        let operator_context = extra_context
-            .map(|content| content.trim().to_string())
-            .filter(|content| !content.is_empty())
-            .ok_or_else(|| {
-                CodingWorkspaceEngineError::ProviderStream(
-                    "coding_gate_extra_context_required".to_string(),
-                )
-            })?;
-        self.store
-            .create_context_note(&current.id, operator_context.clone())?;
-
-        let existing = self.store.list_rework_instructions(
-            &current.project_id,
-            &current.issue_id,
-            &current.id,
-        )?;
-        self.store
-            .save_rework_instruction(&CodingReworkInstruction {
-                id: next_sequential_id("coding_rework_instruction", existing.len()),
-                attempt_id: current.id.clone(),
-                source_stage: CodingExecutionStage::CodeReview,
-                rework_round: current.rework_count + 1,
-                summary: operator_context,
-                fix_hints: Vec::new(),
-                questions: Vec::new(),
-                created_at: Utc::now().to_rfc3339(),
-                consumed_by_node_id: None,
-                consumed_at: None,
-            })?;
-
-        let running = self.store.update_attempt_status(
-            &current.project_id,
-            &current.issue_id,
-            &current.id,
-            CodingAttemptStatus::Running,
-        )?;
-        let coding_attempt = self.store.update_attempt_stage(
-            &running.project_id,
-            &running.issue_id,
-            &running.id,
-            CodingExecutionStage::Coding,
-        )?;
-        self.store
-            .increment_attempt_rework_count(
-                &coding_attempt.project_id,
-                &coding_attempt.issue_id,
-                &coding_attempt.id,
-            )
-            .map_err(CodingWorkspaceEngineError::from)
-    }
-
     pub async fn recover_failed_code_review(
         &self,
         gate_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let candidates = failed_review_gate_attempts(&self.store, gate_id)?;
         let mut recoverable = Vec::new();
+        let mut amendment_blocked = Vec::new();
         for candidate in candidates {
             let current = self.store.get_attempt(
                 &candidate.project_id,
                 &candidate.issue_id,
                 &candidate.id,
             )?;
+            let current = match self.store.ensure_provider_run_allowed(&current) {
+                Ok(current) => current,
+                Err(ProductStoreError::Io(message))
+                    if message == "plan_amendment_blocks_provider_run" =>
+                {
+                    amendment_blocked.push(current);
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             if matches!(
                 recoverable_failed_code_review(&self.store, &current)?,
                 Some(recovery) if recovery.gate_id == gate_id
@@ -247,23 +141,30 @@ impl CodingWorkspaceEngine {
                 recoverable.push(current);
             }
         }
-        if recoverable.len() != 1 {
-            return Err(recovery_state_changed());
+        match recoverable.as_slice() {
+            [attempt] => {
+                return self
+                    .recover_failed_code_review_for_attempt(attempt, gate_id)
+                    .await;
+            }
+            [] if amendment_blocked.len() == 1 => {
+                return Err(ProductStoreError::Io(
+                    "plan_amendment_blocks_provider_run".to_string(),
+                )
+                .into());
+            }
+            _ => {}
         }
-        self.recover_failed_code_review_for_attempt(&recoverable[0].id, gate_id)
-            .await
+        Err(recovery_state_changed())
     }
 
     pub(crate) async fn recover_failed_code_review_for_attempt(
         &self,
-        attempt_id: &str,
+        attempt: &CodingExecutionAttempt,
         gate_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         validate_relative_id(gate_id)?;
-        let located = self.store.get_attempt_by_id(attempt_id)?;
-        let current =
-            self.store
-                .get_attempt(&located.project_id, &located.issue_id, &located.id)?;
+        let current = self.store.ensure_provider_run_allowed(attempt)?;
         let Some(recovery) = recoverable_failed_code_review(&self.store, &current)? else {
             return Err(recovery_state_changed());
         };
@@ -291,11 +192,6 @@ impl CodingWorkspaceEngine {
         }
 
         let reopened = match current.status {
-            CodingAttemptStatus::Failed => self.store.reopen_failed_code_review_attempt(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-            )?,
             CodingAttemptStatus::Blocked | CodingAttemptStatus::Running => current,
             _ => return Err(recovery_state_changed()),
         };
@@ -317,16 +213,7 @@ impl CodingWorkspaceEngine {
         let current =
             self.store
                 .get_attempt(&journal.project_id, &journal.issue_id, &journal.attempt_id)?;
-        let running = match current.status {
-            CodingAttemptStatus::Blocked => self.store.update_attempt_status(
-                &current.project_id,
-                &current.issue_id,
-                &current.id,
-                CodingAttemptStatus::Running,
-            )?,
-            CodingAttemptStatus::Running => current,
-            _ => return Err(recovery_state_changed()),
-        };
+        let running = self.store.reopen_failed_review_attempt_running(&current)?;
         journal = self.store.advance_failed_code_review_recovery_journal(
             &journal,
             FailedCodeReviewRecoveryPhase::AttemptRunning,
@@ -458,12 +345,9 @@ fn journal_recovery_prefix_is_valid(
         || attempt.stage != CodingExecutionStage::CodeReview
         || !matches!(
             attempt.status,
-            CodingAttemptStatus::Failed
-                | CodingAttemptStatus::Blocked
-                | CodingAttemptStatus::Running
+            CodingAttemptStatus::Blocked | CodingAttemptStatus::Running
         )
-        || (attempt.status == CodingAttemptStatus::Failed && attempt.completed_at.is_none())
-        || (attempt.status != CodingAttemptStatus::Failed && attempt.completed_at.is_some())
+        || attempt.completed_at.is_some()
         || !attempt_execution_fingerprint_is_valid(coding_store, attempt)?
     {
         return Ok(false);

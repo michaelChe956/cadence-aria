@@ -9,17 +9,50 @@ import type {
   WorkItemHandoff,
   WorkspaceProviderName,
 } from "./common";
+import type {
+  PlanAmendmentManifest,
+  PlanRepairRequest,
+  PlanRepairSessionSnapshot,
+  WorkspaceSessionLink,
+} from "./coding-plan-repair";
+
+export type {
+  ContractDeltaKind,
+  ContractImpactReport,
+  ContractValidationFinding,
+  ImpactExplanationPath,
+  PlanAmendmentManifest,
+  PlanDefectClass,
+  PlanDefectEvidence,
+  PlanRepairImpactScopeReview,
+  PlanRepairPackageIdentity,
+  PlanRepairRequest,
+  PlanRepairSessionSnapshot,
+  PlanValidationReportArtifact,
+  RepairTarget,
+  WorkItemPlanReviewComplete,
+  WorkspaceSessionLink,
+} from "./coding-plan-repair";
 
 export type CodingAttemptStatus =
   | "created"
   | "running"
   | "waiting_for_human"
   | "blocked"
+  | "awaiting_plan_amendment"
+  | "applying_plan_amendment"
+  | "amendment_apply_failed"
   | "completed"
   | "failed"
   | "aborted";
 
 export type CodingAttemptScope = "work_item" | "work_item_group";
+
+export type CodingAttemptAddress = {
+  projectId: string;
+  issueId: string;
+  attemptId: string;
+};
 
 export type CodingExecutionStage =
   | "prepare_context"
@@ -38,19 +71,28 @@ export type CodingExecutionUnitStatus =
   | "completed"
   | "failed"
   | "blocked"
+  | "blocked_by_plan_defect"
+  | "awaiting_amendment"
+  | "needs_revalidation"
+  | "stale"
+  | "superseded"
   | "skipped";
 
 export type CodingExecutionUnit = {
   unit_id: string;
-  work_item_id: string;
+  logical_work_item_id: string;
+  work_item_revision_id: string;
+  dependency_logical_work_item_ids: string[];
   order_index: number;
   status: CodingExecutionUnitStatus;
   summary: string | null;
-  handoff_ref: string | null;
+  latest_handoff_revision_id: string | null;
   completion_commit: string | null;
 };
 
 export type CodingAttempt = {
+  project_id: string;
+  issue_id: string;
   attempt_id: string;
   work_item_id: string;
   attempt_scope: CodingAttemptScope;
@@ -495,6 +537,8 @@ export type CodingWsInMessage =
 export type CodingWsOutMessage =
   | ({
       type: "coding_session_state";
+      project_id: string;
+      issue_id: string;
       attempt_id: string;
       attempt_scope: CodingAttemptScope;
       work_item_group_id: string | null;
@@ -516,6 +560,7 @@ export type CodingWsOutMessage =
       verification_commands: string[];
       work_item_execution_plan: WorkItemExecutionPlan | null;
       work_item_handoff: WorkItemHandoff | null;
+      linked_plan_repair: PlanRepairSessionSnapshot | null;
       require_execution_plan_confirm: boolean;
     } & Omit<CodingAttemptSnapshotResponse, "attempt">)
   | { type: "coding_stage_change"; stage: CodingExecutionStage }
@@ -564,4 +609,14 @@ export type CodingWsOutMessage =
       provider: WorkspaceProviderName;
     }
   | { type: "coding_protocol_error"; code: string; message: string }
-  | { type: "coding_pong" };
+  | { type: "coding_pong" }
+  | {
+      type: "plan_repair_required";
+      request: PlanRepairRequest;
+      session_link: WorkspaceSessionLink | null;
+    }
+  | {
+      type: "plan_amendment_updated";
+      event_id: string;
+      amendment: PlanAmendmentManifest;
+    };

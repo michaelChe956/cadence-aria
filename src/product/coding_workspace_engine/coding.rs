@@ -1,5 +1,11 @@
 use super::*;
 
+pub(crate) struct CoderExecutionOutcome {
+    pub(crate) attempt: CodingExecutionAttempt,
+    pub(crate) plan_defect_decision: Option<CodeReviewFlowDecision>,
+    pub(crate) plan_defect_report: Option<ExecutionPlanDefectReport>,
+}
+
 impl CodingWorkspaceEngine {
     pub async fn execute_coding(
         &self,
@@ -19,6 +25,20 @@ impl CodingWorkspaceEngine {
         context: &CodingExecutionContext,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        Ok(self
+            .execute_coding_with_commands_outcome(attempt, provider, context, command_rx)
+            .await?
+            .attempt)
+    }
+
+    pub(crate) async fn execute_coding_with_commands_outcome(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        context: &CodingExecutionContext,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<CoderExecutionOutcome, CodingWorkspaceEngineError> {
+        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
@@ -74,16 +94,28 @@ impl CodingWorkspaceEngine {
         let context_note_input =
             format_rework_context_notes(&context_notes, REWORK_CONTEXT_NOTE_CHAR_LIMIT);
         let coding_context_notes = (!context_note_ids.is_empty()).then_some(&context_note_input);
-        let full_prompt = build_coding_prompt(
+        let rendered_context = self.render_coder_unit_run_context(
             &attempt,
-            context,
-            rework_instruction.as_ref(),
-            coding_context_notes,
-        );
-        let prompt_mode = if resume_provider_session_id.is_some() {
-            CodingPromptMode::DeltaOnly
-        } else {
+            &coder_provider,
+            rework_instruction
+                .as_ref()
+                .map(|instruction| instruction.summary.clone()),
+        )?;
+        let full_prompt = rendered_context
+            .as_ref()
+            .map(|rendered| rendered.text.clone())
+            .unwrap_or_else(|| {
+                build_coding_prompt(
+                    &attempt,
+                    context,
+                    rework_instruction.as_ref(),
+                    coding_context_notes,
+                )
+            });
+        let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
+        } else {
+            CodingPromptMode::DeltaOnly
         };
         let prompt = match prompt_mode {
             CodingPromptMode::FullConversation => full_prompt.clone(),
@@ -195,8 +227,19 @@ impl CodingWorkspaceEngine {
                 return Err(error);
             }
         };
+        let (plan_defect_report, plan_defect_decision) =
+            match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
+                Ok(report) if report.findings.is_empty() => (None, None),
+                Ok(report) => {
+                    let projection = self.reviewer_projection_for_attempt(&attempt)?;
+                    let decision = execution_plan_defect_flow_decision(&report, &projection);
+                    (Some(report), Some(decision))
+                }
+                Err(_) => (None, Some(CodeReviewFlowDecision::StopForHumanTriage)),
+            };
+        let plan_defect_route = plan_defect_decision.map(CodeReviewFlowDecision::label);
         let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::Coding,
             "coder_output",
             &full_output,
@@ -234,9 +277,14 @@ impl CodingWorkspaceEngine {
             full_output: &full_output,
             raw_provider_output_ref: &raw_provider_output_ref,
             source: "coding",
+            plan_defect_route,
         })
         .await;
-        Ok(attempt)
+        Ok(CoderExecutionOutcome {
+            attempt,
+            plan_defect_decision,
+            plan_defect_report,
+        })
     }
 
     fn should_resume_coder_session_for_role_run(
@@ -281,6 +329,7 @@ impl CodingWorkspaceEngine {
             full_output,
             raw_provider_output_ref,
             source,
+            plan_defect_route,
         } = input;
         let completed_at = role_run
             .completed_at
@@ -299,12 +348,13 @@ impl CodingWorkspaceEngine {
                 "role_run_id": role_run.id,
                 "run_no": role_run.run_no,
                 "raw_provider_output_ref": raw_provider_output_ref,
+                "plan_defect_route": plan_defect_route,
                 "started_at": role_run.started_at,
                 "completed_at": completed_at
             })),
             created_at: completed_at,
         };
-        self.save_and_emit_chat_entry(entry).await;
+        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 }
 

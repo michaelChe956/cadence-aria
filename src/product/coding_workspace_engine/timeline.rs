@@ -20,7 +20,7 @@ impl CodingWorkspaceEngine {
             completed_at: None,
             artifact_refs: Vec::new(),
         };
-        self.store.save_timeline_node(node.clone())?;
+        self.store.save_timeline_node(attempt, node.clone())?;
         Ok(node)
     }
 
@@ -43,7 +43,7 @@ impl CodingWorkspaceEngine {
             completed_at: None,
             artifact_refs: Vec::new(),
         };
-        self.store.save_timeline_node(node.clone())?;
+        self.store.save_timeline_node(attempt, node.clone())?;
         Ok(node)
     }
 
@@ -66,7 +66,7 @@ impl CodingWorkspaceEngine {
             completed_at: None,
             artifact_refs: Vec::new(),
         };
-        self.store.save_timeline_node(node.clone())?;
+        self.store.save_timeline_node(attempt, node.clone())?;
         Ok(node)
     }
 
@@ -89,7 +89,7 @@ impl CodingWorkspaceEngine {
             completed_at: None,
             artifact_refs: Vec::new(),
         };
-        self.store.save_timeline_node(node.clone())?;
+        self.store.save_timeline_node(attempt, node.clone())?;
         Ok(node)
     }
 
@@ -112,7 +112,7 @@ impl CodingWorkspaceEngine {
             completed_at: None,
             artifact_refs: Vec::new(),
         };
-        self.store.save_timeline_node(node.clone())?;
+        self.store.save_timeline_node(attempt, node.clone())?;
         Ok(node)
     }
 
@@ -142,7 +142,7 @@ impl CodingWorkspaceEngine {
             completed_at: None,
             artifact_refs: Vec::new(),
         };
-        self.store.save_timeline_node(node.clone())?;
+        self.store.save_timeline_node(attempt, node.clone())?;
         Ok(node)
     }
 
@@ -166,7 +166,7 @@ impl CodingWorkspaceEngine {
             completed_at: Some(now),
             artifact_refs: Vec::new(),
         };
-        self.store.save_timeline_node(node.clone())?;
+        self.store.save_timeline_node(attempt, node.clone())?;
         Ok(node)
     }
 

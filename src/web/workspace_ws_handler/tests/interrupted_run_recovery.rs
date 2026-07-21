@@ -168,6 +168,10 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
 
     handle_workspace_inbound_message(
         WorkspaceInboundContext {
+            app_state: WebAppState::new(
+                root.path().to_path_buf(),
+                crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+            ),
             engine,
             run_context,
             outbound_tx,

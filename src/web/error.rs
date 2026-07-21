@@ -52,7 +52,10 @@ impl IntoResponse for ApiError {
             "checkpoint_unsafe_dirty_worktree" | "workspace_session_ambiguous" => {
                 StatusCode::CONFLICT
             }
-            "coding_attempt_active" | "coding_attempt_worktree_not_ready" => StatusCode::CONFLICT,
+            "coding_attempt_active"
+            | "coding_attempt_ambiguous"
+            | "coding_attempt_scope_mismatch"
+            | "coding_attempt_worktree_not_ready" => StatusCode::CONFLICT,
             "artifact_not_found"
             | "artifact_version_not_found"
             | "coding_attempt_not_found"
@@ -86,6 +89,8 @@ impl IntoResponse for ApiError {
             | "workspace_path_not_directory"
             | "workspace_path_not_git_repo"
             | "work_item_plan_not_confirmed"
+            | "coding_plan_revision_binding_missing"
+            | "coding_group_attempt_incomplete"
             | "work_item_dependency_not_completed"
             | "work_item_handoff_missing"
             | "work_item_execution_plan_not_confirmed"

@@ -52,6 +52,219 @@ async fn prepare_outline_review_decision_without_index(
     (tmp, lifecycle, source_node_id, engine)
 }
 
+fn make_work_item_plan_engine_with_accepted_contract_drafts()
+-> (TempDir, LifecycleStore, String, WorkspaceEngine) {
+    let (tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_initial_plan_revision_compile");
+    let mut outline = test_work_item_plan_outline(vec![WorkItemOutlineDependencyEdge {
+        from_outline_id: "outline_a".to_string(),
+        to_outline_id: "outline_b".to_string(),
+    }]);
+    outline.work_item_outlines.truncate(2);
+    outline.work_item_outlines[1].depends_on = vec!["outline_a".to_string()];
+    engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
+        outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
+            outline,
+            design_context_gaps: vec![],
+            validator_findings: vec![],
+            context_blockers: vec![],
+            current_generation_round_id: Some("round_0001".to_string()),
+            selected_generation_mode: Some(WorkItemGenerationModeDto::Serial),
+        }),
+    });
+
+    let store = engine.work_item_plan_store().expect("work item plan store");
+    let draft_a = test_work_item_draft_record(
+        &plan_id,
+        "outline_a",
+        "draft_outline_a",
+        WorkItemDraftStatus::Accepted,
+        WorkItemGenerationMode::Serial,
+        None,
+    );
+    let mut draft_b = test_work_item_draft_record(
+        &plan_id,
+        "outline_b",
+        "draft_outline_b",
+        WorkItemDraftStatus::Accepted,
+        WorkItemGenerationMode::Serial,
+        None,
+    );
+    let mut required = crate::product::work_item_contract::canonical_contract_fixture("unused")
+        .input_contracts
+        .remove(0);
+    required.provider_logical_work_item_id = "wi_a".to_string();
+    required.contract_id = "contract.canonical".to_string();
+    required.required_capabilities = vec!["stable_hash".to_string()];
+    draft_b
+        .candidate
+        .canonical_contract_candidate
+        .input_contracts
+        .push(required);
+    draft_b
+        .candidate
+        .canonical_contract_candidate
+        .handoff_contract
+        .provided_contract_refs
+        .clear();
+
+    for draft in [&draft_a, &draft_b] {
+        store.put_draft_record(draft).expect("put accepted draft");
+    }
+    store
+        .save_active_index(&WorkItemPlanDraftActiveIndex {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: plan_id.clone(),
+            current_generation_round_id: "round_0001".to_string(),
+            outline_state: "confirmed".to_string(),
+            active_outline_id: None,
+            outline_to_current_draft_id: BTreeMap::from([
+                ("outline_a".to_string(), "draft_outline_a".to_string()),
+                ("outline_b".to_string(), "draft_outline_b".to_string()),
+            ]),
+            draft_statuses: BTreeMap::from([
+                (
+                    "draft_outline_a".to_string(),
+                    WorkItemDraftStatus::Accepted,
+                ),
+                (
+                    "draft_outline_b".to_string(),
+                    WorkItemDraftStatus::Accepted,
+                ),
+            ]),
+            batches: vec![],
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .expect("save accepted draft index");
+
+    (tmp, lifecycle, plan_id, engine)
+}
+
+#[tokio::test]
+async fn work_item_plan_initial_compile_publishes_revision_and_projection_bundles() {
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let lifecycle_work_item_count = lifecycle
+        .count_work_items("project_0001", "issue_0001")
+        .unwrap();
+    let outcome = engine.run_work_item_plan_compile().await.unwrap();
+    let revision_store = engine.revision_store();
+
+    let plan = revision_store
+        .get_plan_lineage("project_0001", "issue_0001", &plan_id)
+        .unwrap();
+    let revision_id = plan.active_revision_id.as_deref().unwrap();
+    let revision = revision_store
+        .get_plan_revision(
+            "project_0001",
+            "issue_0001",
+            &plan.id,
+            revision_id,
+        )
+        .unwrap();
+
+    assert_eq!(revision.revision_no, 1);
+    assert_eq!(revision.work_item_bindings.len(), 2);
+    assert!(outcome.projection_validation.is_valid());
+    assert_eq!(
+        outcome
+            .plan_projection_bundle
+            .coder_group_context
+            .ordered_logical_work_item_ids,
+        vec!["wi_a".to_string(), "wi_b".to_string()]
+    );
+    assert_eq!(
+        revision_store
+            .get_dependency_graph_revision(&plan, &revision.dependency_graph_revision_id)
+            .unwrap(),
+        outcome.dependency_graph_revision
+    );
+    assert_eq!(
+        revision_store
+            .get_plan_validation_report(&plan, &revision.validation_report_ref)
+            .unwrap(),
+        outcome.validation_report
+    );
+    assert_eq!(
+        revision_store
+            .get_plan_projection_bundle(&plan, &revision.plan_projection_bundle_id)
+            .unwrap(),
+        outcome.plan_projection_bundle
+    );
+    for (logical_work_item_id, work_item_revision_id) in &revision.work_item_bindings {
+        let work_item_revision = revision_store
+            .get_work_item_revision(
+                &plan,
+                logical_work_item_id,
+                work_item_revision_id,
+            )
+            .unwrap();
+        revision_store
+            .get_verification_plan_revision(
+                &plan,
+                &work_item_revision.verification_plan_revision_id,
+            )
+            .unwrap();
+        revision_store
+            .get_work_item_projection_bundle(
+                &plan,
+                &work_item_revision.work_item_projection_bundle_id,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        lifecycle
+            .count_work_items("project_0001", "issue_0001")
+            .unwrap(),
+        lifecycle_work_item_count,
+        "initial revision compile must not create legacy LifecycleWorkItemRecord facts"
+    );
+}
+
+#[tokio::test]
+async fn work_item_plan_compile_canonical_validation_failure_writes_no_revision_artifacts() {
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let lifecycle_work_item_count = lifecycle
+        .count_work_items("project_0001", "issue_0001")
+        .unwrap();
+    let store = engine.work_item_plan_store().unwrap();
+    let mut draft_b = store
+        .get_draft_record(
+            "project_0001",
+            "issue_0001",
+            &plan_id,
+            "round_0001",
+            "draft_outline_b",
+        )
+        .unwrap();
+    draft_b
+        .candidate
+        .canonical_contract_candidate
+        .input_contracts[0]
+        .required_capabilities = vec!["missing_capability".to_string()];
+    store.put_draft_record(&draft_b).unwrap();
+
+    let error = engine.run_work_item_plan_compile().await.unwrap_err();
+
+    assert!(error.contains("canonical work item plan validation failed"));
+    assert!(matches!(
+        engine.revision_store().get_plan_lineage(
+            "project_0001",
+            "issue_0001",
+            &plan_id,
+        ),
+        Err(ProductStoreError::NotFound { .. })
+    ));
+    assert_eq!(
+        lifecycle
+            .count_work_items("project_0001", "issue_0001")
+            .unwrap(),
+        lifecycle_work_item_count
+    );
+}
+
 #[tokio::test]
 async fn item_and_batch_review_decision_require_active_round() {
     for scope in [WorkItemPlanReviewScope::Item, WorkItemPlanReviewScope::Batch] {

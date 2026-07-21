@@ -10,8 +10,13 @@ use crate::product::coding_models::{
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
+mod attempt_creation_concurrency;
 mod failed_review_recovery;
+mod failed_review_recovery_rollback;
+mod git_operation;
 mod group_uniqueness;
+mod plan_repair;
+mod unit_run_execution_context;
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
@@ -112,7 +117,7 @@ fn code_review_can_route_directly_back_to_coding_for_reviewer_feedback() {
 }
 
 #[test]
-fn reopen_failed_code_review_attempt_is_narrow_and_clears_completed_at() {
+fn failed_code_review_attempt_cannot_be_reopened_as_recoverable() {
     let (_tmp, store, attempt) = setup();
     let attempt = store
         .update_attempt_status(
@@ -140,13 +145,20 @@ fn reopen_failed_code_review_attempt_is_narrow_and_clears_completed_at() {
         .expect("fail attempt");
     assert!(failed.completed_at.is_some());
 
-    let reopened = store
+    let error = store
         .reopen_failed_code_review_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("reopen failed code review");
-
-    assert_eq!(reopened.status, CodingAttemptStatus::Blocked);
-    assert_eq!(reopened.stage, CodingExecutionStage::CodeReview);
-    assert_eq!(reopened.completed_at, None);
+        .expect_err("terminal failed code review cannot become recoverable");
+    assert!(
+        error
+            .to_string()
+            .contains("coding_failed_review_not_recoverable")
+    );
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("terminal attempt remains readable"),
+        failed
+    );
 }
 
 #[test]
@@ -269,7 +281,9 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -280,7 +294,9 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -300,7 +316,7 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
         Some("work_item_plan_0001")
     );
     assert_eq!(units.len(), 2);
-    assert_eq!(active.work_item_id, "work_item_0001");
+    assert_eq!(active.logical_work_item_id, "work_item_0001");
 }
 
 #[test]
@@ -326,7 +342,9 @@ fn rejects_creating_second_active_unit_for_same_attempt() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -338,7 +356,9 @@ fn rejects_creating_second_active_unit_for_same_attempt() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec![WORK_ITEM_ID.to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -370,7 +390,9 @@ fn rejects_updating_pending_unit_to_active_when_another_unit_is_active() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -381,7 +403,9 @@ fn rejects_updating_pending_unit_to_active_when_another_unit_is_active() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec![WORK_ITEM_ID.to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -497,7 +521,9 @@ fn clears_current_work_item_when_last_active_unit_completes() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -544,7 +570,9 @@ fn blocked_or_waiting_units_do_not_set_started_at() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
+            logical_work_item_id: WORK_ITEM_ID.to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Blocked,
         })
@@ -568,7 +596,9 @@ fn blocked_or_waiting_units_do_not_set_started_at() {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec![WORK_ITEM_ID.to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -594,7 +624,7 @@ fn persists_test_plan_raw_output_and_blocked_gate() {
 
     let raw_ref = store
         .save_provider_raw_output(
-            &attempt.id,
+            &attempt,
             CodingExecutionStage::Testing,
             "plan_tests",
             "raw test plan output",
@@ -626,7 +656,7 @@ fn persists_test_plan_raw_output_and_blocked_gate() {
         created_at: "2026-06-10T00:00:00Z".to_string(),
         raw_provider_output_ref: Some(raw_ref.clone()),
     };
-    store.save_test_plan(&plan).unwrap();
+    store.save_test_plan(&attempt, &plan).unwrap();
     let plans = store
         .list_test_plans(PROJECT_ID, ISSUE_ID, &attempt.id)
         .unwrap();
@@ -637,22 +667,25 @@ fn persists_test_plan_raw_output_and_blocked_gate() {
     );
 
     let gate = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Tester),
-            title: "Testing blocked".to_string(),
-            description: "required step missing".to_string(),
-            reason_code: Some("missing_required_steps".to_string()),
-            evidence_refs: vec!["testing_report_0001.json".to_string()],
-            raw_provider_output_ref: Some(raw_ref),
-            available_actions: vec![CodingGateAction {
-                action_id: "retry_test_plan".to_string(),
-                label: "重试测试计划".to_string(),
-                action_type: CodingGateActionType::RetryTestPlan,
-            }],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing blocked".to_string(),
+                description: "required step missing".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec!["testing_report_0001.json".to_string()],
+                raw_provider_output_ref: Some(raw_ref),
+                available_actions: vec![CodingGateAction {
+                    action_id: "retry_test_plan".to_string(),
+                    label: "重试测试计划".to_string(),
+                    action_type: CodingGateActionType::RetryTestPlan,
+                }],
+            },
+        )
         .unwrap();
     let open = store
         .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
@@ -681,44 +714,50 @@ fn persists_test_plan_raw_output_and_blocked_gate() {
 fn blocked_gate_creation_is_idempotent_for_same_node_and_reason() {
     let (_tmp, store, attempt) = setup();
     let first = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Tester),
-            title: "Testing blocked".to_string(),
-            description: "required step missing".to_string(),
-            reason_code: Some("missing_required_steps".to_string()),
-            evidence_refs: vec!["testing_report_0001.json".to_string()],
-            raw_provider_output_ref: None,
-            available_actions: vec![CodingGateAction {
-                action_id: "retry_test_plan".to_string(),
-                label: "重试测试计划".to_string(),
-                action_type: CodingGateActionType::RetryTestPlan,
-            }],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing blocked".to_string(),
+                description: "required step missing".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec!["testing_report_0001.json".to_string()],
+                raw_provider_output_ref: None,
+                available_actions: vec![CodingGateAction {
+                    action_id: "retry_test_plan".to_string(),
+                    label: "重试测试计划".to_string(),
+                    action_type: CodingGateActionType::RetryTestPlan,
+                }],
+            },
+        )
         .unwrap();
 
     let second = store
-        .create_blocked_gate(CreateBlockedGateInput {
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            node_id: Some("coding_node_0001".to_string()),
-            role: Some(CodingProviderRole::Tester),
-            title: "Testing still blocked".to_string(),
-            description: "required step still missing".to_string(),
-            reason_code: Some("missing_required_steps".to_string()),
-            evidence_refs: vec![
-                "testing_report_0001.json".to_string(),
-                "testing_report_0002.json".to_string(),
-            ],
-            raw_provider_output_ref: None,
-            available_actions: vec![CodingGateAction {
-                action_id: "rerun_missing_steps".to_string(),
-                label: "补跑缺失步骤".to_string(),
-                action_type: CodingGateActionType::RerunMissingSteps,
-            }],
-        })
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Testing,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::Tester),
+                title: "Testing still blocked".to_string(),
+                description: "required step still missing".to_string(),
+                reason_code: Some("missing_required_steps".to_string()),
+                evidence_refs: vec![
+                    "testing_report_0001.json".to_string(),
+                    "testing_report_0002.json".to_string(),
+                ],
+                raw_provider_output_ref: None,
+                available_actions: vec![CodingGateAction {
+                    action_id: "rerun_missing_steps".to_string(),
+                    label: "补跑缺失步骤".to_string(),
+                    action_type: CodingGateActionType::RerunMissingSteps,
+                }],
+            },
+        )
         .unwrap();
 
     assert_eq!(second.gate_id, first.gate_id);

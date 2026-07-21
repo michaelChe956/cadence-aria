@@ -2,6 +2,7 @@ import { act } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import {
+  CODING_ATTEMPT_ADDRESS,
   MockWebSocket,
   blockedGate,
   codingSessionState,
@@ -13,6 +14,12 @@ import {
 describe("useCodingWorkspaceWs inbound events", () => {
   installCodingWorkspaceWsTestHooks();
 
+  const SECOND_CODING_ATTEMPT_ADDRESS = {
+    projectId: "project_0002",
+    issueId: "issue_0002",
+    attemptId: "coding_attempt_0002",
+  } as const;
+
   it("connects to the coding attempt websocket and sends hello on open", () => {
     const harness = renderCodingHook();
 
@@ -20,7 +27,9 @@ describe("useCodingWorkspaceWs inbound events", () => {
       harness.ws.open();
     });
 
-    expect(harness.ws.url).toBe("ws://localhost:3000/ws/coding-attempts/coding_attempt_0001");
+    expect(harness.ws.url).toBe(
+      "ws://localhost:3000/ws/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001",
+    );
     expect(harness.ws.sent).toEqual([
       JSON.stringify({
         type: "coding_hello",
@@ -31,12 +40,135 @@ describe("useCodingWorkspaceWs inbound events", () => {
     expect(useCodingWorkspaceStore.getState().connectionStatus).toBe("connected");
   });
 
+  it("encodes every coding attempt address segment in the websocket url", () => {
+    const harness = renderCodingHook({
+      projectId: "project/with space",
+      issueId: "issue/with space",
+      attemptId: "coding attempt/1",
+    });
+
+    expect(harness.ws.url).toBe(
+      "ws://localhost:3000/ws/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/coding-attempts/coding%20attempt%2F1",
+    );
+  });
+
+  it("clears the previous attempt state before connecting a new address", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive(codingSessionState());
+    });
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "running",
+    });
+
+    harness.rerenderAddress({
+      projectId: "project_0002",
+      issueId: "issue_0002",
+      attemptId: "coding_attempt_0002",
+    });
+
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: null,
+      issueId: null,
+      attemptId: null,
+      status: null,
+    });
+    expect(harness.latestWs.url).toBe(
+      "ws://localhost:3000/ws/projects/project_0002/issues/issue_0002/coding-attempts/coding_attempt_0002",
+    );
+  });
+
+  it("ignores a previous socket session state after switching address", () => {
+    const harness = renderCodingHook();
+    const previousWs = harness.ws;
+
+    harness.rerenderAddress(SECOND_CODING_ATTEMPT_ADDRESS);
+    act(() => {
+      previousWs.receive(codingSessionState());
+    });
+
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: null,
+      issueId: null,
+      attemptId: null,
+      status: null,
+    });
+  });
+
+  it("ignores previous socket timeline messages after the new session loads", () => {
+    const harness = renderCodingHook();
+    const previousWs = harness.ws;
+
+    harness.rerenderAddress(SECOND_CODING_ATTEMPT_ADDRESS);
+    act(() => {
+      harness.latestWs.receive(
+        codingSessionState({
+          project_id: "project_0002",
+          issue_id: "issue_0002",
+          attempt_id: "coding_attempt_0002",
+          timeline_nodes: [],
+        }),
+      );
+      previousWs.receive({
+        type: "coding_timeline_node_created",
+        node: {
+          id: "coding_node_from_previous_socket",
+          attempt_id: "coding_attempt_0001",
+          stage: "coding",
+          title: "旧 Attempt 消息",
+          status: "running",
+          agent_role: "author",
+          summary: null,
+          started_at: "2026-07-16T00:00:00Z",
+          completed_at: null,
+          artifact_refs: [],
+        },
+      });
+    });
+
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: "project_0002",
+      issueId: "issue_0002",
+      attemptId: "coding_attempt_0002",
+      timelineNodes: [],
+    });
+  });
+
+  it("accepts current socket messages after switching address", () => {
+    const harness = renderCodingHook();
+
+    harness.rerenderAddress(SECOND_CODING_ATTEMPT_ADDRESS);
+    act(() => {
+      harness.latestWs.receive(
+        codingSessionState({
+          project_id: "project_0002",
+          issue_id: "issue_0002",
+          attempt_id: "coding_attempt_0002",
+          status: "waiting_for_human",
+        }),
+      );
+    });
+
+    expect(useCodingWorkspaceStore.getState()).toMatchObject({
+      projectId: "project_0002",
+      issueId: "issue_0002",
+      attemptId: "coding_attempt_0002",
+      status: "waiting_for_human",
+    });
+  });
+
   it("applies coding session state and timeline updates from websocket messages", () => {
     const harness = renderCodingHook();
 
     act(() => {
       harness.ws.receive({
         type: "coding_session_state",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
         attempt_id: "coding_attempt_0001",
         status: "running",
         stage: "coding",
@@ -103,6 +235,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
 
     const state = useCodingWorkspaceStore.getState();
     expect(state.status).toBe("running");
+    expect(state.projectId).toBe(CODING_ATTEMPT_ADDRESS.projectId);
+    expect(state.issueId).toBe(CODING_ATTEMPT_ADDRESS.issueId);
     expect(state.stage).toBe("coding");
     expect(state.timelineNodes[0]).toMatchObject({
       id: "coding_node_0001",
@@ -195,6 +329,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
     act(() => {
       harness.ws.receive({
         type: "coding_session_state",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
         attempt_id: "coding_attempt_0001",
         status: "running",
         stage: "testing",
@@ -396,6 +532,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
     act(() => {
       harness.ws.receive({
         type: "coding_session_state",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
         attempt_id: "coding_attempt_0001",
         status: "aborted",
         stage: "coding",

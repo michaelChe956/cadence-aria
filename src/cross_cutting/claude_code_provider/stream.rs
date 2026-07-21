@@ -2,18 +2,8 @@ use super::ClaudeCodeProvider;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 
-pub(crate) async fn terminate_aborted_child(child: &mut AsyncGroupChild) {
-    #[cfg(unix)]
-    if let Some(pgid) = child.id() {
-        unsafe {
-            let _ = libc::killpg(pgid as i32, libc::SIGKILL);
-        }
-    }
-    let _ = child.start_kill();
-    let _ = child.inner().start_kill();
-    if let Err(error) = child.wait().await {
-        tracing::warn!(%error, "failed to wait for aborted Claude Code provider process");
-    }
+pub(crate) async fn terminate_aborted_child(child: &mut ManagedProcessChild) {
+    child.terminate().await;
 }
 
 pub(crate) async fn emit_ask_user_question_protocol_error(

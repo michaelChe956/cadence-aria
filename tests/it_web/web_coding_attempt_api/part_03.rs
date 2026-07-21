@@ -27,6 +27,7 @@ fn sample_testing_report(attempt_id: &str) -> TestingReport {
         skipped_required_steps: Vec::new(),
         context_warnings: Vec::new(),
         raw_provider_output_ref: None,
+        plan_defect_findings: Vec::new(),
     }
 }
 
@@ -94,9 +95,17 @@ fn sample_finding() -> ReviewFinding {
         required_action: None,
         source_stage: CodingExecutionStage::CodeReview,
         evidence: Vec::new(),
+        plan_defect_evidence: Vec::new(),
         related_requirements: Vec::new(),
         related_design_constraints: Vec::new(),
         related_work_item_tasks: Vec::new(),
+        defect_class: cadence_aria::product::models::PlanDefectClass::ImplementationDefect,
+        reason_code: None,
+        contract_refs: Vec::new(),
+        capability_refs: Vec::new(),
+        repair_target: None,
+        recommended_route: cadence_aria::product::models::PlanDefectRoute::CoderRework,
+        confidence: None,
     }
 }
 
@@ -147,12 +156,12 @@ async fn coding_attempt_snapshot_includes_generated_work_item_execution_plan() {
         json!({}),
     )
     .await;
-    assert_eq!(attempt["attempt_id"], "coding_attempt_0001");
+    let attempt_id = assert_global_attempt_id(&attempt);
 
     let (status, snapshot) = request_json(
         app,
         Method::GET,
-        "/api/coding-attempts/coding_attempt_0001",
+        &scoped_attempt_uri(&attempt_id, ""),
         json!({}),
     )
     .await;

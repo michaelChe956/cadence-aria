@@ -14,6 +14,10 @@ impl ProductAppPaths {
         &self.root
     }
 
+    pub fn product_data_schema_path(&self) -> PathBuf {
+        self.root.join("schema.json")
+    }
+
     pub fn projects_root(&self) -> PathBuf {
         self.root.join("projects")
     }

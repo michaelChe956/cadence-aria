@@ -1,4 +1,46 @@
 use super::*;
+use crate::product::coding_models::CodingExecutionAttempt;
+use crate::product::work_item_revision_history::build_authoritative_coding_revision_history;
+use crate::web::workspace_ws_types::ArtifactPayload;
+use crate::web::workspace_ws_types::WorkItemRevisionHistoryDto;
+
+pub(crate) fn ws_artifact_update(version: u32, payload: ArtifactPayload) -> WsOutMessage {
+    WsOutMessage::ArtifactUpdate { version, payload }
+}
+
+pub(crate) fn refresh_coding_runtime_revision_history(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+    current_child_session_id: Option<&str>,
+) -> Result<WorkItemRevisionHistoryDto, String> {
+    let projection =
+        build_authoritative_coding_revision_history(app_paths, attempt, current_child_session_id)
+            .map_err(|error| format!("build coding runtime revision history failed: {error}"))?;
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    for session_id in projection.plan_session_ids {
+        let mut versions = lifecycle
+            .list_artifact_versions(&session_id)
+            .map_err(|error| format!("list session artifacts failed: {error}"))?;
+        let mut changed = false;
+        for version in &mut versions {
+            if matches!(
+                version.payload,
+                ArtifactPayload::WorkItemRevisionHistory { .. }
+            ) {
+                version.payload = ArtifactPayload::WorkItemRevisionHistory {
+                    history: Box::new(projection.history.clone()),
+                };
+                changed = true;
+            }
+        }
+        if changed {
+            lifecycle
+                .save_artifact_versions(&session_id, &versions)
+                .map_err(|error| format!("save runtime history artifact failed: {error}"))?;
+        }
+    }
+    Ok(projection.history)
+}
 
 pub(crate) fn map_revision_path(
     path: RevisionPath,
@@ -195,6 +237,28 @@ pub(crate) fn spawn_engine_event_forward_task(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = engine_rx.recv().await {
+            let event = match event {
+                EngineEvent::ArtifactBatchUpdate { mut updates } => {
+                    updates.sort_by_key(|update| update.version);
+                    let mut connected = true;
+                    for update in updates {
+                        if !send_json_outbound(
+                            &outbound_tx,
+                            &ws_artifact_update(update.version, update.payload),
+                        )
+                        .await
+                        {
+                            connected = false;
+                            break;
+                        }
+                    }
+                    if !connected {
+                        break;
+                    }
+                    continue;
+                }
+                event => event,
+            };
             let ws_msg = match event {
                 EngineEvent::StreamChunk {
                     role,
@@ -216,7 +280,10 @@ pub(crate) fn spawn_engine_event_forward_task(
                 },
                 EngineEvent::StageChange { stage } => WsOutMessage::StageChange { stage },
                 EngineEvent::ArtifactUpdate { version, payload } => {
-                    WsOutMessage::ArtifactUpdate { version, payload }
+                    ws_artifact_update(version, payload)
+                }
+                EngineEvent::ArtifactBatchUpdate { .. } => {
+                    unreachable!("artifact batches are expanded before single-event mapping")
                 }
                 EngineEvent::PermissionRequest {
                     id,

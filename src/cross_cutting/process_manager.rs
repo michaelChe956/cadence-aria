@@ -2,20 +2,179 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
+#[cfg(windows)]
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 
+#[cfg(unix)]
+fn unix_process_group_signal_target(current_child_id: Option<u32>, pgid: i32) -> Option<i32> {
+    (current_child_id == u32::try_from(pgid).ok()).then_some(pgid)
+}
+
 #[derive(Debug)]
 pub struct ManagedProcess {
     pub stdin: ChildStdin,
     pub stdout: ChildStdout,
     pub stderr: ChildStderr,
-    pub child: AsyncGroupChild,
+    pub child: ManagedProcessChild,
+}
+
+pub struct ManagedProcessChild {
+    #[cfg(unix)]
+    child: Option<tokio::process::Child>,
+    #[cfg(windows)]
+    child: AsyncGroupChild,
+    #[cfg(unix)]
+    pgid: Option<i32>,
+    #[cfg(all(unix, test))]
+    drop_reaper_spawns: Arc<AtomicUsize>,
+}
+
+impl std::fmt::Debug for ManagedProcessChild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManagedProcessChild")
+            .field("id", &self.id())
+            .finish()
+    }
+}
+
+impl ManagedProcessChild {
+    pub fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        command.kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+            let child = command.spawn()?;
+            let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
+            Ok(Self {
+                child: Some(child),
+                pgid,
+                #[cfg(test)]
+                drop_reaper_spawns: Arc::new(AtomicUsize::new(0)),
+            })
+        }
+        #[cfg(windows)]
+        {
+            let mut group = command.group();
+            group.kill_on_drop(true);
+            group.spawn().map(|child| Self { child })
+        }
+    }
+
+    pub fn inner(&mut self) -> &mut tokio::process::Child {
+        #[cfg(unix)]
+        {
+            self.child
+                .as_mut()
+                .expect("managed process child is unavailable")
+        }
+        #[cfg(windows)]
+        {
+            self.child.inner()
+        }
+    }
+
+    pub fn id(&self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            self.child.as_ref().and_then(tokio::process::Child::id)
+        }
+        #[cfg(windows)]
+        {
+            self.child.id()
+        }
+    }
+
+    pub fn start_kill(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(pgid) = self
+            .pgid
+            .and_then(|pgid| unix_process_group_signal_target(self.id(), pgid))
+        {
+            let result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+            if result == 0 {
+                return Ok(());
+            }
+        }
+        self.inner().start_kill()
+    }
+
+    pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        let status = self.inner().wait().await;
+        if status.is_ok() {
+            #[cfg(unix)]
+            {
+                self.pgid = None;
+            }
+        }
+        status
+    }
+
+    pub async fn terminate(&mut self) {
+        let _ = self.start_kill();
+        let _ = self.inner().start_kill();
+        let _ = self.wait().await;
+    }
+}
+
+impl Drop for ManagedProcessChild {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            if let Some(pgid) = self
+                .pgid
+                .take()
+                .and_then(|pgid| unix_process_group_signal_target(self.id(), pgid))
+            {
+                unsafe {
+                    let _ = libc::killpg(pgid, libc::SIGKILL);
+                }
+            }
+            if let Some(mut child) = self.child.take() {
+                match child.try_wait() {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => {
+                        let _ = child.start_kill();
+                        reap_child_after_drop(
+                            child,
+                            #[cfg(test)]
+                            Arc::clone(&self.drop_reaper_spawns),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn reap_child_after_drop(
+    mut child: tokio::process::Child,
+    #[cfg(test)] reaper_spawns: Arc<AtomicUsize>,
+) {
+    #[cfg(test)]
+    reaper_spawns.fetch_add(1, Ordering::Relaxed);
+    let _ = std::thread::Builder::new()
+        .name("aria-process-reaper".to_string())
+        .spawn(move || {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => return,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                }
+            }
+        });
 }
 
 pub struct ProcessManager;
@@ -64,8 +223,7 @@ impl ProcessManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = command_builder
-            .group_spawn()
+        let mut child = ManagedProcessChild::spawn(&mut command_builder)
             .map_err(|error| map_spawn_error(command, error))?;
 
         let stdin = child.inner().stdin.take().ok_or_else(missing_stdin_pipe)?;
@@ -201,3 +359,8 @@ mod tests {
         assert!(status.success());
     }
 }
+
+#[cfg(all(test, unix))]
+mod drop_tests;
+#[cfg(all(test, windows))]
+mod windows_tests;

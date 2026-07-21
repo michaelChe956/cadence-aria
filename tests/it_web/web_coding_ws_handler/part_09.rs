@@ -102,8 +102,9 @@ fn app_with_group_attempt(root_path: &std::path::Path) -> axum::Router {
         .expect("create work item plan");
 
     let store = CodingAttemptStore::new(app_paths);
-    let attempt = store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
+    let attempt = create_legacy_group_coding_attempt_fixture(
+        &store,
+        CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
@@ -117,15 +118,18 @@ fn app_with_group_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
             },
             max_auto_rework: 2,
-        })
-        .expect("create group attempt");
+        },
+    );
+    seed_authoritative_group_plan_fixture(&store, &attempt);
     store
         .create_coding_unit(CreateCodingExecutionUnitInput {
             attempt_id: attempt.id.clone(),
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            dependency_logical_work_item_ids: Vec::new(),
             order_index: 0,
             status: CodingExecutionUnitStatus::Running,
         })
@@ -136,7 +140,9 @@ fn app_with_group_attempt(root_path: &std::path::Path) -> axum::Router {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
+            logical_work_item_id: "work_item_0002".to_string(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
             order_index: 1,
             status: CodingExecutionUnitStatus::Pending,
         })
@@ -154,9 +160,12 @@ async fn coding_ws_stage_gate_confirm_resolves_persisted_gate() {
     let root = tempdir().expect("root");
     let app = app_with_attempt(root.path());
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
     let gate = store
         .create_stage_gate(
-            "coding_attempt_0001",
+            &attempt,
             CodingExecutionStage::Testing,
             CodingProviderRole::Tester,
             "2026-05-28T00:00:05Z".to_string(),

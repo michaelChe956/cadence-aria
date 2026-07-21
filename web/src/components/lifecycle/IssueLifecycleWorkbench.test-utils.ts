@@ -22,7 +22,7 @@ export * from "./IssueLifecycleWorkbench.test-data";
 export function installIssueLifecycleWorkbenchTestHooks() {
   beforeEach(() => {
     useLifecycleWorkbenchStore.setState({
-      focusedEntityId: null,
+      focusedEntityKey: null,
       isDrawerOpen: false,
     });
   });
@@ -30,6 +30,7 @@ export function installIssueLifecycleWorkbenchTestHooks() {
 
 export function lifecycleFetch(options?: {
   duplicateCardIds?: boolean;
+  sharedLifecycleIdsAcrossIssues?: boolean;
   emptyLifecycle?: boolean;
   invalidLifecycle?: boolean;
   confirmedWorkItem?: boolean;
@@ -61,21 +62,105 @@ export function lifecycleFetch(options?: {
   const latestIssueTitlesByProject = new Map<string, string>();
   const lifecycleByIssue = new Map<string, MockLifecycleData>();
 
+  function issueRecord(issueId: string, title: string) {
+    return {
+      issue_id: issueId,
+      project_id: "project_0001",
+      repo_id: "repository_0001",
+      workspace_id: null,
+      task_id: null,
+      session_id: null,
+      title,
+      description: options?.issueDescription ?? "描述",
+      change_id: `${issueId}-change`,
+      phase: "clarification",
+      status: "draft",
+      active_binding_id: null,
+      artifacts: [],
+      created_at: "2026-05-16T00:00:00Z",
+      updated_at: "2026-05-16T00:00:00Z",
+    };
+  }
+
+  function sharedIdLifecycleData(issueId: string): MockLifecycleData {
+    const planId = "issue_work_item_plan_0001";
+    const data = initialLifecycleData(
+      issueId,
+      false,
+      false,
+      true,
+      false,
+      [
+        issueWorkItemPlanRecord({
+          id: planId,
+          issue_id: issueId,
+          status: "confirmed",
+          work_item_ids: ["work_item_0001"],
+        }),
+      ],
+      false,
+    );
+    data.story_specs[0] = {
+      ...data.story_specs[0],
+      issue_id: issueId,
+      title: `${issueId} Story`,
+    };
+    data.design_specs[0] = {
+      ...data.design_specs[0],
+      issue_id: issueId,
+      title: `${issueId} Design`,
+    };
+    data.work_items[0] = {
+      ...data.work_items[0],
+      issue_id: issueId,
+      title: `${issueId} Child`,
+    };
+    data.workspace_sessions = [
+      workspaceSessionRecord(
+        "story",
+        "story_spec_0001",
+        `workspace_session_${issueId}_story`,
+        { issue_id: issueId },
+      ),
+      workspaceSessionRecord(
+        "design",
+        "design_spec_0001",
+        `workspace_session_${issueId}_design`,
+        { issue_id: issueId },
+      ),
+      workspaceSessionRecord(
+        "work_item",
+        "work_item_0001",
+        `workspace_session_${issueId}_work_item`,
+        { issue_id: issueId },
+      ),
+      workspaceSessionRecord(
+        "work_item_plan",
+        planId,
+        `workspace_session_${issueId}_work_item_plan`,
+        { issue_id: issueId },
+      ),
+    ];
+    return data;
+  }
+
   function lifecycleData(issueId: string) {
     const existing = lifecycleByIssue.get(issueId);
     if (existing) {
       return existing;
     }
-    const initial = initialLifecycleData(
-      issueId,
-      options?.duplicateCardIds,
-      options?.emptyLifecycle,
-      options?.confirmedWorkItem,
-      options?.splitWorkItems,
-      options?.workItemPlans,
-      options?.skippedIntegrationRisk,
-      options?.codingAttempts,
-    );
+    const initial = options?.sharedLifecycleIdsAcrossIssues
+      ? sharedIdLifecycleData(issueId)
+      : initialLifecycleData(
+          issueId,
+          options?.duplicateCardIds,
+          options?.emptyLifecycle,
+          options?.confirmedWorkItem,
+          options?.splitWorkItems,
+          options?.workItemPlans,
+          options?.skippedIntegrationRisk,
+          options?.codingAttempts,
+        );
     lifecycleByIssue.set(issueId, initial);
     return initial;
   }
@@ -548,6 +633,18 @@ export function lifecycleFetch(options?: {
     const issuesMatch = url.match(/^\/api\/projects\/([^/]+)\/issues$/);
     if (issuesMatch) {
       const projectId = issuesMatch[1];
+      if (
+        projectId === "project_0001" &&
+        options?.sharedLifecycleIdsAcrossIssues
+      ) {
+        const deletedIssueIds = deletedIssueIdsByProject.get(projectId);
+        return jsonResponse({
+          issues: [
+            issueRecord("issue_0001", "Issue One"),
+            issueRecord("issue_0002", "Issue Two"),
+          ].filter((issue) => !deletedIssueIds?.has(issue.issue_id)),
+        });
+      }
       const issueCall = issueCallsByProject.get(projectId) ?? 0;
       const title =
         options?.issueTitlesByProject?.[projectId] ??
@@ -620,11 +717,15 @@ export function lifecycleFetch(options?: {
       const requestIssueId = lifecycleMatch[1];
       const projectId = lifecycleMatch[2];
       const issueId = duplicate ? "shared_id" : requestIssueId;
-      const issueTitle = duplicate
-        ? "重复 ID Issue"
-        : latestIssueTitlesByProject.get(projectId) ??
-          options?.issueTitlesByProject?.[projectId] ??
-          "登录会话过期";
+      const issueTitle = options?.sharedLifecycleIdsAcrossIssues
+        ? issueId === "issue_0002"
+          ? "Issue Two"
+          : "Issue One"
+        : duplicate
+          ? "重复 ID Issue"
+          : latestIssueTitlesByProject.get(projectId) ??
+            options?.issueTitlesByProject?.[projectId] ??
+            "登录会话过期";
       if (projectId !== "project_0001") {
         return jsonResponse({
           issue: {

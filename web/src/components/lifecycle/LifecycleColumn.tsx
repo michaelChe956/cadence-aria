@@ -1,5 +1,6 @@
 import type { LifecycleCard as LifecycleCardData } from "../../state/lifecycle-workbench-store";
 import { LifecycleCard } from "./LifecycleCard";
+import { lifecycleCardKey } from "./IssueLifecycleWorkbenchParts";
 
 export function LifecycleColumn({
   title,
@@ -34,10 +35,10 @@ export function LifecycleColumn({
       </div>
       <ul className="space-y-2">
         {cards.map((card) => (
-          <li key={`${card.kind}:${card.id}`}>
+          <li key={lifecycleCardKey(card)}>
             <LifecycleCard
               card={card}
-              selected={selectedKey === `${card.kind}:${card.id}`}
+              selected={selectedKey === lifecycleCardKey(card)}
               onSelect={() => onSelect(card)}
               onGenerateStorySpec={
                 card.kind === "issue" && onGenerateStorySpec

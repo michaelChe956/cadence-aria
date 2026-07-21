@@ -1,6 +1,10 @@
 import { render } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
-import type { CodingGateRequired, WorkItemExecutionPlan } from "../api/types";
+import type {
+  CodingAttemptAddress,
+  CodingGateRequired,
+  WorkItemExecutionPlan,
+} from "../api/types";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useCodingWorkspaceWs } from "./useCodingWorkspaceWs";
 
@@ -44,9 +48,17 @@ export class MockWebSocket {
 
 type CodingWsApi = ReturnType<typeof useCodingWorkspaceWs>;
 
+export const CODING_ATTEMPT_ADDRESS = {
+  projectId: "project_0001",
+  issueId: "issue_0001",
+  attemptId: "coding_attempt_0001",
+} as const;
+
 export function codingSessionState(overrides: Record<string, unknown> = {}) {
   return {
     type: "coding_session_state",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
     attempt_id: "coding_attempt_0001",
     status: "running",
     stage: "testing",
@@ -135,23 +147,33 @@ export function executionPlan(
   };
 }
 
-export function renderCodingHook(attemptId = "coding_attempt_0001") {
+export function renderCodingHook(
+  address: CodingAttemptAddress | null = CODING_ATTEMPT_ADDRESS,
+) {
   let api: CodingWsApi | undefined;
 
-  function Harness() {
-    api = useCodingWorkspaceWs(attemptId);
+  function Harness({ currentAddress }: { currentAddress: CodingAttemptAddress | null }) {
+    api = useCodingWorkspaceWs(currentAddress);
     return null;
   }
 
-  const view = render(<Harness />);
+  const view = render(<Harness currentAddress={address} />);
   return {
     ...view,
+    rerenderAddress(nextAddress: CodingAttemptAddress | null) {
+      view.rerender(<Harness currentAddress={nextAddress} />);
+    },
     get api() {
       if (!api) throw new Error("hook not rendered");
       return api;
     },
     get ws() {
       const ws = MockWebSocket.instances[0];
+      if (!ws) throw new Error("websocket not created");
+      return ws;
+    },
+    get latestWs() {
+      const ws = MockWebSocket.instances.at(-1);
       if (!ws) throw new Error("websocket not created");
       return ws;
     },

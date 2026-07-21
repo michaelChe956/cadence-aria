@@ -1,3 +1,43 @@
+#[test]
+fn provider_projection_renderer_review_prompt_integration_preserves_contract_matrix() {
+    use crate::product::models::ProviderName;
+    use crate::product::work_item_contract::canonical_contract_fixture;
+    use crate::product::work_item_projection::{
+        ReviewerExecutionEnvelope, WorkItemProjectionCompiler, renderer_for,
+    };
+
+    let contract = canonical_contract_fixture("wi_review_prompt_integration");
+    let projections = WorkItemProjectionCompiler
+        .compile(&contract, "work_item_revision_review_integration")
+        .unwrap();
+    let envelope = ReviewerExecutionEnvelope {
+        unit_run_id: "unit_run_review_integration".to_string(),
+        diff_ref: "diff_review_integration".to_string(),
+        test_evidence_refs: vec!["test_evidence_review_integration".to_string()],
+        handoff_revision_ids: vec!["handoff_review_integration".to_string()],
+        contract_delta_refs: vec!["contract_delta_review_integration".to_string()],
+        completion_commit: "4444444444444444444444444444444444444444".to_string(),
+    };
+
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
+    ] {
+        let rendered = renderer_for(&provider)
+            .render_reviewer(&projections.reviewer, &envelope)
+            .unwrap();
+
+        assert!(rendered.text.contains("work_item_revision_review_integration"));
+        assert!(rendered.text.contains("AC-001"));
+        assert!(rendered.text.contains("REQ-CANONICAL-001"));
+        assert!(rendered.text.contains("contract.source"));
+        assert!(rendered.text.contains("contract.canonical"));
+        assert!(rendered.text.contains("diff_review_integration"));
+        assert_eq!(rendered.content_hash.len(), 64);
+    }
+}
+
 #[tokio::test]
 async fn handle_user_message_provider_error_returns_to_prepare_context() {
     let (_tmp, store) = setup();
@@ -475,67 +515,6 @@ fn build_review_input_carries_workspace_review_contract_for_general_artifacts() 
     }
 }
 
-#[test]
-fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
-    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_review_boundary");
-    let outline_payload = work_item_plan_outline_artifact();
-    let ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate } = outline_payload else {
-        panic!("expected outline candidate artifact");
-    };
-
-    let input = engine
-        .build_work_item_plan_outline_review_input(&outline_candidate)
-        .expect("outline review input");
-
-    assert_work_item_plan_boundary_rules(&input.prompt);
-    assert!(input.prompt.contains("estimated_context_tokens"));
-    assert!(input.prompt.contains("session_fit"));
-    for field in [
-        "\"id\"",
-        "\"project_id\"",
-        "\"issue_id\"",
-        "\"source_story_spec_ids\"",
-        "\"source_design_spec_ids\"",
-        "\"strategy_summary\"",
-        "\"work_item_outlines\"",
-        "\"dependency_graph\"",
-        "\"risks\"",
-        "\"handoff_strategy\"",
-        "\"status\"",
-        "\"outline_id\"",
-        "\"title\"",
-        "\"kind\"",
-        "\"goal\"",
-        "\"scope\"",
-        "\"non_goals\"",
-        "\"estimated_context_tokens\"",
-        "\"session_fit\"",
-        "\"exclusive_write_scopes\"",
-        "\"forbidden_write_scopes\"",
-        "\"depends_on\"",
-        "\"verification_intent\"",
-        "\"handoff_notes\"",
-    ] {
-        assert!(
-            input.prompt.contains(field),
-            "outline reviewer prompt must include complete candidate field {field}"
-        );
-    }
-    assert!(input.prompt.contains("单个 Claude Code 或 Codex coding 会话"));
-    assert!(input.prompt.contains("小于 20k"));
-    assert!(input.prompt.contains(
-        "\"generation_round_id\":\"generation_round_unknown\""
-    ));
-    assert!(input.prompt.contains("\"target_outline_id\":\"outline id\""));
-    assert!(input.prompt.contains("从 findings[].target_outline_id 推导"));
-    assert!(
-        !input.prompt.contains("\"affects_items\""),
-        "new outline review schema should not duplicate affected outline references"
-    );
-    assert_review_contract(&input, "work_item_plan_outline_review");
-}
-
 #[tokio::test]
 async fn build_work_item_draft_review_input_includes_boundary_rules() {
     let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
@@ -635,6 +614,7 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
         strategy_summary: "serial backend split".to_string(),
         work_item_outlines: vec![WorkItemOutline {
             outline_id: outline_id.to_string(),
+            logical_work_item_id: "wi_backend".to_string(),
             title: "Backend".to_string(),
             kind: WorkItemKind::Backend,
             goal: "实现后端能力".to_string(),
@@ -691,22 +671,24 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
             attempt_index: 1,
             outline_version_ref: "outline_artifact_0001".to_string(),
             generation_mode: WorkItemGenerationMode::Serial,
-            candidate: WorkItemDraftCandidate {
-                outline_id: outline_id.to_string(),
-                title: "Backend".to_string(),
-                kind: WorkItemKind::Backend,
-                goal: "实现后端能力".to_string(),
-                implementation_context: "实现 src/backend.rs".to_string(),
-                exclusive_write_scopes: vec!["src/backend.rs".to_string()],
-                forbidden_write_scopes: vec![],
-                depends_on_outline_ids: vec![],
-                required_handoff_from_outline_ids: vec![],
-                handoff_summary: "handoff".to_string(),
-                verification_plan: serde_json::json!({
-                    "commands": [],
-                    "manual_checks": [],
-                    "required_gates": []
-                }),
+            candidate: {
+                let mut contract =
+                    crate::product::work_item_contract::canonical_contract_fixture("wi_backend");
+                contract.identity.title = "Backend".to_string();
+                contract.identity.kind = "backend".to_string();
+                contract.goal.summary = "实现后端能力".to_string();
+                contract.input_contracts.clear();
+                contract.write_policy.exclusive_scopes = vec!["src/backend.rs".to_string()];
+                contract.write_policy.forbidden_scopes.clear();
+                WorkItemDraftCandidate {
+                    outline_id: outline_id.to_string(),
+                    logical_work_item_id: "wi_backend".to_string(),
+                    verification_plan:
+                        crate::product::models::WorkItemDraftVerificationPlan {
+                            checks: contract.verification_checks.clone(),
+                        },
+                    canonical_contract_candidate: contract,
+                }
             },
             status: WorkItemDraftStatus::Draft,
             active: true,

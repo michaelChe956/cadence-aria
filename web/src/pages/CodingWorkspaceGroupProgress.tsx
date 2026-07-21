@@ -9,7 +9,7 @@ function currentUnitIndex(
   }
   if (currentWorkItemId) {
     const matchedIndex = units.findIndex(
-      (unit) => unit.work_item_id === currentWorkItemId,
+      (unit) => unit.logical_work_item_id === currentWorkItemId,
     );
     if (matchedIndex >= 0) {
       return matchedIndex;

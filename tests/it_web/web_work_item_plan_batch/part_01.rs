@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::web_work_item_generation::{
     app_with_confirmed_story_and_design_and_streaming_outputs, request_json, valid_outline_output,
+    valid_canonical_draft_output,
 };
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -366,9 +367,9 @@ async fn batch_generation_invokes_one_provider_run_per_outline() {
         (
             captured_prompts.len(),
             captured_prompts[2].contains("outline_backend_session")
-                && captured_prompts[2].contains("输出 SessionStatusDto"),
+                && captured_prompts[2].contains("contract.wi_backend_session.output"),
             captured_prompts[3].contains("outline_frontend_expiry")
-                && captured_prompts[3].contains("输出前端会话过期提示组件"),
+                && captured_prompts[3].contains("contract.wi_frontend_expiry.output"),
         )
     };
     assert_eq!(prompt_count, 4, "outline author + 3 item drafts");

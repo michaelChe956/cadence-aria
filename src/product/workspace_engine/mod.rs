@@ -21,13 +21,13 @@ use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{
-    AppendSpecVersionInput, CreateVerificationPlanInput, CreateWorkItemInput,
-    CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
+    AppendSpecVersionInput, CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
 };
 use crate::product::models::{
     AgentRole, ArtifactRef, DesignContextCapabilities, IssueWorkItemDependencyEdge,
     IssueWorkItemPlan, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
-    OutlineContextBlockerResolution, OutlineContextIndex, PermissionEvent, ProviderConversationRef,
+    OutlineContextBlockerResolution, OutlineContextIndex, PermissionEvent,
+    PlanRepairSessionSnapshotDto, PlanRepairSessionStage, ProviderConversationRef,
     ProviderConversationRole, ProviderName, ProviderSnapshot, RepositoryProfileConfidence,
     VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
     VerificationFallbackPolicy, VerificationManualCheck, VerificationPlan, VerificationScope,
@@ -42,6 +42,7 @@ use crate::product::work_item_plan_store::{
     WorkItemPlanStore, copy_draft_for_current_round, mark_draft_active,
     mark_draft_record_superseded, next_batch_id, next_draft_id, next_generation_round_id,
 };
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_split_engine::{
     OutlineAuthorOutput, RedoSpec, WorkItemPlanContextBlocker, WorkItemSplitProviderOutput,
     build_work_item_draft_invocation,
@@ -77,12 +78,22 @@ mod compile_parse;
 mod controls;
 mod decisions;
 mod draft_batch;
+mod human_presentation;
 mod interrupted_run_recovery;
 mod lifecycle;
 mod lifecycle_recovery;
+mod linked_workspace_amendment;
 mod mappings;
 mod parsers;
 mod plan_outline;
+mod plan_projection;
+mod plan_repair;
+mod plan_repair_artifacts;
+mod plan_repair_publication;
+mod plan_repair_recovery;
+mod plan_repair_review;
+mod plan_repair_transaction;
+mod plan_repair_validation;
 mod prompts;
 mod provider_drive;
 mod review;
@@ -92,29 +103,48 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use human_presentation::{
+    HumanPresentationScope, SaveHumanPresentationRevision, save_human_presentation_revision,
+};
 pub use interrupted_run_recovery::{InterruptedRunRecoveryError, InterruptedRunRecoveryOutcome};
+pub use linked_workspace_amendment::restore_linked_workspace_snapshot;
+pub use plan_projection::{
+    CompiledWorkItemRevision, InitialPlanCompileOutcome, WorkspaceEngineError,
+    compile_plan_projection_bundle, compile_work_item_revision, plan_projection_input,
+    publish_initial_plan_revision,
+};
 pub use types::{
-    AuthorDecisionOutcome, EngineEvent, PendingAuthorChoiceError, ReviewDecisionOutcome,
+    ArtifactUpdateEvent, AuthorDecisionOutcome, EngineEvent, LinkedWorkspaceAmendmentTarget,
+    LinkedWorkspaceSessionSnapshot, PendingAuthorChoiceError, ReviewDecisionOutcome,
     SessionMessage, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,
     WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome, WorkspaceConfirmOutcome,
     WorkspaceEngine, WorkspaceSession, WorkspaceStage,
 };
 
 pub(crate) use artifact_constraints::*;
+#[cfg(test)]
+pub(crate) use compile::WorkItemPlanCompileFinalizerCheckpoint;
 pub(crate) use compile_parse::*;
 pub(crate) use lifecycle_recovery::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;
 pub(crate) use plan_outline::*;
+pub(crate) use plan_repair::{
+    amendment_id_for, canonical_plan_repair_parent_session, linked_child_session,
+};
+pub(crate) use plan_repair_recovery::*;
+pub(crate) use plan_repair_transaction::*;
+pub(crate) use plan_repair_validation::*;
 pub(crate) use prompts::*;
 #[cfg(test)]
 pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, OutlineRevisionCrashPoint,
-    OutlineRevisionPersistencePolicy, PendingAuthorChoice, ProviderSessionDriveInput,
-    ReviewProviderRunResult, RevisionResumeFallbackContext, StructuredOutputDisplayFilter,
-    TimelineNodeDraft, WorkItemPlanCompileProjectionContext, WorkItemPlanOutlineRevisionSource,
+    OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanRepairCrashPoint,
+    ProviderSessionDriveInput, ReviewProviderRunResult, RevisionResumeFallbackContext,
+    StructuredOutputDisplayFilter, TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
+    WorkItemPlanOutlineRevisionSource,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;

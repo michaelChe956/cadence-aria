@@ -122,7 +122,8 @@ async fn item_review_revise_rewrites_only_current_item() {
     let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
         messages.iter().any(|message| {
             message["type"] == "artifact_update"
-                && message["draft_candidate"]["draft_record"]["candidate"]["title"]
+                && message["draft_candidate"]["draft_record"]["candidate"]
+                    ["canonical_contract_candidate"]["tasks"][0]["statement"]
                     == "Reviewer 返修后的后端登录会话 API"
         })
     })
@@ -130,7 +131,8 @@ async fn item_review_revise_rewrites_only_current_item() {
     assert!(
         messages.iter().any(|message| {
             message["type"] == "artifact_update"
-                && message["draft_candidate"]["draft_record"]["candidate"]["title"]
+                && message["draft_candidate"]["draft_record"]["candidate"]
+                    ["canonical_contract_candidate"]["tasks"][0]["statement"]
                     == "Reviewer 返修后的后端登录会话 API"
         }),
         "item review revise should regenerate current outline, got {messages:?}"
@@ -374,7 +376,12 @@ async fn plan_reopen_required_supersedes_drafts_and_reopens_outline() {
             Some(WorkItemDraftSupersedeReason::OutlineRevised)
         );
         assert!(
-            !draft.candidate.title.is_empty(),
+            !draft
+                .candidate
+                .canonical_contract_candidate
+                .identity
+                .title
+                .is_empty(),
             "superseded draft history should remain readable"
         );
     }
@@ -580,7 +587,8 @@ async fn draft_rewrite_supersedes_old_draft_and_regenerates_current_outline() {
     let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
         messages.iter().any(|message| {
             message["type"] == "artifact_update"
-                && message["draft_candidate"]["draft_record"]["candidate"]["title"]
+                && message["draft_candidate"]["draft_record"]["candidate"]
+                    ["canonical_contract_candidate"]["tasks"][0]["statement"]
                     == "重写后的后端登录会话 API"
         })
     })
@@ -697,4 +705,3 @@ async fn draft_pause_enters_human_confirm_without_regenerating() {
 fn valid_draft_output(outline_id: &str) -> Value {
     valid_draft_output_with_title(outline_id, "实现后端登录会话 API")
 }
-

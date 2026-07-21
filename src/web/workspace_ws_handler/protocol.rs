@@ -20,7 +20,12 @@ pub(crate) fn choice_id_unmatched_error(id: &str) -> WsOutMessage {
 }
 
 pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool {
-    if matches!(msg, WsInMessage::Hello { .. } | WsInMessage::Ping) {
+    if matches!(
+        msg,
+        WsInMessage::Hello { .. }
+            | WsInMessage::Ping
+            | WsInMessage::SaveHumanPresentationRevision { .. }
+    ) {
         return true;
     }
 
@@ -41,6 +46,7 @@ pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceSta
                 WsInMessage::Abort
                     | WsInMessage::PermissionResponse { .. }
                     | WsInMessage::ChoiceResponse { .. }
+                    | WsInMessage::StartLinkedWorkspaceAmendment { .. }
             )
         }
         WorkspaceStage::AuthorConfirm => {
@@ -68,6 +74,9 @@ pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceSta
         WorkspaceStage::HumanConfirm => matches!(
             msg,
             WsInMessage::HumanConfirm { .. }
+                | WsInMessage::ConfirmPlanAmendment { .. }
+                | WsInMessage::CancelPlanAmendment { .. }
+                | WsInMessage::StartLinkedWorkspaceAmendment { .. }
                 | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
                 | WsInMessage::RequestRevision { .. }
                 | WsInMessage::Confirm
@@ -85,6 +94,7 @@ pub(crate) fn requires_stage_validation(msg: &WsInMessage) -> bool {
             | WsInMessage::UserMessage { .. }
             | WsInMessage::Rollback { .. }
             | WsInMessage::Hello { .. }
+            | WsInMessage::SaveHumanPresentationRevision { .. }
             | WsInMessage::Ping
     )
 }
@@ -112,7 +122,11 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::WorkItemPlanCompileRecoveryAction { .. } => {
             "work_item_plan_compile_recovery_action"
         }
+        WsInMessage::SaveHumanPresentationRevision { .. } => "save_human_presentation_revision",
         WsInMessage::HumanConfirm { .. } => "human_confirm",
+        WsInMessage::ConfirmPlanAmendment { .. } => "confirm_plan_amendment",
+        WsInMessage::CancelPlanAmendment { .. } => "cancel_plan_amendment",
+        WsInMessage::StartLinkedWorkspaceAmendment { .. } => "start_linked_workspace_amendment",
         WsInMessage::RevertWorkItem { .. } => "revert_work_item",
         WsInMessage::Abort => "abort",
         WsInMessage::Ping => "ping",

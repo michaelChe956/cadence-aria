@@ -161,6 +161,8 @@ function sessionState(
 ): Extract<CodingWsOutMessage, { type: "coding_session_state" }> {
   return {
     type: "coding_session_state",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
     attempt_id: "coding_attempt_0001",
     attempt_scope: "work_item",
     work_item_group_id: null,
@@ -191,6 +193,7 @@ function sessionState(
     verification_commands: [],
     work_item_execution_plan: null,
     work_item_handoff: null,
+    linked_plan_repair: null,
     require_execution_plan_confirm: false,
     ...overrides,
   };
@@ -238,6 +241,8 @@ describe("coding workspace store", () => {
     store.setSessionState(sessionState({ code_review_reports: [codeReview()] }));
 
     const state = useCodingWorkspaceStore.getState();
+    expect(state.projectId).toBe("project_0001");
+    expect(state.issueId).toBe("issue_0001");
     expect(state.attemptId).toBe("coding_attempt_0001");
     expect(state.status).toBe("running");
     expect(state.stage).toBe("coding");
@@ -255,6 +260,8 @@ describe("coding workspace store", () => {
 
     store.setSessionState({
       type: "coding_session_state",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
       attempt_id: "coding_attempt_0001",
       attempt_scope: "work_item_group",
       work_item_group_id: "work_item_plan_0001",
@@ -263,20 +270,24 @@ describe("coding workspace store", () => {
       units: [
         {
           unit_id: "coding_unit_0001",
-          work_item_id: "work_item_0001",
+          logical_work_item_id: "work_item_0001",
+          work_item_revision_id: "work_item_revision_0001",
+          dependency_logical_work_item_ids: [],
           order_index: 0,
           status: "running",
           summary: null,
-          handoff_ref: null,
+          latest_handoff_revision_id: null,
           completion_commit: null,
         },
         {
           unit_id: "coding_unit_0002",
-          work_item_id: "work_item_0002",
+          logical_work_item_id: "work_item_0002",
+          work_item_revision_id: "work_item_revision_0002",
+          dependency_logical_work_item_ids: ["work_item_0001"],
           order_index: 1,
           status: "pending",
           summary: null,
-          handoff_ref: null,
+          latest_handoff_revision_id: null,
           completion_commit: null,
         },
       ],
@@ -305,6 +316,7 @@ describe("coding workspace store", () => {
       verification_commands: [],
       work_item_execution_plan: null,
       work_item_handoff: null,
+      linked_plan_repair: null,
       require_execution_plan_confirm: false,
     });
 

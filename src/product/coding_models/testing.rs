@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::product::plan_repair::PlanDefectFinding;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,4 +143,6 @@ pub struct TestingReport {
     pub context_warnings: Vec<String>,
     #[serde(default)]
     pub raw_provider_output_ref: Option<String>,
+    #[serde(default)]
+    pub plan_defect_findings: Vec<PlanDefectFinding>,
 }

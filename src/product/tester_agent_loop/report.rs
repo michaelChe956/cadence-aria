@@ -43,6 +43,7 @@ pub fn build_testing_report(
         skipped_required_steps: Vec::new(),
         context_warnings: Vec::new(),
         raw_provider_output_ref: None,
+        plan_defect_findings: Vec::new(),
     }
 }
 
@@ -115,6 +116,7 @@ pub fn build_plan_based_testing_report(
         skipped_required_steps,
         context_warnings: plan.context_warnings.clone(),
         raw_provider_output_ref,
+        plan_defect_findings: Vec::new(),
     }
 }
 

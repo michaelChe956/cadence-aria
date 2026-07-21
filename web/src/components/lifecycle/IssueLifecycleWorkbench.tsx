@@ -22,6 +22,7 @@ import {
   listRepositories,
 } from "../../api/client";
 import type {
+  CodingAttemptAddress,
   IssueLifecycleResponse,
   Project,
   Repository,
@@ -59,6 +60,7 @@ import {
   findCardInColumns,
   findWorkspaceSession,
   lifecycleCardKey,
+  lifecycleEntityKey,
   normalizeLifecycleResponse,
   resolveGroupCodingAttempt,
   selectedLifecycleColumns,
@@ -79,15 +81,15 @@ const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
 } satisfies WorkItemPlanOptionsFormValue;
 
 export function IssueLifecycleWorkbench({
-  focusEntityId,
+  focusEntityKey,
   onDrawerFocusChange,
   onOpenWorkspace = defaultOpenWorkspace,
   onOpenCodingWorkspace = defaultOpenCodingWorkspace,
 }: {
-  focusEntityId?: string | null;
-  onDrawerFocusChange?: (entityId: string | null) => void;
+  focusEntityKey?: string | null;
+  onDrawerFocusChange?: (entityKey: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
-  onOpenCodingWorkspace?: (attemptId: string) => void;
+  onOpenCodingWorkspace?: (address: CodingAttemptAddress) => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
@@ -106,8 +108,8 @@ export function IssueLifecycleWorkbench({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshRequestId = useRef(0);
-  const drawerFocusedEntityId = useLifecycleWorkbenchStore(
-    (state) => state.focusedEntityId,
+  const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
+    (state) => state.focusedEntityKey,
   );
   const isDrawerOpen = useLifecycleWorkbenchStore(
     (state) => state.isDrawerOpen,
@@ -121,22 +123,22 @@ export function IssueLifecycleWorkbench({
   }, []);
 
   useEffect(() => {
-    if (focusEntityId === undefined) {
+    if (focusEntityKey === undefined) {
       return;
     }
-    if (focusEntityId) {
-      openDrawer(focusEntityId);
+    if (focusEntityKey) {
+      openDrawer(focusEntityKey);
       return;
     }
     closeDrawer();
-  }, [closeDrawer, focusEntityId, openDrawer]);
+  }, [closeDrawer, focusEntityKey, openDrawer]);
 
   useEffect(() => {
     if (!onDrawerFocusChange) {
       return;
     }
-    onDrawerFocusChange(isDrawerOpen ? drawerFocusedEntityId : null);
-  }, [drawerFocusedEntityId, isDrawerOpen, onDrawerFocusChange]);
+    onDrawerFocusChange(isDrawerOpen ? drawerFocusedEntityKey : null);
+  }, [drawerFocusedEntityKey, isDrawerOpen, onDrawerFocusChange]);
 
   async function refresh(projectIdOverride?: string | null) {
     const requestId = refreshRequestId.current + 1;
@@ -232,8 +234,8 @@ export function IssueLifecycleWorkbench({
     [allColumns, focusedIssueId],
   );
   const focusedEntity = useMemo(
-    () => findCardInColumns(allColumns, drawerFocusedEntityId),
-    [allColumns, drawerFocusedEntityId],
+    () => findCardInColumns(allColumns, drawerFocusedEntityKey),
+    [allColumns, drawerFocusedEntityKey],
   );
   const selectedProject = projects.find(
     (project) => project.project_id === selectedProjectId,
@@ -249,19 +251,21 @@ export function IssueLifecycleWorkbench({
   }
 
   function handleSelectCard(card: LifecycleCardData) {
-    setSelectedCardKey(lifecycleCardKey(card));
+    const cardKey = lifecycleCardKey(card);
+    setSelectedCardKey(cardKey);
     if (card.kind === "issue") {
       setFocusedIssueId(card.issueId);
       closeDrawer();
       return;
     }
-    openDrawer(card.id);
+    openDrawer(cardKey);
   }
 
   function handleOpenFullIssue(card: LifecycleCardData) {
-    setSelectedCardKey(lifecycleCardKey(card));
+    const cardKey = lifecycleCardKey(card);
+    setSelectedCardKey(cardKey);
     setFocusedIssueId(card.issueId);
-    openDrawer(card.id);
+    openDrawer(cardKey);
   }
 
   async function handleOpenWorkspaceFromDrawer(card: LifecycleCardData) {
@@ -287,7 +291,11 @@ export function IssueLifecycleWorkbench({
     if (card.kind === "work_item") {
       if (card.raw.latest_attempt) {
         setError(null);
-        onOpenCodingWorkspace(card.raw.latest_attempt.attempt_id);
+        onOpenCodingWorkspace({
+          projectId: selectedProjectId,
+          issueId: card.issueId,
+          attemptId: card.raw.latest_attempt.attempt_id,
+        });
         return;
       }
 
@@ -298,7 +306,11 @@ export function IssueLifecycleWorkbench({
         card.id,
       );
       await refresh(selectedProjectId);
-      onOpenCodingWorkspace(attempt.attempt_id);
+      onOpenCodingWorkspace({
+        projectId: selectedProjectId,
+        issueId: card.issueId,
+        attemptId: attempt.attempt_id,
+      });
       return;
     }
 
@@ -313,7 +325,11 @@ export function IssueLifecycleWorkbench({
 
     if (latestGroupAttempt) {
       setError(null);
-      onOpenCodingWorkspace(latestGroupAttempt.attempt_id);
+      onOpenCodingWorkspace({
+        projectId: selectedProjectId,
+        issueId: card.issueId,
+        attemptId: latestGroupAttempt.attempt_id,
+      });
       return;
     }
 
@@ -324,7 +340,11 @@ export function IssueLifecycleWorkbench({
       card.id,
     );
     await refresh(selectedProjectId);
-    onOpenCodingWorkspace(attempt.attempt_id);
+    onOpenCodingWorkspace({
+      projectId: selectedProjectId,
+      issueId: card.issueId,
+      attemptId: attempt.attempt_id,
+    });
   }
 
   async function handleGenerateNext(card: LifecycleCardData) {
@@ -345,8 +365,13 @@ export function IssueLifecycleWorkbench({
       const nextId = response.design_specs[0]?.design_spec_id;
       await refresh(selectedProjectId);
       if (nextId) {
-        setSelectedCardKey(`design_spec:${nextId}`);
-        openDrawer(nextId);
+        const nextKey = lifecycleEntityKey(
+          "design_spec",
+          card.issueId,
+          nextId,
+        );
+        setSelectedCardKey(nextKey);
+        openDrawer(nextKey);
       }
       return;
     }
@@ -425,7 +450,7 @@ export function IssueLifecycleWorkbench({
       return;
     }
 
-    const cardKey = `issue:${issueId}`;
+    const cardKey = lifecycleEntityKey("issue", issueId, issueId);
     setDeletingCardKey(cardKey);
     setError(null);
     try {
@@ -481,7 +506,7 @@ export function IssueLifecycleWorkbench({
       if (selectedCardKey === cardKey) {
         setSelectedCardKey(null);
       }
-      if (drawerFocusedEntityId === card.id) {
+      if (drawerFocusedEntityKey === cardKey) {
         closeDrawer();
       }
       await refresh(selectedProjectId);
@@ -524,8 +549,11 @@ export function IssueLifecycleWorkbench({
           title: defaultLaunchTitle({ target, card }),
         },
       );
+      const storySpecId = response.story_specs[0]?.story_spec_id;
       setSelectedCardKey(
-        `story_spec:${response.story_specs[0]?.story_spec_id ?? ""}`,
+        storySpecId
+          ? lifecycleEntityKey("story_spec", card.issueId, storySpecId)
+          : null,
       );
       await refresh(selectedProjectId);
       if (response.workspace_session) {
@@ -543,8 +571,11 @@ export function IssueLifecycleWorkbench({
           story_spec_ids: [card.id],
         },
       );
+      const designSpecId = response.design_specs[0]?.design_spec_id;
       setSelectedCardKey(
-        `design_spec:${response.design_specs[0]?.design_spec_id ?? ""}`,
+        designSpecId
+          ? lifecycleEntityKey("design_spec", card.issueId, designSpecId)
+          : null,
       );
       await refresh(selectedProjectId);
       if (response.workspace_session) {
@@ -685,6 +716,7 @@ export function IssueLifecycleWorkbench({
       {isDrawerOpen && focusedEntity ? (
         <div className="fixed right-0 top-0 z-50 h-full w-[min(480px,100vw)] shadow-xl">
           <LifecycleCardDrawer
+            key={lifecycleCardKey(focusedEntity)}
             entity={toDrawerEntity(
               focusedEntity,
               lifecycles.find(

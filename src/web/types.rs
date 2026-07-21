@@ -485,6 +485,8 @@ impl Default for WorkItemContextBudgetDto {
 #[serde(rename_all = "snake_case")]
 pub struct CodingAttemptDto {
     pub attempt_id: String,
+    pub project_id: String,
+    pub issue_id: String,
     pub work_item_id: String,
     pub attempt_scope: String,
     pub work_item_group_id: Option<String>,
@@ -508,11 +510,13 @@ pub struct CodingAttemptDto {
 #[serde(rename_all = "snake_case")]
 pub struct CodingExecutionUnitDto {
     pub unit_id: String,
-    pub work_item_id: String,
+    pub logical_work_item_id: String,
+    pub work_item_revision_id: String,
+    pub dependency_logical_work_item_ids: Vec<String>,
     pub order_index: u32,
     pub status: String,
     pub summary: Option<String>,
-    pub handoff_ref: Option<String>,
+    pub latest_handoff_revision_id: Option<String>,
     pub completion_commit: Option<String>,
 }
 

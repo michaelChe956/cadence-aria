@@ -1,0 +1,735 @@
+use chrono::Utc;
+
+use crate::product::models::{
+    PlanAmendmentManifest, PlanAmendmentPublicationPhase, PlanRepairAwaitingConfirmationPackage,
+    PlanRepairRequest, PlanRepairRequestStatus, PlanRepairSessionSnapshotDto,
+    PlanRepairSessionStage, RepairTarget, WorkItemPlanLineage, WorkspaceReturnContext,
+    WorkspaceSessionLink, WorkspaceSessionLinkTrigger, WorkspaceSessionRelation,
+};
+use crate::product::plan_repair::PlanRepairError;
+
+use super::*;
+
+impl WorkspaceEngine {
+    pub async fn start_plan_repair(
+        &mut self,
+        request: PlanRepairRequest,
+    ) -> Result<WorkspaceSessionRecord, PlanRepairError> {
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            || self.session.entity_id != request.plan_id
+        {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair requires the matching WorkItemPlan workspace".to_string(),
+            ));
+        }
+        let lifecycle = self.lifecycle_store.as_ref().ok_or_else(|| {
+            PlanRepairError::Store(ProductStoreError::Io(
+                "plan repair requires a persistent workspace engine".to_string(),
+            ))
+        })?;
+        let amendment_id = request
+            .amendment_id
+            .clone()
+            .unwrap_or_else(|| amendment_id_for(&request.fingerprint));
+        let canonical_parent = canonical_plan_repair_parent_session(
+            lifecycle,
+            &self.session.project_id,
+            &self.session.issue_id,
+            &request.plan_id,
+            &amendment_id,
+        )?;
+        if canonical_parent.id != self.session.session_id {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair parent is not the canonical WorkItemPlan workspace".to_string(),
+            ));
+        }
+        let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+        let plan = revision_store
+            .get_plan_lineage(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &request.plan_id,
+            )
+            .map_err(PlanRepairError::Store)?;
+        if plan.active_revision_id.as_deref() != Some(request.base_plan_revision_id.as_str()) {
+            return Err(PlanRepairError::AmendmentConflict {
+                expected: request.base_plan_revision_id,
+                actual: plan.active_revision_id.unwrap_or_default(),
+            });
+        }
+
+        let open_requests = revision_store
+            .list_open_repair_requests(&plan)
+            .map_err(PlanRepairError::Store)?;
+        let mut selected = open_requests
+            .iter()
+            .find(|existing| existing.fingerprint == request.fingerprint)
+            .cloned();
+        if let Some(active_amendment_id) = plan.active_amendment_id.as_deref() {
+            let selected_amendment_id = selected
+                .as_ref()
+                .map(|existing| amendment_id_for(&existing.fingerprint))
+                .unwrap_or_else(|| amendment_id_for(&request.fingerprint));
+            if active_amendment_id != selected_amendment_id {
+                let active_request = open_requests
+                    .iter()
+                    .find(|existing| existing.amendment_id.as_deref() == Some(active_amendment_id))
+                    .ok_or_else(|| PlanRepairError::ActiveAmendmentExists {
+                        amendment_id: active_amendment_id.to_string(),
+                    })?;
+                validate_persisted_repair_request(&plan, active_request)?;
+                let (link, child) = linked_child_session(
+                    lifecycle,
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    active_request,
+                )?
+                .ok_or_else(|| PlanRepairError::ActiveAmendmentExists {
+                    amendment_id: active_amendment_id.to_string(),
+                })?;
+                return reconcile_plan_repair_child(
+                    lifecycle,
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    active_request,
+                    link,
+                    child,
+                );
+            }
+        }
+        if let Some(existing) = selected.as_ref() {
+            validate_persisted_repair_request(&plan, existing)?;
+            validate_reused_repair_request(existing, &request)?;
+            if let Some((link, child)) = linked_child_session(
+                lifecycle,
+                &self.session.project_id,
+                &self.session.issue_id,
+                existing,
+            )? {
+                let selected = revision_store
+                    .merge_repair_request_evidence(&plan, &existing.id, request.evidence.clone())
+                    .map_err(PlanRepairError::Store)?;
+                return reconcile_plan_repair_child(
+                    lifecycle,
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    &selected,
+                    link,
+                    child,
+                );
+            }
+            let recovering = revision_store
+                .transition_orphan_repair_request_to_in_progress(&plan, &existing.id)
+                .map_err(PlanRepairError::Store)?;
+            selected = Some(
+                revision_store
+                    .merge_repair_request_evidence(&plan, &recovering.id, request.evidence.clone())
+                    .map_err(PlanRepairError::Store)?,
+            );
+        }
+
+        if selected.is_none()
+            && let Some(active_amendment_id) = plan.active_amendment_id.as_deref()
+        {
+            let mut recovering = request.clone();
+            recovering.amendment_id = Some(active_amendment_id.to_string());
+            selected = Some(recovering);
+        }
+
+        if let Some(existing) = selected.as_ref()
+            && let Some((link, child)) = linked_child_session(
+                lifecycle,
+                &self.session.project_id,
+                &self.session.issue_id,
+                existing,
+            )?
+        {
+            return reconcile_plan_repair_child(
+                lifecycle,
+                &self.session.project_id,
+                &self.session.issue_id,
+                existing,
+                link,
+                child,
+            );
+        }
+
+        let mut selected = selected.unwrap_or(request);
+        let amendment_id = selected
+            .amendment_id
+            .clone()
+            .unwrap_or_else(|| amendment_id_for(&selected.fingerprint));
+        revision_store
+            .acquire_active_amendment(&plan, &amendment_id)
+            .map_err(|error| match plan.active_amendment_id.as_deref() {
+                Some(existing) => PlanRepairError::ActiveAmendmentExists {
+                    amendment_id: existing.to_string(),
+                },
+                None => PlanRepairError::Store(error),
+            })?;
+
+        if selected.amendment_id.is_none() {
+            selected.amendment_id = Some(amendment_id.clone());
+        }
+        match revision_store.get_repair_request(&plan, &selected.id) {
+            Ok(_) => {
+                selected = revision_store
+                    .assign_repair_request_amendment(&plan, &selected.id, &amendment_id)
+                    .map_err(PlanRepairError::Store)?;
+                selected = revision_store
+                    .transition_orphan_repair_request_to_in_progress(&plan, &selected.id)
+                    .map_err(PlanRepairError::Store)?;
+            }
+            Err(ProductStoreError::NotFound { .. }) => {
+                selected.status = PlanRepairRequestStatus::InProgress;
+                selected.updated_at = Utc::now().to_rfc3339();
+                revision_store
+                    .put_repair_request(&plan, &selected)
+                    .map_err(PlanRepairError::Store)?;
+            }
+            Err(error) => return Err(PlanRepairError::Store(error)),
+        }
+
+        let child_session_id = child_session_id_for(&amendment_id);
+        let child = lifecycle
+            .create_workspace_session_with_id(
+                CreateWorkspaceSessionInput {
+                    project_id: self.session.project_id.clone(),
+                    issue_id: self.session.issue_id.clone(),
+                    entity_id: request_plan_id(&selected),
+                    workspace_type: WorkspaceType::WorkItemPlan,
+                    author_provider: self.session.author_provider.clone(),
+                    reviewer_provider: self
+                        .session
+                        .reviewer_provider
+                        .clone()
+                        .unwrap_or_else(|| self.session.author_provider.clone()),
+                    review_rounds: self.session.review_rounds,
+                    superpowers_enabled: self.session.superpowers_enabled,
+                    openspec_enabled: self.session.openspec_enabled,
+                },
+                child_session_id,
+            )
+            .map_err(PlanRepairError::Store)?;
+        let link = WorkspaceSessionLink {
+            id: link_id_for(&amendment_id),
+            relation: WorkspaceSessionRelation::PlanRepair,
+            parent_session_id: selected.trigger_attempt_id.clone(),
+            child_session_id: child.id.clone(),
+            trigger: WorkspaceSessionLinkTrigger {
+                attempt_id: selected.trigger_attempt_id.clone(),
+                unit_run_id: selected.trigger_unit_run_id.clone(),
+                review_id: selected.trigger_review_id.clone(),
+                finding_id: selected.trigger_finding_id.clone(),
+                repair_request_id: selected.id.clone(),
+                amendment_id: amendment_id.clone(),
+                fingerprint: selected.fingerprint.clone(),
+                base_plan_revision_id: selected.base_plan_revision_id.clone(),
+            },
+            return_context: WorkspaceReturnContext {
+                original_attempt_id: selected.trigger_attempt_id.clone(),
+                original_unit_run_id: selected.trigger_unit_run_id.clone(),
+                timeline_anchor_id: selected.trigger_finding_id.clone(),
+                original_route: format!(
+                    "/workbench/projects/{}/issues/{}/coding/{}",
+                    self.session.project_id, self.session.issue_id, selected.trigger_attempt_id
+                ),
+            },
+            created_at: Utc::now().to_rfc3339(),
+        };
+        lifecycle
+            .put_session_link(&self.session.project_id, &self.session.issue_id, &link)
+            .map_err(PlanRepairError::Store)?;
+        reconcile_plan_repair_child(
+            lifecycle,
+            &self.session.project_id,
+            &self.session.issue_id,
+            &selected,
+            link,
+            child,
+        )
+    }
+
+    pub fn plan_repair_session_state(&self) -> Option<&PlanRepairSessionSnapshotDto> {
+        self.plan_repair_snapshot.as_ref()
+    }
+
+    pub(crate) fn is_cancelled_plan_amendment_replay(&self, amendment_id: &str) -> bool {
+        self.validate_cancelled_plan_amendment_replay(amendment_id)
+            .unwrap_or(false)
+    }
+
+    pub async fn enter_plan_repair_awaiting_confirmation(
+        &mut self,
+        package: PlanRepairAwaitingConfirmationPackage,
+    ) -> Result<(), PlanRepairError> {
+        self.recover_pending_plan_repair_transition()?;
+        let snapshot = self.require_plan_repair_snapshot()?.clone();
+        let lifecycle = self.persistent_lifecycle()?;
+        let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+        let plan = revision_store
+            .get_plan_lineage(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &snapshot.request.plan_id,
+            )
+            .map_err(PlanRepairError::Store)?;
+        let stored_request = revision_store
+            .get_repair_request(&plan, &snapshot.request.id)
+            .map_err(PlanRepairError::Store)?;
+        if stored_request != snapshot.request {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "awaiting-confirmation entry requires the complete authoritative request"
+                    .to_string(),
+            ));
+        }
+        validate_persisted_awaiting_confirmation_package(
+            &revision_store,
+            &snapshot,
+            &plan,
+            &package,
+        )?;
+        if snapshot.stage == PlanRepairSessionStage::AwaitingConfirmation {
+            if stored_request != snapshot.request
+                || stored_request.status != PlanRepairRequestStatus::AwaitingConfirmation
+            {
+                return Err(PlanRepairError::InvalidRepairTarget(
+                    "awaiting-confirmation entry requires the authoritative awaiting request"
+                        .to_string(),
+                ));
+            }
+            if snapshot.projection.as_ref() == Some(&package.projection)
+                && snapshot.amendment.as_ref() == Some(&package.amendment)
+                && snapshot.validation.as_ref() == Some(&package.validation)
+                && snapshot.impact.as_ref() == Some(&package.impact)
+                && snapshot.plan_review.as_ref() == Some(&package.plan_review)
+                && snapshot.package_identity.as_ref() == Some(&package.package_identity)
+            {
+                self.ensure_plan_repair_manifest_artifact().await?;
+                return Ok(());
+            }
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "awaiting-confirmation package conflicts with persisted repair state".to_string(),
+            ));
+        }
+        if !matches!(
+            snapshot.stage,
+            PlanRepairSessionStage::AuthoringRevision
+                | PlanRepairSessionStage::ValidatingContract
+                | PlanRepairSessionStage::GeneratingProjections
+                | PlanRepairSessionStage::PlanReview
+        ) {
+            return Err(PlanRepairError::InvalidRepairTarget(format!(
+                "plan repair cannot enter awaiting confirmation from {:?}",
+                snapshot.stage
+            )));
+        }
+        let expected_status = if snapshot.impact_scope_review.is_some() {
+            PlanRepairRequestStatus::AwaitingConfirmation
+        } else {
+            PlanRepairRequestStatus::InProgress
+        };
+        if snapshot.request.status != expected_status || stored_request.status != expected_status {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair request status does not match awaiting-confirmation transition"
+                    .to_string(),
+            ));
+        }
+        let journal = awaiting_confirmation_transition(self, snapshot, package);
+        self.commit_plan_repair_transition(journal)?;
+        self.ensure_plan_repair_manifest_artifact().await
+    }
+
+    pub async fn confirm_plan_amendment(
+        &mut self,
+        amendment_id: &str,
+    ) -> Result<PlanAmendmentManifest, PlanRepairError> {
+        self.recover_pending_plan_repair_transition()?;
+        let snapshot = self.require_plan_repair_snapshot()?.clone();
+        if snapshot.stage != PlanRepairSessionStage::AwaitingConfirmation {
+            return Err(PlanRepairError::ConfirmationRequired);
+        }
+        let lifecycle = self.persistent_lifecycle()?;
+        let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+        let plan = revision_store
+            .get_plan_lineage(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &snapshot.request.plan_id,
+            )
+            .map_err(PlanRepairError::Store)?;
+        let stored_request = revision_store
+            .get_repair_request(&plan, &snapshot.request.id)
+            .map_err(PlanRepairError::Store)?;
+        if stored_request != snapshot.request
+            || stored_request.status != PlanRepairRequestStatus::AwaitingConfirmation
+        {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair confirmation requires the authoritative awaiting request".to_string(),
+            ));
+        }
+        let package = awaiting_confirmation_package_from_snapshot(&snapshot)?;
+        validate_persisted_awaiting_confirmation_package(
+            &revision_store,
+            &snapshot,
+            &plan,
+            &package,
+        )?;
+        let amendment = package.amendment;
+        if amendment.id != amendment_id {
+            return Err(PlanRepairError::AmendmentConflict {
+                expected: amendment.id,
+                actual: amendment_id.to_string(),
+            });
+        }
+        let confirmation = self
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_type == TimelineNodeType::PlanAmendmentConfirmation)
+            .cloned()
+            .ok_or(PlanRepairError::ConfirmationRequired)?;
+        if confirmation.status != TimelineNodeStatus::Completed {
+            let journal = confirmation_transition(self, snapshot);
+            self.commit_plan_repair_transition(journal)?;
+        }
+        Ok(amendment)
+    }
+
+    pub async fn cancel_plan_amendment(
+        &mut self,
+        amendment_id: &str,
+        reason: Option<String>,
+    ) -> Result<(), PlanRepairError> {
+        self.recover_pending_plan_repair_transition()?;
+        let original_snapshot = self.require_plan_repair_snapshot()?.clone();
+        let amendment = original_snapshot
+            .amendment
+            .as_ref()
+            .ok_or(PlanRepairError::ConfirmationRequired)?;
+        if amendment.id != amendment_id {
+            return Err(PlanRepairError::AmendmentConflict {
+                expected: amendment.id.clone(),
+                actual: amendment_id.to_string(),
+            });
+        }
+        if self.validate_cancelled_plan_amendment_replay(amendment_id)? {
+            return Ok(());
+        }
+        if original_snapshot.stage != PlanRepairSessionStage::AwaitingConfirmation
+            || original_snapshot.request.status != PlanRepairRequestStatus::AwaitingConfirmation
+            || self.session.stage != WorkspaceStage::HumanConfirm
+        {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair cancellation requires an awaiting-confirmation session".to_string(),
+            ));
+        }
+
+        let lifecycle = self.persistent_lifecycle()?;
+        let stored_session = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(PlanRepairError::Store)?;
+        if stored_session.status != WorkspaceSessionStatus::WaitingForHuman {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair cancellation requires the authoritative waiting session".to_string(),
+            ));
+        }
+        let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+        let plan = revision_store
+            .get_plan_lineage(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &original_snapshot.request.plan_id,
+            )
+            .map_err(PlanRepairError::Store)?;
+        let stored_request = revision_store
+            .get_repair_request(&plan, &original_snapshot.request.id)
+            .map_err(PlanRepairError::Store)?;
+        if stored_request != original_snapshot.request
+            || stored_request.status != PlanRepairRequestStatus::AwaitingConfirmation
+        {
+            return Err(PlanRepairError::InvalidRepairTarget(
+                "plan repair cancellation requires the authoritative awaiting request".to_string(),
+            ));
+        }
+        let package = awaiting_confirmation_package_from_snapshot(&original_snapshot)?;
+        validate_persisted_awaiting_confirmation_package(
+            &revision_store,
+            &original_snapshot,
+            &plan,
+            &package,
+        )?;
+        match revision_store.find_plan_amendment_publication_journal(&plan, amendment_id) {
+            Ok(Some(journal)) if journal.phase == PlanAmendmentPublicationPhase::PlanPublished => {
+                return Err(plan_published_conflict());
+            }
+            Ok(_) => {}
+            Err(error) => return Err(PlanRepairError::Store(error)),
+        }
+
+        let cancel_summary = reason
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("用户取消：{value}"))
+            .unwrap_or_else(|| "用户取消 Plan Amendment".to_string());
+        let journal = cancellation_transition(self, original_snapshot, cancel_summary);
+        self.commit_plan_repair_transition(journal)
+    }
+
+    fn validate_cancelled_plan_amendment_replay(
+        &self,
+        amendment_id: &str,
+    ) -> Result<bool, PlanRepairError> {
+        let Some(snapshot) = self.plan_repair_snapshot.as_ref() else {
+            return Ok(false);
+        };
+        if snapshot.request.status != PlanRepairRequestStatus::Cancelled
+            || snapshot.request.amendment_id.as_deref() != Some(amendment_id)
+            || snapshot.stage != PlanRepairSessionStage::Completed
+            || self.session.stage != WorkspaceStage::Completed
+        {
+            return Ok(false);
+        }
+        let lifecycle = self.persistent_lifecycle()?;
+        let stored_session = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(PlanRepairError::Store)?;
+        if stored_session.status != WorkspaceSessionStatus::Terminated {
+            return Ok(false);
+        }
+        let revision_store = WorkItemRevisionStore::new(lifecycle.app_paths());
+        let plan = revision_store
+            .get_plan_lineage(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &snapshot.request.plan_id,
+            )
+            .map_err(PlanRepairError::Store)?;
+        let stored_request = revision_store
+            .get_repair_request(&plan, &snapshot.request.id)
+            .map_err(PlanRepairError::Store)?;
+        Ok(stored_request == snapshot.request
+            && stored_request.status == PlanRepairRequestStatus::Cancelled
+            && stored_request.amendment_id.as_deref() == Some(amendment_id))
+    }
+
+    pub(crate) fn require_plan_repair_snapshot(
+        &self,
+    ) -> Result<&PlanRepairSessionSnapshotDto, PlanRepairError> {
+        self.plan_repair_snapshot.as_ref().ok_or_else(|| {
+            PlanRepairError::InvalidRepairTarget(
+                "workspace session is not a plan repair child".to_string(),
+            )
+        })
+    }
+
+    pub(crate) fn persistent_lifecycle(&self) -> Result<LifecycleStore, PlanRepairError> {
+        self.lifecycle_store.clone().ok_or_else(|| {
+            PlanRepairError::Store(ProductStoreError::Io(
+                "plan repair requires a persistent workspace engine".to_string(),
+            ))
+        })
+    }
+}
+
+pub(crate) fn amendment_id_for(fingerprint: &str) -> String {
+    format!("plan_amendment_{fingerprint}")
+}
+
+pub(crate) fn child_session_id_for(amendment_id: &str) -> String {
+    format!("workspace_session_{amendment_id}")
+}
+
+pub(crate) fn link_id_for(amendment_id: &str) -> String {
+    format!("workspace_session_link_{amendment_id}")
+}
+
+pub(crate) fn canonical_plan_repair_parent_session(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    amendment_id: &str,
+) -> Result<WorkspaceSessionRecord, PlanRepairError> {
+    let expected_child_id = child_session_id_for(amendment_id);
+    let links = lifecycle
+        .list_session_links(project_id, issue_id)
+        .map_err(PlanRepairError::Store)?;
+    let mut candidates = lifecycle
+        .list_workspace_sessions(project_id, issue_id)
+        .map_err(PlanRepairError::Store)?
+        .into_iter()
+        .filter(|session| {
+            session.entity_id == plan_id
+                && session.workspace_type == WorkspaceType::WorkItemPlan
+                && session.status != WorkspaceSessionStatus::Terminated
+                && session.id != expected_child_id
+                && !links.iter().any(|link| link.child_session_id == session.id)
+        });
+    let parent = candidates.next().ok_or_else(|| {
+        PlanRepairError::InvalidRepairTarget(
+            "Plan Repair parent WorkItemPlan workspace is missing".to_string(),
+        )
+    })?;
+    if candidates.next().is_some() {
+        return Err(PlanRepairError::InvalidRepairTarget(
+            "Plan Repair parent WorkItemPlan workspace is ambiguous".to_string(),
+        ));
+    }
+    Ok(parent)
+}
+
+fn plan_published_conflict() -> PlanRepairError {
+    PlanRepairError::AmendmentConflict {
+        expected: "before_plan_published".to_string(),
+        actual: "plan_published".to_string(),
+    }
+}
+
+fn request_plan_id(request: &PlanRepairRequest) -> String {
+    request.plan_id.clone()
+}
+
+fn validate_reused_repair_request(
+    persisted: &PlanRepairRequest,
+    incoming: &PlanRepairRequest,
+) -> Result<(), PlanRepairError> {
+    if persisted.plan_id != incoming.plan_id
+        || persisted.base_plan_revision_id != incoming.base_plan_revision_id
+        || persisted.fingerprint != incoming.fingerprint
+        || persisted.defect_class != incoming.defect_class
+        || !persisted
+            .reason_code
+            .trim()
+            .eq_ignore_ascii_case(incoming.reason_code.trim())
+        || !same_repair_target_identity(&persisted.repair_target, &incoming.repair_target)
+        || !same_string_set(&persisted.contract_refs, &incoming.contract_refs)
+        || !same_string_set(&persisted.capability_refs, &incoming.capability_refs)
+    {
+        return Err(PlanRepairError::InvalidRepairTarget(
+            "persisted plan repair request identity does not match the incoming request"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_persisted_repair_request(
+    plan: &WorkItemPlanLineage,
+    request: &PlanRepairRequest,
+) -> Result<(), PlanRepairError> {
+    if request.plan_id != plan.id
+        || plan.active_revision_id.as_deref() != Some(request.base_plan_revision_id.as_str())
+        || request
+            .amendment_id
+            .as_deref()
+            .is_some_and(|amendment_id| amendment_id != amendment_id_for(&request.fingerprint))
+    {
+        return Err(PlanRepairError::InvalidRepairTarget(
+            "persisted plan repair request lineage is inconsistent with the active plan"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn same_repair_target_identity(left: &RepairTarget, right: &RepairTarget) -> bool {
+    left.kind == right.kind
+        && same_string_set(&left.logical_work_item_ids, &right.logical_work_item_ids)
+        && same_string_set(&left.work_item_revision_ids, &right.work_item_revision_ids)
+}
+
+fn same_string_set(left: &[String], right: &[String]) -> bool {
+    let mut left = left.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut right = right.iter().map(String::as_str).collect::<Vec<_>>();
+    left.sort_unstable();
+    left.dedup();
+    right.sort_unstable();
+    right.dedup();
+    left == right
+}
+
+pub(crate) fn linked_child_session(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    request: &PlanRepairRequest,
+) -> Result<Option<(WorkspaceSessionLink, WorkspaceSessionRecord)>, PlanRepairError> {
+    let Some(amendment_id) = request.amendment_id.as_deref() else {
+        return Ok(None);
+    };
+    let expected_child_id = child_session_id_for(amendment_id);
+    let expected_link_id = link_id_for(amendment_id);
+    let mut candidates = lifecycle
+        .list_session_links(project_id, issue_id)
+        .map_err(PlanRepairError::Store)?
+        .into_iter()
+        .filter(|link| {
+            link.id == expected_link_id
+                || link.child_session_id == expected_child_id
+                || (link.relation == WorkspaceSessionRelation::PlanRepair
+                    && (link.trigger.repair_request_id == request.id
+                        || link.trigger.amendment_id == amendment_id))
+        });
+    let Some(link) = candidates.next() else {
+        return Ok(None);
+    };
+    if candidates.next().is_some() {
+        return Err(plan_repair_lineage_mismatch(
+            "workspace_session_link",
+            &expected_link_id,
+        ));
+    }
+    let expected_route = format!(
+        "/workbench/projects/{project_id}/issues/{issue_id}/coding/{}",
+        request.trigger_attempt_id
+    );
+    if link.relation != WorkspaceSessionRelation::PlanRepair
+        || link.id != expected_link_id
+        || link.parent_session_id != request.trigger_attempt_id
+        || link.child_session_id != expected_child_id
+        || link.trigger.attempt_id != request.trigger_attempt_id
+        || link.trigger.unit_run_id != request.trigger_unit_run_id
+        || link.trigger.review_id != request.trigger_review_id
+        || link.trigger.finding_id != request.trigger_finding_id
+        || link.trigger.repair_request_id != request.id
+        || link.trigger.amendment_id != amendment_id
+        || link.trigger.fingerprint != request.fingerprint
+        || link.trigger.base_plan_revision_id != request.base_plan_revision_id
+        || link.return_context.original_attempt_id != request.trigger_attempt_id
+        || link.return_context.original_unit_run_id != request.trigger_unit_run_id
+        || link.return_context.timeline_anchor_id != request.trigger_finding_id
+        || link.return_context.original_route != expected_route
+    {
+        return Err(plan_repair_lineage_mismatch(
+            "workspace_session_link",
+            &link.id,
+        ));
+    }
+    let child = lifecycle
+        .get_workspace_session(&link.child_session_id)
+        .map_err(PlanRepairError::Store)?;
+    if child.id != expected_child_id
+        || child.project_id != project_id
+        || child.issue_id != issue_id
+        || child.entity_id != request.plan_id
+        || child.workspace_type != WorkspaceType::WorkItemPlan
+        || !matches!(
+            child.status,
+            WorkspaceSessionStatus::Open
+                | WorkspaceSessionStatus::Running
+                | WorkspaceSessionStatus::WaitingForHuman
+                | WorkspaceSessionStatus::BlockedProviderUnavailable
+                | WorkspaceSessionStatus::Terminated
+        )
+    {
+        return Err(plan_repair_lineage_mismatch("workspace_session", &child.id));
+    }
+    Ok(Some((link, child)))
+}
+
+fn plan_repair_lineage_mismatch(kind: &'static str, id: &str) -> PlanRepairError {
+    PlanRepairError::Store(ProductStoreError::IdentityMismatch {
+        kind,
+        id: id.to_string(),
+    })
+}

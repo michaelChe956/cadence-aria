@@ -19,7 +19,7 @@ async fn coding_prompt_includes_rework_fix_hints() {
         )
         .expect("running");
     store
-        .save_rework_instruction(&CodingReworkInstruction {
+        .save_rework_instruction(&attempt, &CodingReworkInstruction {
             id: "coding_rework_instruction_0001".to_string(),
             attempt_id: attempt.id.clone(),
             source_stage: CodingExecutionStage::CodeReview,
@@ -84,14 +84,14 @@ async fn execute_coding_includes_unconsumed_context_notes_and_consumes_them() {
         .increment_attempt_rework_count("project_0001", "issue_0001", &attempt.id)
         .expect("first rework");
     let old_note = store
-        .create_context_note(&attempt.id, "不要带入本轮 Coder prompt".to_string())
+        .create_context_note(&attempt, "不要带入本轮 Coder prompt".to_string())
         .expect("old context note");
     store
         .mark_context_notes_consumed("project_0001", "issue_0001", &attempt.id, &[old_note.id], 1)
         .expect("consume old note");
     let new_note = store
         .create_context_note(
-            &attempt.id,
+            &attempt,
             "请优先修复 provider_install SSE 订阅".to_string(),
         )
         .expect("new context note");
