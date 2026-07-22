@@ -16,6 +16,7 @@ import {
   generateDesignSpecs,
   generateStorySpecs,
   getIssueLifecycle,
+  getRepositoryInitialization,
   prepareWorkItemPlan,
   listProductIssues,
   listProjects,
@@ -27,7 +28,7 @@ import type {
   Project,
   Repository,
   CreateRepositoryRequest,
-  CreateRepositoryResponse,
+  RepositoryInitializationOperationSnapshot,
 } from "../../api/types";
 import {
   groupLifecycleCards,
@@ -407,18 +408,30 @@ export function IssueLifecycleWorkbench({
     await refresh(project.project_id);
   }
 
-  async function handleCreateRepository(
+  async function handleStartRepositoryInitialization(
     payload: CreateRepositoryRequest,
-  ): Promise<CreateRepositoryResponse> {
+  ): Promise<RepositoryInitializationOperationSnapshot> {
     if (!selectedProjectId) {
       const message = "缺少 Project";
       setError(message);
       throw new Error(message);
     }
 
-    const response = await createRepository(selectedProjectId, payload);
-    await refresh(selectedProjectId);
-    return response;
+    return createRepository(selectedProjectId, payload);
+  }
+
+  async function handleFetchRepositoryInitialization(operationId: string) {
+    if (!selectedProjectId) {
+      throw new Error("缺少 Project");
+    }
+
+    return getRepositoryInitialization(selectedProjectId, operationId);
+  }
+
+  async function handleRepositoryInitializationCompleted() {
+    if (selectedProjectId) {
+      await refresh(selectedProjectId);
+    }
   }
 
   async function handleDeleteProject(projectId: string) {
@@ -764,7 +777,9 @@ export function IssueLifecycleWorkbench({
       ) : null}
       {repositoryDialogOpen ? (
         <CreateRepositoryDialog
-          onCreate={handleCreateRepository}
+          onCreate={handleStartRepositoryInitialization}
+          onFetchOperation={handleFetchRepositoryInitialization}
+          onInitializationCompleted={handleRepositoryInitializationCompleted}
           onClose={() => setRepositoryDialogOpen(false)}
         />
       ) : null}
