@@ -28,8 +28,9 @@ use crate::product::cadence_skills::{
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::{ProjectRecord, ProviderName, RepositoryRecord};
 use crate::product::repository_store::{
-    CreateRepositoryInput, RepositoryInitializationCommandSummary, RepositoryRegistrationError,
-    RepositoryRegistrationInput,
+    CreateRepositoryInput, RepositoryInitializationCommandSummary,
+    RepositoryInitializationProgress, RepositoryInitializationStepKind,
+    RepositoryRegistrationError, RepositoryRegistrationInput,
 };
 
 struct AvailableHealth;
@@ -164,23 +165,26 @@ impl RepositoryInitializer for RecordingInitializer {
         _git_root: &std::path::Path,
         _command_timeout: Duration,
         _cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
         self.calls.lock().unwrap().push("initializer");
-        Ok([
-            "/pre-check",
-            "/rule-config",
-            "/mcp-configuration",
-            "/project-rules-examples",
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, command)| RepositoryInitializationCommandSummary {
-            command_index: index + 1,
-            command: command.to_string(),
-            status: "completed".to_string(),
-            output_summary: None,
-        })
-        .collect())
+        let mut summaries = Vec::with_capacity(4);
+        for (index, step) in RepositoryInitializationStepKind::ALL
+            .into_iter()
+            .filter(|step| step.command().is_some())
+            .enumerate()
+        {
+            let command = step.command().expect("Claude initialization command");
+            progress.step_started(step)?;
+            progress.step_completed(step)?;
+            summaries.push(RepositoryInitializationCommandSummary {
+                command_index: index + 1,
+                command: command.to_string(),
+                status: "completed".to_string(),
+                output_summary: None,
+            });
+        }
+        Ok(summaries)
     }
 }
 
@@ -323,20 +327,42 @@ impl RepositoryInitializer for StaticInitializer {
         _git_root: &std::path::Path,
         _command_timeout: Duration,
         _cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
         self.count.fetch_add(1, Ordering::SeqCst);
         if self.fail {
+            let step = RepositoryInitializationStepKind::PreCheck;
+            progress.step_started(step)?;
+            progress.step_completed(step)?;
+            let step = RepositoryInitializationStepKind::RuleConfig;
+            progress.step_started(step)?;
             return Err(RepositoryRegistrationError::for_command(
                 "repository_initialization",
                 "repository_init_command_failed",
                 2,
-                "/rule-config",
+                step.command().expect("Claude initialization command"),
                 Some("failed".to_string()),
                 true,
                 "inspect",
             ));
         }
-        Ok(command_summaries())
+        let mut summaries = Vec::with_capacity(4);
+        for (index, step) in RepositoryInitializationStepKind::ALL
+            .into_iter()
+            .filter(|step| step.command().is_some())
+            .enumerate()
+        {
+            let command = step.command().expect("Claude initialization command");
+            progress.step_started(step)?;
+            progress.step_completed(step)?;
+            summaries.push(RepositoryInitializationCommandSummary {
+                command_index: index + 1,
+                command: command.to_string(),
+                status: "completed".to_string(),
+                output_summary: None,
+            });
+        }
+        Ok(summaries)
     }
 }
 
@@ -440,24 +466,6 @@ fn cadence_result(source_root: &std::path::Path) -> CadenceSkillsPreparationResu
         link_sync_status: LinkSyncStatus::Synchronized,
         warnings: Vec::new(),
     }
-}
-
-fn command_summaries() -> Vec<RepositoryInitializationCommandSummary> {
-    [
-        "/pre-check",
-        "/rule-config",
-        "/mcp-configuration",
-        "/project-rules-examples",
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, command)| RepositoryInitializationCommandSummary {
-        command_index: index + 1,
-        command: command.to_string(),
-        status: "completed".to_string(),
-        output_summary: None,
-    })
-    .collect()
 }
 
 fn registry() -> Arc<ProviderRegistry> {

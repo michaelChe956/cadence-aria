@@ -23,7 +23,8 @@ use crate::product::cadence_skills::{
 use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::{
     CadenceSkillsPreparation, ClaudeRepositoryInitializer, ProjectLookup,
-    RepositoryInitializationCommandSummary, RepositoryInitializer, RepositoryPersistence,
+    RepositoryInitializationCommandSummary, RepositoryInitializationProgress,
+    RepositoryInitializationStepKind, RepositoryInitializer, RepositoryPersistence,
     RepositoryRegistrationCoordinator, RepositoryRegistrationError, RepositoryRegistrationInput,
     RepositoryRegistrationSuccess, RepositoryStore,
 };
@@ -387,22 +388,25 @@ impl RepositoryInitializer for CompletedRepositoryInitializer {
         _git_root: &StdPath,
         _command_timeout: Duration,
         _cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
-        Ok([
-            "/pre-check",
-            "/rule-config",
-            "/mcp-configuration",
-            "/project-rules-examples",
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(offset, command)| RepositoryInitializationCommandSummary {
-            command_index: offset + 1,
-            command: command.to_string(),
-            status: "completed".to_string(),
-            output_summary: None,
-        })
-        .collect())
+        let mut summaries = Vec::with_capacity(4);
+        for (offset, step) in RepositoryInitializationStepKind::ALL
+            .into_iter()
+            .filter(|step| step.command().is_some())
+            .enumerate()
+        {
+            let command = step.command().expect("Claude initialization command");
+            progress.step_started(step)?;
+            progress.step_completed(step)?;
+            summaries.push(RepositoryInitializationCommandSummary {
+                command_index: offset + 1,
+                command: command.to_string(),
+                status: "completed".to_string(),
+                output_summary: None,
+            });
+        }
+        Ok(summaries)
     }
 }
 

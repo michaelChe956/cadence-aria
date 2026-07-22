@@ -37,7 +37,8 @@ use cadence_aria::product::json_store::ProductStoreError;
 use cadence_aria::product::models::{ProviderName, RepositoryRecord};
 use cadence_aria::product::repository_store::{
     CadenceSkillsPreparation, CreateRepositoryInput, RepositoryInitializationCommandSummary,
-    RepositoryInitializer, RepositoryPersistence, RepositoryRegistrationError,
+    RepositoryInitializationProgress, RepositoryInitializationStepKind, RepositoryInitializer,
+    RepositoryPersistence, RepositoryRegistrationError,
 };
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::handlers::RepositoryRegistrationDependencies;
@@ -313,10 +314,10 @@ async fn repository_initialization_http_success_runs_four_independent_claude_tur
             .map(|input| input.prompt.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "/pre-check",
-            "/rule-config",
-            "/mcp-configuration",
-            "/project-rules-examples"
+            "/pre-check --no-interrupt",
+            "/rule-config --no-interrupt",
+            "/mcp-configuration --no-interrupt",
+            "/project-rules-examples --no-interrupt"
         ]
     );
     for input in inputs.iter() {
@@ -446,11 +447,26 @@ impl RepositoryInitializer for BlockingInitializer {
         _git_root: &Path,
         _command_timeout: Duration,
         _cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
         self.started.add_permits(1);
         let permit = self.release.acquire().await.expect("release");
         permit.forget();
-        Ok(command_summaries())
+        RepositoryInitializationStepKind::ALL
+            .into_iter()
+            .filter_map(|step| step.command().map(|command| (step, command)))
+            .enumerate()
+            .map(|(offset, (step, command))| {
+                progress.step_started(step)?;
+                progress.step_completed(step)?;
+                Ok(RepositoryInitializationCommandSummary {
+                    command_index: offset + 1,
+                    command: command.to_string(),
+                    status: "completed".to_string(),
+                    output_summary: None,
+                })
+            })
+            .collect()
     }
 }
 
@@ -749,21 +765,19 @@ async fn repository_initialization_cadence_link_conflicts_preserve_user_content(
 }
 
 fn command_summaries() -> Vec<RepositoryInitializationCommandSummary> {
-    [
-        "/pre-check",
-        "/rule-config",
-        "/mcp-configuration",
-        "/project-rules-examples",
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(offset, command)| RepositoryInitializationCommandSummary {
-        command_index: offset + 1,
-        command: command.to_string(),
-        status: "completed".to_string(),
-        output_summary: None,
-    })
-    .collect()
+    RepositoryInitializationStepKind::ALL
+        .into_iter()
+        .filter_map(|step| step.command().map(|command| (step, command)))
+        .enumerate()
+        .map(
+            |(offset, (_, command))| RepositoryInitializationCommandSummary {
+                command_index: offset + 1,
+                command: command.to_string(),
+                status: "completed".to_string(),
+                output_summary: None,
+            },
+        )
+        .collect()
 }
 
 fn copy_fixture_tree(source: &Path, destination: &Path) {

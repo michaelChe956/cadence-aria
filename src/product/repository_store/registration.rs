@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use super::initializer::ClaudeRepositoryInitializer;
 use super::types::{
     CadenceSkillsPreparationSummary, RepositoryInitializationCommandSummary,
+    RepositoryInitializationProgress, RepositoryInitializationStepKind,
     RepositoryInitializationSummary, RepositoryRegistrationError, RepositoryRegistrationInput,
     RepositoryRegistrationSuccess,
 };
@@ -91,6 +92,7 @@ pub trait RepositoryInitializer: Send + Sync {
         git_root: &Path,
         command_timeout: Duration,
         cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError>;
 }
 
@@ -101,14 +103,33 @@ impl RepositoryInitializer for ClaudeRepositoryInitializer {
         git_root: &Path,
         command_timeout: Duration,
         cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
-        self.initialize(git_root, command_timeout, cancellation)
+        self.initialize(git_root, command_timeout, cancellation, progress)
             .await
     }
 }
 
 type HostReadiness = dyn Fn() -> Result<(), String> + Send + Sync;
 type Clock = dyn Fn() -> String + Send + Sync;
+
+struct NoopRepositoryInitializationProgress;
+
+impl RepositoryInitializationProgress for NoopRepositoryInitializationProgress {
+    fn step_started(
+        &self,
+        _step: RepositoryInitializationStepKind,
+    ) -> Result<(), RepositoryRegistrationError> {
+        Ok(())
+    }
+
+    fn step_completed(
+        &self,
+        _step: RepositoryInitializationStepKind,
+    ) -> Result<(), RepositoryRegistrationError> {
+        Ok(())
+    }
+}
 
 pub struct RepositoryRegistrationCoordinator {
     projects: Arc<dyn ProjectLookup>,
@@ -236,7 +257,12 @@ impl RepositoryRegistrationCoordinator {
 
         let commands = match self
             .initializer
-            .initialize_repository(&git_root, self.initialization_timeout, cancellation.clone())
+            .initialize_repository(
+                &git_root,
+                self.initialization_timeout,
+                cancellation.clone(),
+                Arc::new(NoopRepositoryInitializationProgress),
+            )
             .await
         {
             Ok(commands) => commands,
