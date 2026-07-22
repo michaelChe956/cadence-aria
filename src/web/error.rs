@@ -143,7 +143,9 @@ impl From<crate::product::repository_store::RepositoryRegistrationError> for Api
                 "command": error.command,
                 "reason_code": error.reason_code,
                 "stderr_summary": stderr_summary,
-                "changed_paths": error.changed_paths.unwrap_or_default(),
+                "changed_paths": sanitize_repository_api_changed_paths(
+                    error.changed_paths.unwrap_or_default(),
+                ),
                 "retryable": error.retryable,
                 "action": error.action,
             }),
@@ -203,6 +205,22 @@ pub(crate) fn sanitize_repository_api_text(value: impl AsRef<str>) -> String {
         .collect::<String>()
 }
 
+pub(crate) fn sanitize_repository_api_path(value: impl AsRef<str>) -> String {
+    let value = value.as_ref();
+    if is_absolute_repository_api_path(value) {
+        "<path>".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+pub(crate) fn sanitize_repository_api_changed_paths(changed_paths: Vec<String>) -> Vec<String> {
+    changed_paths
+        .into_iter()
+        .map(sanitize_repository_api_path)
+        .collect()
+}
+
 pub(crate) fn sanitize_repository_api_warnings(warnings: Vec<String>) -> Vec<String> {
     warnings
         .into_iter()
@@ -217,16 +235,20 @@ fn is_sensitive_key(key: &str) -> bool {
         .any(|needle| key.contains(needle))
 }
 
+fn is_absolute_repository_api_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with('\\')
+        || (value.len() >= 3
+            && value.as_bytes()[0].is_ascii_alphabetic()
+            && value.as_bytes()[1] == b':'
+            && matches!(value.as_bytes()[2], b'/' | b'\\'))
+}
+
 fn is_absolute_path_token(token: &str) -> bool {
     let token = token.trim_matches(|character: char| {
         matches!(character, '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';')
     });
-    token.starts_with('/')
-        || token.starts_with('\\')
-        || (token.len() >= 3
-            && token.as_bytes()[0].is_ascii_alphabetic()
-            && token.as_bytes()[1] == b':'
-            && matches!(token.as_bytes()[2], b'/' | b'\\'))
+    is_absolute_repository_api_path(token)
 }
 
 fn redact_absolute_paths(value: &str) -> String {
@@ -393,6 +415,30 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    #[test]
+    fn repository_registration_api_error_sanitizes_changed_paths_at_boundary() {
+        let api_error = ApiError::from(RepositoryRegistrationError {
+            stage: "repository_init_command".to_string(),
+            provider: Some("claude_code".to_string()),
+            command_index: Some(2),
+            command: Some("/rule-config".to_string()),
+            reason_code: "repository_init_command_failed".to_string(),
+            stderr_summary: Some("safe diagnostic".to_string()),
+            changed_paths: Some(vec![
+                "/private/repo/generated".to_string(),
+                ".claude/rules/project.md".to_string(),
+                "src/monkey.rs".to_string(),
+            ]),
+            retryable: true,
+            action: "Inspect changed paths and retry.".to_string(),
+        });
+
+        assert_eq!(
+            api_error.details["changed_paths"],
+            json!(["<path>", ".claude/rules/project.md", "src/monkey.rs"])
+        );
     }
 
     #[test]

@@ -344,6 +344,11 @@ async fn repository_initialization_post_returns_202_then_get_returns_completed_f
     );
 
     let completed = get_operation_until_terminal(&app, "project_0001", operation_id).await;
+    let canonical_repository_path = repo
+        .path()
+        .canonicalize()
+        .expect("canonical repository path");
+    let canonical_repository_path = canonical_repository_path.to_string_lossy();
     assert_eq!(completed["status"], "completed");
     assert!(
         completed["steps"]
@@ -355,6 +360,14 @@ async fn repository_initialization_post_returns_202_then_get_returns_completed_f
     assert_eq!(
         completed["result"]["repository"]["repository_id"],
         "repository_0001"
+    );
+    assert_eq!(completed["result"]["repository"]["path"], "<path>");
+    assert_eq!(completed["result"]["repository"]["runtime_root"], "<path>");
+    let serialized_completed =
+        serde_json::to_string(&completed).expect("serialize completed operation response");
+    assert!(
+        !serialized_completed.contains(canonical_repository_path.as_ref()),
+        "completed operation response leaked repository path: {serialized_completed}"
     );
     assert_eq!(
         completed["result"]["initialization"]["commands"][0]["command"],

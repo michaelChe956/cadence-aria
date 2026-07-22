@@ -6,7 +6,10 @@ use crate::product::repository_store::{
     RepositoryInitializationStepKind, RepositoryInitializationStepStatus,
     RepositoryRegistrationSuccess,
 };
-use crate::web::error::sanitize_repository_api_warnings;
+use crate::web::error::{
+    sanitize_repository_api_changed_paths, sanitize_repository_api_path,
+    sanitize_repository_api_warnings,
+};
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
 ) -> IssueWorkItemPlanDetailDto {
@@ -104,11 +107,26 @@ pub(crate) fn repository_dto(record: RepositoryRecord) -> RepositoryDto {
     }
 }
 
+fn repository_initialization_repository_dto(record: RepositoryRecord) -> RepositoryDto {
+    RepositoryDto {
+        repository_id: record.id,
+        project_id: record.project_id,
+        name: record.name,
+        path: sanitize_repository_api_path(record.path.to_string_lossy()),
+        repo_hash: record.repo_hash,
+        runtime_root: sanitize_repository_api_path(record.runtime_root.to_string_lossy()),
+        default_policy_preset: record.default_policy_preset,
+        default_provider_mode: record.default_provider_mode,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }
+}
+
 pub(crate) fn repository_initialization_result_dto(
     success: &RepositoryRegistrationSuccess,
 ) -> RepositoryInitializationResultDto {
     RepositoryInitializationResultDto {
-        repository: repository_dto(success.repository.clone()),
+        repository: repository_initialization_repository_dto(success.repository.clone()),
         initialization: RepositoryRegistrationInitializationDto {
             source: success.initialization.source_mode.clone(),
             commands: success
@@ -120,7 +138,7 @@ pub(crate) fn repository_initialization_result_dto(
                 })
                 .collect(),
             warnings: sanitize_repository_api_warnings(success.warnings.clone()),
-            changed_paths: success.changed_paths.clone(),
+            changed_paths: sanitize_repository_api_changed_paths(success.changed_paths.clone()),
             completed_at: success.completed_at.clone(),
         },
     }
@@ -854,6 +872,26 @@ pub(crate) fn issue_status_text(status: &IssueStatus) -> &'static str {
 }
 
 #[cfg(test)]
+#[test]
+fn repository_initialization_result_dto_sanitizes_paths_and_changed_paths() {
+    let mut success = super::product_resources::create_repository_tests::registration_success();
+    success.changed_paths = vec![
+        "/private/repo/generated".to_string(),
+        ".claude/rules/project.md".to_string(),
+        "src/monkey.rs".to_string(),
+    ];
+
+    let value = serde_json::to_value(repository_initialization_result_dto(&success))
+        .expect("repository initialization result dto");
+
+    assert_eq!(value["repository"]["path"], "<path>");
+    assert_eq!(value["repository"]["runtime_root"], "<path>");
+    assert_eq!(
+        value["initialization"]["changed_paths"],
+        serde_json::json!(["<path>", ".claude/rules/project.md", "src/monkey.rs"])
+    );
+}
+
 #[test]
 fn repository_registration_success_preserves_all_source_modes() {
     for source_mode in ["online_clone", "online_update", "offline"] {
