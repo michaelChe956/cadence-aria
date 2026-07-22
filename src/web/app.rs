@@ -53,6 +53,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
             delete(handlers::delete_repository),
         )
         .route(
+            "/api/projects/{project_id}/repository-initializations/{operation_id}",
+            get(handlers::get_repository_initialization),
+        )
+        .route(
             "/api/projects/{project_id}/issues",
             get(handlers::list_product_issues).post(handlers::create_product_issue),
         )

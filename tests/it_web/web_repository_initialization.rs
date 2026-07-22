@@ -1,6 +1,6 @@
 //! 验收追踪：
 //! AC-007/008 -> `repository_initialization_cadence_offline_syncs_three_link_layers_safely`
-//! AC-009/010 -> `repository_initialization_http_success_runs_four_independent_claude_turns`
+//! AC-009/010 -> `repository_initialization_post_returns_202_then_get_returns_completed_five_step_result`
 //! AC-012 -> `repository_initialization_failures_stop_and_leave_no_repository_record`
 //! AC-013 -> `repository_initialization_persist_failure_and_same_path_lock_are_transactional`
 
@@ -37,8 +37,10 @@ use cadence_aria::product::json_store::ProductStoreError;
 use cadence_aria::product::models::{ProviderName, RepositoryRecord};
 use cadence_aria::product::repository_store::{
     CadenceSkillsPreparation, CreateRepositoryInput, RepositoryInitializationCommandSummary,
-    RepositoryInitializationProgress, RepositoryInitializationStepKind, RepositoryInitializer,
-    RepositoryPersistence, RepositoryRegistrationError,
+    RepositoryInitializationOperation, RepositoryInitializationOperationInput,
+    RepositoryInitializationOperationStatus, RepositoryInitializationProgress,
+    RepositoryInitializationStepKind, RepositoryInitializer, RepositoryPersistence,
+    RepositoryRegistrationError,
 };
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::handlers::RepositoryRegistrationDependencies;
@@ -270,43 +272,95 @@ async fn create_project(app: axum::Router) {
     assert_eq!(status, StatusCode::OK);
 }
 
+async fn get_operation_until_terminal(
+    app: &axum::Router,
+    project_id: &str,
+    operation_id: &str,
+) -> Value {
+    let uri = format!("/api/projects/{project_id}/repository-initializations/{operation_id}");
+    let mut last_snapshot = Value::Null;
+    for _ in 0..100 {
+        let (status, snapshot) = request_json(app.clone(), Method::GET, &uri, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{snapshot}");
+        if matches!(snapshot["status"].as_str(), Some("completed" | "failed")) {
+            return snapshot;
+        }
+        last_snapshot = snapshot;
+        tokio::task::yield_now().await;
+    }
+    panic!("operation did not reach a terminal state: {last_snapshot}");
+}
+
+async fn get_operation(
+    app: axum::Router,
+    project_id: &str,
+    operation_id: &str,
+) -> (StatusCode, Value) {
+    request_json(
+        app,
+        Method::GET,
+        &format!("/api/projects/{project_id}/repository-initializations/{operation_id}"),
+        json!({}),
+    )
+    .await
+}
+
+fn command_step_id(command_index: usize) -> &'static str {
+    match command_index {
+        1 => "pre_check",
+        2 => "rule_config",
+        3 => "mcp_configuration",
+        4 => "project_rules_examples",
+        _ => panic!("unexpected command index: {command_index}"),
+    }
+}
+
 #[tokio::test]
-async fn repository_initialization_http_success_runs_four_independent_claude_turns() {
-    let root = tempdir().expect("root");
+async fn repository_initialization_post_returns_202_then_get_returns_completed_five_step_result() {
+    let root = tempdir().unwrap();
     let repo = git_repo();
     let provider = Arc::new(ScriptedClaude::new(vec![TurnScript::Complete; 4]));
     let app = build_web_router(integration_state(root.path(), provider.clone(), None, None));
     create_project(app.clone()).await;
-    let (status, body) = request_json(
-        app,
+
+    let (status, accepted) = request_json(
+        app.clone(),
         Method::POST,
         "/api/projects/project_0001/repositories",
-        json!({"name":"Repo","path":repo.path(),"default_provider_mode":"claude_code"}),
+        json!({"name":"Repo","path":repo.path()}),
     )
     .await;
 
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(body["repository"]["repository_id"], "repository_0001");
-    assert_eq!(body["initialization"]["source"], "offline");
-    assert_eq!(
-        body["initialization"]["commands"].as_array().unwrap().len(),
-        4
-    );
-    assert_eq!(
-        body["initialization"]["warnings"],
-        json!(["fixture_warning"])
-    );
-    assert_eq!(
-        body["initialization"]["completed_at"],
-        "2026-07-14T03:00:00Z"
-    );
-    assert_eq!(
-        body["initialization"]["changed_paths"]
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let operation_id = accepted["operation_id"].as_str().unwrap();
+    assert_eq!(accepted["status"], "created");
+    assert_eq!(accepted["steps"].as_array().unwrap().len(), 5);
+    assert!(
+        accepted["steps"]
             .as_array()
             .unwrap()
-            .len(),
-        4
+            .iter()
+            .all(|step| step["status"] == "pending")
     );
+
+    let completed = get_operation_until_terminal(&app, "project_0001", operation_id).await;
+    assert_eq!(completed["status"], "completed");
+    assert!(
+        completed["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|step| step["status"] == "completed")
+    );
+    assert_eq!(
+        completed["result"]["repository"]["repository_id"],
+        "repository_0001"
+    );
+    assert_eq!(
+        completed["result"]["initialization"]["commands"][0]["command"],
+        "/pre-check --no-interrupt",
+    );
+
     let inputs = provider.inputs.lock().expect("inputs");
     assert_eq!(
         inputs
@@ -338,26 +392,26 @@ async fn repository_initialization_failures_stop_and_leave_no_repository_record(
         let provider = Arc::new(ScriptedClaude::new(scripts));
         let app = build_web_router(integration_state(root.path(), provider.clone(), None, None));
         create_project(app.clone()).await;
-        let (status, error) = request_json(
+        let (status, accepted) = request_json(
             app.clone(),
             Method::POST,
             "/api/projects/project_0001/repositories",
             json!({"name":"Repo","path":repo.path()}),
         )
         .await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{error}");
-        assert_eq!(error["code"], "repository_init_command_failed");
+        assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+        let operation_id = accepted["operation_id"].as_str().expect("operation id");
+        let failed = get_operation_until_terminal(&app, "project_0001", operation_id).await;
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["failed_step"], command_step_id(fail_at));
+        assert_eq!(failed["error"]["code"], "repository_init_command_failed");
         assert_eq!(
-            error["details"]["command"],
+            failed["error"]["details"]["command"],
             command_summaries()[fail_at - 1].command
         );
         assert_eq!(provider.inputs.lock().expect("inputs").len(), fail_at);
-        assert_eq!(
-            error["details"]["changed_paths"].as_array().unwrap().len(),
-            fail_at
-        );
-        assert!(error["details"]["retryable"].as_bool().unwrap());
-        assert!(error["details"]["action"].is_string());
+        assert!(failed["error"]["details"]["retryable"].as_bool().unwrap());
+        assert!(failed["error"]["details"]["action"].is_string());
         let (_, repositories) = request_json(
             app,
             Method::GET,
@@ -376,15 +430,22 @@ async fn repository_initialization_interaction_aborts_and_does_not_persist() {
     let provider = Arc::new(ScriptedClaude::new(vec![TurnScript::Interaction]));
     let app = build_web_router(integration_state(root.path(), provider.clone(), None, None));
     create_project(app.clone()).await;
-    let (status, error) = request_json(
+    let (status, accepted) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/repositories",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(error["code"], "repository_init_interaction_required");
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let operation_id = accepted["operation_id"].as_str().expect("operation id");
+    let failed = get_operation_until_terminal(&app, "project_0001", operation_id).await;
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["failed_step"], "pre_check");
+    assert_eq!(
+        failed["error"]["code"],
+        "repository_init_interaction_required"
+    );
     for _ in 0..10 {
         if provider
             .commands
@@ -482,18 +543,28 @@ async fn repository_initialization_persist_failure_and_same_path_lock_are_transa
         None,
     ));
     create_project(app.clone()).await;
-    let (status, error) = request_json(
-        app,
+    let (status, accepted) = request_json(
+        app.clone(),
         Method::POST,
         "/api/projects/project_0001/repositories",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{error}");
-    assert_eq!(error["code"], "repository_persist_failed");
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let operation_id = accepted["operation_id"].as_str().expect("operation id");
+    let failed = get_operation_until_terminal(&app, "project_0001", operation_id).await;
+    assert_eq!(failed["status"], "failed");
+    assert!(
+        failed["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|step| step["status"] == "completed")
+    );
+    assert_eq!(failed["failed_step"], Value::Null);
     assert_eq!(
-        error["details"]["changed_paths"].as_array().unwrap().len(),
-        4
+        failed["error"]["details"]["reason_code"],
+        "repository_persist_failed"
     );
 
     let root = tempdir().expect("root");
@@ -512,19 +583,20 @@ async fn repository_initialization_persist_failure_and_same_path_lock_are_transa
         Some(initializer),
     ));
     create_project(app.clone()).await;
-    let first_app = app.clone();
-    let repo_path = repo.path().to_path_buf();
-    let first = tokio::spawn(async move {
-        request_json(
-            first_app,
-            Method::POST,
-            "/api/projects/project_0001/repositories",
-            json!({"name":"Repo","path":repo_path}),
-        )
-        .await
-    });
+    let (status, accepted) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let operation_id = accepted["operation_id"].as_str().expect("operation id");
     let permit = started.acquire().await.expect("started");
     permit.forget();
+    let (status, running) = get_operation(app.clone(), "project_0001", operation_id).await;
+    assert_eq!(status, StatusCode::OK, "{running}");
+    assert_eq!(running["status"], "running");
     let (status, in_progress) = request_json(
         app.clone(),
         Method::POST,
@@ -535,8 +607,8 @@ async fn repository_initialization_persist_failure_and_same_path_lock_are_transa
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(in_progress["code"], "repository_initialization_in_progress");
     release.add_permits(1);
-    let (status, _) = first.await.expect("first request");
-    assert_eq!(status, StatusCode::CREATED);
+    let completed = get_operation_until_terminal(&app, "project_0001", operation_id).await;
+    assert_eq!(completed["status"], "completed");
     let (status, already_registered) = request_json(
         app,
         Method::POST,
@@ -546,6 +618,112 @@ async fn repository_initialization_persist_failure_and_same_path_lock_are_transa
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(already_registered["code"], "repository_already_registered");
+}
+
+#[tokio::test]
+async fn repository_initialization_operation_unknown_and_cross_project_are_not_found() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let provider = Arc::new(ScriptedClaude::new(vec![TurnScript::Complete; 4]));
+    let app = build_web_router(integration_state(root.path(), provider, None, None));
+    create_project(app.clone()).await;
+    let (status, unknown) = get_operation(
+        app.clone(),
+        "project_0001",
+        "repository_initialization_unknown",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{unknown}");
+    assert_eq!(
+        unknown["code"],
+        "repository_initialization_operation_not_found"
+    );
+
+    let (status, accepted) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let operation_id = accepted["operation_id"].as_str().expect("operation id");
+    let (status, cross_project) = get_operation(app, "project_0002", operation_id).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{cross_project}");
+    assert_eq!(
+        cross_project["code"],
+        "repository_initialization_operation_not_found"
+    );
+}
+
+#[tokio::test]
+async fn repository_initialization_stale_records_are_recovered_before_new_launch() {
+    for status in [
+        RepositoryInitializationOperationStatus::Created,
+        RepositoryInitializationOperationStatus::Running,
+    ] {
+        let root = tempdir().expect("root");
+        let repo = git_repo();
+        let initial_provider = Arc::new(ScriptedClaude::new(Vec::new()));
+        let initial_app =
+            build_web_router(integration_state(root.path(), initial_provider, None, None));
+        create_project(initial_app).await;
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store =
+            cadence_aria::product::repository_store::RepositoryInitializationOperationStore::new(
+                paths,
+            );
+        let operation_id = format!("repository_initialization_stale_{status:?}").to_lowercase();
+        let stale = RepositoryInitializationOperation::new(
+            operation_id.clone(),
+            "project_0001".to_string(),
+            RepositoryInitializationOperationInput {
+                name: "Stale".to_string(),
+                git_root: repo.path().canonicalize().expect("canonical git root"),
+                default_policy_preset: None,
+                default_provider_mode: None,
+            },
+            "2026-07-14T03:00:00Z".to_string(),
+        );
+        store.create(stale).expect("stale operation");
+        if status == RepositoryInitializationOperationStatus::Running {
+            store
+                .mark_running(
+                    "project_0001",
+                    &operation_id,
+                    "2026-07-14T03:01:00Z".to_string(),
+                )
+                .expect("mark stale operation running");
+            store
+                .mark_step_running(
+                    "project_0001",
+                    &operation_id,
+                    RepositoryInitializationStepKind::CadenceSkills,
+                    "2026-07-14T03:01:00Z".to_string(),
+                )
+                .expect("mark stale operation step running");
+        }
+
+        let provider = Arc::new(ScriptedClaude::new(vec![TurnScript::Complete; 4]));
+        let app = build_web_router(integration_state(root.path(), provider, None, None));
+        let (get_status, recovered) =
+            get_operation(app.clone(), "project_0001", &operation_id).await;
+        assert_eq!(get_status, StatusCode::OK, "{recovered}");
+        assert_eq!(recovered["status"], "failed");
+        assert_eq!(
+            recovered["error"]["details"]["reason_code"],
+            "repository_initialization_interrupted"
+        );
+
+        let (post_status, accepted) = request_json(
+            app,
+            Method::POST,
+            "/api/projects/project_0001/repositories",
+            json!({"name":"Repo","path":repo.path()}),
+        )
+        .await;
+        assert_eq!(post_status, StatusCode::ACCEPTED, "{accepted}");
+    }
 }
 
 struct NoGitRunner;

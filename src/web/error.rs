@@ -67,6 +67,7 @@ impl IntoResponse for ApiError {
             | "node_detail_prompt_not_found"
             | "project_not_found"
             | "repository_not_found"
+            | "repository_initialization_operation_not_found"
             | "workspace_not_found"
             | "work_item_not_found"
             | "task_workspace_not_found"

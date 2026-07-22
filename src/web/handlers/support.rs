@@ -250,6 +250,14 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ProductStoreError::NotFound {
             kind: "repository", ..
         } => ApiError::runtime("repository_not_found", "repository not found", json!({})),
+        ProductStoreError::NotFound {
+            kind: "repository_initialization_operation",
+            ..
+        } => ApiError::runtime(
+            "repository_initialization_operation_not_found",
+            "repository initialization operation not found",
+            json!({}),
+        ),
         ProductStoreError::NotFound { kind: "issue", .. } => {
             ApiError::runtime("issue_not_found", "issue not found", json!({}))
         }

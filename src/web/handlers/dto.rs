@@ -1,6 +1,11 @@
 use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
 use crate::product::models::WorkspaceSessionSummaryRecord;
+use crate::product::repository_store::{
+    RepositoryInitializationOperation, RepositoryInitializationOperationStatus,
+    RepositoryInitializationStepKind, RepositoryInitializationStepStatus,
+    RepositoryRegistrationSuccess,
+};
 use crate::web::error::sanitize_repository_api_warnings;
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
@@ -99,31 +104,92 @@ pub(crate) fn repository_dto(record: RepositoryRecord) -> RepositoryDto {
     }
 }
 
-#[derive(serde::Serialize)]
-struct RepositoryRegistrationInitializationDto {
-    source: String,
-    commands: Vec<serde_json::Value>,
-    warnings: Vec<String>,
-    changed_paths: Vec<String>,
-    completed_at: String,
+pub(crate) fn repository_initialization_result_dto(
+    success: &RepositoryRegistrationSuccess,
+) -> RepositoryInitializationResultDto {
+    RepositoryInitializationResultDto {
+        repository: repository_dto(success.repository.clone()),
+        initialization: RepositoryRegistrationInitializationDto {
+            source: success.initialization.source_mode.clone(),
+            commands: success
+                .initialization
+                .commands
+                .iter()
+                .map(|item| {
+                    json!({"index": item.command_index, "command": item.command, "status": item.status})
+                })
+                .collect(),
+            warnings: sanitize_repository_api_warnings(success.warnings.clone()),
+            changed_paths: success.changed_paths.clone(),
+            completed_at: success.completed_at.clone(),
+        },
+    }
 }
-pub(crate) fn repository_registration_response(
-    success: crate::product::repository_store::RepositoryRegistrationSuccess,
-) -> serde_json::Value {
-    let commands = success
-        .initialization
-        .commands
-        .into_iter()
-        .map(|item| json!({"index": item.command_index, "command": item.command, "status": item.status}))
-        .collect();
-    let initialization = RepositoryRegistrationInitializationDto {
-        source: success.initialization.source_mode,
-        commands,
-        warnings: sanitize_repository_api_warnings(success.warnings),
-        changed_paths: success.changed_paths,
-        completed_at: success.completed_at,
-    };
-    json!({"repository": repository_dto(success.repository), "initialization": initialization})
+
+pub(crate) fn repository_initialization_operation_dto(
+    operation: RepositoryInitializationOperation,
+) -> RepositoryInitializationOperationDto {
+    let current_step = operation
+        .steps
+        .iter()
+        .find(|step| step.status == RepositoryInitializationStepStatus::Running)
+        .map(|step| repository_initialization_step_id(step.step_id).to_string());
+    RepositoryInitializationOperationDto {
+        operation_id: operation.operation_id,
+        status: repository_initialization_operation_status(operation.status).to_string(),
+        steps: operation
+            .steps
+            .into_iter()
+            .map(|step| RepositoryInitializationStepDto {
+                step_id: repository_initialization_step_id(step.step_id).to_string(),
+                status: repository_initialization_step_status(step.status).to_string(),
+            })
+            .collect(),
+        current_step,
+        failed_step: operation
+            .failed_step
+            .map(|step| repository_initialization_step_id(step).to_string()),
+        result: operation
+            .result
+            .as_ref()
+            .map(repository_initialization_result_dto),
+        error: operation.error.map(ApiError::from),
+        created_at: operation.created_at,
+        updated_at: operation.updated_at,
+        completed_at: operation.completed_at,
+    }
+}
+
+fn repository_initialization_operation_status(
+    status: RepositoryInitializationOperationStatus,
+) -> &'static str {
+    match status {
+        RepositoryInitializationOperationStatus::Created => "created",
+        RepositoryInitializationOperationStatus::Running => "running",
+        RepositoryInitializationOperationStatus::Completed => "completed",
+        RepositoryInitializationOperationStatus::Failed => "failed",
+    }
+}
+
+fn repository_initialization_step_id(step: RepositoryInitializationStepKind) -> &'static str {
+    match step {
+        RepositoryInitializationStepKind::CadenceSkills => "cadence_skills",
+        RepositoryInitializationStepKind::PreCheck => "pre_check",
+        RepositoryInitializationStepKind::RuleConfig => "rule_config",
+        RepositoryInitializationStepKind::McpConfiguration => "mcp_configuration",
+        RepositoryInitializationStepKind::ProjectRulesExamples => "project_rules_examples",
+    }
+}
+
+fn repository_initialization_step_status(
+    status: RepositoryInitializationStepStatus,
+) -> &'static str {
+    match status {
+        RepositoryInitializationStepStatus::Pending => "pending",
+        RepositoryInitializationStepStatus::Running => "running",
+        RepositoryInitializationStepStatus::Completed => "completed",
+        RepositoryInitializationStepStatus::Failed => "failed",
+    }
 }
 
 pub(crate) fn product_issue_dto_with_binding(
@@ -793,8 +859,10 @@ fn repository_registration_success_preserves_all_source_modes() {
     for source_mode in ["online_clone", "online_update", "offline"] {
         let mut success = super::product_resources::create_repository_tests::registration_success();
         success.initialization.source_mode = source_mode.to_string();
-        let value = repository_registration_response(success);
+        let value = serde_json::to_value(repository_initialization_result_dto(&success))
+            .expect("repository initialization result dto");
         assert_eq!(value["initialization"]["source"], source_mode);
         assert!(value.get("warnings").is_none() && value.get("completed_at").is_none());
+        assert!(value["initialization"].get("warnings").is_some());
     }
 }
