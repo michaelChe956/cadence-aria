@@ -15,6 +15,7 @@ import type {
   NodeDetail,
   PrepareWorkItemPlanRequest,
   PrepareWorkItemPlanResponse,
+  RepositoryInitializationOperationSnapshot,
   TestingReport,
   TimelineNodeType,
   WorkItemExecutionPlan,
@@ -556,6 +557,121 @@ describe("workspace websocket protocol types", () => {
     };
 
     expect(plan.allowed_write_scopes).toEqual(["src/product/**"]);
+  });
+});
+
+describe("repository initialization operation types", () => {
+  it("requires complete created, completed, and failed operation snapshots", () => {
+    const created = {
+      operation_id: "repository_initialization_0001",
+      status: "created",
+      steps: [
+        { step_id: "cadence_skills", status: "pending" },
+        { step_id: "pre_check", status: "pending" },
+        { step_id: "rule_config", status: "pending" },
+        { step_id: "mcp_configuration", status: "pending" },
+        { step_id: "project_rules_examples", status: "pending" },
+      ],
+      current_step: null,
+      failed_step: null,
+      result: null,
+      error: null,
+      created_at: "2026-07-22T00:00:00Z",
+      updated_at: "2026-07-22T00:00:00Z",
+      completed_at: null,
+    } satisfies RepositoryInitializationOperationSnapshot;
+    const completed = {
+      operation_id: "repository_initialization_0001",
+      status: "completed",
+      steps: [
+        { step_id: "cadence_skills", status: "completed" },
+        { step_id: "pre_check", status: "completed" },
+        { step_id: "rule_config", status: "completed" },
+        { step_id: "mcp_configuration", status: "completed" },
+        { step_id: "project_rules_examples", status: "completed" },
+      ],
+      current_step: null,
+      failed_step: null,
+      result: {
+        repository: {
+          repository_id: "repository_0001",
+          project_id: "project_0001",
+          name: "Aria",
+          path: "/work/aria",
+          repo_hash: "repo-hash",
+          runtime_root: "/work/aria/.aria",
+          default_policy_preset: "balanced",
+          default_provider_mode: "claude_code",
+          created_at: "2026-07-22T00:00:00Z",
+          updated_at: "2026-07-22T00:00:00Z",
+        },
+        initialization: {
+          source: "offline",
+          commands: [
+            {
+              index: 1,
+              command: "/pre-check --no-interrupt",
+              status: "completed",
+            },
+            {
+              index: 2,
+              command: "/rule-config --no-interrupt",
+              status: "completed",
+            },
+            {
+              index: 3,
+              command: "/mcp-configuration --no-interrupt",
+              status: "completed",
+            },
+            {
+              index: 4,
+              command: "/project-rules-examples --no-interrupt",
+              status: "completed",
+            },
+          ],
+          warnings: [],
+          changed_paths: [],
+          completed_at: "2026-07-22T00:01:00Z",
+        },
+      },
+      error: null,
+      created_at: "2026-07-22T00:00:00Z",
+      updated_at: "2026-07-22T00:01:00Z",
+      completed_at: "2026-07-22T00:01:00Z",
+    } satisfies RepositoryInitializationOperationSnapshot;
+    const failed = {
+      operation_id: "repository_initialization_0001",
+      status: "failed",
+      steps: [
+        { step_id: "cadence_skills", status: "completed" },
+        { step_id: "pre_check", status: "failed" },
+        { step_id: "rule_config", status: "pending" },
+        { step_id: "mcp_configuration", status: "pending" },
+        { step_id: "project_rules_examples", status: "pending" },
+      ],
+      current_step: null,
+      failed_step: "pre_check",
+      result: null,
+      error: {
+        code: "repository_init_command_failed",
+        message: "repository initialization failed",
+        details: {
+          stage: "repository_init_command",
+          command: "/pre-check --no-interrupt",
+          reason_code: "repository_init_command_failed",
+          retryable: true,
+        },
+      },
+      created_at: "2026-07-22T00:00:00Z",
+      updated_at: "2026-07-22T00:01:00Z",
+      completed_at: "2026-07-22T00:01:00Z",
+    } satisfies RepositoryInitializationOperationSnapshot;
+
+    expect(created.steps).toHaveLength(5);
+    expect(completed.result?.repository.repository_id).toBe("repository_0001");
+    expect(failed.error?.details.reason_code).toBe(
+      "repository_init_command_failed",
+    );
   });
 });
 

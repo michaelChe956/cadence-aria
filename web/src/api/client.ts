@@ -7,7 +7,6 @@ import type {
   CodingAttemptSnapshotResponse,
   CreateProductIssueRequest,
   CreateRepositoryRequest,
-  CreateRepositoryResponse,
   GenerateDesignSpecsRequest,
   GenerateDesignSpecsResponse,
   GenerateStorySpecsRequest,
@@ -22,6 +21,7 @@ import type {
   ProviderHealthResponse,
   Repository,
   RepositoryRegistrationErrorDetails,
+  RepositoryInitializationOperationSnapshot,
   RepositoryListResponse,
   WorkItemExecutionPlan,
 } from "./types";
@@ -105,13 +105,22 @@ export function listRepositories(
 export function createRepository(
   projectId: string,
   payload: CreateRepositoryRequest,
-): Promise<CreateRepositoryResponse> {
-  return requestJson<CreateRepositoryResponse>(
+): Promise<RepositoryInitializationOperationSnapshot> {
+  return requestJson<RepositoryInitializationOperationSnapshot>(
     `/api/projects/${encodeURIComponent(projectId)}/repositories`,
     {
       method: "POST",
       body: JSON.stringify(payload),
     },
+  );
+}
+
+export function getRepositoryInitialization(
+  projectId: string,
+  operationId: string,
+): Promise<RepositoryInitializationOperationSnapshot> {
+  return requestJson<RepositoryInitializationOperationSnapshot>(
+    `/api/projects/${encodeURIComponent(projectId)}/repository-initializations/${encodeURIComponent(operationId)}`,
   );
 }
 

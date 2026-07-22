@@ -76,6 +76,43 @@ export type CreateRepositoryResponse = {
   initialization: RepositoryInitializationSummary;
 };
 
+export type RepositoryInitializationOperationStatus =
+  | "created"
+  | "running"
+  | "completed"
+  | "failed";
+
+export type RepositoryInitializationStepId =
+  | "cadence_skills"
+  | "pre_check"
+  | "rule_config"
+  | "mcp_configuration"
+  | "project_rules_examples";
+
+export type RepositoryInitializationStepStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed";
+
+export type RepositoryInitializationStep = {
+  step_id: RepositoryInitializationStepId;
+  status: RepositoryInitializationStepStatus;
+};
+
+export type RepositoryInitializationOperationSnapshot = {
+  operation_id: string;
+  status: RepositoryInitializationOperationStatus;
+  steps: RepositoryInitializationStep[];
+  current_step: RepositoryInitializationStepId | null;
+  failed_step: RepositoryInitializationStepId | null;
+  result: CreateRepositoryResponse | null;
+  error: ApiError | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+};
+
 export type ProductIssue = {
   issue_id: string;
   project_id: string;
