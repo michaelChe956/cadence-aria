@@ -390,20 +390,59 @@ async fn create_workspace_session_fixture_with_providers(
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    let (status, accepted) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/repositories",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
-    request_json(
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let operation_id = accepted["operation_id"]
+        .as_str()
+        .expect("repository initialization operation id");
+    let operation_uri = format!(
+        "/api/projects/project_0001/repository-initializations/{operation_id}"
+    );
+    let mut last_snapshot = accepted;
+    let mut completed = None;
+    for _ in 0..100 {
+        let (status, snapshot) = request_json(
+            app.clone(),
+            Method::GET,
+            &operation_uri,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{snapshot}");
+        tokio::task::yield_now().await;
+        match snapshot["status"].as_str() {
+            Some("completed") => {
+                completed = Some(snapshot);
+                break;
+            }
+            Some("failed") => panic!(
+                "repository initialization failed before fixture issue creation: {snapshot}"
+            ),
+            _ => {
+                last_snapshot = snapshot;
+            }
+        }
+    }
+    let completed = completed.unwrap_or_else(|| {
+        panic!(
+            "repository initialization did not complete before fixture issue creation: {last_snapshot}"
+        )
+    });
+    assert_eq!(completed["status"], "completed", "{completed}");
+    let (status, issue) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
         json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "{issue}");
     let (status, story_response) = request_json(
         app,
         Method::POST,

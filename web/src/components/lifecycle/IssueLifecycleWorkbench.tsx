@@ -73,14 +73,12 @@ type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 type PendingWorkItemPlanLaunch = {
   card: LifecycleCardData;
 };
-
 const DEFAULT_WORK_ITEM_PLAN_OPTIONS = {
   include_integration_tests: true,
   include_e2e_tests: false,
   force_frontend_backend_split: true,
   require_execution_plan_confirm: false,
 } satisfies WorkItemPlanOptionsFormValue;
-
 export function IssueLifecycleWorkbench({
   focusEntityKey,
   onDrawerFocusChange,
