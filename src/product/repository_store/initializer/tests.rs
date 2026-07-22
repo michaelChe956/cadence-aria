@@ -77,7 +77,7 @@ impl RepositoryInitializationProgress for RecordingProgress {
     fn step_started(
         &self,
         step: RepositoryInitializationStepKind,
-    ) -> Result<(), RepositoryRegistrationError> {
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
         self.events.lock().unwrap().push((step, "started"));
         Ok(())
     }
@@ -85,7 +85,7 @@ impl RepositoryInitializationProgress for RecordingProgress {
     fn step_completed(
         &self,
         step: RepositoryInitializationStepKind,
-    ) -> Result<(), RepositoryRegistrationError> {
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
         self.events.lock().unwrap().push((step, "completed"));
         Ok(())
     }

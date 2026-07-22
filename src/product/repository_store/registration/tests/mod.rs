@@ -176,8 +176,8 @@ impl RepositoryInitializer for RecordingInitializer {
             .enumerate()
         {
             let command = step.command().expect("Claude initialization command");
-            progress.step_started(step)?;
-            progress.step_completed(step)?;
+            progress.step_started(step).map_err(|error| *error)?;
+            progress.step_completed(step).map_err(|error| *error)?;
             summaries.push(RepositoryInitializationCommandSummary {
                 command_index: index + 1,
                 command: command.to_string(),
@@ -333,10 +333,10 @@ impl RepositoryInitializer for StaticInitializer {
         self.count.fetch_add(1, Ordering::SeqCst);
         if self.fail {
             let step = RepositoryInitializationStepKind::PreCheck;
-            progress.step_started(step)?;
-            progress.step_completed(step)?;
+            progress.step_started(step).map_err(|error| *error)?;
+            progress.step_completed(step).map_err(|error| *error)?;
             let step = RepositoryInitializationStepKind::RuleConfig;
-            progress.step_started(step)?;
+            progress.step_started(step).map_err(|error| *error)?;
             return Err(RepositoryRegistrationError::for_command(
                 "repository_initialization",
                 "repository_init_command_failed",
@@ -354,8 +354,8 @@ impl RepositoryInitializer for StaticInitializer {
             .enumerate()
         {
             let command = step.command().expect("Claude initialization command");
-            progress.step_started(step)?;
-            progress.step_completed(step)?;
+            progress.step_started(step).map_err(|error| *error)?;
+            progress.step_completed(step).map_err(|error| *error)?;
             summaries.push(RepositoryInitializationCommandSummary {
                 command_index: index + 1,
                 command: command.to_string(),

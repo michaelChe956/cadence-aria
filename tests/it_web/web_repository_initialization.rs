@@ -674,21 +674,23 @@ impl RepositoryInitializer for BlockingInitializer {
         self.started.add_permits(1);
         let permit = self.release.acquire().await.expect("release");
         permit.forget();
-        RepositoryInitializationStepKind::ALL
-            .into_iter()
-            .filter_map(|step| step.command().map(|command| (step, command)))
-            .enumerate()
-            .map(|(offset, (step, command))| {
-                progress.step_started(step)?;
-                progress.step_completed(step)?;
-                Ok(RepositoryInitializationCommandSummary {
-                    command_index: offset + 1,
-                    command: command.to_string(),
-                    status: "completed".to_string(),
-                    output_summary: None,
+        let summaries: Result<_, Box<RepositoryRegistrationError>> =
+            RepositoryInitializationStepKind::ALL
+                .into_iter()
+                .filter_map(|step| step.command().map(|command| (step, command)))
+                .enumerate()
+                .map(|(offset, (step, command))| {
+                    progress.step_started(step)?;
+                    progress.step_completed(step)?;
+                    Ok(RepositoryInitializationCommandSummary {
+                        command_index: offset + 1,
+                        command: command.to_string(),
+                        status: "completed".to_string(),
+                        output_summary: None,
+                    })
                 })
-            })
-            .collect()
+                .collect();
+        summaries.map_err(|error| *error)
     }
 }
 

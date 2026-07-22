@@ -192,12 +192,12 @@ pub trait RepositoryInitializationProgress: Send + Sync {
     fn step_started(
         &self,
         step: RepositoryInitializationStepKind,
-    ) -> Result<(), RepositoryRegistrationError>;
+    ) -> Result<(), Box<RepositoryRegistrationError>>;
 
     fn step_completed(
         &self,
         step: RepositoryInitializationStepKind,
-    ) -> Result<(), RepositoryRegistrationError>;
+    ) -> Result<(), Box<RepositoryRegistrationError>>;
 }
 
 impl RepositoryRegistrationError {

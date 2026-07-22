@@ -196,10 +196,11 @@ impl RepositoryInitializationProgress for OperationProgressReporter {
     fn step_started(
         &self,
         step: RepositoryInitializationStepKind,
-    ) -> Result<(), RepositoryRegistrationError> {
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
         self.operations
             .mark_step_running(&self.project_id, &self.operation_id, step, (self.clock)())
-            .map_err(Self::operation_store_error)?;
+            .map_err(Self::operation_store_error)
+            .map_err(Box::new)?;
         *self
             .current_step
             .lock()
@@ -210,10 +211,11 @@ impl RepositoryInitializationProgress for OperationProgressReporter {
     fn step_completed(
         &self,
         step: RepositoryInitializationStepKind,
-    ) -> Result<(), RepositoryRegistrationError> {
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
         self.operations
             .mark_step_completed(&self.project_id, &self.operation_id, step, (self.clock)())
-            .map_err(Self::operation_store_error)?;
+            .map_err(Self::operation_store_error)
+            .map_err(Box::new)?;
         let mut current_step = self
             .current_step
             .lock()
@@ -400,15 +402,21 @@ impl RepositoryRegistrationCoordinator {
 
         let mut before = None;
         let execution = async {
-            reporter.step_started(RepositoryInitializationStepKind::CadenceSkills)?;
+            reporter
+                .step_started(RepositoryInitializationStepKind::CadenceSkills)
+                .map_err(|error| *error)?;
             let prepared = self
                 .cadence_skills
                 .prepare_skills(cancellation.clone())
                 .await
                 .map_err(cadence_error)?;
-            reporter.step_completed(RepositoryInitializationStepKind::CadenceSkills)?;
+            reporter
+                .step_completed(RepositoryInitializationStepKind::CadenceSkills)
+                .map_err(|error| *error)?;
 
-            reporter.step_started(RepositoryInitializationStepKind::PreCheck)?;
+            reporter
+                .step_started(RepositoryInitializationStepKind::PreCheck)
+                .map_err(|error| *error)?;
             self.provider_gate
                 .ensure_available(&ProviderName::ClaudeCode)
                 .map_err(|error| {

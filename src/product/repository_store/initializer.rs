@@ -50,7 +50,7 @@ impl ClaudeRepositoryInitializer {
         let mut summaries = Vec::with_capacity(4);
         for (offset, (step, command)) in commands.enumerate() {
             let command_index = offset + 1;
-            progress.step_started(step)?;
+            progress.step_started(step).map_err(|error| *error)?;
             self.gate
                 .ensure_available(&ProviderName::ClaudeCode)
                 .map_err(|error| {
@@ -100,7 +100,7 @@ impl ClaudeRepositoryInitializer {
                     cancellation.clone(),
                 )
                 .await?;
-            progress.step_completed(step)?;
+            progress.step_completed(step).map_err(|error| *error)?;
             summaries.push(summary);
         }
         Ok(summaries)

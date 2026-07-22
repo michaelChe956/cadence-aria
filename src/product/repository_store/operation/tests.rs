@@ -33,7 +33,7 @@ impl RepositoryInitializationProgress for RecordingProgress {
     fn step_started(
         &self,
         step: RepositoryInitializationStepKind,
-    ) -> Result<(), RepositoryRegistrationError> {
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
         self.events.lock().unwrap().push((step, "started"));
         Ok(())
     }
@@ -41,7 +41,7 @@ impl RepositoryInitializationProgress for RecordingProgress {
     fn step_completed(
         &self,
         step: RepositoryInitializationStepKind,
-    ) -> Result<(), RepositoryRegistrationError> {
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
         self.events.lock().unwrap().push((step, "completed"));
         Ok(())
     }
@@ -49,7 +49,7 @@ impl RepositoryInitializationProgress for RecordingProgress {
 
 fn report_operation_progress(
     progress: &dyn RepositoryInitializationProgress,
-) -> Result<(), RepositoryRegistrationError> {
+) -> Result<(), Box<RepositoryRegistrationError>> {
     progress.step_started(RepositoryInitializationStepKind::CadenceSkills)?;
     progress.step_completed(RepositoryInitializationStepKind::CadenceSkills)?;
     progress.step_started(RepositoryInitializationStepKind::PreCheck)?;

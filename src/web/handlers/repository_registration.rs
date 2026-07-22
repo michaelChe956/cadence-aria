@@ -475,8 +475,8 @@ impl RepositoryInitializer for CompletedRepositoryInitializer {
             .enumerate()
         {
             let command = step.command().expect("Claude initialization command");
-            progress.step_started(step)?;
-            progress.step_completed(step)?;
+            progress.step_started(step).map_err(|error| *error)?;
+            progress.step_completed(step).map_err(|error| *error)?;
             summaries.push(RepositoryInitializationCommandSummary {
                 command_index: offset + 1,
                 command: command.to_string(),
