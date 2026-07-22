@@ -396,6 +396,154 @@ async fn repository_initialization_post_returns_202_then_get_returns_completed_f
 }
 
 #[tokio::test]
+async fn repository_initialization_completed_operation_get_sanitizes_persisted_result_paths() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let repository_path = repo
+        .path()
+        .canonicalize()
+        .expect("canonical repository path");
+    let runtime_root = repository_path.join(".aria/runtime");
+    let app = build_web_router(integration_state(
+        root.path(),
+        Arc::new(ScriptedClaude::new(Vec::new())),
+        None,
+        None,
+    ));
+    create_project(app.clone()).await;
+
+    let operation_id = "repository_initialization_completed_sanitization";
+    let operation_store =
+        cadence_aria::product::repository_store::RepositoryInitializationOperationStore::new(
+            ProductAppPaths::new(root.path().join(".aria")),
+        );
+    operation_store
+        .create(RepositoryInitializationOperation::new(
+            operation_id.to_string(),
+            "project_0001".to_string(),
+            RepositoryInitializationOperationInput {
+                name: "Repo".to_string(),
+                git_root: repository_path.clone(),
+                default_policy_preset: Some("manual-write".to_string()),
+                default_provider_mode: Some("claude_code".to_string()),
+            },
+            "2026-07-14T03:00:00Z".to_string(),
+        ))
+        .expect("create completed operation");
+    operation_store
+        .mark_running(
+            "project_0001",
+            operation_id,
+            "2026-07-14T03:00:01Z".to_string(),
+        )
+        .expect("mark operation running");
+    for (index, step) in RepositoryInitializationStepKind::ALL
+        .into_iter()
+        .enumerate()
+    {
+        operation_store
+            .mark_step_running(
+                "project_0001",
+                operation_id,
+                step,
+                format!("2026-07-14T03:00:{:02}Z", index * 2 + 2),
+            )
+            .expect("mark operation step running");
+        operation_store
+            .mark_step_completed(
+                "project_0001",
+                operation_id,
+                step,
+                format!("2026-07-14T03:00:{:02}Z", index * 2 + 3),
+            )
+            .expect("mark operation step completed");
+    }
+    operation_store
+        .finish_completed(
+            "project_0001",
+            operation_id,
+            cadence_aria::product::repository_store::RepositoryRegistrationSuccess {
+                repository: RepositoryRecord {
+                    id: "repository_0001".to_string(),
+                    project_id: "project_0001".to_string(),
+                    name: "Repo".to_string(),
+                    path: repository_path.clone(),
+                    repo_hash: "repo_hash".to_string(),
+                    runtime_root: runtime_root.clone(),
+                    default_policy_preset: "manual-write".to_string(),
+                    default_provider_mode: "claude_code".to_string(),
+                    created_at: "2026-07-14T03:00:12Z".to_string(),
+                    updated_at: "2026-07-14T03:00:12Z".to_string(),
+                },
+                cadence_skills:
+                    cadence_aria::product::repository_store::CadenceSkillsPreparationSummary {
+                        source_mode: "offline".to_string(),
+                        source_root: PathBuf::from("/private/cadence-skills"),
+                        skills_root: PathBuf::from("/private/repo/.claude/skills"),
+                        git_updated: false,
+                        link_sync_status: "synchronized".to_string(),
+                        warnings: Vec::new(),
+                    },
+                initialization:
+                    cadence_aria::product::repository_store::RepositoryInitializationSummary {
+                        provider: "claude_code".to_string(),
+                        source: PathBuf::from("/private/cadence-skills"),
+                        source_mode: "offline".to_string(),
+                        skills_root: PathBuf::from("/private/repo/.claude/skills"),
+                        git_updated: false,
+                        link_sync_status: "synchronized".to_string(),
+                        commands: vec![RepositoryInitializationCommandSummary {
+                            command_index: 1,
+                            command: "/pre-check --no-interrupt".to_string(),
+                            status: "completed".to_string(),
+                            output_summary: None,
+                        }],
+                    },
+                warnings: Vec::new(),
+                changed_paths: vec![
+                    "/private/repo/generated".to_string(),
+                    ".claude/rules/project.md".to_string(),
+                    "src/monkey.rs".to_string(),
+                ],
+                completed_at: "2026-07-14T03:00:12Z".to_string(),
+            },
+            "2026-07-14T03:00:12Z".to_string(),
+        )
+        .expect("finish completed operation");
+
+    let (status, completed) = request_json(
+        app,
+        Method::GET,
+        &format!("/api/projects/project_0001/repository-initializations/{operation_id}"),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(
+        completed["result"]["initialization"]["changed_paths"],
+        json!(["<path>", ".claude/rules/project.md", "src/monkey.rs"])
+    );
+    assert_eq!(completed["result"]["repository"]["path"], "<path>");
+    assert_eq!(completed["result"]["repository"]["runtime_root"], "<path>");
+
+    let serialized = serde_json::to_string(&completed).expect("serialize completed operation");
+    assert!(
+        !serialized.contains("/private/repo/generated"),
+        "completed operation response leaked changed path: {serialized}"
+    );
+    assert!(
+        !serialized.contains(repository_path.to_string_lossy().as_ref()),
+        "completed operation response leaked repository path: {serialized}"
+    );
+    assert!(
+        !serialized.contains(runtime_root.to_string_lossy().as_ref()),
+        "completed operation response leaked runtime root: {serialized}"
+    );
+}
+
+#[tokio::test]
 async fn repository_initialization_failures_stop_and_leave_no_repository_record() {
     for fail_at in 1..=4 {
         let root = tempdir().expect("root");
