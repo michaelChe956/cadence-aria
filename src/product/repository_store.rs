@@ -47,6 +47,11 @@ impl RepositoryStore {
         Self { paths }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn initialization_operation_store(&self) -> RepositoryInitializationOperationStore {
+        RepositoryInitializationOperationStore::new(self.paths.clone())
+    }
+
     pub fn list(&self, project_id: &str) -> Result<Vec<RepositoryRecord>, ProductStoreError> {
         validate_relative_id(project_id)?;
         let path = self.repos_path(project_id);

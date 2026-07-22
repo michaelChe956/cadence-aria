@@ -1,7 +1,7 @@
 mod cases;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +22,7 @@ use crate::cross_cutting::provider_availability_gate::{
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::FakeStreamingProvider;
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::cadence_skills::{
     CadenceSkillsError, CadenceSkillsPreparationResult, CadenceSkillsSourceMode, LinkSyncStatus,
 };
@@ -29,8 +30,8 @@ use crate::product::json_store::ProductStoreError;
 use crate::product::models::{ProjectRecord, ProviderName, RepositoryRecord};
 use crate::product::repository_store::{
     CreateRepositoryInput, RepositoryInitializationCommandSummary,
-    RepositoryInitializationProgress, RepositoryInitializationStepKind,
-    RepositoryRegistrationError, RepositoryRegistrationInput,
+    RepositoryInitializationOperationStore, RepositoryInitializationProgress,
+    RepositoryInitializationStepKind, RepositoryRegistrationError, RepositoryRegistrationInput,
 };
 
 struct AvailableHealth;
@@ -220,7 +221,7 @@ impl ProjectLookup for ConfigProjectLookup {
 struct ConfigRepositoryPersistence {
     find_results: Mutex<VecDeque<Option<RepositoryRecord>>>,
     create_count: AtomicUsize,
-    fail_create: bool,
+    fail_create: AtomicBool,
 }
 
 impl ConfigRepositoryPersistence {
@@ -228,7 +229,7 @@ impl ConfigRepositoryPersistence {
         Self {
             find_results: Mutex::new(find_results.into()),
             create_count: AtomicUsize::new(0),
-            fail_create,
+            fail_create: AtomicBool::new(fail_create),
         }
     }
 }
@@ -247,7 +248,7 @@ impl RepositoryPersistence for ConfigRepositoryPersistence {
         input: CreateRepositoryInput,
     ) -> Result<RepositoryRecord, ProductStoreError> {
         self.create_count.fetch_add(1, Ordering::SeqCst);
-        if self.fail_create {
+        if self.fail_create.load(Ordering::SeqCst) {
             return Err(ProductStoreError::Io("persist failed".to_string()));
         }
         Ok(repository_record(&input.project_id, input.path))
@@ -484,9 +485,15 @@ fn coordinator(
     runner: Arc<dyn BoundedCommandRunner>,
     initializer: Arc<dyn RepositoryInitializer>,
 ) -> RepositoryRegistrationCoordinator {
-    RepositoryRegistrationCoordinator::new(
+    RepositoryRegistrationCoordinator::new_with_operations(
         projects,
         repositories,
+        RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+            std::env::temp_dir().join(format!(
+                "repository-registration-test-{}",
+                uuid::Uuid::new_v4()
+            )),
+        )),
         gate,
         registry(),
         cadence,
@@ -506,6 +513,94 @@ fn input(path: std::path::PathBuf) -> RepositoryRegistrationInput {
         path,
         default_policy_preset: None,
         default_provider_mode: None,
+    }
+}
+
+struct OperationCoordinatorFixture {
+    _temp: TempDir,
+    coordinator: RepositoryRegistrationCoordinator,
+    operations: RepositoryInitializationOperationStore,
+    repositories: Arc<ConfigRepositoryPersistence>,
+    input: RepositoryRegistrationInput,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coordinator_with_operations(
+    projects: Arc<dyn ProjectLookup>,
+    repositories: Arc<dyn RepositoryPersistence>,
+    operations: RepositoryInitializationOperationStore,
+    gate: Arc<ProviderAvailabilityGate>,
+    cadence: Arc<dyn CadenceSkillsPreparation>,
+    host: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    runner: Arc<dyn BoundedCommandRunner>,
+    initializer: Arc<dyn RepositoryInitializer>,
+) -> RepositoryRegistrationCoordinator {
+    RepositoryRegistrationCoordinator::new_with_operations(
+        projects,
+        repositories,
+        operations,
+        gate,
+        registry(),
+        cadence,
+        host,
+        runner,
+        Arc::new(|| "completed-at".to_string()),
+        initializer,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+}
+
+fn operation_coordinator_fixture(
+    cadence_fails: bool,
+    initializer_fails: bool,
+) -> OperationCoordinatorFixture {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("repository");
+    std::fs::create_dir_all(&root).unwrap();
+    let operations = RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+        temp.path().join(".aria"),
+    ));
+    let repositories = Arc::new(ConfigRepositoryPersistence::new(vec![], false));
+    let coordinator = RepositoryRegistrationCoordinator::new_with_operations(
+        Arc::new(ConfigProjectLookup { exists: true }),
+        repositories.clone(),
+        operations.clone(),
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AvailableHealth))),
+        registry(),
+        Arc::new(StaticCadence {
+            failure: cadence_fails.then_some("cadence_skills_unavailable"),
+            count: AtomicUsize::new(0),
+            source_root: temp.path().join("cadence"),
+        }),
+        Arc::new(|| Ok(())),
+        Arc::new(ConfigRunner {
+            root: root.clone(),
+            rev_parse: Mutex::new(None),
+            statuses: Mutex::new(
+                vec![
+                    command_result(Some(0), "", ""),
+                    command_result(Some(0), "?? generated.txt\0", ""),
+                ]
+                .into(),
+            ),
+            call_count: AtomicUsize::new(0),
+        }),
+        Arc::new(|| "completed-at".to_string()),
+        Arc::new(StaticInitializer {
+            fail: initializer_fails,
+            count: AtomicUsize::new(0),
+        }),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+
+    OperationCoordinatorFixture {
+        _temp: temp,
+        coordinator,
+        operations,
+        repositories,
+        input: input(root),
     }
 }
 

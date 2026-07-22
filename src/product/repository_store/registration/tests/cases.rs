@@ -1,4 +1,192 @@
 use super::*;
+use crate::product::repository_store::{
+    RepositoryInitializationOperationStatus, RepositoryInitializationStepStatus,
+};
+
+#[tokio::test]
+async fn repository_registration_persists_real_step_states_and_only_creates_repository_at_completion()
+ {
+    let fixture = operation_coordinator_fixture(false, false);
+    let launch = fixture
+        .coordinator
+        .begin_initialization(fixture.input.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    let operation_id = launch.operation_id().to_string();
+
+    let initial = fixture
+        .operations
+        .get("project_0001", &operation_id)
+        .unwrap();
+    assert_eq!(
+        initial.status,
+        RepositoryInitializationOperationStatus::Created
+    );
+    assert!(
+        initial
+            .steps
+            .iter()
+            .all(|step| step.status == RepositoryInitializationStepStatus::Pending)
+    );
+    assert_eq!(fixture.repositories.create_count.load(Ordering::SeqCst), 0);
+
+    fixture
+        .coordinator
+        .execute_initialization(launch, CancellationToken::new())
+        .await
+        .unwrap();
+    let completed = fixture
+        .operations
+        .get("project_0001", &operation_id)
+        .unwrap();
+    assert_eq!(
+        completed.status,
+        RepositoryInitializationOperationStatus::Completed
+    );
+    assert!(
+        completed
+            .steps
+            .iter()
+            .all(|step| step.status == RepositoryInitializationStepStatus::Completed)
+    );
+    assert!(completed.result.is_some());
+    assert_eq!(fixture.repositories.create_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn repository_registration_persists_step_boundaries_for_execution_failures() {
+    struct Case {
+        name: &'static str,
+        cadence_fails: bool,
+        initializer_fails: bool,
+        persistence_fails: bool,
+        expected_failed_step: Option<RepositoryInitializationStepKind>,
+        expected_steps: [RepositoryInitializationStepStatus; 5],
+        expected_error: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "cadence failure",
+            cadence_fails: true,
+            initializer_fails: false,
+            persistence_fails: false,
+            expected_failed_step: Some(RepositoryInitializationStepKind::CadenceSkills),
+            expected_steps: [
+                RepositoryInitializationStepStatus::Failed,
+                RepositoryInitializationStepStatus::Pending,
+                RepositoryInitializationStepStatus::Pending,
+                RepositoryInitializationStepStatus::Pending,
+                RepositoryInitializationStepStatus::Pending,
+            ],
+            expected_error: "cadence_skills_unavailable",
+        },
+        Case {
+            name: "second Claude command failure",
+            cadence_fails: false,
+            initializer_fails: true,
+            persistence_fails: false,
+            expected_failed_step: Some(RepositoryInitializationStepKind::RuleConfig),
+            expected_steps: [
+                RepositoryInitializationStepStatus::Completed,
+                RepositoryInitializationStepStatus::Completed,
+                RepositoryInitializationStepStatus::Failed,
+                RepositoryInitializationStepStatus::Pending,
+                RepositoryInitializationStepStatus::Pending,
+            ],
+            expected_error: "repository_init_command_failed",
+        },
+        Case {
+            name: "repository persistence failure",
+            cadence_fails: false,
+            initializer_fails: false,
+            persistence_fails: true,
+            expected_failed_step: None,
+            expected_steps: [RepositoryInitializationStepStatus::Completed; 5],
+            expected_error: "repository_persist_failed",
+        },
+    ];
+
+    for case in cases {
+        let fixture = operation_coordinator_fixture(case.cadence_fails, case.initializer_fails);
+        fixture
+            .repositories
+            .fail_create
+            .store(case.persistence_fails, Ordering::SeqCst);
+        let launch = fixture
+            .coordinator
+            .begin_initialization(fixture.input.clone(), CancellationToken::new())
+            .await
+            .unwrap();
+        let operation_id = launch.operation_id().to_string();
+
+        let error = fixture
+            .coordinator
+            .execute_initialization(launch, CancellationToken::new())
+            .await
+            .unwrap_err();
+        let failed = fixture
+            .operations
+            .get("project_0001", &operation_id)
+            .unwrap();
+
+        assert_eq!(
+            failed.status,
+            RepositoryInitializationOperationStatus::Failed,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            failed.failed_step, case.expected_failed_step,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            failed
+                .steps
+                .iter()
+                .map(|step| step.status)
+                .collect::<Vec<_>>(),
+            case.expected_steps,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            failed
+                .error
+                .as_ref()
+                .map(|error| error.reason_code.as_str()),
+            Some(case.expected_error),
+            "{}",
+            case.name
+        );
+        assert_eq!(error.reason_code, case.expected_error, "{}", case.name);
+        assert_eq!(
+            fixture.repositories.create_count.load(Ordering::SeqCst),
+            usize::from(case.persistence_fails),
+            "{}",
+            case.name
+        );
+        if case.persistence_fails {
+            assert_eq!(
+                failed
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.changed_paths.clone()),
+                Some(vec!["generated.txt".to_string()]),
+                "{}",
+                case.name
+            );
+        } else {
+            assert_eq!(
+                fixture.repositories.create_count.load(Ordering::SeqCst),
+                0,
+                "{}",
+                case.name
+            );
+        }
+    }
+}
 
 #[tokio::test]
 async fn repository_registration_runs_in_order_and_persists_once_after_success() {
@@ -14,11 +202,15 @@ async fn repository_registration_runs_in_order_and_persists_once_after_success()
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, Arc::new(FakeStreamingProvider));
     let host_calls = calls.clone();
-    let coordinator = RepositoryRegistrationCoordinator::new(
+    let operations = RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+        temp.path().join(".aria"),
+    ));
+    let coordinator = RepositoryRegistrationCoordinator::new_with_operations(
         Arc::new(RecordingProjectLookup {
             calls: calls.clone(),
         }),
         repositories.clone(),
+        operations.clone(),
         gate,
         Arc::new(registry),
         Arc::new(RecordingCadence {
@@ -42,19 +234,24 @@ async fn repository_registration_runs_in_order_and_persists_once_after_success()
         Duration::from_secs(2),
     );
 
-    let result = coordinator
-        .register(
-            RepositoryRegistrationInput {
-                project_id: "project_0001".to_string(),
-                name: "Repository".to_string(),
-                path: git_root.clone(),
-                default_policy_preset: None,
-                default_provider_mode: None,
-            },
-            CancellationToken::new(),
-        )
+    let input = RepositoryRegistrationInput {
+        project_id: "project_0001".to_string(),
+        name: "Repository".to_string(),
+        path: git_root.clone(),
+        default_policy_preset: None,
+        default_provider_mode: None,
+    };
+    let launch = coordinator
+        .begin_initialization(input, CancellationToken::new())
         .await
         .unwrap();
+    let operation_id = launch.operation_id().to_string();
+    let result = coordinator
+        .execute_initialization(launch, CancellationToken::new())
+        .await
+        .unwrap()
+        .result
+        .expect("completed operation result");
 
     assert_eq!(repositories.created.load(Ordering::SeqCst), 1);
     assert_eq!(result.repository.path, git_root);
@@ -64,6 +261,17 @@ async fn repository_registration_runs_in_order_and_persists_once_after_success()
     assert_eq!(result.warnings, vec!["offline source"]);
     assert_eq!(result.changed_paths, vec!["generated.txt"]);
     assert_eq!(result.completed_at, "2026-07-13T01:02:03Z");
+    let operation = operations.get("project_0001", &operation_id).unwrap();
+    assert_eq!(
+        operation.status,
+        RepositoryInitializationOperationStatus::Completed
+    );
+    assert!(
+        operation
+            .steps
+            .iter()
+            .all(|step| step.status == RepositoryInitializationStepStatus::Completed)
+    );
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         &[
@@ -71,8 +279,8 @@ async fn repository_registration_runs_in_order_and_persists_once_after_success()
             "git_root",
             "repository_find",
             "repository_find",
-            "host_ready",
             "cadence_prepare",
+            "host_ready",
             "git_status",
             "initializer",
             "git_status",
@@ -353,19 +561,25 @@ async fn repository_registration_allows_only_one_same_path_initialization_and_re
             count: AtomicUsize::new(0),
         }),
     ));
+    let first_launch = coordinator
+        .begin_initialization(input(root.clone()), CancellationToken::new())
+        .await
+        .unwrap();
     let first_coordinator = coordinator.clone();
-    let first_input = input(root.clone());
     let first = tokio::spawn(async move {
         first_coordinator
-            .register(first_input, CancellationToken::new())
+            .execute_initialization(first_launch, CancellationToken::new())
             .await
     });
     entered.acquire().await.unwrap().forget();
 
-    let second = coordinator
-        .register(input(root.clone()), CancellationToken::new())
+    let second = match coordinator
+        .begin_initialization(input(root.clone()), CancellationToken::new())
         .await
-        .unwrap_err();
+    {
+        Ok(_) => panic!("same-path initialization must be rejected while the first run is active"),
+        Err(error) => error,
+    };
     assert_eq!(second.reason_code, "repository_initialization_in_progress");
     assert_eq!(cadence.count.load(Ordering::SeqCst), 1);
 
@@ -373,11 +587,24 @@ async fn repository_registration_allows_only_one_same_path_initialization_and_re
     first.await.unwrap().unwrap();
     assert_eq!(repositories.create_count.load(Ordering::SeqCst), 1);
 
-    release.add_permits(1);
-    let third = coordinator
-        .register(input(root), CancellationToken::new())
+    let third_launch = coordinator
+        .begin_initialization(input(root), CancellationToken::new())
         .await
         .unwrap();
+    let third_coordinator = coordinator.clone();
+    let third = tokio::spawn(async move {
+        third_coordinator
+            .execute_initialization(third_launch, CancellationToken::new())
+            .await
+    });
+    entered.acquire().await.unwrap().forget();
+    release.add_permits(1);
+    let third = third
+        .await
+        .unwrap()
+        .unwrap()
+        .result
+        .expect("completed operation result");
     assert_eq!(third.repository.project_id, "project_0001");
     assert_eq!(repositories.create_count.load(Ordering::SeqCst), 2);
 }
@@ -410,11 +637,19 @@ async fn repository_registration_allows_different_paths_to_enter_in_parallel() {
             count: AtomicUsize::new(0),
         }),
     ));
+    let first_launch = coordinator
+        .begin_initialization(input(first_root), CancellationToken::new())
+        .await
+        .unwrap();
+    let second_launch = coordinator
+        .begin_initialization(input(second_root), CancellationToken::new())
+        .await
+        .unwrap();
     let first = {
         let coordinator = coordinator.clone();
         tokio::spawn(async move {
             coordinator
-                .register(input(first_root), CancellationToken::new())
+                .execute_initialization(first_launch, CancellationToken::new())
                 .await
         })
     };
@@ -422,7 +657,7 @@ async fn repository_registration_allows_different_paths_to_enter_in_parallel() {
         let coordinator = coordinator.clone();
         tokio::spawn(async move {
             coordinator
-                .register(input(second_root), CancellationToken::new())
+                .execute_initialization(second_launch, CancellationToken::new())
                 .await
         })
     };
@@ -483,9 +718,13 @@ async fn repository_registration_reports_git_initializer_and_persist_failures_wi
         fail: false,
         count: AtomicUsize::new(0),
     });
-    let before = coordinator(
+    let before_operations = RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+        temp.path().join("before-operations"),
+    ));
+    let before_coordinator = coordinator_with_operations(
         Arc::new(ConfigProjectLookup { exists: true }),
         before_repositories.clone(),
+        before_operations.clone(),
         Arc::new(ProviderAvailabilityGate::new(Arc::new(AvailableHealth))),
         Arc::new(StaticCadence {
             failure: None,
@@ -500,13 +739,41 @@ async fn repository_registration_reports_git_initializer_and_persist_failures_wi
             call_count: AtomicUsize::new(0),
         }),
         before_initializer.clone(),
-    )
-    .register(input(root.clone()), CancellationToken::new())
-    .await
-    .unwrap_err();
+    );
+    let before_launch = before_coordinator
+        .begin_initialization(input(root.clone()), CancellationToken::new())
+        .await
+        .unwrap();
+    let before_operation_id = before_launch.operation_id().to_string();
+    let before = before_coordinator
+        .execute_initialization(before_launch, CancellationToken::new())
+        .await
+        .unwrap_err();
     assert_eq!(before.reason_code, "repository_git_state_failed");
     assert_eq!(before_initializer.count.load(Ordering::SeqCst), 0);
     assert_eq!(before_repositories.create_count.load(Ordering::SeqCst), 0);
+    let before_operation = before_operations
+        .get("project_0001", &before_operation_id)
+        .unwrap();
+    assert_eq!(
+        before_operation.status,
+        RepositoryInitializationOperationStatus::Failed
+    );
+    assert_eq!(
+        before_operation.failed_step,
+        Some(RepositoryInitializationStepKind::PreCheck)
+    );
+    assert_eq!(
+        before_operation.steps[1].status,
+        RepositoryInitializationStepStatus::Failed
+    );
+    assert_eq!(
+        before_operation
+            .error
+            .as_ref()
+            .map(|error| error.reason_code.as_str()),
+        Some("repository_git_state_failed")
+    );
 
     let init_repositories = Arc::new(ConfigRepositoryPersistence::new(vec![], false));
     let init = coordinator(
@@ -544,9 +811,13 @@ async fn repository_registration_reports_git_initializer_and_persist_failures_wi
     assert_eq!(init_repositories.create_count.load(Ordering::SeqCst), 0);
 
     let after_repositories = Arc::new(ConfigRepositoryPersistence::new(vec![], false));
-    let after = coordinator(
+    let after_operations = RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+        temp.path().join("after-operations"),
+    ));
+    let after_coordinator = coordinator_with_operations(
         Arc::new(ConfigProjectLookup { exists: true }),
         after_repositories.clone(),
+        after_operations.clone(),
         Arc::new(ProviderAvailabilityGate::new(Arc::new(AvailableHealth))),
         Arc::new(StaticCadence {
             failure: None,
@@ -570,14 +841,41 @@ async fn repository_registration_reports_git_initializer_and_persist_failures_wi
             fail: false,
             count: AtomicUsize::new(0),
         }),
-    )
-    .register(input(root.clone()), CancellationToken::new())
-    .await
-    .unwrap_err();
+    );
+    let after_launch = after_coordinator
+        .begin_initialization(input(root.clone()), CancellationToken::new())
+        .await
+        .unwrap();
+    let after_operation_id = after_launch.operation_id().to_string();
+    let after = after_coordinator
+        .execute_initialization(after_launch, CancellationToken::new())
+        .await
+        .unwrap_err();
     assert_eq!(after.reason_code, "repository_git_state_failed");
     assert_eq!(after.changed_paths, None);
     assert!(after.action.contains("inspect the repository manually"));
     assert_eq!(after_repositories.create_count.load(Ordering::SeqCst), 0);
+    let after_operation = after_operations
+        .get("project_0001", &after_operation_id)
+        .unwrap();
+    assert_eq!(
+        after_operation.status,
+        RepositoryInitializationOperationStatus::Failed
+    );
+    assert_eq!(after_operation.failed_step, None);
+    assert!(
+        after_operation
+            .steps
+            .iter()
+            .all(|step| step.status == RepositoryInitializationStepStatus::Completed)
+    );
+    assert_eq!(
+        after_operation
+            .error
+            .as_ref()
+            .map(|error| error.reason_code.as_str()),
+        Some("repository_git_state_failed")
+    );
 
     let persist_repositories = Arc::new(ConfigRepositoryPersistence::new(vec![], true));
     let persist = coordinator(
