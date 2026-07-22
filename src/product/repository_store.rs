@@ -15,6 +15,8 @@ mod types;
 
 pub use initializer::ClaudeRepositoryInitializer;
 pub use operation::RepositoryInitializationOperationStore;
+#[allow(unused_imports)]
+pub(crate) use registration::RepositoryInitializationLaunch;
 pub use registration::{
     CadenceSkillsPreparation, ProjectLookup, RepositoryInitializer, RepositoryPersistence,
     RepositoryRegistrationCoordinator,
@@ -138,4 +140,12 @@ impl RepositoryStore {
 fn canonicalize_repo_path(path: &Path) -> Result<PathBuf, ProductStoreError> {
     fs::canonicalize(path)
         .map_err(|error| ProductStoreError::Io(format!("canonicalize {}: {error}", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn repository_initialization_launch_is_nameable_through_repository_store() {
+        let _: Option<crate::product::repository_store::RepositoryInitializationLaunch> = None;
+    }
 }
