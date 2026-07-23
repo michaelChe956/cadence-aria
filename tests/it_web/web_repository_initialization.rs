@@ -307,8 +307,8 @@ async fn get_operation(
 
 fn command_step_id(command_index: usize) -> &'static str {
     match command_index {
-        1 => "pre_check",
-        2 => "rule_config",
+        1 => "rule_config",
+        2 => "pre_check",
         3 => "mcp_configuration",
         4 => "project_rules_examples",
         _ => panic!("unexpected command index: {command_index}"),

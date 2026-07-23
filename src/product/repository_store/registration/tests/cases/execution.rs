@@ -81,7 +81,7 @@ async fn repository_registration_persists_step_boundaries_for_execution_failures
             cadence_fails: false,
             initializer_fails: true,
             persistence_fails: false,
-            expected_failed_step: Some(RepositoryInitializationStepKind::RuleConfig),
+            expected_failed_step: Some(RepositoryInitializationStepKind::PreCheck),
             expected_steps: [
                 RepositoryInitializationStepStatus::Completed,
                 RepositoryInitializationStepStatus::Completed,

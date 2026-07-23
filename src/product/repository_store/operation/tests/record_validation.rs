@@ -488,7 +488,7 @@ fn operation_rejects_running_a_later_step_before_prior_steps() {
         fixture.store.mark_step_running(
             "project_0001",
             &fixture.operation_id,
-            RepositoryInitializationStepKind::RuleConfig,
+            RepositoryInitializationStepKind::PreCheck,
             "2026-07-22T00:00:03Z".into(),
         ),
         Err(ProductStoreError::IdentityMismatch { .. })
@@ -512,7 +512,7 @@ fn operation_rejects_completing_a_later_running_step_before_prior_steps() {
         fixture.store.mark_step_completed(
             "project_0001",
             &fixture.operation_id,
-            RepositoryInitializationStepKind::RuleConfig,
+            RepositoryInitializationStepKind::PreCheck,
             "2026-07-22T00:00:03Z".into(),
         ),
         Err(ProductStoreError::IdentityMismatch { .. })
@@ -547,16 +547,16 @@ fn operation_rejects_malformed_persisted_step_shape() {
 fn operation_rejects_reordered_or_duplicate_persisted_steps() {
     for malformed_steps in [
         vec![
-            RepositoryInitializationStepKind::PreCheck,
-            RepositoryInitializationStepKind::CadenceSkills,
             RepositoryInitializationStepKind::RuleConfig,
+            RepositoryInitializationStepKind::CadenceSkills,
+            RepositoryInitializationStepKind::PreCheck,
             RepositoryInitializationStepKind::McpConfiguration,
             RepositoryInitializationStepKind::ProjectRulesExamples,
         ],
         vec![
             RepositoryInitializationStepKind::CadenceSkills,
             RepositoryInitializationStepKind::CadenceSkills,
-            RepositoryInitializationStepKind::RuleConfig,
+            RepositoryInitializationStepKind::PreCheck,
             RepositoryInitializationStepKind::McpConfiguration,
             RepositoryInitializationStepKind::ProjectRulesExamples,
         ],
@@ -593,7 +593,7 @@ fn operation_rejects_failing_a_later_step_before_prior_steps() {
         fixture.store.finish_failed(
             "project_0001",
             &fixture.operation_id,
-            Some(RepositoryInitializationStepKind::RuleConfig),
+            Some(RepositoryInitializationStepKind::PreCheck),
             repository_persist_failed_error(),
             "2026-07-22T00:00:03Z".into(),
         ),

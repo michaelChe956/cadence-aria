@@ -52,8 +52,8 @@ fn report_operation_progress(
 ) -> Result<(), Box<RepositoryRegistrationError>> {
     progress.step_started(RepositoryInitializationStepKind::CadenceSkills)?;
     progress.step_completed(RepositoryInitializationStepKind::CadenceSkills)?;
-    progress.step_started(RepositoryInitializationStepKind::PreCheck)?;
-    progress.step_completed(RepositoryInitializationStepKind::PreCheck)
+    progress.step_started(RepositoryInitializationStepKind::RuleConfig)?;
+    progress.step_completed(RepositoryInitializationStepKind::RuleConfig)
 }
 
 impl OperationFixture {
@@ -95,7 +95,7 @@ fn success_result(project_id: &str) -> RepositoryRegistrationSuccess {
             link_sync_status: "synchronized".to_string(),
             commands: vec![RepositoryInitializationCommandSummary {
                 command_index: 1,
-                command: "/pre-check --no-interrupt".to_string(),
+                command: "/rule-config --no-interrupt".to_string(),
                 status: "completed".to_string(),
                 output_summary: Some("ok".to_string()),
             }],
@@ -178,7 +178,7 @@ fn running_pre_check_operation() -> OperationFixture {
         .mark_step_running(
             "project_0001",
             &fixture.operation_id,
-            RepositoryInitializationStepKind::PreCheck,
+            RepositoryInitializationStepKind::RuleConfig,
             "2026-07-22T00:00:04Z".into(),
         )
         .unwrap();
@@ -192,7 +192,7 @@ fn failed_pre_check_operation() -> OperationFixture {
         .finish_failed(
             "project_0001",
             &fixture.operation_id,
-            Some(RepositoryInitializationStepKind::PreCheck),
+            Some(RepositoryInitializationStepKind::RuleConfig),
             repository_persist_failed_error(),
             COMPLETED_AT.into(),
         )

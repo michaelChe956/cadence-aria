@@ -414,7 +414,7 @@ impl RepositoryRegistrationCoordinator {
                 .map_err(|error| *error)?;
 
             reporter
-                .step_started(RepositoryInitializationStepKind::PreCheck)
+                .step_started(RepositoryInitializationStepKind::RuleConfig)
                 .map_err(|error| *error)?;
             self.provider_gate
                 .ensure_available(&ProviderName::ClaudeCode)

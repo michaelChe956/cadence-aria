@@ -224,7 +224,7 @@ async fn repository_registration_reports_git_initializer_and_persist_failures_wi
     );
     assert_eq!(
         before_operation.failed_step,
-        Some(RepositoryInitializationStepKind::PreCheck)
+        Some(RepositoryInitializationStepKind::RuleConfig)
     );
     assert_eq!(
         before_operation.steps[1].status,

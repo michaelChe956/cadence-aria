@@ -332,10 +332,10 @@ impl RepositoryInitializer for StaticInitializer {
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
         self.count.fetch_add(1, Ordering::SeqCst);
         if self.fail {
-            let step = RepositoryInitializationStepKind::PreCheck;
+            let step = RepositoryInitializationStepKind::RuleConfig;
             progress.step_started(step).map_err(|error| *error)?;
             progress.step_completed(step).map_err(|error| *error)?;
-            let step = RepositoryInitializationStepKind::RuleConfig;
+            let step = RepositoryInitializationStepKind::PreCheck;
             progress.step_started(step).map_err(|error| *error)?;
             return Err(RepositoryRegistrationError::for_command(
                 "repository_initialization",

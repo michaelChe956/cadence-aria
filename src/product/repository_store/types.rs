@@ -88,8 +88,8 @@ pub enum RepositoryInitializationStepKind {
 impl RepositoryInitializationStepKind {
     pub const ALL: [Self; 5] = [
         Self::CadenceSkills,
-        Self::PreCheck,
         Self::RuleConfig,
+        Self::PreCheck,
         Self::McpConfiguration,
         Self::ProjectRulesExamples,
     ];
@@ -106,8 +106,8 @@ impl RepositoryInitializationStepKind {
 
     pub fn from_command_index(command_index: usize) -> Option<Self> {
         [
-            Self::PreCheck,
             Self::RuleConfig,
+            Self::PreCheck,
             Self::McpConfiguration,
             Self::ProjectRulesExamples,
         ]
