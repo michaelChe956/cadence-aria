@@ -76,8 +76,8 @@ function repositoryInitializationSteps(
 ): RepositoryInitializationStep[] {
   return [
     { step_id: "cadence_skills", status },
-    { step_id: "pre_check", status },
     { step_id: "rule_config", status },
+    { step_id: "pre_check", status },
     { step_id: "mcp_configuration", status },
     { step_id: "project_rules_examples", status },
   ];
@@ -230,12 +230,12 @@ describe("api client", () => {
       status: "failed",
       steps: [
         { step_id: "cadence_skills", status: "completed" },
-        { step_id: "pre_check", status: "failed" },
-        { step_id: "rule_config", status: "pending" },
+        { step_id: "rule_config", status: "failed" },
+        { step_id: "pre_check", status: "pending" },
         { step_id: "mcp_configuration", status: "pending" },
         { step_id: "project_rules_examples", status: "pending" },
       ],
-      failed_step: "pre_check",
+      failed_step: "rule_config",
       error: {
         code: "repository_init_command_failed",
         message: "repository initialization failed",

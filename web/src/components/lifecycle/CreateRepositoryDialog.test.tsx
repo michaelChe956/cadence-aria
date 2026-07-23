@@ -90,8 +90,8 @@ function steps(
 ): RepositoryInitializationStep[] {
   const stepIds: RepositoryInitializationStepId[] = [
     "cadence_skills",
-    "pre_check",
     "rule_config",
+    "pre_check",
     "mcp_configuration",
     "project_rules_examples",
   ];
@@ -142,7 +142,7 @@ function failedOperation(
     status: "failed",
     steps: steps(["completed", "failed", "pending", "pending", "pending"]),
     current_step: null,
-    failed_step: "pre_check",
+    failed_step: "rule_config",
     error: {
       code: "repository_init_command_failed",
       message: "repository registration failed",
@@ -219,7 +219,7 @@ describe("CreateRepositoryDialog", () => {
     setProviderHealth(true, true);
     const firstPoll = operation({
       steps: steps(["completed", "running", "pending", "pending", "pending"]),
-      current_step: "pre_check",
+      current_step: "rule_config",
     });
     const completed = completedOperation();
     const onFetchOperation = vi
@@ -240,13 +240,13 @@ describe("CreateRepositoryDialog", () => {
 
     expect(onFetchOperation).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("status")).toHaveTextContent(
-      "正在执行：执行预检查。已完成 1 / 5。",
+      "正在执行：配置规则。已完成 1 / 5。",
     );
     const stepList = screen.getByRole("list", { name: "初始化步骤" });
     expect(within(stepList).getByText("准备 Cadence Skills").closest("li")).toHaveTextContent(
       "已完成",
     );
-    expect(within(stepList).getByText("执行预检查").closest("li")).toHaveTextContent(
+    expect(within(stepList).getByText("配置规则").closest("li")).toHaveTextContent(
       "正在执行",
     );
 
@@ -322,7 +322,7 @@ describe("CreateRepositoryDialog", () => {
     setProviderHealth(true, true);
     const retrySnapshot = operation({
       steps: steps(["completed", "running", "pending", "pending", "pending"]),
-      current_step: "pre_check",
+      current_step: "rule_config",
     });
     const onFetchOperation = vi
       .fn()
@@ -353,12 +353,12 @@ describe("CreateRepositoryDialog", () => {
 
     expect(onFetchOperation).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("status")).toHaveTextContent(
-      "正在执行：执行预检查。已完成 1 / 5。",
+      "正在执行：配置规则。已完成 1 / 5。",
     );
     expect(within(stepList).getByText("准备 Cadence Skills").closest("li")).toHaveTextContent(
       "已完成",
     );
-    expect(within(stepList).getByText("执行预检查").closest("li")).toHaveTextContent(
+    expect(within(stepList).getByText("配置规则").closest("li")).toHaveTextContent(
       "正在执行",
     );
   });
@@ -404,7 +404,7 @@ describe("CreateRepositoryDialog", () => {
     await user.click(screen.getByRole("button", { name: "添加代码库" }));
 
     const stepList = await screen.findByRole("list", { name: "初始化步骤" });
-    const failedStep = within(stepList).getByText("执行预检查").closest("li");
+    const failedStep = within(stepList).getByText("配置规则").closest("li");
     expect(failedStep).toHaveTextContent("失败");
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent("repository registration failed");
