@@ -78,7 +78,7 @@ fn operation_starts_with_exactly_five_pending_steps_and_enforces_order() {
 
 #[test]
 fn interrupted_operation_marks_running_step_failed_but_preserves_completed_steps() {
-    let fixture = running_pre_check_operation();
+    let fixture = running_rule_config_operation();
     let recovered = fixture
         .store
         .recover_interrupted(

@@ -149,7 +149,7 @@ fn created_operation() -> OperationFixture {
     }
 }
 
-fn running_pre_check_operation() -> OperationFixture {
+fn running_rule_config_operation() -> OperationFixture {
     let fixture = created_operation();
     fixture
         .store
@@ -185,8 +185,8 @@ fn running_pre_check_operation() -> OperationFixture {
     fixture
 }
 
-fn failed_pre_check_operation() -> OperationFixture {
-    let fixture = running_pre_check_operation();
+fn failed_rule_config_operation() -> OperationFixture {
+    let fixture = running_rule_config_operation();
     fixture
         .store
         .finish_failed(

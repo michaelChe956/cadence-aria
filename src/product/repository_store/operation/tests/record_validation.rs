@@ -155,7 +155,7 @@ fn operation_get_rejects_running_record_with_failed_step() {
 
 #[test]
 fn operation_get_rejects_running_record_with_multiple_current_steps() {
-    let fixture = running_pre_check_operation();
+    let fixture = running_rule_config_operation();
     let path = fixture.operation_path();
     let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
     persisted.steps[2].status = RepositoryInitializationStepStatus::Running;
@@ -286,7 +286,7 @@ fn operation_get_rejects_completed_record_with_inconsistent_terminal_fields() {
 
 #[test]
 fn operation_get_rejects_failed_record_with_inconsistent_failed_step() {
-    let fixture = failed_pre_check_operation();
+    let fixture = failed_rule_config_operation();
     let path = fixture.operation_path();
     let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
     persisted.failed_step = None;
@@ -306,7 +306,7 @@ fn operation_get_rejects_failed_record_with_inconsistent_terminal_fields() {
         "completed_at",
         "failed_without_completed_at",
     ] {
-        let fixture = failed_pre_check_operation();
+        let fixture = failed_rule_config_operation();
         let path = fixture.operation_path();
         let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
         match stale_field {
@@ -327,7 +327,7 @@ fn operation_get_rejects_failed_record_with_inconsistent_terminal_fields() {
 
 #[test]
 fn operation_recovery_rejects_multiple_current_steps() {
-    let fixture = running_pre_check_operation();
+    let fixture = running_rule_config_operation();
     let path = fixture.operation_path();
     let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
     persisted.steps[2].status = RepositoryInitializationStepStatus::Running;
