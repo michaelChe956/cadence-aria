@@ -130,3 +130,8 @@ Task 2: complete (commits 513039b6..5ae3dbce, review clean)
 Task 3: complete (commits 5ae3dbce..HEAD, doc-only)
   Caveat: cargo test --locked 全量在本宿主因既有 ETXTBSY flake（btrfs 写后 exec，前次 task-8 已取证）无法全绿；失败测试隔离单跑全过，与本改动无因果。有效验证：--lib repository_store 53/53、it_web web_repository_initialization 10/10、前端 732/732、fmt/clippy/tsc/openspec validate 全绿。
 Final review: approved (7203884b..0f60a118, Ready to merge=Yes); Minor 修复 ca6dab7（辅助函数改名 + 旧 Plan 冻结接口节同步）
+
+# 回退 rule-config 优先顺序（恢复 pre-check 先跑）
+
+Reason: 真机测试添加代码库时 /rule-config 作为第一步失败（Claude API 429 配额耗尽 + 5min/命令超时 + 目标仓库 eza 别名噪声），用户决定撤销顺序调整。
+Action: 代码/测试/web 还原到 7203884b；OpenSpec（已归档 change + 主 specs）与 2026-07-22 Plan 全部恢复 pre-check 先跑；删除 2026-07-23 顺序调整 Plan；tasks.md 移除第 5 节。

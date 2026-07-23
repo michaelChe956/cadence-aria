@@ -9,8 +9,8 @@ fn operation_progress_callback_contract_preserves_step_event_order() {
         &[
             (RepositoryInitializationStepKind::CadenceSkills, "started"),
             (RepositoryInitializationStepKind::CadenceSkills, "completed"),
-            (RepositoryInitializationStepKind::RuleConfig, "started"),
-            (RepositoryInitializationStepKind::RuleConfig, "completed"),
+            (RepositoryInitializationStepKind::PreCheck, "started"),
+            (RepositoryInitializationStepKind::PreCheck, "completed"),
         ],
     );
 }
@@ -45,8 +45,8 @@ fn operation_starts_with_exactly_five_pending_steps_and_enforces_order() {
             .collect::<Vec<_>>(),
         vec![
             RepositoryInitializationStepKind::CadenceSkills,
-            RepositoryInitializationStepKind::RuleConfig,
             RepositoryInitializationStepKind::PreCheck,
+            RepositoryInitializationStepKind::RuleConfig,
             RepositoryInitializationStepKind::McpConfiguration,
             RepositoryInitializationStepKind::ProjectRulesExamples,
         ],
@@ -69,7 +69,7 @@ fn operation_starts_with_exactly_five_pending_steps_and_enforces_order() {
         .mark_step_running(
             "project_0001",
             "repository_initialization_0001",
-            RepositoryInitializationStepKind::PreCheck,
+            RepositoryInitializationStepKind::RuleConfig,
             "2026-07-22T00:00:02Z".into(),
         )
         .unwrap_err();
@@ -78,7 +78,7 @@ fn operation_starts_with_exactly_five_pending_steps_and_enforces_order() {
 
 #[test]
 fn interrupted_operation_marks_running_step_failed_but_preserves_completed_steps() {
-    let fixture = running_rule_config_operation();
+    let fixture = running_pre_check_operation();
     let recovered = fixture
         .store
         .recover_interrupted(
@@ -94,7 +94,7 @@ fn interrupted_operation_marks_running_step_failed_but_preserves_completed_steps
     );
     assert_eq!(
         recovered.failed_step,
-        Some(RepositoryInitializationStepKind::RuleConfig)
+        Some(RepositoryInitializationStepKind::PreCheck)
     );
     assert_eq!(
         recovered.steps[0].status,

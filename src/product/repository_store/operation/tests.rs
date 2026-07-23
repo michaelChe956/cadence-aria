@@ -52,8 +52,8 @@ fn report_operation_progress(
 ) -> Result<(), Box<RepositoryRegistrationError>> {
     progress.step_started(RepositoryInitializationStepKind::CadenceSkills)?;
     progress.step_completed(RepositoryInitializationStepKind::CadenceSkills)?;
-    progress.step_started(RepositoryInitializationStepKind::RuleConfig)?;
-    progress.step_completed(RepositoryInitializationStepKind::RuleConfig)
+    progress.step_started(RepositoryInitializationStepKind::PreCheck)?;
+    progress.step_completed(RepositoryInitializationStepKind::PreCheck)
 }
 
 impl OperationFixture {
@@ -95,7 +95,7 @@ fn success_result(project_id: &str) -> RepositoryRegistrationSuccess {
             link_sync_status: "synchronized".to_string(),
             commands: vec![RepositoryInitializationCommandSummary {
                 command_index: 1,
-                command: "/rule-config --no-interrupt".to_string(),
+                command: "/pre-check --no-interrupt".to_string(),
                 status: "completed".to_string(),
                 output_summary: Some("ok".to_string()),
             }],
@@ -149,7 +149,7 @@ fn created_operation() -> OperationFixture {
     }
 }
 
-fn running_rule_config_operation() -> OperationFixture {
+fn running_pre_check_operation() -> OperationFixture {
     let fixture = created_operation();
     fixture
         .store
@@ -178,21 +178,21 @@ fn running_rule_config_operation() -> OperationFixture {
         .mark_step_running(
             "project_0001",
             &fixture.operation_id,
-            RepositoryInitializationStepKind::RuleConfig,
+            RepositoryInitializationStepKind::PreCheck,
             "2026-07-22T00:00:04Z".into(),
         )
         .unwrap();
     fixture
 }
 
-fn failed_rule_config_operation() -> OperationFixture {
-    let fixture = running_rule_config_operation();
+fn failed_pre_check_operation() -> OperationFixture {
+    let fixture = running_pre_check_operation();
     fixture
         .store
         .finish_failed(
             "project_0001",
             &fixture.operation_id,
-            Some(RepositoryInitializationStepKind::RuleConfig),
+            Some(RepositoryInitializationStepKind::PreCheck),
             repository_persist_failed_error(),
             COMPLETED_AT.into(),
         )

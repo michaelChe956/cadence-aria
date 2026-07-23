@@ -31,7 +31,7 @@
 - **THEN** 系统 SHALL 返回稳定的“初始化操作不存在”错误，且不得返回其他 Project 或代码库的操作信息
 
 ### Requirement: 固定五步真实状态机
-每个代码库初始化 operation SHALL 按以下顺序创建且仅创建五个步骤：`cadence_skills`、`rule_config`、`pre_check`、`mcp_configuration`、`project_rules_examples`。每一步 SHALL 具有 `pending`、`running`、`completed` 或 `failed` 状态；服务端 SHALL 是这些状态的唯一事实来源。
+每个代码库初始化 operation SHALL 按以下顺序创建且仅创建五个步骤：`cadence_skills`、`pre_check`、`rule_config`、`mcp_configuration`、`project_rules_examples`。每一步 SHALL 具有 `pending`、`running`、`completed` 或 `failed` 状态；服务端 SHALL 是这些状态的唯一事实来源。
 
 #### Scenario: 初始化开始时的步骤状态
 - **WHEN** 系统创建新的初始化 operation

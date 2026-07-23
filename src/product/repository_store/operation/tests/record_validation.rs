@@ -155,7 +155,7 @@ fn operation_get_rejects_running_record_with_failed_step() {
 
 #[test]
 fn operation_get_rejects_running_record_with_multiple_current_steps() {
-    let fixture = running_rule_config_operation();
+    let fixture = running_pre_check_operation();
     let path = fixture.operation_path();
     let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
     persisted.steps[2].status = RepositoryInitializationStepStatus::Running;
@@ -286,7 +286,7 @@ fn operation_get_rejects_completed_record_with_inconsistent_terminal_fields() {
 
 #[test]
 fn operation_get_rejects_failed_record_with_inconsistent_failed_step() {
-    let fixture = failed_rule_config_operation();
+    let fixture = failed_pre_check_operation();
     let path = fixture.operation_path();
     let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
     persisted.failed_step = None;
@@ -306,7 +306,7 @@ fn operation_get_rejects_failed_record_with_inconsistent_terminal_fields() {
         "completed_at",
         "failed_without_completed_at",
     ] {
-        let fixture = failed_rule_config_operation();
+        let fixture = failed_pre_check_operation();
         let path = fixture.operation_path();
         let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
         match stale_field {
@@ -327,7 +327,7 @@ fn operation_get_rejects_failed_record_with_inconsistent_terminal_fields() {
 
 #[test]
 fn operation_recovery_rejects_multiple_current_steps() {
-    let fixture = running_rule_config_operation();
+    let fixture = running_pre_check_operation();
     let path = fixture.operation_path();
     let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
     persisted.steps[2].status = RepositoryInitializationStepStatus::Running;
@@ -488,7 +488,7 @@ fn operation_rejects_running_a_later_step_before_prior_steps() {
         fixture.store.mark_step_running(
             "project_0001",
             &fixture.operation_id,
-            RepositoryInitializationStepKind::PreCheck,
+            RepositoryInitializationStepKind::RuleConfig,
             "2026-07-22T00:00:03Z".into(),
         ),
         Err(ProductStoreError::IdentityMismatch { .. })
@@ -512,7 +512,7 @@ fn operation_rejects_completing_a_later_running_step_before_prior_steps() {
         fixture.store.mark_step_completed(
             "project_0001",
             &fixture.operation_id,
-            RepositoryInitializationStepKind::PreCheck,
+            RepositoryInitializationStepKind::RuleConfig,
             "2026-07-22T00:00:03Z".into(),
         ),
         Err(ProductStoreError::IdentityMismatch { .. })
@@ -547,16 +547,16 @@ fn operation_rejects_malformed_persisted_step_shape() {
 fn operation_rejects_reordered_or_duplicate_persisted_steps() {
     for malformed_steps in [
         vec![
-            RepositoryInitializationStepKind::RuleConfig,
-            RepositoryInitializationStepKind::CadenceSkills,
             RepositoryInitializationStepKind::PreCheck,
+            RepositoryInitializationStepKind::CadenceSkills,
+            RepositoryInitializationStepKind::RuleConfig,
             RepositoryInitializationStepKind::McpConfiguration,
             RepositoryInitializationStepKind::ProjectRulesExamples,
         ],
         vec![
             RepositoryInitializationStepKind::CadenceSkills,
             RepositoryInitializationStepKind::CadenceSkills,
-            RepositoryInitializationStepKind::PreCheck,
+            RepositoryInitializationStepKind::RuleConfig,
             RepositoryInitializationStepKind::McpConfiguration,
             RepositoryInitializationStepKind::ProjectRulesExamples,
         ],
@@ -593,7 +593,7 @@ fn operation_rejects_failing_a_later_step_before_prior_steps() {
         fixture.store.finish_failed(
             "project_0001",
             &fixture.operation_id,
-            Some(RepositoryInitializationStepKind::PreCheck),
+            Some(RepositoryInitializationStepKind::RuleConfig),
             repository_persist_failed_error(),
             "2026-07-22T00:00:03Z".into(),
         ),

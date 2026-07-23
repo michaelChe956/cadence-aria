@@ -567,8 +567,8 @@ describe("repository initialization operation types", () => {
       status: "created",
       steps: [
         { step_id: "cadence_skills", status: "pending" },
-        { step_id: "rule_config", status: "pending" },
         { step_id: "pre_check", status: "pending" },
+        { step_id: "rule_config", status: "pending" },
         { step_id: "mcp_configuration", status: "pending" },
         { step_id: "project_rules_examples", status: "pending" },
       ],
@@ -585,8 +585,8 @@ describe("repository initialization operation types", () => {
       status: "completed",
       steps: [
         { step_id: "cadence_skills", status: "completed" },
-        { step_id: "rule_config", status: "completed" },
         { step_id: "pre_check", status: "completed" },
+        { step_id: "rule_config", status: "completed" },
         { step_id: "mcp_configuration", status: "completed" },
         { step_id: "project_rules_examples", status: "completed" },
       ],
@@ -610,12 +610,12 @@ describe("repository initialization operation types", () => {
           commands: [
             {
               index: 1,
-              command: "/rule-config --no-interrupt",
+              command: "/pre-check --no-interrupt",
               status: "completed",
             },
             {
               index: 2,
-              command: "/pre-check --no-interrupt",
+              command: "/rule-config --no-interrupt",
               status: "completed",
             },
             {
@@ -644,20 +644,20 @@ describe("repository initialization operation types", () => {
       status: "failed",
       steps: [
         { step_id: "cadence_skills", status: "completed" },
-        { step_id: "rule_config", status: "failed" },
-        { step_id: "pre_check", status: "pending" },
+        { step_id: "pre_check", status: "failed" },
+        { step_id: "rule_config", status: "pending" },
         { step_id: "mcp_configuration", status: "pending" },
         { step_id: "project_rules_examples", status: "pending" },
       ],
       current_step: null,
-      failed_step: "rule_config",
+      failed_step: "pre_check",
       result: null,
       error: {
         code: "repository_init_command_failed",
         message: "repository initialization failed",
         details: {
           stage: "repository_init_command",
-          command: "/rule-config --no-interrupt",
+          command: "/pre-check --no-interrupt",
           reason_code: "repository_init_command_failed",
           retryable: true,
         },

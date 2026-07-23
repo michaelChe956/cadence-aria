@@ -5,7 +5,7 @@
 ## What Changes
 
 - 将代码库注册改为可跟踪的异步初始化操作：提交后立即返回操作标识，客户端依据服务端真实状态逐项展示进度。
-- 为以下五个固定步骤记录并暴露 `pending`、`running`、`completed`、`failed` 终态状态：Cadence-skills 下载与软链、`/rule-config --no-interrupt`、`/pre-check --no-interrupt`、`/mcp-configuration --no-interrupt`、`/project-rules-examples --no-interrupt`。
+- 为以下五个固定步骤记录并暴露 `pending`、`running`、`completed`、`failed` 终态状态：Cadence-skills 下载与软链、`/pre-check --no-interrupt`、`/rule-config --no-interrupt`、`/mcp-configuration --no-interrupt`、`/project-rules-examples --no-interrupt`。
 - 将四个 Claude Code 初始化提示词改为使用 README 定义的 `--no-interrupt` 参数，禁止初始化流程等待人工输入。
 - 将“添加代码库”弹窗改为真实五步进度面板：执行中不可关闭、完成后展示既有初始化摘要、失败时停留在失败步骤并展示恢复信息；仅成功完成并持久化代码库后刷新工作台列表。
 - 不展示步骤内部百分比、计时估算或模拟进度；不增加初始化日志流、后台继续执行或用户取消功能。

@@ -20,8 +20,3 @@
 - [x] 4.2 补充 Claude 初始化器测试，确认四个独立命令均带 `--no-interrupt`，且交互事件失败。（需求：non-interrupt-repository-bootstrap）
 - [x] 4.3 补充 React 组件与工作台测试，覆盖五步渲染、运行中不可关闭、轮询终态、成功刷新、失败恢复及无障碍状态播报。（需求：repository-initialization-progress）
 - [x] 4.4 执行项目规定的格式化、静态检查、Rust/前端测试与 OpenSpec 验证，修复发现的问题。（需求：repository-initialization-progress、non-interrupt-repository-bootstrap）
-
-## 5. 初始化命令顺序调整（rule_config 优先）
-
-- [x] 5.1 将固定五步顺序调整为 `cadence_skills`、`rule_config`、`pre_check`、`mcp_configuration`、`project_rules_examples`，同步后端顺序来源、Claude 命令执行顺序与失败步骤标记。（需求：repository-initialization-progress、non-interrupt-repository-bootstrap）
-- [x] 5.2 同步前后端测试中的步骤顺序 fixture 与断言，并执行规定验证。（需求：repository-initialization-progress、non-interrupt-repository-bootstrap）

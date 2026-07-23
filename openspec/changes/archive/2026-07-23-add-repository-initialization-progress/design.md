@@ -41,8 +41,8 @@
 operation 在创建时生成以下五项，顺序和值均固定：
 
 1. `cadence_skills`：Cadence-skills 下载/更新与三层软链同步；
-2. `rule_config`：`/rule-config --no-interrupt`；
-3. `pre_check`：`/pre-check --no-interrupt`；
+2. `pre_check`：`/pre-check --no-interrupt`；
+3. `rule_config`：`/rule-config --no-interrupt`；
 4. `mcp_configuration`：`/mcp-configuration --no-interrupt`；
 5. `project_rules_examples`：`/project-rules-examples --no-interrupt`。
 

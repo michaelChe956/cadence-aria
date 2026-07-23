@@ -293,8 +293,8 @@ async fn repository_initializer_runs_four_independent_claude_turns_in_strict_ord
             .map(|input| input.prompt.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "/rule-config --no-interrupt",
             "/pre-check --no-interrupt",
+            "/rule-config --no-interrupt",
             "/mcp-configuration --no-interrupt",
             "/project-rules-examples --no-interrupt",
         ]
@@ -324,8 +324,8 @@ async fn repository_initializer_runs_four_independent_claude_turns_in_strict_ord
             ))
             .collect::<Vec<_>>(),
         vec![
-            (1, "/rule-config --no-interrupt", "completed"),
-            (2, "/pre-check --no-interrupt", "completed"),
+            (1, "/pre-check --no-interrupt", "completed"),
+            (2, "/rule-config --no-interrupt", "completed"),
             (3, "/mcp-configuration --no-interrupt", "completed"),
             (4, "/project-rules-examples --no-interrupt", "completed"),
         ]
@@ -333,10 +333,10 @@ async fn repository_initializer_runs_four_independent_claude_turns_in_strict_ord
     assert_eq!(
         progress.events.lock().unwrap().as_slice(),
         &[
-            (RepositoryInitializationStepKind::RuleConfig, "started"),
-            (RepositoryInitializationStepKind::RuleConfig, "completed"),
             (RepositoryInitializationStepKind::PreCheck, "started"),
             (RepositoryInitializationStepKind::PreCheck, "completed"),
+            (RepositoryInitializationStepKind::RuleConfig, "started"),
+            (RepositoryInitializationStepKind::RuleConfig, "completed"),
             (
                 RepositoryInitializationStepKind::McpConfiguration,
                 "started"
@@ -385,9 +385,9 @@ async fn repository_initializer_reports_only_started_steps_when_second_turn_fail
     assert_eq!(
         progress.events.lock().unwrap().as_slice(),
         &[
-            (RepositoryInitializationStepKind::RuleConfig, "started"),
-            (RepositoryInitializationStepKind::RuleConfig, "completed"),
             (RepositoryInitializationStepKind::PreCheck, "started"),
+            (RepositoryInitializationStepKind::PreCheck, "completed"),
+            (RepositoryInitializationStepKind::RuleConfig, "started"),
         ],
     );
 }
@@ -520,7 +520,7 @@ async fn repository_initializer_aborts_unexpected_permission_and_choice_requests
         assert_eq!(provider.inputs.lock().unwrap().len(), 1);
         assert_eq!(
             progress.events.lock().unwrap().as_slice(),
-            &[(RepositoryInitializationStepKind::RuleConfig, "started")],
+            &[(RepositoryInitializationStepKind::PreCheck, "started")],
         );
     }
 }

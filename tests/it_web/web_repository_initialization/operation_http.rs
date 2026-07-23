@@ -54,7 +54,7 @@ async fn repository_initialization_post_returns_202_then_get_returns_completed_f
     );
     assert_eq!(
         completed["result"]["initialization"]["commands"][0]["command"],
-        "/rule-config --no-interrupt",
+        "/pre-check --no-interrupt",
     );
 
     let inputs = provider.inputs.lock().expect("inputs");
@@ -64,8 +64,8 @@ async fn repository_initialization_post_returns_202_then_get_returns_completed_f
             .map(|input| input.prompt.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "/rule-config --no-interrupt",
             "/pre-check --no-interrupt",
+            "/rule-config --no-interrupt",
             "/mcp-configuration --no-interrupt",
             "/project-rules-examples --no-interrupt"
         ]
@@ -177,7 +177,7 @@ async fn repository_initialization_completed_operation_get_sanitizes_persisted_r
                         link_sync_status: "synchronized".to_string(),
                         commands: vec![RepositoryInitializationCommandSummary {
                             command_index: 1,
-                            command: "/rule-config --no-interrupt".to_string(),
+                            command: "/pre-check --no-interrupt".to_string(),
                             status: "completed".to_string(),
                             output_summary: None,
                         }],
@@ -285,7 +285,7 @@ async fn repository_initialization_interaction_aborts_and_does_not_persist() {
     let operation_id = accepted["operation_id"].as_str().expect("operation id");
     let failed = get_operation_until_terminal(&app, "project_0001", operation_id).await;
     assert_eq!(failed["status"], "failed");
-    assert_eq!(failed["failed_step"], "rule_config");
+    assert_eq!(failed["failed_step"], "pre_check");
     assert_eq!(
         failed["error"]["code"],
         "repository_init_interaction_required"

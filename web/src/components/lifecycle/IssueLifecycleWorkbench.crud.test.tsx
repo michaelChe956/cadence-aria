@@ -76,7 +76,7 @@ function repositoryOperationSnapshot(
     steps: [
       { step_id: "cadence_skills", status: "completed" },
       {
-        step_id: "rule_config",
+        step_id: "pre_check",
         status:
           status === "failed"
             ? "failed"
@@ -85,7 +85,7 @@ function repositoryOperationSnapshot(
               : "running",
       },
       {
-        step_id: "pre_check",
+        step_id: "rule_config",
         status: status === "completed" ? "completed" : "pending",
       },
       {
@@ -97,8 +97,8 @@ function repositoryOperationSnapshot(
         status: status === "completed" ? "completed" : "pending",
       },
     ],
-    current_step: status === "completed" ? null : "rule_config",
-    failed_step: status === "failed" ? "rule_config" : null,
+    current_step: status === "completed" ? null : "pre_check",
+    failed_step: status === "failed" ? "pre_check" : null,
     result: null,
     error: null,
     created_at: "2026-07-14T00:00:00Z",
