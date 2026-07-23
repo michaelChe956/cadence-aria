@@ -94,3 +94,39 @@ P6 Task 4: complete (commits 98000bf..b09de47, review approved after three fix w
   Decision: recovery evidence verifies all nine durable fault points, raw Request/Amendment/Manifest uniqueness, unrelated active revision stability, Story/Design/WorkItem recovery, and real production Runner paths for four roles across Codex, ClaudeCode and Fake scripted adapters.
   Decision: linked protocol errors fail closed unless the complete Story/Design target context matches the pending identity; Work Item repair stays on its Plan Repair Child path.
   Verification boundary: browser E2E/Playwright and real external Provider CLIs were intentionally not run per user instruction; browser acceptance remains user-owned.
+
+# 代码库初始化真实进度
+
+Change: add-repository-initialization-progress
+Plan: cadence/plans/2026-07-22_计划文档_代码库初始化进度_v1.0.md
+Execution mode: subagent-driven-development
+Base: b0dedb9
+Baseline: web pnpm test PASS (89 files / 724 tests); Rust cargo test blocked before tests because build.rs requires missing web/dist/index.html.
+Task 1: complete (commits b0dedb9..d240efa, review approved)
+  Minor: 缺少 mark_step_running 同一步、不同时间戳下保持 started_at/updated_at 不变的直接幂等回归测试；最终全分支审查时复核。
+Task 2: complete (commits d240efa..72458da, review approved)
+  Minor: 全仓 Clippy 仍被 Task 1 既有 `result_large_err` 阻断（types.rs progress trait 和 operation tests helper）；非本任务引入，后续拥有类型/API 范围的任务或最终修复波需解决。
+Task 3: complete (commits 72458da..ac0de30, review approved after one fix wave)
+  Minor: legacy `new` with custom RepositoryPersistence may use UUID temp operation store; Task 4 must use explicit new_with_operations with same ProductAppPaths.
+  Minor: coordinator order test records only generic initializer, not four distinct command names.
+  Minor: no coordinator-level regression for finalization operation-store write failure/non-terminal recovery.
+Task 4: complete (commits ac0de30..f3d59ba, recovery audit and final review clean)
+  Recovery: retained and audited the interrupted candidate diff; comparison against HEAD with the acceptance test established actual 201-vs-202 RED, then fresh Task 4 verification passed.
+  Verification: cargo fmt --check; cargo test --locked --lib repository_initialization_run_registry; cargo test --locked --test it_web repository_initialization_; cargo check --locked.
+Task 4: complete (commits ac0de30..d671cab, review approved after two fix waves)
+  Decision: operation result uses a dedicated RepositoryDto projection with path/runtime_root `<path>`; ordinary repository GET remains unchanged.
+  Decision: operation completed/failed changed_paths use exact whole-path sanitization, preserving relative repository paths.
+  Minor: worker-panic behavior is not injected end-to-end; RAII lease drop plus inactive stale-operation recovery are covered.
+
+# 初始化命令顺序调整（rule_config 优先）
+
+Plan: cadence/plans/2026-07-23_计划文档_初始化命令顺序调整_v1.0.md
+Plan base commit: 7203884b
+Execution mode: subagent-driven-development
+Task 1: complete (commits 7203884b..513039b6, review clean)
+  Minor: registration 测试辅助函数名 running_pre_check_operation/failed_pre_check_operation 语义已变为 RuleConfig 场景，命名有歧义，留待最终审查裁定。
+  Note: Plan Task 1 定向命令 `--lib repository_initialization` 仅匹配 3 个测试，实际取证用 `--lib repository_store`。
+Task 2: complete (commits 513039b6..5ae3dbce, review clean)
+Task 3: complete (commits 5ae3dbce..HEAD, doc-only)
+  Caveat: cargo test --locked 全量在本宿主因既有 ETXTBSY flake（btrfs 写后 exec，前次 task-8 已取证）无法全绿；失败测试隔离单跑全过，与本改动无因果。有效验证：--lib repository_store 53/53、it_web web_repository_initialization 10/10、前端 732/732、fmt/clippy/tsc/openspec validate 全绿。
+Final review: approved (7203884b..0f60a118, Ready to merge=Yes); Minor 修复 ca6dab7（辅助函数改名 + 旧 Plan 冻结接口节同步）
