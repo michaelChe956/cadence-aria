@@ -47,12 +47,12 @@ function repositoryInitializationResult(): CreateRepositoryResponse {
     initialization: {
       source: "offline",
       commands: [
-        { index: 1, command: "/pre-check --no-interrupt", status: "completed" },
         {
-          index: 2,
+          index: 1,
           command: "/rule-config --no-interrupt",
           status: "completed",
         },
+        { index: 2, command: "/pre-check --no-interrupt", status: "completed" },
         {
           index: 3,
           command: "/mcp-configuration --no-interrupt",
@@ -241,7 +241,7 @@ describe("api client", () => {
         message: "repository initialization failed",
         details: {
           stage: "repository_init_command",
-          command: "/pre-check --no-interrupt",
+          command: "/rule-config --no-interrupt",
           reason_code: "repository_init_command_failed",
           retryable: true,
         },

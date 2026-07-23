@@ -610,12 +610,12 @@ describe("repository initialization operation types", () => {
           commands: [
             {
               index: 1,
-              command: "/pre-check --no-interrupt",
+              command: "/rule-config --no-interrupt",
               status: "completed",
             },
             {
               index: 2,
-              command: "/rule-config --no-interrupt",
+              command: "/pre-check --no-interrupt",
               status: "completed",
             },
             {
@@ -657,7 +657,7 @@ describe("repository initialization operation types", () => {
         message: "repository initialization failed",
         details: {
           stage: "repository_init_command",
-          command: "/pre-check --no-interrupt",
+          command: "/rule-config --no-interrupt",
           reason_code: "repository_init_command_failed",
           retryable: true,
         },

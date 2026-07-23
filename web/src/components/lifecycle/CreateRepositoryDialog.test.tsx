@@ -75,8 +75,8 @@ function createResponse(): CreateRepositoryResponse {
     initialization: {
       source: "offline",
       commands: [
-        { index: 1, command: "/cadence-init:pre-check", status: "completed" },
-        { index: 2, command: "/cadence-init:rule-config", status: "completed" },
+        { index: 1, command: "/cadence-init:rule-config", status: "completed" },
+        { index: 2, command: "/cadence-init:pre-check", status: "completed" },
       ],
       warnings: ["cadence_skills_conflict:<path>"],
       changed_paths: [".claude/rules/project.md"],
