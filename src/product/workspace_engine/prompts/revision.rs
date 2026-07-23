@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 use crate::product::workspace_engine::review::trusted_review_comments;
 
 impl WorkspaceEngine {
@@ -61,6 +62,10 @@ impl WorkspaceEngine {
     pub(crate) fn build_revision_delta_prompt(&self, review: &ReviewVerdict) -> String {
         let mut prompt = String::new();
         prompt.push_str("请作为 author 继续返修当前 Workspace 产物。\n\n");
+        prompt.push_str(direct_cadence_routing_rules_reference());
+        prompt.push_str(
+            "当前阶段：真实 Provider resume 后的 bounded revision。\n必调 Skill：using-superpowers，并按当前返修范围重新路由；若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
+        );
         prompt.push_str(&format!(
             "Workspace 类型: {}\n",
             workspace_type_title(&self.session.workspace_type)
@@ -89,6 +94,12 @@ impl WorkspaceEngine {
     ) -> String {
         let mut prompt = String::new();
         prompt.push_str("请作为 author 返修当前 Workspace 产物。\n\n");
+        if !self.has_direct_cadence_routing_rules_system_context() {
+            prompt.push_str(direct_cadence_routing_rules_reference());
+        }
+        prompt.push_str(
+            "当前阶段：候选产物 bounded revision。\n必调 Skill：using-superpowers，并按当前返修范围重新路由；若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
+        );
         prompt.push_str(&format!(
             "Workspace 类型: {}\n",
             workspace_type_title(&self.session.workspace_type)

@@ -116,6 +116,17 @@ fn review_parser_accepts_fenced_json_with_reviewer_blocker_severity() {
 }
 
 #[test]
+fn review_parser_accepts_plain_text_routing_receipt_before_final_json() {
+    let payload = "工作流路由：阶段=只读代码审查；Change=无；Plan=work_item_0001；必调 Skill=using-superpowers → requesting-code-review。\n{\"verdict\":\"approve\",\"summary\":\"review complete\",\"findings\":[]}";
+
+    let parsed = parse_review_payload(payload, CodingExecutionStage::CodeReview);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Approve);
+    assert_eq!(parsed.summary, "review complete");
+    assert!(parsed.findings.is_empty());
+}
+
+#[test]
 fn review_parser_accepts_group_final_review_source_stage_alias() {
     let payload = r#"{
       "verdict": "request_changes",

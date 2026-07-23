@@ -110,6 +110,7 @@ pub(crate) const WORK_ITEM_SPLIT_OUTPUT_SCHEMA: &str = r#"{
   "required": ["repository_profile", "work_items", "verification_plans"]
 }"#;
 
+#[cfg(test)]
 pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {

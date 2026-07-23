@@ -1,5 +1,7 @@
 use super::builder::ensure_workspace_context_message;
-use super::prompts::{output_schema_for, runtime_contract_for, workflow_discipline_for};
+use super::prompts::{
+    constraint_summary_for, output_schema_for, runtime_contract_for, workflow_discipline_for,
+};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::{
@@ -63,6 +65,138 @@ fn story_and_design_runtime_contracts_do_not_inherit_work_item_plan_discipline()
 }
 
 #[test]
+fn design_runtime_contract_allows_abstract_traceability_but_forbids_executable_testing() {
+    let contract = runtime_contract_for(&workspace_session_record(
+        WorkspaceType::Design,
+        ProviderName::Codex,
+    ));
+
+    for required in [
+        "抽象验收可追踪性",
+        "仅说明 ID/关联，不描述如何测试或分配组件/文件的测试或验证职责",
+    ] {
+        assert!(
+            contract.contains(required),
+            "missing `{required}`: {contract}"
+        );
+    }
+    for forbidden in [
+        "测试计划",
+        "测试范围或场景",
+        "测试文件或模块",
+        "测试框架或夹具",
+        "测试命令",
+        "构建命令",
+        "执行 checklist",
+        "组件或文件的测试或验证职责分配",
+    ] {
+        assert!(
+            contract.contains(forbidden),
+            "missing `{forbidden}`: {contract}"
+        );
+    }
+
+    let story_contract = runtime_contract_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Codex,
+    ));
+    assert!(story_contract.contains("任务拆分"));
+
+    let work_item_schema = output_schema_for(&WorkspaceType::WorkItem);
+    assert!(work_item_schema.contains("验证命令"));
+}
+
+#[test]
+fn story_openspec_constraint_summary_preserves_explicit_input_boundaries_as_requirements() {
+    let summary = constraint_summary_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Codex,
+    ));
+
+    for required in [
+        "文件/模块归属",
+        "复用/依赖关系",
+        "自动化验证责任",
+        "稳定 [REQ-*]",
+        "仅在范围段提及不足以覆盖",
+    ] {
+        assert!(
+            summary.contains(required),
+            "Story OpenSpec constraint summary must preserve `{required}`: {summary}"
+        );
+    }
+}
+
+#[test]
+fn story_openspec_constraint_summary_requires_explicit_api_ownership() {
+    let summary = constraint_summary_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Codex,
+    ));
+
+    assert!(
+        summary.contains("具体 API/行为"),
+        "Story OpenSpec constraint summary must bind an explicitly owned API or behavior to its file/module: {summary}"
+    );
+}
+
+#[test]
+fn story_openspec_constraint_summary_requires_exception_scope() {
+    let summary = constraint_summary_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Codex,
+    ));
+
+    assert!(
+        summary.contains("例外、优先级或集合包含关系"),
+        "Story OpenSpec constraint summary must preserve explicit exception scope: {summary}"
+    );
+}
+
+#[test]
+fn workspace_author_workflows_directly_reference_cadence_routing_rules() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
+    ] {
+        let workflow = workflow_discipline_for(&workspace_session_record(
+            workspace_type.clone(),
+            ProviderName::Codex,
+        ));
+
+        assert!(
+            workflow.contains(
+                "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+            ),
+            "{workspace_type:?} must directly reference the Cadence routing kernel"
+        );
+        assert!(
+            workflow.contains(
+                "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+            ),
+            "{workspace_type:?} must directly reference the Cadence OpenSpec/Superpowers workflow"
+        );
+        assert!(
+            !workflow.contains("cadence-workflow"),
+            "{workspace_type:?} must not depend on cadence-workflow"
+        );
+    }
+}
+
+#[test]
+fn workspace_author_stops_when_required_superpowers_are_unavailable() {
+    let mut session = workspace_session_record(WorkspaceType::Story, ProviderName::Codex);
+    session.superpowers_enabled = false;
+
+    let workflow = workflow_discipline_for(&session);
+
+    assert!(workflow.contains("当前 provider 环境未启用必调 Superpowers Skill；必须停止并报告"));
+    assert!(!workflow.contains("Superpowers 未启用；仍需显式说明假设"));
+}
+
+#[test]
 fn workspace_runtime_contract_includes_codegraph_mcp_reading_guidance() {
     for workspace_type in [
         WorkspaceType::Story,
@@ -85,7 +219,7 @@ fn workspace_runtime_contract_includes_codegraph_mcp_reading_guidance() {
 }
 
 #[test]
-fn work_item_output_schema_describes_single_task_not_issue_level_split() {
+fn work_item_output_schema_describes_single_task_and_forbids_issue_level_split() {
     let schema = output_schema_for(&WorkspaceType::WorkItem);
 
     assert!(schema.contains("实现步骤") || schema.contains("子步骤"));
@@ -94,7 +228,8 @@ fn work_item_output_schema_describes_single_task_not_issue_level_split() {
     assert!(schema.contains("单个可执行任务"));
     assert!(schema.contains("禁止跨任务"));
     assert!(!schema.contains("20k"));
-    assert!(!schema.contains("任务拆分"));
+    assert!(schema.contains("禁止 heading"));
+    assert!(schema.contains("任务拆分"));
 }
 
 #[test]

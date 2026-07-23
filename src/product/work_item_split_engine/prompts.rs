@@ -1,3 +1,4 @@
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     IssueRecord, LifecycleWorkItemRecord, OutlineContextBlockerResolution, ProviderName,
@@ -12,10 +13,7 @@ use super::context::{
     collect_design_context, collect_story_context, design_context_gaps,
     merge_design_context_capabilities, summarize_repository_structure,
 };
-use super::schema::{
-    WORK_ITEM_DRAFT_OUTPUT_SCHEMA, WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
-    WORK_ITEM_SPLIT_OUTPUT_SCHEMA,
-};
+use super::schema::{WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA, WORK_ITEM_SPLIT_OUTPUT_SCHEMA};
 use super::types::{
     RedoSpec, WorkItemSplitInvocation, format_context_resolutions, format_string_list,
     prompt_nonce, provider_name_to_type, structured_output_nonce, work_item_kind_text,
@@ -33,7 +31,11 @@ const OUTLINE_WRITE_SCOPE_RULES: &str = "\
 fn work_item_plan_runtime_contract(role: &str) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
     format!(
-        "[openspec_contract]\n\
+        "{}\
+         当前阶段：已确认 Story/Design 后的 Work Item Plan 候选规划。\n\
+         必调 Skill：using-superpowers → writing-plans。\n\
+         前置 gate：Aria 的 human-confirmation gate 承接人工确认；Provider 只能输出候选，不能写入 canonical artifact。\n\n\
+         [openspec_contract]\n\
          Role: {role}\n\
          - 必须基于已确认 Story Spec 与 Design Spec 的 requirement/design trace 进行拆分。\n\
          - 必须维护 Story/Design/Work Item 追踪关系，并在任务拆分中保留来源证据。\n\
@@ -44,6 +46,7 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          - 必须遵守 using-superpowers 的先读规则与 writing-plans 的计划结构要求。\n\
          - 生成的是计划和任务拆分，不执行代码修改。\n\
          - 每个 outline/draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、结构化验证方案、依赖输入、交接输出和风险；其中 draft 只有存在目标仓库可信证据时才可给出 command，证据不足必须进入 manual/repair/blocker，不得臆造命令。\n\
+         - 每个 outline/draft 的 TDD 与验证闭环必须在当前项的 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行；不得把后续 Work Item 才会提供的注册、接线、生成或部署作为当前项验证的前提。无法根据目标仓库事实建立该闭环时，必须调整拆分或进入既有 repair/blocker 路由。\n\
          - 每个 outline 必须拆到单个 Claude Code/Codex 会话可完成，并遵循最少拆分。\n\
          - 拆分目标是在每个 Work Item 能由单个 Claude Code 或 Codex coding 会话可靠完成的前提下，使 outline 数量最少。\n\
          - 必须按最大内聚任务生成，优先合并目标一致、写入范围相同或重叠、可在同一 session 完成编码与验证的工作；先合并，再证明为什么必须拆。\n\
@@ -54,6 +57,7 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          {allowed_outputs}\n\n\
          [forbidden_outputs]\n\
          {forbidden_outputs}\n\n",
+        direct_cadence_routing_rules_reference(),
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
     )
@@ -518,9 +522,15 @@ pub(crate) fn build_work_item_draft_prompt(
     nonce: &str,
 ) -> String {
     let runtime_contract = work_item_plan_runtime_contract("Work Item Draft author");
-    let outline_json = serde_json::to_string_pretty(outline).unwrap_or_else(|_| "{}".to_string());
+    let confirmed_plan_trace = format!(
+        "plan_id: {}\nsource_story_spec_ids: {}\nsource_design_spec_ids: {}\nstrategy_summary: {}",
+        outline.id,
+        outline.source_story_spec_ids.join(", "),
+        outline.source_design_spec_ids.join(", "),
+        outline.strategy_summary,
+    );
     let current_outline_json =
-        serde_json::to_string_pretty(current_outline).unwrap_or_else(|_| "{}".to_string());
+        serde_json::to_string(current_outline).unwrap_or_else(|_| "{}".to_string());
     let direct_dependency_json =
         serde_json::to_string_pretty(direct_dependencies).unwrap_or_else(|_| "[]".to_string());
     let previous_summaries = other_previous
@@ -553,80 +563,36 @@ pub(crate) fn build_work_item_draft_prompt(
         WorkItemGenerationMode::Serial => "serial",
         WorkItemGenerationMode::Batch => "batch",
     };
-    let requirement_id = format!("REQ-{}-001", current_outline.logical_work_item_id);
-    let acceptance_id = format!("AC-{}-001", current_outline.logical_work_item_id);
-    let output_contract_id = format!("contract.{}.output", current_outline.logical_work_item_id);
-    let output_example = serde_json::json!({
-        "draft": {
-            "outline_id": current_outline.outline_id,
-            "logical_work_item_id": current_outline.logical_work_item_id,
-            "canonical_contract": {
-                "schema_version": 1,
-                "identity": {
-                    "logical_work_item_id": current_outline.logical_work_item_id,
-                    "title": current_outline.title,
-                    "kind": work_item_kind_text(&current_outline.kind)
-                },
-                "goal": { "summary": current_outline.goal },
-                "non_goals": current_outline.non_goals,
-                "input_contracts": [],
-                "output_contracts": [{
-                    "contract_id": output_contract_id,
-                    "capabilities": ["stable_output"]
-                }],
-                "tasks": [{
-                    "task_id": format!("task.{}.1", current_outline.logical_work_item_id),
-                    "statement": "Implement the bounded work item",
-                    "requirement_refs": [requirement_id],
-                    "done_when_refs": [acceptance_id]
-                }],
-                "write_policy": {
-                    "exclusive_scopes": current_outline.exclusive_write_scopes,
-                    "forbidden_scopes": current_outline.forbidden_write_scopes
-                },
-                "acceptance_criteria": [{
-                    "criterion_id": acceptance_id,
-                    "statement": "The bounded work item is verified",
-                    "required_evidence": ["source_diff"]
-                }],
-                "verification_checks": [],
-                "handoff_contract": {
-                    "required_fields": ["commit_sha", "tests"],
-                    "provided_contract_refs": [output_contract_id],
-                    "reviewer_check_refs": [acceptance_id]
-                },
-                "blocker_rules": [{
-                    "reason_code": format!("blocker.{}.verification_evidence_missing", current_outline.logical_work_item_id),
-                    "route": "operational_gate",
-                    "target_contract_refs": []
-                }],
-                "design_traceability": [{
-                    "source_type": "design_spec",
-                    "source_id": current_outline
-                        .source_design_spec_ids
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "design_spec_required".to_string()),
-                    "requirement_id": requirement_id
-                }]
-            },
-            "verification_plan": {
-                "checks": []
-            }
-        }
-    })
-    .to_string();
 
     format!(
         "你是 Aria 的 Work Item Draft author。只输出 Canonical Contract Candidate。\n\n\
          {runtime_contract}\
          [generation_mode]\n{mode}\n\n\
-         [confirmed_outline]\n{outline_json}\n\n\
+         [confirmed_plan_trace]\n{confirmed_plan_trace}\n\n\
          [current_work_item_outline]\n{current_outline_json}\n\n\
          [直接依赖 draft 完整内容]\n{direct_dependency_json}\n\n\
          [其他已 accepted draft 摘要]\n{previous_summaries}\n\
          {feedback_section}\
+         [canonical_projection]\n\
+         - Draft 专有 Canonical projection 优先于 [allowed_outputs] 的通用表述；后者只约束规划语义，不许可新增字段或独立产物。\n\
+         - 目标、范围和非目标映射到 identity、goal、write_policy、non_goals；TDD 与验证映射到 tasks、acceptance_criteria、verification_checks。\n\
+         - 依赖、交接和风险映射到 input_contracts、output_contracts、handoff_contract、blocker_rules。\n\
+         - 不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段。\n\n\
+         [canonical_field_contract]\n\
+         这是封闭的类型契约，不是示例 JSON：每个 object 必须且只能包含下列字段；所有列出的字段都必须出现，数组可为空但数组内对象不得缺字段或加字段。\n\
+         - draft: object {{outline_id: string, logical_work_item_id: non-empty string, canonical_contract: object, verification_plan: object}}。\n\
+         - canonical_contract.schema_version: integer literal 1；identity: object {{logical_work_item_id: non-empty string, title: string, kind: backend|frontend|integration|e2e|docs|infra|other}}；goal: object {{summary: string}}；non_goals: string array。\n\
+         - input_contracts: array of {{contract_id: non-empty string, provider_logical_work_item_id: non-empty string, required_capabilities: string array, compatibility_policy: require_all|require_any}}；output_contracts: array of {{contract_id: non-empty string, capabilities: string array}}。\n\
+         - tasks: array of {{task_id: non-empty string, statement: string, requirement_refs: string array, done_when_refs: string array}}；write_policy: object {{exclusive_scopes: string array, forbidden_scopes: string array}}。\n\
+         - acceptance_criteria: array of {{criterion_id: non-empty string, statement: string, required_evidence: array of source_diff|non_zero_test_execution|manual_check|handoff_field}}。\n\
+         - verification_checks: array of {{check_id: non-empty string, command: string|null, manual_instruction: string|null, required: boolean, non_zero_test_execution_required: boolean}}；verification_plan: object {{checks: the exact same verification_checks array}}。\n\
+         - handoff_contract: object {{required_fields: unique non-empty string array, provided_contract_refs: unique non-empty string array, reviewer_check_refs: unique non-empty string array}}。\n\
+         - blocker_rules: array of {{reason_code: non-empty string, route: coder_rework|verification_retry|plan_repair_current|plan_repair_upstream|subgraph_replan|story_amendment|design_amendment|operational_gate, target_contract_refs: string array}}；design_traceability: array of {{source_type: string, source_id: string, requirement_id: string}}。\n\n\
          [hard_rules]\n\
+         - 当前仅处于 human-confirmation 之前的候选阶段：必须读取并遵守 writing-plans 的拆分、TDD、验证与交接质量纪律；只将这些纪律体现在本候选中。\n\
+         - 不得创建 cadence/plans/ 或任何 workspace 文件；不得提前执行 writing-plans 的落盘步骤。\n\
+         - human-confirmation gate 与 daemon 后续负责 canonical writeback 和正式 Plan 落盘；不得声称已完成这些后续步骤。\n\
+         - 仅在最后一个 nonce sentinel block 返回 Canonical Contract Candidate JSON；sentinel 之外只可输出工作流路由回执和简短状态。\n\
          - 只能输出一个 Canonical Contract Candidate，字段必须对应当前 outline_id `{outline_id}` 与 logical_work_item_id `{logical_work_item_id}`。\n\
          - 不得修改 Outline，不得新增、删除或重命名 outline。\n\
          - 不得输出 work_item_id、draft_id、status、generated_from_node_id、accepted_at、batch_id 等后端状态字段。\n\
@@ -641,15 +607,14 @@ pub(crate) fn build_work_item_draft_prompt(
          - 不得输出面向 Coder 的长篇 implementation_context；不要提前生成或渲染 Coder Projection 或 Reviewer Projection。\n\
          - 不要把 human_summary、why_split 或其他 Human presentation 字段放入 Canonical Contract。\n\
          - 若 Story/Design/Outline 证据不足，使用 canonical blocker_rules 表达可路由阻塞，不得编造文件路径。\n\
+         - canonical_contract 必须且只能包含 schema_version、identity、goal、non_goals、input_contracts、output_contracts、tasks、write_policy、acceptance_criteria、verification_checks、handoff_contract、blocker_rules、design_traceability。\n\
+         - verification_plan 只能包含 checks，且 checks 的每项只能包含 check_id、command、manual_instruction、required、non_zero_test_execution_required。\n\
          - 可以先输出简短可读状态；最终 JSON 必须放在最后一个 nonce sentinel block 中，不要输出 Markdown code fence。\n\n\
          [output]\n\
-         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{output_example}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\n\
-         [output_schema]\n\
-         严格按以下 JSON schema 输出。\n\n\
-         {schema}",
+         使用 nonce `{nonce}` 包裹唯一 JSON：开始标签 `<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`，结束标签 `</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`。\n\
+         JSON 顶层必须是 `draft`；draft 只能包含 outline_id、logical_work_item_id、canonical_contract、verification_plan。",
         outline_id = current_outline.outline_id,
         logical_work_item_id = current_outline.logical_work_item_id,
         runtime_contract = runtime_contract,
-        schema = WORK_ITEM_DRAFT_OUTPUT_SCHEMA,
     )
 }

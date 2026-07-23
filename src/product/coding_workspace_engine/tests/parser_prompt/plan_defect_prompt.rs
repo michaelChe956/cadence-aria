@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn tester_execute_prompt_blocks_insufficient_test_plan_without_replanning() {
+    let plan = TestPlan {
+        id: "test_plan_0001".to_string(),
+        attempt_id: "coding_attempt_0001".to_string(),
+        role_run_id: None,
+        run_no: None,
+        summary: "execute fixed plan".to_string(),
+        context_warnings: Vec::new(),
+        assumptions: Vec::new(),
+        steps: vec![crate::product::coding_models::TestPlanStep {
+            id: "step_t1".to_string(),
+            title: "read targeted context".to_string(),
+            intent: "verify available context".to_string(),
+            required: true,
+            tool: crate::product::coding_models::TestPlanTool::ReadFile,
+            risk_level: crate::product::coding_models::TestPlanRiskLevel::Low,
+            command_or_tool_input: serde_json::json!({"path": "src/lib.rs"}),
+            evidence_expectation: "source evidence".to_string(),
+            related_requirements: vec!["REQ-001".to_string()],
+            related_design_constraints: Vec::new(),
+            related_work_item_tasks: Vec::new(),
+        }],
+        created_at: "2026-06-10T00:00:00Z".to_string(),
+        raw_provider_output_ref: None,
+    };
+
+    let prompt = build_tester_execute_plan_prompt(
+        &test_attempt("coding_attempt_0001"),
+        &plan,
+        r#"{"source_artifacts":{"design_specs":[]}}"#,
+    );
+
+    assert!(prompt.contains("Do not generate new TestPlan steps during execute_test_plan"));
+    assert!(prompt.contains("provider_analysis prefixed by \"test_plan_insufficient:\""));
+    assert!(prompt.contains("mark the affected required step blocked"));
+    assert!(prompt.contains("agent-routing-kernel.md"));
+    assert!(prompt.contains("openspec-superpowers-workflow.md"));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+    ));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+    ));
+    assert!(prompt.contains("verification-before-completion"));
+    assert!(!prompt.contains("cadence-workflow"));
+}
+
+#[test]
 fn coding_plan_repair_prompt_contracts_require_canonical_schema_and_legacy_mapping() {
     let attempt = test_attempt("coding_attempt_prompt_contract");
     let context = CodingExecutionContext::default();
@@ -31,7 +79,7 @@ fn coding_plan_repair_prompt_contracts_require_canonical_schema_and_legacy_mappi
         code_review_material_protocol(),
         group_final_review_material_protocol(),
     ] {
-        assert_plan_defect_output_contract(prompt, "findings");
+        assert_plan_defect_output_contract(&prompt, "findings");
         assert!(prompt.contains("普通 implementation defect"));
     }
 }

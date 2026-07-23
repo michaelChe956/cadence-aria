@@ -131,6 +131,13 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
 
     assert!(prompt.contains("[openspec_contract]"));
     assert!(prompt.contains("[superpowers_contract]"));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
+    ));
+    assert!(prompt.contains(
+        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
+    ));
+    assert!(!prompt.contains("cadence-workflow"));
     assert!(prompt.contains("[allowed_outputs]"));
     assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
     assert!(prompt.contains("[forbidden_outputs]"));
@@ -433,6 +440,47 @@ fn outline_author_prompts_require_dependency_write_scope_partitioning() {
         assert!(
             prompt.contains("不要把 web/src/**/*.test.tsx 交给 integration/e2e outline"),
             "outline prompt must avoid colocated frontend tests as integration exclusive scopes: {prompt}"
+        );
+    }
+}
+
+#[test]
+fn work_item_plan_prompts_require_current_scope_verification_closure() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let initial_outline_prompt = build_outline_prompt(
+        &request,
+        &issue,
+        &repository,
+        &["story context".to_string()],
+        &["design context".to_string()],
+        "(empty)",
+        &[],
+        &[],
+    );
+    let (revision_outline_prompt, _) =
+        build_outline_revision_prompt(&request, &issue, "修复验证可达性");
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let draft_prompt = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation")
+    .prompt;
+
+    for prompt in [initial_outline_prompt, revision_outline_prompt, draft_prompt] {
+        assert!(
+            prompt.contains("当前项的 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行"),
+            "Work Item Plan author prompt must require a verification closure executable at the current dependency point: {prompt}"
+        );
+        assert!(
+            prompt.contains("后续 Work Item 才会提供的注册、接线、生成或部署"),
+            "Work Item Plan author prompt must reject verification that relies on later wiring: {prompt}"
         );
     }
 }

@@ -1,3 +1,4 @@
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 use crate::protocol::contracts::{
     NodePromptTemplateRef, PromptSection, execution_contract_for_node, workflow_discipline_for_node,
 };
@@ -26,7 +27,10 @@ pub fn prompt_template_for_node(node_id: &str) -> Option<PromptTemplate> {
         "N05" => n05_sections(),
         "N07" => n07_sections(),
         "N11" => n11_sections(),
-        _ => generic_sections(system_delta(node_id), artifact_kind(node_id)),
+        _ => {
+            let (system_delta, workflow_delta) = generic_node_prompt_deltas(node_id);
+            generic_sections(system_delta, artifact_kind(node_id), workflow_delta)
+        }
     };
 
     Some(PromptTemplate {
@@ -51,7 +55,10 @@ fn n04_sections() -> BTreeMap<PromptSection, String> {
         "[canonical_inputs]\n读取 intake_brief 与 effective_policy 摘要：\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
         "[projection_summary]\n本节点通常没有 projection 输入。如存在历史 projection，只能作为上下文引用：\n{{projection_summary}}",
         "[constraint_summary]\n必须遵守 proposal_constraints：\n{{constraint_summary}}",
-        "[workflow_discipline]\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。{{workflow_discipline_summary}}",
+        &format!(
+            "[workflow_discipline]\n{}\n当前阶段：候选澄清。必调 Skill：using-superpowers → brainstorming。Aria 的现有 gate 承接人工确认，Provider 仅输出候选。\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。{{workflow_discipline_summary}}",
+            direct_cadence_routing_rules_reference()
+        ),
         "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 clarification_record。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要推进节点状态。不要写文件。只输出候选结果。",
     )
@@ -64,7 +71,10 @@ fn n05_sections() -> BTreeMap<PromptSection, String> {
         "[canonical_inputs]\n输入 artifact：\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
         "[projection_summary]\n如已有 projection，只能作为一致性参考：\n{{projection_summary}}",
         "[constraint_summary]\n必须覆盖 proposal_constraints，并声明稳定 requirement IDs：\n{{constraint_summary}}",
-        "[workflow_discipline]\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。{{workflow_discipline_summary}}",
+        &format!(
+            "[workflow_discipline]\n{}\n当前阶段：Story Spec 候选方案。必调 Skill：using-superpowers → brainstorming。Aria 的现有 gate 承接人工确认，Provider 仅输出候选。\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。{{workflow_discipline_summary}}",
+            direct_cadence_routing_rules_reference()
+        ),
         "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 spec。JSON 内的 markdown 字段必须包含范围、用户故事、功能需求、成功标准、待确认项和非功能需求。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要直接修改 OpenSpec。不要直接生成 projection。daemon 会做结构化落盘。",
     )
@@ -77,7 +87,10 @@ fn n07_sections() -> BTreeMap<PromptSection, String> {
         "[canonical_inputs]\n输入 spec 与 spec_gate_decision：\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
         "[projection_summary]\nSpecProjection 摘要：\n{{projection_summary}}",
         "[constraint_summary]\n必须覆盖 requirement_constraints：\n{{constraint_summary}}",
-        "[workflow_discipline]\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。风险必须显式写入“## 风险”。{{workflow_discipline_summary}}",
+        &format!(
+            "[workflow_discipline]\n{}\n当前阶段：Design Spec 候选方案。必调 Skill：using-superpowers → brainstorming。Aria 的现有 gate 承接人工确认，Provider 仅输出候选。\n本节点保留 using-superpowers 与 brainstorming 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物的 open_questions 或待确认项。风险必须显式写入“## 风险”。{{workflow_discipline_summary}}",
+            direct_cadence_routing_rules_reference()
+        ),
         "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 design。JSON 内的 markdown 字段必须包含架构摘要、设计决策、公共组件、数据模型、API 契约、风险和待确认项。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要直接修改 plan。不要生成 dispatch_package。",
     )
@@ -90,13 +103,20 @@ fn n11_sections() -> BTreeMap<PromptSection, String> {
         "[canonical_inputs]\n输入 spec_projection、design_projection、readiness_check 与 constraint bundle：\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
         "[projection_summary]\n{{projection_summary}}",
         "[constraint_summary]\n必须覆盖 requirement_constraints 与 design_constraints：\n{{constraint_summary}}",
-        "[workflow_discipline]\n本节点保留 using-superpowers 与 writing-plans 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物。不得输出 superpowers 实施计划、文件写入步骤、commit 步骤、代码块或安装命令。你必须只输出 Aria PlanProjection 可消费的短 markdown。",
+        &format!(
+            "[workflow_discipline]\n{}\n当前阶段：已确认 OpenSpec 后的候选计划。必调 Skill：using-superpowers → writing-plans。Aria 的现有 gate 承接人工确认，Provider 仅输出候选。\n本节点保留 using-superpowers 与 writing-plans 的纪律约束，但这是 Aria 非交互运行：不得向用户提问或等待确认，不得启动交互式 Todo/确认流程。未决问题必须写入候选产物。不得输出 superpowers 实施计划、文件写入步骤、commit 步骤、代码块或安装命令。你必须只输出 Aria PlanProjection 可消费的短 markdown。",
+            direct_cadence_routing_rules_reference()
+        ),
         "[output_schema]\n{{output_schema_summary}}\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 plan。JSON 内 markdown 字段必须严格包含以下 heading 与表格结构：\n# Plan\n\n## 工作包\n\n| ID | Description | Execution Mode | Human Reason | Traceability | Acceptance |\n|----|-------------|----------------|--------------|--------------|------------|\n| WT-001 | ... | agent_only | | REQ-001, DEC-001 | AC-001 |\n\n## 依赖关系\n\n| From | To | Type |\n|------|----|------|\n\n规则：工作包 ID 必须使用 WT-001、WT-002 这类 WT 前缀；Execution Mode 只能使用 agent_only 或 human_required；Traceability 必须引用已知 REQ/DEC；Acceptance 必须引用成功标准 AC/SC。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。",
         "[completion_or_failure]\n不要直接修改 OpenSpec。不要生成 dispatch_package。不要生成逐文件实现步骤；daemon 会从 PlanProjection 自动写回 tasks.md。",
     )
 }
 
-fn generic_sections(system_delta: &str, artifact_kind: &str) -> BTreeMap<PromptSection, String> {
+fn generic_sections(
+    system_delta: &str,
+    artifact_kind: &str,
+    workflow_delta: &str,
+) -> BTreeMap<PromptSection, String> {
     section_map(
         &format!(
             "[system]\n你是 Aria 的 {artifact_kind} 候选产物生成器或 advisory reviewer。Aria daemon 是唯一运行时真相源；你只能输出候选结果或 advisory 结果。\n{system_delta}"
@@ -105,7 +125,11 @@ fn generic_sections(system_delta: &str, artifact_kind: &str) -> BTreeMap<PromptS
         "[canonical_inputs]\n{{canonical_input_summary}}\n\n完整 canonical_inputs（JSON）：\n{{canonical_inputs_json}}",
         "[projection_summary]\n{{projection_summary}}",
         "[constraint_summary]\n{{constraint_summary}}",
-        "[workflow_discipline]\n{{workflow_discipline_summary}}",
+        &format!(
+            "[workflow_discipline]\n{}\n{}{{{{workflow_discipline_summary}}}}",
+            direct_cadence_routing_rules_reference(),
+            workflow_delta,
+        ),
         &format!(
             "[output_schema]\n最终 stdout 必须包含 <ARIA_STRUCTURED_OUTPUT> JSON block，且 artifact_kind 必须等于 {artifact_kind}。\n</ARIA_STRUCTURED_OUTPUT> 只能作为结束标签出现。\n{{{{output_schema_summary}}}}"
         ),
@@ -168,53 +192,64 @@ fn artifact_kind(node_id: &str) -> &'static str {
     }
 }
 
-fn system_delta(node_id: &str) -> &'static str {
+fn generic_node_prompt_deltas(node_id: &str) -> (&'static str, &'static str) {
     match node_id {
-        "N06" => {
-            "你是 advisory reviewer，只能指出 spec gate 风险与建议；daemon 才能生成 spec_gate_decision。不得要求 requirement_constraints 已存在。"
-        }
-        "N08" => {
-            "你是设计评审 reviewer，优先输出阻塞性 findings、风险与明确 review_decision；不得直接修改 design。"
-        }
-        "N09" => {
-            "你是设计修订候选生成器，只能基于 spec_projection、当前 design 和 design_review.findings 产出修订记录和候选 revised_design_markdown。"
-        }
-        "N10" => {
-            "你是 plan readiness checker，只判断 spec/design/projection/bundle 是否足以进入计划，不生成 plan。"
-        }
-        "N11" => {
-            "你是计划候选生成器，必须产出带显式 work_package_id、traceability_refs 和 acceptance_targets 的 plan。"
-        }
-        "N12" => {
-            "你是 dispatch 候选生成器，必须把 PlanProjection work_package 映射为 WorkTask routing，并保留 source_work_package_id。"
-        }
-        "N16" => {
-            "你是 Codex executor，只能在当前 worktask routing 授权的 worktree 写范围内完成 coding_report 候选输出；不得执行 git commit。"
-        }
-        "N17" => {
-            "你是 Codex executor，默认只运行验证并产出 testing_report；除非 route 明确授权，不得修改生产代码。"
-        }
-        "N18" => {
-            "你是 Codex reviewer，只读检查 worktask 改动并输出 code_review_report；不得修改文件。"
-        }
-        "N19" => {
-            "你是 Codex executor，只能按失败报告或 review findings 做 bounded rework，并产出更新后的 coding_report。"
-        }
-        "N20" => {
-            "你是 ready advisory reviewer，只能给出 ready/block/rework 候选建议；最终决策由 daemon 生成。"
-        }
-        "N24" => {
-            "你是 integration verify advisory reviewer，只能给出 verify/rollback 候选建议；rollback 决策由 daemon 生成。"
-        }
-        "N25" => {
-            "你是 Claude Code orchestrator，基于已有事实生成 final_review 和 coverage_summary 候选输出。"
-        }
-        "N26" => {
-            "你是 Claude Code orchestrator，只有 approval gate 明确确认后才输出候选 patch task delta 或 dispatch routing 意图。"
-        }
-        "N27" => {
-            "你是 Claude Code orchestrator，只引用 final_review 中已经存在的验证事实生成 final_summary。"
-        }
-        _ => "",
+        "N06" => (
+            "你是 advisory reviewer，只能指出 spec gate 风险与建议；daemon 才能生成 spec_gate_decision。不得要求 requirement_constraints 已存在。",
+            "当前阶段：Spec 候选只读 advisory review。必调 Skill：using-superpowers。仅输出风险与建议候选；不得越过 daemon gate。\n",
+        ),
+        "N08" => (
+            "你是设计评审 reviewer，优先输出阻塞性 findings、风险与明确 review_decision；不得直接修改 design。",
+            "当前阶段：Design Spec 候选只读审查。必调 Skill：using-superpowers。仅输出 review 候选；不得修改 design 或越过 daemon gate。\n",
+        ),
+        "N09" => (
+            "你是设计修订候选生成器，只能基于 spec_projection、当前 design 和 design_review.findings 产出修订记录和候选 revised_design_markdown。",
+            "当前阶段：已确认 review finding 下的 bounded Design revision。必调 Skill：using-superpowers，并按当前返修范围重新路由；若范围或架构变化，停止并走既有 gate。\n",
+        ),
+        "N10" => (
+            "你是 plan readiness checker，只判断 spec/design/projection/bundle 是否足以进入计划，不生成 plan。",
+            "当前阶段：Plan readiness 只读检查。必调 Skill：using-superpowers。仅判断是否满足进入计划的 gate；不得生成 plan 或越过 daemon 决策。\n",
+        ),
+        "N12" => (
+            "你是 dispatch 候选生成器，必须把 PlanProjection work_package 映射为 WorkTask routing，并保留 source_work_package_id。",
+            "当前阶段：已确认 Plan 后的 dispatch 候选。必调 Skill：using-superpowers。不得在 prompt 内伪造执行、canonical writeback 或分支操作。\n",
+        ),
+        "N16" => (
+            "你是 Codex executor，只能在当前 worktask routing 授权的 worktree 写范围内完成 coding_report 候选输出；不得执行 git commit。",
+            "当前阶段：已确认 Plan/WorkTask 范围内实施。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。仅在授权写入范围内实施，完成声明前必须取得新鲜验证证据。\n",
+        ),
+        "N17" => (
+            "你是 Codex executor，默认只运行验证并产出 testing_report；除非 route 明确授权，不得修改生产代码。",
+            "当前阶段：测试执行与新鲜验证证据收集。必调 Skill：using-superpowers → verification-before-completion。只执行现有测试职责，不修改生产代码或越过 daemon gate。\n",
+        ),
+        "N18" => (
+            "你是 Codex reviewer，只读检查 worktask 改动并输出 code_review_report；不得修改文件。",
+            "当前阶段：代码审查。必调 Skill：using-superpowers → requesting-code-review。仅输出只读 review report；不得修改文件或越过 daemon gate。\n",
+        ),
+        "N19" => (
+            "你是 Codex executor，只能按失败报告或 review findings 做 bounded rework，并产出更新后的 coding_report。",
+            "当前阶段：已确认 Plan/WorkTask 范围内的 bounded rework。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若本次由审查反馈启动，先按 receiving-code-review 核验反馈。不得扩大范围或越过 daemon gate。\n",
+        ),
+        "N20" => (
+            "你是 ready advisory reviewer，只能给出 ready/block/rework 候选建议；最终决策由 daemon 生成。",
+            "当前阶段：ready advisory 只读复核。必调 Skill：using-superpowers。仅输出 ready/block/rework 候选建议；最终决策仍由 daemon gate 生成。\n",
+        ),
+        "N24" => (
+            "你是 integration verify advisory reviewer，只能给出 verify/rollback 候选建议；rollback 决策由 daemon 生成。",
+            "当前阶段：集成验证与新鲜证据收集。必调 Skill：using-superpowers → verification-before-completion。仅输出 verify/rollback 候选；不得伪造验证证据或越过 daemon gate。\n",
+        ),
+        "N25" => (
+            "你是 Claude Code orchestrator，基于已有事实生成 final_review 和 coverage_summary 候选输出。",
+            "当前阶段：最终审查。必调 Skill：using-superpowers → requesting-code-review。仅基于已有事实输出只读 final_review 候选，保持 JSON report 与 daemon gate。\n",
+        ),
+        "N26" => (
+            "你是 Claude Code orchestrator，只有 approval gate 明确确认后才输出候选 patch task delta 或 dispatch routing 意图。",
+            "当前阶段：审查通过后的 sync/archive gate。必调 Skill：using-superpowers。仅输出 dispatch 候选；Aria daemon 承接 sync/archive 与 canonical writeback。\n",
+        ),
+        "N27" => (
+            "你是 Claude Code orchestrator，只引用 final_review 中已经存在的验证事实生成 final_summary。",
+            "当前阶段：OpenSpec 归档后的分支收尾。必调 Skill：using-superpowers → finishing-a-development-branch。仅引用已有验证事实生成最终摘要；不得新增实施或篡改归档。\n",
+        ),
+        _ => ("", "当前阶段：未知节点；停止并报告。\n"),
     }
 }

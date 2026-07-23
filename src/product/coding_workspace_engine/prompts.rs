@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 use crate::product::coding_models::CodingAttemptScope;
 
 impl CodingWorkspaceEngine {
@@ -38,7 +39,9 @@ impl CodingWorkspaceEngine {
              \nEvaluationContextPack:\n````json\n{}\n````\n\
              \ngit diff:\n````diff\n{}\n````\n\
              {}\
-             \n只输出 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...]}}\n",
+             \n输出顺序与格式：\n\
+             - 首个用户可见消息必须是纯文本工作流路由回执，且不得包含 {{ 或 }}。\n\
+             - 完成必调 Skill 与原始规则读取后，最终审查结论仅输出裸 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...]}}\n",
             provider_runtime_contract("CodeReviewer"),
             attempt.project_id,
             attempt.issue_id,
@@ -183,7 +186,7 @@ pub(crate) fn build_coding_prompt(
         );
     }
     append_coding_context_notes(&mut prompt, context_notes);
-    prompt.push_str(coding_execution_protocol());
+    prompt.push_str(&coding_execution_protocol());
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
@@ -252,7 +255,7 @@ pub(crate) fn build_coding_delta_prompt(
         );
     }
     append_coding_context_notes(&mut prompt, context_notes);
-    prompt.push_str(coding_delta_execution_protocol());
+    prompt.push_str(&coding_delta_execution_protocol());
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
@@ -272,8 +275,10 @@ pub(crate) fn reviewer_test_scope_contract() -> &'static str {
      - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试及其所需浏览器环境，也不得将其转换成 finding、verdict/summary 否决理由、Coder required_action 或任何返修要求。\n"
 }
 
-pub(crate) fn coding_execution_protocol() -> &'static str {
-    "\nCoder 执行协议:\n\
+pub(crate) fn coding_execution_protocol() -> String {
+    with_cadence_routing_reference(concat!(
+        "当前阶段：已确认 OpenSpec 与 Plan/Work Item 范围内实施。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
+        "Coder 执行协议:\n\
      - 在修改代码前，必须先阅读“已确认 Work Item”，并从其中提取本次任务的执行清单。\n\
      - 执行清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、依赖初始化或环境诊断要求、验证命令与执行顺序、完成前自检要求、handoff 中要求交付给下游的契约。\n\
      - 如果 Work Item、Source Draft Supplement、Verification Plan 已明确给出某项要求，必须按其内容执行。\n\
@@ -281,16 +286,20 @@ pub(crate) fn coding_execution_protocol() -> &'static str {
      - 需要判断环境或依赖问题时，必须优先根据 Work Item、Verification Plan、仓库文件和项目规则判断。\n\
      - 如果判断依据不足，必须在最终报告中说明“不足以确定”，并列出需要人工确认的问题。\n\
      - 不得用平台默认技术栈假设替代 Work Item 内容。\n"
+    ))
 }
 
-pub(crate) fn coding_delta_execution_protocol() -> &'static str {
-    "\nCoder 增量执行协议:\n\
+pub(crate) fn coding_delta_execution_protocol() -> String {
+    with_cadence_routing_reference(concat!(
+        "当前阶段：已确认 Plan/Work Item 范围内的 bounded rework。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
+        "Coder 增量执行协议:\n\
      - 继续以本会话中的“已确认 Work Item”和 Verification Plan 作为任务来源。\n\
      - 在继续修改前，必须重新核对本轮修复要求、补充上下文和原 Work Item 中的执行要求。\n\
      - 若存在人工修复意见，人工修复意见优先级最高；当人工修复意见与 reviewer findings、原 Work Item 或既有上下文冲突时，优先遵循人工修复意见，并在最终报告说明冲突和取舍。\n\
      - 若没有人工修复意见，但本轮 reviewer findings 与原 Work Item 冲突，优先遵循更具体、更新的本轮 reviewer findings；同时在最终报告说明冲突和取舍。\n\
      - 不得引入平台默认技术栈假设；语言、构建系统、包管理器、测试框架相关动作必须来自 Work Item、Verification Plan、仓库文件或项目规则。\n\
      - 如果判断依据不足，必须在最终报告中说明“不足以确定”，并列出需要人工确认的问题。\n"
+    ))
 }
 
 pub(crate) fn coding_completion_report_contract() -> &'static str {
@@ -299,14 +308,16 @@ pub(crate) fn coding_completion_report_contract() -> &'static str {
      - 列出实际修改文件。\n\
      - 列出实际执行的验证命令。\n\
      - 粘贴每条验证命令的完整输出。\n\
-     - 报告 git diff --stat。\n\
-     - 明确说明是否触碰 Forbidden Write Scopes。\n\
+     - 报告 git status --short（含未跟踪文件）与 git diff --stat。\n\
+     - 基于两者明确说明是否触碰 Forbidden Write Scopes；若出现允许范围外的已修改或未跟踪文件，必须报告，不得声称未触碰。\n\
      - 如果测试命令显示没有测试被执行或没有实际测试被执行，包括 \"0 tests\" 或 \"running 0 tests\"，不能直接视为已覆盖；必须说明处理方式或风险。\n\
      - 如果某项要求无法执行，说明阻塞原因、已尝试的诊断步骤和需要人工确认的内容。\n"
 }
 
-pub(crate) fn code_review_material_protocol() -> &'static str {
-    "\nCRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
+pub(crate) fn code_review_material_protocol() -> String {
+    with_cadence_routing_reference(concat!(
+        "当前阶段：只读代码审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
+        "首个用户可见消息必须是工作流路由回执；该回执不属于最终审查结论，不能因 JSON 合同省略。完成必调 Skill 与原始规则读取后，最终审查结论必须只输出一个 JSON 对象，不要输出 Markdown、解释、验证报告或表格。\n\
      CodeReviewer 审查协议:\n\
      - 只分析当前变更 diff，不修改代码、不执行写操作。\n\
      - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
@@ -324,10 +335,13 @@ pub(crate) fn code_review_material_protocol() -> &'static str {
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
      - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
+    ))
 }
 
-pub(crate) fn group_final_review_material_protocol() -> &'static str {
-    "\nWorkItemGroup GroupFinalReview 审查协议:\n\
+pub(crate) fn group_final_review_material_protocol() -> String {
+    with_cadence_routing_reference(concat!(
+        "当前阶段：组级 PR 最终只读审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
+        "WorkItemGroup GroupFinalReview 审查协议:\n\
      - 你必须从 Completed Units、unit handoff、EvaluationContextPack 和完整 diff 中提取整组审查清单。\n\
      - 必须确认每个 completed unit 的 handoff 承诺是否体现在最终 diff 或最终报告中。\n\
      - 必须检查依赖 handoff 是否断裂：上游 unit 承诺的 API、状态、文件、测试证据是否被下游正确消费。\n\
@@ -341,6 +355,14 @@ pub(crate) fn group_final_review_material_protocol() -> &'static str {
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 source_stage=group_final_review。\n\
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n"
+    ))
+}
+
+fn with_cadence_routing_reference(protocol: &'static str) -> String {
+    let mut rendered = String::from("\n");
+    rendered.push_str(direct_cadence_routing_rules_reference());
+    rendered.push_str(protocol);
+    rendered
 }
 
 pub(crate) fn append_coding_context_notes(
@@ -424,7 +446,9 @@ pub(crate) fn build_tester_execute_plan_prompt(
 ) -> String {
     let plan_json = serde_json::to_string_pretty(plan).unwrap_or_else(|_| "{}".to_string());
     format!(
-        "Tester Provider Runtime\n\
+        "{}\
+         当前阶段：执行既有测试计划并收集新鲜验证证据。必调 Skill：using-superpowers → verification-before-completion。保持最终 JSON schema，不在 JSON 字段中伪造路由回执。\n\
+         Tester Provider Runtime\n\
          Phase: execute_test_plan\n\
          Attempt: {}\n\
          Work Item: {}\n\
@@ -446,6 +470,7 @@ pub(crate) fn build_tester_execute_plan_prompt(
          TestPlan:\n```json\n{}\n```\n\
          \n\
          Execution Context JSON:\n```json\n{}\n```\n",
+        direct_cadence_routing_rules_reference(),
         attempt.id,
         active_work_item_id_for_prompt(attempt),
         plan_json,

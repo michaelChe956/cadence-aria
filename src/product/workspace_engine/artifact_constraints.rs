@@ -1,5 +1,7 @@
 use crate::product::models::WorkspaceType;
 
+pub(crate) const ARTIFACT_SCHEMA_CONTRACT_MARKER: &str = "[artifact_schema_contract]";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ArtifactHeadingRule {
     pub(crate) label: &'static str,
@@ -144,7 +146,7 @@ pub(crate) fn artifact_constraint_spec_for(
                 id_rule("[API-*]", ArtifactTokenPattern::BracketPrefix("API-")),
             ],
             reviewer_must_fix_rules: vec![
-                "Design artifact: Work Item Plan, development task list, task splitting, or execution checklist content must be reported as must_fix.",
+                "Design artifact: Work Item Plan、开发任务列表、任务拆分、测试计划、测试范围或场景、测试文件或模块、测试框架或夹具、测试命令、构建命令、执行 checklist 或将测试或验证职责分配给组件或文件必须报告为 must_fix；仅把 [DEC-*] 关联到 [REQ-*]/[AC-*] 且不描述如何测试的抽象验收可追踪性不得报告为 must_fix。",
             ],
         },
         WorkspaceType::WorkItem => ArtifactConstraintSpec {
@@ -298,10 +300,109 @@ pub(crate) fn reviewer_boundary_rules_for(workspace_type: &WorkspaceType) -> Str
     output
 }
 
+pub(crate) fn author_artifact_schema_contract_for(
+    workspace_type: &WorkspaceType,
+) -> Option<String> {
+    let spec = markdown_artifact_constraint_spec_for(workspace_type)?;
+    let mut output = format!("\n{ARTIFACT_SCHEMA_CONTRACT_MARKER}\n");
+    output
+        .push_str("最终 Markdown artifact 必须同时满足以下 parser schema；任一必需项缺一不可。\n");
+    append_markdown_artifact_schema_items(&mut output, &spec);
+    Some(output)
+}
+
+pub(crate) fn reviewer_artifact_schema_gate_for(workspace_type: &WorkspaceType) -> Option<String> {
+    let spec = markdown_artifact_constraint_spec_for(workspace_type)?;
+    let mut output = String::from("\n[artifact_schema_review_gate]\n");
+    output.push_str(
+        "以下是 Aria parser 的硬性 gate：每个缺失的必需项或命中的禁止项都必须作为 `must_fix` finding 明确覆盖；存在任一此类问题时不得输出 `pass`。\n",
+    );
+    append_markdown_artifact_schema_items(&mut output, &spec);
+    Some(output)
+}
+
+fn append_markdown_artifact_schema_items(output: &mut String, spec: &ArtifactConstraintSpec) {
+    output.push_str(&format!(
+        "- 必需 heading（使用二级 heading）：{}。\n",
+        format_markdown_heading_labels(&spec.required_headings)
+    ));
+    if !spec.required_id_patterns.is_empty() {
+        output.push_str(&format!(
+            "- 必需稳定 ID：{}。\n",
+            format_id_pattern_labels_with_examples(&spec.required_id_patterns)
+        ));
+    }
+    if !spec.required_tokens.is_empty() {
+        output.push_str(&format!(
+            "- 必需追踪 token：{}。\n",
+            format_rule_labels(spec.required_tokens.iter().map(|rule| rule.label))
+        ));
+    }
+    if !spec.forbidden_headings.is_empty() {
+        output.push_str(&format!(
+            "- 禁止 heading：{}。\n",
+            format_rule_labels(spec.forbidden_headings.iter().map(|rule| rule.label))
+        ));
+    }
+    if !spec.forbidden_tokens.is_empty() {
+        output.push_str(&format!(
+            "- 禁止 token：{}。\n",
+            format_rule_labels(spec.forbidden_tokens.iter().map(|rule| rule.label))
+        ));
+    }
+}
+
+fn markdown_artifact_constraint_spec_for(
+    workspace_type: &WorkspaceType,
+) -> Option<ArtifactConstraintSpec> {
+    (!matches!(workspace_type, WorkspaceType::WorkItemPlan))
+        .then(|| artifact_constraint_spec_for(workspace_type))
+}
+
+fn format_rule_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> String {
+    labels
+        .into_iter()
+        .map(|label| format!("`{label}`"))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+fn format_markdown_heading_labels(rules: &[ArtifactHeadingRule]) -> String {
+    rules
+        .iter()
+        .map(|rule| format!("`## {}`", rule.label))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+fn format_id_pattern_labels_with_examples(rules: &[ArtifactIdPatternRule]) -> String {
+    rules
+        .iter()
+        .map(|rule| {
+            format!(
+                "`{}`（例如 `{}`）",
+                rule.label,
+                example_for_token_pattern(&rule.pattern)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+fn example_for_token_pattern(pattern: &ArtifactTokenPattern) -> String {
+    match pattern {
+        ArtifactTokenPattern::BracketPrefix(prefix) => format!("[{prefix}001]"),
+        ArtifactTokenPattern::WordPrefix(prefix) => format!("{prefix}001"),
+        ArtifactTokenPattern::Literal(literal) => (*literal).to_string(),
+    }
+}
+
 pub(crate) fn allowed_outputs_for(workspace_type: &WorkspaceType) -> &'static str {
     match workspace_type {
         WorkspaceType::Story => "用户故事、功能需求、成功标准、非功能需求、待确认项",
-        WorkspaceType::Design => "架构、数据流、接口、风险、技术约束、验证策略",
+        WorkspaceType::Design => {
+            "架构、数据流、接口、风险、技术约束、需求/验收到设计决策的抽象验收可追踪性（仅说明 ID/关联，不描述如何测试或分配组件/文件的测试或验证职责）"
+        }
         WorkspaceType::WorkItemPlan => "多任务拆解、任务追踪关系、依赖图、验收与验证建议",
         WorkspaceType::WorkItem => "单个可执行任务的目标、范围、实现步骤、验收、验证与追踪关系",
     }
@@ -310,7 +411,9 @@ pub(crate) fn allowed_outputs_for(workspace_type: &WorkspaceType) -> &'static st
 pub(crate) fn forbidden_outputs_for(workspace_type: &WorkspaceType) -> &'static str {
     match workspace_type {
         WorkspaceType::Story => "Work Item、任务拆分、执行计划、实现步骤",
-        WorkspaceType::Design => "Work Item Plan、开发任务列表、执行 checklist",
+        WorkspaceType::Design => {
+            "Work Item Plan、开发任务列表、执行 checklist、测试计划、测试范围或场景、测试文件或模块、测试框架或夹具、测试命令、构建命令、组件或文件的测试或验证职责分配"
+        }
         WorkspaceType::WorkItemPlan => "代码实现、Story/Design 重写",
         WorkspaceType::WorkItem => "兄弟任务、Issue 级完整计划、其它任务的交叉内容",
     }
