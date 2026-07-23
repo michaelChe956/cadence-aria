@@ -554,6 +554,29 @@ async fn repository_initializer_sanitizes_secrets_controls_and_long_output() {
 }
 
 #[tokio::test]
+async fn repository_initializer_keeps_failure_message_when_output_is_non_empty() {
+    // 真实初始化场景：provider 已产生大探索输出后超时/流中断。
+    // command_failure_with_output 的失败原因 message 必须出现在 stderr_summary，
+    // 不得因 output 非空而被既有输出覆盖丢失。
+    use super::LimitedOutput;
+    use super::command_failure_with_output;
+
+    let mut output = LimitedOutput::new(1024);
+    output.push("正在执行 rule-config 探索阶段输出...");
+    let error = command_failure_with_output(
+        1,
+        "/rule-config --no-interrupt",
+        "initialization timed out",
+        &output,
+        true,
+    );
+
+    let summary = error.stderr_summary.unwrap();
+    assert!(summary.contains("正在执行 rule-config 探索阶段输出..."));
+    assert!(summary.contains("initialization timed out"));
+}
+
+#[tokio::test]
 async fn repository_initializer_rechecks_claude_gate_before_every_turn() {
     let available = Arc::new(AtomicBool::new(true));
     let provider = Arc::new(ScriptedProvider::disabling_after_first_start(

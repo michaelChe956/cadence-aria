@@ -134,7 +134,7 @@ impl RepositoryRegistrationDependenciesBuilder {
             initializer: None,
             clock: Arc::new(|| Utc::now().to_rfc3339()),
             git_command_timeout: Duration::from_secs(180),
-            initialization_timeout: Duration::from_secs(300),
+            initialization_timeout: Duration::from_secs(1800),
         }
     }
 

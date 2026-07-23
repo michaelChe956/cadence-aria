@@ -289,7 +289,15 @@ fn command_failure_with_output(
     output: &LimitedOutput,
     retryable: bool,
 ) -> RepositoryRegistrationError {
-    let details = output.summary().unwrap_or_else(|| message.to_string());
+    // 失败原因 message 必须总是可见：output 非空时追加到末尾，
+    // 不得因 provider 已产生探索输出而把超时/错误原因覆盖丢失。
+    let mut details = output.summary().unwrap_or_else(|| message.to_string());
+    if !details.contains(message) {
+        if !details.is_empty() {
+            details.push('\n');
+        }
+        details.push_str(message);
+    }
     command_failure(command_index, command, &details, retryable, output.limit)
 }
 
