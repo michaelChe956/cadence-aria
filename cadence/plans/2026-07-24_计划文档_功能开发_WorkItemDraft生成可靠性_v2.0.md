@@ -37,13 +37,25 @@
 - Runtime only: `/tmp/aria-draft-prompt-validation/`（不提交）
 - Do not modify: `src/`、`web/`、`tests/`、CLI
 
-### 本次固定案例
+### 本次测试案例
 
-- **Case A（正常基线）**：保留已确认的脱敏后端会话 Draft 输入；覆盖无依赖、单个后端写入边界及可信 Rust 验证命令。
-- **Case B（仓库现有失败回归）**：使用当前 Work Item Workspace 中截图所示 `draft_001` 的原始 Draft 输入。该记录当前为 `validation_failed`，对应的确认节点仅允许“重写”和“暂停”。调用时只在内存中读取这一条输入；不得把原始 Prompt、Provider 输出、真实 issue 标题、绝对路径或历史对话复制到 `/tmp`、计划文档或 Git。
-- Case B 的旧持久化记录只保留了失败状态、未保留 findings；因此本轮不猜测旧错误码。每次首次 Claude Code 输出都必须交由当前既有 Validator 判定，Validator 的实际 findings 才是本次统计依据。
+#### Case A：后端登录会话 Draft（正常基线）
 
-- [x] 操作者已确认：Case B 以当前仓库的 `validation_failed` Draft 替换原定的第二个通用案例。
+- **Outline**：`outline_backend_session`；无上游依赖。
+- **目标**：提供登录会话过期检测与刷新相关 API。
+- **专有写入范围**：`src/product/session.rs`、`src/web/session_handlers.rs`；禁止修改 `web/**`。
+- **验证**：必需检查使用可信命令 `cargo test --locked --lib session`。
+- **首次输出通过条件**：Draft 的逻辑身份、标题和 kind 与 Outline 一致；至少一个专有写入范围；必需验证检查原样写入 `verification_plan`；既有 Validator 返回零个 error finding。
+
+#### Case B：紧凑时长格式化函数（仓库现有 `draft_001` 失败回归）
+
+- **Outline**：`outline_implement_compact_duration`；逻辑 Work Item 为 `wi_implement_compact_duration`；该 Draft 在当前 Work Item Workspace 中已是 `validation_failed`，正是截图里没有“确认”按钮的案例。
+- **目标**：在 `src/formatCompactDuration.mjs` 提供无副作用的 ESM 命名导出 `formatCompactDuration(totalSeconds)`；`0`、`3599`、`3600`、`86400` 分别格式化为 `00:00`、`59:59`、`01:00:00`、`24:00:00`。
+- **边界**：只允许修改 `src/formatCompactDuration.mjs`；禁止修改 `test/formatCompactDuration.test.mjs` 与 `package.json`；负数、浮点数、非安全整数和非数值不在本项契约内。
+- **当前失败事实**：旧 Draft 把 `check_red_esm_boundary`、`check_green_esm_boundary`（验证检查 ID）写进任务的 `done_when_refs`，而 `done_when_refs` 只能引用 acceptance criterion ID，触发 `unknown_done_when_ref`；同时三个 `required=true` 的验证检查只有 `manual_instruction`、没有 command，触发 `missing_required_verification_command`。
+- **首次输出通过条件**：所有 `done_when_refs` 只引用本 Draft 声明的 acceptance criterion ID；若当前 Outline 有可信命令目录，每个 `required=true` 验证检查都提供目录中的非空 command；若目录为空，所有人工检查必须 `required=false` 且存在指向这些检查的 `operational_gate` blocker；`verification_plan` 与 canonical contract 的验证检查完全一致；既有 Validator 返回零个 error finding。
+
+- [x] 操作者已确认：以 Case B 替换原定的第二个通用案例；Case B 的历史失败码必须在本轮首次输出统计中归零。
 - [ ] 每个案例调用 Claude Code 20 次；每次仅记录首次输出是否通过既有本地 Validator、失败码和调用序号，不保存 Prompt 或模型原文。
 - [ ] 若单案例，要求至少 19/20；若双案例，要求合计至少 38/40。自动修复结果单独记录但不计入首次通过率。
 - [ ] 达标后停止自动化操作并向操作者报告聚合结果，进入人工验证；未达标时只修改一个 Prompt 文案变量，先运行现有确定性测试，再对相同案例重跑。
