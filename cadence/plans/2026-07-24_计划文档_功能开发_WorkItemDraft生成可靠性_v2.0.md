@@ -37,7 +37,13 @@
 - Runtime only: `/tmp/aria-draft-prompt-validation/`（不提交）
 - Do not modify: `src/`、`web/`、`tests/`、CLI
 
-- [ ] 在调用前由操作者指定或确认两个脱敏案例；案例不得包含客户数据、真实 issue 标题、绝对路径或完整历史对话。
+### 本次固定案例
+
+- **Case A（正常基线）**：保留已确认的脱敏后端会话 Draft 输入；覆盖无依赖、单个后端写入边界及可信 Rust 验证命令。
+- **Case B（仓库现有失败回归）**：使用当前 Work Item Workspace 中截图所示 `draft_001` 的原始 Draft 输入。该记录当前为 `validation_failed`，对应的确认节点仅允许“重写”和“暂停”。调用时只在内存中读取这一条输入；不得把原始 Prompt、Provider 输出、真实 issue 标题、绝对路径或历史对话复制到 `/tmp`、计划文档或 Git。
+- Case B 的旧持久化记录只保留了失败状态、未保留 findings；因此本轮不猜测旧错误码。每次首次 Claude Code 输出都必须交由当前既有 Validator 判定，Validator 的实际 findings 才是本次统计依据。
+
+- [x] 操作者已确认：Case B 以当前仓库的 `validation_failed` Draft 替换原定的第二个通用案例。
 - [ ] 每个案例调用 Claude Code 20 次；每次仅记录首次输出是否通过既有本地 Validator、失败码和调用序号，不保存 Prompt 或模型原文。
 - [ ] 若单案例，要求至少 19/20；若双案例，要求合计至少 38/40。自动修复结果单独记录但不计入首次通过率。
 - [ ] 达标后停止自动化操作并向操作者报告聚合结果，进入人工验证；未达标时只修改一个 Prompt 文案变量，先运行现有确定性测试，再对相同案例重跑。
