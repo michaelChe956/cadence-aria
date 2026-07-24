@@ -120,9 +120,9 @@ fn work_item_plan_draft_validator_trusted_command_matrix_has_one_target_finding(
     type Mutation = fn(&mut WorkItemPlanOutline, &mut WorkItemDraftCandidate);
 
     let cases: [(&str, Mutation); 2] = [
-        ("untrusted_required_verification_command", |_, candidate| {
-            candidate.canonical_contract_candidate.verification_checks[0].command =
-                Some("pnpm --dir web test".to_string());
+        ("untrusted_required_verification_command", |outline, _| {
+            outline.work_item_outlines[0].trusted_verification_commands[0].command =
+                "pnpm --dir web test".to_string();
         }),
         (
             "missing_trusted_verification_command_catalog",
@@ -155,6 +155,7 @@ fn work_item_plan_draft_validator_trusted_command_matrix_has_one_target_finding(
         for unrelated_identity_code in [
             "unknown_provider_logical_work_item",
             "draft_outline_identity_mismatch",
+            "verification_plan_not_derived_from_contract",
         ] {
             assert!(
                 !has_code(&report, unrelated_identity_code),
