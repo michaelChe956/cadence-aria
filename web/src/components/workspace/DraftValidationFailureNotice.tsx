@@ -7,7 +7,6 @@ interface DraftValidationFailureNoticeProps {
 export function DraftValidationFailureNotice({ findings }: DraftValidationFailureNoticeProps) {
   const availableFindings = findings ?? [];
   const summaryFindings = availableFindings.slice(0, 3);
-  const remainingFindings = availableFindings.slice(3);
 
   return (
     <section
@@ -30,11 +29,11 @@ export function DraftValidationFailureNotice({ findings }: DraftValidationFailur
               </li>
             ))}
           </ul>
-          {remainingFindings.length > 0 ? (
+          {availableFindings.length > 0 ? (
             <details className="mt-2">
               <summary>查看全部 {availableFindings.length} 项错误</summary>
               <ul className="mt-2 list-disc space-y-1 pl-5">
-                {remainingFindings.map((finding) => (
+                {availableFindings.map((finding) => (
                   <li key={finding.finding_id}>
                     <code>{finding.code ?? finding.finding_id}</code>：{finding.message}
                   </li>
