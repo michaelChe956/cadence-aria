@@ -459,6 +459,33 @@ async fn accepting_work_item_draft_updates_current_artifact_without_new_version(
     );
 }
 
+#[tokio::test]
+async fn finishing_work_item_draft_or_batch_run_clears_short_lived_repair_state() {
+    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_clear_draft_repair_state");
+    for node_type in [TimelineNodeType::WorkItemDraftRun, TimelineNodeType::WorkItemBatchRun] {
+        engine.session.stage = WorkspaceStage::Running;
+        let node_id = engine
+            .create_timeline_node(TimelineNodeDraft {
+                node_type,
+                agent: Some(ProviderName::Codex),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "Draft".to_string(),
+                summary: None,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        engine.active_node_id = Some(node_id);
+        engine.remember_one_draft_repair("outline_a", Vec::new(), None);
+        engine.mark_active_run_started("draft-run".to_string());
+
+        engine.mark_active_run_finished("draft-run");
+
+        assert!(engine.work_item_draft_repair_states.is_empty());
+    }
+}
+
 async fn prepare_work_item_plan_outline_artifact(engine: &mut WorkspaceEngine) {
     engine.update_artifact(work_item_plan_outline_artifact()).await;
 }

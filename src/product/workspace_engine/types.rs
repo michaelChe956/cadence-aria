@@ -381,8 +381,8 @@ pub struct WorkspaceEngine {
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkItemDraftRepairState {
-    pub(crate) initial_validation_findings: Vec<WorkItemSplitFinding>,
-    pub(crate) _prior_user_feedback: Option<String>,
+    pub(crate) initial_validation_findings: Option<Vec<WorkItemSplitFinding>>,
+    pub(crate) original_user_feedback: Option<String>,
 }
 
 #[derive(Debug, Clone)]

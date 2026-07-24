@@ -130,6 +130,7 @@ impl WorkspaceEngine {
                 let findings = self
                     .current_work_item_draft_candidate_payload()?
                     .validator_findings;
+                self.remember_draft_rewrite_user_feedback(&outline_id, feedback.clone());
                 let combined_feedback =
                     combine_draft_validation_feedback(feedback.as_deref(), &findings);
                 self.pending_revision_context =

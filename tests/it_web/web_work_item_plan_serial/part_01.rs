@@ -685,6 +685,16 @@ async fn manual_rewrite_merges_validation_findings_and_user_feedback() {
     assert!(repair_prompt.contains("补充：保留接口兼容"));
     assert!(repair_prompt.contains("[draft_validation_findings]"));
     assert!(repair_prompt.contains(&format!("{code}: {message}")));
+    assert_eq!(
+        repair_prompt.matches("[draft_validation_findings]").count(),
+        1,
+        "automatic repair must not carry findings from the manual rewrite prompt"
+    );
+    assert_eq!(
+        repair_prompt.matches(&format!("{code}: {message}")).count(),
+        1,
+        "automatic repair must include only the current findings"
+    );
 
     ws.close(None).await.ok();
 }

@@ -9,13 +9,33 @@ impl WorkspaceEngine {
         findings: Vec<WorkItemSplitFinding>,
         prior_user_feedback: Option<String>,
     ) {
+        let original_user_feedback = self
+            .work_item_draft_repair_states
+            .get(outline_id)
+            .and_then(|state| state.original_user_feedback.clone())
+            .or(prior_user_feedback);
         self.work_item_draft_repair_states.insert(
             outline_id.to_string(),
             WorkItemDraftRepairState {
-                initial_validation_findings: findings,
-                _prior_user_feedback: prior_user_feedback,
+                initial_validation_findings: Some(findings),
+                original_user_feedback,
             },
         );
+    }
+
+    pub(crate) fn remember_draft_rewrite_user_feedback(
+        &mut self,
+        outline_id: &str,
+        user_feedback: Option<String>,
+    ) {
+        let state = self
+            .work_item_draft_repair_states
+            .entry(outline_id.to_string())
+            .or_insert(WorkItemDraftRepairState {
+                initial_validation_findings: None,
+                original_user_feedback: None,
+            });
+        state.original_user_feedback = user_feedback;
     }
 
     pub(crate) async fn complete_work_item_draft_author(
@@ -62,13 +82,19 @@ impl WorkspaceEngine {
             &accepted_candidates,
             &outline_candidate.outline,
         );
-        if report.has_errors()
-            && !self
-                .work_item_draft_repair_states
-                .contains_key(&active_outline_id)
-        {
+        let initial_repair_attempted = self
+            .work_item_draft_repair_states
+            .get(&active_outline_id)
+            .and_then(|state| state.initial_validation_findings.as_ref())
+            .is_some();
+        if report.has_errors() && !initial_repair_attempted {
             let findings = work_item_split_findings_to_dto(&report.findings);
-            let feedback = combine_draft_validation_feedback(prior_user_feedback, &findings);
+            let original_user_feedback = self
+                .work_item_draft_repair_states
+                .get(&active_outline_id)
+                .and_then(|state| state.original_user_feedback.as_deref())
+                .or(prior_user_feedback);
+            let feedback = combine_draft_validation_feedback(original_user_feedback, &findings);
             let diagnostics = WorkItemDraftGenerationDiagnostics {
                 auto_repair_attempted: true,
                 initial_validation_findings: report.findings.clone(),
@@ -77,7 +103,7 @@ impl WorkspaceEngine {
             self.remember_one_draft_repair(
                 &active_outline_id,
                 report.findings,
-                prior_user_feedback.map(str::to_string),
+                original_user_feedback.map(str::to_string),
             );
             return Ok(WorkItemDraftAuthorOutcome::RetryOnce {
                 feedback,
@@ -88,17 +114,21 @@ impl WorkspaceEngine {
         let repair_state = self
             .work_item_draft_repair_states
             .remove(&active_outline_id);
-        let diagnostics = repair_state
-            .as_ref()
-            .map(|state| WorkItemDraftGenerationDiagnostics {
-                auto_repair_attempted: true,
-                initial_validation_findings: state.initial_validation_findings.clone(),
-                final_validation_findings: if report.has_errors() {
-                    report.findings.clone()
-                } else {
-                    Vec::new()
-                },
-            });
+        let diagnostics = repair_state.and_then(|state| {
+            state
+                .initial_validation_findings
+                .map(
+                    |initial_validation_findings| WorkItemDraftGenerationDiagnostics {
+                        auto_repair_attempted: true,
+                        initial_validation_findings,
+                        final_validation_findings: if report.has_errors() {
+                            report.findings.clone()
+                        } else {
+                            Vec::new()
+                        },
+                    },
+                )
+        });
         let previous_draft_record = match index
             .outline_to_current_draft_id
             .get(&active_outline_id)
@@ -243,13 +273,19 @@ impl WorkspaceEngine {
             &batch_candidates,
             &outline_candidate.outline,
         );
-        if report.has_errors()
-            && !self
-                .work_item_draft_repair_states
-                .contains_key(&active_outline_id)
-        {
+        let initial_repair_attempted = self
+            .work_item_draft_repair_states
+            .get(&active_outline_id)
+            .and_then(|state| state.initial_validation_findings.as_ref())
+            .is_some();
+        if report.has_errors() && !initial_repair_attempted {
             let findings = work_item_split_findings_to_dto(&report.findings);
-            let feedback = combine_draft_validation_feedback(prior_user_feedback, &findings);
+            let original_user_feedback = self
+                .work_item_draft_repair_states
+                .get(&active_outline_id)
+                .and_then(|state| state.original_user_feedback.as_deref())
+                .or(prior_user_feedback);
+            let feedback = combine_draft_validation_feedback(original_user_feedback, &findings);
             let diagnostics = WorkItemDraftGenerationDiagnostics {
                 auto_repair_attempted: true,
                 initial_validation_findings: report.findings.clone(),
@@ -258,7 +294,7 @@ impl WorkspaceEngine {
             self.remember_one_draft_repair(
                 &active_outline_id,
                 report.findings,
-                prior_user_feedback.map(str::to_string),
+                original_user_feedback.map(str::to_string),
             );
             return Ok(WorkItemDraftAuthorOutcome::RetryOnce {
                 feedback,
@@ -269,14 +305,20 @@ impl WorkspaceEngine {
         let diagnostics = self
             .work_item_draft_repair_states
             .remove(&active_outline_id)
-            .map(|state| WorkItemDraftGenerationDiagnostics {
-                auto_repair_attempted: true,
-                initial_validation_findings: state.initial_validation_findings,
-                final_validation_findings: if report.has_errors() {
-                    report.findings.clone()
-                } else {
-                    Vec::new()
-                },
+            .and_then(|state| {
+                state
+                    .initial_validation_findings
+                    .map(
+                        |initial_validation_findings| WorkItemDraftGenerationDiagnostics {
+                            auto_repair_attempted: true,
+                            initial_validation_findings,
+                            final_validation_findings: if report.has_errors() {
+                                report.findings.clone()
+                            } else {
+                                Vec::new()
+                            },
+                        },
+                    )
             });
         let status = if report.has_errors() {
             WorkItemDraftStatus::ValidationFailed

@@ -488,6 +488,12 @@ impl WorkspaceEngine {
     pub fn mark_active_run_finished(&mut self, run_id: &str) {
         if self.active_run_id.as_deref() == Some(run_id) {
             self.active_run_id = None;
+            if matches!(
+                self.active_node_type(),
+                Some(TimelineNodeType::WorkItemDraftRun | TimelineNodeType::WorkItemBatchRun)
+            ) {
+                self.work_item_draft_repair_states.clear();
+            }
         }
     }
 
