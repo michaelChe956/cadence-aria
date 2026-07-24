@@ -29,6 +29,7 @@ const OUTLINE_WRITE_SCOPE_RULES: &str = "\
          forbidden_write_scopes 应显式写出依赖方或被依赖方已拥有的实现目录，帮助后续 draft 避免越界。\n\n";
 
 pub const WORK_ITEM_DRAFT_PROMPT_VERSION: &str = "work_item_draft_v2";
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 11_000;
 
 fn work_item_plan_runtime_contract(role: &str) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -59,6 +60,26 @@ fn work_item_plan_runtime_contract(role: &str) -> String {
          {allowed_outputs}\n\n\
          [forbidden_outputs]\n\
          {forbidden_outputs}\n\n",
+        direct_cadence_routing_rules_reference(),
+        allowed_outputs = allowed_outputs_for(&workspace_type),
+        forbidden_outputs = forbidden_outputs_for(&workspace_type),
+    )
+}
+
+fn work_item_draft_runtime_contract() -> String {
+    let workspace_type = WorkspaceType::WorkItemPlan;
+    format!(
+        "{}\
+         当前阶段：已确认 Story/Design 后的 Work Item Plan 候选规划；必调 Skill：using-superpowers → writing-plans。\n\
+         前置 gate：Aria 的 human-confirmation gate 承接人工确认；Provider 只能输出候选，不能写入 canonical artifact。\n\
+         [openspec_contract]\n\
+         Role: Work Item Draft author。必须基于已确认 Story Spec、Design Spec 与 source_story_spec_ids/source_design_spec_ids 追踪关系；冲突、缺失验收依据或边界不明时输出 blocker 或 reviewer 可处理风险，不得猜测。\n\
+         [superpowers_contract]\n\
+         遵守 using-superpowers、writing-plans、TDD 与验证纪律；只生成候选，不执行代码修改。候选必须给出可执行目标、范围、非目标、结构化验证方案、依赖、交接和风险；TDD 与验证闭环必须在当前项的 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行，不得把后续 Work Item 才会提供的注册、接线、生成或部署作为前提。command 仅可来自目标仓库可信证据，不得根据 WorkItemKind 推导；证据不足用 manual/repair/blocker。每项必须可由单个 Claude Code/Codex 会话完成，estimated_context_tokens 不得超过 50k。\n\
+         [allowed_outputs]\n\
+         {allowed_outputs}\n\
+         [forbidden_outputs]\n\
+         {forbidden_outputs}\n",
         direct_cadence_routing_rules_reference(),
         allowed_outputs = allowed_outputs_for(&workspace_type),
         forbidden_outputs = forbidden_outputs_for(&workspace_type),
@@ -525,7 +546,7 @@ pub(crate) fn build_work_item_draft_prompt(
     feedback: Option<&str>,
     nonce: &str,
 ) -> String {
-    let runtime_contract = work_item_plan_runtime_contract("Work Item Draft author");
+    let runtime_contract = work_item_draft_runtime_contract();
     let confirmed_plan_trace = format!(
         "plan_id: {}\nsource_story_spec_ids: {}\nsource_design_spec_ids: {}\nstrategy_summary: {}",
         outline.id,
@@ -546,17 +567,18 @@ pub(crate) fn build_work_item_draft_prompt(
         "(empty: do not invent required commands; use an operational_gate blocker when verification cannot be grounded)"
             .to_string()
     } else {
-        current_outline
-            .trusted_verification_commands
-            .iter()
-            .map(|entry| {
-                format!(
-                    "- command: {} | cwd: {} | purpose: {} | source_ref: {}",
+        format!(
+            "fields: command|cwd|purpose|source_ref\n{}",
+            current_outline
+                .trusted_verification_commands
+                .iter()
+                .map(|entry| format!(
+                    "- {}|{}|{}|{}",
                     entry.command, entry.cwd, entry.purpose, entry.source_ref
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
     };
     let direct_dependency_json =
         serde_json::to_string_pretty(direct_dependencies).unwrap_or_else(|_| "[]".to_string());
@@ -592,13 +614,13 @@ pub(crate) fn build_work_item_draft_prompt(
     };
 
     format!(
-        "你是 Aria 的 Work Item Draft author。只输出 Canonical Contract Candidate。\n\n\
+        "你是 Aria 的 Work Item Draft author。只输出 Canonical Contract Candidate。\n\
          {runtime_contract}\
-         [mode]\n{mode}\n\n\
-         [confirmed_plan_trace]\n{confirmed_plan_trace}\n\n\
-         [current_work_item_outline]\n{current_outline_json}\n\n\
-         [trusted_verification_command_catalog]\n{trusted_command_catalog}\n\n\
-         [直接依赖 draft 完整内容]\n{direct_dependency_json}\n\n\
+         [mode]\n{mode}\n\
+         [confirmed_plan_trace]\n{confirmed_plan_trace}\n\
+         [current_work_item_outline]\n{current_outline_json}\n\
+         [trusted_verification_command_catalog]\n{trusted_command_catalog}\n\
+         [直接依赖 draft 完整内容]\n{direct_dependency_json}\n\
          [其他已 accepted draft 摘要]\n{previous_summaries}\n\
          {feedback_section}\
          [canonical_projection]\n\
@@ -630,12 +652,12 @@ pub(crate) fn build_work_item_draft_prompt(
          - 只能输出一个 Canonical Contract Candidate，且字段对应当前 outline_id `{outline_id}` 与 logical_work_item_id `{logical_work_item_id}`。\n\
          - 不得修改 Outline，不得新增、删除或重命名 outline。\n\
          - 不得输出 work_item_id、draft_id、status 等后端状态字段；Provider JSON 使用 canonical_contract，且 logical_work_item_id 必须与其 identity 一致。\n\
-         - handoff_contract 是 Canonical singleton，不新增 handoff ID；稳定语义由非空且不重复的 required_fields、provided_contract_refs 与 reviewer_check_refs 表达。\n\
+         - handoff_contract 是 Canonical singleton；required_fields、provided_contract_refs、reviewer_check_refs 均非空且不重复。\n\
          - verification_plan.checks 必须逐项、逐字段、按原顺序复制 canonical_contract.verification_checks；不得额外、缺失或重排。\n\
          - verification command 必须来自目标仓库的可信证据，不得根据 WorkItemKind 推导；证据不足进入 manual/repair/blocker，绝不使用 Aria 当前仓库命令兜底。\n\
          - 不得输出面向 Coder 的长篇 implementation_context；不要提前生成或渲染 Coder Projection 或 Reviewer Projection。\n\
-         - canonical_contract 必须且只能包含 schema_version、identity、goal、non_goals、input_contracts、output_contracts、tasks、write_policy、acceptance_criteria、verification_checks、handoff_contract、blocker_rules、design_traceability。\n\
-         - verification_plan 只能包含 checks，且 checks 的每项只能包含 check_id、command、manual_instruction、required、non_zero_test_execution_required。\n\n\
+         - canonical_contract 必须且只能包含 schema_version 及 [canonical_field_contract] 所列字段。\n\
+         - verification_plan 只能包含 checks，其字段遵循 [canonical_field_contract]。\n\n\
          [output]\n\
          使用 nonce `{nonce}` 包裹唯一 JSON：开始标签 `<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`，结束标签 `</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`。\n\
          JSON 顶层必须是 `draft`；draft 只能包含 outline_id、logical_work_item_id、canonical_contract、verification_plan。",

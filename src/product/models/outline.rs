@@ -6,6 +6,13 @@ use crate::product::work_item_contract::{CanonicalWorkItemContract, Verification
 
 use super::lifecycle::{IssueWorkItemPlan, WorkItemKind, WorkItemSplitFinding};
 
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_COMMANDS: usize = 3;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_COMMAND_LENGTH: usize = 48;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_CWD_LENGTH: usize = 16;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH: usize = 32;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH: usize = 32;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES: usize = 425;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemPlanOutline {

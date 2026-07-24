@@ -480,13 +480,14 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
               },
               "trusted_verification_commands": {
                 "type": "array",
+                "maxItems": 3,
                 "items": {
                   "type": "object",
                   "properties": {
-                    "command": { "type": "string" },
-                    "cwd": { "type": "string" },
-                    "purpose": { "type": "string" },
-                    "source_ref": { "type": "string" }
+                    "command": { "type": "string", "maxLength": 48 },
+                    "cwd": { "type": "string", "maxLength": 16 },
+                    "purpose": { "type": "string", "maxLength": 32 },
+                    "source_ref": { "type": "string", "maxLength": 32 }
                   },
                   "required": ["command", "cwd", "purpose", "source_ref"],
                   "additionalProperties": false

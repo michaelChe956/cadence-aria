@@ -79,6 +79,72 @@ fn single_item_prompt_uses_compact_contract_without_duplicate_schema_or_outline(
 }
 
 #[test]
+fn single_item_prompt_accepts_maximum_legal_trusted_command_catalog_within_budget() {
+    let mut outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let catalog = &mut outline.work_item_outlines[0].trusted_verification_commands;
+    catalog.clear();
+    for index in 0..3 {
+        catalog.push(crate::product::models::TrustedDraftVerificationCommand {
+            command: format!("{index}{}", "c".repeat(47)),
+            cwd: format!("{index}{}", "w".repeat(15)),
+            purpose: format!("{index}{}", "p".repeat(31)),
+            source_ref: format!("{index}{}", "s".repeat(if index == 2 { 17 } else { 31 })),
+        });
+    }
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("maximum legal catalog must remain invocable");
+
+    assert!(
+        invocation.prompt.len() < 11_000,
+        "maximum legal catalog must remain under the provider guardrail: {} bytes",
+        invocation.prompt.len()
+    );
+}
+
+#[test]
+fn single_item_prompt_rejects_oversized_trusted_command_catalog_before_provider_invocation() {
+    let mut outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let catalog = &mut outline.work_item_outlines[0].trusted_verification_commands;
+    catalog.clear();
+    for index in 0..20 {
+        catalog.push(crate::product::models::TrustedDraftVerificationCommand {
+            command: format!("{index}{}", "c".repeat(47)),
+            cwd: format!("{index}{}", "w".repeat(15)),
+            purpose: format!("{index}{}", "p".repeat(31)),
+            source_ref: format!("{index}{}", "s".repeat(31)),
+        });
+    }
+
+    let error = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect_err("oversized trusted catalog must fail before provider invocation");
+
+    assert_eq!(error.code, "work_item_draft_prompt_too_large");
+    assert_eq!(
+        error.message,
+        "work item draft prompt exceeds the 11000-byte provider-context limit"
+    );
+}
+
+#[test]
 fn single_item_prompt_projects_planning_discipline_into_canonical_fields() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")

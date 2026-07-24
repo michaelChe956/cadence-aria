@@ -129,6 +129,88 @@ fn work_item_plan_draft_validator_requires_operational_gate_when_catalog_is_empt
 }
 
 #[test]
+fn work_item_plan_draft_validator_allows_empty_catalog_with_operational_gate() {
+    let mut outline = valid_outline();
+    outline.work_item_outlines[0]
+        .trusted_verification_commands
+        .clear();
+    let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    for check in &mut candidate.canonical_contract_candidate.verification_checks {
+        check.command = None;
+        check.required = false;
+        check.non_zero_test_execution_required = false;
+    }
+    candidate.canonical_contract_candidate.blocker_rules[0].route =
+        crate::product::work_item_contract::BlockerRoute::OperationalGate;
+    candidate.canonical_contract_candidate.blocker_rules[0]
+        .target_contract_refs
+        .clear();
+    candidate.verification_plan.checks = candidate
+        .canonical_contract_candidate
+        .verification_checks
+        .clone();
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    assert!(
+        !has_code(&report, "missing_trusted_verification_command_catalog"),
+        "operational gate must make an empty catalog routable: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn work_item_plan_outline_validator_rejects_trusted_command_catalog_over_budget() {
+    let mut outline = valid_outline();
+    let command = outline.work_item_outlines[0].trusted_verification_commands[0].clone();
+    outline.work_item_outlines[0].trusted_verification_commands = vec![command; 4];
+
+    let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+    assert_has_code(&report, "trusted_verification_command_catalog_too_large");
+}
+
+#[test]
+fn work_item_plan_outline_validator_rejects_overlong_trusted_command_catalog_fields() {
+    for field in ["command", "cwd", "purpose", "source_ref"] {
+        let mut outline = valid_outline();
+        let command = &mut outline.work_item_outlines[0].trusted_verification_commands[0];
+        match field {
+            "command" => command.command = "c".repeat(49),
+            "cwd" => command.cwd = "w".repeat(17),
+            "purpose" => command.purpose = "p".repeat(33),
+            "source_ref" => command.source_ref = "s".repeat(33),
+            _ => unreachable!("only trusted catalog fields are checked"),
+        }
+
+        let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+        assert_has_code(
+            &report,
+            "trusted_verification_command_catalog_field_too_large",
+        );
+    }
+}
+
+#[test]
+fn work_item_plan_outline_validator_rejects_trusted_catalog_utf8_projection_over_budget() {
+    let mut outline = valid_outline();
+    let mut command = outline.work_item_outlines[0].trusted_verification_commands[0].clone();
+    command.command = "界".repeat(48);
+    command.cwd.clear();
+    command.purpose.clear();
+    command.source_ref.clear();
+    outline.work_item_outlines[0].trusted_verification_commands = vec![command; 3];
+
+    let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+    assert_has_code(
+        &report,
+        "trusted_verification_command_catalog_projection_too_large",
+    );
+}
+
+#[test]
 fn work_item_plan_draft_validator_fails_closed_when_candidate_outline_is_missing() {
     let outline = valid_outline();
     let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);

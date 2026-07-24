@@ -356,7 +356,21 @@ fn work_item_plan_outline_schema_requires_closed_trusted_verification_command_ca
     let catalog = &outline_item["properties"]["trusted_verification_commands"];
 
     assert_eq!(catalog["type"], "array");
+    assert_eq!(catalog["maxItems"], 3);
     assert_required_closed_array_items(catalog);
+    for field in ["command", "cwd", "purpose", "source_ref"] {
+        assert_eq!(
+            catalog["items"]["properties"][field]["maxLength"],
+            match field {
+                "command" => 48,
+                "cwd" => 16,
+                "purpose" => 32,
+                "source_ref" => 32,
+                _ => unreachable!("only trusted catalog fields are checked"),
+            },
+            "trusted command catalog field {field} must have a prompt-budget bound"
+        );
+    }
     assert!(
         outline_item["required"]
             .as_array()

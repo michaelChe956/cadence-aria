@@ -14,7 +14,7 @@ use crate::web::error::{ApiError, ApiResult};
 use crate::web::types::GenerateWorkItemsRequest;
 
 use super::WorkItemSplitEngine;
-use super::prompts::build_work_item_draft_prompt;
+use super::prompts::{WORK_ITEM_DRAFT_PROMPT_MAX_BYTES, build_work_item_draft_prompt};
 use super::types::{
     ProviderOutput, ProviderWorkItemDraftInput, WorkItemDraftInvocation,
     WorkItemSplitProviderOutput, parse_confidence, parse_fallback_policy, parse_safety,
@@ -182,6 +182,17 @@ pub fn build_work_item_draft_invocation(
         feedback,
         &nonce,
     );
+    if prompt.len() >= WORK_ITEM_DRAFT_PROMPT_MAX_BYTES {
+        return Err(ApiError::validation_with_details(
+            "work_item_draft_prompt_too_large",
+            "work item draft prompt exceeds the 11000-byte provider-context limit",
+            json!({
+                "prompt_bytes": prompt.len(),
+                "max_prompt_bytes": WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
+                "outline_id": current_outline_id,
+            }),
+        ));
+    }
 
     Ok(WorkItemDraftInvocation {
         prompt,

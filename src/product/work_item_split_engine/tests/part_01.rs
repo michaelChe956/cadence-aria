@@ -602,7 +602,7 @@ fn outline_parser_rejects_verification_plan_or_work_item_id() {
 }
 
 #[test]
-fn single_item_prompt_contains_accepted_previous_context() {
+fn single_item_prompt_rejects_oversized_accepted_previous_context_before_provider_invocation() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
         .outline
@@ -620,20 +620,20 @@ fn single_item_prompt_contains_accepted_previous_context() {
         accepted_candidate,
     );
 
-    let invocation = build_work_item_draft_invocation(
+    let error = build_work_item_draft_invocation(
         &outline,
         "outline_frontend",
         WorkItemGenerationMode::Serial,
         &[accepted_backend],
         Some("补充错误态"),
     )
-    .expect("draft invocation");
+    .expect_err("oversized accepted dependency context must fail before provider invocation");
 
-    assert!(invocation.prompt.contains("outline_frontend"));
-    assert!(invocation.prompt.contains("serial"));
-    assert!(invocation.prompt.contains("SessionStatusDto"));
-    assert!(invocation.prompt.contains("直接依赖 draft 完整内容"));
-    assert!(invocation.prompt.contains("补充错误态"));
+    assert_eq!(error.code, "work_item_draft_prompt_too_large");
+    assert_eq!(
+        error.message,
+        "work item draft prompt exceeds the 11000-byte provider-context limit"
+    );
 }
 
 #[test]
