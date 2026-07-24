@@ -312,6 +312,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "接受" })).toBeInTheDocument(),
     );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(
       screen.getByTestId("work-item-plan-artifact-panel"),
     ).toHaveTextContent("Backend flow");
@@ -322,7 +323,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
     );
   });
 
-  it("draft confirm hides accept when validation failed", async () => {
+  it("draft confirm announces validation findings at artifact and chat entry points", async () => {
     const api = mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
@@ -341,7 +342,40 @@ describe("ChatWorkspacePage work item plan flow", () => {
       ],
       workItemPlanArtifact: {
         type: "draft_candidate",
-        payload: { ...workItemDraftPayload(), can_accept: false },
+        payload: {
+          ...workItemDraftPayload(),
+          can_accept: false,
+          validator_findings: [
+            {
+              finding_id: "finding_1",
+              level: "error",
+              code: "unknown_done_when_ref",
+              message: "完成条件引用不存在",
+              affected_scopes: [],
+            },
+            {
+              finding_id: "finding_2",
+              level: "error",
+              code: "missing_required_verification_command",
+              message: "缺少必需验证命令",
+              affected_scopes: [],
+            },
+            {
+              finding_id: "finding_3",
+              level: "error",
+              code: "missing_handoff",
+              message: "缺少交接说明",
+              affected_scopes: [],
+            },
+            {
+              finding_id: "finding_4",
+              level: "error",
+              code: "missing_scope",
+              message: "缺少写入范围",
+              affected_scopes: [],
+            },
+          ],
+        },
       },
     });
 
@@ -353,7 +387,14 @@ describe("ChatWorkspacePage work item plan flow", () => {
     expect(
       screen.queryByRole("button", { name: "接受" }),
     ).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "重写" }));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("Draft 校验失败，暂不能接受（4 项）");
+    expect(screen.getByRole("button", { name: "根据校验错误重写" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("Draft 校验失败，暂不能接受（4 项）");
+    expect(screen.getByText("missing_scope")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "根据校验错误重写" }));
     await userEvent.click(screen.getByRole("button", { name: "暂停" }));
 
     expect(api.sendWorkItemDraftDecision).toHaveBeenNthCalledWith(
@@ -447,7 +488,7 @@ describe("ChatWorkspacePage work item plan flow", () => {
       ],
       workItemPlanArtifact: {
         type: "draft_candidate",
-        payload: { ...workItemDraftPayload(), can_accept: false },
+        payload: { ...workItemDraftPayload(), can_accept: false, validator_findings: [] },
       },
     });
 
@@ -461,7 +502,10 @@ describe("ChatWorkspacePage work item plan flow", () => {
     expect(
       screen.queryByRole("button", { name: "进入 Review" }),
     ).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "重写" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "校验详情暂不可用，请根据 Draft 内容重写",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "根据校验错误重写" }));
     await userEvent.click(screen.getByRole("button", { name: "暂停" }));
 
     expect(api.sendWorkItemDraftDecision).toHaveBeenNthCalledWith(

@@ -257,6 +257,12 @@ export type WorkItemDraftStatus =
   | "validation_failed"
   | "copied";
 
+export type WorkItemDraftGenerationDiagnostics = {
+  auto_repair_attempted: boolean;
+  initial_validation_findings: ValidatorFindingDto[];
+  final_validation_findings: ValidatorFindingDto[];
+};
+
 export type WorkItemDraftRecord = {
   project_id?: string;
   issue_id?: string;
@@ -268,6 +274,7 @@ export type WorkItemDraftRecord = {
   attempt_index?: number;
   outline_version_ref?: string;
   generation_mode?: WorkItemGenerationMode | string;
+  generation_diagnostics?: WorkItemDraftGenerationDiagnostics | null;
   candidate: WorkItemDraftCandidate;
   status: WorkItemDraftStatus | string;
   active: boolean;
