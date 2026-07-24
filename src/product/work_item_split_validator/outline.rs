@@ -80,66 +80,7 @@ pub(crate) fn validate_outline_traceability_and_scopes(
                 vec![item.outline_id.clone()],
             ));
         }
-        if item.trusted_verification_commands.len() > MAX_TRUSTED_DRAFT_VERIFICATION_COMMANDS {
-            findings.push(error(
-                "trusted_verification_command_catalog_too_large",
-                format!(
-                    "outline {} trusted verification command catalog exceeds the maximum of {} entries",
-                    item.outline_id, MAX_TRUSTED_DRAFT_VERIFICATION_COMMANDS
-                ),
-                vec![item.outline_id.clone()],
-            ));
-        }
-        for command in &item.trusted_verification_commands {
-            let field_too_large = command.command.chars().count()
-                > MAX_TRUSTED_DRAFT_VERIFICATION_COMMAND_LENGTH
-                || command.cwd.chars().count() > MAX_TRUSTED_DRAFT_VERIFICATION_CWD_LENGTH
-                || command.purpose.chars().count() > MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH
-                || command.source_ref.chars().count()
-                    > MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH;
-            if field_too_large {
-                findings.push(error(
-                    "trusted_verification_command_catalog_field_too_large",
-                    format!(
-                        "outline {} trusted verification command catalog contains a field exceeding its maximum length",
-                        item.outline_id
-                    ),
-                    vec![item.outline_id.clone()],
-                ));
-            }
-        }
-        let trusted_catalog_prompt_bytes = if item.trusted_verification_commands.is_empty() {
-            0
-        } else {
-            "fields: command|cwd|purpose|source_ref\n".len()
-                + item
-                    .trusted_verification_commands
-                    .iter()
-                    .map(|command| {
-                        "- ".len()
-                            + command.command.len()
-                            + "|".len()
-                            + command.cwd.len()
-                            + "|".len()
-                            + command.purpose.len()
-                            + "|".len()
-                            + command.source_ref.len()
-                    })
-                    .sum::<usize>()
-                + item.trusted_verification_commands.len().saturating_sub(1)
-        };
-        if trusted_catalog_prompt_bytes > MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES {
-            findings.push(error(
-                "trusted_verification_command_catalog_projection_too_large",
-                format!(
-                    "outline {} trusted verification command catalog projects to {} bytes, exceeding the {}-byte prompt budget",
-                    item.outline_id,
-                    trusted_catalog_prompt_bytes,
-                    MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES
-                ),
-                vec![item.outline_id.clone()],
-            ));
-        }
+        validate_trusted_verification_command_catalog(item, findings);
         match item.estimated_context_tokens {
             Some(value)
                 if value > 0 && value <= SINGLE_AGENT_SESSION_CONTEXT_TOKEN_HARD_LIMIT => {}
@@ -179,6 +120,59 @@ pub(crate) fn validate_outline_traceability_and_scopes(
                 vec![item.outline_id.clone()],
             )),
         }
+    }
+}
+
+pub(crate) fn validate_trusted_verification_command_catalog(
+    item: &WorkItemOutline,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    if item.trusted_verification_commands.len() > MAX_TRUSTED_DRAFT_VERIFICATION_COMMANDS {
+        findings.push(error(
+            "trusted_verification_command_catalog_too_large",
+            format!(
+                "outline {} trusted verification command catalog exceeds the maximum of {} entries",
+                item.outline_id, MAX_TRUSTED_DRAFT_VERIFICATION_COMMANDS
+            ),
+            vec![item.outline_id.clone()],
+        ));
+    }
+    for command in &item.trusted_verification_commands {
+        let field_too_large = command.command.chars().count()
+            > MAX_TRUSTED_DRAFT_VERIFICATION_COMMAND_LENGTH
+            || command.cwd.chars().count() > MAX_TRUSTED_DRAFT_VERIFICATION_CWD_LENGTH
+            || command.purpose.chars().count() > MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH
+            || command.source_ref.chars().count()
+                > MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH;
+        if field_too_large {
+            findings.push(error(
+                    "trusted_verification_command_catalog_field_too_large",
+                    format!(
+                        "outline {} trusted verification command catalog contains a field exceeding its maximum length",
+                        item.outline_id
+                    ),
+                    vec![item.outline_id.clone()],
+                ));
+        }
+    }
+    let trusted_catalog_prompt_bytes = if item.trusted_verification_commands.is_empty() {
+        0
+    } else {
+        crate::product::models::trusted_draft_verification_command_catalog_prompt_bytes(
+            &item.trusted_verification_commands,
+        )
+    };
+    if trusted_catalog_prompt_bytes > MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES {
+        findings.push(error(
+                "trusted_verification_command_catalog_projection_too_large",
+                format!(
+                    "outline {} trusted verification command catalog projects to {} bytes, exceeding the {}-byte prompt budget",
+                    item.outline_id,
+                    trusted_catalog_prompt_bytes,
+                    MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES
+                ),
+                vec![item.outline_id.clone()],
+            ));
     }
 }
 

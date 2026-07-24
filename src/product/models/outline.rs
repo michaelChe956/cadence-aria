@@ -13,6 +13,28 @@ pub const MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH: usize = 32;
 pub const MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH: usize = 32;
 pub const MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES: usize = 425;
 
+pub fn trusted_draft_verification_command_catalog_prompt_projection(
+    commands: &[TrustedDraftVerificationCommand],
+) -> String {
+    format!(
+        "fields: command|cwd|purpose|source_ref\n{}",
+        commands
+            .iter()
+            .map(|entry| format!(
+                "- {}|{}|{}|{}",
+                entry.command, entry.cwd, entry.purpose, entry.source_ref
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+pub fn trusted_draft_verification_command_catalog_prompt_bytes(
+    commands: &[TrustedDraftVerificationCommand],
+) -> usize {
+    trusted_draft_verification_command_catalog_prompt_projection(commands).len()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemPlanOutline {

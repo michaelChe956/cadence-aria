@@ -91,9 +91,15 @@ fn single_item_prompt_accepts_maximum_legal_trusted_command_catalog_within_budge
             command: format!("{index}{}", "c".repeat(47)),
             cwd: format!("{index}{}", "w".repeat(15)),
             purpose: format!("{index}{}", "p".repeat(31)),
-            source_ref: format!("{index}{}", "s".repeat(if index == 2 { 17 } else { 31 })),
+            source_ref: format!("{index}{}", "s".repeat(if index == 2 { 16 } else { 31 })),
         });
     }
+
+    assert_eq!(
+        crate::product::models::trusted_draft_verification_command_catalog_prompt_bytes(catalog),
+        crate::product::models::MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES,
+        "maximum legal catalog must use the prompt's exact rendered byte projection"
+    );
 
     let invocation = build_work_item_draft_invocation(
         &outline,
@@ -108,6 +114,53 @@ fn single_item_prompt_accepts_maximum_legal_trusted_command_catalog_within_budge
         invocation.prompt.len() < 11_000,
         "maximum legal catalog must remain under the provider guardrail: {} bytes",
         invocation.prompt.len()
+    );
+}
+
+#[test]
+fn single_item_prompt_rejects_short_catalog_that_exceeds_semantic_limit_before_provider_invocation()
+{
+    let mut outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let catalog = &mut outline.work_item_outlines[0].trusted_verification_commands;
+    catalog.clear();
+    for index in 0..4 {
+        catalog.push(crate::product::models::TrustedDraftVerificationCommand {
+            command: format!("test-{index}"),
+            cwd: ".".to_string(),
+            purpose: "unit".to_string(),
+            source_ref: "repo/path".to_string(),
+        });
+    }
+    let prompt = crate::product::work_item_split_engine::prompts::build_work_item_draft_prompt(
+        &outline,
+        &outline.work_item_outlines[0],
+        WorkItemGenerationMode::Serial,
+        &[],
+        &[],
+        None,
+        "nonce",
+    );
+    assert!(
+        prompt.len() < 11_000,
+        "semantic catalog violation must be checked before the full prompt budget: {} bytes",
+        prompt.len()
+    );
+
+    let error = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect_err("short catalog exceeding maxItems must fail before provider invocation");
+
+    assert_eq!(
+        error.code,
+        "trusted_verification_command_catalog_too_large"
     );
 }
 
@@ -137,10 +190,13 @@ fn single_item_prompt_rejects_oversized_trusted_command_catalog_before_provider_
     )
     .expect_err("oversized trusted catalog must fail before provider invocation");
 
-    assert_eq!(error.code, "work_item_draft_prompt_too_large");
+    assert_eq!(
+        error.code,
+        "trusted_verification_command_catalog_too_large"
+    );
     assert_eq!(
         error.message,
-        "work item draft prompt exceeds the 11000-byte provider-context limit"
+        "outline outline_backend trusted verification command catalog exceeds the maximum of 3 entries"
     );
 }
 

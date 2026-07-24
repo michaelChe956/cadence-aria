@@ -567,17 +567,8 @@ pub(crate) fn build_work_item_draft_prompt(
         "(empty: do not invent required commands; use an operational_gate blocker when verification cannot be grounded)"
             .to_string()
     } else {
-        format!(
-            "fields: command|cwd|purpose|source_ref\n{}",
-            current_outline
-                .trusted_verification_commands
-                .iter()
-                .map(|entry| format!(
-                    "- {}|{}|{}|{}",
-                    entry.command, entry.cwd, entry.purpose, entry.source_ref
-                ))
-                .collect::<Vec<_>>()
-                .join("\n")
+        crate::product::models::trusted_draft_verification_command_catalog_prompt_projection(
+            &current_outline.trusted_verification_commands,
         )
     };
     let direct_dependency_json =

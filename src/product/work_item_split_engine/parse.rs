@@ -159,6 +159,21 @@ pub fn build_work_item_draft_invocation(
                 json!({ "outline_id": current_outline_id }),
             )
         })?;
+    let mut catalog_findings = Vec::new();
+    crate::product::work_item_split_validator::outline::validate_trusted_verification_command_catalog(
+        current_outline,
+        &mut catalog_findings,
+    );
+    if let Some(finding) = catalog_findings.into_iter().next() {
+        return Err(ApiError::validation_with_details(
+            finding.code,
+            finding.message,
+            json!({
+                "outline_id": current_outline_id,
+                "work_item_ids": finding.work_item_ids,
+            }),
+        ));
+    }
     let dependency_ids: HashSet<&str> = current_outline
         .depends_on
         .iter()
