@@ -61,6 +61,10 @@
   - 后续遇到涉及 Story Spec、Design Spec、Work Item 任一产物 Workspace 的 Bug、展示异常、状态恢复异常、交互定位异常、审核/返修流程异常时，必须同时评估三种产物类型是否受影响。
   - 若三者复用同一链路，应优先在共享层修复，并补充覆盖 `story`、`design`、`work_item` 的回归测试；完整规则详见 `cadence/project-rules/workspace-artifact-bug-triage.md`。
 
+- **Work Item Draft Prompt 测试提醒规则**
+  - 修改 Work Item Draft Prompt、Canonical Contract 投影或 Provider 输出结构约束时，交付前必须提醒操作者授权执行 Case A、Case B 各 10 次的真实 Claude Code 验证。
+  - 不得自动调用 Provider，不得新增 CI、Hook、产品 CLI 或持久化评估报告；完整规则详见 `cadence/project-rules/work-item-draft-prompt-validation.md`。
+
 **示例规则**（默认不启用，需用户主动添加）：
 
 ```markdown

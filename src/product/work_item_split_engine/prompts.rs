@@ -622,9 +622,9 @@ pub(crate) fn build_work_item_draft_prompt(
          [registration]\n\
          先在内部登记 acceptance criterion ID、traceability requirement ID、input/output contract ID、以及上列可信命令；不要输出该草稿登记表。\n\n\
          [projection]\n\
-         done_when_refs 只能引用 criterion_id；requirement_refs 只能引用登记的 requirement_id；reviewer_check_refs 必须覆盖全部 criterion_id；blocker target 只能引用 input/output contract_id；required=true 的 command 必须逐字来自可信目录。\n\n\
+         done_when_refs 只能引用 criterion_id；requirement_refs 只能引用登记的 requirement_id；reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致，不得引用 verification check、task 或其他 ID；blocker target 只能引用 input/output contract_id；required=true 的 command 必须逐字来自可信目录。\n\n\
          [self_check]\n\
-         输出前逐项验证上述集合关系、verification_plan 与 canonical checks 的逐字段同序相等，以及 required command 的非空和目录成员关系。目录为空或不足以支持必需验证时，输出有说明的 operational_gate blocker，不得伪造 required command。\n\n\
+         输出前逐项验证上述集合关系、verification_plan 与 canonical checks 的逐字段同序相等，以及 required command 的非空和目录成员关系。可信目录为空时，所有 verification_checks 必须 required=false 且 command=null，并且必须输出有说明的 operational_gate blocker；不得输出 required=true 或伪造 required command。\n\n\
          [canonical_field_contract]\n\
          这是封闭的类型契约，不是示例 JSON：每个 object 必须且只能包含下列字段；所有列出的字段都必须出现，数组可为空但数组内对象不得缺字段或加字段。\n\
          - draft: object {{outline_id: string, logical_work_item_id: non-empty string, canonical_contract: object, verification_plan: object}}。\n\

@@ -26,12 +26,12 @@
 系统 SHALL 在操作者明确授权后，允许使用一至两个脱敏 Draft 案例对 Claude Code 进行临时 Prompt 试运行。试运行 MUST 不创建运行时评估模块、CLI、持久化报告或默认 CI 步骤。
 
 #### Scenario: 单案例达到首次通过率门槛
-- **WHEN** 一个脱敏案例在 Claude Code 上执行 20 次
-- **THEN** 系统 MUST 以首次输出通过既有本地 Validator 作为成功，并要求至少 19 次成功后才转入人工验证
+- **WHEN** 一个脱敏案例在 Claude Code 上取得 10 个有效首次输出
+- **THEN** 系统 MUST 以首次输出通过既有本地 Validator 作为成功，并要求 10 次全部成功后才转入人工验证
 
 #### Scenario: 双案例达到首次通过率门槛
-- **WHEN** 两个脱敏案例各在 Claude Code 上执行 20 次
-- **THEN** 系统 MUST 以首次输出通过既有本地 Validator 作为成功，并要求合计至少 38 次成功后才转入人工验证
+- **WHEN** 两个脱敏案例各在 Claude Code 上取得 10 个有效首次输出
+- **THEN** 系统 MUST 以首次输出通过既有本地 Validator 作为成功，并要求两个案例均全数成功后才转入人工验证
 
 #### Scenario: Prompt 试运行未达标
 - **WHEN** 临时试运行未达到 95% 首次通过率

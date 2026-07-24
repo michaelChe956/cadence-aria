@@ -264,6 +264,54 @@ fn single_item_prompt_requires_registration_projection_and_self_check() {
 }
 
 #[test]
+fn single_item_prompt_forbids_required_checks_without_a_trusted_command() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    assert!(
+        invocation.prompt.contains(
+            "可信目录为空时，所有 verification_checks 必须 required=false 且 command=null"
+        ),
+        "draft prompt must forbid required checks without a trusted command"
+    );
+}
+
+#[test]
+fn single_item_prompt_requires_reviewer_checks_to_equal_criteria() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    assert!(
+        invocation.prompt.contains(
+            "reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致"
+        ),
+        "draft prompt must require reviewer checks to contain only acceptance criterion IDs"
+    );
+}
+
+#[test]
 fn single_item_prompt_includes_closed_typed_canonical_field_contract() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
