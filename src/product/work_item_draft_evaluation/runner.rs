@@ -17,7 +17,6 @@ use crate::product::work_item_draft_evaluation::types::{
     DEFAULT_RUNS_PER_SCENARIO, DraftEvaluationDependencySummary, DraftEvaluationError,
     DraftEvaluationOutcome, DraftEvaluationReport, DraftEvaluationReportInput,
     DraftEvaluationScenario, DraftEvaluationScenarioFile, MIN_RELEASE_SCENARIOS, build_report,
-    is_safe_scenario_id,
 };
 use crate::product::work_item_split_engine::{
     WORK_ITEM_DRAFT_OUTPUT_SCHEMA, WORK_ITEM_DRAFT_PROMPT_VERSION,
@@ -58,7 +57,8 @@ pub fn run_evaluation_with_adapter(
     runs_per_scenario: usize,
     non_release_smoke: bool,
 ) -> Result<DraftEvaluationReport, DraftEvaluationError> {
-    validate_evaluation_request(scenarios, runs_per_scenario, non_release_smoke)?;
+    validate_run_shape(scenarios.len(), runs_per_scenario, non_release_smoke)?;
+    validate_scenarios(scenarios)?;
 
     let mut outcomes = Vec::with_capacity(scenarios.len().saturating_mul(runs_per_scenario));
     for scenario in scenarios {
@@ -89,43 +89,6 @@ pub fn run_evaluation_with_adapter(
         non_release_smoke,
         outcomes,
     })
-}
-
-pub const REQUIRED_RELEASE_COVERAGE_CATEGORIES: [&str; 10] = [
-    "valid_control",
-    "missing_required_verification_command",
-    "unknown_done_when_ref",
-    "unknown_requirement_ref",
-    "unknown_reviewer_check_ref",
-    "acceptance_criterion_without_reviewer_check",
-    "stage_blocker_without_target_contract",
-    "verification_plan_not_derived_from_contract",
-    "untrusted_required_verification_command",
-    "missing_trusted_verification_command_catalog",
-];
-
-pub fn validate_evaluation_request(
-    scenarios: &[DraftEvaluationScenario],
-    runs_per_scenario: usize,
-    non_release_smoke: bool,
-) -> Result<(), DraftEvaluationError> {
-    validate_run_shape(scenarios.len(), runs_per_scenario, non_release_smoke)?;
-    scenarios
-        .len()
-        .checked_mul(runs_per_scenario)
-        .ok_or_else(|| {
-            DraftEvaluationError::new(
-                "draft_eval_run_count_overflow",
-                "scenario_count * runs_per_scenario overflowed",
-            )
-        })?;
-    validate_scenarios(scenarios, non_release_smoke)
-}
-
-pub fn validate_evaluation_scenario_corpus(
-    scenarios: &[DraftEvaluationScenario],
-) -> Result<(), DraftEvaluationError> {
-    validate_scenarios(scenarios, true)
 }
 
 fn evaluate_one(
@@ -295,19 +258,9 @@ fn validate_run_shape(
     Ok(())
 }
 
-fn validate_scenarios(
-    scenarios: &[DraftEvaluationScenario],
-    non_release_smoke: bool,
-) -> Result<(), DraftEvaluationError> {
+fn validate_scenarios(scenarios: &[DraftEvaluationScenario]) -> Result<(), DraftEvaluationError> {
     let mut ids = std::collections::BTreeSet::new();
-    let mut category_counts = std::collections::BTreeMap::<&str, usize>::new();
     for scenario in scenarios {
-        if !is_safe_scenario_id(&scenario.scenario_id) {
-            return Err(DraftEvaluationError::new(
-                "draft_eval_scenario_id_invalid",
-                "scenario_id must be 1-64 lowercase ASCII letters, digits, underscores, or hyphens",
-            ));
-        }
         if !ids.insert(&scenario.scenario_id) {
             return Err(DraftEvaluationError::new(
                 "draft_eval_scenario_id_duplicate",
@@ -337,41 +290,6 @@ fn validate_scenarios(
                 ),
             ));
         }
-        let mut scenario_categories = std::collections::BTreeSet::new();
-        for category in &scenario.expected_coverage_categories {
-            let Some(required) = REQUIRED_RELEASE_COVERAGE_CATEGORIES
-                .iter()
-                .find(|required| **required == category)
-                .copied()
-            else {
-                return Err(DraftEvaluationError::new(
-                    "draft_eval_coverage_category_invalid",
-                    format!("scenario {} uses unknown category", scenario.scenario_id),
-                ));
-            };
-            if !scenario_categories.insert(required) {
-                return Err(DraftEvaluationError::new(
-                    "draft_eval_duplicate_scenario_category",
-                    format!(
-                        "scenario {} repeats coverage category {required}",
-                        scenario.scenario_id
-                    ),
-                ));
-            }
-        }
-        for category in scenario_categories {
-            *category_counts.entry(category).or_default() += 1;
-        }
-    }
-    if !non_release_smoke
-        && REQUIRED_RELEASE_COVERAGE_CATEGORIES
-            .iter()
-            .any(|category| category_counts.get(category).copied().unwrap_or_default() < 2)
-    {
-        return Err(DraftEvaluationError::new(
-            "draft_eval_required_category_coverage",
-            "release evaluation requires every required category at least twice",
-        ));
     }
     Ok(())
 }

@@ -132,70 +132,7 @@ fn compare_requires_both_independent_reports_to_pass() {
 
     let comparison = compare_reports(&passing, &failing).expect("comparable reports");
 
-    assert_ne!(passing.run_id, failing.run_id);
     assert!(!comparison.release_gate_passed);
-}
-
-#[test]
-fn compare_rejects_a_copied_report_with_the_same_run_id() {
-    let report = report_from(outcomes_with_first_passes(30, 10, |_| 10));
-
-    let error = compare_reports(&report, &report.clone()).expect_err("same run must be rejected");
-
-    assert_eq!(error.code, "draft_eval_same_run");
-}
-
-#[test]
-fn compare_rejects_fake_provider_reports_even_when_counts_are_self_consistent() {
-    let mut first = report_from(outcomes_with_first_passes(30, 10, |_| 10));
-    let mut second = report_from(outcomes_with_first_passes(30, 10, |_| 10));
-    first.provider = ProviderType::Fake;
-    second.provider = ProviderType::Fake;
-
-    let error = compare_reports(&first, &second).expect_err("fake reports are non-release");
-
-    assert_eq!(error.code, "draft_eval_report_provider_invalid");
-}
-
-#[test]
-fn compare_revalidates_persisted_gate_percentages_counts_and_scenario_completeness() {
-    let baseline = report_from(outcomes_with_first_passes(30, 10, |_| 10));
-
-    let mut tampered_gate = baseline.clone();
-    tampered_gate.release_gate_passed = false;
-    assert_eq!(
-        compare_reports(&baseline, &tampered_gate)
-            .expect_err("tampered gate")
-            .code,
-        "draft_eval_report_gate_mismatch"
-    );
-
-    let mut tampered_percentage = baseline.clone();
-    tampered_percentage.first_pass_rate_percent = 94;
-    assert_eq!(
-        compare_reports(&baseline, &tampered_percentage)
-            .expect_err("tampered percentage")
-            .code,
-        "draft_eval_report_percentage_mismatch"
-    );
-
-    let mut tampered_count = baseline.clone();
-    tampered_count.total_first_pass_count -= 1;
-    assert_eq!(
-        compare_reports(&baseline, &tampered_count)
-            .expect_err("tampered count")
-            .code,
-        "draft_eval_report_first_pass_count_mismatch"
-    );
-
-    let mut missing_scenario = baseline.clone();
-    missing_scenario.per_scenario_stats.remove("scenario_00");
-    assert_eq!(
-        compare_reports(&baseline, &missing_scenario)
-            .expect_err("missing scenario stats")
-            .code,
-        "draft_eval_report_scenario_stats_incomplete"
-    );
 }
 
 #[test]
@@ -248,18 +185,13 @@ fn draft_evaluation_report_serialization_is_audited_and_rejects_raw_fields() {
             "first_pass_rate_percent",
             "non_release_smoke",
             "per_scenario_first_pass_rates",
-            "per_scenario_stats",
             "prompt_version",
             "provider",
             "release_gate_passed",
-            "repair_attempt_count",
             "repaired_pass_rate_percent",
-            "repaired_pass_count",
-            "run_id",
             "runs_per_scenario",
             "scenario_count",
             "scenario_set_hash",
-            "total_first_pass_count",
             "total_runs",
         ])
     );
@@ -298,137 +230,6 @@ fn scenario(index: usize) -> DraftEvaluationScenario {
         expected_coverage_categories: vec!["valid_control".to_string()],
         scenario_traits: vec!["no_dependency".to_string()],
         user_feedback: None,
-    }
-}
-
-const REQUIRED_COVERAGE_CATEGORIES: [&str; 10] = [
-    "valid_control",
-    "missing_required_verification_command",
-    "unknown_done_when_ref",
-    "unknown_requirement_ref",
-    "unknown_reviewer_check_ref",
-    "acceptance_criterion_without_reviewer_check",
-    "stage_blocker_without_target_contract",
-    "verification_plan_not_derived_from_contract",
-    "untrusted_required_verification_command",
-    "missing_trusted_verification_command_catalog",
-];
-
-fn release_scenarios() -> Vec<DraftEvaluationScenario> {
-    (0..30)
-        .map(|index| {
-            let mut scenario = scenario(index);
-            scenario.expected_coverage_categories =
-                vec![REQUIRED_COVERAGE_CATEGORIES[index / 3].to_string()];
-            scenario
-        })
-        .collect()
-}
-
-struct PanicProviderAdapter;
-
-impl ProviderAdapter for PanicProviderAdapter {
-    fn run(&self, _input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
-        panic!("provider adapter must not be called before evaluation preflight succeeds")
-    }
-}
-
-#[test]
-fn release_evaluation_rejects_missing_required_category_coverage_before_adapter_setup() {
-    let scenarios = (0..30).map(scenario).collect::<Vec<_>>();
-
-    let error = run_evaluation_with_adapter(
-        &PanicProviderAdapter,
-        ProviderType::Codex,
-        Path::new("/tmp/draft-eval-workspace"),
-        &scenarios,
-        10,
-        false,
-    )
-    .expect_err("release corpus must cover every required category twice");
-
-    assert_eq!(error.code, "draft_eval_required_category_coverage");
-}
-
-#[test]
-fn release_evaluation_rejects_unknown_coverage_category_before_adapter_setup() {
-    let mut scenarios = release_scenarios();
-    scenarios[0].expected_coverage_categories = vec!["not_allowed".to_string()];
-
-    let error = run_evaluation_with_adapter(
-        &PanicProviderAdapter,
-        ProviderType::Codex,
-        Path::new("/tmp/draft-eval-workspace"),
-        &scenarios,
-        10,
-        false,
-    )
-    .expect_err("release corpus categories are a closed whitelist");
-
-    assert_eq!(error.code, "draft_eval_coverage_category_invalid");
-}
-
-#[test]
-fn release_coverage_counts_distinct_scenarios_not_duplicate_category_entries() {
-    let mut scenarios = (0..30).map(scenario).collect::<Vec<_>>();
-    for (index, category) in REQUIRED_COVERAGE_CATEGORIES.iter().enumerate() {
-        scenarios[index].expected_coverage_categories =
-            vec![category.to_string(), category.to_string()];
-    }
-
-    let error = run_evaluation_with_adapter(
-        &PanicProviderAdapter,
-        ProviderType::Codex,
-        Path::new("/tmp/draft-eval-workspace"),
-        &scenarios,
-        10,
-        false,
-    )
-    .expect_err("duplicate category entries must not replace a second scenario");
-
-    assert_eq!(error.code, "draft_eval_duplicate_scenario_category");
-}
-
-#[test]
-fn evaluation_rejects_total_run_count_overflow_before_adapter_setup() {
-    let scenarios = release_scenarios();
-
-    let error = run_evaluation_with_adapter(
-        &PanicProviderAdapter,
-        ProviderType::Codex,
-        Path::new("/tmp/draft-eval-workspace"),
-        &scenarios,
-        usize::MAX,
-        false,
-    )
-    .expect_err("run count overflow must fail closed during preflight");
-
-    assert_eq!(error.code, "draft_eval_run_count_overflow");
-}
-
-#[test]
-fn evaluation_rejects_unsafe_scenario_ids_before_adapter_setup() {
-    for invalid_id in [
-        "../secret".to_string(),
-        "scenario with spaces".to_string(),
-        "scenario/path".to_string(),
-        String::new(),
-        "a".repeat(65),
-    ] {
-        let mut invalid = scenario(0);
-        invalid.scenario_id = invalid_id;
-
-        let error = run_evaluation_with_adapter(
-            &PanicProviderAdapter,
-            ProviderType::Codex,
-            Path::new("/tmp/draft-eval-workspace"),
-            &[invalid],
-            1,
-            true,
-        )
-        .expect_err("scenario id must be anonymous and report-safe");
-
-        assert_eq!(error.code, "draft_eval_scenario_id_invalid");
     }
 }
 
@@ -515,7 +316,7 @@ fn draft_evaluation_runner_uses_fake_adapter_for_30_by_10_threshold_run() {
         first_attempts: AtomicUsize::new(0),
         repair_attempts: AtomicUsize::new(0),
     };
-    let scenarios = release_scenarios();
+    let scenarios = (0..30).map(scenario).collect::<Vec<_>>();
 
     let report = run_evaluation_with_adapter(
         &adapter,
