@@ -63,7 +63,18 @@ pub struct WorkItemOutline {
     pub forbidden_write_scopes: Vec<String>,
     pub depends_on: Vec<String>,
     pub verification_intent: Vec<String>,
+    #[serde(default)]
+    pub trusted_verification_commands: Vec<TrustedDraftVerificationCommand>,
     pub handoff_notes: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TrustedDraftVerificationCommand {
+    pub command: String,
+    pub cwd: String,
+    pub purpose: String,
+    pub source_ref: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

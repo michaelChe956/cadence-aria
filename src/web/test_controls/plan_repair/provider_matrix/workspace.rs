@@ -196,6 +196,7 @@ fn outline_artifact(contract: &CanonicalWorkItemContract) -> ArtifactPayload {
                     forbidden_write_scopes: Vec::new(),
                     depends_on: Vec::new(),
                     verification_intent: vec!["cargo test --locked --lib core".to_string()],
+                    trusted_verification_commands: Vec::new(),
                     handoff_notes: "publish finalization contract".to_string(),
                 }],
                 dependency_graph: Vec::new(),

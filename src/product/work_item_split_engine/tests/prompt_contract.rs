@@ -110,6 +110,38 @@ fn single_item_prompt_projects_planning_discipline_into_canonical_fields() {
 }
 
 #[test]
+fn single_item_prompt_requires_registration_projection_and_self_check() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    for required in [
+        "[trusted_verification_command_catalog]",
+        "[registration]",
+        "[projection]",
+        "[self_check]",
+        "done_when_refs 只能引用 criterion_id",
+        "required=true 的 command 必须逐字来自可信目录",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "draft prompt must contain closed-contract protocol {required}: {}",
+            invocation.prompt
+        );
+    }
+}
+
+#[test]
 fn single_item_prompt_includes_closed_typed_canonical_field_contract() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")

@@ -1,7 +1,7 @@
 use super::*;
 use crate::product::models::{
-    WorkItemDraftCandidate, WorkItemOutline, WorkItemOutlineDependencyEdge,
-    WorkItemOutlineSessionFit,
+    TrustedDraftVerificationCommand, WorkItemDraftCandidate, WorkItemOutline,
+    WorkItemOutlineDependencyEdge, WorkItemOutlineSessionFit,
 };
 
 type VerificationMutation = fn(&mut WorkItemDraftCandidate);
@@ -97,6 +97,35 @@ fn work_item_plan_draft_validator_accepts_clean_canonical_candidate() {
         "expected clean candidate, got {:?}",
         report.findings
     );
+}
+
+#[test]
+fn work_item_plan_draft_validator_rejects_required_command_outside_confirmed_catalog() {
+    let outline = valid_outline();
+    let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    candidate.canonical_contract_candidate.verification_checks[0].command =
+        Some("pnpm --dir web test".to_string());
+    candidate.verification_plan.checks = candidate
+        .canonical_contract_candidate
+        .verification_checks
+        .clone();
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    assert_has_code(&report, "untrusted_required_verification_command");
+}
+
+#[test]
+fn work_item_plan_draft_validator_requires_operational_gate_when_catalog_is_empty() {
+    let mut outline = valid_outline();
+    outline.work_item_outlines[0]
+        .trusted_verification_commands
+        .clear();
+    let candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    assert_has_code(&report, "missing_trusted_verification_command_catalog");
 }
 
 #[test]
@@ -371,6 +400,12 @@ fn valid_outline() -> WorkItemPlanOutline {
                 forbidden_write_scopes: vec!["web/**".to_string()],
                 depends_on: vec![],
                 verification_intent: vec!["cargo test --locked --lib api".to_string()],
+                trusted_verification_commands: vec![TrustedDraftVerificationCommand {
+                    command: "cargo test --locked --lib canonical_work_item_".to_string(),
+                    cwd: ".".to_string(),
+                    purpose: "验证 canonical contract".to_string(),
+                    source_ref: "design_spec_0001#verification".to_string(),
+                }],
                 handoff_notes: "提供 API contract".to_string(),
             },
             WorkItemOutline {
@@ -389,6 +424,12 @@ fn valid_outline() -> WorkItemPlanOutline {
                 forbidden_write_scopes: vec!["src/product/**".to_string()],
                 depends_on: vec!["outline_backend".to_string()],
                 verification_intent: vec!["pnpm -C web test".to_string()],
+                trusted_verification_commands: vec![TrustedDraftVerificationCommand {
+                    command: "cargo test --locked --lib canonical_work_item_".to_string(),
+                    cwd: ".".to_string(),
+                    purpose: "验证 canonical contract".to_string(),
+                    source_ref: "design_spec_0001#verification".to_string(),
+                }],
                 handoff_notes: "消费 API contract".to_string(),
             },
         ],

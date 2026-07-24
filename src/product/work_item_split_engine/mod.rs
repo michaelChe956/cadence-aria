@@ -29,6 +29,8 @@ pub use parse::{
     build_work_item_draft_invocation, parse_work_item_draft_output,
     parse_work_item_plan_outline_output,
 };
+pub use prompts::WORK_ITEM_DRAFT_PROMPT_VERSION;
+pub use schema::WORK_ITEM_DRAFT_OUTPUT_SCHEMA;
 pub use types::{
     OutlineAuthorOutput, RedoSpec, WorkItemDraftInvocation, WorkItemPlanContextBlocker,
     WorkItemSplitInvocation, WorkItemSplitProviderOutput, repatch_dependencies,

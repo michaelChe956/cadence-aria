@@ -321,6 +321,53 @@ fn work_item_plan_author_canonical_schema_enforces_stable_identity_constraints()
 }
 
 #[test]
+fn work_item_plan_author_canonical_schema_requires_non_empty_command_for_required_checks() {
+    let schema: serde_json::Value = serde_json::from_str(
+        crate::product::work_item_split_engine::schema::WORK_ITEM_DRAFT_OUTPUT_SCHEMA,
+    )
+    .expect("draft schema json");
+    let draft = &schema["properties"]["draft"];
+    let contract_check = &draft["properties"]["canonical_contract"]["properties"]
+        ["verification_checks"]["items"];
+    let projection_check =
+        &draft["properties"]["verification_plan"]["properties"]["checks"]["items"];
+
+    for check in [contract_check, projection_check] {
+        assert_eq!(check["allOf"][0]["if"]["properties"]["required"]["const"], true);
+        assert_eq!(
+            check["allOf"][0]["then"]["properties"]["command"]["type"],
+            "string"
+        );
+        assert_eq!(
+            check["allOf"][0]["then"]["properties"]["command"]["minLength"],
+            1
+        );
+    }
+}
+
+#[test]
+fn work_item_plan_outline_schema_requires_closed_trusted_verification_command_catalog() {
+    let schema: serde_json::Value = serde_json::from_str(
+        crate::product::work_item_split_engine::schema::WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
+    )
+    .expect("outline schema json");
+    let outline_item = &schema["properties"]["outline"]["properties"]["work_item_outlines"]
+        ["items"];
+    let catalog = &outline_item["properties"]["trusted_verification_commands"];
+
+    assert_eq!(catalog["type"], "array");
+    assert_required_closed_array_items(catalog);
+    assert!(
+        outline_item["required"]
+            .as_array()
+            .expect("outline item required fields")
+            .iter()
+            .any(|field| field == "trusted_verification_commands"),
+        "trusted command catalog must be an explicit outline field"
+    );
+}
+
+#[test]
 fn work_item_plan_author_canonical_prompt_requests_contract_candidate_only() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
@@ -376,6 +423,7 @@ fn work_item_plan_author_canonical_prompt_is_provider_neutral_about_verification
         .expect("outline");
     for item in &mut outline.work_item_outlines {
         item.verification_intent.clear();
+        item.trusted_verification_commands.clear();
     }
 
     for outline_id in ["outline_backend", "outline_frontend"] {

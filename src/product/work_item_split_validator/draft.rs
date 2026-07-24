@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use crate::product::work_item_contract::{ContractFindingSeverity, validate_canonical_contract};
+use crate::product::work_item_contract::{
+    BlockerRoute, ContractFindingSeverity, validate_canonical_contract,
+};
 
 use super::*;
 
@@ -201,6 +203,63 @@ pub(crate) fn validate_draft_verification_plan(
                 current.logical_work_item_id.clone(),
             ],
         ));
+    }
+}
+
+pub(crate) fn validate_draft_trusted_verification_commands(
+    current: &WorkItemDraftCandidate,
+    current_outline: &WorkItemOutline,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    let trusted_commands = current_outline
+        .trusted_verification_commands
+        .iter()
+        .map(|entry| entry.command.as_str())
+        .collect::<BTreeSet<_>>();
+
+    if trusted_commands.is_empty()
+        && !current
+            .canonical_contract_candidate
+            .blocker_rules
+            .iter()
+            .any(|blocker| blocker.route == BlockerRoute::OperationalGate)
+    {
+        findings.push(error(
+            "missing_trusted_verification_command_catalog",
+            format!(
+                "draft {} has no confirmed trusted verification command catalog; add an operational_gate blocker instead of inventing a required command",
+                current.outline_id
+            ),
+            vec![
+                current.outline_id.clone(),
+                current.logical_work_item_id.clone(),
+            ],
+        ));
+    }
+
+    for check in current
+        .canonical_contract_candidate
+        .verification_checks
+        .iter()
+        .filter(|check| check.required)
+    {
+        let Some(command) = check.command.as_deref() else {
+            continue;
+        };
+        if !trusted_commands.contains(command) {
+            findings.push(error(
+                "untrusted_required_verification_command",
+                format!(
+                    "draft {} required verification check {} command is not in the confirmed trusted catalog",
+                    current.outline_id, check.check_id
+                ),
+                vec![
+                    current.outline_id.clone(),
+                    current.logical_work_item_id.clone(),
+                    check.check_id.clone(),
+                ],
+            ));
+        }
     }
 }
 

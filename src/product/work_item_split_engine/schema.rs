@@ -110,8 +110,7 @@ pub(crate) const WORK_ITEM_SPLIT_OUTPUT_SCHEMA: &str = r#"{
   "required": ["repository_profile", "work_items", "verification_plans"]
 }"#;
 
-#[cfg(test)]
-pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
+pub const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
     "draft": {
@@ -269,7 +268,14 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                   "required",
                   "non_zero_test_execution_required"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "allOf": [{
+                  "if": { "properties": { "required": { "const": true } } },
+                  "then": {
+                    "properties": { "command": { "type": "string", "minLength": 1 } },
+                    "required": ["command"]
+                  }
+                }]
               },
               "uniqueItems": true
             },
@@ -376,7 +382,14 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                   "required",
                   "non_zero_test_execution_required"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "allOf": [{
+                  "if": { "properties": { "required": { "const": true } } },
+                  "then": {
+                    "properties": { "command": { "type": "string", "minLength": 1 } },
+                    "required": ["command"]
+                  }
+                }]
               },
               "uniqueItems": true
             }
@@ -465,6 +478,20 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
                 "type": "array",
                 "items": { "type": "string" }
               },
+              "trusted_verification_commands": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "command": { "type": "string" },
+                    "cwd": { "type": "string" },
+                    "purpose": { "type": "string" },
+                    "source_ref": { "type": "string" }
+                  },
+                  "required": ["command", "cwd", "purpose", "source_ref"],
+                  "additionalProperties": false
+                }
+              },
               "handoff_notes": { "type": "string" }
             },
             "required": [
@@ -483,6 +510,7 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
               "forbidden_write_scopes",
               "depends_on",
               "verification_intent",
+              "trusted_verification_commands",
               "handoff_notes"
             ],
             "additionalProperties": false

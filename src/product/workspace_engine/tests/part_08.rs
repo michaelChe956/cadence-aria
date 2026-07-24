@@ -628,6 +628,7 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
             forbidden_write_scopes: vec![],
             depends_on: vec![],
             verification_intent: vec!["cargo test".to_string()],
+            trusted_verification_commands: Vec::new(),
             handoff_notes: "handoff".to_string(),
         }],
         dependency_graph: vec![],

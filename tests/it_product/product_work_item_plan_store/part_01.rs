@@ -46,6 +46,7 @@ fn work_item_plan_models_roundtrip() {
             forbidden_write_scopes: vec!["web".to_string()],
             depends_on: vec![],
             verification_intent: vec!["cargo test --locked --test it_product".to_string()],
+            trusted_verification_commands: Vec::new(),
             handoff_notes: "生成给后续 item 的摘要".to_string(),
         }],
         dependency_graph: vec![WorkItemOutlineDependencyEdge {
@@ -740,6 +741,7 @@ fn sample_outline(outline_id: &str, kind: WorkItemKind) -> WorkItemOutline {
         forbidden_write_scopes: Vec::new(),
         depends_on: Vec::new(),
         verification_intent: vec!["cargo test --locked".to_string()],
+        trusted_verification_commands: Vec::new(),
         handoff_notes: "handoff".to_string(),
     }
 }
