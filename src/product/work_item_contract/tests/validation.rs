@@ -1,7 +1,7 @@
 use super::canonical_contract_fixture;
 use crate::product::work_item_contract::{
-    BlockerRoute, ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
-    validate_canonical_contract,
+    BlockerRoute, CanonicalWorkItemContract, ContractFindingSeverity, ContractValidationFinding,
+    ContractValidationReport, validate_canonical_contract,
 };
 
 fn finding<'a>(report: &'a ContractValidationReport, code: &str) -> &'a ContractValidationFinding {
@@ -314,6 +314,77 @@ fn canonical_work_item_validation_rejects_required_check_with_blank_command() {
             .as_deref(),
         Some("check_canonical")
     );
+}
+
+#[test]
+fn canonical_work_item_validation_rejects_each_draft_only_reference_mutation_once() {
+    type Mutation = fn(&mut CanonicalWorkItemContract);
+
+    let cases: [(&str, Mutation); 9] = [
+        ("missing_required_verification_command", |contract| {
+            contract.verification_checks[0].command = None;
+        }),
+        ("unknown_done_when_ref", |contract| {
+            contract.tasks[0].done_when_refs = vec!["check_canonical".to_string()];
+        }),
+        ("unknown_reviewer_check_ref", |contract| {
+            contract.handoff_contract.reviewer_check_refs = vec!["check_canonical".to_string()];
+        }),
+        ("stage_blocker_without_target_contract", |contract| {
+            contract.blocker_rules[0].target_contract_refs = vec!["REQ-CANONICAL-001".to_string()];
+        }),
+        ("stage_blocker_without_target_contract", |contract| {
+            contract.blocker_rules[0].target_contract_refs = vec!["NFR-001".to_string()];
+        }),
+        ("stage_blocker_without_target_contract", |contract| {
+            contract.blocker_rules[0].target_contract_refs = vec!["check_canonical".to_string()];
+        }),
+        ("stage_blocker_without_target_contract", |contract| {
+            contract.blocker_rules[0].target_contract_refs =
+                vec!["src/product/work_item_contract".to_string()];
+        }),
+        ("unknown_requirement_ref", |contract| {
+            contract.tasks[0].requirement_refs = vec!["REQ-NOT-IN-DESIGN".to_string()];
+        }),
+        ("stage_blocker_without_target_contract", |contract| {
+            contract.blocker_rules[0].target_contract_refs.clear();
+        }),
+    ];
+
+    for (expected_code, mutate) in cases {
+        let mut contract = canonical_contract_fixture("WI-01");
+        mutate(&mut contract);
+
+        let report = validate_canonical_contract(&contract);
+        assert!(!report.is_valid(), "{expected_code} must reject the Draft");
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.code == expected_code)
+                .count(),
+            1,
+            "expected exactly one {expected_code}, got {:?}",
+            report.findings
+        );
+        for unrelated_identity_code in [
+            "blank_logical_work_item_id",
+            "blank_input_contract_id",
+            "blank_output_contract_id",
+            "duplicate_task_id",
+            "duplicate_acceptance_criterion_id",
+            "duplicate_verification_check_id",
+        ] {
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .all(|finding| finding.code != unrelated_identity_code),
+                "{expected_code} must not create unrelated identity finding {unrelated_identity_code}: {:?}",
+                report.findings
+            );
+        }
+    }
 }
 
 #[test]

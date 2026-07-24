@@ -116,6 +116,56 @@ fn work_item_plan_draft_validator_rejects_required_command_outside_confirmed_cat
 }
 
 #[test]
+fn work_item_plan_draft_validator_trusted_command_matrix_has_one_target_finding() {
+    type Mutation = fn(&mut WorkItemPlanOutline, &mut WorkItemDraftCandidate);
+
+    let cases: [(&str, Mutation); 2] = [
+        ("untrusted_required_verification_command", |_, candidate| {
+            candidate.canonical_contract_candidate.verification_checks[0].command =
+                Some("pnpm --dir web test".to_string());
+        }),
+        (
+            "missing_trusted_verification_command_catalog",
+            |outline, _| {
+                outline.work_item_outlines[0]
+                    .trusted_verification_commands
+                    .clear();
+            },
+        ),
+    ];
+
+    for (expected_code, mutate) in cases {
+        let mut outline = valid_outline();
+        let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+        mutate(&mut outline, &mut candidate);
+
+        let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+        assert!(report.has_errors(), "{expected_code} must reject the Draft");
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.code == expected_code)
+                .count(),
+            1,
+            "expected exactly one {expected_code}, got {:?}",
+            report.findings
+        );
+        for unrelated_identity_code in [
+            "unknown_provider_logical_work_item",
+            "draft_outline_identity_mismatch",
+        ] {
+            assert!(
+                !has_code(&report, unrelated_identity_code),
+                "{expected_code} must not create unrelated identity finding {unrelated_identity_code}: {:?}",
+                report.findings
+            );
+        }
+    }
+}
+
+#[test]
 fn work_item_plan_draft_validator_requires_operational_gate_when_catalog_is_empty() {
     let mut outline = valid_outline();
     outline.work_item_outlines[0]

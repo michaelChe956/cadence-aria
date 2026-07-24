@@ -615,6 +615,36 @@ async fn serial_second_local_validation_failure_stops_at_confirm() {
         .expect("final findings")
         .is_empty());
 
+    ws.send(Message::Text(
+        json!({
+            "type": "work_item_draft_decision",
+            "outline_id": "outline_backend_session",
+            "decision": "pause",
+            "feedback": null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("pause after the exhausted automatic repair");
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(5), |messages| {
+        messages
+            .iter()
+            .any(|message| message["type"] == "stage_change" && message["stage"] == "human_confirm")
+    })
+    .await;
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["type"] == "stage_change" && message["stage"] == "human_confirm"),
+        "pause after a second validation failure must enter human confirmation, got {messages:?}"
+    );
+    assert_eq!(
+        prompts.lock().unwrap().len(),
+        3,
+        "manual pause must not invoke the Provider after the one automatic repair"
+    );
+
     ws.close(None).await.ok();
 }
 
