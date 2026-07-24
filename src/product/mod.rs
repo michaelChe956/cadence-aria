@@ -26,7 +26,6 @@ pub mod runtime_binding_store;
 pub mod test_executor;
 pub mod tester_agent_loop;
 pub mod work_item_contract;
-pub mod work_item_draft_evaluation;
 pub mod work_item_plan_store;
 pub mod work_item_projection;
 pub(crate) mod work_item_revision_history;

@@ -125,7 +125,6 @@ pub(crate) use artifact_constraints::*;
 #[cfg(test)]
 pub(crate) use compile::WorkItemPlanCompileFinalizerCheckpoint;
 pub(crate) use compile_parse::*;
-pub(crate) use draft_batch::combine_draft_validation_feedback;
 pub(crate) use lifecycle_recovery::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;
