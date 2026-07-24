@@ -125,7 +125,7 @@ pub(super) async fn run_workspace_provider_roles(
         .map(|contract| contract.contract_id.clone())
         .collect();
     engine
-        .complete_work_item_draft_author(candidate)
+        .complete_work_item_draft_author(candidate, None)
         .await
         .map_err(fixture_error)?;
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::WorkItemDraftAuthorOutcome;
 
 #[macro_use]
 #[path = "run/followups.rs"]
@@ -577,93 +578,109 @@ pub(crate) async fn spawn_provider_run_from_handler(
             }
             ProviderRunKind::WorkItemPlanDraft { feedback } => {
                 let mut command_rx = command_rx;
-                let Some(node_id) = engine.active_timeline_node_id() else {
-                    engine.mark_active_run_finished(&run_label);
-                    drop(engine);
-                    let err = WsOutMessage::Error {
-                        message: "work item draft run node unavailable".to_string(),
+                let mut feedback = feedback.or_else(|| engine.pending_revision_context.clone());
+                while engine.active_node_type()
+                    == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)
+                {
+                    let Some(node_id) = engine.active_timeline_node_id() else {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error {
+                            message: "work item draft run node unavailable".to_string(),
+                        };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
                     };
-                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                    return;
-                };
-                let provider_input = match engine
-                    .build_current_work_item_draft_streaming_input(feedback.as_deref())
-                {
-                    Ok(input) => input,
-                    Err(message) => {
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
-                    }
-                };
-                let author_provider = engine.session().author_provider.clone();
-                engine
-                    .emit_provider_prompt_event(
-                        &node_id,
-                        provider_input.prompt.clone(),
-                        if feedback.is_some() {
-                            "发送给 WorkItemDraft provider 的增量返修提示词"
-                        } else {
-                            "发送给 WorkItemDraft provider 的完整提示词"
-                        },
-                        Some(author_provider.clone()),
-                    )
-                    .await;
-                let provider_session = provider_for_run
-                    .start(provider_input, run_cancel.clone())
-                    .await;
-                let full_output = match engine
-                    .drive_work_item_plan_provider_session_to_output(
-                        provider_session,
-                        &mut command_rx,
-                        node_id,
-                        author_provider,
-                    )
-                    .await
-                {
-                    Ok(output) => output,
-                    Err(_) => {
-                        engine.mark_active_run_finished(&run_label);
-                        return;
-                    }
-                };
-                let structured_output = match parse_work_item_split_structured_output(&full_output)
-                {
-                    Ok(output) => output,
-                    Err(message) => {
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let err = WsOutMessage::Error {
-                            message: format!("work item draft generate failed: {message}"),
+                    let provider_input = match engine
+                        .build_current_work_item_draft_streaming_input(feedback.as_deref())
+                    {
+                        Ok(input) => input,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
+                    let author_provider = engine.session().author_provider.clone();
+                    engine
+                        .emit_provider_prompt_event(
+                            &node_id,
+                            provider_input.prompt.clone(),
+                            if feedback.is_some() {
+                                "发送给 WorkItemDraft provider 的增量返修提示词"
+                            } else {
+                                "发送给 WorkItemDraft provider 的完整提示词"
+                            },
+                            Some(author_provider.clone()),
+                        )
+                        .await;
+                    let provider_session = provider_for_run
+                        .start(provider_input, run_cancel.clone())
+                        .await;
+                    let full_output = match engine
+                        .drive_work_item_plan_provider_session_to_output(
+                            provider_session,
+                            &mut command_rx,
+                            node_id,
+                            author_provider,
+                        )
+                        .await
+                    {
+                        Ok(output) => output,
+                        Err(_) => {
+                            engine.mark_active_run_finished(&run_label);
+                            return;
+                        }
+                    };
+                    let structured_output =
+                        match parse_work_item_split_structured_output(&full_output) {
+                            Ok(output) => output,
+                            Err(message) => {
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let err = WsOutMessage::Error {
+                                    message: format!("work item draft generate failed: {message}"),
+                                };
+                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                return;
+                            }
                         };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
+                    let candidate = match parse_work_item_draft_output(structured_output) {
+                        Ok(candidate) => candidate,
+                        Err(error) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error {
+                                message: format!("work item draft parse failed: {}", error.message),
+                            };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
+                    match engine
+                        .complete_work_item_draft_author(candidate, feedback.as_deref())
+                        .await
+                    {
+                        Ok(WorkItemDraftAuthorOutcome::RetryOnce {
+                            feedback: repair_feedback,
+                            ..
+                        }) => feedback = Some(repair_feedback),
+                        Ok(WorkItemDraftAuthorOutcome::AwaitConfirmation) => break,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
                     }
-                };
-                let candidate = match parse_work_item_draft_output(structured_output) {
-                    Ok(candidate) => candidate,
-                    Err(error) => {
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let err = WsOutMessage::Error {
-                            message: format!("work item draft parse failed: {}", error.message),
-                        };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
-                    }
-                };
-                if let Err(message) = engine.complete_work_item_draft_author(candidate).await {
-                    engine.mark_active_run_finished(&run_label);
-                    drop(engine);
-                    let err = WsOutMessage::Error { message };
-                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                    return;
                 }
             }
             ProviderRunKind::WorkItemPlanBatch => {
                 let mut command_rx = command_rx;
+                let mut feedback = engine.pending_revision_context.clone();
                 while engine.active_node_type()
                     == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemBatchRun)
                 {
@@ -676,18 +693,31 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
                         return;
                     };
-                    let provider_input =
-                        match engine.build_current_work_item_batch_draft_streaming_input() {
-                            Ok(input) => input,
-                            Err(message) => {
-                                engine.mark_active_run_finished(&run_label);
-                                drop(engine);
-                                let err = WsOutMessage::Error { message };
-                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                                return;
-                            }
-                        };
+                    let provider_input = match engine
+                        .build_current_work_item_batch_draft_streaming_input(feedback.as_deref())
+                    {
+                        Ok(input) => input,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
+                    };
                     let author_provider = engine.session().author_provider.clone();
+                    engine
+                        .emit_provider_prompt_event(
+                            &node_id,
+                            provider_input.prompt.clone(),
+                            if feedback.is_some() {
+                                "发送给 WorkItemBatch provider 的本地校验修复提示词"
+                            } else {
+                                "发送给 WorkItemBatch provider 的完整提示词"
+                            },
+                            Some(author_provider.clone()),
+                        )
+                        .await;
                     let provider_session = provider_for_run
                         .start(provider_input, run_cancel.clone())
                         .await;
@@ -736,15 +766,22 @@ pub(crate) async fn spawn_provider_run_from_handler(
                             return;
                         }
                     };
-                    if let Err(message) = engine
-                        .complete_work_item_batch_draft_author(candidate)
+                    match engine
+                        .complete_work_item_batch_draft_author(candidate, feedback.as_deref())
                         .await
                     {
-                        engine.mark_active_run_finished(&run_label);
-                        drop(engine);
-                        let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                        return;
+                        Ok(WorkItemDraftAuthorOutcome::RetryOnce {
+                            feedback: repair_feedback,
+                            ..
+                        }) => feedback = Some(repair_feedback),
+                        Ok(WorkItemDraftAuthorOutcome::AwaitConfirmation) => feedback = None,
+                        Err(message) => {
+                            engine.mark_active_run_finished(&run_label);
+                            drop(engine);
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            return;
+                        }
                     }
                 }
             }

@@ -326,6 +326,15 @@ pub enum WorkItemDraftDecisionOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkItemDraftAuthorOutcome {
+    AwaitConfirmation,
+    RetryOnce {
+        feedback: String,
+        diagnostics: crate::product::models::WorkItemDraftGenerationDiagnostics,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkItemBatchDecisionOutcome {
     StartBatchRun,
     StartDraftRun,
@@ -363,11 +372,17 @@ pub struct WorkspaceEngine {
     pub(crate) stream_buffers: HashMap<String, PendingStreamBuffer>,
     pub(crate) work_item_plan_author_retry_count: u32,
     pub(crate) work_item_plan_revision_retry_count: u32,
-    pub(crate) work_item_batch_retry_counts: HashMap<String, u32>,
+    pub(crate) work_item_draft_repair_states: HashMap<String, WorkItemDraftRepairState>,
     pub(crate) outline_revision_recovery_error: Option<String>,
     pub(crate) outline_revision_crash_after: Option<OutlineRevisionCrashPoint>,
     pub(crate) plan_repair_crash_after: Option<PlanRepairCrashPoint>,
     pub(crate) plan_repair_snapshot: Option<PlanRepairSessionSnapshotDto>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkItemDraftRepairState {
+    pub(crate) initial_validation_findings: Vec<WorkItemSplitFinding>,
+    pub(crate) _prior_user_feedback: Option<String>,
 }
 
 #[derive(Debug, Clone)]

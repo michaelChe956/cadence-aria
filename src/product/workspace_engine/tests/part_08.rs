@@ -672,6 +672,7 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
             attempt_index: 1,
             outline_version_ref: "outline_artifact_0001".to_string(),
             generation_mode: WorkItemGenerationMode::Serial,
+            generation_diagnostics: None,
             candidate: {
                 let mut contract =
                     crate::product::work_item_contract::canonical_contract_fixture("wi_backend");

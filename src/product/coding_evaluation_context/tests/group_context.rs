@@ -325,6 +325,7 @@ fn draft_record(
         attempt_index: 1,
         outline_version_ref: "outline_version_0001".to_string(),
         generation_mode: WorkItemGenerationMode::Serial,
+        generation_diagnostics: None,
         candidate: {
             let logical_work_item_id = format!("wi_{outline_id}");
             let mut contract = crate::product::work_item_contract::canonical_contract_fixture(

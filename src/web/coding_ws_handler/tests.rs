@@ -191,6 +191,7 @@ fn coding_execution_context_supplements_source_draft_when_final_compile_context_
             attempt_index: 1,
             outline_version_ref: "outline_version_001".to_string(),
             generation_mode: WorkItemGenerationMode::Serial,
+            generation_diagnostics: None,
             candidate: {
                 let mut contract = crate::product::work_item_contract::canonical_contract_fixture(
                     "wi_sparse_backend",

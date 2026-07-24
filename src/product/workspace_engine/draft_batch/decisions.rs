@@ -127,7 +127,13 @@ impl WorkspaceEngine {
                 self.accept_current_work_item_draft(outline_id).await
             }
             WorkItemDraftDecisionDto::Rewrite => {
-                self.pending_revision_context = feedback;
+                let findings = self
+                    .current_work_item_draft_candidate_payload()?
+                    .validator_findings;
+                let combined_feedback =
+                    combine_draft_validation_feedback(feedback.as_deref(), &findings);
+                self.pending_revision_context =
+                    (!combined_feedback.trim().is_empty()).then_some(combined_feedback);
                 self.complete_active_node(Some("用户要求重写当前 Work Item Draft".to_string()))
                     .await;
                 self.start_serial_work_item_draft_run_for(&outline_id)

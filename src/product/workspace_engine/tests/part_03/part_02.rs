@@ -383,7 +383,7 @@ async fn work_item_plan_batch_optional_choice_can_apply_findings() {
         .expect("active batch run node");
     assert_eq!(active_node.node_type, TimelineNodeType::WorkItemBatchRun);
     let input = engine
-        .build_current_work_item_batch_draft_streaming_input()
+        .build_current_work_item_batch_draft_streaming_input(None)
         .expect("batch streaming input");
     assert!(
         input
@@ -604,6 +604,7 @@ fn test_work_item_draft_record(
         attempt_index: 1,
         outline_version_ref: "outline_001".to_string(),
         generation_mode,
+        generation_diagnostics: None,
         candidate: {
             let logical_work_item_id = format!(
                 "wi_{}",

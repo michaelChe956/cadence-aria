@@ -90,6 +90,7 @@ fn sample_draft_record(
         attempt_index: 1,
         outline_version_ref: "artifact://outline/1".to_string(),
         generation_mode: WorkItemGenerationMode::Serial,
+        generation_diagnostics: None,
         candidate,
         status: WorkItemDraftStatus::Accepted,
         active: true,

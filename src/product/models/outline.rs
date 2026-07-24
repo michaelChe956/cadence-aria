@@ -120,6 +120,8 @@ pub struct WorkItemDraftRecord {
     pub attempt_index: u32,
     pub outline_version_ref: String,
     pub generation_mode: WorkItemGenerationMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_diagnostics: Option<WorkItemDraftGenerationDiagnostics>,
     pub candidate: WorkItemDraftCandidate,
     pub status: WorkItemDraftStatus,
     pub active: bool,
@@ -140,6 +142,16 @@ pub struct WorkItemDraftRecord {
     pub superseded_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemDraftGenerationDiagnostics {
+    pub auto_repair_attempted: bool,
+    #[serde(default)]
+    pub initial_validation_findings: Vec<WorkItemSplitFinding>,
+    #[serde(default)]
+    pub final_validation_findings: Vec<WorkItemSplitFinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

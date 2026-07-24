@@ -543,6 +543,10 @@ macro_rules! workspace_ws_provider_run_followups {
             $workspace_runs_for_task
                 .replace_command_tx_if_token(&$session_id_for_task, $run_token, draft_command_tx)
                 .await;
+            let mut feedback = $engine.pending_revision_context.clone();
+            while $engine.active_node_type()
+                == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)
+            {
             let Some(node_id) = $engine.active_timeline_node_id() else {
                 $engine.mark_active_run_finished(&$run_label);
                 drop($engine);
@@ -559,7 +563,9 @@ macro_rules! workspace_ws_provider_run_followups {
                 .await;
                 return;
             };
-            let provider_input = match $engine.build_current_work_item_draft_streaming_input(None) {
+            let provider_input = match $engine
+                .build_current_work_item_draft_streaming_input(feedback.as_deref())
+            {
                 Ok(input) => input,
                 Err(message) => {
                     $engine.mark_active_run_finished(&$run_label);
@@ -580,7 +586,11 @@ macro_rules! workspace_ws_provider_run_followups {
                 .emit_provider_prompt_event(
                     &node_id,
                     provider_input.prompt.clone(),
-                    "发送给 WorkItemDraft provider 的完整提示词",
+                    if feedback.is_some() {
+                        "发送给 WorkItemDraft provider 的增量返修提示词"
+                    } else {
+                        "发送给 WorkItemDraft provider 的完整提示词"
+                    },
                     Some(author_name.clone()),
                 )
                 .await;
@@ -592,7 +602,7 @@ macro_rules! workspace_ws_provider_run_followups {
                     provider_session,
                     &mut draft_command_rx,
                     node_id,
-                    author_name,
+                    author_name.clone(),
                 )
                 .await
             {
@@ -640,19 +650,30 @@ macro_rules! workspace_ws_provider_run_followups {
                     return;
                 }
             };
-            if let Err(message) = $engine.complete_work_item_draft_author(candidate).await {
-                $engine.mark_active_run_finished(&$run_label);
-                drop($engine);
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                clear_active_run_if_token(
-                    &$current_run_for_task,
-                    &$workspace_runs_for_task,
-                    &$session_id_for_task,
-                    $run_token,
-                )
-                .await;
-                return;
+            match $engine
+                .complete_work_item_draft_author(candidate, feedback.as_deref())
+                .await
+            {
+                Ok(WorkItemDraftAuthorOutcome::RetryOnce {
+                    feedback: repair_feedback,
+                    ..
+                }) => feedback = Some(repair_feedback),
+                Ok(WorkItemDraftAuthorOutcome::AwaitConfirmation) => break,
+                Err(message) => {
+                    $engine.mark_active_run_finished(&$run_label);
+                    drop($engine);
+                    let err = WsOutMessage::Error { message };
+                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    clear_active_run_if_token(
+                        &$current_run_for_task,
+                        &$workspace_runs_for_task,
+                        &$session_id_for_task,
+                        $run_token,
+                    )
+                    .await;
+                    return;
+                }
+            }
             }
         }
     }};

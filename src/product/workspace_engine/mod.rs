@@ -139,6 +139,7 @@ pub(crate) use prompts::*;
 #[cfg(test)]
 pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;
+pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, OutlineRevisionCrashPoint,
     OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanRepairCrashPoint,

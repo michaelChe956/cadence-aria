@@ -413,6 +413,17 @@ async fn batch_local_validation_failure_retries_once() {
         }),
         "batch retry should still reach batch confirm, got {messages:?}"
     );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| {
+                message["type"] == "execution_event"
+                    && message["event"]["title"] == "Provider Prompt"
+            })
+            .count(),
+        4,
+        "each batch provider invocation, including the repair, must emit a prompt event"
+    );
 
     let store = WorkItemPlanStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let drafts = store
@@ -425,6 +436,14 @@ async fn batch_local_validation_failure_retries_once() {
             .any(|draft| draft.outline_id == "outline_backend_session"
                 && draft.status == cadence_aria::product::models::WorkItemDraftStatus::Draft)
     );
+    let repaired = drafts
+        .iter()
+        .find(|draft| draft.outline_id == "outline_backend_session")
+        .expect("repaired backend draft");
+    let diagnostics = serde_json::to_value(repaired).expect("serialize repaired draft")
+        ["generation_diagnostics"]
+        .clone();
+    assert_eq!(diagnostics["auto_repair_attempted"], true);
 
     let index = store
         .load_active_index("project_0001", "issue_0001", &plan_id)
@@ -434,11 +453,16 @@ async fn batch_local_validation_failure_retries_once() {
     assert_eq!(batch.item_draft_ids.len(), 3);
     assert!(batch.validation_failed_ids.is_empty());
 
-    let prompt_count = prompts.lock().unwrap().len();
+    let captured_prompts = prompts.lock().unwrap();
+    let prompt_count = captured_prompts.len();
     assert_eq!(
         prompt_count, 5,
         "outline author + failed draft + retry + 2 drafts"
     );
+    assert!(captured_prompts[2].contains("[draft_validation_findings]"));
+    assert!(captured_prompts[2].contains(
+        "write_scope_required: draft outline_backend_session must include at least one canonical exclusive write scope"
+    ));
 
     ws.close(None).await.ok();
 }
@@ -505,6 +529,14 @@ async fn batch_local_validation_second_failure_marks_validation_failed_and_conti
         failed.status,
         cadence_aria::product::models::WorkItemDraftStatus::ValidationFailed
     );
+    let diagnostics = serde_json::to_value(failed).expect("serialize failed draft")
+        ["generation_diagnostics"]
+        .clone();
+    assert_eq!(diagnostics["auto_repair_attempted"], true);
+    assert!(!diagnostics["final_validation_findings"]
+        .as_array()
+        .expect("final findings")
+        .is_empty());
 
     let index = store
         .load_active_index("project_0001", "issue_0001", &plan_id)
@@ -515,11 +547,16 @@ async fn batch_local_validation_second_failure_marks_validation_failed_and_conti
     assert_eq!(batch.item_draft_ids.len(), 2);
     assert_eq!(batch.validation_failed_ids, vec![failed.draft_id.clone()]);
 
-    let prompt_count = prompts.lock().unwrap().len();
+    let captured_prompts = prompts.lock().unwrap();
+    let prompt_count = captured_prompts.len();
     assert_eq!(
         prompt_count, 5,
         "outline author + failed draft + retry + 2 drafts"
     );
+    assert!(captured_prompts[2].contains("[draft_validation_findings]"));
+    assert!(captured_prompts[2].contains(
+        "write_scope_required: draft outline_backend_session must include at least one canonical exclusive write scope"
+    ));
 
     ws.close(None).await.ok();
 }
