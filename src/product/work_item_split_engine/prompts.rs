@@ -29,7 +29,12 @@ const OUTLINE_WRITE_SCOPE_RULES: &str = "\
          forbidden_write_scopes 应显式写出依赖方或被依赖方已拥有的实现目录，帮助后续 draft 避免越界。\n\n";
 
 pub const WORK_ITEM_DRAFT_PROMPT_VERSION: &str = "work_item_draft_v2";
-pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 11_000;
+/// Fail-closed 硬兜底：只拦截病态序列化回归（如整条持久化记录被注入 prompt）。
+/// 质量预算不由本常量承担，见 WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES 的预算测试。
+/// prompt 经 stdin JSON 发送给 Provider，无 OS ARG_MAX 约束；真实物理边界是模型上下文窗口。
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 65_536;
+/// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 12_000;
 
 fn work_item_plan_runtime_contract(role: &str) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
@@ -571,8 +576,21 @@ pub(crate) fn build_work_item_draft_prompt(
             &current_outline.trusted_verification_commands,
         )
     };
-    let direct_dependency_json =
-        serde_json::to_string_pretty(direct_dependencies).unwrap_or_else(|_| "[]".to_string());
+    let direct_dependency_json = serde_json::to_string_pretty(
+        &direct_dependencies
+            .iter()
+            .map(|draft| {
+                serde_json::json!({
+                    "outline_id": &draft.outline_id,
+                    "draft_id": &draft.draft_id,
+                    "logical_work_item_id": &draft.candidate.logical_work_item_id,
+                    "output_contracts": &draft.candidate.canonical_contract_candidate.output_contracts,
+                    "handoff_contract": &draft.candidate.canonical_contract_candidate.handoff_contract,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string());
     let previous_summaries = other_previous
         .iter()
         .map(|draft| {
@@ -611,7 +629,7 @@ pub(crate) fn build_work_item_draft_prompt(
          [confirmed_plan_trace]\n{confirmed_plan_trace}\n\
          [current_work_item_outline]\n{current_outline_json}\n\
          [trusted_verification_command_catalog]\n{trusted_command_catalog}\n\
-         [直接依赖 draft 完整内容]\n{direct_dependency_json}\n\
+         [直接依赖的可消费交接合同]\n{direct_dependency_json}\n\
          [其他已 accepted draft 摘要]\n{previous_summaries}\n\
          {feedback_section}\
          [canonical_projection]\n\

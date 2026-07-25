@@ -5,6 +5,7 @@ use crate::product::models::{
     WorkItemDraftRecord, WorkItemDraftStatus, WorkItemGenerationMode,
 };
 use crate::product::work_item_split_engine::prompts::{
+    WORK_ITEM_DRAFT_PROMPT_MAX_BYTES, WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES,
     build_outline_prompt, build_outline_revision_prompt, build_revision_prompt, build_split_prompt,
 };
 use crate::product::work_item_split_engine::schema::WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA;
@@ -602,7 +603,7 @@ fn outline_parser_rejects_verification_plan_or_work_item_id() {
 }
 
 #[test]
-fn single_item_prompt_rejects_oversized_accepted_previous_context_before_provider_invocation() {
+fn single_item_prompt_projects_direct_dependency_within_provider_budget() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
         .outline
@@ -614,25 +615,157 @@ fn single_item_prompt_rejects_oversized_accepted_previous_context_before_provide
         .canonical_contract_candidate
         .output_contracts[0]
         .contract_id = "SessionStatusDto".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .handoff_contract
+        .required_fields = vec!["handoff-required-field-sentinel".to_string()];
+    accepted_candidate
+        .canonical_contract_candidate
+        .tasks[0]
+        .statement = "task-must-not-leak-into-direct-dependency-sentinel".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .acceptance_criteria[0]
+        .statement = "acceptance-must-not-leak-into-direct-dependency-sentinel".to_string();
     let accepted_backend = sample_draft_record(
         "draft_backend",
         "outline_backend",
         accepted_candidate,
     );
 
-    let error = build_work_item_draft_invocation(
+    let invocation = build_work_item_draft_invocation(
         &outline,
         "outline_frontend",
         WorkItemGenerationMode::Serial,
         &[accepted_backend],
         Some("补充错误态"),
     )
-    .expect_err("oversized accepted dependency context must fail before provider invocation");
+    .expect("direct dependency context must stay within the provider budget");
 
+    assert!(
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
+        "direct dependency prompt is {} bytes",
+        invocation.prompt.len()
+    );
+    assert!(invocation.prompt.contains("SessionStatusDto"));
+    let direct_dependency_start = invocation
+        .prompt
+        .find("[直接依赖的可消费交接合同]\n")
+        .expect("direct dependency section");
+    let direct_dependency_end = invocation
+        .prompt
+        .find("[其他已 accepted draft 摘要]")
+        .expect("next prompt section");
+    let direct_dependency_section =
+        &invocation.prompt[direct_dependency_start..direct_dependency_end];
+    assert!(direct_dependency_section.contains("handoff-required-field-sentinel"));
+    assert!(!direct_dependency_section.contains("task-must-not-leak-into-direct-dependency-sentinel"));
+    assert!(!direct_dependency_section
+        .contains("acceptance-must-not-leak-into-direct-dependency-sentinel"));
+    assert!(!invocation.prompt.contains("\"project_id\""));
+    assert!(!invocation.prompt.contains("\"accepted_at\""));
+}
+
+#[test]
+fn serial_prompt_above_legacy_11000_limit_remains_invocable_below_hard_backstop() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let mut accepted_candidate =
+        parse_work_item_draft_output(canonical_author_output("outline_backend", "wi_backend"))
+            .expect("canonical backend draft");
+    accepted_candidate
+        .canonical_contract_candidate
+        .output_contracts[0]
+        .contract_id = "SessionStatusDto".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .handoff_contract
+        .required_fields = vec!["handoff-required-field-sentinel".to_string()];
+    accepted_candidate
+        .canonical_contract_candidate
+        .tasks[0]
+        .statement = "task-must-not-leak-into-direct-dependency-sentinel".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .acceptance_criteria[0]
+        .statement = "acceptance-must-not-leak-into-direct-dependency-sentinel".to_string();
+    let accepted_backend = sample_draft_record(
+        "draft_backend",
+        "outline_backend",
+        accepted_candidate,
+    );
+
+    // 与 single_item_prompt_projects_direct_dependency_within_provider_budget 相同的 fixture；
+    // 追加 6,000 字节 feedback，使总 prompt 超过旧 11,000 上限但远低于 64KB 硬兜底。
+    let feedback = "f".repeat(6_000);
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_frontend",
+        WorkItemGenerationMode::Serial,
+        &[accepted_backend],
+        Some(&feedback),
+    )
+    .expect("prompt above the legacy 11000-byte limit must remain invocable below the 64KB hard backstop");
+    assert!(
+        invocation.prompt.len() > 11_000,
+        "fixture must actually exceed the legacy limit: {} bytes",
+        invocation.prompt.len()
+    );
+    assert!(
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
+        "fixture must stay below the hard backstop: {} bytes",
+        invocation.prompt.len()
+    );
+}
+
+#[test]
+fn serial_prompt_above_hard_backstop_is_rejected() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let mut accepted_candidate =
+        parse_work_item_draft_output(canonical_author_output("outline_backend", "wi_backend"))
+            .expect("canonical backend draft");
+    accepted_candidate
+        .canonical_contract_candidate
+        .output_contracts[0]
+        .contract_id = "SessionStatusDto".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .handoff_contract
+        .required_fields = vec!["handoff-required-field-sentinel".to_string()];
+    accepted_candidate
+        .canonical_contract_candidate
+        .tasks[0]
+        .statement = "task-must-not-leak-into-direct-dependency-sentinel".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .acceptance_criteria[0]
+        .statement = "acceptance-must-not-leak-into-direct-dependency-sentinel".to_string();
+    let accepted_backend = sample_draft_record(
+        "draft_backend",
+        "outline_backend",
+        accepted_candidate,
+    );
+
+    let feedback = "f".repeat(70_000);
+    let error = build_work_item_draft_invocation(
+        &outline,
+        "outline_frontend",
+        WorkItemGenerationMode::Serial,
+        &[accepted_backend],
+        Some(&feedback),
+    )
+    .expect_err("prompt above the 64KB hard backstop must fail closed");
     assert_eq!(error.code, "work_item_draft_prompt_too_large");
-    assert_eq!(
-        error.message,
-        "work item draft prompt exceeds the 11000-byte provider-context limit"
+    assert_eq!(error.details["max_prompt_bytes"], 65_536);
+    assert!(
+        error.details["prompt_bytes"].as_u64().expect("prompt_bytes") >= 65_536,
+        "details must report the actual prompt size: {}",
+        error.details
     );
 }
 

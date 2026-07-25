@@ -200,7 +200,10 @@ pub fn build_work_item_draft_invocation(
     if prompt.len() >= WORK_ITEM_DRAFT_PROMPT_MAX_BYTES {
         return Err(ApiError::validation_with_details(
             "work_item_draft_prompt_too_large",
-            "work item draft prompt exceeds the 11000-byte provider-context limit",
+            format!(
+                "work item draft prompt exceeds the {}-byte provider-context hard backstop",
+                WORK_ITEM_DRAFT_PROMPT_MAX_BYTES
+            ),
             json!({
                 "prompt_bytes": prompt.len(),
                 "max_prompt_bytes": WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,

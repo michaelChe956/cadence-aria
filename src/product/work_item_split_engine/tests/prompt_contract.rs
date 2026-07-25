@@ -72,8 +72,8 @@ fn single_item_prompt_uses_compact_contract_without_duplicate_schema_or_outline(
         invocation.prompt
     );
     assert!(
-        invocation.prompt.len() < 11_000,
-        "draft prompt must remain below the provider-context guardrail: {} bytes",
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES,
+        "draft prompt must remain below the quality budget: {} bytes",
         invocation.prompt.len()
     );
 }
@@ -111,8 +111,8 @@ fn single_item_prompt_accepts_maximum_legal_trusted_command_catalog_within_budge
     .expect("maximum legal catalog must remain invocable");
 
     assert!(
-        invocation.prompt.len() < 11_000,
-        "maximum legal catalog must remain under the provider guardrail: {} bytes",
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES,
+        "maximum legal catalog must remain under the quality budget: {} bytes",
         invocation.prompt.len()
     );
 }
@@ -144,8 +144,8 @@ fn single_item_prompt_rejects_short_catalog_that_exceeds_semantic_limit_before_p
         "nonce",
     );
     assert!(
-        prompt.len() < 11_000,
-        "semantic catalog violation must be checked before the full prompt budget: {} bytes",
+        prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
+        "semantic catalog violation must be checked before the full prompt hard backstop: {} bytes",
         prompt.len()
     );
 
