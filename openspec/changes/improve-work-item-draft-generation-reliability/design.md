@@ -72,7 +72,7 @@ Work Item Draft 确认区 SHALL 在 `can_accept=false` 时显示共享的校验�
 ## Risks / Trade-offs
 
 - [真实评估成本和 Provider 波动] → 真实评估显式触发，按 Provider 单独统计，记录 Prompt 版本；以两轮独立结果而非单次结果决定发布。
-- [Prompt 增加上下文导致输出质量下降] → 使用紧凑注册表和错误码映射；为 Prompt 长度保留现有上下文预算测试。
+- [Prompt 增加上下文导致输出质量下降] → 使用紧凑注册表和错误码映射；为 Prompt 长度保留上下文预算测试。Draft Prompt 上限采用双层模型：64KB（65,536 B）fail-closed 硬兜底只拦截病态序列化回归（prompt 经 stdin JSON 发送，无 ARG_MAX 约束；物理边界为模型上下文窗口）；12,000 B 质量预算由真实规模中文 fixture 的确定性预算测试承担。论证见 `cadence/designs/2026-07-25_技术方案_WorkItemDraftPrompt固定开销瘦身与上限重论证_v1.0.md`。
 - [自动修复掩盖系统问题] → 限制为一次，持久化诊断，并将失败码纳入基准语料和评估报表。
 - [命令目录缺失阻塞 Draft] → 明确呈现 context/blocker，而非生成无法确认的虚假成功 Draft。
 - [错误列表过长影响确认区可读性] → 默认显示前三项并提供完整展开；Artifact 仍提供原始细节。
