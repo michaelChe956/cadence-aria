@@ -564,7 +564,9 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     {
                         Ok(input) => input,
                         Err(message) => {
-                            engine.mark_active_run_finished(&run_label);
+                            engine
+                                .finish_active_run_with_failed_node(message.clone())
+                                .await;
                             drop(engine);
                             let err = WsOutMessage::Error { message };
                             let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
