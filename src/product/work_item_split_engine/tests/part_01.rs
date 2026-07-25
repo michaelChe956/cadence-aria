@@ -643,8 +643,8 @@ fn single_item_prompt_projects_direct_dependency_within_provider_budget() {
     .expect("direct dependency context must stay within the provider budget");
 
     assert!(
-        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
-        "direct dependency prompt is {} bytes",
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES,
+        "direct dependency prompt must stay within the quality budget: {} bytes",
         invocation.prompt.len()
     );
     assert!(invocation.prompt.contains("SessionStatusDto"));

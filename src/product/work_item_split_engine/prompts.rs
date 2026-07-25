@@ -34,6 +34,7 @@ pub const WORK_ITEM_DRAFT_PROMPT_VERSION: &str = "work_item_draft_v2";
 /// prompt 经 stdin JSON 发送给 Provider，无 OS ARG_MAX 约束；真实物理边界是模型上下文窗口。
 pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 65_536;
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
+#[cfg(test)]
 pub(crate) const WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES: usize = 12_000;
 
 fn work_item_plan_runtime_contract(role: &str) -> String {
