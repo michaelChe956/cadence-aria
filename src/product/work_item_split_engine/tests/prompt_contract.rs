@@ -19,8 +19,9 @@ fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
         "writing-plans 的拆分、TDD、验证与交接质量纪律",
         "不得创建 cadence/plans/ 或任何 workspace 文件",
         "不得提前执行 writing-plans 的落盘步骤",
-        "仅在最后一个 nonce sentinel block 返回 Canonical Contract Candidate JSON",
-        "human-confirmation gate 与 daemon 后续负责 canonical writeback 和正式 Plan 落盘",
+        "仅在最后一个 nonce sentinel block 返回唯一 Canonical Contract Candidate JSON",
+        // 落盘职责条款并入 workspace 文件禁令（语义保留）。
+        "canonical writeback 与正式 Plan 落盘由 human-confirmation gate 与 daemon 负责",
     ] {
         assert!(
             invocation.prompt.contains(required),
@@ -60,15 +61,15 @@ fn single_item_prompt_uses_compact_contract_without_duplicate_schema_or_outline(
     assert!(
         invocation
             .prompt
-            .contains("canonical_contract 必须且只能包含 schema_version"),
-        "draft prompt must retain the canonical contract field whitelist: {}",
+            .contains("必须且只能含所列字段"),
+        "draft prompt must retain the canonical contract field whitelist in the shorthand field contract: {}",
         invocation.prompt
     );
     assert!(
         invocation
             .prompt
-            .contains("verification_plan 只能包含 checks"),
-        "draft prompt must retain the verification-plan field contract: {}",
+            .contains("verification_plan: obj{checks:"),
+        "draft prompt must retain the verification-plan field contract in the shorthand field contract: {}",
         invocation.prompt
     );
     assert!(
@@ -330,10 +331,10 @@ fn single_item_prompt_includes_closed_typed_canonical_field_contract() {
     for required in [
         "[canonical_field_contract]",
         "schema_version: integer literal 1",
-        "goal: object {summary: string}",
-        "tasks: array of {task_id: non-empty string, statement: string, requirement_refs: string array, done_when_refs: string array}",
-        "blocker_rules: array of {reason_code: non-empty string, route:",
-        "design_traceability: array of {source_type: string, source_id: string, requirement_id: string}",
+        "goal: obj{summary: string}",
+        "tasks: [obj{task_id: str+, statement: string, requirement_refs: [string], done_when_refs: [string]}]",
+        "blocker_rules: [obj{reason_code: str+, route:",
+        "design_traceability: [obj{source_type: string, source_id: string, requirement_id: string}]",
     ] {
         assert!(
             invocation.prompt.contains(required),

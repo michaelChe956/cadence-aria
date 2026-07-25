@@ -81,7 +81,7 @@ fn work_item_draft_runtime_contract() -> String {
          [openspec_contract]\n\
          Role: Work Item Draft author。必须基于已确认 Story Spec、Design Spec 与 source_story_spec_ids/source_design_spec_ids 追踪关系；冲突、缺失验收依据或边界不明时输出 blocker 或 reviewer 可处理风险，不得猜测。\n\
          [superpowers_contract]\n\
-         遵守 using-superpowers、writing-plans、TDD 与验证纪律；只生成候选，不执行代码修改。候选必须给出可执行目标、范围、非目标、结构化验证方案、依赖、交接和风险；TDD 与验证闭环必须在当前项的 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行，不得把后续 Work Item 才会提供的注册、接线、生成或部署作为前提。command 仅可来自目标仓库可信证据，不得根据 WorkItemKind 推导；证据不足用 manual/repair/blocker。每项必须可由单个 Claude Code/Codex 会话完成，estimated_context_tokens 不得超过 50k。\n\
+         遵守 using-superpowers、writing-plans、TDD 与验证纪律；只生成候选，不执行代码修改。TDD 与验证闭环必须在当前项 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行，不得把后续 Work Item 才会提供的注册、接线、生成或部署作为前提。command 仅可来自目标仓库可信证据，不得根据 WorkItemKind 推导；证据不足用 manual/repair/blocker。每项必须可由单个 Claude Code/Codex 会话完成，estimated_context_tokens 不得超过 50k。\n\
          [allowed_outputs]\n\
          {allowed_outputs}\n\
          [forbidden_outputs]\n\
@@ -634,40 +634,32 @@ pub(crate) fn build_work_item_draft_prompt(
          [其他已 accepted draft 摘要]\n{previous_summaries}\n\
          {feedback_section}\
          [canonical_projection]\n\
-         - Draft 专有 Canonical projection 优先于 [allowed_outputs] 的通用表述；后者只约束规划语义，不许可新增字段或独立产物。\n\
-         - 目标、范围和非目标映射到 identity、goal、write_policy、non_goals；TDD 与验证映射到 tasks、acceptance_criteria、verification_checks。\n\
-         - 依赖、交接和风险映射到 input_contracts、output_contracts、handoff_contract、blocker_rules。\n\
-         - 不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段。\n\n\
+         - Draft 专有 Canonical projection 优先于 [allowed_outputs] 的通用表述；目标、范围和非目标映射到 identity、goal、write_policy、non_goals；TDD 与验证映射到 tasks、acceptance_criteria、verification_checks。\n\
+         - 依赖、交接和风险映射到 input_contracts、output_contracts、handoff_contract、blocker_rules；不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段。\n\n\
          [registration]\n\
-         先在内部登记 acceptance criterion ID、traceability requirement ID、input/output contract ID、以及上列可信命令；不要输出该草稿登记表。\n\n\
+         内部登记 acceptance criterion ID、traceability requirement ID、input/output contract ID 与上列可信命令；不输出该登记表。\n\n\
          [projection]\n\
-         done_when_refs 只能引用 criterion_id；requirement_refs 只能引用登记的 requirement_id；reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致，不得引用 verification check、task 或其他 ID；blocker target 只能引用 input/output contract_id；required=true 的 command 必须逐字来自可信目录。\n\n\
+         done_when_refs 只能引用 criterion_id；requirement_refs 只能引用登记的 requirement_id；reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致；blocker target 只能引用 input/output contract_id；required=true 的 command 必须逐字来自可信目录。\n\n\
          [self_check]\n\
-         输出前逐项验证上述集合关系、verification_plan 与 canonical checks 的逐字段同序相等，以及 required command 的非空和目录成员关系。可信目录为空时，所有 verification_checks 必须 required=false 且 command=null，并且必须输出有说明的 operational_gate blocker；不得输出 required=true 或伪造 required command。\n\n\
+         输出前逐项验证上述集合关系、verification_plan 与 canonical checks 的逐字段同序相等。可信目录为空时，所有 verification_checks 必须 required=false 且 command=null，并且必须输出有说明的 operational_gate blocker；不得输出 required=true 或伪造 required command。\n\n\
          [canonical_field_contract]\n\
-         这是封闭的类型契约，不是示例 JSON：每个 object 必须且只能包含下列字段；所有列出的字段都必须出现，数组可为空但数组内对象不得缺字段或加字段。\n\
-         - draft: object {{outline_id: string, logical_work_item_id: non-empty string, canonical_contract: object, verification_plan: object}}。\n\
-         - canonical_contract.schema_version: integer literal 1；identity: object {{logical_work_item_id: non-empty string, title: string, kind: backend|frontend|integration|e2e|docs|infra|other}}；goal: object {{summary: string}}；non_goals: string array。\n\
-         - input_contracts: array of {{contract_id: non-empty string, provider_logical_work_item_id: non-empty string, required_capabilities: string array, compatibility_policy: require_all|require_any}}；output_contracts: array of {{contract_id: non-empty string, capabilities: string array}}。\n\
-         - tasks: array of {{task_id: non-empty string, statement: string, requirement_refs: string array, done_when_refs: string array}}；write_policy: object {{exclusive_scopes: string array, forbidden_scopes: string array}}。\n\
-         - acceptance_criteria: array of {{criterion_id: non-empty string, statement: string, required_evidence: array of source_diff|non_zero_test_execution|manual_check|handoff_field}}。\n\
-         - verification_checks: array of {{check_id: non-empty string, command: string|null, manual_instruction: string|null, required: boolean, non_zero_test_execution_required: boolean}}；verification_plan: object {{checks: the exact same verification_checks array}}。\n\
-         - handoff_contract: object {{required_fields: unique non-empty string array, provided_contract_refs: unique non-empty string array, reviewer_check_refs: unique non-empty string array}}。\n\
-         - blocker_rules: array of {{reason_code: non-empty string, route: coder_rework|verification_retry|plan_repair_current|plan_repair_upstream|subgraph_replan|story_amendment|design_amendment|operational_gate, target_contract_refs: string array}}；design_traceability: array of {{source_type: string, source_id: string, requirement_id: string}}。\n\n\
+         封闭类型契约（非示例）：记号 str+=非空 string，[T]=T 数组，obj=object；每个 obj 必须且只能含所列字段，所列字段全部必填，数组可空但元素不得缺/加字段。\n\
+         - draft: obj{{outline_id: str+, logical_work_item_id: str+, canonical_contract: obj, verification_plan: obj}}。\n\
+         - canonical_contract.schema_version: integer literal 1；identity: obj{{logical_work_item_id: str+, title: string, kind: backend|frontend|integration|e2e|docs|infra|other}}；goal: obj{{summary: string}}；non_goals: [string]。\n\
+         - input_contracts: [obj{{contract_id: str+, provider_logical_work_item_id: str+, required_capabilities: [string], compatibility_policy: require_all|require_any}}]；output_contracts: [obj{{contract_id: str+, capabilities: [string]}}]。\n\
+         - tasks: [obj{{task_id: str+, statement: string, requirement_refs: [string], done_when_refs: [string]}}]；write_policy: obj{{exclusive_scopes: [string], forbidden_scopes: [string]}}。\n\
+         - acceptance_criteria: [obj{{criterion_id: str+, statement: string, required_evidence: [source_diff|non_zero_test_execution|manual_check|handoff_field]}}]。\n\
+         - verification_checks: [obj{{check_id: str+, command: string|null, manual_instruction: string|null, required: boolean, non_zero_test_execution_required: boolean}}]；verification_plan: obj{{checks: 与 verification_checks 完全相同的数组}}。\n\
+         - handoff_contract: obj{{required_fields: 唯一 str+ 数组, provided_contract_refs: 唯一 str+ 数组, reviewer_check_refs: 唯一 str+ 数组}}。\n\
+         - blocker_rules: [obj{{reason_code: str+, route: coder_rework|verification_retry|plan_repair_current|plan_repair_upstream|subgraph_replan|story_amendment|design_amendment|operational_gate, target_contract_refs: [string]}}]；design_traceability: [obj{{source_type: string, source_id: string, requirement_id: string}}]。\n\n\
          [hard_rules]\n\
          - 当前仅处于 human-confirmation 之前的候选阶段：必须读取并遵守 writing-plans 的拆分、TDD、验证与交接质量纪律；只将这些纪律体现在本候选中。\n\
-         - 不得创建 cadence/plans/ 或任何 workspace 文件；不得提前执行 writing-plans 的落盘步骤。\n\
-         - human-confirmation gate 与 daemon 后续负责 canonical writeback 和正式 Plan 落盘；不得声称已完成这些后续步骤。\n\
-         - 仅在最后一个 nonce sentinel block 返回 Canonical Contract Candidate JSON；不要输出 Markdown code fence。\n\
-         - 只能输出一个 Canonical Contract Candidate，且字段对应当前 outline_id `{outline_id}` 与 logical_work_item_id `{logical_work_item_id}`。\n\
-         - 不得修改 Outline，不得新增、删除或重命名 outline。\n\
-         - 不得输出 work_item_id、draft_id、status 等后端状态字段；Provider JSON 使用 canonical_contract，且 logical_work_item_id 必须与其 identity 一致。\n\
+         - 不得创建 cadence/plans/ 或任何 workspace 文件；不得提前执行 writing-plans 的落盘步骤；canonical writeback 与正式 Plan 落盘由 human-confirmation gate 与 daemon 负责，不得声称已完成。\n\
+         - 仅在最后一个 nonce sentinel block 返回唯一 Canonical Contract Candidate JSON（不用 Markdown code fence），其 outline_id/logical_work_item_id 对应当前 `{outline_id}`/`{logical_work_item_id}`；draft 只含 [canonical_field_contract] 所列字段。\n\
+         - 不得修改、新增、删除或重命名 Outline；不得输出 work_item_id、draft_id、status 等后端状态字段；logical_work_item_id 必须与其 identity 一致。\n\
          - handoff_contract 是 Canonical singleton；required_fields、provided_contract_refs、reviewer_check_refs 均非空且不重复。\n\
-         - verification_plan.checks 必须逐项、逐字段、按原顺序复制 canonical_contract.verification_checks；不得额外、缺失或重排。\n\
          - verification command 必须来自目标仓库的可信证据，不得根据 WorkItemKind 推导；证据不足进入 manual/repair/blocker，绝不使用 Aria 当前仓库命令兜底。\n\
-         - 不得输出面向 Coder 的长篇 implementation_context；不要提前生成或渲染 Coder Projection 或 Reviewer Projection。\n\
-         - canonical_contract 必须且只能包含 schema_version 及 [canonical_field_contract] 所列字段。\n\
-         - verification_plan 只能包含 checks，其字段遵循 [canonical_field_contract]。\n\n\
+         - 不得输出面向 Coder 的长篇 implementation_context；不要提前生成或渲染 Coder Projection 或 Reviewer Projection。\n\n\
          [output]\n\
          使用 nonce `{nonce}` 包裹唯一 JSON：开始标签 `<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`，结束标签 `</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`。\n\
          JSON 顶层必须是 `draft`；draft 只能包含 outline_id、logical_work_item_id、canonical_contract、verification_plan。",

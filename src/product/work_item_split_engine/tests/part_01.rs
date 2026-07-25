@@ -475,8 +475,10 @@ fn work_item_plan_prompts_require_current_scope_verification_closure() {
     .prompt;
 
     for prompt in [initial_outline_prompt, revision_outline_prompt, draft_prompt] {
+        // C 去重后 draft 段写作“当前项 exclusive_write_scopes”（无“的”）；
+        // 三种 prompt 共有的保留语义子串如下。
         assert!(
-            prompt.contains("当前项的 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行"),
+            prompt.contains("exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行"),
             "Work Item Plan author prompt must require a verification closure executable at the current dependency point: {prompt}"
         );
         assert!(
@@ -666,6 +668,159 @@ fn single_item_prompt_projects_direct_dependency_within_provider_budget() {
     assert!(!invocation.prompt.contains("\"accepted_at\""));
 }
 
+/// 生成恰好 `chars` 个汉字的中文长文本（UTF-8 每字 3 字节），用于真实规模 fixture。
+fn realistic_zh(unit: &str, chars: usize) -> String {
+    unit.chars().cycle().take(chars).collect()
+}
+
+/// 对齐 session_0003 实测锚点（outline JSON ~1.7KB、依赖投影 ~1.1KB）的中文 outline fixture：
+/// goal ~50 汉字、scope 3×~40、non_goals 3×~30、verification_intent 3×~45、handoff_notes ~40。
+fn realistic_chinese_outline_author_output() -> serde_json::Value {
+    serde_json::json!({
+        "outline": {
+            "id": "outline_artifact_realistic",
+            "project_id": "project_0001",
+            "issue_id": "issue_0001",
+            "source_story_spec_ids": ["story_spec_0001"],
+            "source_design_spec_ids": ["design_spec_0001"],
+            "strategy_summary": "先落地领域模块，再以真实规模中文单元测试收口",
+            "work_item_outlines": [
+                {
+                    "outline_id": "outline_backend",
+                    "logical_work_item_id": "wi_backend",
+                    "title": "领域模块",
+                    "kind": "backend",
+                    "goal": "实现领域模块 API",
+                    "scope": ["src/product"],
+                    "non_goals": [],
+                    "estimated_context_tokens": 12000,
+                    "session_fit": "fits_single_agent_session",
+                    "source_story_spec_ids": ["story_spec_0001"],
+                    "source_design_spec_ids": ["design_spec_0001"],
+                    "exclusive_write_scopes": ["src/product/**"],
+                    "forbidden_write_scopes": ["web/**"],
+                    "depends_on": [],
+                    "verification_intent": ["cargo test --locked --lib api"],
+                    "trusted_verification_commands": [{
+                        "command": "cargo test --locked --lib canonical_work_item_",
+                        "cwd": ".",
+                        "purpose": "验证 canonical contract",
+                        "source_ref": "design_spec_0001#verification"
+                    }],
+                    "handoff_notes": "提供 API contract"
+                },
+                {
+                    "outline_id": "outline_unit_tests",
+                    "logical_work_item_id": "wi_unit_tests",
+                    "title": "真实规模中文单元测试",
+                    "kind": "integration",
+                    "goal": realistic_zh("为工作项拆分引擎的草稿提示词瘦身提供真实规模中文目标描述覆盖，", 50),
+                    "scope": [
+                        realistic_zh("覆盖提示词模板固定开销缩减后的端到端行为与既有封闭字段契约回归验证场景，", 40),
+                        realistic_zh("覆盖直接依赖交接合同投影在真实中文规模下的字节预算与语义保留场景，", 40),
+                        realistic_zh("覆盖可信验证命令目录为空与满载两种边界下的阻断路由与降级行为场景，", 40)
+                    ],
+                    "non_goals": [
+                        realistic_zh("不修改路由参考全文与后端持久化状态字段的既有语义，", 30),
+                        realistic_zh("不调整质量预算常量与硬兜底上限的既有取值，", 30),
+                        realistic_zh("不引入面向编码者投影或评审者投影的提前渲染逻辑，", 30)
+                    ],
+                    "estimated_context_tokens": 14000,
+                    "session_fit": "fits_single_agent_session",
+                    "source_story_spec_ids": ["story_spec_0001"],
+                    "source_design_spec_ids": ["design_spec_0001"],
+                    "exclusive_write_scopes": ["src/product/work_item_split_engine/tests/**"],
+                    "forbidden_write_scopes": ["src/product/work_item_split_engine/prompts.rs"],
+                    "depends_on": ["outline_backend"],
+                    "verification_intent": [
+                        realistic_zh("运行定向单元测试确认缩减后提示词仍包含封闭字段契约与自检段落全文，", 45),
+                        realistic_zh("运行契约回归测试确认字段白名单与唯一输出哨兵段落语义不发生回退，", 45),
+                        realistic_zh("运行真实规模中文预算测试确认余量目标与质量预算阈值同时满足要求，", 45)
+                    ],
+                    "trusted_verification_commands": [{
+                        "command": "cargo test --locked --lib work_item_split_engine",
+                        "cwd": ".",
+                        "purpose": "回归拆分引擎契约",
+                        "source_ref": "design_spec_0001#verification"
+                    }],
+                    "handoff_notes": realistic_zh("交接说明包含可直接消费的合同字段、验证命令来源证据与回滚边界，", 40)
+                }
+            ],
+            "risks": [],
+            "handoff_strategy": "领域模块输出 contract 给单元测试项",
+            "status": "draft"
+        },
+        "context_blockers": []
+    })
+}
+
+#[test]
+fn realistic_chinese_serial_prompt_stays_within_quality_budget() {
+    // fixture 对齐 session_0003 实测锚点：current outline JSON 实测 1,891 B（目标 ~1.7KB）、
+    // 直接依赖投影实测 1,119 B（目标 ~1.1KB）。
+    // 阈值 = 实测 post-slim prompt 10,941 B + 800 余量 = 11,741（< 质量预算 12,000）；
+    // A–E 瘦身分段实测合计节省 980 B（fixture 规模无关的模板固定开销）。
+    let outline = parse_work_item_plan_outline_output(realistic_chinese_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let mut accepted_candidate =
+        parse_work_item_draft_output(canonical_author_output("outline_backend", "wi_backend"))
+            .expect("canonical backend draft");
+    accepted_candidate
+        .canonical_contract_candidate
+        .output_contracts[0]
+        .capabilities = vec![
+        realistic_zh("提供稳定可消费的会话状态读取能力与契约化数据结构字段，", 50),
+        realistic_zh("提供幂等的工作项状态迁移与独立回滚边界保证能力，", 50),
+        realistic_zh("提供结构化的验证结果汇总与阻断路由信号输出能力，", 50),
+    ];
+    accepted_candidate
+        .canonical_contract_candidate
+        .handoff_contract
+        .required_fields = vec![
+        "commit_sha".to_string(),
+        "module_api_version".to_string(),
+        "session_status_dto".to_string(),
+        "verification_report_ref".to_string(),
+        "rollback_boundary".to_string(),
+        "consumer_contract_hash".to_string(),
+    ];
+    let accepted_module_draft = sample_draft_record(
+        "draft_backend",
+        "outline_backend",
+        accepted_candidate,
+    );
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_unit_tests",
+        WorkItemGenerationMode::Serial,
+        &[accepted_module_draft],
+        None,
+    )
+    .expect("realistic serial prompt must stay invocable");
+    assert!(
+        invocation.prompt.len() < 11_741,
+        "realistic Chinese serial prompt must stay within the slimmed margin target: {} bytes",
+        invocation.prompt.len()
+    );
+    assert!(
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES,
+        "quality budget: {} bytes",
+        invocation.prompt.len()
+    );
+    // 契约关键语义必须保留
+    assert!(invocation.prompt.contains("[canonical_field_contract]"));
+    assert!(invocation.prompt.contains("verification_plan"));
+    assert!(invocation.prompt.contains("operational_gate"));
+    assert!(invocation.prompt.contains("[cadence_original_routing_rules]"));
+    assert!(invocation.prompt.contains("agent-routing-kernel.md"));
+    assert!(invocation.prompt.contains("openspec-superpowers-workflow.md"));
+    assert!(invocation.prompt.contains("[直接依赖的可消费交接合同]"));
+    assert!(invocation.prompt.contains("ARIA_STRUCTURED_OUTPUT"));
+}
+
 #[test]
 fn serial_prompt_above_legacy_11000_limit_remains_invocable_below_hard_backstop() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
@@ -786,11 +941,13 @@ fn single_item_prompt_forbids_work_item_id_and_outline_changes() {
     .expect("draft invocation");
 
     assert!(invocation.prompt.contains("不得输出 work_item_id"));
-    assert!(invocation.prompt.contains("不得修改 Outline"));
+    // B 去重后合并为单条：修改/新增/删除/重命名 Outline 全部禁止。
+    assert!(invocation.prompt.contains("不得修改、新增、删除或重命名 Outline"));
+    // 输出唯一性并入 nonce sentinel 条款（语义保留）。
     assert!(
         invocation
             .prompt
-            .contains("只能输出一个 Canonical Contract Candidate")
+            .contains("返回唯一 Canonical Contract Candidate JSON")
     );
 }
 
@@ -821,7 +978,8 @@ fn single_item_prompt_requires_executable_plan_runtime_contracts() {
     assert!(invocation.prompt.contains("implementation_context"));
     assert!(invocation.prompt.contains("canonical_contract"));
     assert!(invocation.prompt.contains("handoff_contract"));
-    assert!(invocation.prompt.contains("verification_plan.checks"));
+    // verification_plan 字段契约改由 [canonical_field_contract] 简写记号承载（语义保留）。
+    assert!(invocation.prompt.contains("verification_plan: obj{checks:"));
     assert!(invocation.prompt.contains("estimated_context_tokens"));
     assert!(invocation.prompt.contains("单个 Claude Code/Codex 会话"));
     assert!(invocation.prompt.contains("50k"));
@@ -844,10 +1002,11 @@ fn single_item_prompt_requires_verification_checks_as_exact_execution_view() {
     )
     .expect("draft invocation");
 
+    // 逐字段复制硬规则与 field_contract 重复，已删除；执行视图精确一致性由 [self_check] 保留。
     assert!(
         invocation
             .prompt
-            .contains("verification_plan.checks 必须逐项、逐字段、按原顺序复制"),
+            .contains("verification_plan 与 canonical checks 的逐字段同序相等"),
         "draft prompt must require an exact execution view: {}",
         invocation.prompt
     );

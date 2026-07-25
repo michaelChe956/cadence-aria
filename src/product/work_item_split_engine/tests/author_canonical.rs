@@ -465,11 +465,13 @@ fn work_item_plan_author_canonical_prompt_is_provider_neutral_about_verification
                 .prompt
                 .contains("每个 draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、验证命令")
         );
-        assert!(invocation.prompt.contains("结构化验证方案"));
+        // 结构化验证方案要求改由 [canonical_field_contract] 简写记号承载（语义保留）。
+        assert!(invocation.prompt.contains("verification_plan: obj{checks:"));
+        // 逐字段复制硬规则与 field_contract 重复，已删除；精确一致性由 [self_check] 保留。
         assert!(
             invocation
                 .prompt
-                .contains("verification_plan.checks 必须逐项、逐字段、按原顺序复制")
+                .contains("verification_plan 与 canonical checks 的逐字段同序相等")
         );
     }
 }
