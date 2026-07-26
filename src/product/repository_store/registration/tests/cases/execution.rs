@@ -56,7 +56,7 @@ async fn repository_registration_persists_step_boundaries_for_execution_failures
         initializer_fails: bool,
         persistence_fails: bool,
         expected_failed_step: Option<RepositoryInitializationStepKind>,
-        expected_steps: [RepositoryInitializationStepStatus; 5],
+        expected_steps: [RepositoryInitializationStepStatus; 6],
         expected_error: &'static str,
     }
 
@@ -69,6 +69,7 @@ async fn repository_registration_persists_step_boundaries_for_execution_failures
             expected_failed_step: Some(RepositoryInitializationStepKind::CadenceSkills),
             expected_steps: [
                 RepositoryInitializationStepStatus::Failed,
+                RepositoryInitializationStepStatus::Pending,
                 RepositoryInitializationStepStatus::Pending,
                 RepositoryInitializationStepStatus::Pending,
                 RepositoryInitializationStepStatus::Pending,
@@ -88,6 +89,7 @@ async fn repository_registration_persists_step_boundaries_for_execution_failures
                 RepositoryInitializationStepStatus::Failed,
                 RepositoryInitializationStepStatus::Pending,
                 RepositoryInitializationStepStatus::Pending,
+                RepositoryInitializationStepStatus::Pending,
             ],
             expected_error: "repository_init_command_failed",
         },
@@ -97,7 +99,14 @@ async fn repository_registration_persists_step_boundaries_for_execution_failures
             initializer_fails: false,
             persistence_fails: true,
             expected_failed_step: None,
-            expected_steps: [RepositoryInitializationStepStatus::Completed; 5],
+            expected_steps: [
+                RepositoryInitializationStepStatus::Completed,
+                RepositoryInitializationStepStatus::Completed,
+                RepositoryInitializationStepStatus::Completed,
+                RepositoryInitializationStepStatus::Completed,
+                RepositoryInitializationStepStatus::Completed,
+                RepositoryInitializationStepStatus::Pending,
+            ],
             expected_error: "repository_persist_failed",
         },
     ];
@@ -280,6 +289,12 @@ async fn repository_registration_runs_in_order_and_persists_once_after_success()
             "initializer",
             "git_status",
             "repository_create",
+            "git_finalize_add",
+            "git_finalize_diff",
+            "git_finalize_commit",
+            "git_finalize_remote",
+            "git_finalize_upstream",
+            "git_finalize_push",
         ]
     );
 }

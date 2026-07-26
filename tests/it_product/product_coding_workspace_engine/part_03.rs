@@ -386,7 +386,7 @@ async fn retry_code_review_prompt_includes_previous_role_run_diagnostic() {
     assert!(prompt.contains("reason_code: code_review_blocked"));
     assert!(prompt.contains("Code reviewer task update"));
     assert!(prompt.contains("Review context was missing"));
-    assert!(prompt.contains("只输出 JSON"));
+    assert!(prompt.contains("最终审查结论仅输出裸 JSON"));
     assert!(!prompt.contains(&format!("role_run_id: {}", retry_run.id)));
 }
 

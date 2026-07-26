@@ -80,6 +80,7 @@ function createResponse(): CreateRepositoryResponse {
       ],
       warnings: ["cadence_skills_conflict:<path>"],
       changed_paths: [".claude/rules/project.md"],
+      git_finalize_warning: null,
       completed_at: "2026-07-14T00:01:00Z",
     },
   };
@@ -94,6 +95,7 @@ function steps(
     "rule_config",
     "mcp_configuration",
     "project_rules_examples",
+    "git_finalize",
   ];
   return stepIds.map((step_id, index) => ({ step_id, status: states[index]! }));
 }
@@ -104,7 +106,7 @@ function operation(
   return {
     operation_id: "repository_initialization_0001",
     status: "running",
-    steps: steps(["running", "pending", "pending", "pending", "pending"]),
+    steps: steps(["running", "pending", "pending", "pending", "pending", "pending"]),
     current_step: "cadence_skills",
     failed_step: null,
     result: null,
@@ -127,6 +129,7 @@ function completedOperation(
       "completed",
       "completed",
       "completed",
+      "completed",
     ]),
     current_step: null,
     result: createResponse(),
@@ -140,7 +143,7 @@ function failedOperation(
 ): RepositoryInitializationOperationSnapshot {
   return operation({
     status: "failed",
-    steps: steps(["completed", "failed", "pending", "pending", "pending"]),
+    steps: steps(["completed", "failed", "pending", "pending", "pending", "pending"]),
     current_step: null,
     failed_step: "pre_check",
     error: {
@@ -183,7 +186,7 @@ afterEach(() => {
 });
 
 describe("CreateRepositoryDialog", () => {
-  it("shows five server-driven steps and disables close while running", async () => {
+  it("shows six server-driven steps including git finalization and disables close while running", async () => {
     setProviderHealth(true, true);
     const user = userEvent.setup();
     const running = operation();
@@ -201,13 +204,14 @@ describe("CreateRepositoryDialog", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "添加代码库" });
     const stepList = within(dialog).getByRole("list", { name: "初始化步骤" });
-    expect(within(stepList).getAllByRole("listitem")).toHaveLength(5);
+    expect(within(stepList).getAllByRole("listitem")).toHaveLength(6);
     expect(stepList).toHaveTextContent("准备 Cadence Skills");
     expect(stepList).toHaveTextContent("执行预检查");
     expect(stepList).toHaveTextContent("配置规则");
     expect(stepList).toHaveTextContent("配置 MCP");
     expect(stepList).toHaveTextContent("生成项目规则示例");
-    expect(within(dialog).getByRole("status")).toHaveTextContent("已完成 0 / 5");
+    expect(stepList).toHaveTextContent("提交并推送");
+    expect(within(dialog).getByRole("status")).toHaveTextContent("已完成 0 / 6");
     expect(dialog).toHaveTextContent("正在初始化，请保持此窗口打开");
     expect(dialog).toHaveFocus();
     expect(within(dialog).getByRole("button", { name: "关闭" })).toBeDisabled();
@@ -218,7 +222,7 @@ describe("CreateRepositoryDialog", () => {
     vi.useFakeTimers();
     setProviderHealth(true, true);
     const firstPoll = operation({
-      steps: steps(["completed", "running", "pending", "pending", "pending"]),
+      steps: steps(["completed", "running", "pending", "pending", "pending", "pending"]),
       current_step: "pre_check",
     });
     const completed = completedOperation();
@@ -240,7 +244,7 @@ describe("CreateRepositoryDialog", () => {
 
     expect(onFetchOperation).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("status")).toHaveTextContent(
-      "正在执行：执行预检查。已完成 1 / 5。",
+      "正在执行：执行预检查。已完成 1 / 6。",
     );
     const stepList = screen.getByRole("list", { name: "初始化步骤" });
     expect(within(stepList).getByText("准备 Cadence Skills").closest("li")).toHaveTextContent(
@@ -267,6 +271,83 @@ describe("CreateRepositoryDialog", () => {
       await vi.advanceTimersByTimeAsync(2_000);
     });
     expect(onFetchOperation).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a completed operation successful while surfacing a failed git finalize step", async () => {
+    setProviderHealth(true, true);
+    const user = userEvent.setup();
+    const onInitializationCompleted = vi.fn();
+    const result = createResponse();
+    result.initialization.git_finalize_warning = "git push failed";
+    const completedWithGitFinalizeFailure = completedOperation({
+      steps: steps([
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "failed",
+      ]),
+      failed_step: "git_finalize",
+      result,
+    });
+    render(
+      <CreateRepositoryDialog
+        onCreate={vi.fn().mockResolvedValue(completedWithGitFinalizeFailure)}
+        onFetchOperation={vi.fn()}
+        onInitializationCompleted={onInitializationCompleted}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await fillRequiredFields(user);
+    await user.click(screen.getByRole("button", { name: "添加代码库" }));
+
+    const gitFinalizeStep = within(
+      screen.getByRole("list", { name: "初始化步骤" }),
+    )
+      .getByText("提交并推送")
+      .closest("li");
+    expect(gitFinalizeStep).toHaveTextContent("失败");
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveAttribute("aria-live", "assertive");
+    expect(alert).toHaveTextContent(
+      "自动提交推送未完成，请在目标仓库手动执行 git commit / git push",
+    );
+    expect(alert).toHaveTextContent("git push failed");
+    expect(onInitializationCompleted).toHaveBeenCalledWith(result);
+  });
+
+  it("shows a git finalize warning without reporting a completed step as failed", async () => {
+    setProviderHealth(true, true);
+    const user = userEvent.setup();
+    const result = createResponse();
+    result.initialization.git_finalize_warning =
+      "未配置远端或 upstream，已跳过推送，请手动推送";
+    render(
+      <CreateRepositoryDialog
+        onCreate={vi.fn().mockResolvedValue(completedOperation({ result }))}
+        onFetchOperation={vi.fn()}
+        onInitializationCompleted={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await fillRequiredFields(user);
+    await user.click(screen.getByRole("button", { name: "添加代码库" }));
+
+    const gitFinalizeStep = within(
+      screen.getByRole("list", { name: "初始化步骤" }),
+    )
+      .getByText("提交并推送")
+      .closest("li");
+    expect(gitFinalizeStep).toHaveTextContent("已完成");
+    expect(screen.getByText("未配置远端或 upstream，已跳过推送，请手动推送")).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "自动提交推送未完成，请在目标仓库手动执行 git commit / git push",
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a local error and lets the user refill when a completed operation has no result", async () => {
@@ -321,7 +402,7 @@ describe("CreateRepositoryDialog", () => {
     vi.useFakeTimers();
     setProviderHealth(true, true);
     const retrySnapshot = operation({
-      steps: steps(["completed", "running", "pending", "pending", "pending"]),
+      steps: steps(["completed", "running", "pending", "pending", "pending", "pending"]),
       current_step: "pre_check",
     });
     const onFetchOperation = vi
@@ -353,7 +434,7 @@ describe("CreateRepositoryDialog", () => {
 
     expect(onFetchOperation).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("status")).toHaveTextContent(
-      "正在执行：执行预检查。已完成 1 / 5。",
+      "正在执行：执行预检查。已完成 1 / 6。",
     );
     expect(within(stepList).getByText("准备 Cadence Skills").closest("li")).toHaveTextContent(
       "已完成",

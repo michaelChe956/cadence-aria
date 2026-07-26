@@ -8,6 +8,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 #[cfg(windows)]
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
@@ -15,6 +16,9 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+
+const TRANSIENT_SPAWN_RETRY_COUNT: usize = 2;
+const TRANSIENT_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 #[cfg(unix)]
 fn unix_process_group_signal_target(current_child_id: Option<u32>, pgid: i32) -> Option<i32> {
@@ -211,20 +215,32 @@ impl ProcessManager {
             return Err(command_missing(command));
         }
 
-        let mut command_builder = Command::new(command);
-        if !inherit_environment {
-            command_builder.env_clear();
-        }
-        command_builder
-            .args(args)
-            .current_dir(working_dir)
-            .envs(env_vars)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut retry_count = 0;
+        let mut child = loop {
+            let mut command_builder = Command::new(command);
+            if !inherit_environment {
+                command_builder.env_clear();
+            }
+            command_builder
+                .args(args)
+                .current_dir(working_dir)
+                .envs(env_vars)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
 
-        let mut child = ManagedProcessChild::spawn(&mut command_builder)
-            .map_err(|error| map_spawn_error(command, error))?;
+            match ManagedProcessChild::spawn(&mut command_builder) {
+                Ok(child) => break child,
+                Err(error)
+                    if is_retryable_spawn_error(&error)
+                        && retry_count < TRANSIENT_SPAWN_RETRY_COUNT =>
+                {
+                    retry_count += 1;
+                    tokio::time::sleep(TRANSIENT_SPAWN_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(map_spawn_error(command, error)),
+            }
+        };
 
         let stdin = child.inner().stdin.take().ok_or_else(missing_stdin_pipe)?;
         let stdout = child
@@ -293,6 +309,18 @@ fn is_command_missing_error(error: &std::io::Error) -> bool {
         || error_text.contains("no such file or directory")
 }
 
+fn is_retryable_spawn_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(26)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 fn missing_stdin_pipe() -> ProviderAdapterError {
     ProviderAdapterError::execution_failed(None, String::new(), "provider stdin pipe missing", 0)
 }
@@ -317,6 +345,14 @@ mod tests {
 
     use super::*;
     use crate::protocol::provider_errors::ProviderErrorCode;
+
+    #[cfg(unix)]
+    #[test]
+    fn text_file_busy_is_retryable_but_not_a_missing_command() {
+        let busy = std::io::Error::from_raw_os_error(26);
+        assert!(is_retryable_spawn_error(&busy));
+        assert!(!is_command_missing_error(&busy));
+    }
 
     #[tokio::test]
     async fn process_manager_reports_missing_command() {

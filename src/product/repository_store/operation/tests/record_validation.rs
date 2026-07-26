@@ -440,7 +440,7 @@ fn operation_recovery_allows_running_operation_with_completed_prefix_without_cur
 }
 
 #[test]
-fn operation_recovery_allows_all_completed_running_operation_without_current_step() {
+fn operation_recovery_completes_all_steps_with_persisted_git_finalize_result() {
     let fixture = completed_steps_operation();
     let recovered = fixture
         .store
@@ -453,7 +453,7 @@ fn operation_recovery_allows_all_completed_running_operation_without_current_ste
 
     assert_eq!(
         recovered.status,
-        RepositoryInitializationOperationStatus::Failed
+        RepositoryInitializationOperationStatus::Completed
     );
     assert_eq!(recovered.failed_step, None);
     assert!(
@@ -462,6 +462,7 @@ fn operation_recovery_allows_all_completed_running_operation_without_current_ste
             .iter()
             .all(|step| step.status == RepositoryInitializationStepStatus::Completed)
     );
+    assert!(recovered.result.is_some());
     assert_eq!(
         fixture
             .store

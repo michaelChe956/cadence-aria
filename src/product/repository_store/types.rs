@@ -49,6 +49,8 @@ pub struct RepositoryRegistrationSuccess {
     pub initialization: RepositoryInitializationSummary,
     pub warnings: Vec<String>,
     pub changed_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_finalize_warning: Option<String>,
     pub completed_at: String,
 }
 
@@ -83,20 +85,22 @@ pub enum RepositoryInitializationStepKind {
     RuleConfig,
     McpConfiguration,
     ProjectRulesExamples,
+    GitFinalize,
 }
 
 impl RepositoryInitializationStepKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::CadenceSkills,
         Self::PreCheck,
         Self::RuleConfig,
         Self::McpConfiguration,
         Self::ProjectRulesExamples,
+        Self::GitFinalize,
     ];
 
     pub fn command(self) -> Option<&'static str> {
         match self {
-            Self::CadenceSkills => None,
+            Self::CadenceSkills | Self::GitFinalize => None,
             Self::PreCheck => Some("/pre-check --no-interrupt"),
             Self::RuleConfig => Some("/rule-config --no-interrupt"),
             Self::McpConfiguration => Some("/mcp-configuration --no-interrupt"),
@@ -150,6 +154,8 @@ pub struct RepositoryInitializationOperation {
     pub steps: Vec<RepositoryInitializationStepRecord>,
     pub failed_step: Option<RepositoryInitializationStepKind>,
     pub result: Option<RepositoryRegistrationSuccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_finalize_checkpoint: Option<RepositoryRegistrationSuccess>,
     pub error: Option<RepositoryRegistrationError>,
     pub created_at: String,
     pub updated_at: String,
@@ -180,6 +186,7 @@ impl RepositoryInitializationOperation {
                 .collect(),
             failed_step: None,
             result: None,
+            git_finalize_checkpoint: None,
             error: None,
             updated_at: created_at.clone(),
             created_at,

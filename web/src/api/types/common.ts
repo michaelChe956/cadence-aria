@@ -68,6 +68,7 @@ export type RepositoryInitializationSummary = {
   commands: RepositoryInitializationCommand[];
   warnings: string[];
   changed_paths: string[];
+  git_finalize_warning: string | null;
   completed_at: string;
 };
 
@@ -87,7 +88,8 @@ export type RepositoryInitializationStepId =
   | "pre_check"
   | "rule_config"
   | "mcp_configuration"
-  | "project_rules_examples";
+  | "project_rules_examples"
+  | "git_finalize";
 
 export type RepositoryInitializationStepStatus =
   | "pending"

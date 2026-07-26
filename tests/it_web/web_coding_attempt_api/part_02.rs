@@ -391,10 +391,8 @@ async fn bootstrap_confirmed_work_item_without_workspace_session(
         json!({"name":"Coding","description":null}),
     )
     .await;
-    request_json(
+    let repository = register_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
         json!({
             "name":"Repo",
             "path":repo_path,
@@ -402,6 +400,7 @@ async fn bootstrap_confirmed_work_item_without_workspace_session(
         }),
     )
     .await;
+    assert_eq!(repository["repository_id"], "repository_0001");
     request_json(
         app.clone(),
         Method::POST,

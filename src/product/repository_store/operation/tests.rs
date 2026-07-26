@@ -102,6 +102,7 @@ fn success_result(project_id: &str) -> RepositoryRegistrationSuccess {
         },
         warnings: Vec::new(),
         changed_paths: Vec::new(),
+        git_finalize_warning: None,
         completed_at: COMPLETED_AT.to_string(),
     }
 }
@@ -220,6 +221,16 @@ fn completed_steps_operation() -> OperationFixture {
                 format!("2026-07-22T00:00:{:02}Z", index * 2 + 2),
             )
             .unwrap();
+        if step == RepositoryInitializationStepKind::GitFinalize {
+            fixture
+                .store
+                .checkpoint_git_finalize_result(
+                    "project_0001",
+                    &fixture.operation_id,
+                    success_result("project_0001"),
+                )
+                .unwrap();
+        }
         fixture
             .store
             .mark_step_completed(
@@ -230,5 +241,52 @@ fn completed_steps_operation() -> OperationFixture {
             )
             .unwrap();
     }
+    fixture
+}
+
+fn running_git_finalize_operation() -> OperationFixture {
+    let fixture = created_operation();
+    fixture
+        .store
+        .mark_running("project_0001", &fixture.operation_id, RUNNING_AT.into())
+        .unwrap();
+    for (index, step) in [
+        RepositoryInitializationStepKind::CadenceSkills,
+        RepositoryInitializationStepKind::PreCheck,
+        RepositoryInitializationStepKind::RuleConfig,
+        RepositoryInitializationStepKind::McpConfiguration,
+        RepositoryInitializationStepKind::ProjectRulesExamples,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fixture
+            .store
+            .mark_step_running(
+                "project_0001",
+                &fixture.operation_id,
+                step,
+                format!("2026-07-22T00:01:{:02}Z", index * 2),
+            )
+            .unwrap();
+        fixture
+            .store
+            .mark_step_completed(
+                "project_0001",
+                &fixture.operation_id,
+                step,
+                format!("2026-07-22T00:01:{:02}Z", index * 2 + 1),
+            )
+            .unwrap();
+    }
+    fixture
+        .store
+        .mark_step_running(
+            "project_0001",
+            &fixture.operation_id,
+            RepositoryInitializationStepKind::GitFinalize,
+            "2026-07-22T00:01:10Z".into(),
+        )
+        .unwrap();
     fixture
 }

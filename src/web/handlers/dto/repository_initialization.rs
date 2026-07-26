@@ -41,6 +41,14 @@ pub(super) fn repository_initialization_result_dto_impl(
                 .collect(),
             warnings: sanitize_repository_api_warnings(success.warnings.clone()),
             changed_paths: sanitize_repository_api_changed_paths(success.changed_paths.clone()),
+            git_finalize_warning: success
+                .git_finalize_warning
+                .as_ref()
+                .and_then(|warning| {
+                    sanitize_repository_api_warnings(vec![warning.clone()])
+                        .into_iter()
+                        .next()
+                }),
             completed_at: success.completed_at.clone(),
         },
     }
@@ -49,6 +57,7 @@ pub(super) fn repository_initialization_result_dto_impl(
 pub(crate) fn repository_initialization_operation_dto(
     operation: RepositoryInitializationOperation,
 ) -> RepositoryInitializationOperationDto {
+    let is_completed = operation.status == RepositoryInitializationOperationStatus::Completed;
     let current_step = operation
         .steps
         .iter()
@@ -69,10 +78,14 @@ pub(crate) fn repository_initialization_operation_dto(
         failed_step: operation
             .failed_step
             .map(|step| repository_initialization_step_id(step).to_string()),
-        result: operation
-            .result
-            .as_ref()
-            .map(super::repository_initialization_result_dto),
+        result: is_completed
+            .then(|| {
+                operation
+                    .result
+                    .as_ref()
+                    .map(super::repository_initialization_result_dto)
+            })
+            .flatten(),
         error: operation.error.map(ApiError::from),
         created_at: operation.created_at,
         updated_at: operation.updated_at,
@@ -98,6 +111,7 @@ fn repository_initialization_step_id(step: RepositoryInitializationStepKind) -> 
         RepositoryInitializationStepKind::RuleConfig => "rule_config",
         RepositoryInitializationStepKind::McpConfiguration => "mcp_configuration",
         RepositoryInitializationStepKind::ProjectRulesExamples => "project_rules_examples",
+        RepositoryInitializationStepKind::GitFinalize => "git_finalize",
     }
 }
 

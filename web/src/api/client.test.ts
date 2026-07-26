@@ -66,6 +66,7 @@ function repositoryInitializationResult(): CreateRepositoryResponse {
       ],
       warnings: [],
       changed_paths: [],
+      git_finalize_warning: null,
       completed_at: "2026-07-22T00:01:00Z",
     },
   };
@@ -80,6 +81,7 @@ function repositoryInitializationSteps(
     { step_id: "rule_config", status },
     { step_id: "mcp_configuration", status },
     { step_id: "project_rules_examples", status },
+    { step_id: "git_finalize", status },
   ];
 }
 
@@ -234,6 +236,7 @@ describe("api client", () => {
         { step_id: "rule_config", status: "pending" },
         { step_id: "mcp_configuration", status: "pending" },
         { step_id: "project_rules_examples", status: "pending" },
+        { step_id: "git_finalize", status: "pending" },
       ],
       failed_step: "pre_check",
       error: {

@@ -30,3 +30,19 @@ fn repository_registration_success_preserves_all_source_modes() {
         assert!(value["initialization"].get("warnings").is_some());
     }
 }
+
+#[test]
+fn repository_initialization_result_dto_exposes_git_finalize_warning() {
+    let mut success = super::product_resources::create_repository_tests::registration_success();
+    success.git_finalize_warning = Some(
+        "git_finalize: 无 remote，已跳过 push，请手动推送".to_string(),
+    );
+
+    let value = serde_json::to_value(repository_initialization_result_dto(&success))
+        .expect("repository initialization result dto");
+
+    assert_eq!(
+        value["initialization"]["git_finalize_warning"],
+        "git_finalize: 无 remote，已跳过 push，请手动推送",
+    );
+}

@@ -610,26 +610,158 @@ impl BoundedCommandRunner for RecordingRunner {
         &self,
         request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
-        let stdout = if request.argv == ["rev-parse", "--show-toplevel"] {
-            self.calls.lock().unwrap().push("git_root");
-            format!("{}\n", self.root.display())
-        } else {
-            self.calls.lock().unwrap().push("git_status");
-            if self.status_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                " M existing.txt\0".to_string()
-            } else {
-                " M existing.txt\0?? generated.txt\0".to_string()
+        let (label, result) = match request.argv.as_slice() {
+            [first, second] if first == "rev-parse" && second == "--show-toplevel" => (
+                "git_root",
+                command_result(Some(0), &format!("{}\n", self.root.display()), ""),
+            ),
+            [first, second, third, fourth]
+                if first == "status"
+                    && second == "--porcelain=v1"
+                    && third == "-z"
+                    && fourth == "--untracked-files=all" =>
+            {
+                let stdout = if self.status_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    " M existing.txt\0"
+                } else {
+                    " M existing.txt\0?? generated.txt\0"
+                };
+                ("git_status", command_result(Some(0), stdout, ""))
             }
+            [first, second] if first == "add" && second == "-A" => {
+                ("git_finalize_add", command_result(Some(0), "", ""))
+            }
+            [first, second, third]
+                if first == "diff" && second == "--cached" && third == "--quiet" =>
+            {
+                ("git_finalize_diff", command_result(Some(1), "", ""))
+            }
+            [first, second, message]
+                if first == "commit"
+                    && second == "-m"
+                    && message == "初始化cadence-aria 代码库" =>
+            {
+                ("git_finalize_commit", command_result(Some(0), "", ""))
+            }
+            [first] if first == "remote" => (
+                "git_finalize_remote",
+                command_result(Some(0), "origin\n", ""),
+            ),
+            [first, second, third, fourth]
+                if first == "rev-parse"
+                    && second == "--abbrev-ref"
+                    && third == "--symbolic-full-name"
+                    && fourth == "@{u}" =>
+            {
+                (
+                    "git_finalize_upstream",
+                    command_result(Some(0), "origin/main\n", ""),
+                )
+            }
+            [first] if first == "push" => ("git_finalize_push", command_result(Some(0), "", "")),
+            argv => panic!("unexpected Git argv: {argv:?}"),
         };
-        Ok(BoundedCommandResult {
-            exit_code: Some(0),
-            stdout,
-            stderr: String::new(),
-            timed_out: false,
-            cancelled: false,
-            stdout_truncated: false,
-            stderr_truncated: false,
-            duration_ms: 1,
-        })
+        self.calls.lock().unwrap().push(label);
+        Ok(result)
+    }
+}
+
+struct GitFinalizeRunner {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    root: std::path::PathBuf,
+    status_calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl BoundedCommandRunner for GitFinalizeRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        let (label, result) = match request.argv.as_slice() {
+            [first, second] if first == "rev-parse" && second == "--show-toplevel" => (
+                "git_root",
+                command_result(Some(0), &format!("{}\n", self.root.display()), ""),
+            ),
+            [first, second, third, fourth]
+                if first == "status"
+                    && second == "--porcelain=v1"
+                    && third == "-z"
+                    && fourth == "--untracked-files=all" =>
+            {
+                let stdout = if self.status_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    " M existing.txt\0"
+                } else {
+                    " M existing.txt\0?? generated.txt\0"
+                };
+                ("git_status", command_result(Some(0), stdout, ""))
+            }
+            [first, second] if first == "add" && second == "-A" => {
+                ("git_finalize_add", command_result(Some(0), "", ""))
+            }
+            [first, second, third]
+                if first == "diff" && second == "--cached" && third == "--quiet" =>
+            {
+                ("git_finalize_diff", command_result(Some(1), "", ""))
+            }
+            [first, second, message]
+                if first == "commit"
+                    && second == "-m"
+                    && message == "初始化cadence-aria 代码库" =>
+            {
+                ("git_finalize_commit", command_result(Some(0), "", ""))
+            }
+            [first] if first == "remote" => (
+                "git_finalize_remote",
+                command_result(Some(0), "origin\n", ""),
+            ),
+            [first, second, third, fourth]
+                if first == "rev-parse"
+                    && second == "--abbrev-ref"
+                    && third == "--symbolic-full-name"
+                    && fourth == "@{u}" =>
+            {
+                (
+                    "git_finalize_upstream",
+                    command_result(Some(0), "origin/main\n", ""),
+                )
+            }
+            [first] if first == "push" => ("git_finalize_push", command_result(Some(0), "", "")),
+            argv => panic!("unexpected Git argv: {argv:?}"),
+        };
+        self.calls.lock().unwrap().push(label);
+        Ok(result)
+    }
+}
+
+struct ScriptedGitRunner {
+    calls: Mutex<Vec<Vec<String>>>,
+    responses: Mutex<VecDeque<(Vec<String>, BoundedCommandResult)>>,
+}
+
+impl ScriptedGitRunner {
+    fn new(responses: Vec<(Vec<String>, BoundedCommandResult)>) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses.into()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl BoundedCommandRunner for ScriptedGitRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        let (expected_argv, result) = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected extra Git invocation");
+        assert_eq!(request.argv, expected_argv, "unexpected Git argv");
+        self.calls.lock().unwrap().push(request.argv);
+        Ok(result)
     }
 }

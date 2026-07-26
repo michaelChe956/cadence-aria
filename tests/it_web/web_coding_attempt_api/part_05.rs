@@ -6,13 +6,12 @@ pub(crate) async fn bootstrap_story_and_design(app: axum::Router, repo_path: &st
         json!({"name":"Coding","description":null}),
     )
     .await;
-    request_json(
+    let repository = register_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
         json!({"name":"Repo","path":repo_path}),
     )
     .await;
+    assert_eq!(repository["repository_id"], "repository_0001");
     request_json(
         app.clone(),
         Method::POST,
@@ -53,6 +52,43 @@ pub(crate) async fn bootstrap_story_and_design(app: axum::Router, repo_path: &st
         json!({"confirmed_by":"human"}),
     )
     .await;
+}
+
+async fn register_repository_and_wait(app: axum::Router, request: Value) -> Value {
+    let (status, accepted) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+
+    let operation_id = accepted["operation_id"].as_str().expect("operation id");
+    let operation_uri = format!(
+        "/api/projects/project_0001/repository-initializations/{operation_id}"
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let (status, snapshot) = request_json(
+            app.clone(),
+            Method::GET,
+            &operation_uri,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{snapshot}");
+        match snapshot["status"].as_str() {
+            Some("completed") => return snapshot["result"]["repository"].clone(),
+            Some("failed") => panic!("repository initialization failed: {snapshot}"),
+            _ => {
+                if tokio::time::Instant::now() >= deadline {
+                    panic!("repository initialization did not finish: {snapshot}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
 }
 
 pub(crate) async fn request_json(

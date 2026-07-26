@@ -135,3 +135,48 @@ Final review: approved (7203884b..0f60a118, Ready to merge=Yes); Minor 修复 ca
 
 Reason: 真机测试添加代码库时 /rule-config 作为第一步失败（Claude API 429 配额耗尽 + 5min/命令超时 + 目标仓库 eza 别名噪声），用户决定撤销顺序调整。
 Action: 代码/测试/web 还原到 7203884b；OpenSpec（已归档 change + 主 specs）与 2026-07-22 Plan 全部恢复 pre-check 先跑；删除 2026-07-23 顺序调整 Plan；tasks.md 移除第 5 节。
+
+# WorkItemDraftPrompt 开销瘦身与上限重论证
+
+Plan: cadence/plans/2026-07-25_计划文档_基线修复_WorkItemDraftPrompt开销瘦身与上限重论证_v1.0.md
+Plan commit: 5ccd91fd
+Execution mode: subagent-driven-development
+Task 1: complete (commits 5ccd91fd..f4a92f79, review approved)
+  Minor: 投影测试改用 QUALITY_BUDGET 断言、QUALITY_BUDGET 常量加 #[cfg(test)]（controller 修复，避免 clippy dead_code）。
+  Minor: 提交 8f514702 混合归因（含前序 Plan 的依赖投影与测试改写），原子性已论证，commit body 未注明。
+Task 2: complete (commits f4a92f79..e175f732, review approved after controller adjudication)
+  Decision: fixture 对齐 session_0003 实测锚点（outline JSON 1,891 B / 投影 1,119 B），阈值=实测 10,941+800=11,741；12,000 质量预算断言未动；实际节省 980 B（估值 2,690 B 系计划高估）。
+  Minor: verification_plan.checks 精确复制约束从 hard_rules 降为 self_check 提示（plan-mandated，断言已锁定）。
+  Minor: 两条断言更新为兼容子串（方向合理，语义由保留段落覆盖）。
+Task 3: complete (commits e175f732..06c3af2a, review approved)
+  Note: commit 裹挟并行 Plan（文件大小守卫）的纯移动产物（provider_run.rs 696 行、part_01 改名），全文 diff 证明除 3 行修复外零漂移；配套 run.rs 瘦身与 include 接线仍未提交（并行 Plan 范围）。
+  Minor: 新分支附带 transition_stage(PrepareContext) 副作用（plan-mandated 复用 helper 的必然结果）。
+Task 4: complete (design.md 双层模型修订；fmt/clippy/lib 1361/it_web serial 19/openspec validate/git diff --check 全绿；3.3/4.1 保持未勾选待 Case A/B 授权)
+Final review: With fixes → 修复波 b24b0ad0（batch 分支同类悬挂一行修复 + batch 回归 11/11）。Minors 留档：draft 循环其余 Err 分支悬挂属既存行为（后续统一审计）；clear_active_run_if_token 不对称属既存。
+Case A/B 真实验证（操作者授权）：Case A backend_session 10/10 pass（0 inconclusive）；Case B compact_duration 10/10 pass（2 次非连续 inconclusive 超时）。3.3/4.1 已勾选；pnpm tsc -b + pnpm test 736/736 补证。
+
+# 末端 WorkItem 交接契约引用可空
+
+Change: relax-terminal-handoff-contract-refs
+Plan: cadence/plans/2026-07-26_计划文档_基线修复_末端WorkItem交接契约引用可空_v1.0.md
+Plan commit: c7c99403
+Execution mode: subagent-driven-development
+Base: a7192b50
+Task 1: complete (commits a7192b50..66c53630, review approved)
+  Minor: Plan Task 1 Step 2 命令为双位置参数（cargo 拒绝），implementer 改用等价 --lib 精确过滤命令；后续 Plan 命令模板应只写单个 TESTNAME 过滤器。
+  Note: 并行会话的 task-brief 会覆盖 .superpowers/sdd/task-N-brief.md 固定路径；本 Plan 后续 brief 使用唯一文件名。
+Task 2: complete (commits 66c53630..9607f860, review approved)
+  Minor: schema 行仍用记号 `str+`（非空 string），hard_rules 行措辞为"非空白"，两处对元素约束的记号轻微不对称；留待最终审查裁定。
+  Note: 并行会话并发 cargo 构建曾致 3 个无关瞬态失败（[cadence_project_rules] 断言），stash 对照实验证明与本任务无关，重跑全绿。
+Task 3: complete (commit 8066e065, review approved; 父提交为并行会话 a2976742，diff 仅 tasks.md)
+  ⚠️ 已消解：1.1–2.2 勾选依据由 Task 1/2 审查结论覆盖。
+Final review: approved (66c53630/9607f860/8066e065, Ready to merge=Yes)。Minors 留档：str+ vs 非空白记号不对称（保留）；Plan Step 2 命令模板已订正（本次提交）；spec「两项链路通过 Final Compile」场景由 tasks 4.1 Case A/B 真实验证兜底（归档前必须完成）。
+
+# Provider Prompt 项目规则引用
+
+Change: use-project-rules-in-prompts
+Plan: cadence/plans/2026-07-26_计划文档_功能开发_ProviderPrompt项目规则引用_v1.0.md
+Execution mode: subagent-driven-development
+Task 1/2: complete (commits 9607f860..a2976742, review approved)
+  Minor: RED 阶段后半部分的逐条失败尾部因并发 Cargo 锁与输出截断未留存；实施报告已披露，且不影响最终契约或 GREEN 证据。
+Task 3: pending (全量质量门禁、OpenSpec 收尾与文档提交)。

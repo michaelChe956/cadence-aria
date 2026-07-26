@@ -21,6 +21,7 @@ const STEP_LABELS: Record<RepositoryInitializationStepId, string> = {
   rule_config: "配置规则",
   mcp_configuration: "配置 MCP",
   project_rules_examples: "生成项目规则示例",
+  git_finalize: "提交并推送",
 };
 
 type CreateRepositoryDialogProps = {
@@ -262,7 +263,11 @@ export function CreateRepositoryDialog({
         {operation ? (
           completedResult ? (
             <>
-              <RepositoryInitializationSuccess response={completedResult} />
+              <RepositoryInitializationProgress operation={operation} />
+              <RepositoryInitializationSuccess
+                response={completedResult}
+                operation={operation}
+              />
               <div className="mt-4 flex justify-end">
                 <button
                   type="button"
@@ -547,10 +552,15 @@ function stepStatusLabel(status: RepositoryInitializationStep["status"]) {
 
 function RepositoryInitializationSuccess({
   response,
+  operation,
 }: {
   response: CreateRepositoryResponse;
+  operation: RepositoryInitializationOperationSnapshot;
 }) {
   const { initialization } = response;
+  const gitFinalizeFailed = operation.steps.some(
+    (step) => step.step_id === "git_finalize" && step.status === "failed",
+  );
   return (
     <section className="space-y-3 text-sm" aria-label="代码库初始化结果">
       <h3 className="font-semibold text-[var(--aria-ink)]">代码库初始化完成</h3>
@@ -588,6 +598,22 @@ function RepositoryInitializationSuccess({
               <li key={warning}>{warning}</li>
             ))}
           </ul>
+        </div>
+      ) : null}
+      {gitFinalizeFailed ? (
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="rounded-md border border-[var(--aria-danger)]/30 bg-red-50 px-3 py-2 text-[var(--aria-danger)]"
+        >
+          <p>自动提交推送未完成，请在目标仓库手动执行 git commit / git push</p>
+          {initialization.git_finalize_warning ? (
+            <p className="mt-1">{initialization.git_finalize_warning}</p>
+          ) : null}
+        </div>
+      ) : initialization.git_finalize_warning ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
+          {initialization.git_finalize_warning}
         </div>
       ) : null}
     </section>

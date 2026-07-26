@@ -326,11 +326,12 @@ async fn repository_registration_reports_git_initializer_and_persist_failures_wi
         RepositoryInitializationOperationStatus::Failed
     );
     assert_eq!(after_operation.failed_step, None);
-    assert!(
-        after_operation
-            .steps
-            .iter()
-            .all(|step| step.status == RepositoryInitializationStepStatus::Completed)
+    assert!(after_operation.steps[..5]
+        .iter()
+        .all(|step| step.status == RepositoryInitializationStepStatus::Completed));
+    assert_eq!(
+        after_operation.steps[5].status,
+        RepositoryInitializationStepStatus::Pending
     );
     assert_eq!(
         after_operation

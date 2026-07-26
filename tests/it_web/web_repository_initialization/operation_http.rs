@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn repository_initialization_post_returns_202_then_get_returns_completed_five_step_result() {
+async fn repository_initialization_post_returns_202_then_get_returns_completed_six_step_result() {
     let root = tempdir().unwrap();
     let repo = git_repo();
     let provider = Arc::new(ScriptedClaude::new(vec![TurnScript::Complete; 4]));
@@ -17,7 +17,12 @@ async fn repository_initialization_post_returns_202_then_get_returns_completed_f
     assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
     let operation_id = accepted["operation_id"].as_str().unwrap();
     assert_eq!(accepted["status"], "created");
-    assert_eq!(accepted["steps"].as_array().unwrap().len(), 5);
+    assert_eq!(accepted["steps"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        accepted["steps"][5]["step_id"],
+        "git_finalize",
+        "git finalize must be the sixth and final initialization step"
+    );
     assert!(
         accepted["steps"]
             .as_array()
@@ -188,6 +193,7 @@ async fn repository_initialization_completed_operation_get_sanitizes_persisted_r
                     ".claude/rules/project.md".to_string(),
                     "src/monkey.rs".to_string(),
                 ],
+                git_finalize_warning: None,
                 completed_at: "2026-07-14T03:00:12Z".to_string(),
             },
             "2026-07-14T03:00:12Z".to_string(),
@@ -400,12 +406,14 @@ async fn repository_initialization_persist_failure_and_same_path_lock_are_transa
     let operation_id = accepted["operation_id"].as_str().expect("operation id");
     let failed = get_operation_until_terminal(&app, "project_0001", operation_id).await;
     assert_eq!(failed["status"], "failed");
-    assert!(
-        failed["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|step| step["status"] == "completed")
+    assert!(failed["steps"].as_array().unwrap()[..5]
+        .iter()
+        .all(|step| step["status"] == "completed")
+    );
+    assert_eq!(
+        failed["steps"][5]["status"],
+        "pending",
+        "repository persistence fails before git finalize starts"
     );
     assert_eq!(failed["failed_step"], Value::Null);
     assert_eq!(

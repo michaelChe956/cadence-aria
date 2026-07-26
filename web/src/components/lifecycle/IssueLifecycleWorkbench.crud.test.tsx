@@ -225,6 +225,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
           ],
           warnings: ["cadence_skills_conflict:<path>"],
           changed_paths: [".claude/rules/project.md"],
+          git_finalize_warning: null,
           completed_at: "2026-07-14T00:01:00Z",
         },
       },

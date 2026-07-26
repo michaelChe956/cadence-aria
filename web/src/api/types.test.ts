@@ -571,6 +571,7 @@ describe("repository initialization operation types", () => {
         { step_id: "rule_config", status: "pending" },
         { step_id: "mcp_configuration", status: "pending" },
         { step_id: "project_rules_examples", status: "pending" },
+        { step_id: "git_finalize", status: "pending" },
       ],
       current_step: null,
       failed_step: null,
@@ -589,6 +590,7 @@ describe("repository initialization operation types", () => {
         { step_id: "rule_config", status: "completed" },
         { step_id: "mcp_configuration", status: "completed" },
         { step_id: "project_rules_examples", status: "completed" },
+        { step_id: "git_finalize", status: "completed" },
       ],
       current_step: null,
       failed_step: null,
@@ -631,6 +633,7 @@ describe("repository initialization operation types", () => {
           ],
           warnings: [],
           changed_paths: [],
+          git_finalize_warning: null,
           completed_at: "2026-07-22T00:01:00Z",
         },
       },
@@ -648,6 +651,7 @@ describe("repository initialization operation types", () => {
         { step_id: "rule_config", status: "pending" },
         { step_id: "mcp_configuration", status: "pending" },
         { step_id: "project_rules_examples", status: "pending" },
+        { step_id: "git_finalize", status: "pending" },
       ],
       current_step: null,
       failed_step: "pre_check",
@@ -667,7 +671,7 @@ describe("repository initialization operation types", () => {
       completed_at: "2026-07-22T00:01:00Z",
     } satisfies RepositoryInitializationOperationSnapshot;
 
-    expect(created.steps).toHaveLength(5);
+    expect(created.steps).toHaveLength(6);
     expect(completed.result?.repository.repository_id).toBe("repository_0001");
     expect(failed.error?.details.reason_code).toBe(
       "repository_init_command_failed",

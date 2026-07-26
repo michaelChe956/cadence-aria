@@ -10,6 +10,7 @@ pub struct RepositoryRegistrationInitializationDto {
     pub commands: Vec<serde_json::Value>,
     pub warnings: Vec<String>,
     pub changed_paths: Vec<String>,
+    pub git_finalize_warning: Option<String>,
     pub completed_at: String,
 }
 

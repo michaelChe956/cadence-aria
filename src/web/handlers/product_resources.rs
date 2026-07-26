@@ -234,6 +234,7 @@ pub(super) mod create_repository_tests {
             },
             warnings: Vec::new(),
             changed_paths: Vec::new(),
+            git_finalize_warning: None,
             completed_at: "2026-07-14T00:01:00Z".to_string(),
         }
     }

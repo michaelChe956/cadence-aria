@@ -189,6 +189,28 @@ impl OperationProgressReporter {
             "Repository initialization state could not be persisted; query the operation after recovery.",
         )
     }
+
+    fn checkpoint_git_finalize_result(
+        &self,
+        result: RepositoryRegistrationSuccess,
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
+        self.operations
+            .checkpoint_git_finalize_result(&self.project_id, &self.operation_id, result)
+            .map(|_| ())
+            .map_err(Self::operation_store_error)
+            .map_err(Box::new)
+    }
+
+    fn update_git_finalize_checkpoint_warning(
+        &self,
+        warning: String,
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
+        self.operations
+            .update_git_finalize_checkpoint_warning(&self.project_id, &self.operation_id, warning)
+            .map(|_| ())
+            .map_err(Self::operation_store_error)
+            .map_err(Box::new)
+    }
 }
 
 impl RepositoryInitializationProgress for OperationProgressReporter {
@@ -502,14 +524,43 @@ impl RepositoryRegistrationCoordinator {
                     mapped
                 })?;
 
-            Ok(RepositoryRegistrationSuccess {
+            let mut success = RepositoryRegistrationSuccess {
                 repository,
                 cadence_skills: preparation_summary(&prepared),
                 initialization,
                 warnings: prepared.warnings,
                 changed_paths,
+                git_finalize_warning: None,
                 completed_at: (self.clock)(),
-            })
+            };
+
+            reporter
+                .step_started(RepositoryInitializationStepKind::GitFinalize)
+                .map_err(|error| *error)?;
+            reporter
+                .checkpoint_git_finalize_result(success.clone())
+                .map_err(|error| *error)?;
+            let (git_finalize_warning, git_finalize_succeeded) =
+                match self.git_finalize(&git_root, cancellation.clone()).await {
+                    Ok(warning) => (warning, true),
+                    Err(reason) => (Some(format!(
+                    "git_finalize: {}；请手动提交推送",
+                    sanitize_summary(&reason, 4 * 1024),
+                )), false),
+                };
+            if let Some(warning) = git_finalize_warning.as_ref() {
+                reporter
+                    .update_git_finalize_checkpoint_warning(warning.clone())
+                    .map_err(|error| *error)?;
+            }
+            if git_finalize_succeeded {
+                reporter
+                    .step_completed(RepositoryInitializationStepKind::GitFinalize)
+                    .map_err(|error| *error)?;
+            }
+            success.git_finalize_warning = git_finalize_warning;
+
+            Ok(success)
         }
         .await;
 
@@ -734,6 +785,7 @@ impl RepositoryRegistrationCoordinator {
 
 mod helpers;
 use helpers::*;
+mod git_finalize;
 
 #[cfg(test)]
 mod tests;

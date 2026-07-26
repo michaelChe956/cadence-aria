@@ -453,16 +453,18 @@ async fn batch_local_validation_failure_retries_once() {
     assert_eq!(batch.item_draft_ids.len(), 3);
     assert!(batch.validation_failed_ids.is_empty());
 
-    let captured_prompts = prompts.lock().unwrap();
-    let prompt_count = captured_prompts.len();
-    assert_eq!(
-        prompt_count, 5,
-        "outline author + failed draft + retry + 2 drafts"
-    );
-    assert!(captured_prompts[2].contains("[draft_validation_findings]"));
-    assert!(captured_prompts[2].contains(
-        "write_scope_required: draft outline_backend_session must include at least one canonical exclusive write scope"
-    ));
+    {
+        let captured_prompts = prompts.lock().unwrap();
+        let prompt_count = captured_prompts.len();
+        assert_eq!(
+            prompt_count, 5,
+            "outline author + failed draft + retry + 2 drafts"
+        );
+        assert!(captured_prompts[2].contains("[draft_validation_findings]"));
+        assert!(captured_prompts[2].contains(
+            "write_scope_required: draft outline_backend_session must include at least one canonical exclusive write scope"
+        ));
+    }
 
     ws.close(None).await.ok();
 }
@@ -547,16 +549,18 @@ async fn batch_local_validation_second_failure_marks_validation_failed_and_conti
     assert_eq!(batch.item_draft_ids.len(), 2);
     assert_eq!(batch.validation_failed_ids, vec![failed.draft_id.clone()]);
 
-    let captured_prompts = prompts.lock().unwrap();
-    let prompt_count = captured_prompts.len();
-    assert_eq!(
-        prompt_count, 5,
-        "outline author + failed draft + retry + 2 drafts"
-    );
-    assert!(captured_prompts[2].contains("[draft_validation_findings]"));
-    assert!(captured_prompts[2].contains(
-        "write_scope_required: draft outline_backend_session must include at least one canonical exclusive write scope"
-    ));
+    {
+        let captured_prompts = prompts.lock().unwrap();
+        let prompt_count = captured_prompts.len();
+        assert_eq!(
+            prompt_count, 5,
+            "outline author + failed draft + retry + 2 drafts"
+        );
+        assert!(captured_prompts[2].contains("[draft_validation_findings]"));
+        assert!(captured_prompts[2].contains(
+            "write_scope_required: draft outline_backend_session must include at least one canonical exclusive write scope"
+        ));
+    }
 
     ws.close(None).await.ok();
 }

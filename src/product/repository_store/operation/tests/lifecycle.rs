@@ -16,7 +16,7 @@ fn operation_progress_callback_contract_preserves_step_event_order() {
 }
 
 #[test]
-fn operation_starts_with_exactly_five_pending_steps_and_enforces_order() {
+fn operation_starts_with_exactly_six_pending_steps_and_enforces_order() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));
     let store = RepositoryInitializationOperationStore::new(paths);
@@ -49,6 +49,7 @@ fn operation_starts_with_exactly_five_pending_steps_and_enforces_order() {
             RepositoryInitializationStepKind::RuleConfig,
             RepositoryInitializationStepKind::McpConfiguration,
             RepositoryInitializationStepKind::ProjectRulesExamples,
+            RepositoryInitializationStepKind::GitFinalize,
         ],
     );
     assert!(
@@ -149,6 +150,290 @@ fn completed_operation_requires_all_steps_and_persists_final_result() {
     let persisted: RepositoryInitializationOperation =
         read_json(&fixture.operation_path()).unwrap();
     assert_eq!(persisted, completed);
+}
+
+#[test]
+fn completed_operation_keeps_repository_result_when_git_finalize_failed() {
+    let fixture = running_git_finalize_operation();
+    let mut result = success_result("project_0001");
+    result.git_finalize_warning = Some(
+        "git_finalize_push: permission denied；请手动提交推送".to_string(),
+    );
+
+    let completed = fixture
+        .store
+        .finish_completed(
+            "project_0001",
+            &fixture.operation_id,
+            result,
+            COMPLETED_AT.into(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        completed.status,
+        RepositoryInitializationOperationStatus::Completed
+    );
+    assert_eq!(
+        completed.failed_step,
+        Some(RepositoryInitializationStepKind::GitFinalize)
+    );
+    assert_eq!(
+        completed.steps[5].status,
+        RepositoryInitializationStepStatus::Failed
+    );
+    assert!(completed.error.is_none());
+    assert!(completed
+        .result
+        .as_ref()
+        .and_then(|result| result.git_finalize_warning.as_ref())
+        .is_some());
+}
+
+#[test]
+fn interrupted_git_finalize_keeps_registered_repository_result() {
+    let fixture = running_git_finalize_operation();
+    fixture
+        .store
+        .checkpoint_git_finalize_result(
+            "project_0001",
+            &fixture.operation_id,
+            success_result("project_0001"),
+        )
+        .expect("persist registered repository before git finalize");
+
+    let recovered = fixture
+        .store
+        .recover_interrupted("project_0001", &fixture.operation_id, COMPLETED_AT.into())
+        .expect("git finalize interruption recovers as completed registration");
+    assert_eq!(
+        recovered.status,
+        RepositoryInitializationOperationStatus::Completed
+    );
+    assert_eq!(
+        recovered.failed_step,
+        Some(RepositoryInitializationStepKind::GitFinalize)
+    );
+    assert_eq!(
+        recovered.steps[5].status,
+        RepositoryInitializationStepStatus::Failed
+    );
+    assert!(recovered.error.is_none());
+    assert!(recovered
+        .result
+        .as_ref()
+        .and_then(|result| result.git_finalize_warning.as_ref())
+        .expect("manual recovery warning")
+        .contains("手动执行 git commit / git push"));
+}
+
+#[test]
+fn interrupted_before_git_finalize_completion_preserves_checkpoint_warning() {
+    let fixture = running_git_finalize_operation();
+    fixture
+        .store
+        .checkpoint_git_finalize_result(
+            "project_0001",
+            &fixture.operation_id,
+            success_result("project_0001"),
+        )
+        .expect("persist registered repository before git finalize");
+    let warning = "git_finalize: 无 upstream，已跳过 push，请手动推送".to_string();
+    fixture
+        .store
+        .update_git_finalize_checkpoint_warning(
+            "project_0001",
+            &fixture.operation_id,
+            warning.clone(),
+        )
+        .expect("persist skip-push warning while git finalize remains running");
+
+    let recovered = fixture
+        .store
+        .recover_interrupted("project_0001", &fixture.operation_id, COMPLETED_AT.into())
+        .expect("running git finalize recovers as completed registration");
+
+    assert_eq!(
+        recovered.status,
+        RepositoryInitializationOperationStatus::Completed
+    );
+    assert_eq!(
+        recovered.failed_step,
+        Some(RepositoryInitializationStepKind::GitFinalize)
+    );
+    assert_eq!(
+        recovered.steps[5].status,
+        RepositoryInitializationStepStatus::Failed
+    );
+    assert_eq!(
+        recovered
+            .result
+            .as_ref()
+        .and_then(|result| result.git_finalize_warning.as_ref()),
+        Some(&warning)
+    );
+    assert!(recovered.error.is_none());
+}
+
+#[test]
+fn interrupted_after_git_finalize_completion_keeps_completed_result() {
+    let fixture = running_git_finalize_operation();
+    fixture
+        .store
+        .checkpoint_git_finalize_result(
+            "project_0001",
+            &fixture.operation_id,
+            success_result("project_0001"),
+        )
+        .expect("persist registered repository before git finalize");
+    fixture
+        .store
+        .mark_step_completed(
+            "project_0001",
+            &fixture.operation_id,
+            RepositoryInitializationStepKind::GitFinalize,
+            COMPLETED_AT.into(),
+        )
+        .expect("complete git finalize before terminal write");
+
+    let recovered = fixture
+        .store
+        .recover_interrupted("project_0001", &fixture.operation_id, COMPLETED_AT.into())
+        .expect("completed git finalize recovers as completed registration");
+    assert_eq!(
+        recovered.status,
+        RepositoryInitializationOperationStatus::Completed
+    );
+    assert_eq!(recovered.failed_step, None);
+    assert_eq!(
+        recovered.steps[5].status,
+        RepositoryInitializationStepStatus::Completed
+    );
+    assert!(recovered.error.is_none());
+    assert!(recovered
+        .result
+        .as_ref()
+        .and_then(|result| result.git_finalize_warning.as_ref())
+        .is_none());
+}
+
+#[test]
+fn interrupted_after_skip_push_completion_keeps_persisted_warning() {
+    let fixture = running_git_finalize_operation();
+    fixture
+        .store
+        .checkpoint_git_finalize_result(
+            "project_0001",
+            &fixture.operation_id,
+            success_result("project_0001"),
+        )
+        .expect("persist registered repository before git finalize");
+    let warning = "git_finalize: 无 remote，已跳过 push，请手动推送".to_string();
+    fixture
+        .store
+        .update_git_finalize_checkpoint_warning(
+            "project_0001",
+            &fixture.operation_id,
+            warning.clone(),
+        )
+        .expect("persist skip-push warning before completing git finalize");
+    fixture
+        .store
+        .mark_step_completed(
+            "project_0001",
+            &fixture.operation_id,
+            RepositoryInitializationStepKind::GitFinalize,
+            COMPLETED_AT.into(),
+        )
+        .expect("complete git finalize before terminal write");
+
+    let recovered = fixture
+        .store
+        .recover_interrupted("project_0001", &fixture.operation_id, COMPLETED_AT.into())
+        .expect("completed skip-push finalize recovers as completed registration");
+
+    assert_eq!(
+        recovered.status,
+        RepositoryInitializationOperationStatus::Completed
+    );
+    assert_eq!(recovered.failed_step, None);
+    assert_eq!(
+        recovered.steps[5].status,
+        RepositoryInitializationStepStatus::Completed
+    );
+    assert_eq!(
+        recovered
+            .result
+            .as_ref()
+            .and_then(|result| result.git_finalize_warning.as_ref()),
+        Some(&warning)
+    );
+}
+
+#[test]
+fn git_finalize_cannot_complete_without_persisted_repository_result() {
+    let fixture = running_git_finalize_operation();
+
+    let error = fixture
+        .store
+        .mark_step_completed(
+            "project_0001",
+            &fixture.operation_id,
+            RepositoryInitializationStepKind::GitFinalize,
+            COMPLETED_AT.into(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, ProductStoreError::IdentityMismatch { .. }));
+}
+
+#[test]
+fn completed_legacy_five_step_operation_remains_readable() {
+    let fixture = completed_steps_operation();
+    fixture
+        .store
+        .finish_completed(
+            "project_0001",
+            &fixture.operation_id,
+            success_result("project_0001"),
+            COMPLETED_AT.into(),
+        )
+        .unwrap();
+
+    let path = fixture.operation_path();
+    let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
+    let removed_step = persisted.steps.pop().expect("git finalize step");
+    assert_eq!(removed_step.step_id, RepositoryInitializationStepKind::GitFinalize);
+    write_json(&path, &persisted).unwrap();
+
+    let legacy = fixture
+        .store
+        .get("project_0001", &fixture.operation_id)
+        .expect("legacy operation remains readable");
+    assert_eq!(legacy.steps.len(), 5);
+    assert_eq!(legacy.failed_step, None);
+    assert!(legacy.result.is_some());
+}
+
+#[test]
+fn interrupted_legacy_five_step_operation_remains_recoverable() {
+    let fixture = running_pre_check_operation();
+    let path = fixture.operation_path();
+    let mut persisted: RepositoryInitializationOperation = read_json(&path).unwrap();
+    let removed_step = persisted.steps.pop().expect("git finalize step");
+    assert_eq!(removed_step.step_id, RepositoryInitializationStepKind::GitFinalize);
+    write_json(&path, &persisted).unwrap();
+
+    let recovered = fixture
+        .store
+        .recover_interrupted("project_0001", &fixture.operation_id, COMPLETED_AT.into())
+        .expect("legacy operation remains recoverable");
+    assert_eq!(recovered.status, RepositoryInitializationOperationStatus::Failed);
+    assert_eq!(
+        recovered.failed_step,
+        Some(RepositoryInitializationStepKind::PreCheck)
+    );
+    assert_eq!(recovered.steps.len(), 5);
 }
 
 #[test]

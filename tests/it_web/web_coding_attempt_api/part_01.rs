@@ -60,7 +60,7 @@ async fn creates_coding_attempt_for_confirmed_work_item_and_surfaces_latest_atte
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "response: {attempt}");
     let attempt_id = assert_global_attempt_id(&attempt);
     assert_eq!(attempt["work_item_id"], "work_item_0001");
     assert_eq!(attempt["attempt_no"], 1);
