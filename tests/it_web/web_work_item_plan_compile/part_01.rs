@@ -2,13 +2,16 @@ use std::fs;
 
 use axum::http::Method;
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::issue_store::IssueStore;
 use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::models::{
-    IssueWorkItemPlanStatus, ProviderName, WorkItemDraftStatus, WorkItemGenerationMode,
-    WorkItemPlanCommitState, WorkItemPlanCompileStatus, WorkspaceType,
+    HumanPresentationRevision, IssueWorkItemPlanStatus, ProviderName, WorkItemDraftStatus,
+    WorkItemGenerationMode, WorkItemPlanCommitState, WorkItemPlanCompileStatus, WorkspaceType,
 };
 use cadence_aria::product::work_item_plan_store::WorkItemPlanStore;
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
+use cadence_aria::product::workspace_repository::workspace_repository_for_session;
+use cadence_aria::web::workspace_context::ensure_workspace_context_message;
 use cadence_aria::web::workspace_ws_types::{
     ArtifactPayload, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
     WorkspaceStage as WsWorkspaceStage,
@@ -170,7 +173,8 @@ async fn batch_accept_all_runs_final_compile_and_publishes_revision_entities() {
     .await;
     let (_session_id, plan_id, mut ws) = prepare_plan_accept_outline_and_select_batch(&app).await;
 
-    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     assert!(
         lifecycle
             .list_work_items("project_0001", "issue_0001")
@@ -261,7 +265,7 @@ async fn batch_accept_all_runs_final_compile_and_publishes_revision_entities() {
     assert_eq!(plan.work_item_ids.len(), 3);
     assert_eq!(plan.verification_plan_ids.len(), 3);
     assert_eq!(plan.dependency_graph.len(), 2);
-    let revision_store = WorkItemRevisionStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
     let lineage = revision_store
         .get_plan_lineage("project_0001", "issue_0001", &plan_id)
         .expect("load active plan lineage");
@@ -330,8 +334,124 @@ async fn batch_accept_all_runs_final_compile_and_publishes_revision_entities() {
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>()
     );
+    let issue = IssueStore::new(app_paths.clone())
+        .get("project_0001", "issue_0001")
+        .expect("load issue for runtime repository");
+    let expected_repository_id = issue.repo_id.expect("issue repository id");
+    for session in &work_item_sessions {
+        let binding = session
+            .work_item_runtime_binding
+            .as_ref()
+            .expect("runtime binding");
+        let projection_bundle = revision_store
+            .get_work_item_projection_bundle(&lineage, &binding.projection_bundle_id)
+            .expect("load human projection bundle");
+        let context = &session.messages[0].content;
+        assert!(context.contains(&format!("plan_id: {}", binding.plan_id)));
+        assert!(context.contains(&format!(
+            "plan_revision_id: {}",
+            binding.plan_revision_id
+        )));
+        assert!(context.contains(&format!(
+            "work_item_revision_id: {}",
+            binding.work_item_revision_id
+        )));
+        assert!(context.contains(&format!(
+            "projection_bundle_id: {}",
+            binding.projection_bundle_id
+        )));
+        assert!(context.contains(&format!(
+            "verification_plan_revision_id: {}",
+            binding.verification_plan_revision_id
+        )));
+        assert!(context.contains(&format!(
+            "human_projection_hash: {}",
+            binding.human_projection_hash
+        )));
+        assert!(context.contains(&format!(
+            "title: {}",
+            projection_bundle.human_projection.title
+        )));
+        assert!(context.contains(&format!(
+            "goal: {}",
+            projection_bundle.human_projection.goal
+        )));
+        let verification_plan = revision_store
+            .get_verification_plan_revision(&lineage, &binding.verification_plan_revision_id)
+            .expect("load revision verification plan");
+        assert!(context.contains("[verification_checks]"));
+        for check in &verification_plan.verification_checks {
+            assert!(context.contains(&check.check_id));
+        }
+        for forbidden in [
+            "[work_item_plan_source]",
+            "canonical_contract",
+            "coder_projection",
+            "reviewer_projection",
+            "criterion_refs",
+        ] {
+            assert!(
+                !context.contains(forbidden),
+                "Work Item Human Context must not expose {forbidden}: {context}"
+            );
+        }
+        assert_eq!(
+            workspace_repository_for_session(&app_paths, &lifecycle, session)
+                .expect("Work Item RuntimeBinding must resolve repository without Legacy Work Item")
+                .id,
+            expected_repository_id
+        );
+    }
+    let presentation_session = (*work_item_sessions[0]).clone();
+    let original_message_count = presentation_session.messages.len();
+    let presentation_binding = presentation_session
+        .work_item_runtime_binding
+        .as_ref()
+        .expect("presentation runtime binding");
+    revision_store
+        .put_human_presentation_revision(
+            &lineage,
+            &HumanPresentationRevision {
+                id: "human_presentation_revision_0001".to_string(),
+                source_plan_projection_bundle_id: None,
+                source_work_item_projection_bundle_id: Some(
+                    presentation_binding.projection_bundle_id.clone(),
+                ),
+                supersedes: None,
+                human_summary: "先完成库导出，再由服务与界面消费。".to_string(),
+                why_split: Some("降低并行修改冲突。".to_string()),
+                dependency_explanation: vec!["服务依赖库导出的稳定接口。".to_string()],
+                risk_explanation: vec!["变更公共导出时必须保留兼容性。".to_string()],
+                source_refs: vec!["design_spec_0001".to_string()],
+                normative: false,
+                used_by_provider: false,
+                created_at: "2026-07-26T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save human presentation");
+    let refreshed_session = ensure_workspace_context_message(
+        &app_paths,
+        &lifecycle,
+        presentation_session,
+    )
+    .expect("refresh Work Item human context");
+    assert_eq!(
+        refreshed_session.messages.len(),
+        original_message_count,
+        "refreshing Revision-backed context must replace the existing system message"
+    );
+    let refreshed_context = &refreshed_session.messages[0].content;
+    for expected in [
+        "human_presentation_id: human_presentation_revision_0001",
+        "human_summary: 先完成库导出，再由服务与界面消费。",
+        "why_split: 降低并行修改冲突。",
+        "dependency_explanation: [服务依赖库导出的稳定接口。]",
+        "risk_explanation: [变更公共导出时必须保留兼容性。]",
+    ] {
+        assert!(refreshed_context.contains(expected), "missing {expected}");
+    }
 
-    let store = WorkItemPlanStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let store = WorkItemPlanStore::new(app_paths);
     let index = store
         .load_active_index("project_0001", "issue_0001", &plan_id)
         .expect("load active index")

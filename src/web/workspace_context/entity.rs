@@ -105,9 +105,43 @@ pub(super) fn work_item_context_summary(
         .map(|contract| contract.contract_id.as_str())
         .collect::<Vec<_>>()
         .join(", ");
+    let verification_checks = runtime
+        .verification_plan_revision
+        .verification_checks
+        .iter()
+        .map(|check| {
+            let instruction = check
+                .command
+                .as_deref()
+                .or(check.manual_instruction.as_deref())
+                .unwrap_or("无执行说明");
+            format!("- {}: {instruction}", check.check_id)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let human_presentation = runtime.human_presentation.as_ref().map_or_else(
+        || "无".to_string(),
+        |presentation| {
+            format!(
+                "human_presentation_id: {}\nhuman_summary: {}\nwhy_split: {}\ndependency_explanation: [{}]\nrisk_explanation: [{}]\nsource_refs: [{}]",
+                presentation.id,
+                presentation.human_summary,
+                presentation.why_split.as_deref().unwrap_or("无"),
+                presentation.dependency_explanation.join(", "),
+                presentation.risk_explanation.join(", "),
+                presentation.source_refs.join(", "),
+            )
+        },
+    );
 
     Ok(format!(
-        "title: {}\ngoal: {}\nnon_goals: [{}]\ninput_contracts: [{}]\noutput_contracts: [{}]\ndepends_on: [{}]\nexclusive_write_scopes: [{}]\nforbidden_write_scopes: [{}]\ncompletion_summary: [{}]\nsource_refs: [{}]\nnormative: {}\nused_by_provider: {}",
+        "plan_id: {}\nplan_revision_id: {}\nwork_item_revision_id: {}\nprojection_bundle_id: {}\nverification_plan_revision_id: {}\nhuman_projection_hash: {}\ntitle: {}\ngoal: {}\nnon_goals: [{}]\ninput_contracts: [{}]\noutput_contracts: [{}]\ndepends_on: [{}]\nexclusive_write_scopes: [{}]\nforbidden_write_scopes: [{}]\ncompletion_summary: [{}]\nsource_refs: [{}]\nnormative: {}\nused_by_provider: {}\n\n[verification_checks]\n{}\n\n[human_presentation]\n{}",
+        runtime.binding.plan_id,
+        runtime.binding.plan_revision_id,
+        runtime.binding.work_item_revision_id,
+        runtime.binding.projection_bundle_id,
+        runtime.binding.verification_plan_revision_id,
+        runtime.binding.human_projection_hash,
         human.title,
         human.goal,
         human.non_goals.join(", "),
@@ -120,6 +154,8 @@ pub(super) fn work_item_context_summary(
         human.source_refs.join(", "),
         human.normative,
         human.used_by_provider,
+        verification_checks,
+        human_presentation,
     ))
 }
 

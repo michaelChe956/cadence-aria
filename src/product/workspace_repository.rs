@@ -4,6 +4,7 @@ use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{RepositoryRecord, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::repository_store::RepositoryStore;
+use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 
 pub fn workspace_repository_for_session(
     app_paths: &ProductAppPaths,
@@ -43,15 +44,16 @@ fn workspace_repository_id(
                 kind: "repository",
                 id: format!("issue:{}:repo_id", session.issue_id),
             }),
-        WorkspaceType::WorkItem => lifecycle
-            .list_work_items(&session.project_id, &session.issue_id)?
-            .into_iter()
-            .find(|work_item| work_item.id == session.entity_id)
-            .map(|work_item| work_item.repository_id)
-            .ok_or_else(|| ProductStoreError::NotFound {
-                kind: "work_item",
-                id: session.entity_id.clone(),
-            }),
+        WorkspaceType::WorkItem => {
+            WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
+            IssueStore::new(app_paths.clone())
+                .get(&session.project_id, &session.issue_id)?
+                .repo_id
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "repository",
+                    id: format!("issue:{}:repo_id", session.issue_id),
+                })
+        }
         WorkspaceType::WorkItemPlan => IssueStore::new(app_paths.clone())
             .get(&session.project_id, &session.issue_id)?
             .repo_id
