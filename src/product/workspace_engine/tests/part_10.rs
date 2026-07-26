@@ -378,7 +378,7 @@ fn reviewer_prompt_requires_nonce_sentinel() {
     assert!(input.prompt.contains("[cadence_project_rules]"));
     assert!(input.prompt.contains("AGENTS.md"));
     assert!(input.prompt.contains("CLAUDE.md"));
-    assert!(!input.prompt.contains("Cadence-skills/"));
+    assert!(!input.prompt.contains(&["Cadence-", "skills/"].concat()));
     assert!(input.prompt.contains("当前阶段：候选产物审查"));
     assert!(input.prompt.contains("必调 Skill：using-superpowers。"));
     assert!(

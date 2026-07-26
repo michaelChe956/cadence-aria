@@ -408,7 +408,7 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
     assert!(prompt.contains("[cadence_project_rules]"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
-    assert!(!prompt.contains("Cadence-skills/"));
+    assert!(!prompt.contains(&["Cadence-", "skills/"].concat()));
     assert!(prompt.contains("requesting-code-review"));
     assert!(prompt.contains("source_stage=group_final_review"));
     assert!(prompt.contains("只输出 JSON"));

@@ -34,9 +34,13 @@ mod tests {
     fn direct_reference_excludes_external_and_knowledge_base_constraints() {
         let prompt = direct_cadence_routing_rules_reference();
 
-        for forbidden in ["Cadence-skills/", "KnowledgeBase", "唯一流程权威"] {
+        for forbidden in [
+            ["Cadence-", "skills/"].concat(),
+            "KnowledgeBase".to_owned(),
+            "唯一流程权威".to_owned(),
+        ] {
             assert!(
-                !prompt.contains(forbidden),
+                !prompt.contains(&forbidden),
                 "unexpected {forbidden}: {prompt}"
             );
         }

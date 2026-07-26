@@ -179,7 +179,10 @@ fn workspace_author_workflows_directly_reference_cadence_routing_rules() {
             workflow.contains("AGENTS.md") && workflow.contains("CLAUDE.md"),
             "{workspace_type:?}"
         );
-        assert!(!workflow.contains("Cadence-skills/"), "{workspace_type:?}");
+        assert!(
+            !workflow.contains(&["Cadence-", "skills/"].concat()),
+            "{workspace_type:?}"
+        );
         assert!(
             !workflow.contains("cadence-workflow"),
             "{workspace_type:?} must not depend on cadence-workflow"

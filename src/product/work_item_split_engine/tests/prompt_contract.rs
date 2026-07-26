@@ -364,7 +364,11 @@ fn work_item_plan_prompts_keep_json_contract_without_markdown_schema() {
     assert!(invocation.prompt.contains("[cadence_project_rules]"));
     assert!(invocation.prompt.contains("AGENTS.md"));
     assert!(invocation.prompt.contains("CLAUDE.md"));
-    assert!(!invocation.prompt.contains("Cadence-skills/"));
+    assert!(
+        !invocation
+            .prompt
+            .contains(&["Cadence-", "skills/"].concat())
+    );
     assert!(
         !invocation.prompt.contains("[artifact_schema_contract]"),
         "Work Item Plan JSON prompt must not receive a Markdown artifact schema: {}",

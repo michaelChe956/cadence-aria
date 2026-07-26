@@ -172,7 +172,7 @@ fn coding_prompt_requires_material_driven_execution_without_fixed_stack_terms() 
     assert!(prompt.contains("[cadence_project_rules]"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
-    assert!(!prompt.contains("Cadence-skills/"));
+    assert!(!prompt.contains(&["Cadence-", "skills/"].concat()));
     assert!(prompt.contains("executing-plans"));
     assert!(prompt.contains("test-driven-development"));
     assert!(!prompt.contains("cadence-workflow"));
@@ -228,7 +228,7 @@ fn coding_delta_prompt_requires_material_driven_rework_without_fixed_stack_terms
     assert!(prompt.contains("[cadence_project_rules]"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
-    assert!(!prompt.contains("Cadence-skills/"));
+    assert!(!prompt.contains(&["Cadence-", "skills/"].concat()));
     assert!(prompt.contains("executing-plans"));
     assert!(prompt.contains("test-driven-development"));
     assert!(!prompt.contains("cadence-workflow"));
@@ -346,7 +346,7 @@ fn coding_lifecycle_protocols_reuse_the_canonical_cadence_routing_reference() {
         );
         assert!(protocol.contains("AGENTS.md"));
         assert!(protocol.contains("CLAUDE.md"));
-        assert!(!protocol.contains("Cadence-skills/"));
+        assert!(!protocol.contains(&["Cadence-", "skills/"].concat()));
     }
 }
 
@@ -420,7 +420,7 @@ async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
     assert!(prompt.contains("[cadence_project_rules]"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
-    assert!(!prompt.contains("Cadence-skills/"));
+    assert!(!prompt.contains(&["Cadence-", "skills/"].concat()));
     assert!(prompt.contains("requesting-code-review"));
     assert!(prompt.contains("首个用户可见消息必须是工作流路由回执"));
     assert!(prompt.contains("最终审查结论必须只输出一个 JSON 对象"));

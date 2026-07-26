@@ -215,17 +215,17 @@ git commit -m "fix: use project rules in provider prompts"
 - Consumes: Task 2 已提交的集中规则片段和全部 prompt 契约。
 - Produces: 已勾选的 OpenSpec 高层工作包及可追溯的验证证据；不变更运行时接口。
 
-- [ ] **Step 1: 确认旧文本已从运行时和测试范围消失**
+- [ ] **Step 1: 确认旧文本已从本 Change 的运行时和契约测试范围消失**
 
 Run the following three commands separately; each must return no matches. Exit status 1 from rg is the expected no-match result.
 
 ~~~bash
-rg -n -F '[cadence_original_routing_rules]' src tests
-rg -n -F 'Cadence-skills/' src tests
-rg -n -F 'KnowledgeBase 的 manifest 或内容' src tests
+rg -n -F '[cadence_original_routing_rules]' src/product/cadence_skills/routing_reference.rs src/product/workspace_engine/tests/part_10.rs src/product/workspace_engine/tests/part_16.rs src/product/workspace_engine/tests/part_31.rs src/web/workspace_context/tests.rs src/product/work_item_split_engine/tests/prompt_contract.rs src/product/work_item_split_engine/tests/part_01.rs src/product/coding_workspace_engine/tests/parser_prompt.rs src/product/coding_workspace_engine/tests/parser_prompt/plan_defect_prompt.rs src/product/coding_workspace_engine/tests/provider_execution_context.rs src/product/tester_agent_loop/tests.rs tests/it_core/context_builder.rs tests/it_core/runtime_prompt_routing.rs
+rg -n -F 'Cadence-skills/' src/product/cadence_skills/routing_reference.rs src/product/workspace_engine/tests/part_10.rs src/product/workspace_engine/tests/part_16.rs src/product/workspace_engine/tests/part_31.rs src/web/workspace_context/tests.rs src/product/work_item_split_engine/tests/prompt_contract.rs src/product/work_item_split_engine/tests/part_01.rs src/product/coding_workspace_engine/tests/parser_prompt.rs src/product/coding_workspace_engine/tests/parser_prompt/plan_defect_prompt.rs src/product/coding_workspace_engine/tests/provider_execution_context.rs src/product/tester_agent_loop/tests.rs tests/it_core/context_builder.rs tests/it_core/runtime_prompt_routing.rs
+rg -n -F 'KnowledgeBase 的 manifest 或内容' src/product/cadence_skills/routing_reference.rs src/product/workspace_engine/tests/part_10.rs src/product/workspace_engine/tests/part_16.rs src/product/workspace_engine/tests/part_31.rs src/web/workspace_context/tests.rs src/product/work_item_split_engine/tests/prompt_contract.rs src/product/work_item_split_engine/tests/part_01.rs src/product/coding_workspace_engine/tests/parser_prompt.rs src/product/coding_workspace_engine/tests/parser_prompt/plan_defect_prompt.rs src/product/coding_workspace_engine/tests/provider_execution_context.rs src/product/tester_agent_loop/tests.rs tests/it_core/context_builder.rs tests/it_core/runtime_prompt_routing.rs
 ~~~
 
-若任一命令打印匹配，先修正该 prompt 或契约断言；不得修改 cadence/plans 中其他人现有的历史计划来伪造扫描结果。
+若任一命令打印匹配，先修正该 prompt 或契约断言；不得修改 cadence/plans 中其他人现有的历史计划来伪造扫描结果。独立 Cadence skills 安装/迁移模块不属于本 Change 的流程型 Provider prompt，因此不在本扫描范围内；本 Change 的负向契约断言必须在运行时构造旧路径，以保持逐字检查语义并避免扫描自命中。
 
 - [ ] **Step 2: 运行项目全量质量门禁**
 
@@ -240,7 +240,7 @@ openspec validate use-project-rules-in-prompts --strict
 git diff --check -- src/product/cadence_skills/routing_reference.rs src/product/workspace_engine/tests src/web/workspace_context/tests.rs src/product/work_item_split_engine/tests src/product/coding_workspace_engine/tests src/product/tester_agent_loop/tests.rs tests/it_core openspec/changes/use-project-rules-in-prompts cadence/plans/2026-07-26_计划文档_功能开发_ProviderPrompt项目规则引用_v1.0.md
 ~~~
 
-Expected: 所有门禁成功；如全量测试失败，保留完整失败输出，先按 systematic-debugging 定位是否与本变更相关，不得在没有根因的情况下改动实现。
+Expected: 格式、Clippy、检查、定向契约测试、OpenSpec 严格验证与范围 diff 检查成功。如全量测试失败，保留完整失败输出，先按 systematic-debugging 定位是否与本变更相关，不得在没有根因的情况下改动实现。操作者已批准接受既有 `large_file_guard` 基线例外：`cargo test --locked` 必须实际执行并如实记录其仅有的既有失败（`part_01.rs`、`WorkItemPlanArtifactContent.tsx`、`WorkItemPlanArtifactPanel.test.tsx` 均在实现基线 `9607f860` 前超限），不得描述为全量测试通过。
 
 - [ ] **Step 3: 仅根据获得的绿色证据更新任务并提交文档收尾**
 

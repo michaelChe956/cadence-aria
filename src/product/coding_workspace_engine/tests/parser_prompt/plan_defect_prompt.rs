@@ -39,7 +39,7 @@ fn tester_execute_prompt_blocks_insufficient_test_plan_without_replanning() {
     assert!(prompt.contains("[cadence_project_rules]"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
-    assert!(!prompt.contains("Cadence-skills/"));
+    assert!(!prompt.contains(&["Cadence-", "skills/"].concat()));
     assert!(prompt.contains("verification-before-completion"));
     assert!(!prompt.contains("cadence-workflow"));
 }

@@ -77,7 +77,10 @@ fn runtime_prompts_directly_reference_rules_and_declare_their_actual_stage() {
             prompt.contains("AGENTS.md") && prompt.contains("CLAUDE.md"),
             "{node_id}: {prompt}"
         );
-        assert!(!prompt.contains("Cadence-skills/"), "{node_id}: {prompt}");
+        assert!(
+            !prompt.contains(&["Cadence-", "skills/"].concat()),
+            "{node_id}: {prompt}"
+        );
         assert!(!prompt.contains("cadence-workflow"));
         for fragment in required_stage_fragments {
             assert!(

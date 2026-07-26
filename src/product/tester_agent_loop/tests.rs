@@ -103,7 +103,7 @@ fn tester_plan_prompt_requires_openspec_superpowers_and_step_bound_tools() {
     assert!(prompt.contains("[cadence_project_rules]"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
-    assert!(!prompt.contains("Cadence-skills/"));
+    assert!(!prompt.contains(&["Cadence-", "skills/"].concat()));
     assert!(prompt.contains("verification-before-completion"));
     assert!(!prompt.contains("cadence-workflow"));
     assert!(prompt.contains("Story Spec"));

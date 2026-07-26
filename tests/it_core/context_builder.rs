@@ -99,7 +99,10 @@ fn context_builder_renders_each_planning_prompt_and_maps_adapter_input() {
             result.adapter_input.prompt
         );
         assert!(
-            !result.adapter_input.prompt.contains("Cadence-skills/"),
+            !result
+                .adapter_input
+                .prompt
+                .contains(&["Cadence-", "skills/"].concat()),
             "{node_id}: {}",
             result.adapter_input.prompt
         );
@@ -384,7 +387,10 @@ fn context_builder_renders_p4_provider_nodes_and_rejects_missing_required_inputs
             result.adapter_input.prompt
         );
         assert!(
-            !result.adapter_input.prompt.contains("Cadence-skills/"),
+            !result
+                .adapter_input
+                .prompt
+                .contains(&["Cadence-", "skills/"].concat()),
             "{node_id}: {}",
             result.adapter_input.prompt
         );
