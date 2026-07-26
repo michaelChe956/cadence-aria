@@ -204,11 +204,12 @@ impl RepositoryRegistrationDependenciesBuilder {
         let operations = RepositoryInitializationOperationStore::new(app_paths);
         let cadence_skills = self.cadence_skills.unwrap_or_else(|| {
             Arc::new(CadenceSkillsManager::with_dependencies(
-                home,
+                home.clone(),
                 self.runner.clone(),
                 self.command_environment,
             ))
         });
+        let git_environment = git_finalize_environment(&home);
         let host_readiness = self.host_readiness.unwrap_or_else(|| {
             Arc::new(|| {
                 crate::web::provider_availability::host_real_workflow_ready()
@@ -222,23 +223,39 @@ impl RepositoryRegistrationDependenciesBuilder {
                 4 * 1024,
             ))
         });
+        let coordinator = RepositoryRegistrationCoordinator::new_with_operations(
+            projects,
+            repositories,
+            operations,
+            self.gate,
+            self.registry,
+            cadence_skills,
+            host_readiness,
+            self.runner,
+            self.clock,
+            initializer,
+            self.git_command_timeout,
+            self.initialization_timeout,
+        )
+        .with_git_environment(git_environment);
         Ok(RepositoryRegistrationDependencies {
-            coordinator: Arc::new(RepositoryRegistrationCoordinator::new_with_operations(
-                projects,
-                repositories,
-                operations,
-                self.gate,
-                self.registry,
-                cadence_skills,
-                host_readiness,
-                self.runner,
-                self.clock,
-                initializer,
-                self.git_command_timeout,
-                self.initialization_timeout,
-            )),
+            coordinator: Arc::new(coordinator),
         })
     }
+}
+
+fn git_finalize_environment(home: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    let mut environment = std::collections::BTreeMap::from([
+        ("LC_ALL".to_string(), "C".to_string()),
+        ("HOME".to_string(), home.to_string_lossy().into_owned()),
+    ]);
+    if let Some(value) = std::env::var_os("SSH_AUTH_SOCK").filter(|value| !value.is_empty()) {
+        environment.insert(
+            "SSH_AUTH_SOCK".to_string(),
+            value.to_string_lossy().into_owned(),
+        );
+    }
+    environment
 }
 
 pub async fn create_repository(
@@ -505,5 +522,30 @@ mod tests {
         .expect_err("relative HOME");
         assert_eq!(error.stage, "cadence_skills_home");
         assert_eq!(error.reason_code, "cadence_skills_unavailable");
+    }
+
+    #[test]
+    fn built_coordinator_carries_validated_home_in_git_environment() {
+        let dependencies = RepositoryRegistrationDependencies::builder(
+            ProductAppPaths::new(std::env::temp_dir().join("git-env-test")),
+            "/home/tester",
+            Arc::new(crate::cross_cutting::bounded_command_runner::TokioBoundedCommandRunner),
+            fake_repository_registration_gate(),
+            Arc::new(ProviderRegistry::default()),
+        )
+        .build()
+        .expect("build");
+        let environment = dependencies.coordinator.git_environment();
+        assert_eq!(
+            environment.get("HOME").map(String::as_str),
+            Some("/home/tester")
+        );
+        assert_eq!(environment.get("LC_ALL").map(String::as_str), Some("C"));
+        for key in environment.keys() {
+            assert!(
+                matches!(key.as_str(), "LC_ALL" | "HOME" | "SSH_AUTH_SOCK"),
+                "unexpected key {key}"
+            );
+        }
     }
 }
