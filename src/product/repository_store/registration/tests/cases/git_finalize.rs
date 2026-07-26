@@ -376,3 +376,100 @@ async fn repository_registration_keeps_completed_result_when_git_finalize_push_f
     assert!(operation.result.is_some());
     assert!(runner.responses.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn git_finalize_commits_with_injected_home_identity() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[user]\n\tname = Aria Finalize\n\temail = aria-finalize@example.com\n",
+    )
+    .unwrap();
+    let git_root = temp.path().join("repository");
+    std::fs::create_dir_all(&git_root).unwrap();
+    for argv in [vec!["init", "-b", "main"], vec!["config", "commit.gpgsign", "false"]] {
+        let status = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&git_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {argv:?} failed");
+    }
+    std::fs::write(git_root.join("AGENTS.md"), "# agents\n").unwrap();
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = RepositoryRegistrationCoordinator::new_with_operations(
+        Arc::new(RecordingProjectLookup {
+            calls: calls.clone(),
+        }),
+        Arc::new(RecordingRepositoryPersistence {
+            calls: calls.clone(),
+            created: AtomicUsize::new(0),
+        }),
+        RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+            temp.path().join(".aria"),
+        )),
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AvailableHealth))),
+        registry(),
+        Arc::new(RecordingCadence {
+            calls: calls.clone(),
+            source_root: temp.path().join("cadence-source"),
+        }),
+        Arc::new(|| Ok(())),
+        Arc::new(crate::cross_cutting::bounded_command_runner::TokioBoundedCommandRunner),
+        Arc::new(|| "2026-07-25T00:00:00Z".to_string()),
+        Arc::new(RecordingInitializer {
+            calls: calls.clone(),
+        }),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    )
+    .with_git_environment(std::collections::BTreeMap::from([
+        ("LC_ALL".to_string(), "C".to_string()),
+        ("HOME".to_string(), home.to_string_lossy().into_owned()),
+    ]));
+
+    let outcome = coordinator
+        .git_finalize(&git_root, CancellationToken::new())
+        .await
+        .expect("git_finalize with injected HOME must succeed");
+    assert!(
+        outcome.is_some(),
+        "no remote configured, push must be skipped with a note"
+    );
+
+    let log = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%an <%ae>"])
+        .current_dir(&git_root)
+        .output()
+        .unwrap();
+    assert!(log.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&log.stdout).trim(),
+        "Aria Finalize <aria-finalize@example.com>"
+    );
+}
+
+#[test]
+fn default_git_environment_includes_allowed_keys_only_when_present() {
+    let environment = super::super::default_git_environment(|key| match key {
+        "HOME" => Some(std::ffi::OsString::from("/home/tester")),
+        "SSH_AUTH_SOCK" => None,
+        _ => None,
+    });
+    assert_eq!(environment.get("LC_ALL").map(String::as_str), Some("C"));
+    assert_eq!(
+        environment.get("HOME").map(String::as_str),
+        Some("/home/tester")
+    );
+    assert!(!environment.contains_key("SSH_AUTH_SOCK"));
+    assert_eq!(environment.len(), 2);
+
+    let empty = super::super::default_git_environment(|key| {
+        (key == "HOME").then(|| std::ffi::OsString::from(""))
+    });
+    assert_eq!(empty.len(), 1, "empty HOME must be skipped");
+    assert_eq!(empty.get("LC_ALL").map(String::as_str), Some("C"));
+}
