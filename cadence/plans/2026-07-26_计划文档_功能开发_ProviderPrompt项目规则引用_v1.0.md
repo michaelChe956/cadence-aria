@@ -46,7 +46,7 @@
 - Consumes: 不变的 direct_cadence_routing_rules_reference() -> &'static str，以及各 prompt 构造器已有的共享插入点。
 - Produces: 断言统一要求 [cadence_project_rules]、AGENTS.md、CLAUDE.md 和阻塞语义；断言不再依赖外部规则文件名或路径。
 
-- [ ] **Step 1: 将共享引用的单元测试先改为新契约**
+- [x] **Step 1: 将共享引用的单元测试先改为新契约**
 
 删除外部路径常量及三个旧测试，改写为下列两个测试；此时 production 常量仍是旧文本，因此首个测试必然失败。
 
@@ -77,7 +77,7 @@ fn direct_reference_excludes_external_and_knowledge_base_constraints() {
 }
 ~~~
 
-- [ ] **Step 2: 将 Workspace 和 Web Workspace Context 断言切换为项目文件**
+- [x] **Step 2: 将 Workspace 和 Web Workspace Context 断言切换为项目文件**
 
 在 part_31.rs 的 initial author、system context reuse 与 full revision 三组断言中，把唯一出现次数替换为 [cadence_project_rules]，并以如下组合作为规则契约。对 part_10.rs、part_16.rs 和 src/web/workspace_context/tests.rs 的 author、reviewer、revision workflow 断言应用同一替换；repair 断言改为 !prompt.contains("[cadence_project_rules]")，以保持“不得重启路由生命周期”的原语义。
 
@@ -88,7 +88,7 @@ assert!(prompt.contains("AGENTS.md") && prompt.contains("CLAUDE.md"), "{prompt}"
 assert!(!prompt.contains("Cadence-skills/"), "{prompt}");
 ~~~
 
-- [ ] **Step 3: 将 Coding、Tester 与 Work Item Draft 断言切换为项目文件**
+- [x] **Step 3: 将 Coding、Tester 与 Work Item Draft 断言切换为项目文件**
 
 在 parser_prompt.rs 的 coder、delta、lifecycle 与 compiled context 测试，parser_prompt/plan_defect_prompt.rs，provider_execution_context.rs，tester_agent_loop/tests.rs，以及 work_item_split_engine/tests/prompt_contract.rs 和 part_01.rs 中，删除成对的外部路径检查，增加以下断言。保留现有业务阶段、schema、测试计划、gate 和 Work Item Draft 预算断言；质量预算测试仍须断言 canonical_field_contract、verification_plan、operational_gate、直接依赖合同和 ARIA_STRUCTURED_OUTPUT。
 
@@ -99,7 +99,7 @@ assert!(prompt.contains("CLAUDE.md"), "{prompt}");
 assert!(!prompt.contains("Cadence-skills/"), "{prompt}");
 ~~~
 
-- [ ] **Step 4: 将运行时模板的真实渲染测试切换为项目文件**
+- [x] **Step 4: 将运行时模板的真实渲染测试切换为项目文件**
 
 在 tests/it_core/runtime_prompt_routing.rs 和 tests/it_core/context_builder.rs 的 planning 与 P4 Provider node 循环中保留节点、阶段和 section 完整性检查，替换外部路径检查为：
 
@@ -111,7 +111,7 @@ assert!(!prompt.contains("Cadence-skills/"), "{node_id}: {prompt}");
 
 这覆盖 runtime_units/prompt_template_registry.rs 的 N04、N05、N07、N11 及 generic 节点，无需复制或修改模板实现。
 
-- [ ] **Step 5: 运行新断言并确认旧集中常量导致 RED**
+- [x] **Step 5: 运行新断言并确认旧集中常量导致 RED**
 
 Run the following commands:
 
@@ -141,7 +141,7 @@ Expected: 每条命令因 prompt 尚未包含 [cadence_project_rules]、AGENTS.m
 - Consumes: 全部既有调用点的 direct_cadence_routing_rules_reference()。
 - Produces: 不变的 &'static str 返回类型；每个调用点无需改动便获得同一段项目规则读取要求。
 
-- [ ] **Step 1: 用项目相对规则文本替换唯一集中常量**
+- [x] **Step 1: 用项目相对规则文本替换唯一集中常量**
 
 删除 AGENT_ROUTING_KERNEL_RULE_PATH 与 OPENSPEC_SUPERPOWERS_WORKFLOW_RULE_PATH，并将函数体中的 REFERENCE 精确替换为：
 
@@ -161,7 +161,7 @@ pub(crate) fn direct_cadence_routing_rules_reference() -> &'static str {
 
 不要更名函数或修改任一 prompt 构造器；workspace_engine 对 system context 的包含检查仍以完整返回字符串判断，因此无需新增分支。
 
-- [ ] **Step 2: 运行聚焦测试确认 GREEN**
+- [x] **Step 2: 运行聚焦测试确认 GREEN**
 
 Run the following commands:
 
@@ -184,7 +184,7 @@ cargo test --locked --test it_core context_builder_renders_p4_provider_nodes_and
 
 Expected: 全部通过，且 Work Item Draft 预算断言保持原有阈值与行为；不启动真实 Provider，也不执行 Git push。
 
-- [ ] **Step 3: 格式化并提交实现与契约测试**
+- [x] **Step 3: 格式化并提交实现与契约测试**
 
 Run the following commands:
 
@@ -215,7 +215,7 @@ git commit -m "fix: use project rules in provider prompts"
 - Consumes: Task 2 已提交的集中规则片段和全部 prompt 契约。
 - Produces: 已勾选的 OpenSpec 高层工作包及可追溯的验证证据；不变更运行时接口。
 
-- [ ] **Step 1: 确认旧文本已从本 Change 的运行时和契约测试范围消失**
+- [x] **Step 1: 确认旧文本已从本 Change 的运行时和契约测试范围消失**
 
 Run the following three commands separately; each must return no matches. Exit status 1 from rg is the expected no-match result.
 
@@ -227,7 +227,7 @@ rg -n -F 'KnowledgeBase 的 manifest 或内容' src/product/cadence_skills/routi
 
 若任一命令打印匹配，先修正该 prompt 或契约断言；不得修改 cadence/plans 中其他人现有的历史计划来伪造扫描结果。独立 Cadence skills 安装/迁移模块不属于本 Change 的流程型 Provider prompt，因此不在本扫描范围内；本 Change 的负向契约断言必须在运行时构造旧路径，以保持逐字检查语义并避免扫描自命中。
 
-- [ ] **Step 2: 运行项目全量质量门禁**
+- [x] **Step 2: 运行项目全量质量门禁**
 
 Run the following commands:
 
@@ -242,7 +242,7 @@ git diff --check -- src/product/cadence_skills/routing_reference.rs src/product/
 
 Expected: 格式、Clippy、检查、定向契约测试、OpenSpec 严格验证与范围 diff 检查成功。如全量测试失败，保留完整失败输出，先按 systematic-debugging 定位是否与本变更相关，不得在没有根因的情况下改动实现。操作者已批准接受既有 `large_file_guard` 基线例外：`cargo test --locked` 必须实际执行并如实记录其仅有的既有失败（`part_01.rs`、`WorkItemPlanArtifactContent.tsx`、`WorkItemPlanArtifactPanel.test.tsx` 均在实现基线 `9607f860` 前超限），不得描述为全量测试通过。
 
-- [ ] **Step 3: 仅根据获得的绿色证据更新任务并提交文档收尾**
+- [x] **Step 3: 仅根据获得的绿色证据更新任务并提交文档收尾**
 
 将 openspec/changes/use-project-rules-in-prompts/tasks.md 的 1.1 至 3.1 全部改为 [x]。再次执行 openspec validate use-project-rules-in-prompts --strict，然后只暂存本计划与该 tasks.md：
 
