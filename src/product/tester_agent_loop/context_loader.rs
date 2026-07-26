@@ -4,6 +4,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::WorkspaceType;
+use crate::product::work_item_runtime_reader::{ResolvedWorkItemRuntime, WorkItemRuntimeReader};
 
 use super::tools::LoadTestContextInput;
 
@@ -36,9 +37,13 @@ impl TestContextLoader {
 
     pub fn load(&self, input: &LoadTestContextInput) -> Result<LoadedTestContext, String> {
         let lifecycle = LifecycleStore::new(self.paths.clone());
+        let runtime = WorkItemRuntimeReader::new(self.paths.clone())
+            .resolve_active_coding_unit_runtime(&self.attempt)
+            .map_err(|error| format!("load_test_context_runtime_binding_failed:{error}"))?
+            .map(|(_unit, _run, runtime)| runtime);
         let mut warnings = Vec::new();
         let artifact_refs = if input.artifact_refs.is_empty() {
-            default_artifact_refs(&lifecycle, &self.attempt, &mut warnings)?
+            default_artifact_refs(&lifecycle, &self.attempt, runtime.as_ref(), &mut warnings)?
         } else {
             input.artifact_refs.clone()
         };
@@ -46,7 +51,8 @@ impl TestContextLoader {
         let mut total_chars = 0usize;
 
         for artifact_ref in artifact_refs {
-            let Some(markdown) = load_markdown_for_ref(&lifecycle, &self.attempt, &artifact_ref)?
+            let Some(markdown) =
+                load_markdown_for_ref(&lifecycle, &self.attempt, runtime.as_ref(), &artifact_ref)?
             else {
                 warnings.push(format!(
                     "load_test_context_artifact_not_found:{artifact_ref}"
@@ -82,8 +88,18 @@ impl TestContextLoader {
 fn default_artifact_refs(
     lifecycle: &LifecycleStore,
     attempt: &CodingExecutionAttempt,
+    runtime: Option<&ResolvedWorkItemRuntime>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<String>, String> {
+    if let Some(runtime) = runtime {
+        return Ok(runtime
+            .lineage
+            .story_spec_refs
+            .iter()
+            .chain(runtime.lineage.design_spec_refs.iter())
+            .cloned()
+            .collect());
+    }
     let work_items = lifecycle
         .list_work_items(&attempt.project_id, &attempt.issue_id)
         .map_err(|error| format!("load_test_context_list_work_items_failed:{error}"))?;
@@ -111,12 +127,27 @@ fn default_artifact_refs(
 fn load_markdown_for_ref(
     lifecycle: &LifecycleStore,
     attempt: &CodingExecutionAttempt,
+    runtime: Option<&ResolvedWorkItemRuntime>,
     artifact_ref: &str,
 ) -> Result<Option<String>, String> {
     let (artifact_id, version_ref) = artifact_ref
         .split_once('@')
         .map(|(artifact_id, version_ref)| (artifact_id, Some(version_ref)))
         .unwrap_or((artifact_ref, None));
+    if let Some(runtime) = runtime {
+        if artifact_id == runtime.binding.logical_work_item_id {
+            return load_bound_work_item_markdown(runtime, version_ref);
+        }
+        if !runtime
+            .lineage
+            .story_spec_refs
+            .iter()
+            .chain(runtime.lineage.design_spec_refs.iter())
+            .any(|id| id == artifact_id)
+        {
+            return Ok(None);
+        }
+    }
     if lifecycle
         .list_story_specs(&attempt.project_id, &attempt.issue_id)
         .map_err(|error| format!("load_test_context_list_story_specs_failed:{error}"))?
@@ -133,7 +164,30 @@ fn load_markdown_for_ref(
     {
         return load_spec_markdown(lifecycle, attempt, artifact_id, version_ref);
     }
+    if runtime.is_some() {
+        return Ok(None);
+    }
     load_work_item_markdown(lifecycle, attempt, artifact_id, version_ref)
+}
+
+fn load_bound_work_item_markdown(
+    runtime: &ResolvedWorkItemRuntime,
+    version_ref: Option<&str>,
+) -> Result<Option<String>, String> {
+    if version_ref.is_some_and(|value| value != runtime.binding.work_item_revision_id) {
+        return Ok(None);
+    }
+    let canonical_contract = serde_json::to_string_pretty(
+        &runtime.work_item_revision.canonical_contract,
+    )
+    .map_err(|error| format!("load_test_context_serialize_canonical_contract_failed:{error}"))?;
+    Ok(Some(format!(
+        "# Bound Canonical Work Item Contract\n\n- Plan revision: {}\n- Work item revision: {}\n- Verification plan revision: {}\n\n## Canonical Contract\n\n{}\n",
+        runtime.binding.plan_revision_id,
+        runtime.binding.work_item_revision_id,
+        runtime.binding.verification_plan_revision_id,
+        canonical_contract,
+    )))
 }
 
 fn load_spec_markdown(

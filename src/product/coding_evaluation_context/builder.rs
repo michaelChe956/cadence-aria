@@ -297,39 +297,7 @@ pub(super) fn schema_v2_active_unit_runtime(
     )>,
     ProductStoreError,
 > {
-    if attempt.scope != CodingAttemptScope::WorkItemGroup {
-        return Ok(None);
-    }
-    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
-        return Ok(None);
-    };
-    let revision_store =
-        crate::product::work_item_revision_store::WorkItemRevisionStore::new(paths.clone());
-    match revision_store.get_plan_lineage(&attempt.project_id, &attempt.issue_id, plan_id) {
-        Ok(_) => {}
-        Err(ProductStoreError::NotFound { kind, .. }) if kind == "work_item_plan_lineage" => {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    }
-
-    let coding_store = CodingAttemptStore::new(paths.clone());
-    let unit = coding_store
-        .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        .ok_or_else(|| ProductStoreError::IdentityMismatch {
-            kind: "runtime_binding_missing",
-            id: attempt.id.clone(),
-        })?;
-    let run = coding_store
-        .list_coding_unit_runs(attempt, &unit.id)?
-        .into_iter()
-        .max_by_key(|run| run.execution_no);
-    let runtime = WorkItemRuntimeReader::new(paths.clone()).normative_context_for_unit(
-        attempt,
-        &unit,
-        run.as_ref(),
-    )?;
-    Ok(Some((unit, run, runtime)))
+    WorkItemRuntimeReader::new(paths.clone()).resolve_active_coding_unit_runtime(attempt)
 }
 
 fn evaluation_repo_diff_base<'a>(

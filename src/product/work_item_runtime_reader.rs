@@ -172,6 +172,47 @@ impl WorkItemRuntimeReader {
         self.resolve_binding(&session.project_id, &session.issue_id, binding)
     }
 
+    pub fn resolve_active_coding_unit_runtime(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<
+        Option<(
+            CodingExecutionUnit,
+            Option<CodingUnitRun>,
+            ResolvedWorkItemRuntime,
+        )>,
+        ProductStoreError,
+    > {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup {
+            return Ok(None);
+        }
+        let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+            return Ok(None);
+        };
+        let revision_store = WorkItemRevisionStore::new(self.paths.clone());
+        match revision_store.get_plan_lineage(&attempt.project_id, &attempt.issue_id, plan_id) {
+            Ok(_) => {}
+            Err(ProductStoreError::NotFound { kind, .. }) if kind == "work_item_plan_lineage" => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+
+        let attempt_store = CodingAttemptStore::new(self.paths.clone());
+        let unit = attempt_store
+            .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                kind: "runtime_binding_missing",
+                id: attempt.id.clone(),
+            })?;
+        let run = attempt_store
+            .list_coding_unit_runs(attempt, &unit.id)?
+            .into_iter()
+            .max_by_key(|run| run.execution_no);
+        let runtime = self.normative_context_for_unit(attempt, &unit, run.as_ref())?;
+        Ok(Some((unit, run, runtime)))
+    }
+
     pub fn resolve_coding_unit(
         &self,
         attempt: &CodingExecutionAttempt,

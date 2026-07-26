@@ -1,4 +1,5 @@
 use super::*;
+use crate::cross_cutting::streaming_provider::ProviderToolCall;
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
@@ -16,6 +17,7 @@ use crate::product::models::{
     VerificationPlanRevision, WorkItemPlanRevision, WorkItemProjectionBundle,
     WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+use crate::product::tester_agent_loop::{TestContextLoader, execute_tester_tool_call_with_context};
 use crate::product::work_item_contract::{
     ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
     build_dependency_contract_graph, canonical_contract_hash,
@@ -32,6 +34,7 @@ use crate::product::work_item_revision_store::{
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use sha2::Digest;
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn initial_plan_publication_store_allocates_ids_deterministically_without_live_writes() {
@@ -612,8 +615,8 @@ fn runtime_reader_rejects_missing_or_non_work_item_workspace_bindings() {
     }
 }
 
-#[test]
-fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
+#[tokio::test]
+async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
     let temp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));
     let issue = IssueStore::new(paths.clone())
@@ -771,6 +774,41 @@ fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
             .context_warnings
             .iter()
             .any(|warning| warning == "missing_work_item")
+    );
+
+    let selector = resolved
+        .work_item_revision
+        .canonical_contract
+        .goal
+        .summary
+        .clone();
+    let context_loader = TestContextLoader::new(paths.clone(), attempt.clone());
+    let loaded = execute_tester_tool_call_with_context(
+        &ProviderToolCall {
+            id: "tool_load_test_context_0001".to_string(),
+            tool_name: "load_test_context".to_string(),
+            input: serde_json::json!({
+                "step_id": "test_context_step_0001",
+                "reason": "Need the bound work item goal",
+                "artifact_refs": [binding.logical_work_item_id],
+                "selectors": [selector]
+            }),
+        },
+        temp.path(),
+        temp.path(),
+        Some(&context_loader),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(!loaded.result.is_error, "{}", loaded.result.output);
+    let loaded: serde_json::Value = serde_json::from_str(&loaded.result.output).unwrap();
+    assert_eq!(loaded["snippets"][0]["artifact_ref"], WORK_ITEM_ID);
+    assert!(
+        loaded["snippets"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains(&resolved.work_item_revision.canonical_contract.goal.summary)
     );
 
     let mut different_hash = run;
