@@ -17,6 +17,7 @@ use crate::product::models::{
     VerificationPlanRevision, WorkItemPlanRevision, WorkItemProjectionBundle,
     WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::tester_agent_loop::{TestContextLoader, execute_tester_tool_call_with_context};
 use crate::product::work_item_contract::{
     ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
@@ -32,6 +33,7 @@ use crate::product::work_item_revision_store::{
     InitialWorkItemPublicationArtifacts,
 };
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
+use crate::web::coding_ws_handler::repository_path_for_attempt;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use sha2::Digest;
 use tokio_util::sync::CancellationToken;
@@ -619,10 +621,19 @@ fn runtime_reader_rejects_missing_or_non_work_item_workspace_bindings() {
 async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
     let temp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let repository = RepositoryStore::new(paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: PROJECT_ID.to_string(),
+            name: "Runtime Reader Repository".to_string(),
+            path: temp.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+        })
+        .unwrap();
     let issue = IssueStore::new(paths.clone())
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
-            repo_id: Some("repository_0001".to_string()),
+            repo_id: Some(repository.id.clone()),
             title: "Runtime Reader Issue".to_string(),
             description: None,
             change_id: None,
@@ -730,7 +741,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
         evaluation.work_item.artifact_id,
         binding.logical_work_item_id
     );
-    assert_eq!(evaluation.work_item.repository_id, "repository_0001");
+    assert_eq!(evaluation.work_item.repository_id, repository.id);
     assert_eq!(
         evaluation.work_item.title,
         resolved.projection_bundle.human_projection.title
@@ -757,7 +768,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
 
     let tester = build_tester_execution_context_pack(paths.clone(), &attempt).unwrap();
     assert_eq!(tester.work_item.artifact_id, binding.logical_work_item_id);
-    assert_eq!(tester.work_item.repository_id, "repository_0001");
+    assert_eq!(tester.work_item.repository_id, repository.id);
     assert_eq!(
         tester.work_item.title,
         resolved.projection_bundle.human_projection.title
@@ -774,6 +785,10 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
             .context_warnings
             .iter()
             .any(|warning| warning == "missing_work_item")
+    );
+    assert_eq!(
+        repository_path_for_attempt(&paths, &attempt).unwrap(),
+        repository.path
     );
 
     let selector = resolved
