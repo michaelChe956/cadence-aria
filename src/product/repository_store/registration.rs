@@ -261,6 +261,7 @@ pub struct RepositoryRegistrationCoordinator {
     initializer: Arc<dyn RepositoryInitializer>,
     git_command_timeout: Duration,
     initialization_timeout: Duration,
+    git_environment: BTreeMap<String, String>,
 }
 
 impl RepositoryRegistrationCoordinator {
@@ -332,7 +333,18 @@ impl RepositoryRegistrationCoordinator {
             initializer,
             git_command_timeout,
             initialization_timeout,
+            git_environment: default_git_environment(|key| std::env::var_os(key)),
         }
+    }
+
+    pub(crate) fn with_git_environment(mut self, environment: BTreeMap<String, String>) -> Self {
+        self.git_environment = environment;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn git_environment(&self) -> &BTreeMap<String, String> {
+        &self.git_environment
     }
 
     pub(crate) async fn begin_initialization(
@@ -774,13 +786,25 @@ impl RepositoryRegistrationCoordinator {
                 working_dir: working_dir.to_path_buf(),
                 timeout: self.git_command_timeout,
                 cancellation,
-                environment: BTreeMap::from([("LC_ALL".to_string(), "C".to_string())]),
+                environment: self.git_environment.clone(),
                 stdout_limit: GIT_OUTPUT_LIMIT,
                 stderr_limit: GIT_OUTPUT_LIMIT,
             })
             .await
             .map_err(|error| error.to_string())
     }
+}
+
+fn default_git_environment(
+    read: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> BTreeMap<String, String> {
+    let mut environment = BTreeMap::from([("LC_ALL".to_string(), "C".to_string())]);
+    for key in ["HOME", "SSH_AUTH_SOCK"] {
+        if let Some(value) = read(key).filter(|value| !value.is_empty()) {
+            environment.insert(key.to_string(), value.to_string_lossy().into_owned());
+        }
+    }
+    environment
 }
 
 mod helpers;
