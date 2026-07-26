@@ -8,10 +8,12 @@ use crate::product::models::{
     HandoffRevision, HumanPresentationRevision, LogicalWorkItem, NodeDetail, PermissionEvent,
     PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
     PlanDefectClass, PlanDefectEvidence, PlanDefectRoute, PlanProjectionBundle, PlanRepairRequest,
-    PlanRepairRequestStatus, PlanRevisionReason, PlanValidationReportArtifact, ProviderSnapshot,
-    RepairTarget, RepairTargetKind, VerificationPlanRevision, WorkItemDraftRevision,
-    WorkItemDraftRevisionState, WorkItemDraftRevisionStatus, WorkItemPlanLineage,
-    WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision, WorkItemRevisionReplacement,
+    PlanRepairRequestStatus, PlanRevisionReason, PlanValidationReportArtifact, ProviderName,
+    ProviderSnapshot, RepairTarget, RepairTargetKind, VerificationPlanRevision,
+    WorkItemDraftRevision, WorkItemDraftRevisionState, WorkItemDraftRevisionStatus,
+    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
+    WorkItemRevisionReplacement, WorkItemRuntimeBinding, WorkspaceSessionRecord,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_contract::{
     ContractValidationReport, build_dependency_contract_graph, canonical_contract_fixture,
@@ -124,6 +126,110 @@ fn work_item_revision_models_plan_revision_roundtrip_without_legacy_fields() {
         serde_json::from_value::<WorkItemPlanRevision>(value).unwrap(),
         revision
     );
+}
+
+#[test]
+fn work_item_runtime_binding_roundtrips_as_reference_only() {
+    let binding = WorkItemRuntimeBinding {
+        plan_id: "work_item_plan_0001".to_string(),
+        plan_revision_id: "plan_revision_0001".to_string(),
+        logical_work_item_id: "wi_core".to_string(),
+        work_item_revision_id: "work_item_revision_0001".to_string(),
+        projection_bundle_id: "work_item_projection_bundle_0001".to_string(),
+        verification_plan_revision_id: "verification_plan_revision_0001".to_string(),
+        canonical_contract_hash: "sha256:contract".to_string(),
+        projection_compiler_version: "projection-compiler-v1".to_string(),
+        human_projection_hash: "sha256:human".to_string(),
+        coder_projection_hash: "sha256:coder".to_string(),
+        reviewer_projection_hash: "sha256:reviewer".to_string(),
+    };
+
+    assert_serde_roundtrip(&binding);
+    let value = serde_json::to_value(&binding).unwrap();
+    for forbidden in [
+        "canonical_contract",
+        "human_projection",
+        "coder_projection",
+        "reviewer_projection",
+        "verification_checks",
+        "execution_status",
+    ] {
+        assert!(
+            value.get(forbidden).is_none(),
+            "binding must not store {forbidden}"
+        );
+    }
+    for field in [
+        "plan_id",
+        "plan_revision_id",
+        "logical_work_item_id",
+        "work_item_revision_id",
+        "projection_bundle_id",
+        "verification_plan_revision_id",
+        "canonical_contract_hash",
+        "projection_compiler_version",
+        "human_projection_hash",
+        "coder_projection_hash",
+        "reviewer_projection_hash",
+    ] {
+        assert_missing_field_rejected::<WorkItemRuntimeBinding>(&value, field);
+    }
+}
+
+#[test]
+fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
+    let binding = WorkItemRuntimeBinding {
+        plan_id: "work_item_plan_0001".to_string(),
+        plan_revision_id: "plan_revision_0001".to_string(),
+        logical_work_item_id: "wi_core".to_string(),
+        work_item_revision_id: "work_item_revision_0001".to_string(),
+        projection_bundle_id: "work_item_projection_bundle_0001".to_string(),
+        verification_plan_revision_id: "verification_plan_revision_0001".to_string(),
+        canonical_contract_hash: "sha256:contract".to_string(),
+        projection_compiler_version: "projection-compiler-v1".to_string(),
+        human_projection_hash: "sha256:human".to_string(),
+        coder_projection_hash: "sha256:coder".to_string(),
+        reviewer_projection_hash: "sha256:reviewer".to_string(),
+    };
+    let session = WorkspaceSessionRecord {
+        id: "workspace_session_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "wi_core".to_string(),
+        workspace_type: WorkspaceType::WorkItem,
+        status: WorkspaceSessionStatus::Open,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: ProviderName::ClaudeCode,
+        review_rounds: 2,
+        superpowers_enabled: true,
+        openspec_enabled: true,
+        provider_conversations: Vec::new(),
+        messages: Vec::new(),
+        created_at: "2026-07-26T00:00:00Z".to_string(),
+        updated_at: "2026-07-26T00:00:00Z".to_string(),
+        work_item_runtime_binding: Some(binding.clone()),
+    };
+
+    assert_serde_roundtrip(&session);
+    let mut missing_binding = serde_json::to_value(&session).unwrap();
+    missing_binding
+        .as_object_mut()
+        .unwrap()
+        .remove("work_item_runtime_binding");
+    assert_eq!(
+        serde_json::from_value::<WorkspaceSessionRecord>(missing_binding)
+            .unwrap()
+            .work_item_runtime_binding,
+        None
+    );
+
+    for workspace_type in [WorkspaceType::Story, WorkspaceType::Design] {
+        let mut non_work_item = session.clone();
+        non_work_item.workspace_type = workspace_type;
+        non_work_item.work_item_runtime_binding = None;
+        assert_serde_roundtrip(&non_work_item);
+        assert_eq!(non_work_item.work_item_runtime_binding, None);
+    }
 }
 
 #[test]

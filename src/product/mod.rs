@@ -30,6 +30,7 @@ pub mod work_item_plan_store;
 pub mod work_item_projection;
 pub(crate) mod work_item_revision_history;
 pub mod work_item_revision_store;
+pub mod work_item_runtime_reader;
 pub mod work_item_split_engine;
 pub mod work_item_split_validator;
 pub mod workspace_engine;

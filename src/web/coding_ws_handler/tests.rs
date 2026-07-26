@@ -47,6 +47,7 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         review_rounds: 1,
         superpowers_enabled: true,
         openspec_enabled: true,
+        work_item_runtime_binding: None,
         provider_conversations: Vec::new(),
         messages: vec![WorkspaceMessageRecord {
             role: "assistant".to_string(),

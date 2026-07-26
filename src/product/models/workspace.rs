@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
 use super::provider::{ProviderConversationRef, ProviderName};
+use super::work_item_revision::WorkItemRuntimeBinding;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +40,8 @@ pub struct WorkspaceSessionRecord {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    #[serde(default)]
+    pub work_item_runtime_binding: Option<WorkItemRuntimeBinding>,
     #[serde(default)]
     pub provider_conversations: Vec<ProviderConversationRef>,
     pub messages: Vec<WorkspaceMessageRecord>,

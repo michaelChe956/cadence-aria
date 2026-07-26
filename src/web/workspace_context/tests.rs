@@ -396,6 +396,7 @@ fn workspace_session_record(
         review_rounds: 1,
         superpowers_enabled: true,
         openspec_enabled: true,
+        work_item_runtime_binding: None,
         provider_conversations: Vec::new(),
         messages: Vec::new(),
         created_at: "2026-06-30T00:00:00Z".to_string(),

@@ -1,7 +1,13 @@
 use super::*;
+use crate::product::coding_attempt_store::{CodingAttemptStore, CreateGroupCodingAttemptInput};
+use crate::product::coding_models::{
+    CodingAttemptPlanBinding, CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRun,
+    CodingUnitRunStatus,
+};
 use crate::product::models::{
-    DependencyGraphRevision, PlanProjectionBundle, PlanValidationReportArtifact,
+    DependencyGraphRevision, PlanProjectionBundle, PlanValidationReportArtifact, ProviderName,
     VerificationPlanRevision, WorkItemPlanRevision, WorkItemProjectionBundle,
+    WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_contract::{
     ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
@@ -12,9 +18,12 @@ use crate::product::work_item_projection::{
     WorkItemProjectionCompiler, projection_hashes,
 };
 use crate::product::work_item_revision_store::{
-    InitialPlanPublicationArtifacts, InitialPlanPublicationCheckpoint, InitialPlanPublicationPhase,
+    InitialPlanPublicationArtifacts, InitialPlanPublicationCheckpoint,
+    InitialPlanPublicationJournal, InitialPlanPublicationPhase,
     InitialWorkItemPublicationArtifacts,
 };
+use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
+use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use sha2::Digest;
 
 #[test]
@@ -459,5 +468,291 @@ fn assert_initial_publication_is_complete(
                 .unwrap(),
             item.projection_bundle
         );
+    }
+}
+
+#[test]
+fn runtime_reader_resolves_a_published_binding_without_legacy_work_item_records() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths.clone());
+    let journal = initial_publication_journal(&store);
+    let published = store
+        .publish_or_resume_initial_plan_revision(&journal)
+        .unwrap();
+    let item = published.artifacts.work_items.first().unwrap();
+    let bundle = &item.projection_bundle;
+    let binding = crate::product::models::WorkItemRuntimeBinding {
+        plan_id: PLAN_ID.to_string(),
+        plan_revision_id: published.artifacts.plan_revision.id.clone(),
+        logical_work_item_id: item.logical_work_item.id.clone(),
+        work_item_revision_id: item.work_item_revision.id.clone(),
+        projection_bundle_id: bundle.id.clone(),
+        verification_plan_revision_id: item.verification_plan_revision.id.clone(),
+        canonical_contract_hash: item.work_item_revision.canonical_contract_hash.clone(),
+        projection_compiler_version: bundle.compiler_version.clone(),
+        human_projection_hash: bundle.human_projection_hash.clone(),
+        coder_projection_hash: bundle.coder_projection_hash.clone(),
+        reviewer_projection_hash: bundle.reviewer_projection_hash.clone(),
+    };
+
+    let resolved = WorkItemRuntimeReader::new(paths)
+        .resolve_binding(PROJECT_ID, ISSUE_ID, &binding)
+        .unwrap();
+
+    assert_eq!(resolved.binding, binding);
+    assert_eq!(resolved.work_item_revision, item.work_item_revision);
+    assert_eq!(
+        resolved.verification_plan_revision,
+        item.verification_plan_revision
+    );
+    assert_eq!(resolved.projection_bundle, *bundle);
+}
+
+#[test]
+fn runtime_reader_fails_closed_when_binding_references_another_projection_bundle() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths.clone());
+    let journal = initial_publication_journal(&store);
+    let published = store
+        .publish_or_resume_initial_plan_revision(&journal)
+        .unwrap();
+    let item = published.artifacts.work_items.first().unwrap();
+    let bundle = &item.projection_bundle;
+    let binding = crate::product::models::WorkItemRuntimeBinding {
+        plan_id: PLAN_ID.to_string(),
+        plan_revision_id: published.artifacts.plan_revision.id.clone(),
+        logical_work_item_id: item.logical_work_item.id.clone(),
+        work_item_revision_id: item.work_item_revision.id.clone(),
+        projection_bundle_id: "projection_bundle_from_another_revision".to_string(),
+        verification_plan_revision_id: item.verification_plan_revision.id.clone(),
+        canonical_contract_hash: item.work_item_revision.canonical_contract_hash.clone(),
+        projection_compiler_version: bundle.compiler_version.clone(),
+        human_projection_hash: bundle.human_projection_hash.clone(),
+        coder_projection_hash: bundle.coder_projection_hash.clone(),
+        reviewer_projection_hash: bundle.reviewer_projection_hash.clone(),
+    };
+
+    let error = WorkItemRuntimeReader::new(paths)
+        .resolve_binding(PROJECT_ID, ISSUE_ID, &binding)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProductStoreError::IdentityMismatch {
+            kind: "runtime_binding_integrity_mismatch",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn runtime_reader_resolves_a_work_item_workspace_binding() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths.clone());
+    let published = store
+        .publish_or_resume_initial_plan_revision(&initial_publication_journal(&store))
+        .unwrap();
+    let binding = runtime_binding(&published);
+    let session = work_item_workspace_session(Some(binding.clone()));
+
+    let resolved = WorkItemRuntimeReader::new(paths)
+        .resolve_workspace(&session)
+        .unwrap();
+
+    assert_eq!(resolved.binding, binding);
+    assert_eq!(
+        resolved.work_item_revision.id,
+        binding.work_item_revision_id
+    );
+}
+
+#[test]
+fn runtime_reader_rejects_missing_or_non_work_item_workspace_bindings() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemRevisionStore::new(paths.clone());
+    let published = store
+        .publish_or_resume_initial_plan_revision(&initial_publication_journal(&store))
+        .unwrap();
+    let binding = runtime_binding(&published);
+    let reader = WorkItemRuntimeReader::new(paths);
+
+    let missing_error = reader
+        .resolve_workspace(&work_item_workspace_session(None))
+        .unwrap_err();
+    assert!(matches!(
+        missing_error,
+        ProductStoreError::IdentityMismatch {
+            kind: "runtime_binding_missing",
+            ..
+        }
+    ));
+
+    for workspace_type in [WorkspaceType::Story, WorkspaceType::Design] {
+        let mut session = work_item_workspace_session(Some(binding.clone()));
+        session.workspace_type = workspace_type;
+        let error = reader.resolve_workspace(&session).unwrap_err();
+        assert!(matches!(
+            error,
+            ProductStoreError::IdentityMismatch {
+                kind: "runtime_workspace_type",
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let revision_store = WorkItemRevisionStore::new(paths.clone());
+    let published = revision_store
+        .publish_or_resume_initial_plan_revision(&initial_publication_journal(&revision_store))
+        .unwrap();
+    let binding = runtime_binding(&published);
+    let attempt_store = CodingAttemptStore::new(paths.clone());
+    let attempt = attempt_store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: binding.plan_id.clone(),
+            current_work_item_id: binding.logical_work_item_id.clone(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/runtime-reader".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .unwrap();
+    attempt_store
+        .save_plan_binding(
+            &attempt,
+            &CodingAttemptPlanBinding {
+                attempt_id: attempt.id.clone(),
+                plan_id: binding.plan_id.clone(),
+                bound_plan_revision_id: binding.plan_revision_id.clone(),
+                applied_amendment_ids: Vec::new(),
+                updated_at: "2026-07-26T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+    let unit = CodingExecutionUnit {
+        id: "coding_unit_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        project_id: attempt.project_id.clone(),
+        issue_id: attempt.issue_id.clone(),
+        plan_id: binding.plan_id.clone(),
+        logical_work_item_id: binding.logical_work_item_id.clone(),
+        work_item_revision_id: binding.work_item_revision_id.clone(),
+        dependency_logical_work_item_ids: Vec::new(),
+        order_index: 0,
+        status: CodingExecutionUnitStatus::Pending,
+        started_at: None,
+        completed_at: None,
+        latest_handoff_revision_id: None,
+        completion_commit: None,
+        summary: None,
+        created_at: "2026-07-26T00:00:00Z".to_string(),
+        updated_at: "2026-07-26T00:00:00Z".to_string(),
+    };
+    let run = coding_unit_run(&unit, &binding);
+    let reader = WorkItemRuntimeReader::new(paths);
+
+    let resolved = reader
+        .resolve_coding_unit(&attempt, &unit, Some(&run))
+        .unwrap();
+    assert_eq!(resolved.binding, binding);
+
+    let mut different_hash = run;
+    different_hash.coder_projection_hash = "sha256:another-coder-projection".to_string();
+    let error = reader
+        .resolve_coding_unit(&attempt, &unit, Some(&different_hash))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProductStoreError::IdentityMismatch {
+            kind: "runtime_binding_integrity_mismatch",
+            ..
+        }
+    ));
+}
+
+fn runtime_binding(published: &InitialPlanPublicationJournal) -> WorkItemRuntimeBinding {
+    let item = published.artifacts.work_items.first().unwrap();
+    let bundle = &item.projection_bundle;
+    WorkItemRuntimeBinding {
+        plan_id: PLAN_ID.to_string(),
+        plan_revision_id: published.artifacts.plan_revision.id.clone(),
+        logical_work_item_id: item.logical_work_item.id.clone(),
+        work_item_revision_id: item.work_item_revision.id.clone(),
+        projection_bundle_id: bundle.id.clone(),
+        verification_plan_revision_id: item.verification_plan_revision.id.clone(),
+        canonical_contract_hash: item.work_item_revision.canonical_contract_hash.clone(),
+        projection_compiler_version: bundle.compiler_version.clone(),
+        human_projection_hash: bundle.human_projection_hash.clone(),
+        coder_projection_hash: bundle.coder_projection_hash.clone(),
+        reviewer_projection_hash: bundle.reviewer_projection_hash.clone(),
+    }
+}
+
+fn work_item_workspace_session(
+    work_item_runtime_binding: Option<WorkItemRuntimeBinding>,
+) -> WorkspaceSessionRecord {
+    WorkspaceSessionRecord {
+        id: "workspace_session_0001".to_string(),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        entity_id: WORK_ITEM_ID.to_string(),
+        workspace_type: WorkspaceType::WorkItem,
+        status: WorkspaceSessionStatus::Open,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: ProviderName::ClaudeCode,
+        review_rounds: 1,
+        superpowers_enabled: true,
+        openspec_enabled: true,
+        work_item_runtime_binding,
+        provider_conversations: Vec::new(),
+        messages: Vec::new(),
+        created_at: "2026-07-26T00:00:00Z".to_string(),
+        updated_at: "2026-07-26T00:00:00Z".to_string(),
+    }
+}
+
+fn coding_unit_run(unit: &CodingExecutionUnit, binding: &WorkItemRuntimeBinding) -> CodingUnitRun {
+    CodingUnitRun {
+        id: "coding_unit_run_0001".to_string(),
+        unit_id: unit.id.clone(),
+        execution_no: 1,
+        work_item_revision_id: binding.work_item_revision_id.clone(),
+        resolved_handoff_revision_ids: Vec::new(),
+        canonical_contract_hash: binding.canonical_contract_hash.clone(),
+        projection_bundle_id: binding.projection_bundle_id.clone(),
+        projection_compiler_version: binding.projection_compiler_version.clone(),
+        coder_provider_renderer_version: "codex-provider-projection-renderer-v1".to_string(),
+        reviewer_provider_renderer_version: "claude-code-provider-projection-renderer-v1"
+            .to_string(),
+        internal_reviewer_provider_renderer_version: None,
+        coder_projection_hash: binding.coder_projection_hash.clone(),
+        reviewer_projection_hash: binding.reviewer_projection_hash.clone(),
+        coder_execution_context_hash: None,
+        reviewer_execution_context_hash: None,
+        internal_reviewer_execution_context_hash: None,
+        status: CodingUnitRunStatus::Pending,
+        unit_rework_count: 0,
+        verification_retry_count: 0,
+        operational_retry_count: 0,
+        plan_repair_count: 0,
+        start_commit: None,
+        completion_commit: None,
+        created_at: "2026-07-26T00:00:00Z".to_string(),
+        updated_at: "2026-07-26T00:00:00Z".to_string(),
     }
 }
