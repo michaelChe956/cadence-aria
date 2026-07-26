@@ -2,11 +2,15 @@ use super::*;
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
+use crate::product::coding_evaluation_context::{
+    EvaluationContextRole, build_evaluation_context_pack, build_tester_execution_context_pack,
+};
 use crate::product::coding_models::{
     CodingAttemptPlanBinding, CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRun,
     CodingUnitRunStatus,
 };
 use crate::product::coding_work_item_context::load_coding_work_item_context;
+use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::models::{
     DependencyGraphRevision, PlanProjectionBundle, PlanValidationReportArtifact, ProviderName,
     VerificationPlanRevision, WorkItemPlanRevision, WorkItemProjectionBundle,
@@ -612,6 +616,16 @@ fn runtime_reader_rejects_missing_or_non_work_item_workspace_bindings() {
 fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
     let temp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let issue = IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            title: "Runtime Reader Issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .unwrap();
+    assert_eq!(issue.id, ISSUE_ID);
     let revision_store = WorkItemRevisionStore::new(paths.clone());
     let published = revision_store
         .publish_or_resume_initial_plan_revision(&initial_publication_journal(&revision_store))
@@ -705,6 +719,59 @@ fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
     assert!(markdown.contains("## Coder Projection"));
     assert!(markdown.contains(&resolved.projection_bundle.coder_projection.objective));
     assert!(!markdown.contains("Canonical Contract"));
+
+    let evaluation =
+        build_evaluation_context_pack(paths.clone(), &attempt, EvaluationContextRole::Tester)
+            .unwrap();
+    assert_eq!(
+        evaluation.work_item.artifact_id,
+        binding.logical_work_item_id
+    );
+    assert_eq!(evaluation.work_item.repository_id, "repository_0001");
+    assert_eq!(
+        evaluation.work_item.title,
+        resolved.projection_bundle.human_projection.title
+    );
+    assert!(
+        evaluation
+            .work_item
+            .raw_markdown_or_sections
+            .contains("schema_version")
+    );
+    assert_eq!(
+        evaluation
+            .group_context
+            .as_ref()
+            .map(|context| &context.plan_id),
+        Some(&binding.plan_id)
+    );
+    assert!(
+        !evaluation
+            .context_warnings
+            .iter()
+            .any(|warning| warning == "missing_work_item")
+    );
+
+    let tester = build_tester_execution_context_pack(paths.clone(), &attempt).unwrap();
+    assert_eq!(tester.work_item.artifact_id, binding.logical_work_item_id);
+    assert_eq!(tester.work_item.repository_id, "repository_0001");
+    assert_eq!(
+        tester.work_item.title,
+        resolved.projection_bundle.human_projection.title
+    );
+    assert_eq!(
+        tester
+            .group_context
+            .as_ref()
+            .map(|context| &context.plan_id),
+        Some(&binding.plan_id)
+    );
+    assert!(
+        !tester
+            .context_warnings
+            .iter()
+            .any(|warning| warning == "missing_work_item")
+    );
 
     let mut different_hash = run;
     different_hash.coder_projection_hash = "sha256:another-coder-projection".to_string();
