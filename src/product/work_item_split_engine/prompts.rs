@@ -650,14 +650,14 @@ pub(crate) fn build_work_item_draft_prompt(
          - tasks: [obj{{task_id: str+, statement: string, requirement_refs: [string], done_when_refs: [string]}}]；write_policy: obj{{exclusive_scopes: [string], forbidden_scopes: [string]}}。\n\
          - acceptance_criteria: [obj{{criterion_id: str+, statement: string, required_evidence: [source_diff|non_zero_test_execution|manual_check|handoff_field]}}]。\n\
          - verification_checks: [obj{{check_id: str+, command: string|null, manual_instruction: string|null, required: boolean, non_zero_test_execution_required: boolean}}]；verification_plan: obj{{checks: 与 verification_checks 完全相同的数组}}。\n\
-         - handoff_contract: obj{{required_fields: 唯一 str+ 数组, provided_contract_refs: 唯一 str+ 数组, reviewer_check_refs: 唯一 str+ 数组}}。\n\
+         - handoff_contract: obj{{required_fields: 唯一 str+ 数组, provided_contract_refs: 唯一 str+ 数组（无下游消费者时为空数组）, reviewer_check_refs: 唯一 str+ 数组}}。\n\
          - blocker_rules: [obj{{reason_code: str+, route: coder_rework|verification_retry|plan_repair_current|plan_repair_upstream|subgraph_replan|story_amendment|design_amendment|operational_gate, target_contract_refs: [string]}}]；design_traceability: [obj{{source_type: string, source_id: string, requirement_id: string}}]。\n\n\
          [hard_rules]\n\
          - 当前仅处于 human-confirmation 之前的候选阶段：必须读取并遵守 writing-plans 的拆分、TDD、验证与交接质量纪律；只将这些纪律体现在本候选中。\n\
          - 不得创建 cadence/plans/ 或任何 workspace 文件；不得提前执行 writing-plans 的落盘步骤；canonical writeback 与正式 Plan 落盘由 human-confirmation gate 与 daemon 负责，不得声称已完成。\n\
          - 仅在最后一个 nonce sentinel block 返回唯一 Canonical Contract Candidate JSON（不用 Markdown code fence），其 outline_id/logical_work_item_id 对应当前 `{outline_id}`/`{logical_work_item_id}`；draft 只含 [canonical_field_contract] 所列字段。\n\
          - 不得修改、新增、删除或重命名 Outline；不得输出 work_item_id、draft_id、status 等后端状态字段；logical_work_item_id 必须与其 identity 一致。\n\
-         - handoff_contract 是 Canonical singleton；required_fields、provided_contract_refs、reviewer_check_refs 均非空且不重复。\n\
+         - handoff_contract 是 Canonical singleton；required_fields、reviewer_check_refs 非空且不重复；provided_contract_refs 元素唯一且非空白，仅列出被下游 WorkItem input_contracts 消费的契约 ref，无下游消费者（链路末端）时必须为空数组。\n\
          - verification command 必须来自目标仓库的可信证据，不得根据 WorkItemKind 推导；证据不足进入 manual/repair/blocker，绝不使用 Aria 当前仓库命令兜底。\n\
          - 不得输出面向 Coder 的长篇 implementation_context；不要提前生成或渲染 Coder Projection 或 Reviewer Projection。\n\n\
          [output]\n\
