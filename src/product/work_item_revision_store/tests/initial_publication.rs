@@ -1,9 +1,12 @@
 use super::*;
-use crate::product::coding_attempt_store::{CodingAttemptStore, CreateGroupCodingAttemptInput};
+use crate::product::coding_attempt_store::{
+    CodingAttemptStore, CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
+};
 use crate::product::coding_models::{
     CodingAttemptPlanBinding, CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRun,
     CodingUnitRunStatus,
 };
+use crate::product::coding_work_item_context::load_coding_work_item_context;
 use crate::product::models::{
     DependencyGraphRevision, PlanProjectionBundle, PlanValidationReportArtifact, ProviderName,
     VerificationPlanRevision, WorkItemPlanRevision, WorkItemProjectionBundle,
@@ -644,32 +647,64 @@ fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
             },
         )
         .unwrap();
-    let unit = CodingExecutionUnit {
-        id: "coding_unit_0001".to_string(),
-        attempt_id: attempt.id.clone(),
-        project_id: attempt.project_id.clone(),
-        issue_id: attempt.issue_id.clone(),
-        plan_id: binding.plan_id.clone(),
-        logical_work_item_id: binding.logical_work_item_id.clone(),
-        work_item_revision_id: binding.work_item_revision_id.clone(),
-        dependency_logical_work_item_ids: Vec::new(),
-        order_index: 0,
-        status: CodingExecutionUnitStatus::Pending,
-        started_at: None,
-        completed_at: None,
-        latest_handoff_revision_id: None,
-        completion_commit: None,
-        summary: None,
-        created_at: "2026-07-26T00:00:00Z".to_string(),
-        updated_at: "2026-07-26T00:00:00Z".to_string(),
-    };
+    let unit = attempt_store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: attempt.id.clone(),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            plan_id: binding.plan_id.clone(),
+            logical_work_item_id: binding.logical_work_item_id.clone(),
+            work_item_revision_id: binding.work_item_revision_id.clone(),
+            dependency_logical_work_item_ids: Vec::new(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .unwrap();
+    let attempt = attempt_store
+        .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .unwrap();
     let run = coding_unit_run(&unit, &binding);
-    let reader = WorkItemRuntimeReader::new(paths);
+    let reader = WorkItemRuntimeReader::new(paths.clone());
 
     let resolved = reader
         .resolve_coding_unit(&attempt, &unit, Some(&run))
         .unwrap();
     assert_eq!(resolved.binding, binding);
+
+    let (coder_projection, coder_hash) = reader
+        .coder_projection_for_unit(&attempt, &unit, Some(&run))
+        .unwrap();
+    assert_eq!(
+        coder_projection,
+        resolved.projection_bundle.coder_projection
+    );
+    assert_eq!(coder_hash, resolved.binding.coder_projection_hash);
+
+    let (reviewer_projection, reviewer_hash) = reader
+        .reviewer_projection_for_unit(&attempt, &unit, Some(&run))
+        .unwrap();
+    assert_eq!(
+        reviewer_projection,
+        resolved.projection_bundle.reviewer_projection
+    );
+    assert_eq!(reviewer_hash, resolved.binding.reviewer_projection_hash);
+
+    let normative = reader
+        .normative_context_for_unit(&attempt, &unit, Some(&run))
+        .unwrap();
+    assert_eq!(normative.work_item_revision, resolved.work_item_revision);
+    assert_eq!(
+        normative.verification_plan_revision,
+        resolved.verification_plan_revision
+    );
+
+    let coder_context = load_coding_work_item_context(&paths, &attempt).unwrap();
+    let markdown = coder_context
+        .markdown
+        .expect("bound coder projection markdown");
+    assert!(markdown.contains("## Coder Projection"));
+    assert!(markdown.contains(&resolved.projection_bundle.coder_projection.objective));
+    assert!(!markdown.contains("Canonical Contract"));
 
     let mut different_hash = run;
     different_hash.coder_projection_hash = "sha256:another-coder-projection".to_string();

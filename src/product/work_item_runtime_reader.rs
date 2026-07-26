@@ -9,6 +9,7 @@ use crate::product::models::{
     VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle,
     WorkItemRevision, WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceType,
 };
+use crate::product::work_item_projection::{CoderWorkItemProjection, ReviewerWorkItemProjection};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +256,41 @@ impl WorkItemRuntimeReader {
         }
 
         Ok(resolved)
+    }
+
+    pub fn coder_projection_for_unit(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit: &CodingExecutionUnit,
+        run: Option<&CodingUnitRun>,
+    ) -> Result<(CoderWorkItemProjection, String), ProductStoreError> {
+        let runtime = self.resolve_coding_unit(attempt, unit, run)?;
+        Ok((
+            runtime.projection_bundle.coder_projection,
+            runtime.binding.coder_projection_hash,
+        ))
+    }
+
+    pub fn reviewer_projection_for_unit(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit: &CodingExecutionUnit,
+        run: Option<&CodingUnitRun>,
+    ) -> Result<(ReviewerWorkItemProjection, String), ProductStoreError> {
+        let runtime = self.resolve_coding_unit(attempt, unit, run)?;
+        Ok((
+            runtime.projection_bundle.reviewer_projection,
+            runtime.binding.reviewer_projection_hash,
+        ))
+    }
+
+    pub fn normative_context_for_unit(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit: &CodingExecutionUnit,
+        run: Option<&CodingUnitRun>,
+    ) -> Result<ResolvedWorkItemRuntime, ProductStoreError> {
+        self.resolve_coding_unit(attempt, unit, run)
     }
 }
 
