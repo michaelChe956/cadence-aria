@@ -179,4 +179,27 @@ Plan: cadence/plans/2026-07-26_计划文档_功能开发_ProviderPrompt项目规
 Execution mode: subagent-driven-development
 Task 1/2: complete (commits 9607f860..a2976742, review approved)
   Minor: RED 阶段后半部分的逐条失败尾部因并发 Cargo 锁与输出截断未留存；实施报告已披露，且不影响最终契约或 GREEN 证据。
-Task 3: pending (全量质量门禁、OpenSpec 收尾与文档提交)。
+Task 3: complete (commit d697cad, review approved)
+  Exception: `cargo test --locked` 已执行，1361 个 lib 测试通过、it_core 143/144 通过；唯一 `large_file_guard` 失败为操作者批准接受的既有基线超限。扫描、14 项定向契约测试、fmt、clippy、check、OpenSpec 严格验证与范围 diff 检查均通过。
+Plan tracking fix: complete (commit 48c750b, review clean)
+Spec sync: complete (commit b9a770a, project-rule-aware-prompts 主规格已创建并验证)
+Archive: complete (commit b6ddf8e, archived to openspec/changes/archive/2026-07-26-use-project-rules-in-prompts)
+Final review: core Change approved; whole branch not merge-ready because concurrent add-repository-initialization-git-finalize has two Important findings outside this Change.
+
+# git_finalize 命令环境注入
+
+Change: fix-git-finalize-command-environment
+Plan: cadence/plans/2026-07-26_计划文档_基线修复_gitFinalize命令环境注入_v1.0.md
+Plan commit: 8f9235a9
+Execution mode: subagent-driven-development
+Base: 8f9235a9
+Task 1: complete (commits 8f9235a9..28e77d3f, review approved)
+  Minor: `git init -b main` 依赖宿主 git ≥ 2.28（plan-mandated，留档）；未设 GIT_CONFIG_NOSYSTEM，/etc/gitconfig 理论可干扰（风险极低，留档）。
+Task 2: complete (commits 28e77d3f..9b0aa069, review approved)
+  Minor: `#[cfg(test)] git_environment()` 暂 dead_code warning（plan-mandated 预留给 Task 3，消费后自然消除）。
+Task 3: complete (commits 9b0aa069..a345bf8d, review approved)
+  Note: brief 测试示例 fixture 不可编译（FixedAvailableProviderHealth 为带参 tuple struct），按 brief 授权改用 fake_repository_registration_gate()，被测逻辑与断言未动。
+Task 4: BLOCKED（it_web 既有回归，二分定位 64869f47 引入）→ 操作者选 A 修复
+Regression fix: 134a4f2e（it_web fixture 适配 GitFinalize checkpoint 两阶段协议，10/10 转绿）
+Task 4: complete (15cd52c2；fmt/clippy/repository_store 67/67/it_web 10/10/openspec validate 全绿)
+Final review: With fixes → Important 修复（补对照测试，注入 {LC_ALL, GIT_CONFIG_NOSYSTEM} 无 HOME，断言 commit 身份失败确定性复现；68/68 绿）。Minors 5 条留档（见终审报告）。Ready to merge=Yes。
