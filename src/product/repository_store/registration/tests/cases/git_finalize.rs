@@ -473,3 +473,65 @@ fn default_git_environment_includes_allowed_keys_only_when_present() {
     assert_eq!(empty.len(), 1, "empty HOME must be skipped");
     assert_eq!(empty.get("LC_ALL").map(String::as_str), Some("C"));
 }
+
+#[tokio::test]
+async fn git_finalize_commit_fails_without_injected_home_identity() {
+    let temp = TempDir::new().unwrap();
+    let git_root = temp.path().join("repository");
+    std::fs::create_dir_all(&git_root).unwrap();
+    for argv in [vec!["init", "-b", "main"], vec!["config", "commit.gpgsign", "false"]] {
+        let status = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&git_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {argv:?} failed");
+    }
+    std::fs::write(git_root.join("AGENTS.md"), "# agents\n").unwrap();
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = RepositoryRegistrationCoordinator::new_with_operations(
+        Arc::new(RecordingProjectLookup {
+            calls: calls.clone(),
+        }),
+        Arc::new(RecordingRepositoryPersistence {
+            calls: calls.clone(),
+            created: AtomicUsize::new(0),
+        }),
+        RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+            temp.path().join(".aria"),
+        )),
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AvailableHealth))),
+        registry(),
+        Arc::new(RecordingCadence {
+            calls: calls.clone(),
+            source_root: temp.path().join("cadence-source"),
+        }),
+        Arc::new(|| Ok(())),
+        Arc::new(crate::cross_cutting::bounded_command_runner::TokioBoundedCommandRunner),
+        Arc::new(|| "2026-07-25T00:00:00Z".to_string()),
+        Arc::new(RecordingInitializer {
+            calls: calls.clone(),
+        }),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    )
+    .with_git_environment(std::collections::BTreeMap::from([
+        ("LC_ALL".to_string(), "C".to_string()),
+        ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
+    ]));
+
+    let error = coordinator
+        .git_finalize(&git_root, CancellationToken::new())
+        .await
+        .expect_err("git_finalize without HOME must fail at commit identity resolution");
+    assert!(
+        error.contains("git_finalize_commit"),
+        "expected commit-stage failure, got: {error}"
+    );
+    assert!(
+        error.contains("unable to auto-detect email address")
+            || error.contains("Author identity unknown"),
+        "expected identity resolution failure, got: {error}"
+    );
+}
