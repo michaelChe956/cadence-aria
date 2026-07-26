@@ -167,17 +167,19 @@ fn workspace_author_workflows_directly_reference_cadence_routing_rules() {
         ));
 
         assert!(
-            workflow.contains(
-                "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
-            ),
-            "{workspace_type:?} must directly reference the Cadence routing kernel"
+            workflow.contains("[cadence_project_rules]"),
+            "{workspace_type:?}"
+        );
+        assert_eq!(
+            workflow.matches("[cadence_project_rules]").count(),
+            1,
+            "{workspace_type:?}"
         );
         assert!(
-            workflow.contains(
-                "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
-            ),
-            "{workspace_type:?} must directly reference the Cadence OpenSpec/Superpowers workflow"
+            workflow.contains("AGENTS.md") && workflow.contains("CLAUDE.md"),
+            "{workspace_type:?}"
         );
+        assert!(!workflow.contains("Cadence-skills/"), "{workspace_type:?}");
         assert!(
             !workflow.contains("cadence-workflow"),
             "{workspace_type:?} must not depend on cadence-workflow"

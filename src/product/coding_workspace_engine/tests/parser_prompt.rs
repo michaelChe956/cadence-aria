@@ -169,12 +169,10 @@ fn coding_prompt_requires_material_driven_execution_without_fixed_stack_terms() 
 
     assert_no_fixed_stack_terms(&prompt);
     assert!(prompt.contains("Coder 执行协议"));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
-    ));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
-    ));
+    assert!(prompt.contains("[cadence_project_rules]"));
+    assert!(prompt.contains("AGENTS.md"));
+    assert!(prompt.contains("CLAUDE.md"));
+    assert!(!prompt.contains("Cadence-skills/"));
     assert!(prompt.contains("executing-plans"));
     assert!(prompt.contains("test-driven-development"));
     assert!(!prompt.contains("cadence-workflow"));
@@ -227,12 +225,10 @@ fn coding_delta_prompt_requires_material_driven_rework_without_fixed_stack_terms
 
     assert_no_fixed_stack_terms(&prompt);
     assert!(prompt.contains("Coder 增量执行协议"));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
-    ));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
-    ));
+    assert!(prompt.contains("[cadence_project_rules]"));
+    assert!(prompt.contains("AGENTS.md"));
+    assert!(prompt.contains("CLAUDE.md"));
+    assert!(!prompt.contains("Cadence-skills/"));
     assert!(prompt.contains("executing-plans"));
     assert!(prompt.contains("test-driven-development"));
     assert!(!prompt.contains("cadence-workflow"));
@@ -345,9 +341,12 @@ fn coding_lifecycle_protocols_reuse_the_canonical_cadence_routing_reference() {
         group_final_review_material_protocol(),
     ] {
         assert!(
-            protocol.contains("以下两份 Cadence 原始规则是唯一流程权威"),
+            protocol.contains("[cadence_project_rules]"),
             "every coding lifecycle prompt must use the shared canonical routing reference"
         );
+        assert!(protocol.contains("AGENTS.md"));
+        assert!(protocol.contains("CLAUDE.md"));
+        assert!(!protocol.contains("Cadence-skills/"));
     }
 }
 
@@ -418,12 +417,10 @@ async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
         .expect("code review prompt");
 
     assert!(prompt.contains("compiled implementation context"));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
-    ));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
-    ));
+    assert!(prompt.contains("[cadence_project_rules]"));
+    assert!(prompt.contains("AGENTS.md"));
+    assert!(prompt.contains("CLAUDE.md"));
+    assert!(!prompt.contains("Cadence-skills/"));
     assert!(prompt.contains("requesting-code-review"));
     assert!(prompt.contains("首个用户可见消息必须是工作流路由回执"));
     assert!(prompt.contains("最终审查结论必须只输出一个 JSON 对象"));

@@ -36,14 +36,10 @@ fn tester_execute_prompt_blocks_insufficient_test_plan_without_replanning() {
     assert!(prompt.contains("Do not generate new TestPlan steps during execute_test_plan"));
     assert!(prompt.contains("provider_analysis prefixed by \"test_plan_insufficient:\""));
     assert!(prompt.contains("mark the affected required step blocked"));
-    assert!(prompt.contains("agent-routing-kernel.md"));
-    assert!(prompt.contains("openspec-superpowers-workflow.md"));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
-    ));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
-    ));
+    assert!(prompt.contains("[cadence_project_rules]"));
+    assert!(prompt.contains("AGENTS.md"));
+    assert!(prompt.contains("CLAUDE.md"));
+    assert!(!prompt.contains("Cadence-skills/"));
     assert!(prompt.contains("verification-before-completion"));
     assert!(!prompt.contains("cadence-workflow"));
 }

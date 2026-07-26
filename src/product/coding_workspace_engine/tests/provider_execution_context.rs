@@ -405,12 +405,10 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
         .unwrap();
 
     let prompt = provider.input().prompt;
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
-    ));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
-    ));
+    assert!(prompt.contains("[cadence_project_rules]"));
+    assert!(prompt.contains("AGENTS.md"));
+    assert!(prompt.contains("CLAUDE.md"));
+    assert!(!prompt.contains("Cadence-skills/"));
     assert!(prompt.contains("requesting-code-review"));
     assert!(prompt.contains("source_stage=group_final_review"));
     assert!(prompt.contains("只输出 JSON"));

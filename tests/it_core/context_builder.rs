@@ -88,15 +88,20 @@ fn context_builder_renders_each_planning_prompt_and_maps_adapter_input() {
             result
                 .adapter_input
                 .prompt
-                .contains("agent-routing-kernel.md"),
-            "{node_id} prompt must directly reference the Cadence routing kernel"
+                .contains("[cadence_project_rules]"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
         );
         assert!(
-            result
-                .adapter_input
-                .prompt
-                .contains("openspec-superpowers-workflow.md"),
-            "{node_id} prompt must directly reference the Cadence OpenSpec/Superpowers workflow"
+            result.adapter_input.prompt.contains("AGENTS.md")
+                && result.adapter_input.prompt.contains("CLAUDE.md"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
+        );
+        assert!(
+            !result.adapter_input.prompt.contains("Cadence-skills/"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
         );
         assert!(
             !result.adapter_input.prompt.contains("cadence-workflow"),
@@ -368,15 +373,20 @@ fn context_builder_renders_p4_provider_nodes_and_rejects_missing_required_inputs
             result
                 .adapter_input
                 .prompt
-                .contains("agent-routing-kernel.md"),
-            "{node_id} prompt must directly reference the Cadence routing kernel"
+                .contains("[cadence_project_rules]"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
         );
         assert!(
-            result
-                .adapter_input
-                .prompt
-                .contains("openspec-superpowers-workflow.md"),
-            "{node_id} prompt must directly reference the Cadence OpenSpec/Superpowers workflow"
+            result.adapter_input.prompt.contains("AGENTS.md")
+                && result.adapter_input.prompt.contains("CLAUDE.md"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
+        );
+        assert!(
+            !result.adapter_input.prompt.contains("Cadence-skills/"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
         );
         assert!(
             !result.adapter_input.prompt.contains("cadence-workflow"),

@@ -22,19 +22,19 @@ fn initial_author_inputs_directly_route_every_workspace_artifact_type() {
             .prompt;
 
         assert!(
-            prompt.contains("[cadence_original_routing_rules]"),
+            prompt.contains("[cadence_project_rules]"),
             "initial {workspace_type:?} author prompt must include the direct routing reference: {prompt}"
         );
         assert_eq!(
-            prompt.matches("[cadence_original_routing_rules]").count(),
+            prompt.matches("[cadence_project_rules]").count(),
             1,
             "initial {workspace_type:?} author fallback must include the direct routing reference exactly once: {prompt}"
         );
         assert!(
-            prompt.contains("agent-routing-kernel.md")
-                && prompt.contains("openspec-superpowers-workflow.md"),
-            "initial {workspace_type:?} author prompt must name both authoritative rule files: {prompt}"
+            prompt.contains("AGENTS.md") && prompt.contains("CLAUDE.md"),
+            "initial {workspace_type:?} author prompt must name both project rule files: {prompt}"
         );
+        assert!(!prompt.contains("Cadence-skills/"), "{prompt}");
         assert!(
             prompt.contains(required_skill),
             "initial {workspace_type:?} author prompt must select its phase skill: {prompt}"
@@ -76,10 +76,13 @@ fn initial_author_reuses_system_routing_reference_for_every_workspace_type() {
             .prompt;
 
         assert_eq!(
-            prompt.matches("[cadence_original_routing_rules]").count(),
+            prompt.matches("[cadence_project_rules]").count(),
             1,
             "initial {workspace_type:?} author prompt must reuse, not repeat, the system routing reference: {prompt}"
         );
+        assert!(prompt.contains("[cadence_project_rules]"), "{prompt}");
+        assert!(prompt.contains("AGENTS.md") && prompt.contains("CLAUDE.md"), "{prompt}");
+        assert!(!prompt.contains("Cadence-skills/"), "{prompt}");
     }
 }
 
@@ -341,10 +344,13 @@ fn full_revision_prompt_does_not_repeat_schema_from_generation_context() {
         "full revision must reuse, not repeat, the schema already present in generation context: {prompt}"
     );
     assert_eq!(
-        prompt.matches("[cadence_original_routing_rules]").count(),
+        prompt.matches("[cadence_project_rules]").count(),
         1,
         "full revision must reuse, not repeat, the direct routing reference already present in generation context: {prompt}"
     );
+    assert!(prompt.contains("[cadence_project_rules]"), "{prompt}");
+    assert!(prompt.contains("AGENTS.md") && prompt.contains("CLAUDE.md"), "{prompt}");
+    assert!(!prompt.contains("Cadence-skills/"), "{prompt}");
 }
 
 #[test]

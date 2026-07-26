@@ -132,12 +132,10 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
 
     assert!(prompt.contains("[openspec_contract]"));
     assert!(prompt.contains("[superpowers_contract]"));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
-    ));
-    assert!(prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
-    ));
+    assert!(prompt.contains("[cadence_project_rules]"));
+    assert!(prompt.contains("AGENTS.md"));
+    assert!(prompt.contains("CLAUDE.md"));
+    assert!(!prompt.contains("Cadence-skills/"));
     assert!(!prompt.contains("cadence-workflow"));
     assert!(prompt.contains("[allowed_outputs]"));
     assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
@@ -814,9 +812,10 @@ fn realistic_chinese_serial_prompt_stays_within_quality_budget() {
     assert!(invocation.prompt.contains("[canonical_field_contract]"));
     assert!(invocation.prompt.contains("verification_plan"));
     assert!(invocation.prompt.contains("operational_gate"));
-    assert!(invocation.prompt.contains("[cadence_original_routing_rules]"));
-    assert!(invocation.prompt.contains("agent-routing-kernel.md"));
-    assert!(invocation.prompt.contains("openspec-superpowers-workflow.md"));
+    assert!(invocation.prompt.contains("[cadence_project_rules]"));
+    assert!(invocation.prompt.contains("AGENTS.md"));
+    assert!(invocation.prompt.contains("CLAUDE.md"));
+    assert!(!invocation.prompt.contains("Cadence-skills/"));
     assert!(invocation.prompt.contains("[直接依赖的可消费交接合同]"));
     assert!(invocation.prompt.contains("ARIA_STRUCTURED_OUTPUT"));
 }
