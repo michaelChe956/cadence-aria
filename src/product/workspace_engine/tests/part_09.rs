@@ -340,7 +340,39 @@ fn make_work_item_plan_engine_with_draft_candidate(
 
     let project_id = "project_0001";
     let issue_id = "issue_0001";
-    let repository_id = "repo_0001";
+    let repository_path = tmp.path().join("repository");
+    std::fs::create_dir(&repository_path).unwrap();
+    let repository = crate::product::repository_store::RepositoryStore::new(lifecycle.app_paths())
+        .create(crate::product::repository_store::CreateRepositoryInput {
+            project_id: project_id.to_string(),
+            name: "Workspace Engine Fixture Repository".to_string(),
+            path: repository_path,
+            default_policy_preset: None,
+            default_provider_mode: None,
+        })
+        .unwrap();
+    let repository_id = repository.id.clone();
+    let now = chrono::Utc::now().to_rfc3339();
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(project_id, issue_id)
+            .join("issue.json"),
+        &crate::product::models::IssueRecord {
+            id: issue_id.to_string(),
+            project_id: project_id.to_string(),
+            repo_id: Some(repository.id),
+            title: "Workspace Engine Fixture Issue".to_string(),
+            description: Some("RuntimeBinding Final Compile fixture".to_string()),
+            change_id: "workspace_engine_fixture".to_string(),
+            phase: crate::product::models::IssuePhase::Clarification,
+            status: crate::product::models::IssueStatus::Draft,
+            active_binding_id: None,
+            created_at: now.clone(),
+            updated_at: now,
+        },
+    )
+    .unwrap();
 
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {

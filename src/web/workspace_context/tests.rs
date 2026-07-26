@@ -6,7 +6,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
-    CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+    CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
 use crate::product::models::{
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus, ProviderName,

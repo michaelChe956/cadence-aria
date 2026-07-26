@@ -287,20 +287,7 @@ pub(crate) async fn handle_human_confirm_from_handler(
                 let _ = send_json_outbound(&outbound_tx, &err).await;
             }
         }
-        Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { child_sessions }) => {
-            let lifecycle = LifecycleStore::new(run_context.app_paths.clone());
-            for session in child_sessions {
-                if let Err(error) =
-                    ensure_workspace_context_message(&run_context.app_paths, &lifecycle, session)
-                {
-                    let err = WsOutMessage::Error {
-                        message: format!("ensure child workspace context failed: {error}"),
-                    };
-                    let _ = send_json_outbound(&outbound_tx, &err).await;
-                    return;
-                }
-            }
-        }
+        Ok(ReviewDecisionOutcome::ConfirmedWithChildSessions { .. }) => {}
         Ok(ReviewDecisionOutcome::StartRevision) => {
             if let Err(message) = spawn_provider_run_from_handler(
                 run_context,

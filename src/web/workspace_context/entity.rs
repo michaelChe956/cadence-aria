@@ -2,10 +2,11 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
-    DesignSpecRecord, IssueRecord, IssueWorkItemPlan, LifecycleWorkItemRecord, RepositoryRecord,
-    SpecVersionRecord, StorySpecRecord, WorkspaceSessionRecord, WorkspaceType,
+    DesignSpecRecord, IssueRecord, IssueWorkItemPlan, RepositoryRecord, SpecVersionRecord,
+    StorySpecRecord, WorkspaceSessionRecord, WorkspaceType,
 };
 use crate::product::repository_store::RepositoryStore;
+use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 
 pub(super) struct WorkspaceEntityContext {
     pub(super) title: String,
@@ -14,6 +15,7 @@ pub(super) struct WorkspaceEntityContext {
 }
 
 pub(super) fn workspace_entity_context(
+    app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
     issue: &IssueRecord,
@@ -37,17 +39,18 @@ pub(super) fn workspace_entity_context(
             })
         }
         WorkspaceType::WorkItem => {
-            let work_item = find_work_item(lifecycle, session, &session.entity_id)?;
+            let runtime =
+                WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
             let mut linked_context =
-                linked_story_context(lifecycle, session, &work_item.story_spec_ids)?;
+                linked_story_context(lifecycle, session, &runtime.lineage.story_spec_refs)?;
             linked_context.extend(linked_design_context(
                 lifecycle,
                 session,
-                &work_item.design_spec_ids,
+                &runtime.lineage.design_spec_refs,
             )?);
             Ok(WorkspaceEntityContext {
-                title: work_item.title,
-                repository_id: work_item.repository_id,
+                title: runtime.projection_bundle.human_projection.title,
+                repository_id: issue_repo_id(issue)?,
                 linked_context,
             })
         }
@@ -70,6 +73,7 @@ pub(super) fn workspace_entity_context(
 }
 
 pub(super) fn work_item_context_summary(
+    app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
 ) -> Result<String, ProductStoreError> {
@@ -87,63 +91,35 @@ pub(super) fn work_item_context_summary(
     if session.workspace_type != WorkspaceType::WorkItem {
         return Ok(String::new());
     }
-    let work_item = find_work_item(lifecycle, session, &session.entity_id)?;
-    let verification_plan_summary = if let Some(ref plan_ref) = work_item.verification_plan_ref {
-        match lifecycle.get_verification_plan(&session.project_id, &session.issue_id, plan_ref) {
-            Ok(plan) => {
-                let checks: Vec<String> = plan
-                    .commands
-                    .iter()
-                    .map(|command| format!("- {}: {}", command.label, command.command))
-                    .collect();
-                if checks.is_empty() {
-                    "(no commands)".to_string()
-                } else {
-                    checks.join("\n")
-                }
-            }
-            Err(_) => "(verification plan not found)".to_string(),
-        }
-    } else {
-        "(no verification plan)".to_string()
-    };
-    let source_context = if work_item.source_work_item_plan_id.is_some()
-        || work_item.source_outline_id.is_some()
-        || work_item.source_draft_id.is_some()
-        || work_item.planned_implementation_context.is_some()
-        || work_item.planned_handoff_summary.is_some()
-    {
-        format!(
-            "\n[work_item_plan_source]\nsource_work_item_plan_id: {}\nsource_outline_id: {}\nsource_draft_id: {}\nplanned_implementation_context:\n{}\nplanned_handoff_summary:\n{}",
-            work_item
-                .source_work_item_plan_id
-                .as_deref()
-                .unwrap_or("(none)"),
-            work_item.source_outline_id.as_deref().unwrap_or("(none)"),
-            work_item.source_draft_id.as_deref().unwrap_or("(none)"),
-            work_item
-                .planned_implementation_context
-                .as_deref()
-                .unwrap_or("(none)"),
-            work_item
-                .planned_handoff_summary
-                .as_deref()
-                .unwrap_or("(none)")
-        )
-    } else {
-        String::new()
-    };
+    let runtime = WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
+    let human = &runtime.projection_bundle.human_projection;
+    let inputs = human
+        .inputs
+        .iter()
+        .map(|contract| contract.contract_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let outputs = human
+        .outputs
+        .iter()
+        .map(|contract| contract.contract_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
 
     Ok(format!(
-        "kind: {:?}\ndepends_on: [{}]\nexclusive_write_scopes: [{}]\nforbidden_write_scopes: [{}]\ncontext_budget: target_context_k={}, max_summary_chars={}, max_code_context_chars={}\nverification_commands:\n{}{source_context}",
-        work_item.kind,
-        work_item.depends_on.join(", "),
-        work_item.exclusive_write_scopes.join(", "),
-        work_item.forbidden_write_scopes.join(", "),
-        work_item.context_budget.target_context_k,
-        work_item.context_budget.max_summary_chars,
-        work_item.context_budget.max_code_context_chars,
-        verification_plan_summary
+        "title: {}\ngoal: {}\nnon_goals: [{}]\ninput_contracts: [{}]\noutput_contracts: [{}]\ndepends_on: [{}]\nexclusive_write_scopes: [{}]\nforbidden_write_scopes: [{}]\ncompletion_summary: [{}]\nsource_refs: [{}]\nnormative: {}\nused_by_provider: {}",
+        human.title,
+        human.goal,
+        human.non_goals.join(", "),
+        inputs,
+        outputs,
+        human.dependencies.join(", "),
+        human.scope_summary.owned_scopes.join(", "),
+        human.scope_summary.forbidden_scopes.join(", "),
+        human.completion_summary.join(", "),
+        human.source_refs.join(", "),
+        human.normative,
+        human.used_by_provider,
     ))
 }
 
@@ -174,21 +150,6 @@ fn find_design_spec(
         .ok_or_else(|| ProductStoreError::NotFound {
             kind: "design_spec",
             id: design_spec_id.to_string(),
-        })
-}
-
-fn find_work_item(
-    lifecycle: &LifecycleStore,
-    session: &WorkspaceSessionRecord,
-    work_item_id: &str,
-) -> Result<LifecycleWorkItemRecord, ProductStoreError> {
-    lifecycle
-        .list_work_items(&session.project_id, &session.issue_id)?
-        .into_iter()
-        .find(|work_item| work_item.id == work_item_id)
-        .ok_or_else(|| ProductStoreError::NotFound {
-            kind: "work_item",
-            id: work_item_id.to_string(),
         })
 }
 

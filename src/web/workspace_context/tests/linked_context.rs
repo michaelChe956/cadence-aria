@@ -143,81 +143,15 @@ fn design_workspace_context_includes_linked_story_markdown() {
 }
 
 #[test]
-fn work_item_workspace_context_includes_linked_design_markdown() {
+fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
     let root = tempdir().expect("root");
-    let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let repository = RepositoryStore::new(app_paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: "project_0001".to_string(),
-            name: "Repo".to_string(),
-            path: repo.path().to_path_buf(),
-            default_policy_preset: None,
-            default_provider_mode: None,
-        })
-        .expect("repository");
-    IssueStore::new(app_paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some(repository.id.clone()),
-            title: "爬楼梯问题".to_string(),
-            description: Some("使用 Python 实现 climb_stairs".to_string()),
-            change_id: None,
-        })
-        .expect("issue");
-
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    let story = lifecycle
-        .create_story_spec(CreateStorySpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id.clone(),
-            title: "爬楼梯问题 Story Spec".to_string(),
-        })
-        .expect("story");
-    let design = lifecycle
-        .create_design_spec(CreateDesignSpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            story_spec_ids: vec![story.id.clone()],
-            title: "爬楼梯问题 Design Spec".to_string(),
-        })
-        .expect("design");
-    lifecycle
-        .append_version(AppendSpecVersionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: design.id.clone(),
-            markdown: "# 爬楼梯问题 Design Spec\n\n[DEC-001] 使用迭代动态规划。".to_string(),
-            provider_run_refs: Vec::new(),
-            review_refs: Vec::new(),
-            confirmed_by: Some("human".to_string()),
-        })
-        .expect("design version");
-    lifecycle
-        .update_spec_confirmation_status(
-            "project_0001",
-            "issue_0001",
-            &design.id,
-            LifecycleConfirmationStatus::Confirmed,
-        )
-        .expect("confirm design");
-    let work_item = lifecycle
-        .create_work_item(CreateWorkItemInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
-            story_spec_ids: vec![story.id],
-            design_spec_ids: vec![design.id],
-            title: "实现爬楼梯问题".to_string(),
-            ..Default::default()
-        })
-        .expect("work item");
     let session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            entity_id: work_item.id,
+            entity_id: "wi_library_export".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
             reviewer_provider: ProviderName::ClaudeCode,
@@ -227,85 +161,27 @@ fn work_item_workspace_context_includes_linked_design_markdown() {
         })
         .expect("session");
 
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .expect("workspace context");
-    let context = &session.messages[0].content;
+    let error = ensure_workspace_context_message(&app_paths, &lifecycle, session).unwrap_err();
 
-    assert!(context.contains("- Design Spec: 爬楼梯问题 Design Spec (design_spec_0001)"));
-    assert!(context.contains("# 爬楼梯问题 Design Spec"));
-    assert!(context.contains("[DEC-001] 使用迭代动态规划。"));
-    assert!(context.contains("只使用 writing-plans 的计划结构要求"));
-    assert!(context.contains("不要创建 docs/superpowers/plans 文件"));
-    assert!(context.contains("不要询问 Subagent-Driven 或 Inline Execution"));
+    assert!(matches!(
+        error,
+        crate::product::json_store::ProductStoreError::IdentityMismatch {
+            kind: "runtime_binding_missing",
+            ..
+        }
+    ));
 }
 
 #[test]
-fn work_item_workspace_context_includes_source_draft_plan_context() {
+fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failure() {
     let root = tempdir().expect("root");
-    let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let repository = RepositoryStore::new(app_paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: "project_0001".to_string(),
-            name: "Repo".to_string(),
-            path: repo.path().to_path_buf(),
-            default_policy_preset: None,
-            default_provider_mode: None,
-        })
-        .expect("repository");
-    IssueStore::new(app_paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some(repository.id.clone()),
-            title: "Provider 依赖安装".to_string(),
-            description: Some("检查并安装 provider CLI".to_string()),
-            change_id: None,
-        })
-        .expect("issue");
-
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    let story = lifecycle
-        .create_story_spec(CreateStorySpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id.clone(),
-            title: "Provider 依赖 Story Spec".to_string(),
-        })
-        .expect("story");
-    let design = lifecycle
-        .create_design_spec(CreateDesignSpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            story_spec_ids: vec![story.id.clone()],
-            title: "Provider 依赖 Design Spec".to_string(),
-        })
-        .expect("design");
-    let work_item = lifecycle
-        .create_work_item(CreateWorkItemInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
-            story_spec_ids: vec![story.id],
-            design_spec_ids: vec![design.id],
-            title: "Provider 依赖核心服务".to_string(),
-            work_item_set_id: Some("issue_work_item_plan_0001".to_string()),
-            source_work_item_plan_id: Some("issue_work_item_plan_0001".to_string()),
-            source_outline_id: Some("outline_backend".to_string()),
-            source_draft_id: Some("draft_backend".to_string()),
-            planned_implementation_context: Some(
-                "实现 provider dependency core，先写 TDD 单测。".to_string(),
-            ),
-            planned_handoff_summary: Some(
-                "交付 ProviderDependencyService 与 provider catalog。".to_string(),
-            ),
-            ..Default::default()
-        })
-        .expect("work item");
     let session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            entity_id: work_item.id,
+            entity_id: "wi_library_export".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
             reviewer_provider: ProviderName::ClaudeCode,
@@ -315,20 +191,24 @@ fn work_item_workspace_context_includes_source_draft_plan_context() {
         })
         .expect("session");
 
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .expect("workspace context");
-    let context = &session.messages[0].content;
+    let error =
+        ensure_workspace_context_message(&app_paths, &lifecycle, session.clone()).unwrap_err();
 
-    assert!(context.contains("[work_item_plan_source]"));
-    assert!(context.contains("source_work_item_plan_id: issue_work_item_plan_0001"));
-    assert!(context.contains("source_outline_id: outline_backend"));
-    assert!(context.contains("source_draft_id: draft_backend"));
-    assert!(context.contains("planned_implementation_context"));
-    assert!(context.contains("实现 provider dependency core"));
-    assert!(context.contains("planned_handoff_summary"));
-    assert!(context.contains("交付 ProviderDependencyService"));
-    assert!(context.contains("[openspec_contract]"));
-    assert!(context.contains("[superpowers_contract]"));
+    assert!(matches!(
+        error,
+        crate::product::json_store::ProductStoreError::IdentityMismatch {
+            kind: "runtime_binding_missing",
+            ..
+        }
+    ));
+    assert!(
+        lifecycle
+            .get_workspace_session(&session.id)
+            .unwrap()
+            .messages
+            .is_empty(),
+        "Binding 缺失时不得持久化旧 Work Item Context"
+    );
 }
 
 #[test]

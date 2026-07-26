@@ -243,6 +243,20 @@ async fn batch_accept_all_runs_final_compile_and_publishes_revision_entities() {
     assert!(legacy_work_items.is_empty());
     assert!(legacy_verification_plans.is_empty());
     assert_eq!(work_item_sessions.len(), 3);
+    assert!(
+        work_item_sessions
+            .iter()
+            .all(|session| session.work_item_runtime_binding.is_some()),
+        "Final Compile 进入 human_confirm 前必须持久化每个 Work Item Session 的 RuntimeBinding"
+    );
+    assert!(
+        work_item_sessions.iter().all(|session| {
+            session.messages.first().is_some_and(|message| {
+                message.role == "system" && message.content.contains("[work_item_context]")
+            })
+        }),
+        "Final Compile 进入 human_confirm 前必须持久化每个 Work Item Session 的 Revision 上下文"
+    );
     assert_eq!(plan.status, IssueWorkItemPlanStatus::Confirmed);
     assert_eq!(plan.work_item_ids.len(), 3);
     assert_eq!(plan.verification_plan_ids.len(), 3);
