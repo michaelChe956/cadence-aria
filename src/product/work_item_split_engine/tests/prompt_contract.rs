@@ -373,3 +373,45 @@ fn work_item_plan_prompts_keep_json_contract_without_markdown_schema() {
         invocation.prompt
     );
 }
+
+#[test]
+fn single_item_prompt_relaxes_handoff_provided_contract_refs_for_terminal_items() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    for required in [
+        "provided_contract_refs: 唯一 str+ 数组（无下游消费者时为空数组）",
+        "provided_contract_refs 元素唯一且非空白",
+        "仅列出被下游 WorkItem input_contracts 消费的契约 ref",
+        "无下游消费者（链路末端）时必须为空数组",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "draft prompt must state the terminal-item handoff rule; missing {required}: {}",
+            invocation.prompt
+        );
+    }
+    assert!(
+        !invocation
+            .prompt
+            .contains("required_fields、provided_contract_refs、reviewer_check_refs 均非空且不重复"),
+        "draft prompt must not require non-empty provided_contract_refs: {}",
+        invocation.prompt
+    );
+    assert!(
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES,
+        "draft prompt must remain below the quality budget: {} bytes",
+        invocation.prompt.len()
+    );
+}
