@@ -125,6 +125,52 @@ async fn repository_initialization_completed_operation_get_sanitizes_persisted_r
             "2026-07-14T03:00:01Z".to_string(),
         )
         .expect("mark operation running");
+    let success = cadence_aria::product::repository_store::RepositoryRegistrationSuccess {
+        repository: RepositoryRecord {
+            id: "repository_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            name: "Repo".to_string(),
+            path: repository_path.clone(),
+            repo_hash: "repo_hash".to_string(),
+            runtime_root: runtime_root.clone(),
+            default_policy_preset: "manual-write".to_string(),
+            default_provider_mode: "claude_code".to_string(),
+            created_at: "2026-07-14T03:00:12Z".to_string(),
+            updated_at: "2026-07-14T03:00:12Z".to_string(),
+        },
+        cadence_skills:
+            cadence_aria::product::repository_store::CadenceSkillsPreparationSummary {
+                source_mode: "offline".to_string(),
+                source_root: PathBuf::from("/private/cadence-skills"),
+                skills_root: PathBuf::from("/private/repo/.claude/skills"),
+                git_updated: false,
+                link_sync_status: "synchronized".to_string(),
+                warnings: Vec::new(),
+            },
+        initialization:
+            cadence_aria::product::repository_store::RepositoryInitializationSummary {
+                provider: "claude_code".to_string(),
+                source: PathBuf::from("/private/cadence-skills"),
+                source_mode: "offline".to_string(),
+                skills_root: PathBuf::from("/private/repo/.claude/skills"),
+                git_updated: false,
+                link_sync_status: "synchronized".to_string(),
+                commands: vec![RepositoryInitializationCommandSummary {
+                    command_index: 1,
+                    command: "/pre-check --no-interrupt".to_string(),
+                    status: "completed".to_string(),
+                    output_summary: None,
+                }],
+            },
+        warnings: Vec::new(),
+        changed_paths: vec![
+            "/private/repo/generated".to_string(),
+            ".claude/rules/project.md".to_string(),
+            "src/monkey.rs".to_string(),
+        ],
+        git_finalize_warning: None,
+        completed_at: "2026-07-14T03:00:12Z".to_string(),
+    };
     for (index, step) in RepositoryInitializationStepKind::ALL
         .into_iter()
         .enumerate()
@@ -137,6 +183,11 @@ async fn repository_initialization_completed_operation_get_sanitizes_persisted_r
                 format!("2026-07-14T03:00:{:02}Z", index * 2 + 2),
             )
             .expect("mark operation step running");
+        if step == RepositoryInitializationStepKind::GitFinalize {
+            operation_store
+                .checkpoint_git_finalize_result("project_0001", operation_id, success.clone())
+                .expect("checkpoint git finalize result");
+        }
         operation_store
             .mark_step_completed(
                 "project_0001",
@@ -150,52 +201,7 @@ async fn repository_initialization_completed_operation_get_sanitizes_persisted_r
         .finish_completed(
             "project_0001",
             operation_id,
-            cadence_aria::product::repository_store::RepositoryRegistrationSuccess {
-                repository: RepositoryRecord {
-                    id: "repository_0001".to_string(),
-                    project_id: "project_0001".to_string(),
-                    name: "Repo".to_string(),
-                    path: repository_path.clone(),
-                    repo_hash: "repo_hash".to_string(),
-                    runtime_root: runtime_root.clone(),
-                    default_policy_preset: "manual-write".to_string(),
-                    default_provider_mode: "claude_code".to_string(),
-                    created_at: "2026-07-14T03:00:12Z".to_string(),
-                    updated_at: "2026-07-14T03:00:12Z".to_string(),
-                },
-                cadence_skills:
-                    cadence_aria::product::repository_store::CadenceSkillsPreparationSummary {
-                        source_mode: "offline".to_string(),
-                        source_root: PathBuf::from("/private/cadence-skills"),
-                        skills_root: PathBuf::from("/private/repo/.claude/skills"),
-                        git_updated: false,
-                        link_sync_status: "synchronized".to_string(),
-                        warnings: Vec::new(),
-                    },
-                initialization:
-                    cadence_aria::product::repository_store::RepositoryInitializationSummary {
-                        provider: "claude_code".to_string(),
-                        source: PathBuf::from("/private/cadence-skills"),
-                        source_mode: "offline".to_string(),
-                        skills_root: PathBuf::from("/private/repo/.claude/skills"),
-                        git_updated: false,
-                        link_sync_status: "synchronized".to_string(),
-                        commands: vec![RepositoryInitializationCommandSummary {
-                            command_index: 1,
-                            command: "/pre-check --no-interrupt".to_string(),
-                            status: "completed".to_string(),
-                            output_summary: None,
-                        }],
-                    },
-                warnings: Vec::new(),
-                changed_paths: vec![
-                    "/private/repo/generated".to_string(),
-                    ".claude/rules/project.md".to_string(),
-                    "src/monkey.rs".to_string(),
-                ],
-                git_finalize_warning: None,
-                completed_at: "2026-07-14T03:00:12Z".to_string(),
-            },
+            success,
             "2026-07-14T03:00:12Z".to_string(),
         )
         .expect("finish completed operation");
