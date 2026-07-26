@@ -202,52 +202,47 @@ export type WorkItemPlanContextBlockerPayload = {
   allowed_actions: string[];
 };
 
-export type WorkItemDraftVerificationCommand = {
-  id?: string;
-  label?: string;
-  command?: string;
-  description?: string;
-  cwd?: string;
-  purpose?: string;
-  required?: boolean;
-  timeout_seconds?: number;
-  safety?: string;
-  expected_exit_code?: number;
+export type WorkItemContractIdentity = {
+  logical_work_item_id: string;
+  title: string;
+  kind: string;
 };
 
-export type WorkItemDraftVerificationManualCheck = {
-  label?: string;
-  instructions?: string;
-  required?: boolean;
+export type WorkItemGoal = {
+  summary: string;
+};
+
+export type DesignTraceabilityRef = {
+  source_type: string;
+  source_id: string;
+  requirement_id: string;
+};
+
+export type CanonicalWorkItemContract = {
+  schema_version: number;
+  identity: WorkItemContractIdentity;
+  goal: WorkItemGoal;
+  non_goals: string[];
+  input_contracts: RequiredInputContract[];
+  output_contracts: PromisedOutputContract[];
+  tasks: WorkItemTask[];
+  write_policy: WorkItemWritePolicy;
+  acceptance_criteria: AcceptanceCriterion[];
+  verification_checks: VerificationCheck[];
+  handoff_contract: HandoffContract;
+  blocker_rules: BlockerRule[];
+  design_traceability: DesignTraceabilityRef[];
 };
 
 export type WorkItemDraftVerificationPlan = {
-  commands: WorkItemDraftVerificationCommand[];
-  manual_checks: WorkItemDraftVerificationManualCheck[];
-  required_gates: Array<
-    | string
-    | {
-        gate_id?: string;
-        name?: string;
-        description?: string;
-        depends_on?: string[];
-      }
-  >;
-  risk_notes: string[];
+  checks: VerificationCheck[];
 };
 
 export type WorkItemDraftCandidate = {
   outline_id: string;
-  title: string;
-  kind: WorkItemKind | string;
-  goal?: string;
-  implementation_context: string;
-  exclusive_write_scopes: string[];
-  forbidden_write_scopes: string[];
-  depends_on_outline_ids: string[];
-  required_handoff_from_outline_ids: string[];
+  logical_work_item_id: string;
+  canonical_contract_candidate: CanonicalWorkItemContract;
   verification_plan: WorkItemDraftVerificationPlan;
-  handoff_summary: string;
 };
 
 export type WorkItemDraftStatus =

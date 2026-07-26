@@ -1,9 +1,10 @@
 import { useState } from "react";
 import type {
+  CanonicalWorkItemContract,
   ValidatorFindingDto,
+  VerificationCheck,
   WorkItemBatchStatePayload,
   WorkItemDraftRecord,
-  WorkItemDraftVerificationCommand,
   WorkItemDraftVerificationPlan,
   WorkItemPlanArtifactPayload,
   WorkItemPlanArtifactVersion,
@@ -412,30 +413,27 @@ function diffOutlineArtifacts(base: WorkItemPlanOutline, compare: WorkItemPlanOu
 
 function diffDraftArtifacts(base: WorkItemDraftRecord, compare: WorkItemDraftRecord) {
   const rows: Array<{ field: string; before: string; after: string }> = [];
-  pushDiffRow(rows, "title", base.candidate.title, compare.candidate.title);
-  pushDiffRow(
-    rows,
-    "implementation_context",
-    base.candidate.implementation_context,
-    compare.candidate.implementation_context,
-  );
+  const baseContract = base.candidate.canonical_contract_candidate;
+  const compareContract = compare.candidate.canonical_contract_candidate;
+  pushDiffRow(rows, "title", baseContract.identity.title, compareContract.identity.title);
+  pushDiffRow(rows, "goal", baseContract.goal.summary, compareContract.goal.summary);
   pushDiffRow(
     rows,
     "exclusive_write_scopes",
-    base.candidate.exclusive_write_scopes,
-    compare.candidate.exclusive_write_scopes,
+    baseContract.write_policy.exclusive_scopes,
+    compareContract.write_policy.exclusive_scopes,
   );
   pushDiffRow(
     rows,
     "verification.commands",
-    base.candidate.verification_plan.commands.map(commandLabel).filter(isPresent),
-    compare.candidate.verification_plan.commands.map(commandLabel).filter(isPresent),
+    base.candidate.verification_plan.checks.map(commandLabel).filter(isPresent),
+    compare.candidate.verification_plan.checks.map(commandLabel).filter(isPresent),
   );
   pushDiffRow(
     rows,
-    "handoff_summary",
-    base.candidate.handoff_summary,
-    compare.candidate.handoff_summary,
+    "handoff.required_fields",
+    baseContract.handoff_contract.required_fields,
+    compareContract.handoff_contract.required_fields,
   );
   return rows;
 }
@@ -612,6 +610,7 @@ function WorkItemDraftCard({
   canAccept?: boolean;
 }) {
   const candidate = record.candidate;
+  const contract = candidate.canonical_contract_candidate;
   return (
     <article className="rounded-md border border-[var(--aria-line)] bg-white p-3">
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
@@ -620,25 +619,43 @@ function WorkItemDraftCard({
             {record.outline_id} · {record.draft_id}
           </div>
           <h3 className="mt-1 break-words text-sm font-semibold text-[var(--aria-ink)]">
-            {candidate.title}
+            {contract.identity.title}
           </h3>
         </div>
         <span className="rounded border border-[var(--aria-line)] px-2 py-0.5 text-xs text-[var(--aria-ink-muted)]">
-          {candidate.kind} / {record.status}
+          {contract.identity.kind} / {record.status}
         </span>
       </div>
-      {candidate.goal ? <ReadableBlock title="Goal" content={candidate.goal} /> : null}
-      <ReadableBlock title="Implementation context" content={candidate.implementation_context} />
+      {contract.goal.summary ? (
+        <ReadableBlock title="Goal" content={contract.goal.summary} />
+      ) : null}
       <DetailLists
         rows={[
-          ["Depends on", candidate.depends_on_outline_ids],
-          ["Required handoff", candidate.required_handoff_from_outline_ids],
-          ["Write scopes", candidate.exclusive_write_scopes],
-          ["Forbidden scopes", candidate.forbidden_write_scopes],
+          ["Write scopes", contract.write_policy.exclusive_scopes],
+          ["Forbidden scopes", contract.write_policy.forbidden_scopes],
+          ["Non goals", contract.non_goals],
+          [
+            "Output contracts",
+            contract.output_contracts.map((output) => output.contract_id),
+          ],
         ]}
       />
+      <DraftTasks tasks={contract.tasks} />
       <VerificationPlan plan={candidate.verification_plan} />
-      <ReadableBlock title="Handoff summary" content={candidate.handoff_summary} />
+      <DetailLists
+        rows={[
+          ["Handoff required fields", contract.handoff_contract.required_fields],
+          ["Handoff contracts", contract.handoff_contract.provided_contract_refs],
+        ]}
+      />
+      {contract.blocker_rules.length > 0 ? (
+        <BulletList
+          title="Blocker rules"
+          items={contract.blocker_rules.map(
+            (rule) => `${rule.reason_code} → ${rule.route}`,
+          )}
+        />
+      ) : null}
       {typeof canAccept === "boolean" ? (
         <KeyValue label="can accept" value={canAccept ? "yes" : "no"} />
       ) : null}
@@ -646,16 +663,35 @@ function WorkItemDraftCard({
   );
 }
 
+function DraftTasks({ tasks }: { tasks: CanonicalWorkItemContract["tasks"] }) {
+  if (tasks.length === 0) {
+    return null;
+  }
+  return (
+    <div className="mt-3 space-y-2">
+      <div className="text-xs font-semibold text-[var(--aria-ink-muted)]">Tasks</div>
+      {tasks.map((task) => (
+        <div key={task.task_id} className="text-sm leading-6 text-[var(--aria-ink)]">
+          <span className="font-mono text-xs text-[var(--aria-ink-muted)]">
+            {task.task_id}
+          </span>{" "}
+          {normalizeDisplayText(task.statement)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function VerificationPlan({ plan }: { plan: WorkItemDraftVerificationPlan }) {
-  const commands = plan.commands
+  const commands = plan.checks
     .map(commandLabel)
     .filter((command): command is string => Boolean(command));
-  const gates = plan.required_gates
-    .map((gate) => (typeof gate === "string" ? gate : gate.name ?? gate.gate_id ?? gate.description))
-    .filter((gate): gate is string => Boolean(gate));
-  const manualChecks = plan.manual_checks
-    .map((check) => check.label ?? check.instructions)
-    .filter((check): check is string => Boolean(check));
+  const manualChecks = plan.checks
+    .map((check) => check.manual_instruction)
+    .filter((instruction): instruction is string => Boolean(instruction));
+  const requiredChecks = plan.checks
+    .filter((check) => check.required)
+    .map((check) => check.check_id);
 
   return (
     <div className="mt-3 space-y-2">
@@ -663,9 +699,8 @@ function VerificationPlan({ plan }: { plan: WorkItemDraftVerificationPlan }) {
       <DetailLists
         rows={[
           ["Commands", commands],
-          ["Required gates", gates],
           ["Manual checks", manualChecks],
-          ["Risk notes", plan.risk_notes ?? []],
+          ["Required checks", requiredChecks],
         ]}
       />
     </div>
@@ -774,12 +809,6 @@ function outlineItems(outline: WorkItemPlanOutline) {
   return outline.work_item_outlines ?? outline.work_items ?? [];
 }
 
-function commandLabel(command: WorkItemDraftVerificationCommand) {
-  return (
-    command.command ??
-    command.label ??
-    command.description ??
-    command.id ??
-    null
-  );
+function commandLabel(check: VerificationCheck) {
+  return check.command ?? null;
 }
