@@ -715,7 +715,7 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
         updated_at: "2026-07-18T00:00:00Z".to_string(),
     };
     store.put_plan_lineage(&lineage).expect("plan lineage");
-    seed_group_work_item_revisions(&store, &lineage);
+    let work_item_projections = seed_group_work_item_revisions(&store, &lineage);
     let dependency = DependencyGraphRevision {
         id: "dependency_graph_revision_0001".to_string(),
         plan_id: lineage.id.clone(),
@@ -729,6 +729,39 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
     store
         .put_dependency_graph_revision(&lineage, &dependency)
         .expect("dependency graph");
+    let dependency_graph = DependencyContractGraph {
+        contracts: BTreeMap::from([
+            (
+                "work_item_0001".to_string(),
+                group_canonical_contract("work_item_0001", "实现爬楼梯"),
+            ),
+            (
+                "work_item_0002".to_string(),
+                group_canonical_contract("work_item_0002", "实现爬楼梯 part 2"),
+            ),
+        ]),
+        edges: dependency.edges.clone(),
+    };
+    let compiled_plan = PlanProjectionCompiler
+        .compile(PlanProjectionCompileInput {
+            plan_id: &lineage.id,
+            goal: "实现爬楼梯",
+            split_reason: "按依赖顺序拆分",
+            source_refs: vec!["story_spec_0001".to_string(), "design_spec_0001".to_string()],
+            dependency_graph: &dependency_graph,
+            work_item_projections: &work_item_projections,
+            expected_work_item_revision_ids: BTreeMap::from([
+                (
+                    "work_item_0001".to_string(),
+                    "work_item_revision_0001".to_string(),
+                ),
+                (
+                    "work_item_0002".to_string(),
+                    "work_item_revision_0002".to_string(),
+                ),
+            ]),
+        })
+        .expect("compile group plan projection");
     let revision = WorkItemPlanRevision {
         id: "plan_revision_0001".to_string(),
         plan_id: lineage.id.clone(),
@@ -750,6 +783,26 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
         created_at: "2026-07-18T00:00:00Z".to_string(),
     };
+    let plan_projection = PlanProjectionBundle {
+        id: revision.plan_projection_bundle_id.clone(),
+        plan_revision_id: revision.id.clone(),
+        dependency_graph_revision_id: revision.dependency_graph_revision_id.clone(),
+        work_item_projection_bundle_refs: vec![
+            "projection_work_item_revision_0001".to_string(),
+            "projection_work_item_revision_0002".to_string(),
+        ],
+        human_group_projection: compiled_plan.human,
+        coder_group_context: compiled_plan.coder,
+        reviewer_group_matrix: compiled_plan.reviewer,
+        human_group_projection_hash: "human_group_hash".to_string(),
+        coder_group_context_hash: "coder_group_hash".to_string(),
+        reviewer_group_matrix_hash: "reviewer_group_hash".to_string(),
+        compiler_version: "projection-compiler-v1".to_string(),
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    store
+        .put_plan_projection_bundle(&lineage, &plan_projection)
+        .expect("plan projection bundle");
     store.put_plan_revision(&lineage, &revision).expect("plan revision");
     store
         .set_active_plan_revision(&lineage, &revision.id)

@@ -1,8 +1,9 @@
 use super::super::dto::*;
 use super::super::support::*;
 use super::super::*;
-use super::{coding_provider_config_snapshot, group_work_item_execution_order};
+use super::coding_provider_config_snapshot_for_runtime_binding;
 use crate::product::coding_attempt_store::CodingGroupInitializationPhase;
+use crate::product::issue_store::IssueStore;
 
 pub async fn create_group_coding_attempt(
     State(state): State<WebAppState>,
@@ -23,46 +24,26 @@ pub async fn create_group_coding_attempt(
     let group_lock_key = format!("work_item_group:{project_id}:{issue_id}:{plan_id}");
     let _group_guard = state.coding_runs.lock_named(&group_lock_key).await;
     let coding_store = CodingAttemptStore::new(app_paths.clone());
-    let all_work_items = lifecycle
-        .list_work_items(&project_id, &issue_id)
-        .map_err(product_store_api_error)?;
-    let ordered = group_work_item_execution_order(&plan, &all_work_items)?;
-    if ordered.is_empty() {
-        return Err(ApiError::validation(
-            "work_item_group_empty",
-            "work item group has no compiled work items",
-        ));
-    }
-    if let Some(mismatched) = ordered
-        .iter()
-        .find(|item| item.work_item_set_id.as_deref() != Some(plan_id.as_str()))
-    {
-        return Err(ApiError::validation_with_details(
-            "work_item_group_mismatch",
-            "compiled work item does not belong to the selected group",
-            json!({ "work_item_id": mismatched.id }),
-        ));
-    }
-
     let authoritative = coding_store
         .resolve_authoritative_group_plan_binding(&project_id, &issue_id, &plan_id)
         .map_err(coding_plan_revision_binding_api_error)?;
-    if authoritative
-        .units
-        .iter()
-        .map(|unit| unit.logical_work_item_id.as_str())
-        .ne(ordered.iter().map(|item| item.id.as_str()))
-    {
-        return Err(coding_plan_revision_binding_api_error(
-            ProductStoreError::IdentityMismatch {
-                kind: "coding_group_order",
-                id: plan_id.clone(),
-            },
-        ));
-    }
-
-    let current_work_item = ordered.first().expect("checked non-empty");
-    let repository = find_repository(&app_paths, &project_id, &current_work_item.repository_id)?;
+    let current_unit = authoritative.units.first().ok_or_else(|| {
+        coding_plan_revision_binding_api_error(ProductStoreError::IdentityMismatch {
+            kind: "coding_group_order",
+            id: plan_id.clone(),
+        })
+    })?;
+    let repository_id = IssueStore::new(app_paths.clone())
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .repo_id
+        .ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "repository",
+                id: format!("issue:{issue_id}:repo_id"),
+            })
+        })?;
+    let repository = find_repository(&app_paths, &project_id, &repository_id)?;
     if !is_git_repo(&repository.path) {
         return Err(ApiError::validation(
             "repository_path_not_git_repo",
@@ -76,9 +57,13 @@ pub async fn create_group_coding_attempt(
         .join(".worktrees")
         .join("aria-issues")
         .join(&issue_id);
-    let provider_config_snapshot = coding_provider_config_snapshot(
+    let provider_config_snapshot = coding_provider_config_snapshot_for_runtime_binding(
         &lifecycle,
-        current_work_item,
+        &project_id,
+        &issue_id,
+        &plan_id,
+        &authoritative.plan_revision_id,
+        current_unit,
         &repository.default_provider_mode,
         &*state.provider_availability,
     )?;
@@ -86,7 +71,7 @@ pub async fn create_group_coding_attempt(
         project_id: project_id.clone(),
         issue_id: issue_id.clone(),
         plan_id: plan_id.clone(),
-        current_work_item_id: current_work_item.id.clone(),
+        current_work_item_id: current_unit.logical_work_item_id.clone(),
         base_branch: base_branch.clone(),
         branch_name: branch_name.clone(),
         worktree_path: None,
@@ -99,7 +84,11 @@ pub async fn create_group_coding_attempt(
         .await
         .map_err(product_store_api_error)?;
     let creation_guard = coding_store
-        .acquire_work_item_attempt_creation_async(&project_id, &issue_id, &current_work_item.id)
+        .acquire_work_item_attempt_creation_async(
+            &project_id,
+            &issue_id,
+            &current_unit.logical_work_item_id,
+        )
         .await
         .map_err(product_store_api_error)?;
     let mut journal = coding_store

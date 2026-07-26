@@ -90,6 +90,7 @@ impl IntoResponse for ApiError {
             | "workspace_path_not_directory"
             | "workspace_path_not_git_repo"
             | "work_item_plan_not_confirmed"
+            | "schema_v2_group_coding_required"
             | "coding_plan_revision_binding_missing"
             | "coding_group_attempt_incomplete"
             | "work_item_dependency_not_completed"

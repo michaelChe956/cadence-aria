@@ -5,19 +5,22 @@ use crate::product::coding_models::{
     CodingExecutionUnitStatus,
 };
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
-use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthoritativeCodingUnitBinding {
     pub logical_work_item_id: String,
     pub work_item_revision_id: String,
+    pub verification_plan_revision_id: String,
+    pub projection_bundle_id: String,
     pub dependency_logical_work_item_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthoritativeGroupPlanBinding {
     pub plan_revision_id: String,
+    pub dependency_graph_revision_id: String,
+    pub plan_projection_bundle_id: String,
     pub units: Vec<AuthoritativeCodingUnitBinding>,
 }
 
@@ -32,56 +35,60 @@ impl super::CodingAttemptStore {
             validate_relative_id(id)?;
         }
 
-        let lifecycle = LifecycleStore::new(self.paths());
-        let plan = lifecycle.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
-        let work_items = lifecycle.list_work_items(project_id, issue_id)?;
-        let mut ordered = plan
-            .work_item_ids
-            .iter()
-            .enumerate()
-            .map(|(index, logical_id)| {
-                work_items
-                    .iter()
-                    .find(|item| item.id == *logical_id)
-                    .cloned()
-                    .map(|item| (index, item))
-                    .ok_or_else(|| invalid_plan_binding("coding group work item is missing"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        ordered.sort_by(|(left_index, left), (right_index, right)| {
-            left.sequence_hint
-                .unwrap_or(u32::MAX)
-                .cmp(&right.sequence_hint.unwrap_or(u32::MAX))
-                .then_with(|| left_index.cmp(right_index))
-        });
-        if ordered.is_empty()
-            || ordered
-                .iter()
-                .any(|(_, item)| item.work_item_set_id.as_deref() != Some(plan_id))
-        {
-            return Err(invalid_plan_binding(
-                "coding group membership is missing or inconsistent",
-            ));
-        }
-        let ordered_ids = ordered
-            .into_iter()
-            .map(|(_, item)| item.id)
-            .collect::<Vec<_>>();
-        let expected_ids = ordered_ids.iter().cloned().collect::<BTreeSet<_>>();
-        if expected_ids.len() != ordered_ids.len() {
-            return Err(invalid_plan_binding(
-                "coding group contains duplicate work items",
-            ));
-        }
-
         let revision_store = WorkItemRevisionStore::new(self.paths());
         let lineage = revision_store.get_plan_lineage(project_id, issue_id, plan_id)?;
         let plan_revision_id = lineage
             .active_revision_id
             .clone()
             .ok_or_else(|| invalid_plan_binding("active plan revision is missing"))?;
+        self.resolve_authoritative_group_plan_binding_for_revision(
+            project_id,
+            issue_id,
+            plan_id,
+            &plan_revision_id,
+        )
+    }
+
+    pub fn resolve_authoritative_group_plan_binding_for_revision(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        plan_revision_id: &str,
+    ) -> Result<AuthoritativeGroupPlanBinding, ProductStoreError> {
+        for id in [project_id, issue_id, plan_id, plan_revision_id] {
+            validate_relative_id(id)?;
+        }
+
+        let revision_store = WorkItemRevisionStore::new(self.paths());
+        let lineage = revision_store.get_plan_lineage(project_id, issue_id, plan_id)?;
         let revision =
             revision_store.get_plan_revision(project_id, issue_id, plan_id, &plan_revision_id)?;
+        if revision.plan_id != plan_id {
+            return Err(invalid_plan_binding(
+                "bound plan revision does not belong to the coding group",
+            ));
+        }
+        let plan_projection = revision_store
+            .get_plan_projection_bundle(&lineage, &revision.plan_projection_bundle_id)?;
+        if plan_projection.plan_revision_id != revision.id
+            || plan_projection.dependency_graph_revision_id != revision.dependency_graph_revision_id
+            || plan_projection.coder_group_context.plan_id != plan_id
+        {
+            return Err(invalid_plan_binding(
+                "plan projection bundle does not match the bound plan revision",
+            ));
+        }
+        let ordered_ids = plan_projection
+            .coder_group_context
+            .ordered_logical_work_item_ids
+            .clone();
+        let expected_ids = ordered_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if ordered_ids.is_empty() || expected_ids.len() != ordered_ids.len() {
+            return Err(invalid_plan_binding(
+                "plan projection order is missing or contains duplicate work items",
+            ));
+        }
         let binding_ids = revision
             .work_item_bindings
             .keys()
@@ -94,6 +101,13 @@ impl super::CodingAttemptStore {
         }
         let graph = revision_store
             .get_dependency_graph_revision(&lineage, &revision.dependency_graph_revision_id)?;
+        if plan_projection.coder_group_context.dependency_edges != graph.edges
+            || plan_projection.reviewer_group_matrix.dependency_edges != graph.edges
+        {
+            return Err(invalid_plan_binding(
+                "plan projection dependencies do not match the bound dependency graph",
+            ));
+        }
         let mut dependencies = expected_ids
             .iter()
             .map(|logical_id| (logical_id.clone(), Vec::new()))
@@ -119,6 +133,7 @@ impl super::CodingAttemptStore {
         }
 
         let mut units = Vec::with_capacity(ordered_ids.len());
+        let mut projection_bundle_ids = BTreeSet::new();
         for logical_id in ordered_ids {
             let revision_id = revision
                 .work_item_bindings
@@ -128,12 +143,6 @@ impl super::CodingAttemptStore {
             if logical_id == revision_id {
                 return Err(invalid_plan_binding(
                     "logical work item ID aliases its revision ID",
-                ));
-            }
-            let logical = revision_store.get_logical_work_item(&lineage, &logical_id)?;
-            if logical.active_revision_id.as_deref() != Some(revision_id.as_str()) {
-                return Err(invalid_plan_binding(
-                    "logical work item active revision differs from the plan binding",
                 ));
             }
             let work_item_revision =
@@ -149,17 +158,50 @@ impl super::CodingAttemptStore {
                     "work item revision does not belong to the bound logical work item",
                 ));
             }
+            let verification = revision_store.get_verification_plan_revision(
+                &lineage,
+                &work_item_revision.verification_plan_revision_id,
+            )?;
+            let projection = revision_store.get_work_item_projection_bundle(
+                &lineage,
+                &work_item_revision.work_item_projection_bundle_id,
+            )?;
+            if verification.logical_work_item_id != logical_id
+                || projection.work_item_revision_id != work_item_revision.id
+                || projection.canonical_contract_hash != work_item_revision.canonical_contract_hash
+            {
+                return Err(invalid_plan_binding(
+                    "work item revision dependencies do not match the bound logical work item",
+                ));
+            }
+            projection_bundle_ids.insert(projection.id.clone());
             units.push(AuthoritativeCodingUnitBinding {
                 logical_work_item_id: logical_id.clone(),
                 work_item_revision_id: revision_id,
+                verification_plan_revision_id: verification.id,
+                projection_bundle_id: projection.id,
                 dependency_logical_work_item_ids: dependencies
                     .remove(&logical_id)
                     .expect("known logical work item"),
             });
         }
+        let projection_bundle_refs = plan_projection
+            .work_item_projection_bundle_refs
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if projection_bundle_refs.len() != plan_projection.work_item_projection_bundle_refs.len()
+            || projection_bundle_refs != projection_bundle_ids
+        {
+            return Err(invalid_plan_binding(
+                "plan projection bundle refs do not match bound work item projections",
+            ));
+        }
 
         Ok(AuthoritativeGroupPlanBinding {
-            plan_revision_id,
+            plan_revision_id: plan_revision_id.to_string(),
+            dependency_graph_revision_id: revision.dependency_graph_revision_id,
+            plan_projection_bundle_id: revision.plan_projection_bundle_id,
             units,
         })
     }
@@ -194,8 +236,22 @@ impl super::CodingAttemptStore {
                 ));
             }
         };
+        let binding = self
+            .get_plan_binding(&stored)
+            .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?;
+        if binding.plan_id != plan_id {
+            return Err(incomplete_group_attempt(
+                &stored.id,
+                "attempt plan binding targets another coding group",
+            ));
+        }
         let authoritative = self
-            .resolve_authoritative_group_plan_binding(&stored.project_id, &stored.issue_id, plan_id)
+            .resolve_authoritative_group_plan_binding_for_revision(
+                &stored.project_id,
+                &stored.issue_id,
+                plan_id,
+                &binding.bound_plan_revision_id,
+            )
             .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?;
         if stored.work_item_id
             != authoritative
@@ -207,17 +263,6 @@ impl super::CodingAttemptStore {
             return Err(incomplete_group_attempt(
                 &stored.id,
                 "attempt root work item differs from authoritative order",
-            ));
-        }
-        let binding = self
-            .get_plan_binding(&stored)
-            .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?;
-        if binding.plan_id != plan_id
-            || binding.bound_plan_revision_id != authoritative.plan_revision_id
-        {
-            return Err(incomplete_group_attempt(
-                &stored.id,
-                "attempt plan binding is stale or inconsistent",
             ));
         }
         let units = self

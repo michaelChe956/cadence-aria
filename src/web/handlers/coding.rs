@@ -1,7 +1,9 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
+use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_models::CodingAttemptScope;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::state::CodingAttemptRunKey;
 
 mod group;
@@ -16,6 +18,20 @@ pub async fn create_coding_attempt(
 ) -> ApiResult<Json<CodingAttemptDto>> {
     let app_paths = product_app_paths(&state);
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    if is_schema_v2_group_work_item(
+        &app_paths,
+        &lifecycle,
+        &project_id,
+        &issue_id,
+        &work_item_id,
+    )
+    .map_err(product_store_api_error)?
+    {
+        return Err(ApiError::validation(
+            "schema_v2_group_coding_required",
+            "schema v2 work items must start coding through their work item group",
+        ));
+    }
     let work_items = lifecycle
         .list_work_items(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
@@ -329,39 +345,6 @@ pub(crate) fn save_work_item_execution_plan_for_attempt(
         .map_err(product_store_api_error)
 }
 
-pub(crate) fn group_work_item_execution_order(
-    plan: &IssueWorkItemPlanRecord,
-    work_items: &[LifecycleWorkItemRecord],
-) -> Result<Vec<LifecycleWorkItemRecord>, ApiError> {
-    let mut selected = plan
-        .work_item_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| {
-            work_items
-                .iter()
-                .find(|item| &item.id == id)
-                .cloned()
-                .map(|item| (index, item))
-                .ok_or_else(|| {
-                    ApiError::runtime(
-                        "work_item_not_found",
-                        "plan work item not found",
-                        json!({ "work_item_id": id }),
-                    )
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    selected.sort_by(|(left_index, left_item), (right_index, right_item)| {
-        left_item
-            .sequence_hint
-            .unwrap_or(u32::MAX)
-            .cmp(&right_item.sequence_hint.unwrap_or(u32::MAX))
-            .then_with(|| left_index.cmp(right_index))
-    });
-    Ok(selected.into_iter().map(|(_, item)| item).collect())
-}
-
 pub(crate) fn next_execution_plan_id(
     _coding_store: &CodingAttemptStore,
     project_id: &str,
@@ -381,6 +364,47 @@ pub(crate) fn work_item_by_id<'a>(
     work_items.iter().find(|item| item.id == work_item_id)
 }
 
+fn is_schema_v2_group_work_item(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    work_item_id: &str,
+) -> Result<bool, ProductStoreError> {
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
+    for plan in lifecycle.list_issue_work_item_plans(project_id, issue_id)? {
+        if plan.status != IssueWorkItemPlanStatus::Confirmed
+            || !plan.work_item_ids.iter().any(|id| id == work_item_id)
+        {
+            continue;
+        }
+        let lineage = match revision_store.get_plan_lineage(project_id, issue_id, &plan.id) {
+            Ok(lineage) => lineage,
+            Err(ProductStoreError::NotFound { kind, .. }) if kind == "work_item_plan_lineage" => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(active_revision_id) = lineage.active_revision_id else {
+            return Ok(true);
+        };
+        let revision = revision_store.get_plan_revision(
+            project_id,
+            issue_id,
+            &plan.id,
+            &active_revision_id,
+        )?;
+        if revision.work_item_bindings.contains_key(work_item_id) {
+            return Ok(true);
+        }
+        return Err(ProductStoreError::IdentityMismatch {
+            kind: "schema_v2_group_plan_binding",
+            id: plan.id,
+        });
+    }
+    Ok(false)
+}
+
 pub(crate) fn coding_provider_config_snapshot(
     lifecycle: &LifecycleStore,
     work_item: &LifecycleWorkItemRecord,
@@ -394,6 +418,63 @@ pub(crate) fn coding_provider_config_snapshot(
         session.entity_id == work_item.id
             && session.workspace_type == WorkspaceType::WorkItem
             && session.status == WorkspaceSessionStatus::Confirmed
+    }) {
+        let author = resolve_explicit_provider_name(
+            provider_name_key(&session.author_provider),
+            provider_availability,
+        )?
+        .provider;
+        let reviewer = resolve_explicit_provider_name(
+            provider_name_key(&session.reviewer_provider),
+            provider_availability,
+        )?
+        .provider;
+        return Ok(ProviderConfigSnapshot {
+            author,
+            reviewer: Some(reviewer),
+            review_rounds: session.review_rounds,
+        });
+    }
+
+    let author =
+        resolve_default_coding_provider(repository_default_provider, provider_availability)?
+            .provider;
+    Ok(ProviderConfigSnapshot {
+        author: author.clone(),
+        reviewer: Some(author),
+        review_rounds: 1,
+    })
+}
+
+pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    plan_revision_id: &str,
+    unit: &AuthoritativeCodingUnitBinding,
+    repository_default_provider: &str,
+    provider_availability: &dyn Fn(&ProviderName) -> bool,
+) -> ApiResult<ProviderConfigSnapshot> {
+    let sessions = lifecycle
+        .list_workspace_sessions(project_id, issue_id)
+        .map_err(product_store_api_error)?;
+    if let Some(session) = sessions.iter().rev().find(|session| {
+        session.entity_id == unit.logical_work_item_id
+            && session.workspace_type == WorkspaceType::WorkItem
+            && session.status == WorkspaceSessionStatus::Confirmed
+            && session
+                .work_item_runtime_binding
+                .as_ref()
+                .is_some_and(|binding| {
+                    binding.plan_id == plan_id
+                        && binding.plan_revision_id == plan_revision_id
+                        && binding.logical_work_item_id == unit.logical_work_item_id
+                        && binding.work_item_revision_id == unit.work_item_revision_id
+                        && binding.projection_bundle_id == unit.projection_bundle_id
+                        && binding.verification_plan_revision_id
+                            == unit.verification_plan_revision_id
+                })
     }) {
         let author = resolve_explicit_provider_name(
             provider_name_key(&session.author_provider),

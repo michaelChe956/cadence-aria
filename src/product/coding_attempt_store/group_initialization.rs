@@ -546,6 +546,8 @@ fn validate_group_initialization_input(
     for binding in unit_bindings {
         validate_relative_id(&binding.logical_work_item_id)?;
         validate_relative_id(&binding.work_item_revision_id)?;
+        validate_relative_id(&binding.verification_plan_revision_id)?;
+        validate_relative_id(&binding.projection_bundle_id)?;
         for dependency_id in &binding.dependency_logical_work_item_ids {
             validate_relative_id(dependency_id)?;
         }

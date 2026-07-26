@@ -15,6 +15,9 @@ use cadence_aria::product::coding_attempt_store::{
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
 use cadence_aria::product::work_item_contract::DependencyContractEdge;
+use cadence_aria::product::work_item_projection::{
+    PlanProjectionCompileInput, PlanProjectionCompiler,
+};
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChoiceOption, CodingExecutionAttempt,
@@ -28,16 +31,18 @@ use cadence_aria::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore,
 };
 use cadence_aria::product::models::{
-    DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, PlanRevisionReason,
-    ProviderName, RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
-    VerificationCommandSource, VerificationFallbackPolicy, VerificationScope, WorkItemKind,
-    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus, WorkItemStatus,
+    DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, PlanProjectionBundle,
+    PlanRevisionReason, ProviderName, RepositoryProfileConfidence, VerificationCommand,
+    VerificationCommandSafety, VerificationCommandSource, VerificationFallbackPolicy,
+    VerificationScope, WorkItemKind, WorkItemPlanLineage, WorkItemPlanRevision,
+    WorkItemPlanStatus, WorkItemStatus,
     WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::{CodingAttemptRunKey, WebAppState};
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
+use cadence_aria::product::work_item_contract::DependencyContractGraph;
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
@@ -184,7 +189,7 @@ async fn rejects_coding_attempt_when_work_item_plan_is_not_confirmed() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "response: {body}");
     assert_eq!(body["code"], "work_item_plan_not_confirmed");
 }
 #[tokio::test]
@@ -252,6 +257,12 @@ async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
         WebRuntime::new_fake(root.path().to_path_buf()),
     ));
     bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    fs::remove_dir_all(
+        ProductAppPaths::new(root.path().join(".aria"))
+            .issue_root("project_0001", "issue_0001")
+            .join("work-items"),
+    )
+    .expect("remove legacy work items");
 
     let (status, body) = request_json(
         app,
@@ -269,6 +280,187 @@ async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     assert_eq!(body["active_unit_id"], "coding_unit_0001");
     assert_eq!(body["branch_name"], "aria/issues/issue_0001");
 }
+
+#[tokio::test]
+async fn creates_group_coding_attempt_from_schema_v2_revisions_without_legacy_work_items() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let issue_root = app_paths.issue_root("project_0001", "issue_0001");
+    fs::remove_dir_all(issue_root.join("work-items")).expect("remove legacy work items");
+    fs::remove_dir_all(issue_root.join("verification-plans"))
+        .expect("remove legacy verification plans");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    assert!(
+        lifecycle
+            .list_work_items("project_0001", "issue_0001")
+            .expect("list legacy work items")
+            .is_empty()
+    );
+    assert!(
+        lifecycle
+            .list_verification_plans("project_0001", "issue_0001")
+            .expect("list legacy verification plans")
+            .is_empty()
+    );
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "response: {body}");
+    let attempt_id = assert_global_attempt_id(&body);
+    let coding_store = CodingAttemptStore::new(app_paths);
+    let attempt = coding_store
+        .get_attempt("project_0001", "issue_0001", &attempt_id)
+        .expect("persisted group attempt");
+    assert_eq!(
+        coding_store
+            .get_plan_binding(&attempt)
+            .expect("Revision-backed plan binding")
+            .bound_plan_revision_id,
+        "plan_revision_0001"
+    );
+    assert_eq!(
+        coding_store
+            .list_coding_units("project_0001", "issue_0001", &attempt_id)
+            .expect("Revision-backed group units")
+            .into_iter()
+            .map(|unit| (unit.logical_work_item_id, unit.work_item_revision_id))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "work_item_0001".to_string(),
+                "work_item_revision_0001".to_string(),
+            ),
+            (
+                "work_item_0002".to_string(),
+                "work_item_revision_0002".to_string(),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn rejects_single_work_item_coding_for_a_schema_v2_group() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    fs::remove_dir_all(
+        ProductAppPaths::new(root.path().join(".aria"))
+            .issue_root("project_0001", "issue_0001")
+            .join("work-items"),
+    )
+    .expect("remove legacy work items");
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "response: {body}");
+    assert_eq!(body["code"], "schema_v2_group_coding_required");
+}
+
+#[tokio::test]
+async fn rejects_group_coding_when_plan_projection_dependencies_do_not_match_the_graph() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let plan_projection_path = app_paths
+        .issue_root("project_0001", "issue_0001")
+        .join(
+            "work-item-revisions/work_item_plan_0001/plan-projection-bundles/plan_projection_bundle_0001.json",
+        );
+    let mut plan_projection: Value = serde_json::from_slice(
+        &fs::read(&plan_projection_path).expect("plan projection bundle"),
+    )
+    .expect("parse plan projection bundle");
+    plan_projection["coder_group_context"]["dependency_edges"] = json!([]);
+    fs::write(
+        plan_projection_path,
+        serde_json::to_vec_pretty(&plan_projection).expect("serialize plan projection bundle"),
+    )
+    .expect("write invalid plan projection bundle");
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "response: {body}");
+    assert_eq!(body["code"], "coding_plan_revision_binding_missing");
+    assert_group_attempt_creation_rolled_back(&app_paths);
+}
+
+#[tokio::test]
+async fn rejects_group_coding_when_plan_projection_repeats_a_work_item_bundle_ref() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let plan_projection_path = app_paths
+        .issue_root("project_0001", "issue_0001")
+        .join(
+            "work-item-revisions/work_item_plan_0001/plan-projection-bundles/plan_projection_bundle_0001.json",
+        );
+    let mut plan_projection: Value = serde_json::from_slice(
+        &fs::read(&plan_projection_path).expect("plan projection bundle"),
+    )
+    .expect("parse plan projection bundle");
+    let first_ref = plan_projection["work_item_projection_bundle_refs"][0].clone();
+    plan_projection["work_item_projection_bundle_refs"]
+        .as_array_mut()
+        .expect("projection refs")
+        .push(first_ref);
+    fs::write(
+        plan_projection_path,
+        serde_json::to_vec_pretty(&plan_projection).expect("serialize plan projection bundle"),
+    )
+    .expect("write invalid plan projection bundle");
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "response: {body}");
+    assert_eq!(body["code"], "coding_plan_revision_binding_missing");
+    assert_group_attempt_creation_rolled_back(&app_paths);
+}
+
 #[tokio::test]
 async fn returns_group_coding_attempt_snapshot_with_units() {
     let root = tempdir().expect("root");
@@ -454,7 +646,7 @@ async fn rejects_group_coding_attempt_for_unconfirmed_plan() {
 }
 
 #[tokio::test]
-async fn rejects_group_coding_attempt_when_single_item_attempt_holds_issue_lock() {
+async fn rejects_group_coding_attempt_when_a_legacy_single_item_attempt_is_active() {
     let root = tempdir().expect("root");
     let repo = git_repo();
     let app = build_web_router(WebAppState::new(
@@ -463,15 +655,23 @@ async fn rejects_group_coding_attempt_when_single_item_attempt_holds_issue_lock(
     ));
     bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
 
-    let (single_status, single) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
-        json!({}),
-    )
-    .await;
-    assert_eq!(single_status, StatusCode::OK);
-    assert_global_attempt_id(&single);
+    let single = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")))
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "legacy_lock_holder".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("active legacy single-item attempt");
+    assert!(single.status.is_active());
 
     let (status, body) = request_json(
         app,

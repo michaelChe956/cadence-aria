@@ -13,14 +13,19 @@ use crate::product::lifecycle_store::{
 };
 use crate::product::models::{
     DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
-    PlanRevisionReason, ProviderConversationRef, ProviderConversationRole, WorkItemPlanLineage,
-    WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
+    PlanProjectionBundle, PlanRevisionReason, ProviderConversationRef, ProviderConversationRole,
+    VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus,
+    WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract, PromisedOutputContract,
     WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
 };
-use crate::product::work_item_projection::{WorkItemProjectionCompiler, projection_hashes};
+use crate::product::work_item_projection::{
+    CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
+    ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler,
+    plan_projection_hashes, projection_hashes,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use std::fs;
@@ -122,6 +127,8 @@ fn seed_group_attempt_fixture(
         .put_plan_lineage(&lineage)
         .expect("plan lineage");
     let mut plan_bindings = std::collections::BTreeMap::new();
+    let mut work_item_projections = std::collections::BTreeMap::new();
+    let mut projection_bundle_refs = Vec::new();
     for (index, (work_item_id, revision_id)) in work_items.iter().enumerate() {
         let logical = LogicalWorkItem {
             id: (*work_item_id).to_string(),
@@ -191,11 +198,26 @@ fn seed_group_attempt_fixture(
             logical_work_item_id: logical.id.clone(),
             source_draft_revision_id: format!("draft_revision_{:04}", index + 1),
             canonical_contract_hash: canonical_contract_hash(&contract).expect("contract hash"),
-            canonical_contract: contract,
+            canonical_contract: contract.clone(),
             work_item_projection_bundle_id: format!("projection_bundle_{:04}", index + 1),
             verification_plan_revision_id: format!("verification_revision_{:04}", index + 1),
             created_at: "2026-07-18T00:00:00Z".to_string(),
         };
+        revision_store
+            .put_verification_plan_revision(
+                &lineage,
+                &VerificationPlanRevision {
+                    id: work_item_revision.verification_plan_revision_id.clone(),
+                    logical_work_item_id: logical.id.clone(),
+                    source_draft_revision_id: work_item_revision.source_draft_revision_id.clone(),
+                    verification_checks: work_item_revision
+                        .canonical_contract
+                        .verification_checks
+                        .clone(),
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("verification plan revision");
         revision_store
             .put_work_item_revision(&lineage, &work_item_revision)
             .expect("work item revision");
@@ -215,9 +237,9 @@ fn seed_group_attempt_fixture(
                     canonical_contract_hash: work_item_revision.canonical_contract_hash.clone(),
                     projection_schema_version: 1,
                     compiler_version: "work-item-projection-compiler-v1".to_string(),
-                    human_projection: projections.human,
-                    coder_projection: projections.coder,
-                    reviewer_projection: projections.reviewer,
+                    human_projection: projections.human.clone(),
+                    coder_projection: projections.coder.clone(),
+                    reviewer_projection: projections.reviewer.clone(),
                     human_projection_hash: hashes.human,
                     coder_projection_hash: hashes.coder,
                     reviewer_projection_hash: hashes.reviewer,
@@ -225,6 +247,8 @@ fn seed_group_attempt_fixture(
                 },
             )
             .expect("work item projection bundle");
+        projection_bundle_refs.push(work_item_revision.work_item_projection_bundle_id.clone());
+        work_item_projections.insert(logical.id.clone(), projections);
         revision_store
             .set_active_work_item_revision(&lineage, &logical, None, &work_item_revision.id)
             .expect("active work item revision");
@@ -247,6 +271,77 @@ fn seed_group_attempt_fixture(
     revision_store
         .put_dependency_graph_revision(&lineage, &graph)
         .expect("dependency graph");
+    let ordered_logical_work_item_ids = work_items
+        .iter()
+        .map(|(logical_id, _)| (*logical_id).to_string())
+        .collect::<Vec<_>>();
+    let compiled_plan = CompiledPlanProjections {
+        human: HumanGroupProjection {
+            plan_id: lineage.id.clone(),
+            goal: "group attempt fixture".to_string(),
+            split_reason: "fixture uses deterministic plan projections".to_string(),
+            work_items: ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| {
+                    let projection = &work_item_projections[logical_id].human;
+                    HumanGroupWorkItemSummary {
+                        logical_work_item_id: logical_id.clone(),
+                        title: projection.title.clone(),
+                        goal: projection.goal.clone(),
+                        depends_on: graph
+                            .edges
+                            .iter()
+                            .filter(|edge| edge.to == *logical_id)
+                            .map(|edge| edge.from.clone())
+                            .collect(),
+                        provides: projection
+                            .outputs
+                            .iter()
+                            .map(|output| output.contract_id.clone())
+                            .collect(),
+                        scope_summary: projection.scope_summary.clone(),
+                    }
+                })
+                .collect(),
+            contract_flow: Vec::new(),
+            risks: Vec::new(),
+            source_refs: Vec::new(),
+            normative: false,
+            used_by_provider: false,
+        },
+        coder: CoderGroupContext {
+            plan_id: lineage.id.clone(),
+            ordered_logical_work_item_ids: ordered_logical_work_item_ids.clone(),
+            dependency_edges: graph.edges.clone(),
+            group_write_scopes: ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| {
+                    (
+                        logical_id.clone(),
+                        work_item_projections[logical_id].coder.write_policy.clone(),
+                    )
+                })
+                .collect(),
+        },
+        reviewer: ReviewerGroupMatrix {
+            plan_id: lineage.id.clone(),
+            work_items: ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| ReviewerGroupMatrixEntry {
+                    logical_work_item_id: logical_id.clone(),
+                    criterion_refs: work_item_projections[logical_id]
+                        .reviewer
+                        .criterion_refs
+                        .clone(),
+                    input_contract_refs: Vec::new(),
+                    output_contract_refs: Vec::new(),
+                })
+                .collect(),
+            dependency_edges: graph.edges.clone(),
+            design_traceability_refs: Vec::new(),
+        },
+    };
+    let plan_projection_hashes = plan_projection_hashes(&compiled_plan).expect("plan hashes");
     let plan_revision = WorkItemPlanRevision {
         id: "plan_revision_0001".to_string(),
         plan_id: lineage.id.clone(),
@@ -259,6 +354,25 @@ fn seed_group_attempt_fixture(
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
         created_at: "2026-07-18T00:00:00Z".to_string(),
     };
+    revision_store
+        .put_plan_projection_bundle(
+            &lineage,
+            &PlanProjectionBundle {
+                id: plan_revision.plan_projection_bundle_id.clone(),
+                plan_revision_id: plan_revision.id.clone(),
+                dependency_graph_revision_id: plan_revision.dependency_graph_revision_id.clone(),
+                work_item_projection_bundle_refs: projection_bundle_refs,
+                human_group_projection: compiled_plan.human,
+                coder_group_context: compiled_plan.coder,
+                reviewer_group_matrix: compiled_plan.reviewer,
+                human_group_projection_hash: plan_projection_hashes.human,
+                coder_group_context_hash: plan_projection_hashes.coder,
+                reviewer_group_matrix_hash: plan_projection_hashes.reviewer,
+                compiler_version: "plan-projection-compiler-v1".to_string(),
+                created_at: "2026-07-18T00:00:00Z".to_string(),
+            },
+        )
+        .expect("plan projection bundle");
     revision_store
         .put_plan_revision(&lineage, &plan_revision)
         .expect("plan revision");

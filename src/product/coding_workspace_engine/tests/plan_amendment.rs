@@ -69,6 +69,14 @@ async fn coding_amendment_reexecutes_only_manifest_affected_units() {
         binding.applied_amendment_ids,
         vec![fixture.manifest.id.clone()]
     );
+    assert_eq!(
+        fixture
+            .store
+            .validate_group_attempt_integrity(&updated)
+            .expect("amended group attempt must resolve its new revision binding")
+            .plan_revision_id,
+        "plan_revision_0002"
+    );
 
     let revised_runs = fixture
         .store
@@ -138,6 +146,30 @@ async fn coding_amendment_reexecutes_only_manifest_affected_units() {
             .unwrap()
             .len(),
         2
+    );
+}
+
+#[tokio::test]
+async fn group_validation_keeps_the_bound_plan_revision_after_plan_repair_publishes() {
+    let fixture = amendment_fixture().await;
+
+    let authoritative = fixture
+        .store
+        .validate_group_attempt_integrity(&fixture.attempt)
+        .expect("existing attempt must keep its original plan binding");
+
+    assert_eq!(authoritative.plan_revision_id, "plan_revision_0001");
+    assert_eq!(
+        authoritative
+            .units
+            .iter()
+            .map(|unit| unit.work_item_revision_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "work_item_revision_0001",
+            "work_item_revision_0002",
+            "work_item_revision_0003",
+        ]
     );
 }
 
@@ -646,6 +678,29 @@ async fn amendment_fixture() -> AmendmentFixture {
         plan_projection_bundle_id: "plan_projection_bundle_0002".to_string(),
         created_at: "2026-07-19T00:00:01Z".to_string(),
     };
+    let previous_plan_projection = revision_store
+        .get_plan_projection_bundle(&plan, &previous_plan.plan_projection_bundle_id)
+        .unwrap();
+    let mut next_plan_projection = previous_plan_projection;
+    next_plan_projection.id = next_plan.plan_projection_bundle_id.clone();
+    next_plan_projection.plan_revision_id = next_plan.id.clone();
+    next_plan_projection.dependency_graph_revision_id =
+        next_plan.dependency_graph_revision_id.clone();
+    next_plan_projection.work_item_projection_bundle_refs = next_plan_projection
+        .work_item_projection_bundle_refs
+        .iter()
+        .map(|bundle_id| {
+            if bundle_id == &old_revision.work_item_projection_bundle_id {
+                revised.work_item_projection_bundle_id.clone()
+            } else {
+                bundle_id.clone()
+            }
+        })
+        .collect();
+    next_plan_projection.created_at = "2026-07-19T00:00:01Z".to_string();
+    revision_store
+        .put_plan_projection_bundle(&plan, &next_plan_projection)
+        .unwrap();
     revision_store.put_plan_revision(&plan, &next_plan).unwrap();
     let published_request = revision_store
         .get_repair_request(&plan, "plan_repair_request_0001")
