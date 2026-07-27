@@ -118,11 +118,25 @@ pub(crate) fn parse_review_payload(
     full_output: &str,
     default_source_stage: CodingExecutionStage,
 ) -> CodeReviewProviderPayload {
-    let json = extract_json_object(full_output).unwrap_or(full_output);
-    match serde_json::from_str::<RawCodeReviewProviderPayload>(json) {
-        Ok(raw) => raw.into_payload(default_source_stage),
-        Err(error) => blocked_review_payload(full_output, &error),
+    let candidates = extract_json_object_candidates(full_output);
+    if candidates.is_empty() {
+        // 没有任何平衡 JSON 对象时保持原有诊断行为：按整体输出解析以区分语法错误。
+        return match serde_json::from_str::<RawCodeReviewProviderPayload>(full_output) {
+            Ok(raw) => raw.into_payload(default_source_stage),
+            Err(error) => blocked_review_payload(full_output, &error),
+        };
     }
+    // 输出可能夹带与结论无关的 JSON 片段；逐个候选尝试 Schema 校验，
+    // 取第一个通过校验的对象，全部失败才按最后一个候选（契约要求结论位于末尾）报错。
+    let mut last_error = None;
+    for json in candidates {
+        match serde_json::from_str::<RawCodeReviewProviderPayload>(json) {
+            Ok(raw) => return raw.into_payload(default_source_stage),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let error = last_error.expect("candidates 非空时必然记录过反序列化错误");
+    blocked_review_payload(full_output, &error)
 }
 
 impl RawCodeReviewProviderPayload {

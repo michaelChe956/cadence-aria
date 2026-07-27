@@ -149,8 +149,7 @@ pub(crate) fn review_findings_have_actionable_findings(findings: &[ReviewFinding
     })
 }
 
-pub(crate) fn extract_json_object(output: &str) -> Option<&str> {
-    let start = output.find('{')?;
+fn balanced_json_object_end(output: &str, start: usize) -> Option<usize> {
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
@@ -173,13 +172,43 @@ pub(crate) fn extract_json_object(output: &str) -> Option<&str> {
             '}' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    return Some(&output[start..start + offset + ch.len_utf8()]);
+                    return Some(start + offset + ch.len_utf8());
                 }
             }
             _ => {}
         }
     }
     None
+}
+
+pub(crate) fn extract_json_object(output: &str) -> Option<&str> {
+    let start = output.find('{')?;
+    let end = balanced_json_object_end(output, start)?;
+    Some(&output[start..end])
+}
+
+/// 按出现顺序提取输出中的全部顶层平衡 JSON 对象。
+///
+/// Provider 输出可能在路由回执、证据表格或示例中夹带与结论无关的 JSON
+/// 片段（例如 `{"type": "module"}`），调用方需要遍历候选并按 Schema
+/// 校验挑选真正的结构化结论，而不是盲目信任第一个 `{`。
+pub(crate) fn extract_json_object_candidates(output: &str) -> Vec<&str> {
+    let mut candidates = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(relative) = output[search_from..].find('{') {
+        let start = search_from + relative;
+        match balanced_json_object_end(output, start) {
+            Some(end) => {
+                candidates.push(&output[start..end]);
+                search_from = end;
+            }
+            None => {
+                // 当前 `{` 无法平衡（可能是散文中的括号），跳过它继续找后续候选。
+                search_from = start + 1;
+            }
+        }
+    }
+    candidates
 }
 
 #[allow(unused_imports)]

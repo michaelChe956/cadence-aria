@@ -116,6 +116,27 @@ fn review_parser_accepts_fenced_json_with_reviewer_blocker_severity() {
 }
 
 #[test]
+fn review_parser_skips_unrelated_json_fragments_before_final_verdict() {
+    let payload = "全部验证证据已收集完毕。以下为代码审查结果。\n\
+                   \n\
+                   | `check_scope_and_dependency_boundary` | ✅ 通过 | `package.json` 仅 `{\"type\": \"module\"}`，无依赖 |\n\
+                   \n\
+                   ```json\n\
+                   {\n\
+                     \"verdict\": \"approve\",\n\
+                     \"summary\": \"review complete\",\n\
+                     \"findings\": []\n\
+                   }\n\
+                   ```";
+
+    let parsed = parse_review_payload(payload, CodingExecutionStage::CodeReview);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Approve);
+    assert_eq!(parsed.summary, "review complete");
+    assert!(parsed.findings.is_empty());
+}
+
+#[test]
 fn review_parser_accepts_plain_text_routing_receipt_before_final_json() {
     let payload = "工作流路由：阶段=只读代码审查；Change=无；Plan=work_item_0001；必调 Skill=using-superpowers → requesting-code-review。\n{\"verdict\":\"approve\",\"summary\":\"review complete\",\"findings\":[]}";
 

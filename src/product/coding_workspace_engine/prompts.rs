@@ -334,6 +334,7 @@ pub(crate) fn code_review_material_protocol() -> String {
      - finding.severity 只能使用 error、warning、info。\n\
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
+     - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n\
      - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
     ))
 }
@@ -354,7 +355,8 @@ pub(crate) fn group_final_review_material_protocol() -> String {
      - finding.severity 只能使用 error、warning、info。\n\
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 source_stage=group_final_review。\n\
-     - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n"
+     - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
+     - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n"
     ))
 }
 
