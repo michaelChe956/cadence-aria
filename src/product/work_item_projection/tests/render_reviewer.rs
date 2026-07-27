@@ -96,6 +96,42 @@ fn assert_reviewer_section_oracle(
 }
 
 #[test]
+fn provider_projection_renderer_reviewer_declares_verdict_json_output_contract() {
+    let compiled = compiled_fixture();
+    let envelope = reviewer_execution_envelope_fixture();
+
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
+    ] {
+        let rendered = renderer_for(&provider)
+            .render_reviewer(&compiled.reviewer, &envelope)
+            .unwrap();
+        assert!(
+            rendered
+                .text
+                .contains("\"verdict\":\"approve|request_changes|blocked\""),
+            "{provider:?} reviewer projection must declare the verdict JSON schema"
+        );
+        assert!(
+            rendered
+                .text
+                .contains("最终审查结论必须只输出一个 JSON 对象"),
+            "{provider:?}"
+        );
+        assert!(rendered.text.contains("除最终结论 JSON 外"), "{provider:?}");
+        assert!(rendered.text.contains("不得出现 { 或 }"), "{provider:?}");
+        assert!(
+            rendered
+                .text
+                .contains("不要输出 Markdown 代码块或自然语言总结"),
+            "{provider:?}"
+        );
+    }
+}
+
+#[test]
 fn provider_projection_renderer_reviewer_golden_sections_are_semantically_equal_across_providers() {
     let compiled = compiled_fixture();
     let envelope = reviewer_execution_envelope_fixture();

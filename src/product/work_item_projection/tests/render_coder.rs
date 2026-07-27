@@ -121,6 +121,34 @@ fn assert_coder_section_oracle(
 }
 
 #[test]
+fn provider_projection_renderer_coder_does_not_leak_reviewer_verdict_contract() {
+    let compiled = compiled_fixture();
+    let envelope = coder_execution_envelope_fixture();
+
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
+    ] {
+        let rendered = renderer_for(&provider)
+            .render_coder(&compiled.coder, &envelope)
+            .unwrap();
+        assert!(
+            !rendered
+                .text
+                .contains("最终审查结论必须只输出一个 JSON 对象"),
+            "{provider:?} coder projection must not contain the reviewer verdict contract"
+        );
+        assert!(
+            !rendered
+                .text
+                .contains("\"verdict\":\"approve|request_changes|blocked\""),
+            "{provider:?}"
+        );
+    }
+}
+
+#[test]
 fn provider_projection_renderer_coder_golden_sections_are_semantically_equal_across_providers() {
     let compiled = compiled_fixture();
     let envelope = coder_execution_envelope_fixture();

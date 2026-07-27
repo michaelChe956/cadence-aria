@@ -463,6 +463,25 @@ fn typed_section(
         .map_err(|error| ProjectionRenderError::Serialization(error.to_string()))
 }
 
+/// 各角色在 projection 路径下的结构化输出契约。
+///
+/// Reviewer 的最终结论由 coding_workspace_engine 的 review parser 统一解析，
+/// 必须声明与解析器 Schema 对齐的 verdict JSON 契约；否则 Provider 只能自由
+/// 发挥，输出的报告无法通过 Schema 校验而被误判为 blocked。
+fn role_structured_output_contract(role: ProjectionRenderRole) -> &'static str {
+    match role {
+        ProjectionRenderRole::Coder => "",
+        ProjectionRenderRole::Reviewer => concat!(
+            "\nCode Review 结构化输出契约:\n",
+            "- 最终审查结论必须只输出一个 JSON 对象：{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...]}\n",
+            "- verdict 只能使用 approve、request_changes、blocked；如果没有阻塞问题，verdict 使用 approve。\n",
+            "- findings 必须包含 severity、file_path、line、message、required_action、source_stage=code_review。\n",
+            "- 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n",
+            "- JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
+        ),
+    }
+}
+
 fn render(
     profile: ProviderRenderProfile,
     role: ProjectionRenderRole,
@@ -471,12 +490,13 @@ fn render(
     validate_mandatory_sections(role, &sections)?;
 
     let mut text = format!(
-        "# {} {} Work Item Projection\n\nPermission and Tool Guidance: {}\n\nStructured Output: {}\n{}",
+        "# {} {} Work Item Projection\n\nPermission and Tool Guidance: {}\n\nStructured Output: {}\n{}{}",
         profile.provider_label,
         role.label(),
         profile.permission_and_tool_hint,
         profile.structured_output_wrapper,
         plan_defect_structured_output_contract(),
+        role_structured_output_contract(role),
     );
     for section in sections {
         text.push_str("\n## ");
