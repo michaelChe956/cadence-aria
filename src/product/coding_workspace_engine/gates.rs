@@ -2,7 +2,62 @@ use super::*;
 
 mod schema_v2;
 
+pub(crate) const CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE: &str = "coding_output_human_triage";
+
 impl CodingWorkspaceEngine {
+    /// 当 Coder 输出无法进入任何自动化路由（plan defect 契约校验失败，
+    /// 或 finding 校验后仍只能人工分诊）时，落地人工分诊 blocked gate，
+    /// 避免流程停在 running/coding 而 UI 没有任何可操作入口。
+    pub(crate) fn open_coding_output_human_triage_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        report: Option<&ExecutionPlanDefectReport>,
+        parse_error: Option<&str>,
+        raw_provider_output_ref: Option<String>,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let description = match (report, parse_error) {
+            (Some(report), _) => format!(
+                "Coder 报告的 plan defect 需要人工分诊（{} 条 finding），流程已暂停: {}",
+                report.findings.len(),
+                report
+                    .findings
+                    .first()
+                    .map(|finding| finding.message.clone())
+                    .unwrap_or_default()
+            ),
+            (None, Some(error)) => format!(
+                "Coder 完成报告中的 plan_defect_findings 未通过契约校验，流程已暂停并等待人工分诊: {error}"
+            ),
+            (None, None) => "Coder 输出需要人工分诊，流程已暂停".to_string(),
+        };
+        let updated = self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )?;
+        self.store.create_blocked_gate(
+            &updated,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Coding,
+                node_id: Some(node_id.to_string()),
+                role: Some(CodingProviderRole::Coder),
+                title: "Coder 输出需要人工分诊".to_string(),
+                description,
+                reason_code: Some(CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE.to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref,
+                available_actions: vec![
+                    coding_gate_action_for_id("retry_coding").expect("retry coding action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        )?;
+        Ok(updated)
+    }
+
     pub(crate) async fn emit_permission_request(
         &self,
         node_id: &str,

@@ -80,6 +80,17 @@ fn coding_plan_repair_prompt_contracts_require_canonical_schema_and_legacy_mappi
     }
 }
 
+#[test]
+fn plan_defect_output_contract_declares_field_value_constraints() {
+    let contract = crate::product::plan_repair::plan_defect_structured_output_contract();
+
+    assert!(contract.contains("severity 只能使用 error、warning"));
+    assert!(contract.contains("confidence 只能使用 low、medium、high"));
+    assert!(contract.contains("repair_target 必须是对象"));
+    assert!(contract.contains("logical_work_item_ids"));
+    assert!(contract.contains("work_item_revision_ids"));
+}
+
 pub(super) fn assert_plan_defect_output_contract(prompt: &str, container: &str) {
     assert!(prompt.contains(container), "missing {container}: {prompt}");
     for field in [

@@ -133,8 +133,23 @@ async fn coding_plan_repair_coder_plan_finding_safe_stops_before_code_review_run
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
-    assert_eq!(attempt.status, CodingAttemptStatus::Running);
+    assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
     assert_eq!(attempt.stage, CodingExecutionStage::Coding);
+    let gates = store
+        .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("open gates");
+    assert_eq!(gates.len(), 1, "triage gate must replace the silent stall");
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("coding_output_human_triage")
+    );
+    let action_ids: Vec<&str> = gates[0]
+        .available_actions
+        .iter()
+        .map(|action| action.action_id.as_str())
+        .collect();
+    assert!(action_ids.contains(&"retry_coding"));
+    assert!(action_ids.contains(&"abort"));
 
     ws.close(None).await.expect("close ws");
     server.abort();

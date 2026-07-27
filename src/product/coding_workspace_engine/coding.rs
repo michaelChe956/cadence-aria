@@ -227,15 +227,19 @@ impl CodingWorkspaceEngine {
                 return Err(error);
             }
         };
-        let (plan_defect_report, plan_defect_decision) =
+        let (plan_defect_report, plan_defect_decision, plan_defect_error) =
             match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
-                Ok(report) if report.findings.is_empty() => (None, None),
+                Ok(report) if report.findings.is_empty() => (None, None, None),
                 Ok(report) => {
                     let projection = self.reviewer_projection_for_attempt(&attempt)?;
                     let decision = execution_plan_defect_flow_decision(&report, &projection);
-                    (Some(report), Some(decision))
+                    (Some(report), Some(decision), None)
                 }
-                Err(_) => (None, Some(CodeReviewFlowDecision::StopForHumanTriage)),
+                Err(error) => (
+                    None,
+                    Some(CodeReviewFlowDecision::StopForHumanTriage),
+                    Some(error.to_string()),
+                ),
             };
         let plan_defect_route = plan_defect_decision.map(CodeReviewFlowDecision::label);
         let raw_provider_output_ref = self.store.save_provider_raw_output(
@@ -280,6 +284,17 @@ impl CodingWorkspaceEngine {
             plan_defect_route,
         })
         .await;
+        let attempt = if plan_defect_decision == Some(CodeReviewFlowDecision::StopForHumanTriage) {
+            self.open_coding_output_human_triage_gate(
+                &attempt,
+                &node.id,
+                plan_defect_report.as_ref(),
+                plan_defect_error.as_deref(),
+                Some(raw_provider_output_ref.clone()),
+            )?
+        } else {
+            attempt
+        };
         Ok(CoderExecutionOutcome {
             attempt,
             plan_defect_decision,
