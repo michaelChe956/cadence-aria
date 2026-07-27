@@ -168,7 +168,7 @@ impl WorkItemRuntimeReader {
 
   补充 Session JSON 缺少可选字段可解析、Work Item Session 有 Binding 可 roundtrip、Story/Design Session 保持 `None` 的测试；同时断言 Binding JSON 不含 `canonical_contract`、`human_projection`、`coder_projection`、`reviewer_projection`、`verification_checks` 或执行状态字段。
 
-- [ ] **步骤 5：运行 Task 1 验证并提交。**
+- [x] **步骤 5：运行 Task 1 验证并提交。**
 
   运行：`cargo test --locked --lib work_item_runtime_reader`
 
@@ -237,7 +237,7 @@ impl LifecycleStore {
 
   `handle_human_confirm_from_handler` 的 `ConfirmedWithChildSessions` 分支不得再在成功响应之后执行可能失败的 Context 构建。保留读取并发送已经就绪的 child session 信息即可；若存储中缺少 Binding/Context，返回明确 `runtime_binding_missing` 错误，而不是访问旧 Work Item 或发送先成功后失败的 WebSocket 序列。
 
-- [ ] **步骤 6：运行恢复与 Compile 测试并提交。**
+- [x] **步骤 6：运行恢复与 Compile 测试并提交。**
 
   运行：
 
@@ -305,7 +305,7 @@ pub fn workspace_repository_for_session(
 
   删除或收窄 `find_work_item`、`needs_source_draft_supplement` 等只为 WorkItem 子 Workspace Context 服务的调用路径；`[work_item_context]` 必须明确列出 `plan_revision_id`、`work_item_revision_id`、`verification_plan_revision_id` 与 Human Projection Hash，供人工审计而不让其成为 Provider 执行输入。
 
-- [ ] **步骤 5：运行三类型回归并提交。**
+- [x] **步骤 5：运行三类型回归并提交。**
 
   运行：
 
@@ -375,7 +375,7 @@ pub struct AuthoritativeGroupPlanBinding {
 
   为同一 Group 重试、`AttemptPersisted`/`PlanBindingSaved`/首 Unit 中断恢复、以及 Amendment 发布后已完成 UnitRun 的测试添加断言：当前创建只绑定其 `bound_plan_revision_id`，旧 UnitRun 与 Handoff 不变，新 Revision 只能经已有 Amendment Journal 生效。
 
-- [ ] **步骤 6：运行 Group 测试并提交。**
+- [x] **步骤 6：运行 Group 测试并提交。**
 
   运行：
 
@@ -459,7 +459,7 @@ impl WorkItemRuntimeReader {
 
   运行 `rg -n 'list_work_items\\(' src`，为每个命中写分类：仅 Legacy 历史入口/测试可保留但不得从 v2 路由进入；v2 可达的 `workspace_context/entity.rs`、`workspace_repository.rs`、`handlers/coding/{group.rs,rs}`、`coding_ws_handler/context.rs`、`coding_work_item_context.rs`、`coding_evaluation_context/{builder.rs,tester_execution.rs}`、`tester_agent_loop/context_loader.rs`、`coding_workspace_engine/{gates.rs,handoffs.rs}`、`handlers/lifecycle.rs` 必须迁移或明确下线。将该清单作为 PR 描述的一部分，并以测试证明没有 fallback。
 
-- [ ] **步骤 7：运行角色、生命周期与 Handoff 测试并提交。**
+- [x] **步骤 7：运行角色、生命周期与 Handoff 测试并提交。**
 
   运行：
 
@@ -569,8 +569,9 @@ Story + Design 已确认
 ## 执行复核记录（2026-07-27）
 
 - 已按提交与当前源码逐项复核并勾选已落地的测试编写、实现、恢复/不变性和 Legacy Reader 清点步骤；对应实现提交为 `0600bf65`、`cb01219c`、`6df449db`、`4de89880`、`972bbb33`、`45c00677`、`4e4f7113`、`83541d29`、`d047acd5`、`e6f160ac`。
-- 所有“运行红灯测试”及“运行验证/全量验证”步骤仍保留未勾选：历史红灯输出未作为可复核证据持久化，本次最终验收测试按操作者安排由操作者执行。相应的提交存在，但提交不能替代新鲜测试证据。
-- 上方审查清单同样保留为未勾选，待最终验收测试与代码审查完成后统一关闭。
+- 所有“运行红灯测试”仍保留未勾选：历史红灯输出未作为可复核证据持久化，不能由当前已修复代码倒推补齐。
+- Task 1–5 的验证步骤已取得新鲜通过证据：Rust 1379 个库测试、宿主机 Web 集成测试 293 通过 / 12 忽略、格式/编译/Clippy，以及前端类型检查和 737 个 Vitest 测试均通过。Task 6 的全量 `cargo test --locked` 仍未勾选，因为 `it_core::large_file_guard` 报出 9 个文件超过 800 行；该命令结果为 143 通过、1 失败。
+- 上方审查清单继续保留为未勾选，待文件行数守卫修复、最终人工验收与代码审查完成后统一关闭。
 
 ## 计划自检记录（2026-07-26）
 
