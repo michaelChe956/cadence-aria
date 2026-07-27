@@ -9,8 +9,8 @@ use crate::cross_cutting::streaming_provider::{ProviderCommand, StreamingProvide
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
 use crate::product::models::{
-    ProviderName, WorkItemKind, WorkItemOutline, WorkItemOutlineSessionFit,
-    WorkItemPlanDraftActiveIndex, WorkItemPlanOutline, WorkspaceType,
+    ProviderName, TrustedDraftVerificationCommand, WorkItemKind, WorkItemOutline,
+    WorkItemOutlineSessionFit, WorkItemPlanDraftActiveIndex, WorkItemPlanOutline, WorkspaceType,
 };
 use crate::product::work_item_contract::CanonicalWorkItemContract;
 use crate::product::work_item_plan_store::WorkItemPlanStore;
@@ -196,7 +196,12 @@ fn outline_artifact(contract: &CanonicalWorkItemContract) -> ArtifactPayload {
                     forbidden_write_scopes: Vec::new(),
                     depends_on: Vec::new(),
                     verification_intent: vec!["cargo test --locked --lib core".to_string()],
-                    trusted_verification_commands: Vec::new(),
+                    trusted_verification_commands: vec![TrustedDraftVerificationCommand {
+                        command: "cargo test --locked --lib core".to_string(),
+                        cwd: ".".to_string(),
+                        purpose: "验证核心工作流契约".to_string(),
+                        source_ref: "provider_matrix#trusted_command".to_string(),
+                    }],
                     handoff_notes: "publish finalization contract".to_string(),
                 }],
                 dependency_graph: Vec::new(),

@@ -161,12 +161,25 @@ async fn prepare_plan_accept_outline_and_select_batch(
     (session_id, plan_id, ws)
 }
 
+fn outline_trusting_unsafe_command(outline_id: &str) -> Value {
+    let mut output = valid_outline_output();
+    let outline = output["outline"]["work_item_outlines"]
+        .as_array_mut()
+        .expect("work item outlines");
+    let item = outline
+        .iter_mut()
+        .find(|item| item["outline_id"] == outline_id)
+        .expect("target outline");
+    item["trusted_verification_commands"][0]["command"] = json!("rm -rf /");
+    output
+}
+
 #[tokio::test]
 async fn strict_validator_item_failure_in_batch_returns_batch_confirm_without_real_writes() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
-        valid_outline_output(),
+        outline_trusting_unsafe_command("outline_backend_session"),
         unsafe_backend_draft_output(),
         valid_frontend_draft_output(),
         valid_integration_draft_output(),
@@ -286,7 +299,7 @@ async fn downgrade_to_serial_copies_unaffected_batch_drafts_and_revalidates() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
-        valid_outline_output(),
+        outline_trusting_unsafe_command("outline_frontend_expiry"),
         valid_draft_output("outline_backend_session"),
         unsafe_frontend_draft_output(),
         valid_integration_draft_output(),

@@ -1,4 +1,6 @@
 //! 集成测试入口：web 域。各子模块原为独立 tests/*.rs，合并以减少二进制数量。
+use tower::ServiceExt;
+
 static TEST_CONTROLS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(crate) struct TestControlsEnvGuard {
@@ -27,6 +29,81 @@ pub(crate) async fn disable_test_controls() -> tokio::sync::MutexGuard<'static, 
         std::env::remove_var("ARIA_E2E_TEST_CONTROLS");
     }
     guard
+}
+
+pub(crate) async fn create_repository_and_wait(
+    app: axum::Router,
+    project_id: &str,
+    request_body: serde_json::Value,
+) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri(format!("/api/projects/{project_id}/repositories"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(request_body.to_string()))
+                .expect("create repository request"),
+        )
+        .await
+        .expect("create repository response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("create repository body");
+    let accepted: serde_json::Value = serde_json::from_slice(&body).expect("accepted operation");
+    assert_eq!(
+        status,
+        axum::http::StatusCode::ACCEPTED,
+        "repository initialization must be asynchronous: {accepted}"
+    );
+    let operation_id = accepted["operation_id"]
+        .as_str()
+        .expect("accepted repository initialization operation id");
+    let operation_uri =
+        format!("/api/projects/{project_id}/repository-initializations/{operation_id}");
+    let mut last_snapshot = accepted;
+    for _ in 0..100 {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri(&operation_uri)
+                    .body(axum::body::Body::empty())
+                    .expect("repository initialization status request"),
+            )
+            .await
+            .expect("repository initialization status response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("repository initialization status body");
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&body).expect("repository initialization status json");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "repository initialization status request failed: {snapshot}"
+        );
+        match snapshot["status"].as_str() {
+            Some("completed") => {
+                let result = snapshot["result"].clone();
+                assert!(
+                    result.is_object(),
+                    "completed repository initialization result is missing: {snapshot}"
+                );
+                return result;
+            }
+            Some("failed") => panic!("repository initialization failed: {snapshot}"),
+            _ => {
+                last_snapshot = snapshot;
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    panic!("repository initialization did not reach a terminal state: {last_snapshot}");
 }
 
 #[path = "it_web/web_api_handlers.rs"]

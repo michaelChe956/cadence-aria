@@ -351,10 +351,9 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
         json!({"name":"Gate","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;

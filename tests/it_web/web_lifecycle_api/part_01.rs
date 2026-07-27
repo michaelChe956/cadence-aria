@@ -32,10 +32,9 @@ async fn issue_creation_requires_repository_and_lifecycle_lists_cards() {
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -95,10 +94,9 @@ async fn generate_endpoints_create_workspace_sessions_and_first_cards() {
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -220,10 +218,9 @@ async fn generate_story_specs_falls_back_from_default_codex_to_available_claude_
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -270,10 +267,9 @@ async fn confirmed_story_and_design_can_generate_design_and_work_item_workspaces
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -375,10 +371,9 @@ async fn delete_lifecycle_entities_removes_cards_and_workspace_sessions() {
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -500,10 +495,9 @@ async fn generating_story_specs_returns_404_when_bound_repository_was_deleted() 
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -553,10 +547,9 @@ async fn workspace_session_message_run_and_confirm_update_session_state() {
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
