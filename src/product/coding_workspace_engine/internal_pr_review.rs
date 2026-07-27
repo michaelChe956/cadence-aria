@@ -61,8 +61,7 @@ impl CodingWorkspaceEngine {
     ) -> Result<String, CodingWorkspaceEngineError> {
         let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
         let units_section = self.format_group_unit_handoff_section(&handoffs);
-        let evaluation_context_json = self
-            .evaluation_context_json_for_role(attempt, EvaluationContextRole::InternalReviewer)?;
+        let evaluation_context_json = self.group_final_review_evaluation_context_json(attempt)?;
         let diff = match worktree_path {
             Some(path) => {
                 self._git_service

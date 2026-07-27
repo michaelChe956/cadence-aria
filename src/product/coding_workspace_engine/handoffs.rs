@@ -266,20 +266,22 @@ impl CodingWorkspaceEngine {
                 &active.id,
                 &handoff,
             )?;
-            let lifecycle = LifecycleStore::new(self.store.paths());
-            let current_work_item_id = self.active_work_item_id_for_attempt(attempt);
-            if lifecycle
-                .list_work_items(&attempt.project_id, &attempt.issue_id)?
-                .iter()
-                .any(|item| item.id == current_work_item_id)
-            {
-                lifecycle.update_work_item_handoff_summary(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    current_work_item_id,
-                    Some(format!("units/{}/work-item-handoff.json", active.id)),
-                    handoff.commit_sha.clone(),
-                )?;
+            if self.schema_v2_group_plan_lineage(attempt)?.is_none() {
+                let lifecycle = LifecycleStore::new(self.store.paths());
+                let current_work_item_id = self.active_work_item_id_for_attempt(attempt);
+                if lifecycle
+                    .list_work_items(&attempt.project_id, &attempt.issue_id)?
+                    .iter()
+                    .any(|item| item.id == current_work_item_id)
+                {
+                    lifecycle.update_work_item_handoff_summary(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        current_work_item_id,
+                        Some(format!("units/{}/work-item-handoff.json", active.id)),
+                        handoff.commit_sha.clone(),
+                    )?;
+                }
             }
 
             return Ok(());
@@ -616,6 +618,9 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        if self.schema_v2_group_plan_lineage(attempt)?.is_some() {
+            return Ok(());
+        }
         let lifecycle = LifecycleStore::new(self.store.paths());
         let existing_work_item_ids = lifecycle
             .list_work_items(&attempt.project_id, &attempt.issue_id)?

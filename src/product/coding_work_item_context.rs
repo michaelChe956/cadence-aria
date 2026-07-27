@@ -68,9 +68,10 @@ fn is_schema_v2_group_attempt(
         .get_plan_lineage(&attempt.project_id, &attempt.issue_id, plan_id)
     {
         Ok(_) => Ok(true),
-        Err(ProductStoreError::NotFound { kind, .. }) if kind == "work_item_plan_lineage" => {
-            Ok(false)
-        }
+        Err(ProductStoreError::NotFound {
+            kind: "work_item_plan_lineage",
+            ..
+        }) => Ok(false),
         Err(error) => Err(error),
     }
 }

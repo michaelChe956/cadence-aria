@@ -7,6 +7,27 @@ pub(super) fn plan_repair_fixture() -> PlanRepairFixture {
 pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> PlanRepairFixture {
     let tmp = TempDir::new().expect("temp dir");
     let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let repository_path = tmp.path().join("worktree");
+    std::fs::create_dir_all(&repository_path).expect("repository directory");
+    let repository = RepositoryStore::new(paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "plan repair fixture".to_string(),
+            path: repository_path,
+            default_policy_preset: None,
+            default_provider_mode: Some("fake".to_string()),
+        })
+        .expect("repository");
+    let issue = IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some(repository.id),
+            title: "plan repair fixture".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("issue");
+    assert_eq!(issue.id, "issue_0001");
     let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -59,6 +80,21 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         "projection_bundle_upstream",
     );
     revision_store
+        .put_verification_plan_revision(
+            &plan,
+            &VerificationPlanRevision {
+                id: upstream_revision.verification_plan_revision_id.clone(),
+                logical_work_item_id: upstream.id.clone(),
+                source_draft_revision_id: upstream_revision.source_draft_revision_id.clone(),
+                verification_checks: upstream_revision
+                    .canonical_contract
+                    .verification_checks
+                    .clone(),
+                created_at: "2026-07-19T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+    revision_store
         .put_work_item_revision(&plan, &upstream_revision)
         .unwrap();
     let upstream_compiled = WorkItemProjectionCompiler
@@ -74,9 +110,9 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
                 canonical_contract_hash: upstream_revision.canonical_contract_hash.clone(),
                 projection_schema_version: 1,
                 compiler_version: "work-item-projection-compiler-v1".to_string(),
-                human_projection: upstream_compiled.human,
-                coder_projection: upstream_compiled.coder,
-                reviewer_projection: upstream_compiled.reviewer,
+                human_projection: upstream_compiled.human.clone(),
+                coder_projection: upstream_compiled.coder.clone(),
+                reviewer_projection: upstream_compiled.reviewer.clone(),
                 human_projection_hash: upstream_hashes.human,
                 coder_projection_hash: upstream_hashes.coder,
                 reviewer_projection_hash: upstream_hashes.reviewer,
@@ -107,6 +143,21 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         "projection_bundle_current",
     );
     revision_store
+        .put_verification_plan_revision(
+            &plan,
+            &VerificationPlanRevision {
+                id: current_revision.verification_plan_revision_id.clone(),
+                logical_work_item_id: current.id.clone(),
+                source_draft_revision_id: current_revision.source_draft_revision_id.clone(),
+                verification_checks: current_revision
+                    .canonical_contract
+                    .verification_checks
+                    .clone(),
+                created_at: "2026-07-19T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+    revision_store
         .put_work_item_revision(&plan, &current_revision)
         .unwrap();
     revision_store
@@ -123,9 +174,9 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         canonical_contract_hash: current_revision.canonical_contract_hash.clone(),
         projection_schema_version: 1,
         compiler_version: "work-item-projection-compiler-v1".to_string(),
-        human_projection: compiled.human,
-        coder_projection: compiled.coder,
-        reviewer_projection: compiled.reviewer,
+        human_projection: compiled.human.clone(),
+        coder_projection: compiled.coder.clone(),
+        reviewer_projection: compiled.reviewer.clone(),
         human_projection_hash: hashes.human,
         coder_projection_hash: hashes.coder.clone(),
         reviewer_projection_hash: hashes.reviewer.clone(),
@@ -134,36 +185,126 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
     revision_store
         .put_work_item_projection_bundle(&plan, &bundle)
         .unwrap();
+    let dependency_graph = DependencyGraphRevision {
+        id: "dependency_graph_revision_0001".to_string(),
+        plan_id: plan.id.clone(),
+        edges: Vec::new(),
+        created_at: "2026-07-19T00:00:00Z".to_string(),
+    };
     revision_store
-        .put_dependency_graph_revision(
+        .put_dependency_graph_revision(&plan, &dependency_graph)
+        .unwrap();
+    let plan_revision = WorkItemPlanRevision {
+        id: "plan_revision_0001".to_string(),
+        plan_id: plan.id.clone(),
+        revision_no: 1,
+        supersedes: None,
+        reason: PlanRevisionReason::InitialCompile,
+        work_item_bindings: BTreeMap::from([
+            (upstream.id.clone(), upstream_revision.id.clone()),
+            (current.id.clone(), current_revision.id.clone()),
+        ]),
+        dependency_graph_revision_id: dependency_graph.id.clone(),
+        validation_report_ref: "validation_report_0001".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        created_at: "2026-07-19T00:00:00Z".to_string(),
+    };
+    let ordered_logical_work_item_ids = vec![upstream.id.clone(), current.id.clone()];
+    let work_item_projections = BTreeMap::from([
+        (upstream.id.clone(), upstream_compiled),
+        (current.id.clone(), compiled),
+    ]);
+    let compiled_plan = CompiledPlanProjections {
+        human: HumanGroupProjection {
+            plan_id: plan.id.clone(),
+            goal: "Plan repair fixture".to_string(),
+            split_reason: "Fixture publishes complete Schema v2 revisions".to_string(),
+            work_items: ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| {
+                    let projection = &work_item_projections[logical_id].human;
+                    HumanGroupWorkItemSummary {
+                        logical_work_item_id: logical_id.clone(),
+                        title: projection.title.clone(),
+                        goal: projection.goal.clone(),
+                        depends_on: dependency_graph
+                            .edges
+                            .iter()
+                            .filter(|edge| edge.to == *logical_id)
+                            .map(|edge| edge.from.clone())
+                            .collect(),
+                        provides: projection
+                            .outputs
+                            .iter()
+                            .map(|output| output.contract_id.clone())
+                            .collect(),
+                        scope_summary: projection.scope_summary.clone(),
+                    }
+                })
+                .collect(),
+            contract_flow: Vec::new(),
+            risks: Vec::new(),
+            source_refs: Vec::new(),
+            normative: false,
+            used_by_provider: false,
+        },
+        coder: CoderGroupContext {
+            plan_id: plan.id.clone(),
+            ordered_logical_work_item_ids: ordered_logical_work_item_ids.clone(),
+            dependency_edges: dependency_graph.edges.clone(),
+            group_write_scopes: ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| {
+                    (
+                        logical_id.clone(),
+                        work_item_projections[logical_id].coder.write_policy.clone(),
+                    )
+                })
+                .collect(),
+        },
+        reviewer: ReviewerGroupMatrix {
+            plan_id: plan.id.clone(),
+            work_items: ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| ReviewerGroupMatrixEntry {
+                    logical_work_item_id: logical_id.clone(),
+                    criterion_refs: work_item_projections[logical_id]
+                        .reviewer
+                        .criterion_refs
+                        .clone(),
+                    input_contract_refs: Vec::new(),
+                    output_contract_refs: Vec::new(),
+                })
+                .collect(),
+            dependency_edges: dependency_graph.edges.clone(),
+            design_traceability_refs: Vec::new(),
+        },
+    };
+    let plan_hashes = plan_projection_hashes(&compiled_plan).unwrap();
+    revision_store
+        .put_plan_projection_bundle(
             &plan,
-            &DependencyGraphRevision {
-                id: "dependency_graph_revision_0001".to_string(),
-                plan_id: plan.id.clone(),
-                edges: Vec::new(),
+            &PlanProjectionBundle {
+                id: plan_revision.plan_projection_bundle_id.clone(),
+                plan_revision_id: plan_revision.id.clone(),
+                dependency_graph_revision_id: plan_revision.dependency_graph_revision_id.clone(),
+                work_item_projection_bundle_refs: vec![
+                    upstream_revision.work_item_projection_bundle_id.clone(),
+                    current_revision.work_item_projection_bundle_id.clone(),
+                ],
+                human_group_projection: compiled_plan.human,
+                coder_group_context: compiled_plan.coder,
+                reviewer_group_matrix: compiled_plan.reviewer,
+                human_group_projection_hash: plan_hashes.human,
+                coder_group_context_hash: plan_hashes.coder,
+                reviewer_group_matrix_hash: plan_hashes.reviewer,
+                compiler_version: "plan-projection-compiler-v1".to_string(),
                 created_at: "2026-07-19T00:00:00Z".to_string(),
             },
         )
         .unwrap();
     revision_store
-        .put_plan_revision(
-            &plan,
-            &WorkItemPlanRevision {
-                id: "plan_revision_0001".to_string(),
-                plan_id: plan.id.clone(),
-                revision_no: 1,
-                supersedes: None,
-                reason: PlanRevisionReason::InitialCompile,
-                work_item_bindings: BTreeMap::from([
-                    (upstream.id.clone(), upstream_revision.id.clone()),
-                    (current.id.clone(), current_revision.id.clone()),
-                ]),
-                dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
-                validation_report_ref: "validation_report_0001".to_string(),
-                plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-                created_at: "2026-07-19T00:00:00Z".to_string(),
-            },
-        )
+        .put_plan_revision(&plan, &plan_revision)
         .unwrap();
     let plan = revision_store
         .set_active_plan_revision(&plan, "plan_revision_0001")

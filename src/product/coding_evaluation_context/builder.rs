@@ -297,14 +297,7 @@ pub(super) fn schema_v2_active_unit_runtime(
     )>,
     ProductStoreError,
 > {
-    match WorkItemRuntimeReader::new(paths.clone()).resolve_active_coding_unit_runtime(attempt) {
-        Err(ProductStoreError::IdentityMismatch { kind, .. })
-            if kind == "runtime_binding_missing" =>
-        {
-            Ok(None)
-        }
-        result => result,
-    }
+    WorkItemRuntimeReader::new(paths.clone()).resolve_active_coding_unit_runtime(attempt)
 }
 
 fn evaluation_repo_diff_base<'a>(

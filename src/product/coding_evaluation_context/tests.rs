@@ -29,6 +29,7 @@ use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot};
 
 mod group_context;
+mod schema_v2_runtime;
 mod tester_execution;
 
 const PROJECT_ID: &str = "project_0001";

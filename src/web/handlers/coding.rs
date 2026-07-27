@@ -12,12 +12,61 @@ mod scope;
 pub use group::create_group_coding_attempt;
 use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};
 
+pub(crate) struct RuntimeBindingProviderConfigInput<'a> {
+    pub project_id: &'a str,
+    pub issue_id: &'a str,
+    pub plan_id: &'a str,
+    pub plan_revision_id: &'a str,
+    pub unit: &'a AuthoritativeCodingUnitBinding,
+    pub repository_default_provider: &'a str,
+}
+
 pub async fn create_coding_attempt(
     State(state): State<WebAppState>,
     Path((project_id, issue_id, work_item_id)): Path<(String, String, String)>,
 ) -> ApiResult<Json<CodingAttemptDto>> {
     let app_paths = product_app_paths(&state);
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let creation_guard = coding_store
+        .acquire_work_item_attempt_creation_async(&project_id, &issue_id, &work_item_id)
+        .await
+        .map_err(product_store_api_error)?;
+    let active_attempts = coding_store
+        .list_attempts_for_work_item(&project_id, &issue_id, &work_item_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|attempt| attempt.status.is_active())
+        .collect::<Vec<_>>();
+    if active_attempts.len() > 1 {
+        return Err(ApiError::runtime(
+            "coding_attempt_ambiguous",
+            "multiple active coding attempts exist for this work item",
+            json!({
+                "attempt_ids": active_attempts
+                    .iter()
+                    .map(|attempt| attempt.id.as_str())
+                    .collect::<Vec<_>>()
+            }),
+        ));
+    }
+    if let Some(active_attempt) = active_attempts.into_iter().next() {
+        if active_attempt.scope == CodingAttemptScope::WorkItem {
+            lifecycle
+                .bind_issue_worktree_lock_to_attempt(
+                    &project_id,
+                    &issue_id,
+                    &work_item_id,
+                    &active_attempt.id,
+                )
+                .map_err(product_store_api_error)?;
+        }
+        return Err(ApiError::runtime(
+            "coding_attempt_active",
+            "work item already has an active coding attempt",
+            json!({ "attempt_id": active_attempt.id }),
+        ));
+    }
     if is_schema_v2_group_work_item(
         &app_paths,
         &lifecycle,
@@ -99,47 +148,6 @@ pub async fn create_coding_attempt(
         return Err(ApiError::validation(
             "repository_path_not_git_repo",
             "repository path must point to a git work tree",
-        ));
-    }
-
-    let coding_store = CodingAttemptStore::new(app_paths.clone());
-    let creation_guard = coding_store
-        .acquire_work_item_attempt_creation_async(&project_id, &issue_id, &work_item.id)
-        .await
-        .map_err(product_store_api_error)?;
-    let active_attempts = coding_store
-        .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .filter(|attempt| attempt.status.is_active())
-        .collect::<Vec<_>>();
-    if active_attempts.len() > 1 {
-        return Err(ApiError::runtime(
-            "coding_attempt_ambiguous",
-            "multiple active coding attempts exist for this work item",
-            json!({
-                "attempt_ids": active_attempts
-                    .iter()
-                    .map(|attempt| attempt.id.as_str())
-                    .collect::<Vec<_>>()
-            }),
-        ));
-    }
-    if let Some(active_attempt) = active_attempts.into_iter().next() {
-        if active_attempt.scope == CodingAttemptScope::WorkItem {
-            lifecycle
-                .bind_issue_worktree_lock_to_attempt(
-                    &project_id,
-                    &issue_id,
-                    &work_item.id,
-                    &active_attempt.id,
-                )
-                .map_err(product_store_api_error)?;
-        }
-        return Err(ApiError::runtime(
-            "coding_attempt_active",
-            "work item already has an active coding attempt",
-            json!({ "attempt_id": active_attempt.id }),
         ));
     }
 
@@ -380,7 +388,10 @@ fn is_schema_v2_group_work_item(
         }
         let lineage = match revision_store.get_plan_lineage(project_id, issue_id, &plan.id) {
             Ok(lineage) => lineage,
-            Err(ProductStoreError::NotFound { kind, .. }) if kind == "work_item_plan_lineage" => {
+            Err(ProductStoreError::NotFound {
+                kind: "work_item_plan_lineage",
+                ..
+            }) => {
                 continue;
             }
             Err(error) => return Err(error),
@@ -403,6 +414,30 @@ fn is_schema_v2_group_work_item(
         });
     }
     Ok(false)
+}
+
+fn is_schema_v2_group_attempt(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<bool, ProductStoreError> {
+    if attempt.scope != CodingAttemptScope::WorkItemGroup {
+        return Ok(false);
+    }
+    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+        return Ok(false);
+    };
+    match WorkItemRevisionStore::new(app_paths.clone()).get_plan_lineage(
+        &attempt.project_id,
+        &attempt.issue_id,
+        plan_id,
+    ) {
+        Ok(_) => Ok(true),
+        Err(ProductStoreError::NotFound {
+            kind: "work_item_plan_lineage",
+            ..
+        }) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn coding_provider_config_snapshot(
@@ -448,32 +483,27 @@ pub(crate) fn coding_provider_config_snapshot(
 
 pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
     lifecycle: &LifecycleStore,
-    project_id: &str,
-    issue_id: &str,
-    plan_id: &str,
-    plan_revision_id: &str,
-    unit: &AuthoritativeCodingUnitBinding,
-    repository_default_provider: &str,
+    input: RuntimeBindingProviderConfigInput<'_>,
     provider_availability: &dyn Fn(&ProviderName) -> bool,
 ) -> ApiResult<ProviderConfigSnapshot> {
     let sessions = lifecycle
-        .list_workspace_sessions(project_id, issue_id)
+        .list_workspace_sessions(input.project_id, input.issue_id)
         .map_err(product_store_api_error)?;
     if let Some(session) = sessions.iter().rev().find(|session| {
-        session.entity_id == unit.logical_work_item_id
+        session.entity_id == input.unit.logical_work_item_id
             && session.workspace_type == WorkspaceType::WorkItem
             && session.status == WorkspaceSessionStatus::Confirmed
             && session
                 .work_item_runtime_binding
                 .as_ref()
                 .is_some_and(|binding| {
-                    binding.plan_id == plan_id
-                        && binding.plan_revision_id == plan_revision_id
-                        && binding.logical_work_item_id == unit.logical_work_item_id
-                        && binding.work_item_revision_id == unit.work_item_revision_id
-                        && binding.projection_bundle_id == unit.projection_bundle_id
+                    binding.plan_id == input.plan_id
+                        && binding.plan_revision_id == input.plan_revision_id
+                        && binding.logical_work_item_id == input.unit.logical_work_item_id
+                        && binding.work_item_revision_id == input.unit.work_item_revision_id
+                        && binding.projection_bundle_id == input.unit.projection_bundle_id
                         && binding.verification_plan_revision_id
-                            == unit.verification_plan_revision_id
+                            == input.unit.verification_plan_revision_id
                 })
     }) {
         let author = resolve_explicit_provider_name(
@@ -494,7 +524,7 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
     }
 
     let author =
-        resolve_default_coding_provider(repository_default_provider, provider_availability)?
+        resolve_default_coding_provider(input.repository_default_provider, provider_availability)?
             .provider;
     Ok(ProviderConfigSnapshot {
         author: author.clone(),
@@ -677,18 +707,33 @@ pub(crate) async fn delete_coding_attempt(
         .current_work_item_id
         .as_deref()
         .unwrap_or(&attempt.work_item_id);
-    let work_item = lifecycle
-        .list_work_items(&attempt.project_id, &attempt.issue_id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .find(|work_item| work_item.id == active_work_item_id)
-        .ok_or_else(|| {
-            product_store_api_error(ProductStoreError::NotFound {
-                kind: "work_item",
-                id: active_work_item_id.to_string(),
-            })
-        })?;
-    let repository = find_repository(&app_paths, &attempt.project_id, &work_item.repository_id)?;
+    let repository_id =
+        if is_schema_v2_group_attempt(&app_paths, &attempt).map_err(product_store_api_error)? {
+            IssueStore::new(app_paths.clone())
+                .get(&attempt.project_id, &attempt.issue_id)
+                .map_err(product_store_api_error)?
+                .repo_id
+                .ok_or_else(|| {
+                    product_store_api_error(ProductStoreError::NotFound {
+                        kind: "issue_repository",
+                        id: attempt.issue_id.clone(),
+                    })
+                })?
+        } else {
+            lifecycle
+                .list_work_items(&attempt.project_id, &attempt.issue_id)
+                .map_err(product_store_api_error)?
+                .into_iter()
+                .find(|work_item| work_item.id == active_work_item_id)
+                .ok_or_else(|| {
+                    product_store_api_error(ProductStoreError::NotFound {
+                        kind: "work_item",
+                        id: active_work_item_id.to_string(),
+                    })
+                })?
+                .repository_id
+        };
+    let repository = find_repository(&app_paths, &attempt.project_id, &repository_id)?;
 
     if let Ok(Some(shared)) =
         lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)

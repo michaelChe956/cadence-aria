@@ -37,63 +37,17 @@ fn app_with_group_full_chain_attempt_fixture(
             default_provider_mode: Some("fake".to_string()),
         })
         .expect("create repository");
+    let issue = IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some(repository.id.clone()),
+            title: "coding ws group fixture".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("create issue");
+    assert_eq!(issue.id, "issue_0001");
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    lifecycle
-        .create_work_item(CreateWorkItemInput {
-            id: Some("work_item_0001".to_string()),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id.clone(),
-            story_spec_ids: Vec::new(),
-            design_spec_ids: Vec::new(),
-            title: "实现爬楼梯".to_string(),
-            work_item_set_id: Some("work_item_plan_0001".to_string()),
-            sequence_hint: Some(10),
-            plan_status: WorkItemPlanStatus::Confirmed,
-            ..Default::default()
-        })
-        .expect("create work item 1");
-    lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
-        .expect("create work item session 1");
-    lifecycle
-        .create_work_item(CreateWorkItemInput {
-            id: Some("work_item_0002".to_string()),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
-            story_spec_ids: Vec::new(),
-            design_spec_ids: Vec::new(),
-            title: "补充边界校验".to_string(),
-            work_item_set_id: Some("work_item_plan_0001".to_string()),
-            sequence_hint: Some(20),
-            plan_status: WorkItemPlanStatus::Confirmed,
-            ..Default::default()
-        })
-        .expect("create work item 2");
-    lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_0002".to_string(),
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
-        .expect("create work item session 2");
     lifecycle
         .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
             id: Some("work_item_plan_0001".to_string()),
@@ -118,7 +72,7 @@ fn app_with_group_full_chain_attempt_fixture(
             created_from_provider_run: None,
             validator_findings: Vec::new(),
         })
-        .expect("create work item plan");
+        .expect("create schema v2 plan metadata");
     let plan_session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: "project_0001".to_string(),
@@ -188,6 +142,40 @@ fn app_with_group_full_chain_attempt_fixture(
         WebRuntime::new_fake(root_path.to_path_buf()),
         registry,
     ))
+}
+
+#[tokio::test]
+async fn schema_v2_group_coding_websocket_initializes_without_legacy_work_items() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_group_full_chain_attempt(root.path());
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    assert!(
+        lifecycle
+            .list_work_items("project_0001", "issue_0001")
+            .expect("list legacy work items")
+            .is_empty(),
+        "Schema v2 Group fixture must not create Legacy Work Item records"
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let initial = recv_json(&mut ws).await;
+    assert!(matches!(
+        initial,
+        CodingWsOutMessage::CodingSessionState {
+            attempt_scope,
+            work_item_group_id: Some(_),
+            ..
+        } if attempt_scope == "work_item_group"
+    ));
+    ws.close(None).await.expect("close ws");
+    server.abort();
 }
 
 struct GroupFinalReviewPlanDefectProvider {

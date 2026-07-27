@@ -1,5 +1,6 @@
 include!("web_coding_ws_handler/part_01.rs");
 include!("web_coding_ws_handler/fixtures.rs");
+include!("web_coding_ws_handler/fixtures_authoritative_group.rs");
 include!("web_coding_ws_handler/part_02.rs");
 include!("web_coding_ws_handler/part_03.rs");
 include!("web_coding_ws_handler/part_04.rs");

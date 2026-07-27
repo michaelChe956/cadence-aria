@@ -21,22 +21,28 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
+use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
 use crate::product::models::{
     AmendmentResumeMode, AmendmentResumeTarget, DependencyGraphRevision, LogicalWorkItem,
     PlanAmendmentManifest, PlanDefectClass, PlanDefectEvidence, PlanDefectRoute,
-    PlanRepairRequestStatus, PlanRepairSessionStage, PlanRevisionReason, RepairTarget,
-    RepairTargetKind, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle,
-    WorkItemRevision,
+    PlanProjectionBundle, PlanRepairRequestStatus, PlanRepairSessionStage, PlanRevisionReason,
+    RepairTarget, RepairTargetKind, VerificationPlanRevision, WorkItemPlanLineage,
+    WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::plan_repair::PlanDefectConfidence;
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::tester_agent_loop::TesterAgentOptions;
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, ContractCompatibilityPolicy,
     HandoffContract, PromisedOutputContract, RequiredInputContract, WorkItemContractIdentity,
     WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
 };
-use crate::product::work_item_projection::{WorkItemProjectionCompiler, projection_hashes};
+use crate::product::work_item_projection::{
+    CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
+    ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler,
+    plan_projection_hashes, projection_hashes,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 mod delivery_ack;

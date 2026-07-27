@@ -6,16 +6,16 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::{
     CodingAttemptPlanBinding, CodingAttemptScope, CodingExecutionUnitStatus, CodingProviderRole,
-    RemoteKind,
+    CodingUnitRun, CodingUnitRunStatus, RemoteKind,
 };
 use crate::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, LifecycleStore,
 };
 use crate::product::models::{
-    DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
-    PlanProjectionBundle, PlanRevisionReason, ProviderConversationRef, ProviderConversationRole,
-    VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus,
-    WorkItemProjectionBundle, WorkItemRevision,
+    DependencyGraphRevision, HandoffRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
+    LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason, ProviderConversationRef,
+    ProviderConversationRole, VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision,
+    WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract, PromisedOutputContract,
@@ -24,7 +24,7 @@ use crate::product::work_item_contract::{
 use crate::product::work_item_projection::{
     CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
     ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler,
-    plan_projection_hashes, projection_hashes,
+    plan_projection_hashes, projection_hashes, renderer_for,
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -64,52 +64,85 @@ fn seed_group_attempt_fixture(
     initialize_attempt: bool,
     with_dependency: bool,
 ) {
+    seed_group_attempt_fixture_with_legacy_work_items(
+        store,
+        attempt,
+        initialize_attempt,
+        with_dependency,
+        true,
+    );
+}
+
+fn seed_schema_v2_group_attempt_fixture(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    initialize_attempt: bool,
+    with_dependency: bool,
+) {
+    seed_group_attempt_fixture_with_legacy_work_items(
+        store,
+        attempt,
+        initialize_attempt,
+        with_dependency,
+        false,
+    );
+}
+
+fn seed_group_attempt_fixture_with_legacy_work_items(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    initialize_attempt: bool,
+    with_dependency: bool,
+    include_legacy_work_items: bool,
+) {
     let lifecycle = LifecycleStore::new(store.paths());
     let work_items = [
         ("work_item_0001", "work_item_revision_0001"),
         ("work_item_0002", "work_item_revision_0002"),
         ("work_item_0003", "work_item_revision_0003"),
     ];
-    for (index, (work_item_id, _)) in work_items.iter().enumerate() {
+    if include_legacy_work_items {
+        for (index, (work_item_id, _)) in work_items.iter().enumerate() {
+            lifecycle
+                .create_work_item(CreateWorkItemInput {
+                    id: Some((*work_item_id).to_string()),
+                    project_id: attempt.project_id.clone(),
+                    issue_id: attempt.issue_id.clone(),
+                    repository_id: "repository_0001".to_string(),
+                    title: format!("group work item {}", index + 1),
+                    work_item_set_id: Some("work_item_plan_0001".to_string()),
+                    sequence_hint: Some(((index + 1) * 10) as u32),
+                    plan_status: WorkItemPlanStatus::Confirmed,
+                    ..Default::default()
+                })
+                .expect("group work item");
+        }
         lifecycle
-            .create_work_item(CreateWorkItemInput {
-                id: Some((*work_item_id).to_string()),
+            .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+                id: Some("work_item_plan_0001".to_string()),
                 project_id: attempt.project_id.clone(),
                 issue_id: attempt.issue_id.clone(),
-                repository_id: "repository_0001".to_string(),
-                title: format!("group work item {}", index + 1),
-                work_item_set_id: Some("work_item_plan_0001".to_string()),
-                sequence_hint: Some(((index + 1) * 10) as u32),
-                plan_status: WorkItemPlanStatus::Confirmed,
-                ..Default::default()
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                options: IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: IssueWorkItemPlanStatus::Confirmed,
+                work_item_ids: work_items
+                    .iter()
+                    .map(|(work_item_id, _)| (*work_item_id).to_string())
+                    .collect(),
+                repository_profile_ref: None,
+                verification_plan_ids: Vec::new(),
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
             })
-            .expect("group work item");
+            .expect("group plan");
     }
-    lifecycle
-        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
-            id: Some("work_item_plan_0001".to_string()),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            source_story_spec_ids: Vec::new(),
-            source_design_spec_ids: Vec::new(),
-            options: IssueWorkItemPlanOptions {
-                include_integration_tests: false,
-                include_e2e_tests: false,
-                force_frontend_backend_split: false,
-                require_execution_plan_confirm: false,
-            },
-            status: IssueWorkItemPlanStatus::Confirmed,
-            work_item_ids: work_items
-                .iter()
-                .map(|(work_item_id, _)| (*work_item_id).to_string())
-                .collect(),
-            repository_profile_ref: None,
-            verification_plan_ids: Vec::new(),
-            dependency_graph: Vec::new(),
-            created_from_provider_run: None,
-            validator_findings: Vec::new(),
-        })
-        .expect("group plan");
 
     let revision_store = WorkItemRevisionStore::new(store.paths());
     let lineage = WorkItemPlanLineage {
@@ -436,6 +469,7 @@ mod provider_start_persistence;
 mod runtime_handoff_compatibility;
 mod runtime_handoff_delta;
 mod runtime_handoff_impact;
+mod schema_v2_runtime;
 mod tester_cancellation;
 mod tester_repair_plan_defect;
 

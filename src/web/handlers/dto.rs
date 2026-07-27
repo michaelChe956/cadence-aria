@@ -384,6 +384,11 @@ pub(crate) fn lifecycle_work_item_dto(
     })
 }
 
+mod work_item_runtime;
+pub(crate) use work_item_runtime::{
+    LifecycleWorkItemRuntimeDtoInput, lifecycle_work_item_runtime_dto,
+};
+
 pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {
     CodingAttemptDto {
         attempt_id: attempt.id.clone(),

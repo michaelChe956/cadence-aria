@@ -1,5 +1,7 @@
 use super::*;
 
+mod schema_v2;
+
 impl CodingWorkspaceEngine {
     pub(crate) async fn emit_permission_request(
         &self,
@@ -209,38 +211,55 @@ impl CodingWorkspaceEngine {
             ));
         }
 
-        let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
-        let lifecycle = LifecycleStore::new(self.store.paths());
-        let work_items = lifecycle.list_work_items(&attempt.project_id, &attempt.issue_id)?;
         let reports =
             self.store
                 .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         let worktree_path = self.attempt_worktree_path(attempt).await.ok();
+        let completed_work_item_ids = self
+            .store
+            .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .filter(|unit| {
+                unit.status == crate::product::coding_models::CodingExecutionUnitStatus::Completed
+            })
+            .map(|unit| unit.logical_work_item_id)
+            .collect::<Vec<_>>();
 
-        for (unit, handoff) in &handoffs {
-            let work_item = work_items
-                .iter()
-                .find(|item| item.id == unit.logical_work_item_id)
-                .ok_or_else(|| {
-                    CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone())
-                })?;
-            self.validate_changed_files_for_work_item(
-                work_item,
-                &handoff.files_changed,
-                worktree_path.as_ref(),
-            )?;
-            self.verify_required_gates_satisfied(attempt, &lifecycle, work_item, &reports)?;
+        if self.schema_v2_group_plan_lineage(attempt)?.is_some() {
+            for facts in self.schema_v2_group_completion_gate_facts(attempt)? {
+                self.validate_changed_files_for_runtime(
+                    &facts.runtime,
+                    &facts.handoff.artifacts,
+                    worktree_path.as_ref(),
+                )?;
+                self.verify_schema_v2_required_gates_satisfied(attempt, &facts.runtime, &reports)?;
+            }
+        } else {
+            let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
+            let lifecycle = LifecycleStore::new(self.store.paths());
+            let work_items = lifecycle.list_work_items(&attempt.project_id, &attempt.issue_id)?;
+            for (unit, handoff) in &handoffs {
+                let work_item = work_items
+                    .iter()
+                    .find(|item| item.id == unit.logical_work_item_id)
+                    .ok_or_else(|| {
+                        CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone())
+                    })?;
+                self.validate_changed_files_for_work_item(
+                    work_item,
+                    &handoff.files_changed,
+                    worktree_path.as_ref(),
+                )?;
+                self.verify_required_gates_satisfied(attempt, &lifecycle, work_item, &reports)?;
+            }
         }
 
+        let lifecycle = LifecycleStore::new(self.store.paths());
         let lock_holder_work_item_id = lifecycle
             .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
             .and_then(|shared| shared.current_active_work_item_id)
             .or_else(|| attempt.current_work_item_id.clone())
-            .or_else(|| {
-                handoffs
-                    .last()
-                    .map(|(unit, _)| unit.logical_work_item_id.clone())
-            })
+            .or_else(|| completed_work_item_ids.last().cloned())
             .unwrap_or_else(|| attempt.work_item_id.clone());
         self.ensure_issue_shared_worktree_clean(attempt, &lock_holder_work_item_id)
             .await?;

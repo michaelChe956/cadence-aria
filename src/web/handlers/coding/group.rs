@@ -1,9 +1,12 @@
 use super::super::dto::*;
 use super::super::support::*;
 use super::super::*;
-use super::coding_provider_config_snapshot_for_runtime_binding;
+use super::{
+    RuntimeBindingProviderConfigInput, coding_provider_config_snapshot_for_runtime_binding,
+};
 use crate::product::coding_attempt_store::CodingGroupInitializationPhase;
 use crate::product::issue_store::IssueStore;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 pub async fn create_group_coding_attempt(
     State(state): State<WebAppState>,
@@ -24,6 +27,33 @@ pub async fn create_group_coding_attempt(
     let group_lock_key = format!("work_item_group:{project_id}:{issue_id}:{plan_id}");
     let _group_guard = state.coding_runs.lock_named(&group_lock_key).await;
     let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let pending_journal =
+        match coding_store.get_group_initialization(&project_id, &issue_id, &plan_id) {
+            Ok(journal) => Some(journal),
+            Err(ProductStoreError::NotFound {
+                kind: "coding_group_initialization_journal",
+                ..
+            }) => None,
+            Err(error) => return Err(coding_group_attempt_incomplete_api_error(error)),
+        };
+    if let Some(journal) = pending_journal
+        && journal.phase != CodingGroupInitializationPhase::Completed
+    {
+        let active_revision_id = WorkItemRevisionStore::new(app_paths.clone())
+            .get_plan_lineage(&project_id, &issue_id, &plan_id)
+            .map_err(product_store_api_error)?
+            .active_revision_id;
+        if active_revision_id.as_deref()
+            != Some(journal.plan_binding.bound_plan_revision_id.as_str())
+        {
+            return Err(coding_group_attempt_incomplete_api_error(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_group_initialization_plan_revision",
+                    id: journal.attempt.id,
+                },
+            ));
+        }
+    }
     let authoritative = coding_store
         .resolve_authoritative_group_plan_binding(&project_id, &issue_id, &plan_id)
         .map_err(coding_plan_revision_binding_api_error)?;
@@ -59,12 +89,14 @@ pub async fn create_group_coding_attempt(
         .join(&issue_id);
     let provider_config_snapshot = coding_provider_config_snapshot_for_runtime_binding(
         &lifecycle,
-        &project_id,
-        &issue_id,
-        &plan_id,
-        &authoritative.plan_revision_id,
-        current_unit,
-        &repository.default_provider_mode,
+        RuntimeBindingProviderConfigInput {
+            project_id: &project_id,
+            issue_id: &issue_id,
+            plan_id: &plan_id,
+            plan_revision_id: &authoritative.plan_revision_id,
+            unit: current_unit,
+            repository_default_provider: &repository.default_provider_mode,
+        },
         &*state.provider_availability,
     )?;
     let initialization_input = CreateGroupCodingAttemptInput {

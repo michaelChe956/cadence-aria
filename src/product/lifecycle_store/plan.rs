@@ -113,6 +113,29 @@ impl LifecycleStore {
         Ok(plan)
     }
 
+    pub fn delete_schema_v2_issue_work_item_plan_metadata(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        let plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+        delete_required_file(
+            &self
+                .issue_work_item_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json")),
+            "issue_work_item_plan",
+            plan_id,
+        )?;
+        self.delete_workspace_sessions_for_entity(
+            project_id,
+            issue_id,
+            plan_id,
+            WorkspaceType::WorkItemPlan,
+        )?;
+        Ok(plan)
+    }
+
     pub fn confirm_issue_work_item_plan(
         &self,
         project_id: &str,

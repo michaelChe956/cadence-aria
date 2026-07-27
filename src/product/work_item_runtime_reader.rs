@@ -192,7 +192,10 @@ impl WorkItemRuntimeReader {
         let revision_store = WorkItemRevisionStore::new(self.paths.clone());
         match revision_store.get_plan_lineage(&attempt.project_id, &attempt.issue_id, plan_id) {
             Ok(_) => {}
-            Err(ProductStoreError::NotFound { kind, .. }) if kind == "work_item_plan_lineage" => {
+            Err(ProductStoreError::NotFound {
+                kind: "work_item_plan_lineage",
+                ..
+            }) => {
                 return Ok(None);
             }
             Err(error) => return Err(error),

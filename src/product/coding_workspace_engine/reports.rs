@@ -112,6 +112,44 @@ impl CodingWorkspaceEngine {
         })
     }
 
+    pub(crate) fn group_final_review_evaluation_context_json(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let plan_id = attempt.work_item_group_id.as_deref().ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream(
+                "group_final_review_plan_binding_missing".to_string(),
+            )
+        })?;
+        let units = self
+            .authoritative_group_reviewer_bindings(attempt)?
+            .into_iter()
+            .map(|binding| {
+                serde_json::json!({
+                    "logical_work_item_id": binding.projection_binding.logical_work_item_id,
+                    "work_item_revision_id": binding.run.work_item_revision_id,
+                    "canonical_contract_hash": binding.run.canonical_contract_hash,
+                    "projection_bundle_id": binding.run.projection_bundle_id,
+                    "projection_compiler_version": binding.run.projection_compiler_version,
+                    "reviewer_projection_hash": binding.run.reviewer_projection_hash,
+                    "reviewer_projection": binding.projection_binding.projection,
+                    "resolved_handoff_revision_ids": binding.run.resolved_handoff_revision_ids,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_v2_group_final_review": true,
+            "attempt_id": attempt.id,
+            "plan_id": plan_id,
+            "units": units,
+        }))
+        .map_err(|error| {
+            CodingWorkspaceEngineError::ProviderStream(format!(
+                "serialize_group_final_review_evaluation_context_failed: {error}"
+            ))
+        })
+    }
+
     pub(crate) fn retry_diagnostic_for_previous_run(
         &self,
         attempt: &CodingExecutionAttempt,

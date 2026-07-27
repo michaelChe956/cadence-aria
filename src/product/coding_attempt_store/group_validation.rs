@@ -63,7 +63,7 @@ impl super::CodingAttemptStore {
         let revision_store = WorkItemRevisionStore::new(self.paths());
         let lineage = revision_store.get_plan_lineage(project_id, issue_id, plan_id)?;
         let revision =
-            revision_store.get_plan_revision(project_id, issue_id, plan_id, &plan_revision_id)?;
+            revision_store.get_plan_revision(project_id, issue_id, plan_id, plan_revision_id)?;
         if revision.plan_id != plan_id {
             return Err(invalid_plan_binding(
                 "bound plan revision does not belong to the coding group",

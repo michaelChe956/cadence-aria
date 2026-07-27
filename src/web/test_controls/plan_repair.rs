@@ -9,6 +9,7 @@ mod linked_workspace;
 mod provider_matrix;
 mod recovery;
 mod seed;
+mod seed_projection;
 mod topology;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
