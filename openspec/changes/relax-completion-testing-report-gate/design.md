@@ -45,15 +45,15 @@ Testing 至少半年不进入产品流程，当前完成语义对所有 attempt 
 
 此次仅解除 TestingReport 依赖。changed-file/runtime scope、可见 handoff、全部 unit 完成、completion commit、共享 worktree 清洁性及现有一致性检查仍按原顺序执行并可阻塞完成。
 
-### 5. 旧语义测试显式退役但保留上下文
+### 5. 将旧 testing 门禁测试改写为新语义回归
 
-断言“缺少 testing report 必须返回 `VerificationGateResultMissing`”的 legacy 集成测试不再代表产品要求。由于该 fixture 当前还受既有 lineage NotFound 问题阻塞，不在本 change 中修复无关 lineage 行为；测试将标记为 ignored，并注明 testing 门禁已停用及既有 fixture 阻塞原因。新增可运行的 schema v2 回归测试承担新语义的主要验证。
+原 `group_final_confirm_requires_testing_report_for_each_unit_plan` 已确认在当前基线上可运行并通过，其断言“缺少 matching testing report 必须返回 `VerificationGateResultMissing`”不再代表产品要求。该测试将改名并改写为：verification plan 仍含 required gate、attempt 不保存任何 testing report、其他完成条件满足时 final confirm 成功且 attempt 进入 Completed。新增 schema v2 group 回归测试承担 revision-bound required check 场景；现有 single-attempt final-confirm 测试补充 required verification plan 且无 report 的覆盖。
 
 ## Risks / Trade-offs
 
 - **[风险] 未执行自动化测试的代码也可被标记完成。** → 这是已确认的产品取舍；继续依赖 Code Reviewer、Internal Reviewer 与非 testing 结构门禁，UI/API 不伪造 testing 成功结果。
 - **[风险] 存量 TestingReport 即使失败也不再影响完成。** → Testing 已明确不属于当前验收标准；report 数据继续保留，但不参与 completion decision。
-- **[风险] 三条完成路径同时修改扩大回归面。** → 分别覆盖 schema v2 group，并对 legacy/single 调用结构做针对性测试或静态验证；运行全量 lib、clippy、fmt 和相关集成测试。
+- **[风险] 三条完成路径同时修改扩大回归面。** → 分别覆盖 schema v2 group、legacy group 与 single-attempt 无 testing report 场景，并运行全量 lib、clippy、fmt 和相关集成测试。
 - **[风险] 历史停滞 attempt 不会自动完成。** → 部署后使用现有恢复/重试入口重新触发 final completion；若现有入口无法安全重放，则创建新 attempt，不在本 change 中改写持久化状态。
 
 ## Migration Plan
