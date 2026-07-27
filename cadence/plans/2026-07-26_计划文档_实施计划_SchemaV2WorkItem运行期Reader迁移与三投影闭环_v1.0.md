@@ -118,7 +118,7 @@ impl WorkItemRuntimeReader {
 }
 ```
 
-- [ ] **步骤 1：为 Session Binding、Coding Unit 派生 Binding 和完整性失败关闭写失败测试。**
+- [x] **步骤 1：为 Session Binding、Coding Unit 派生 Binding 和完整性失败关闭写失败测试。**
 
   在 `work_item_runtime_reader/tests.rs` 建立只包含 Revision Store Fixture 的测试，不调用 `LifecycleStore::create_work_item`。至少覆盖：合法 Binding 能取得同一逻辑 ID 的 Revision/Bundle/Verification；缺少 Session Binding 返回 `runtime_binding_missing`；PlanRevision 的 `work_item_bindings`、`WorkItemRevision.work_item_projection_bundle_id`、`WorkItemRevision.verification_plan_revision_id`、Bundle `canonical_contract_hash` 任一不符时返回稳定的 `runtime_binding_integrity_mismatch`；带不同 UnitRun Hash 的 Coding 调用失败关闭。
 
@@ -144,7 +144,7 @@ impl WorkItemRuntimeReader {
 
   预期：失败，原因是 `WorkItemRuntimeBinding`、`WorkItemRuntimeReader` 或目标方法尚不存在；不得通过创建 Legacy Work Item 夹具使测试转绿。
 
-- [ ] **步骤 3：实现最小、纯引用的 Binding 与解析器。**
+- [x] **步骤 3：实现最小、纯引用的 Binding 与解析器。**
 
   在 `WorkItemRuntimeBinding` 上实现从已发布对象构造的内部构造器与 ID 非空校验；在 `WorkspaceSessionRecord` 增加 `#[serde(default)] pub work_item_runtime_binding: Option<WorkItemRuntimeBinding>`。Reader 依次读取 lineage → binding 指定的 PlanRevision → DependencyGraph/PlanProjectionBundle → logical work item → WorkItemRevision → VerificationPlanRevision → ProjectionBundle，并校验：
 
@@ -164,7 +164,7 @@ impl WorkItemRuntimeReader {
 
   `resolve_workspace` 必须拒绝非 `WorkspaceType::WorkItem` 或缺 Binding；`resolve_coding_unit` 必须先验证 Attempt 的 `CodingAttemptPlanBinding.bound_plan_revision_id`、Unit 的逻辑 ID/Revision ID，再在有 UnitRun 时验证 Contract/Bundle/Compiler/Projection Hash。不得查询 `LifecycleStore::list_work_items`。
 
-- [ ] **步骤 4：完成 Serde 与边界测试。**
+- [x] **步骤 4：完成 Serde 与边界测试。**
 
   补充 Session JSON 缺少可选字段可解析、Work Item Session 有 Binding 可 roundtrip、Story/Design Session 保持 `None` 的测试；同时断言 Binding JSON 不含 `canonical_contract`、`human_projection`、`coder_projection`、`reviewer_projection`、`verification_checks` 或执行状态字段。
 
@@ -204,7 +204,7 @@ impl LifecycleStore {
 }
 ```
 
-- [ ] **步骤 1：先写 Binding 幂等性与 Compile 成功边界的失败测试。**
+- [x] **步骤 1：先写 Binding 幂等性与 Compile 成功边界的失败测试。**
 
   为 `ensure_work_item_runtime_binding` 写三个测试：首次写入成功；重放同值不改变 Binding；同一 Session 重放不同 Binding 返回 `IdentityMismatch`。在 `web_work_item_plan_compile/part_01.rs` 扩展 `batch_accept_all_runs_final_compile_and_publishes_revision_entities`：断言三份 Legacy 列表仍为空、每个 Work Item 子 Session 含 Binding、首条 system context 已持久化且包含 Human Projection 标题/摘要。添加 failpoint 用例，在第一个子 Session Binding 或 Context 准备后中断并恢复，断言不重复 Session、不更换 Revision/Binding、成功前不产生 committed compile report。
 
@@ -223,17 +223,17 @@ impl LifecycleStore {
 
   预期：失败，因为 Final Compile 尚未保存 Binding/上下文，或恢复 checkpoint 尚不存在。
 
-- [ ] **步骤 3：实现 Session Binding 的锁内幂等写入。**
+- [x] **步骤 3：实现 Session Binding 的锁内幂等写入。**
 
   `LifecycleStore::ensure_work_item_runtime_binding` 必须在 `find_workspace_session_path` 的独占锁内读取 Session，先验证该 Session 为 WorkItem，再按以下规则处理：`None` 写入 Binding；`Some(existing) == binding` 原样返回；不同则返回 `IdentityMismatch { kind: "work_item_runtime_binding", ... }`。写入时更新 `updated_at`，不得改写 messages、状态、Provider 配置，也不得创建任何 Legacy Record。
 
-- [ ] **步骤 4：在 Finalizer 中把“子 Workspace 可运行”放到 committed 前。**
+- [x] **步骤 4：在 Finalizer 中把“子 Workspace 可运行”放到 committed 前。**
 
   在 `WorkspaceEngine::finalize_initial_plan_compile` 的每个 logical Work Item 循环内，从 `InitialPlanCompileOutcome` 的已发布 Revision/Bundle/Verification 对象构建 Binding，随后顺序执行：确保或复用子 Session → `ensure_work_item_runtime_binding` → 调用既有 `ensure_workspace_context_message` 生成 Revision Store 驱动的 system context → 更新 Compile Transaction cursor。新增 `WorkItemPlanCompileFinalizerCheckpoint::FirstChildBindingEnsured` 与 `FirstChildContextPrepared`，恢复时必须复用同一 `compile_id`、Session ID 和 Binding。
 
   `WorkItemPlanCompileReportPayload { status: Committed }` 及 `persist_compile_report` 必须位于所有子 Session Context 成功之后；失败仅保留可重放 Journal/cursor，不发送 human-confirm 成功。
 
-- [ ] **步骤 5：移除确认成功后的补救式 Context 初始化。**
+- [x] **步骤 5：移除确认成功后的补救式 Context 初始化。**
 
   `handle_human_confirm_from_handler` 的 `ConfirmedWithChildSessions` 分支不得再在成功响应之后执行可能失败的 Context 构建。保留读取并发送已经就绪的 child session 信息即可；若存储中缺少 Binding/Context，返回明确 `runtime_binding_missing` 错误，而不是访问旧 Work Item 或发送先成功后失败的 WebSocket 序列。
 
@@ -277,7 +277,7 @@ pub fn workspace_repository_for_session(
 ) -> Result<RepositoryRecord, ProductStoreError>;
 ```
 
-- [ ] **步骤 1：为 Work Item Human Context 写无旧目录失败测试，并保留 Story/Design 对照。**
+- [x] **步骤 1：为 Work Item Human Context 写无旧目录失败测试，并保留 Story/Design 对照。**
 
   在 `workspace_context` 测试中创建只含 Revision Store、Issue、Story/Design Spec 与带 Binding Session 的 Fixture；不创建 `LifecycleWorkItemRecord`。断言生成 context 成功并包含 Human Projection 的标题、目标、依赖与范围摘要，以及存在时的 HumanPresentationRevision 风险/依赖解释和 Revision 标识，但不包含 Coder/Reviewer Projection、Canonical Contract JSON 或旧 `[work_item_plan_source]` 段。再以表驱动方式断言 Story、Design、WorkItem 三种 Session 都可恢复，只有 WorkItem 需要 Binding。
 
@@ -295,13 +295,13 @@ pub fn workspace_repository_for_session(
 
   预期：Work Item 仍因 `find_work_item` 读取旧目录失败；Story/Design 现有断言保持通过。
 
-- [ ] **步骤 3：以 Reader 替换 Work Item 分支。**
+- [x] **步骤 3：以 Reader 替换 Work Item 分支。**
 
   `workspace_entity_context` 与 `work_item_context_summary` 的 `WorkspaceType::WorkItem` 分支改为 `WorkItemRuntimeReader::resolve_workspace`：标题取 `projection_bundle.human_projection.title`，人类摘要取该 Projection 的 goal/dependencies/scope 与可选 `human_presentation` 的风险说明，关联 Story/Design 取 `runtime.lineage.story_spec_refs` / `design_spec_refs`，验证摘要取 `verification_plan_revision.verification_checks`。`workspace_repository_id` 的 WorkItem 分支改为 Issue 的 `repo_id`，并在缺失时失败关闭；不得从旧 Work Item 取 `repository_id`。
 
   保留 Story、Design、WorkItemPlan 的原有分支与传入的 LifecycleStore；不得给 Story/Design 创建 Binding，也不得在 Reader 失败后回退 `find_work_item`。
 
-- [ ] **步骤 4：删除旧 Work Item Context 构造与验证旧字段依赖。**
+- [x] **步骤 4：删除旧 Work Item Context 构造与验证旧字段依赖。**
 
   删除或收窄 `find_work_item`、`needs_source_draft_supplement` 等只为 WorkItem 子 Workspace Context 服务的调用路径；`[work_item_context]` 必须明确列出 `plan_revision_id`、`work_item_revision_id`、`verification_plan_revision_id` 与 Human Projection Hash，供人工审计而不让其成为 Provider 执行输入。
 
@@ -351,7 +351,7 @@ pub struct AuthoritativeGroupPlanBinding {
 }
 ```
 
-- [ ] **步骤 1：为 Group 创建写无 Legacy 记录的失败测试。**
+- [x] **步骤 1：为 Group 创建写无 Legacy 记录的失败测试。**
 
   复用 Final Compile Fixture，明确断言 `LifecycleStore::list_work_items(...).is_empty()` 后调用 `POST /projects/{project}/issues/{issue}/work-item-plans/{plan}/coding-attempts`。断言 Attempt 的 `bound_plan_revision_id` 为 active Revision、Units 顺序与 `PlanProjectionBundle.coder_group_context.ordered_logical_work_item_ids` 相同、每个 Unit 指向 PlanRevision 指定 Revision，且 Group 初始化 Journal 可重放。
 
@@ -361,17 +361,17 @@ pub struct AuthoritativeGroupPlanBinding {
 
   预期：当前实现因 `list_work_items` 或 `group_work_item_execution_order` 报 `work_item_not_found`/空组失败。
 
-- [ ] **步骤 3：重写权威 Group Binding 的解析顺序。**
+- [x] **步骤 3：重写权威 Group Binding 的解析顺序。**
 
   `CodingAttemptStore::resolve_authoritative_group_plan_binding` 必须删除第一个 `LifecycleStore::list_work_items` 分支，改为：读取 lineage 的 active PlanRevision → 读取该 PlanRevision 的 PlanProjectionBundle → 使用 `ordered_logical_work_item_ids` 固定顺序 → 验证无重复且和 `work_item_bindings` 集合精确一致 → 读取 DependencyGraphRevision → 对每个逻辑 ID 读取 Revision、Verification、ProjectionBundle 并构造 Unit Binding。若 logical ID 的 active Revision 与 **该 PlanRevision Binding** 不同，不得拒绝历史 PlanBinding；只校验被读取 Revision 属于正确 logical item，避免 Plan Repair 后错误漂移。
 
-- [ ] **步骤 4：迁移 Handler 的仓库、Provider 与入口策略。**
+- [x] **步骤 4：迁移 Handler 的仓库、Provider 与入口策略。**
 
   `create_group_coding_attempt` 先取 confirmed plan（仅确认状态）与 `AuthoritativeGroupPlanBinding`，再从 `IssueStore::get(...).repo_id` 解析仓库。Provider 配置从具有相同 logical ID 和相同 `work_item_runtime_binding` 的已绑定 WorkItem Session 获取；无 Session 时使用现有 repository 默认配置。不得把 `LifecycleWorkItemRecord` 重新引回 `coding_provider_config_snapshot`。
 
   `create_coding_attempt`、`save_work_item_execution_plan_for_attempt`、`group_work_item_execution_order`、`work_item_by_id` 的 v2 可达调用也必须改为 Reader/AuthoritativeBinding；若单 Work Item API 不属于 Schema v2 支持表面，则对具有有效 v2 PlanRevision 的请求返回明确 `schema_v2_group_coding_required`，不可悄悄使用旧路径。
 
-- [ ] **步骤 5：验证 Group Journal 重放与 Plan Repair 稳定性。**
+- [x] **步骤 5：验证 Group Journal 重放与 Plan Repair 稳定性。**
 
   为同一 Group 重试、`AttemptPersisted`/`PlanBindingSaved`/首 Unit 中断恢复、以及 Amendment 发布后已完成 UnitRun 的测试添加断言：当前创建只绑定其 `bound_plan_revision_id`，旧 UnitRun 与 Handoff 不变，新 Revision 只能经已有 Amendment Journal 生效。
 
@@ -419,7 +419,7 @@ impl WorkItemRuntimeReader {
 }
 ```
 
-- [ ] **步骤 1：为每种角色的正确读取与错误 Hash 写失败测试。**
+- [x] **步骤 1：为每种角色的正确读取与错误 Hash 写失败测试。**
 
   新增/修改测试，使用只含 Revision Store 和 Group Attempt/Unit/Run 的 Fixture：
 
@@ -441,21 +441,21 @@ impl WorkItemRuntimeReader {
 
   预期：至少一个测试因旧 Work Item/VerificationPlan 读取或 Human Projection 被当作执行数据而失败。
 
-- [ ] **步骤 3：替换 Coder/Reviewer 运行上下文。**
+- [x] **步骤 3：替换 Coder/Reviewer 运行上下文。**
 
   `load_coding_work_item_context` 不再构造 `LifecycleWorkItemRecord` Markdown、读取旧 VerificationPlan、查 Draft 或回退 Workspace Artifact。它通过当前 Unit/Run 的 Reader 得到 Coder Projection 与 `VerificationPlanRevision`，仅生成传给现有 renderer 的最小结构化输入。`coding_execution_context` 使用该结果；现有 `CodingWorkspaceEngine::render_coder_unit_run_context` 与 `render_reviewer_unit_run_context` 保持 Renderer/Hash 校验逻辑，并改为共同使用 Reader 的解析结果，禁止重复按 active revision 查询。
 
   `ensure_work_item_execution_plan_confirmed` 仅对仍有 Canonical Contract 明确等价语义的 v2 Unit 执行确认；当前 Contract 没有该语义时，不得从旧字段猜测，直接取消该 Legacy 前置检查。`repository_path_for_attempt` 从 Issue `repo_id` 解析仓库。
 
-- [ ] **步骤 4：替换 Tester/Evaluation 的规范性输入。**
+- [x] **步骤 4：替换 Tester/Evaluation 的规范性输入。**
 
   `build_evaluation_context_pack`、`tester_execution` 与 `TestContextLoader` 通过 `normative_context_for_unit` 取绑定 Revision：Story/Design 引用来自 PlanLineage，Work Item Markdown 由 Canonical Contract 的稳定 formatter 生成，验证命令由 `VerificationPlanRevision` 生成。缺失 artifact ref 只能产生针对用户显式可选展示的 warning；缺 Binding、Plan/Unit/Hash 不一致必须返回错误，不能为空上下文继续执行。
 
-- [ ] **步骤 5：替换 Gate、Handoff 与生命周期派生读模型。**
+- [x] **步骤 5：替换 Gate、Handoff 与生命周期派生读模型。**
 
   `gates.rs` 以当前 Unit/Run、VerificationPlanRevision、DependencyGraphRevision、已完成 HandoffRevision 完成 required checks 与依赖门禁；`handoffs.rs` 只更新 Coding Unit、UnitRun、HandoffRevision、共享 worktree lock，不再探测/写入旧 Work Item completion。`issue_lifecycle` 从 active PlanRevision 的 Human Group Projection + CodingAttempt/Unit 状态生成 Work Item DTO；删除/终止针对 v2 仅删除允许删除的 Session/Attempt 元数据，缺 Binding 失败关闭，绝不删除或回填历史 Legacy 文件。
 
-- [ ] **步骤 6：逐项清点并关闭 v2 可达旧 Reader。**
+- [x] **步骤 6：逐项清点并关闭 v2 可达旧 Reader。**
 
   运行 `rg -n 'list_work_items\\(' src`，为每个命中写分类：仅 Legacy 历史入口/测试可保留但不得从 v2 路由进入；v2 可达的 `workspace_context/entity.rs`、`workspace_repository.rs`、`handlers/coding/{group.rs,rs}`、`coding_ws_handler/context.rs`、`coding_work_item_context.rs`、`coding_evaluation_context/{builder.rs,tester_execution.rs}`、`tester_agent_loop/context_loader.rs`、`coding_workspace_engine/{gates.rs,handoffs.rs}`、`handlers/lifecycle.rs` 必须迁移或明确下线。将该清单作为 PR 描述的一部分，并以测试证明没有 fallback。
 
@@ -501,7 +501,7 @@ Story + Design 已确认
   → Plan Repair 只作用于后续 Binding，历史 UnitRun/Handoff 不漂移
 ```
 
-- [ ] **步骤 1：写全链路红灯集成测试。**
+- [x] **步骤 1：写全链路红灯集成测试。**
 
   用同一测试覆盖三种真实逻辑 Work Item（例如 library export、service、UI）：Final Compile 后断言旧目录为空；连接子 Workspace 不报 `product_store_not_found: work_item ...`；创建 Group Coding 成功；将一个 UnitRun 的 Bundle/Hash 篡改后 Coder/Reviewer/Gate 明确失败关闭；恢复未篡改 Fixture 后继续到 Handoff。测试不得手工 `create_work_item`。
 
@@ -520,7 +520,7 @@ Story + Design 已确认
 
   预期：在实现所有 Reader 替换前失败于旧读取点；不得为让测试通过写入 Legacy 记录。
 
-- [ ] **步骤 3：完成 Compile 恢复、Binding 不变性与三类型矩阵。**
+- [x] **步骤 3：完成 Compile 恢复、Binding 不变性与三类型矩阵。**
 
   增加 table-driven Workspace 测试：Story/Design 无 Binding 正常恢复；WorkItem 有正确 Binding 正常恢复；WorkItem 无 Binding、错 PlanRevision、错 Bundle、错 Hash 均失败关闭。添加 Final Compile Journal 在发布后、首 Binding 后、首 Context 后的三种恢复位置；每次重放均断言 Revision IDs、Binding、Session IDs、Artifact Version IDs 不变。
 
@@ -565,6 +565,12 @@ Story + Design 已确认
 - [ ] Plan Repair 后历史 Session、completed UnitRun、HandoffRevision 不漂移；只有 Amendment 事务创建的后续 Unit 使用新 Binding。
 - [ ] Story、Design、WorkItem 三类 Workspace 的创建和恢复均覆盖，且仅 WorkItem 要求 Binding。
 - [ ] `rg -n 'list_work_items\\(' src` 的每个 v2 可达调用已消除或下线，无任何 fallback。
+
+## 执行复核记录（2026-07-27）
+
+- 已按提交与当前源码逐项复核并勾选已落地的测试编写、实现、恢复/不变性和 Legacy Reader 清点步骤；对应实现提交为 `0600bf65`、`cb01219c`、`6df449db`、`4de89880`、`972bbb33`、`45c00677`、`4e4f7113`、`83541d29`、`d047acd5`、`e6f160ac`。
+- 所有“运行红灯测试”及“运行验证/全量验证”步骤仍保留未勾选：历史红灯输出未作为可复核证据持久化，本次最终验收测试按操作者安排由操作者执行。相应的提交存在，但提交不能替代新鲜测试证据。
+- 上方审查清单同样保留为未勾选，待最终验收测试与代码审查完成后统一关闭。
 
 ## 计划自检记录（2026-07-26）
 
