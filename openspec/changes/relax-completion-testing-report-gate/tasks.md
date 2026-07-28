@@ -1,7 +1,7 @@
 ## 1. 完成门禁回归测试
 
 - [ ] 1.1 新增 schema v2 group 回归测试，证明 required verification check 存在但无 testing report 时仍可通过完成门禁。
-- [ ] 1.2 将断言旧 testing-report 门禁语义的 legacy group 集成测试改写为无 testing report 仍可完成。
+- [ ] 1.2 将断言旧 testing-report 门禁语义的 legacy group 集成测试改写为：一个 required plan 只有 Blocked report、另一个没有 report，仍可完成且原 report 保持不变。
 - [ ] 1.3 扩展 single-attempt final-confirm 测试，覆盖 required verification plan 存在但无 testing report 时完成。
 - [ ] 1.4 确认非 testing 完成门禁回归用例继续覆盖文件范围、handoff/unit 状态与 worktree 清洁性。
 
