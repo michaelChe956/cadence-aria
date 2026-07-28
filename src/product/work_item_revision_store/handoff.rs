@@ -27,6 +27,43 @@ impl WorkItemRevisionStore {
         )
     }
 
+    /// 删除单个 handoff revision。仅用于 coding attempt 删除流程清理该 attempt
+    /// 已认领的交接产物；不作为通用存储操作暴露。删除前校验档案归属的
+    /// logical_work_item_id 与传入参数一致，归属不符时不删除。
+    pub fn delete_handoff_revision(
+        &self,
+        plan: &WorkItemPlanLineage,
+        logical_work_item_id: &str,
+        handoff_revision_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        self.ensure_plan_scope(plan)?;
+        validate_relative_id(logical_work_item_id)?;
+        validate_relative_id(handoff_revision_id)?;
+        self.get_logical_work_item(plan, logical_work_item_id)?;
+        // 显式校验归属：读到档案后确认 logical_work_item_id 一致再删，防止 path
+        // 拼写差异或指针错配导致误删其他 work item 的交接产物。
+        let existing =
+            self.get_handoff_revision(plan, logical_work_item_id, handoff_revision_id)?;
+        if existing.logical_work_item_id != logical_work_item_id {
+            return Err(identity_mismatch("handoff_revision", handoff_revision_id));
+        }
+        let path = self.handoff_revision_path(
+            &plan.project_id,
+            &plan.issue_id,
+            &plan.id,
+            logical_work_item_id,
+            handoff_revision_id,
+        );
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ProductStoreError::Io(format!(
+                "remove {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
     pub fn get_handoff_revision(
         &self,
         plan: &WorkItemPlanLineage,

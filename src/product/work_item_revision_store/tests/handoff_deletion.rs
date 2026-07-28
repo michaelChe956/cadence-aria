@@ -13,11 +13,11 @@ use crate::product::models::{
 
 use super::*;
 
-/// 归属校验测试的落地形态说明（写给 Task 2 实现）：
-/// `delete_handoff_revision` 形态 (a) 先 `get_handoff_revision` 读出档案、校验
-/// `logical_work_item_id` 与传入参数一致再删；形态 (b) path 完全由传入的
-/// `logical_work_item_id` 决定，归属不符直接撞 NotFound。本测试套两种形态都能通过，
-/// 关键断言是「wi_a 的档案未被误删」。Task 2 选形态 (a)（显式校验更安全）。
+// 归属校验测试的落地形态说明（写给 Task 2 实现）：
+// `delete_handoff_revision` 形态 (a) 先 `get_handoff_revision` 读出档案、校验
+// `logical_work_item_id` 与传入参数一致再删；形态 (b) path 完全由传入的
+// `logical_work_item_id` 决定，归属不符直接撞 NotFound。本测试套两种形态都能通过，
+// 关键断言是「wi_a 的档案未被误删」。Task 2 选形态 (a)（显式校验更安全）。
 
 const WORK_ITEM_A: &str = "wi_a";
 const WORK_ITEM_B: &str = "wi_b";
