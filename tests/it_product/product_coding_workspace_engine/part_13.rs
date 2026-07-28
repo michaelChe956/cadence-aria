@@ -605,7 +605,7 @@ async fn group_final_confirm_rejects_unit_handoff_outside_exclusive_scope() {
 }
 
 #[tokio::test]
-async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
+async fn group_final_confirm_completes_without_passed_testing_reports_for_required_plans() {
     let (_root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
     let lifecycle = LifecycleStore::new(paths.clone());
     for (work_item_id, plan_id) in [
@@ -652,13 +652,31 @@ async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
             Some("frontend done".to_string()),
         )
         .expect("complete unit2");
+    let blocked_report = TestingReport {
+        id: "testing_report_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        role_run_id: None,
+        run_no: None,
+        commands: Vec::new(),
+        overall_status: TestingOverallStatus::Blocked,
+        provider_claim: None,
+        backend_verified: true,
+        started_at: "2026-06-27T00:00:00Z".to_string(),
+        completed_at: Some("2026-06-27T00:01:00Z".to_string()),
+        plan_id: Some("verification_plan_0001".to_string()),
+        plan_summary: None,
+        steps: Vec::new(),
+        unplanned_commands: Vec::new(),
+        unplanned_evidence: Vec::new(),
+        missing_required_steps: Vec::new(),
+        skipped_required_steps: Vec::new(),
+        context_warnings: Vec::new(),
+        raw_provider_output_ref: None,
+        plan_defect_findings: Vec::new(),
+    };
     store
-        .save_testing_report(&attempt, &passed_testing_report_for_plan(
-            &attempt.id,
-            "testing_report_0001",
-            "verification_plan_0001",
-        ))
-        .expect("save unit1 testing report");
+        .save_testing_report(&attempt, &blocked_report)
+        .expect("save blocked testing report");
     let attempt = store
         .update_attempt_status(
             &attempt.project_id,
@@ -724,17 +742,19 @@ async fn group_final_confirm_requires_testing_report_for_each_unit_plan() {
         })
         .expect("save final confirm node");
 
-    let error = engine
+    let updated = engine
         .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .await
-        .expect_err("unit2 has no matching testing report");
+        .expect("required plans must not require passed testing reports");
 
-    match error {
-        cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::VerificationGateResultMissing(attempt_id) => {
-            assert_eq!(attempt_id, attempt.id);
-        }
-        other => panic!("expected missing verification gate result, got {other:?}"),
-    }
+    assert_eq!(updated.status, CodingAttemptStatus::Completed);
+    assert!(updated.completed_at.is_some());
+    assert_eq!(
+        store
+            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("testing reports"),
+        vec![blocked_report]
+    );
 }
 
 #[tokio::test]

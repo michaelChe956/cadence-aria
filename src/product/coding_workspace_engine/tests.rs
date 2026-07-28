@@ -19,7 +19,8 @@ use crate::product::models::{
 };
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract, PromisedOutputContract,
-    WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
+    VerificationCheck, WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy,
+    canonical_contract_hash,
 };
 use crate::product::work_item_projection::{
     CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
@@ -70,6 +71,7 @@ fn seed_group_attempt_fixture(
         initialize_attempt,
         with_dependency,
         true,
+        &[],
     );
 }
 
@@ -78,6 +80,7 @@ fn seed_schema_v2_group_attempt_fixture(
     attempt: &CodingExecutionAttempt,
     initialize_attempt: bool,
     with_dependency: bool,
+    verification_checks: &[VerificationCheck],
 ) {
     seed_group_attempt_fixture_with_legacy_work_items(
         store,
@@ -85,6 +88,7 @@ fn seed_schema_v2_group_attempt_fixture(
         initialize_attempt,
         with_dependency,
         false,
+        verification_checks,
     );
 }
 
@@ -94,6 +98,7 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
     initialize_attempt: bool,
     with_dependency: bool,
     include_legacy_work_items: bool,
+    verification_checks: &[VerificationCheck],
 ) {
     let lifecycle = LifecycleStore::new(store.paths());
     let work_items = [
@@ -196,7 +201,7 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
                 forbidden_scopes: Vec::new(),
             },
             acceptance_criteria: Vec::new(),
-            verification_checks: Vec::new(),
+            verification_checks: verification_checks.to_vec(),
             handoff_contract: HandoffContract {
                 required_fields: Vec::new(),
                 provided_contract_refs: vec![format!("contract_{work_item_id}")],

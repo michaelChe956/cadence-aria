@@ -484,10 +484,15 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
 }
 
 #[tokio::test]
-async fn handle_final_confirm_completes_waiting_attempt_and_timeline_node() {
+async fn handle_final_confirm_completes_without_testing_report_for_required_plan() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    create_required_verification_plan(
+        &lifecycle,
+        "work_item_0001",
+        "verification_plan_0001",
+    );
     lifecycle
         .create_work_item(CreateWorkItemInput {
             project_id: "project_0001".to_string(),
@@ -496,6 +501,7 @@ async fn handle_final_confirm_completes_waiting_attempt_and_timeline_node() {
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "Coding work item".to_string(),
+            verification_plan_ref: Some("verification_plan_0001".to_string()),
             ..Default::default()
         })
         .expect("create work item");
@@ -560,6 +566,12 @@ async fn handle_final_confirm_completes_waiting_attempt_and_timeline_node() {
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
+    assert!(
+        store
+            .list_testing_reports("project_0001", "issue_0001", &attempt.id)
+            .expect("testing reports")
+            .is_empty()
+    );
     let updated = engine
         .handle_final_confirm("project_0001", "issue_0001", &attempt.id)
         .await

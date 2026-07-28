@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn schema_v2_group_completion_gates_resolve_revision_bindings_without_legacy_work_items() {
+async fn schema_v2_group_completion_gates_pass_without_testing_reports() {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -27,7 +27,14 @@ async fn schema_v2_group_completion_gates_resolve_revision_bindings_without_lega
             max_auto_rework: 2,
         })
         .expect("group attempt");
-    seed_schema_v2_group_attempt_fixture(&store, &attempt, true, false);
+    let required_checks = [VerificationCheck {
+        check_id: "check_unit_tests".to_string(),
+        command: Some("node --test".to_string()),
+        manual_instruction: None,
+        required: true,
+        non_zero_test_execution_required: true,
+    }];
+    seed_schema_v2_group_attempt_fixture(&store, &attempt, true, false, &required_checks);
     assert!(
         LifecycleStore::new(store.paths())
             .list_work_items(&attempt.project_id, &attempt.issue_id)
@@ -159,12 +166,18 @@ async fn schema_v2_group_completion_gates_resolve_revision_bindings_without_lega
         .save_coding_attempt(&attempt)
         .expect("final review attempt");
 
+    assert!(
+        store
+            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("testing reports")
+            .is_empty()
+    );
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     engine
         .run_group_completion_gates(&attempt)
         .await
-        .expect("schema v2 gate must use bound revisions without legacy work items");
+        .expect("required checks must not require testing reports");
 }
 
 #[tokio::test]
@@ -188,7 +201,7 @@ async fn schema_v2_group_handoff_ignores_legacy_work_item_records() {
             max_auto_rework: 2,
         })
         .expect("group attempt");
-    seed_schema_v2_group_attempt_fixture(&store, &attempt, true, false);
+    seed_schema_v2_group_attempt_fixture(&store, &attempt, true, false, &[]);
     let lifecycle = LifecycleStore::new(store.paths());
     let legacy_root = lifecycle.work_items_root(&attempt.project_id, &attempt.issue_id);
     fs::create_dir_all(&legacy_root).expect("legacy work item root");
