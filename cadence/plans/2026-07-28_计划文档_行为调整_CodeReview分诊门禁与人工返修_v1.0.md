@@ -55,8 +55,12 @@
 - Modify: `src/product/coding_workspace_engine/tests.rs`（注册新测试模块）
 
 **Interfaces:**
-- Consumes: `execute_code_review_with_commands(attempt, provider, command_rx)`（`code_review.rs`）；`CapturingProjectionProvider::new(output)`（`tests/provider_execution_context.rs`）；`review_plan_defect_output()`（`tests/provider_execution_context.rs:522`）；`running_attempt_with_worktree()`（参考 `plan_defect_entrypoints.rs`）。
+- Consumes: `execute_code_review_with_commands(attempt, provider, command_rx)`（`code_review.rs`）；`CapturingProjectionProvider::new(output)`（`tests/provider_execution_context.rs`）；`review_plan_defect_output()`（`tests/provider_execution_context.rs:522`，返回能通过契约校验的计划类输出，verdict=blocked + StartPlanRepair finding）；`running_attempt_with_worktree()`（参考 `plan_defect_entrypoints.rs`）。
 - Produces: 测试覆盖 spec requirement 1（StopForHumanTriage）、2（RetryVerification）、3（OpenOperationalGate）、4（动作集合）、6（互斥）。
+
+**夹具可行性说明（重要）：**
+- `StopForHumanTriage`（来自 implementation defect 字段校验失败）不要求 finding 通过 `validate_plan_defect_finding`，因此可由 `running_attempt_with_worktree()` + `CapturingProjectionProvider` 直接构造，不需 projection bundle。本案例即属此类。
+- `RetryVerification`（verification_incomplete）与 `OpenOperationalGate`（operational_blocker）要求 finding 通过完整契约校验，包括与 `reviewer_projection.blocker_routing` 对齐。`running_attempt_with_worktree()` 构造的 attempt 无 plan lineage / projection bundle，**无法直接构造能通过校验的这两类 finding**。可复用路径见 `provider_execution_context.rs:90-165`：先 `execute_coding` 产出 unit run 与 projection bundle，再走 code review；或参考 `provider_execution_context.rs:522` 的 `review_plan_defect_output()` 返回的输出格式构造同构的 verification_incomplete / operational_blocker 输出。若该夹具成本过高，这两个测试可在 Task 2 门禁落地后补，但必须在测试文件中明确记录为待补，不得用 PASS 状态混淜。
 
 - [ ] **Step 1: 注册新测试模块**
 
@@ -256,30 +260,34 @@ let available_actions = if reason_code == "code_review_provider_interrupted" {
 
 `code_review.rs:201` 既有逻辑：`verdict == Blocked && !has_actionable_findings` → `code_review_blocked` gate。这是 `StopForHumanTriage` 决策的子集（verdict=blocked 无 actionable finding 时 `code_review_flow_decision` 返回 `StopForHumanTriage`）。
 
-互斥策略：**让既有 `code_review_blocked` 分支继续处理它覆盖的情形，新逻辑只在「该分支未触发」时按决策落分诊门禁。** 在 `code_review.rs:201` 的 `if` 块之后追加：
+互斥策略：**让既有 `code_review_blocked` 分支继续处理它覆盖的情形，新逻辑只在「该分支未触发」时按决策落分诊门禁。** 关键事实：既有 `code_review.rs:201` 分支的硬条件是 `verdict == Blocked && !has_actionable_findings`，本案例 `verdict=request_changes` 时该分支**不进入**，因此守卫在 request_changes 下恒为 false、互斥天然成立。守卫的真正作用是覆盖 `verdict=Blocked && !actionable` 这个 `StopForHumanTriage` 来源（plan_defect.rs:177-178）—— 该情形既有分支已落地 `code_review_blocked` gate，新逻辑必须跳过。在 `code_review.rs:201` 的 `if` 块之后追加：
 
 ```rust
 // 既有的 code_review_blocked 门禁已落地时，不再重复落地分诊门禁。
+// 既有分支硬条件是 verdict==Blocked && !actionable，本案例 verdict=request_changes
+// 时该分支不进入，守卫恒为 false，互斥天然成立。守卫的真正作用是覆盖
+// verdict==Blocked && !actionable 这个 StopForHumanTriage 来源（plan_defect.rs:177-178）。
 let code_review_blocked_landed = report.verdict == ReviewVerdict::Blocked
     && !code_review_report_has_actionable_findings(&report);
 if !code_review_blocked_landed {
-    let (triage_reason_code, triage_title) = match plan_defect_route {
-        CodeReviewFlowDecision::StopForHumanTriage => (
-            "code_review_output_human_triage",
-            "Code Review 结论需人工分诊",
-        ),
-        CodeReviewFlowDecision::RetryVerification => (
+    let triage_reason_code: Option<&'static str> = match plan_defect_route {
+        CodeReviewFlowDecision::StopForHumanTriage => {
+            Some(("code_review_output_human_triage", "Code Review 结论需人工分诊"))
+        }
+        CodeReviewFlowDecision::RetryVerification => Some((
             "code_review_verification_incomplete",
             "Code Review 验证证据不完整",
-        ),
-        CodeReviewFlowDecision::OpenOperationalGate => (
+        )),
+        CodeReviewFlowDecision::OpenOperationalGate => Some((
             "code_review_operational_blocker",
             "Code Review 命中运维阻塞",
-        ),
-        // RunCoderFix / StartPlanRepair / ContinueAfterApprove 不在此处理
-        _ => (core::option::Option::<&str>::None, ""),
-    };
-    if let (Some(reason_code), title) = (triage_reason_code, triage_title) {
+        )),
+        // RunCoderFix / StartPlanRepair / ContinueAfterApprove / StartStoryAmendment
+        // / StartDesignAmendment 不在此处理
+        _ => None,
+    }
+    .map(|(reason_code, title)| (reason_code, title));
+    if let Some((reason_code, title)) = triage_reason_code {
         self.create_review_blocked_gate(ReviewBlockedGateInput {
             attempt: &attempt,
             node_id: &node.id,
@@ -364,7 +372,7 @@ async fn triage_gate_send_to_coder_routes_request_changes_to_coder_rework() {
         tx,
     );
     let updated = engine
-        .respond_gate_action(
+        .handle_blocked_gate_response(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
@@ -372,6 +380,7 @@ async fn triage_gate_send_to_coder_routes_request_changes_to_coder_rework() {
             "send_to_coder",
             Some("请按审查结论返修".to_string()),
         )
+        .await
         .unwrap();
     assert_eq!(updated.stage, CodingExecutionStage::Coding);
     assert_eq!(updated.status, CodingAttemptStatus::Running);
@@ -379,7 +388,7 @@ async fn triage_gate_send_to_coder_routes_request_changes_to_coder_rework() {
 }
 ```
 
-确认 `respond_gate_action` 的确切签名（在 `gates.rs` 内查找 `pub.*fn respond_gate_action` 或同等公开入口），按实际签名调整调用。
+实际入口为 `handle_blocked_gate_response`（`gates.rs:479`，`async`），签名为 `(project_id, issue_id, attempt_id, gate_id, action_id, extra_context: Option<String>)`。
 
 再测拒绝路径（spec requirement 5 第二条 scenario）：
 
@@ -403,14 +412,15 @@ async fn triage_gate_send_to_coder_without_operator_context_is_rejected() {
         tx,
     );
     let result = engine
-        .respond_gate_action(
+        .handle_blocked_gate_response(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
             &gate_id,
             "send_to_coder",
             None,
-        );
+        )
+        .await;
     assert!(result.is_err(), "must reject send_to_coder without operator context");
     let persisted = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
