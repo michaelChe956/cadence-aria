@@ -4,8 +4,19 @@ use super::{
 };
 use crate::product::models::ProviderName;
 use crate::product::work_item_projection::{
-    ReviewerExecutionEnvelope, ReviewerWorkItemProjection, WorkItemProjectionCompiler, renderer_for,
+    RenderedExecutionContext, ReviewerExecutionEnvelope, ReviewerWorkItemProjection,
+    WorkItemProjectionCompiler, renderer_for,
 };
+
+/// 复用本文件既有 reviewer 渲染夹具渲染任意 provider 的 reviewer projection，
+/// 供契约文案断言使用。
+fn render_reviewer_fixture() -> RenderedExecutionContext {
+    let compiled = compiled_fixture();
+    let envelope = reviewer_execution_envelope_fixture();
+    renderer_for(&ProviderName::Codex)
+        .render_reviewer(&compiled.reviewer, &envelope)
+        .expect("reviewer fixture must render")
+}
 
 const REVIEWER_SECTION_TITLES: &[&str] = &[
     "Work Item Identity/Revision",
@@ -243,4 +254,34 @@ fn provider_projection_renderer_reviewer_empty_execution_envelope_lists_remain_e
             .unwrap();
         assert_reviewer_section_oracle(&rendered.text, &projection, &envelope);
     }
+}
+
+#[test]
+fn reviewer_contract_bounds_implementation_defect_fields() {
+    let rendered = render_reviewer_fixture();
+    let text = &rendered.text;
+    // 三条断言各自独立锚定 render.rs Reviewer 契约中两条新增文案的核心子串，
+    // 使任一断言失败都能捕获“新文案被删除”这一回归。
+    //
+    // 断言 1：锚定第一条新文案——implementation_defect 字段边界
+    // （禁止填写计划类字段）。子串 `的 finding 禁止填写` 在全仓仅来自
+    // render.rs 的该新增文案，旧契约行（findings 必须包含…）不含“禁止填写”。
+    assert!(
+        text.contains("defect_class=implementation_defect 的 finding 禁止填写"),
+        "contract must forbid plan defect fields on implementation_defect findings"
+    );
+    // 断言 2：锚定第二条新文案——implementation_defect 证据写入
+    // message 与 required_action 的自然语言描述。子串在全仓仅来自该新增文案。
+    assert!(
+        text.contains("证据写入 message 与 required_action 的自然语言描述"),
+        "contract must name message/required_action as the evidence outlet for implementation_defect"
+    );
+    // 断言 3：锚定第二条新文案同区域——只有计划类缺陷才允许携带
+    // plan_defect_evidence 与路由字段。枚举子串在全仓仅来自该新增文案。
+    assert!(
+        text.contains(
+            "current_work_item_invalid、upstream_contract_invalid、dependency_graph_invalid"
+        ),
+        "contract must enumerate plan defect classes that may carry plan_defect_evidence"
+    );
 }

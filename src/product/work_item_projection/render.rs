@@ -476,6 +476,8 @@ fn role_structured_output_contract(role: ProjectionRenderRole) -> &'static str {
             "- 最终审查结论必须只输出一个 JSON 对象：{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...]}\n",
             "- verdict 只能使用 approve、request_changes、blocked；如果没有阻塞问题，verdict 使用 approve。\n",
             "- findings 必须包含 severity、file_path、line、message、required_action、source_stage=code_review。\n",
+            "- defect_class=implementation_defect 的 finding 禁止填写 reason_code、contract_refs、capability_refs、repair_target、confidence、plan_defect_evidence；这些字段必须省略或留空。\n",
+            "- implementation_defect 的证据写入 message 与 required_action 的自然语言描述；只有计划类缺陷（current_work_item_invalid、upstream_contract_invalid、dependency_graph_invalid 等）才允许携带 plan_defect_evidence 与路由字段。\n",
             "- 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n",
             "- JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
         ),
