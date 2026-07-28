@@ -198,9 +198,9 @@ impl CodingWorkspaceEngine {
             role_run_status,
             reason_code,
         )?;
-        if report.verdict == ReviewVerdict::Blocked
-            && !code_review_report_has_actionable_findings(&report)
-        {
+        let lands_code_review_blocked = report.verdict == ReviewVerdict::Blocked
+            && !code_review_report_has_actionable_findings(&report);
+        if lands_code_review_blocked {
             self.create_review_blocked_gate(ReviewBlockedGateInput {
                 attempt: &attempt,
                 node_id: &node.id,
@@ -215,12 +215,10 @@ impl CodingWorkspaceEngine {
             .await?;
         }
         // 既有的 code_review_blocked 门禁已落地时，不再重复落地分诊门禁。
-        // 既有分支硬条件是 verdict==Blocked && !actionable，该情形已被 plan_defect.rs
-        // 判定为 StopForHumanTriage（plan_defect.rs:177-178），由上面分支统一落
-        // code_review_blocked gate；新分诊门禁必须跳过，避免 double-gate。
-        let code_review_blocked_landed = report.verdict == ReviewVerdict::Blocked
-            && !code_review_report_has_actionable_findings(&report);
-        if !code_review_blocked_landed {
+        // 当 lands_code_review_blocked 为真（verdict==Blocked && !actionable），该情形
+        // 已被 plan_defect.rs 判定为 StopForHumanTriage（plan_defect.rs:177-178），
+        // 由上面分支统一落 code_review_blocked gate；新分诊门禁必须跳过，避免 double-gate。
+        if !lands_code_review_blocked {
             // 仅处理三个分诊决策；RunCoderFix / StartPlanRepair /
             // ContinueAfterApprove / StartStoryAmendment / StartDesignAmendment 由
             // runner 后续处理，不在此落门禁。门禁动作不触发 plan repair。
