@@ -15,15 +15,17 @@ Coding 阶段的同类缺陷已在提交 `e462fbc1` 修复（`open_coding_output
 - Code Review 的三个人工路由决策都具备可操作 blocked gate，attempt 不再停留 `running`。
 - 三个决策使用可区分的 reason code。
 - 单次审查结论只落地一个 blocked gate。
+- 分诊门禁提供送回 Coder、重试审查、人工继续、终止四个动作，其中送回 Coder 在分诊门禁下对 `request_changes` 审查结论可用。
 - Reviewer 结构化输出契约明确 implementation defect 的字段边界与证据出口。
 
 **Non-Goals:**
 
 - 不修改 `validate_plan_defect_finding` 的校验判定，不放宽 plan defect 契约。
 - 不为 `RetryVerification` 引入自动化验证补跑能力。
+- 不改变 plan repair 的唤起条件，门禁动作不触发 plan repair。
 - 不引入、不恢复 Testing 或 tester 角色相关流程内容。
 - 不改动 coding 阶段 `runner.rs` 中同类静默返回路径（另案处理）。
-- 不修改 completion gate、plan repair、internal PR review 的既有判定。
+- 不修改 completion gate、internal PR review 的既有判定。
 - 不自动迁移、重放或改写历史停滞 attempt。
 
 ## Decisions
@@ -50,13 +52,30 @@ reason code 映射：
 
 备选方案：新增独立门禁函数。放弃原因是会复制状态流转与动作装配逻辑。
 
-### 动作集合限定为重试审查与终止
+### 动作集合包含送回 Coder、重试审查、人工继续与终止
 
-三个门禁均只提供「重试代码审查」与「终止」。
+三个门禁均提供四个动作：`send_to_coder`、`retry_review`、`manual_continue`、`abort`。
 
-理由：`retry_coding` 在 Code Review 阶段语义混乱——当前 unit 已产出 completion commit，返修应由 `RunCoderFix` 决策经 `execute_coder_fix_from_review_outcome` 走既有路径，不应由门禁旁路触发。`send_to_coder` 同理排除。
+理由：本案例的正确处置是把 4 条 implementation defect 送回 Coder 返修，因此「送回 Coder」应是分诊门禁的首选动作；`retry_review` 覆盖「Reviewer 输出格式填错、结论本身可重新表达」；`manual_continue` 覆盖「问题不成立或属历史不可复现事实」且带审计留痕；`abort` 终止流程。
 
-备选方案：额外提供 `retry_coding`。放弃原因是引入与返修路径重复的旁路状态机。
+备选方案 1：只给 `retry_review` + `abort`。放弃原因是 Reviewer 抱怨的 TDD red 证据属历史不可复现事实，重跑审查会循环得出同样结论，最后只能 abort 丢弃 attempt。
+
+备选方案 2：加 `retry_coding`。放弃原因是当前 unit 已产出 completion commit，重启 Coder 属返修路径，应由 `send_to_coder` 走既有 rework instruction 路径，不应由 gate 旁路触发。
+
+### 送回 Coder 走代码审查反馈返修路径并放宽 verdict 前置条件
+
+三个分诊门禁上的 `send_to_coder` MUST 走 `send_code_review_feedback_to_coder`（`rework.rs:420`），不走审查轮次超限反馈路径。为此需两处改动：
+
+1. `gates.rs:635` 的 `SendToCoder` 分派条件 `is_code_review_blocked_gate` MUST 扩展，让三个分诊 reason code 也走 `send_code_review_feedback_to_coder`。
+2. `rework.rs:456` 的前置条件 `review_report.verdict != ReviewVerdict::Blocked` MUST 放宽为 `verdict` 不在 {`Blocked`, `RequestChanges`} 时才拒绝，使分诊门禁下 `request_changes` 的审查结论可被送回 Coder。
+
+备选方案：不改分派与前置，让分诊门禁单独新增返修函数。放弃原因是会复制 rework instruction 装配逻辑。
+
+### 门禁动作不触及 plan repair
+
+分诊门禁的四个动作都不在 plan repair 的唤起路径上。plan repair 仅由 finding 的 `defect_class` 为 `current_work_item_invalid`/`upstream_contract_invalid`/`dependency_graph_invalid` 且通过契约校验、并与 reviewer projection 的 blocker_routing 对齐时才唤起。本 change MUST NOT 改变这些条件。
+
+理由：分诊门禁处理的是「Reviewer 输出不合契约」或「证据不足」等非计划问题，区别于「计划本身错误」。
 
 ### 与既有 `code_review_blocked` 门禁互斥
 
@@ -74,8 +93,10 @@ reason code 映射：
 
 ## Risks / Trade-offs
 
+- [`send_to_coder` verdict 放宽影响既有 `code_review_blocked` 门禁行为] → 仅放宽 `rework.rs:456` 的前置条件与 `gates.rs:635` 的分派条件，不改 `send_review_limit_feedback_to_coder` 的轮次超限语义；为既有 `code_review_blocked` 门禁的 `request_changes` 送回路径编写回归测试。
+- [`send_code_review_feedback_to_coder` 要求 operator_context] → 复用既有「未提供操作说明时拒绝执行」错误契约，不放宽。
 - [门禁互斥判断遗漏导致重复 gate] → 为 `verdict=blocked` 且无可执行 finding 的组合编写专门回归测试，断言只有一个 blocked gate。
-- [`RetryVerification` 无自动补验证能力，用户只能重试审查或终止] → 这是当前流程不含 Testing 的既有事实，门禁描述明确说明停机原因，由用户决策。
+- [`RetryVerification` 无自动补验证能力，用户只能重试审查、送回 Coder、人工继续或终止] → 这是当前流程不含 Testing 的既有事实，门禁描述明确说明停机原因，由用户决策。
 - [契约文案变更影响 Reviewer 输出稳定性] → 只增补字段边界与证据出口，不改动既有 verdict/findings 结构约束；以契约渲染测试锁定文案存在。
 - [历史停滞 attempt 不会自动恢复] → 部署后通过既有恢复入口重试，或使用新 attempt 验证。
 
