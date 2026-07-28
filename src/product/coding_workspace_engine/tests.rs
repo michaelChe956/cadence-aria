@@ -463,6 +463,7 @@ mod gate_rework;
 mod git_operation_reconcile;
 mod group_completion_authority;
 mod group_terminal;
+mod legacy_completion_gate;
 mod parser_prompt;
 mod plan_amendment;
 mod plan_defect_entrypoints;

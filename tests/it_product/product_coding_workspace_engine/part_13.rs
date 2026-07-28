@@ -605,14 +605,10 @@ async fn group_final_confirm_rejects_unit_handoff_outside_exclusive_scope() {
 }
 
 #[tokio::test]
-async fn group_final_confirm_completes_without_passed_testing_reports_for_required_plans() {
+async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
     let (_root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
     let lifecycle = LifecycleStore::new(paths.clone());
-    for (work_item_id, plan_id) in [
-        ("work_item_0001", "verification_plan_0001"),
-        ("work_item_0002", "verification_plan_0002"),
-    ] {
-        create_required_verification_plan(&lifecycle, work_item_id, plan_id);
+    for work_item_id in ["work_item_0001", "work_item_0002"] {
         lifecycle
             .create_work_item(CreateWorkItemInput {
                 id: Some(work_item_id.to_string()),
@@ -622,7 +618,6 @@ async fn group_final_confirm_completes_without_passed_testing_reports_for_requir
                 story_spec_ids: Vec::new(),
                 design_spec_ids: Vec::new(),
                 title: format!("title for {work_item_id}"),
-                verification_plan_ref: Some(plan_id.to_string()),
                 ..Default::default()
             })
             .expect("create work item");
@@ -652,31 +647,6 @@ async fn group_final_confirm_completes_without_passed_testing_reports_for_requir
             Some("frontend done".to_string()),
         )
         .expect("complete unit2");
-    let blocked_report = TestingReport {
-        id: "testing_report_0001".to_string(),
-        attempt_id: attempt.id.clone(),
-        role_run_id: None,
-        run_no: None,
-        commands: Vec::new(),
-        overall_status: TestingOverallStatus::Blocked,
-        provider_claim: None,
-        backend_verified: true,
-        started_at: "2026-06-27T00:00:00Z".to_string(),
-        completed_at: Some("2026-06-27T00:01:00Z".to_string()),
-        plan_id: Some("verification_plan_0001".to_string()),
-        plan_summary: None,
-        steps: Vec::new(),
-        unplanned_commands: Vec::new(),
-        unplanned_evidence: Vec::new(),
-        missing_required_steps: Vec::new(),
-        skipped_required_steps: Vec::new(),
-        context_warnings: Vec::new(),
-        raw_provider_output_ref: None,
-        plan_defect_findings: Vec::new(),
-    };
-    store
-        .save_testing_report(&attempt, &blocked_report)
-        .expect("save blocked testing report");
     let attempt = store
         .update_attempt_status(
             &attempt.project_id,
@@ -741,20 +711,25 @@ async fn group_final_confirm_completes_without_passed_testing_reports_for_requir
             artifact_refs: Vec::new(),
         })
         .expect("save final confirm node");
+    assert!(matches!(
+        store.get_plan_binding(&attempt),
+        Err(cadence_aria::product::json_store::ProductStoreError::NotFound {
+            kind: "coding_attempt_plan_binding",
+            ..
+        })
+    ));
 
-    let updated = engine
+    let error = engine
         .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .await
-        .expect("required plans must not require passed testing reports");
+        .expect_err("legacy group without authoritative binding must fail closed");
+    assert!(error.to_string().contains("coding_attempt_plan_binding"));
 
-    assert_eq!(updated.status, CodingAttemptStatus::Completed);
-    assert!(updated.completed_at.is_some());
-    assert_eq!(
-        store
-            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("testing reports"),
-        vec![blocked_report]
-    );
+    let persisted = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("persisted attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::WaitingForHuman);
+    assert!(persisted.completed_at.is_none());
 }
 
 #[tokio::test]
