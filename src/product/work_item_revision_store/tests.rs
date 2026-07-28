@@ -17,6 +17,8 @@ use crate::product::work_item_contract::canonical_contract_fixture;
 use super::WorkItemRevisionStore;
 
 mod concurrency;
+#[path = "tests/handoff_deletion.rs"]
+mod handoff_deletion;
 mod initial_publication;
 mod projection_artifacts;
 mod publication;
