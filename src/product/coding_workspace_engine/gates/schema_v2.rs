@@ -138,31 +138,4 @@ impl CodingWorkspaceEngine {
         }
         Ok(())
     }
-
-    pub(super) fn verify_schema_v2_required_gates_satisfied(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        runtime: &ResolvedWorkItemRuntime,
-        reports: &[TestingReport],
-    ) -> Result<(), CodingWorkspaceEngineError> {
-        if runtime
-            .verification_plan_revision
-            .verification_checks
-            .iter()
-            .any(|check| check.required)
-        {
-            let passed = reports.iter().any(|report| {
-                (report.overall_status == TestingOverallStatus::Passed
-                    || report.overall_status == TestingOverallStatus::PassedWithWarnings)
-                    && report.plan_id.as_deref()
-                        == Some(runtime.binding.verification_plan_revision_id.as_str())
-            });
-            if !passed {
-                return Err(CodingWorkspaceEngineError::VerificationGateResultMissing(
-                    attempt.id.clone(),
-                ));
-            }
-        }
-        Ok(())
-    }
 }

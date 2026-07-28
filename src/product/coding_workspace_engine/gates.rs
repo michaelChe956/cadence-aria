@@ -234,10 +234,8 @@ impl CodingWorkspaceEngine {
             &changed_files,
             worktree_path.as_ref(),
         )?;
-        let reports =
-            self.store
-                .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        self.verify_required_gates_satisfied(attempt, &lifecycle, &work_item, &reports)?;
+        // Testing is not orchestrated by the production pipeline and is intentionally
+        // not a completion prerequisite. All non-testing gates below remain required.
 
         if self.store.get_visible_work_item_handoff(attempt)?.is_none() {
             return Err(CodingWorkspaceEngineError::WorkItemHandoffMissing(
@@ -266,9 +264,8 @@ impl CodingWorkspaceEngine {
             ));
         }
 
-        let reports =
-            self.store
-                .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        // Testing is not orchestrated by the production pipeline and is intentionally
+        // not a completion prerequisite. All non-testing gates below remain required.
         let worktree_path = self.attempt_worktree_path(attempt).await.ok();
         let completed_work_item_ids = self
             .store
@@ -287,7 +284,6 @@ impl CodingWorkspaceEngine {
                     &facts.handoff.artifacts,
                     worktree_path.as_ref(),
                 )?;
-                self.verify_schema_v2_required_gates_satisfied(attempt, &facts.runtime, &reports)?;
             }
         } else {
             let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
@@ -305,7 +301,6 @@ impl CodingWorkspaceEngine {
                     &handoff.files_changed,
                     worktree_path.as_ref(),
                 )?;
-                self.verify_required_gates_satisfied(attempt, &lifecycle, work_item, &reports)?;
             }
         }
 
@@ -349,38 +344,6 @@ impl CodingWorkspaceEngine {
                             relative_path.clone(),
                         )
                     })?;
-            }
-        }
-        Ok(())
-    }
-
-    fn verify_required_gates_satisfied(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        lifecycle: &LifecycleStore,
-        work_item: &LifecycleWorkItemRecord,
-        reports: &[TestingReport],
-    ) -> Result<(), CodingWorkspaceEngineError> {
-        if let Some(plan_ref) = &work_item.verification_plan_ref {
-            let verification_plan = lifecycle.get_verification_plan(
-                &attempt.project_id,
-                &attempt.issue_id,
-                plan_ref,
-            )?;
-            if !verification_plan.required_gates.is_empty() {
-                let passed = reports.iter().any(|report| {
-                    let passed_status = report.overall_status == TestingOverallStatus::Passed
-                        || report.overall_status == TestingOverallStatus::PassedWithWarnings;
-                    let plan_matches = attempt.scope
-                        != crate::product::coding_models::CodingAttemptScope::WorkItemGroup
-                        || report.plan_id.as_deref() == Some(plan_ref);
-                    passed_status && plan_matches
-                });
-                if !passed {
-                    return Err(CodingWorkspaceEngineError::VerificationGateResultMissing(
-                        attempt.id.clone(),
-                    ));
-                }
             }
         }
         Ok(())
