@@ -747,10 +747,57 @@ pub(crate) async fn delete_coding_attempt(
     }
 
     cleanup_coding_attempt_workspace(&repository, &attempt).await?;
+    cleanup_attempt_handoff_revisions(&app_paths, &coding_store, &attempt)
+        .map_err(product_store_api_error)?;
     coding_store
         .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// 删除 attempt 时清理该 attempt 各 unit 已认领的 handoff revision。
+/// 清理在 attempt 记录删除之前执行（依赖 unit 指针可读）。归属校验由
+/// `delete_handoff_revision` 负责；删除阶段文件缺失视为已清理（幂等），
+/// 其他错误上抛中断删除流程（失败关闭，不静默留不一致状态）。
+///
+/// attempt 未进入 plan 阶段（无 plan binding）时必然无 unit、无 handoff
+/// 产出，清理视为空操作返回；这与 `delete_handoff_revision` 对 handoff
+/// 档案 NotFound 的容忍语义一致，不构成静默吞错。
+fn cleanup_attempt_handoff_revisions(
+    app_paths: &ProductAppPaths,
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<(), ProductStoreError> {
+    // 无 unit 认领 handoff 时清理为空操作；先取 units，避免在无 plan
+    // binding 的 attempt 上强制要求 binding 存在。
+    let units =
+        coding_store.list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let target_units = units
+        .iter()
+        .filter(|unit| unit.latest_handoff_revision_id.is_some())
+        .collect::<Vec<_>>();
+    if target_units.is_empty() {
+        return Ok(());
+    }
+    let binding = coding_store.get_plan_binding(attempt)?;
+    let lineage = WorkItemRevisionStore::new(app_paths.clone()).get_plan_lineage(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &binding.plan_id,
+    )?;
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
+    for unit in target_units {
+        let handoff_id = unit
+            .latest_handoff_revision_id
+            .as_deref()
+            .expect("filtered units have handoff revision id");
+        // 归属校验 + 删除交由 delete_handoff_revision；`?` 传播错误
+        // （Ok(()) 返回值无意义故不绑定）。NotFound 仅在 remove_file 阶段
+        // 容忍，get 阶段 NotFound 会传播（指针指向不存在档案说明状态
+        // 不一致，按失败关闭处理）。
+        revision_store.delete_handoff_revision(&lineage, &unit.logical_work_item_id, handoff_id)?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn confirm_work_item_execution_plan(
