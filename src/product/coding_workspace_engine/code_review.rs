@@ -87,6 +87,7 @@ impl CodingWorkspaceEngine {
             provider_type: provider_type_for_name(&reviewer),
             role: AdapterRole::Reviewer,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+            provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(&attempt)),
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_code_review_json".to_string(),

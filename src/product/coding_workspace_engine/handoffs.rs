@@ -445,6 +445,8 @@ impl CodingWorkspaceEngine {
             role: AdapterRole::Handoff,
             prompt,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+            // 流日志落在 attempt 目录下，与 provider-raw 同根；不得写入目标 worktree。
+            provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
             context_files: Vec::new(),
             output_schema: output_schema.to_string(),
             timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,

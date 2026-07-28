@@ -368,6 +368,21 @@ impl CodingWorkspaceEngine {
         }
     }
 
+    /// 该 attempt 的 provider 流日志目录（Aria 侧）。
+    ///
+    /// 所有构造 `AdapterInput` 的执行路径都应使用它，而不是留空：留空虽然在当前
+    /// 的 streaming fallback 路由下不写日志，但一旦路由变化就会退化成写入目标
+    /// 仓库（change `fix-provider-stream-log-location`）。
+    pub(crate) fn attempt_provider_stream_log_dir(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> String {
+        self.store
+            .provider_stream_log_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .to_string_lossy()
+            .to_string()
+    }
+
     pub(crate) async fn attempt_worktree_path(
         &self,
         attempt: &CodingExecutionAttempt,

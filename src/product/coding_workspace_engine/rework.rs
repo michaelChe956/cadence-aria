@@ -186,6 +186,7 @@ impl CodingWorkspaceEngine {
             provider_type: provider_type_for_name(&coder_provider_name),
             role: AdapterRole::Executor,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+            provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_markdown".to_string(),

@@ -280,6 +280,18 @@ impl super::CodingAttemptStore {
             .join("provider-raw")
     }
 
+    /// provider 进程流日志目录，与 `provider-raw` 同处 attempt 根下，
+    /// 随 attempt 目录删除一并清理。
+    pub fn provider_stream_log_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("provider-streams")
+    }
+
     pub(crate) fn blocked_gates_root(
         &self,
         project_id: &str,
