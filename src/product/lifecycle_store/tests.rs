@@ -314,3 +314,43 @@ fn delete_work_item_removes_record_session_and_timeline() {
     );
     assert!(!timeline_root.exists());
 }
+
+/// change `remove-work-item-handoff` 工作包 1.12：
+/// 移除交接摘要引用后，work item 的完成 commit 记录必须仍可写入并读取。
+/// `update_work_item_handoff_summary` 是 `completion_commit` 的唯一写入点，
+/// 不能随交接摘要一并删除。
+#[test]
+fn work_item_completion_commit_is_persisted_and_readable() {
+    let (_tmp, store) = setup();
+    let work_item = store
+        .create_work_item(CreateWorkItemInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "Work item with completion commit".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let updated = store
+        .update_work_item_completion_commit(
+            PROJECT_ID,
+            ISSUE_ID,
+            &work_item.id,
+            Some("abc1234".to_string()),
+        )
+        .expect("write completion commit");
+    assert_eq!(updated.completion_commit.as_deref(), Some("abc1234"));
+
+    let reloaded = store
+        .list_work_items(PROJECT_ID, ISSUE_ID)
+        .expect("list work items")
+        .into_iter()
+        .find(|item| item.id == work_item.id)
+        .expect("work item exists");
+    assert_eq!(
+        reloaded.completion_commit.as_deref(),
+        Some("abc1234"),
+        "完成 commit 必须持久化并可读"
+    );
+}
