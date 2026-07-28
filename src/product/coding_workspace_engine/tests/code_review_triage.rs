@@ -342,3 +342,97 @@ async fn blocked_verdict_without_actionable_findings_lands_only_code_review_bloc
         "不得与 code_review_output_human_triage 分诊 gate 重复",
     );
 }
+
+/// 分诊门禁的 `send_to_coder` 必须走代码审查反馈返修路径（`send_code_review_
+/// feedback_to_coder`），而不是审查轮次超限路径（`send_review_limit_feedback_
+/// to_coder`，后者在 `rework_count < max_auto_rework` 时直接报错）。
+///
+/// 复用 `run_code_review_with_provider_output`（返回 `(TempDir, store, attempt)`，
+/// TempDir 必须由调用方持有）落地 `code_review_output_human_triage` 门禁，再通过
+/// 引擎 gate 响应入口 `handle_blocked_gate_response`（`gates.rs:479`，async，签名
+/// `(project_id, issue_id, attempt_id, gate_id, action_id, extra_context)`）执行
+/// `send_to_coder`（带 operator_context）。
+///
+/// 夹具的 provider 输出 `verdict=request_changes`（见
+/// `implementation_finding_with_plan_defect_fields`），所以本测试同时覆盖
+/// `rework.rs:456` 的 verdict 前置必须接受 `RequestChanges`。
+#[tokio::test]
+async fn triage_gate_send_to_coder_routes_request_changes_to_coder_rework() {
+    let (_root, store, attempt) =
+        run_code_review_with_provider_output(implementation_finding_with_plan_defect_fields())
+            .await;
+    let gate_id = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .gate_id;
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        tx,
+    );
+    let updated = engine
+        .handle_blocked_gate_response(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &gate_id,
+            "send_to_coder",
+            Some("请按审查结论返修".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.stage, CodingExecutionStage::Coding);
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.rework_count, attempt.rework_count + 1);
+}
+
+/// 分诊门禁 `send_to_coder` 复用 `send_code_review_feedback_to_coder` 的不变量：
+/// 必须提供非空 operator_context，否则拒绝并保持 Blocked。
+///
+/// 该拒绝语义来自 `send_code_review_feedback_to_coder`（`rework.rs:436`）对
+/// `operator_context` 的强制要求；本 change 复用该不变量，不改它。
+#[tokio::test]
+async fn triage_gate_send_to_coder_without_operator_context_is_rejected() {
+    let (_root, store, attempt) =
+        run_code_review_with_provider_output(implementation_finding_with_plan_defect_fields())
+            .await;
+    let gate_id = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .gate_id;
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        tx,
+    );
+    let result = engine
+        .handle_blocked_gate_response(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &gate_id,
+            "send_to_coder",
+            None,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "must reject send_to_coder without operator context"
+    );
+    let persisted = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .unwrap();
+    assert_eq!(
+        persisted.status,
+        CodingAttemptStatus::Blocked,
+        "must stay blocked"
+    );
+}

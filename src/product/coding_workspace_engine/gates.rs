@@ -633,7 +633,7 @@ impl CodingWorkspaceEngine {
                 )?
             }
             CodingGateActionType::SendToCoder => {
-                if is_code_review_blocked_gate(&gate) {
+                if is_code_review_feedback_gate(&gate) {
                     self.send_code_review_feedback_to_coder(&current, extra_context)?
                 } else {
                     self.send_review_limit_feedback_to_coder(&current, extra_context)?
@@ -738,8 +738,14 @@ impl CodingWorkspaceEngine {
     }
 }
 
-fn is_code_review_blocked_gate(gate: &CodingGateRequired) -> bool {
-    gate.reason_code.as_deref() == Some("code_review_blocked")
-        && gate.stage == Some(CodingExecutionStage::CodeReview)
+fn is_code_review_feedback_gate(gate: &CodingGateRequired) -> bool {
+    gate.stage == Some(CodingExecutionStage::CodeReview)
         && gate.role == Some(CodingProviderRole::CodeReviewer)
+        && matches!(
+            gate.reason_code.as_deref(),
+            Some("code_review_blocked")
+                | Some("code_review_output_human_triage")
+                | Some("code_review_verification_incomplete")
+                | Some("code_review_operational_blocker")
+        )
 }

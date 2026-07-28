@@ -453,7 +453,10 @@ impl CodingWorkspaceEngine {
                     "send_to_coder_missing_code_review_report".to_string(),
                 )
             })?;
-        if review_report.verdict != ReviewVerdict::Blocked {
+        if !matches!(
+            review_report.verdict,
+            ReviewVerdict::Blocked | ReviewVerdict::RequestChanges
+        ) {
             return Err(CodingWorkspaceEngineError::ProviderStream(
                 "send_to_coder_latest_review_not_actionable".to_string(),
             ));
