@@ -457,6 +457,7 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
     }
 }
 
+mod code_review_triage;
 mod coder_resume_recovery;
 mod gate_coder_feedback;
 mod gate_rework;
