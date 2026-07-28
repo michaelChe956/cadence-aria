@@ -219,6 +219,7 @@ fn adapter_input(canonical_inputs: Value) -> AdapterInput {
         provider_type: ProviderType::Fake,
         role: AdapterRole::Reviewer,
         worktree_path: None,
+        provider_stream_log_dir: None,
         prompt: canonical_inputs.to_string(),
         context_files: vec![],
         output_schema: "schema://aria/artifacts/design_review/v1".to_string(),

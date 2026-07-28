@@ -22,6 +22,7 @@ fn make_input(prompt: &str) -> AdapterInput {
         provider_type: crate::protocol::contracts::ProviderType::Fake,
         role: crate::protocol::contracts::AdapterRole::Orchestrator,
         worktree_path: None,
+        provider_stream_log_dir: None,
         context_files: Vec::new(),
         output_schema: String::new(),
         timeout: 60,

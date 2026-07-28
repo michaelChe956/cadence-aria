@@ -51,6 +51,8 @@ impl ProviderWorkspaceRunner {
             provider_type: provider_type_for_name(&session.author_provider),
             role: AdapterRole::Orchestrator,
             worktree_path: Some(repository.path.to_string_lossy().to_string()),
+            // workspace session 无 coding attempt 上下文，按契约缺省不写流日志。
+            provider_stream_log_dir: None,
             prompt,
             context_files: Vec::new(),
             output_schema: "provider_workspace_markdown".to_string(),

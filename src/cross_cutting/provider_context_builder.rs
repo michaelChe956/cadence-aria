@@ -105,6 +105,8 @@ pub fn build_provider_context(
         provider_type: context_package.provider_type.clone(),
         role: context_package.adapter_role.clone(),
         worktree_path: context_package.worktree_path.clone(),
+        // runtime unit 无 coding attempt 上下文，按契约缺省不写流日志。
+        provider_stream_log_dir: None,
         prompt,
         context_files: context_package.context_files.clone(),
         output_schema: context_package.output_schema_ref.clone(),

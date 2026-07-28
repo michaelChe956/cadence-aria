@@ -196,6 +196,12 @@ pub struct AdapterInput {
     pub provider_type: ProviderType,
     pub role: AdapterRole,
     pub worktree_path: Option<String>,
+    /// 流日志落盘目录。由调用方提供 Aria 侧目录；为 None 时不写流日志。
+    ///
+    /// MUST NOT 由 adapter 从 `worktree_path` 推导：那会把流日志写进被开发的
+    /// 目标代码库（change `fix-provider-stream-log-location`）。
+    #[serde(default)]
+    pub provider_stream_log_dir: Option<String>,
     pub prompt: String,
     pub context_files: Vec<String>,
     pub output_schema: String,
