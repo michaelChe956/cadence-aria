@@ -11,6 +11,7 @@ use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
 use std::fs;
 use std::process::Command as StdCommand;
 
+mod handoff_review_object;
 mod plan_defect_prompt;
 mod review_parser;
 mod routing_contract;
