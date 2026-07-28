@@ -14,5 +14,5 @@
 ## 3. 验证与运行时交付
 
 - [x] 3.1 运行定向 TDD、全量 lib、格式化、clippy 及相关集成测试，记录既有无关失败与本 change 结果。
-- [ ] 3.2 严格校验 OpenSpec change，并完成代码审查。
+- [x] 3.2 严格校验 OpenSpec change，并完成代码审查。
 - [ ] 3.3 经用户确认后重启后端，在现有或新 attempt 上手动验证 internal PR review 通过后可显示执行成功。
