@@ -8,7 +8,7 @@ Coding Workspace 当前生产 runner 编排 Coder、Code Reviewer、review reque
 
 **Goals:**
 
-- 让 schema v2 group、legacy group 与 single-attempt 在 internal PR review 通过且非 testing 门禁满足时完成。
+- 让 schema v2 group 与 single-attempt 在 internal PR review 通过且非 testing 门禁满足时完成；让 legacy group completion gate 在同等条件下不因 testing report 阻塞。
 - 即使 canonical contract 或 legacy verification plan 声明 required 检查，缺少 testing report 也不阻塞完成。
 - 保留文件范围、runtime binding、handoff、unit 状态、worktree 清洁性等既有非 testing 完成校验。
 - 以回归测试固定“Testing 不参与完成判定”的产品语义。
@@ -20,14 +20,15 @@ Coding Workspace 当前生产 runner 编排 Coder、Code Reviewer、review reque
 - 不新增项目级、attempt 级或环境级 testing gate 开关。
 - 不改变 Internal Reviewer、review request、rework 或 final-confirm 的其他行为。
 - 不自动迁移、自动重放或直接修改历史停滞 attempt。
+- 不放宽 group terminal status 对 `CodingAttemptPlanBinding`、`WorkItemPlanLineage` 与 authoritative plan revision 的既有完整性要求；无 binding 的 legacy group terminalization 不在本 change 范围内。
 
 ## Decisions
 
-### 1. 从所有完成路径移除 testing report 校验
+### 1. 从所有 completion gate 移除 testing report 校验
 
-完成门禁的 schema v2 group、legacy group 与 single-attempt 路径均不再调用 required verification result 校验函数；不只修复当前 schema v2 生产路径，以免同一完成语义在不同 attempt 类型中分叉。
+完成门禁的 schema v2 group、legacy group 与 single-attempt 路径均不再调用 required verification result 校验函数；不只修复当前 schema v2 生产路径，以免 gate 语义在不同 attempt 类型中分叉。schema v2 group 与 single-attempt 继续覆盖完整 final-confirm/Completed 流程；legacy group 仅在 gate 层验证，因为当前 group terminal status 无条件要求 authoritative plan binding，而补齐 lineage 后该 attempt 即进入 schema v2 路径。
 
-**替代方案：** 仅修改 schema v2 group。该方案改动最小，但 legacy/single 路径仍保留一个生产 pipeline 无法满足的门禁，行为不一致，因此不采用。
+**替代方案：** 仅修改 schema v2 group。该方案改动最小，但 legacy/single gate 仍保留一个生产 pipeline 无法满足的门禁，行为不一致，因此不采用。另一替代方案是允许无 binding legacy group terminalize；这会放宽 Completed/Failed/Aborted 共用的核心完整性约束，属于独立行为变化，因此不纳入本 change。
 
 ### 2. 删除专用于完成判定的 testing 校验函数
 
@@ -47,13 +48,14 @@ Testing 至少半年不进入产品流程，当前完成语义对所有 attempt 
 
 ### 5. 将旧 testing 门禁测试改写为新语义回归
 
-原 `group_final_confirm_requires_testing_report_for_each_unit_plan` 已确认在当前基线上可运行并通过，其断言“缺少 matching testing report 必须返回 `VerificationGateResultMissing`”不再代表产品要求。该测试将改名并改写为：verification plan 仍含 required gate、attempt 不保存任何 testing report、其他完成条件满足时 final confirm 成功且 attempt 进入 Completed。新增 schema v2 group 回归测试承担 revision-bound required check 场景；现有 single-attempt final-confirm 测试补充 required verification plan 且无 report 的覆盖。
+原 `group_final_confirm_requires_testing_report_for_each_unit_plan` 的早期 `VerificationGateResultMissing` 断言不再代表产品要求。实现中确认：无 lineage 的 legacy group 可以进入 legacy completion gate，但 group terminal status 无条件要求 `CodingAttemptPlanBinding` 和 `WorkItemPlanLineage`；补齐这些数据后流程会被识别为 schema v2。因此 legacy 测试改为 crate 内直接调用 `run_group_completion_gates`，验证一个 required plan 只有 Blocked report、另一个 required plan 无 report 时 gate 通过且原 report 不变，不声称无 binding legacy attempt 可 terminalize。schema v2 group 与 single-attempt 测试继续覆盖完整 final-confirm/Completed 结果。
 
 ## Risks / Trade-offs
 
 - **[风险] 未执行自动化测试的代码也可被标记完成。** → 这是已确认的产品取舍；继续依赖 Code Reviewer、Internal Reviewer 与非 testing 结构门禁，UI/API 不伪造 testing 成功结果。
 - **[风险] 存量 TestingReport 即使失败也不再影响完成。** → Testing 已明确不属于当前验收标准；report 数据继续保留，但不参与 completion decision。
-- **[风险] 三条完成路径同时修改扩大回归面。** → 分别覆盖 schema v2 group、legacy group 与 single-attempt 无 testing report 场景，并运行全量 lib、clippy、fmt 和相关集成测试。
+- **[风险] 三条 completion gate 同时修改扩大回归面。** → schema v2 group 与 single-attempt 覆盖完整 final-confirm，legacy group 覆盖 gate-level 行为，并运行全量 lib、clippy、fmt 和相关集成测试。
+- **[风险] legacy gate 与 group terminal binding 不变量被误解为同一能力。** → Spec 明确区分 gate 判定与 terminal status；本 change 不允许无 authoritative binding 的 group attempt 完成。
 - **[风险] 历史停滞 attempt 不会自动完成。** → 部署后使用现有恢复/重试入口重新触发 final completion；若现有入口无法安全重放，则创建新 attempt，不在本 change 中改写持久化状态。
 
 ## Migration Plan

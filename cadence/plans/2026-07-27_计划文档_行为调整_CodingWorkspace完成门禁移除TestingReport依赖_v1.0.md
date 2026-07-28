@@ -2,7 +2,7 @@
 
 > **面向执行 Agent：** 必须逐任务执行本计划；实施时优先调用 `superpowers:subagent-driven-development`，也可调用 `superpowers:executing-plans`。步骤使用复选框跟踪，严格遵循先失败测试、再最小实现、再验证、再提交的 TDD 顺序。
 
-**目标：** 让 schema v2 group、legacy group 与 single-attempt 在 Internal PR Review 已通过且其他非 testing 完成门禁满足时完成，不再要求 TestingReport。
+**目标：** 让 schema v2 group 与 single-attempt 在 Internal PR Review/适用 review 已通过且其他非 testing 门禁满足时完成；让 legacy group completion gate 不再要求 TestingReport，同时保持 group terminal authoritative binding 不变量。
 
 **架构：** 不新增配置、状态或兼容分支；直接从三条 completion gate 路径移除 TestingReport 读取与 required verification result 校验，并删除两个专用私有校验函数。Testing stage、tester 配置、TestingReport 模型/存储及 `VerificationGateResultMissing` 公共错误变体继续保留；文件范围、runtime binding、handoff、unit 状态、completion commit 与共享 worktree 清洁性校验保持原样。
 
@@ -12,10 +12,11 @@
 
 - 已批准 OpenSpec：`openspec/changes/relax-completion-testing-report-gate/`。
 - Testing 至少未来半年不进入产品完成标准；本 change 不引入 testing gate 开关。
-- schema v2 group、legacy group、single-attempt 的完成语义必须一致。
+- schema v2 group、legacy group、single-attempt 的 completion gate 均不得依赖 TestingReport；schema v2 group 与 single-attempt 覆盖完整 final-confirm/Completed，legacy group 只覆盖 gate-level 行为。
 - 不删除或修改 Testing stage、tester 配置、TestingReport 持久化格式及历史数据。
 - 保留 `VerificationGateResultMissing` 公共错误变体。
 - 不改变 Internal Reviewer、final confirm、handoff、rework、review request 与状态持久化的其他行为。
+- 不放宽 group terminal status 对 `CodingAttemptPlanBinding`、`WorkItemPlanLineage` 和 authoritative plan revision 的完整性要求；无 binding legacy group 继续失败关闭。
 - 非 testing 门禁必须继续失败关闭：completion commit、runtime binding、changed-file scope、handoff、unit 完成状态、共享 worktree 清洁性。
 - 不自动迁移或直接修改历史停滞 attempt；运行时重试或重启前必须获得用户确认。
 - Rust 命令使用宿主机工具链；定向单测必须带 `--lib`，禁止任何 `cargo` 命令使用 `-j 1`。
@@ -30,7 +31,8 @@
 | `src/product/coding_workspace_engine/tests.rs` | 为 schema v2 fixture 增加从源头注入 `VerificationCheck` 的测试入口，保持 immutable revision 语义。 |
 | `src/product/coding_workspace_engine/tests/schema_v2_runtime.rs` | 覆盖 schema v2 required check 存在但没有 TestingReport 时完成门禁成功。 |
 | `tests/it_product/product_coding_workspace_engine/part_08.rs` | 覆盖 single-attempt required legacy verification plan 存在但没有 TestingReport 时 final confirm 成功。 |
-| `tests/it_product/product_coding_workspace_engine/part_13.rs` | 将 legacy group 的旧 testing-report 必需测试改为“无 report 仍完成”的新语义。 |
+| `tests/it_product/product_coding_workspace_engine/part_13.rs` | 保留既有 legacy terminal binding 失败关闭回归；删除错误假设为 legacy 的 final-confirm testing 门禁测试。 |
+| `src/product/coding_workspace_engine/tests/legacy_completion_gate.rs`（新增） | crate 内直接覆盖无 lineage legacy group completion gate：Blocked/no report 不阻塞且 report 原样保留。 |
 | `tests/it_product/product_coding_workspace_engine/part_14.rs` | 删除改写测试后不再使用的 passed testing report fixture（若 `rg` 确认无调用）。 |
 | `src/product/coding_workspace_engine/gates.rs` | 移除 single-attempt 与 legacy group 的 TestingReport 完成校验，保留所有非 testing 门禁。 |
 | `src/product/coding_workspace_engine/gates/schema_v2.rs` | 删除 schema v2 required verification report 校验函数。 |
@@ -38,20 +40,22 @@
 
 ---
 
-### Task 1：建立三条完成路径的 RED 回归测试
+### Task 1：建立三条 completion gate 的 RED 回归与 terminal invariant 保护
 
 **文件：**
 
 - 修改：`src/product/coding_workspace_engine/tests.rs:18-27,60-105,130-220`
 - 修改：`src/product/coding_workspace_engine/tests/schema_v2_runtime.rs:1-168`
 - 修改：`tests/it_product/product_coding_workspace_engine/part_08.rs:487-583`
-- 修改：`tests/it_product/product_coding_workspace_engine/part_13.rs:608-739`
+- 修改：`tests/it_product/product_coding_workspace_engine/part_13.rs:608-756`
+- 新建：`src/product/coding_workspace_engine/tests/legacy_completion_gate.rs`
+- 修改：`src/product/coding_workspace_engine/tests.rs`（注册测试模块与复用所需 import）
 - 修改：`tests/it_product/product_coding_workspace_engine/part_14.rs:70-111`（仅在 helper 无调用后删除）
 
 **接口：**
 
 - Consumes：`seed_group_attempt_fixture_with_legacy_work_items`、`VerificationCheck`、`handle_final_confirm`、`run_group_completion_gates`。
-- Produces：三个失败测试，分别固定 schema v2 group、legacy group、single-attempt 的无 Passed TestingReport 完成语义；legacy group 同时覆盖存量 Blocked report 被忽略且数据不变；fixture 必须在 immutable revision 首次写入前注入 required check，且 `tests.rs` 必须保持不超过 800 行。
+- Produces：schema v2 group 与 single-attempt 的 final-confirm RED，以及 legacy group 的 crate 内 gate-level RED；legacy 测试同时覆盖存量 Blocked report 被忽略且数据不变，且不声称无 binding legacy group 可 terminalize。
 
 - [ ] **Step 1：最小扩展 schema v2 fixture，使 required check 在 revision 首次发布时写入**
 
@@ -186,74 +190,226 @@ cargo test --locked --lib schema_v2_group_completion_gates_pass_without_testing_
 
 预期：测试 FAIL，错误链包含 `VerificationGateResultMissing`。如果失败原因是 immutable revision identity mismatch、runtime binding mismatch、handoff missing 或 worktree dirty，先修正 fixture，不得进入实现。
 
-- [ ] **Step 4：把 legacy group 旧语义测试改为无 report 完成**
+- [ ] **Step 4：新增 legacy group gate-level RED 测试，并保留 terminal binding 失败关闭回归**
 
-在 `tests/it_product/product_coding_workspace_engine/part_13.rs`：
-
-1. 将测试改名为：
+新建 `src/product/coding_workspace_engine/tests/legacy_completion_gate.rs`。该文件位于 crate 内，可调用 `pub(crate) run_group_completion_gates`；使用无 `WorkItemPlanLineage` 的 legacy fixture，避免把 gate 测试误变成 schema v2：
 
 ```rust
-async fn group_final_confirm_completes_without_passed_testing_reports_for_required_plans()
-```
-
-2. 保留两个 required verification plan、两个 work item、两个 handoff、两个 completed unit、FinalConfirm 状态、head commit、shared worktree lock 与 timeline node 构造。
-3. 删除原 `save_testing_report(...passed_testing_report_for_plan(...))` 整段；改为保存一个绑定 `verification_plan_0001` 的 Blocked report，同时 `verification_plan_0002` 保持完全没有 report：
-
-```rust
-let blocked_report = TestingReport {
-    id: "testing_report_0001".to_string(),
-    attempt_id: attempt.id.clone(),
-    role_run_id: None,
-    run_no: None,
-    commands: Vec::new(),
-    overall_status: TestingOverallStatus::Blocked,
-    provider_claim: None,
-    backend_verified: true,
-    started_at: "2026-06-27T00:00:00Z".to_string(),
-    completed_at: Some("2026-06-27T00:01:00Z".to_string()),
-    plan_id: Some("verification_plan_0001".to_string()),
-    plan_summary: None,
-    steps: Vec::new(),
-    unplanned_commands: Vec::new(),
-    unplanned_evidence: Vec::new(),
-    missing_required_steps: Vec::new(),
-    skipped_required_steps: Vec::new(),
-    context_warnings: Vec::new(),
-    raw_provider_output_ref: None,
-    plan_defect_findings: Vec::new(),
+use super::*;
+use crate::product::lifecycle_store::CreateVerificationPlanInput;
+use crate::product::models::{
+    RepositoryProfileConfidence, VerificationCommand, VerificationCommandSafety,
+    VerificationCommandSource, VerificationFallbackPolicy, VerificationScope,
 };
-store
-    .save_testing_report(&attempt, &blocked_report)
-    .expect("save blocked testing report");
+
+fn create_required_legacy_verification_plan(
+    lifecycle: &LifecycleStore,
+    work_item_id: &str,
+    plan_id: &str,
+) {
+    lifecycle
+        .create_verification_plan(CreateVerificationPlanInput {
+            id: Some(plan_id.to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: work_item_id.to_string(),
+            repository_profile_ref: None,
+            provider_run_ref: None,
+            scope: VerificationScope::Unit,
+            commands: vec![VerificationCommand {
+                id: "unit_tests".to_string(),
+                label: "Unit tests".to_string(),
+                command: "cargo test --locked --lib unit".to_string(),
+                cwd: ".".to_string(),
+                purpose: "unit tests".to_string(),
+                required: true,
+                timeout_seconds: 120,
+                source: VerificationCommandSource::Provider,
+                safety: VerificationCommandSafety::Approved,
+            }],
+            manual_checks: Vec::new(),
+            required_gates: vec!["unit_tests".to_string()],
+            risk_notes: Vec::new(),
+            confidence: RepositoryProfileConfidence::High,
+            fallback_policy: VerificationFallbackPolicy::ManualGate,
+        })
+        .expect("create required verification plan");
+}
+
+#[tokio::test]
+async fn legacy_group_completion_gates_ignore_non_passed_testing_reports() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+    let lifecycle = LifecycleStore::new(store.paths());
+
+    for (index, (work_item_id, plan_id)) in [
+        ("work_item_0001", "verification_plan_0001"),
+        ("work_item_0002", "verification_plan_0002"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        create_required_legacy_verification_plan(&lifecycle, work_item_id, plan_id);
+        lifecycle
+            .create_work_item(CreateWorkItemInput {
+                id: Some(work_item_id.to_string()),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                repository_id: "repository_0001".to_string(),
+                title: work_item_id.to_string(),
+                verification_plan_ref: Some(plan_id.to_string()),
+                ..Default::default()
+            })
+            .expect("legacy work item");
+        let unit = store
+            .create_coding_unit(CreateCodingExecutionUnitInput {
+                attempt_id: attempt.id.clone(),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                plan_id: "work_item_plan_0001".to_string(),
+                logical_work_item_id: work_item_id.to_string(),
+                work_item_revision_id: format!("work_item_revision_{:04}", index + 1),
+                dependency_logical_work_item_ids: Vec::new(),
+                order_index: index as u32,
+                status: CodingExecutionUnitStatus::Completed,
+            })
+            .expect("completed coding unit");
+        store
+            .save_coding_unit_handoff(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &unit.id,
+                &WorkItemHandoff {
+                    id: format!("work_item_handoff_{:04}", index + 1),
+                    project_id: attempt.project_id.clone(),
+                    issue_id: attempt.issue_id.clone(),
+                    work_item_id: work_item_id.to_string(),
+                    attempt_id: attempt.id.clone(),
+                    provider_run_ref: None,
+                    summary: format!("handoff for {work_item_id}"),
+                    files_changed: Vec::new(),
+                    commit_sha: Some("deadbeef".to_string()),
+                    diff_summary: String::new(),
+                    tests_run: Vec::new(),
+                    test_result_summary: String::new(),
+                    review_summary: None,
+                    api_or_contract_changes: Vec::new(),
+                    open_risks: Vec::new(),
+                    next_work_item_notes: Vec::new(),
+                    created_at: "2026-07-27T00:00:00Z".to_string(),
+                },
+            )
+            .expect("legacy handoff");
+        store
+            .update_coding_unit_completion_commit(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &unit.id,
+                Some("deadbeef".to_string()),
+            )
+            .expect("completion commit");
+    }
+
+    let attempt = store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some("deadbeef".to_string()),
+        )
+        .expect("attempt head commit");
+    assert!(
+        WorkItemRevisionStore::new(store.paths())
+            .get_plan_lineage(
+                &attempt.project_id,
+                &attempt.issue_id,
+                "work_item_plan_0001",
+            )
+            .is_err()
+    );
+
+    let mut blocked_report = blocked_report_with(Vec::new(), Vec::new());
+    blocked_report.id = "testing_report_blocked".to_string();
+    blocked_report.attempt_id = attempt.id.clone();
+    blocked_report.plan_id = Some("verification_plan_0001".to_string());
+    store
+        .save_testing_report(&attempt, &blocked_report)
+        .expect("blocked testing report");
+
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    engine
+        .run_group_completion_gates(&attempt)
+        .await
+        .expect("legacy completion gate must ignore testing report status");
+
+    assert_eq!(
+        store
+            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("testing reports"),
+        vec![blocked_report]
+    );
+}
 ```
 
-4. 将结尾断言改为：
+在 `src/product/coding_workspace_engine/tests.rs` 模块列表中注册：
 
 ```rust
-let updated = engine
+mod legacy_completion_gate;
+```
+
+把 `tests/it_product/product_coding_workspace_engine/part_13.rs` 中 Task 1 新增的 `group_final_confirm_completes_without_passed_testing_reports_for_required_plans` 改为 terminal invariant 回归 `group_final_confirm_without_authoritative_plan_binding_fails_closed`：保留 completed unit、handoff、FinalConfirm、head commit 与 lock setup；删除 required verification plan 和 Blocked report 数据；结尾断言：
+
+```rust
+let error = engine
     .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
     .await
-    .expect("required plans must not require passed testing reports");
+    .expect_err("legacy group without authoritative binding must fail closed");
+assert!(error.to_string().contains("coding_attempt_plan_binding"));
 
-assert_eq!(updated.status, CodingAttemptStatus::Completed);
-assert!(updated.completed_at.is_some());
-assert_eq!(
-    store
-        .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("testing reports"),
-    vec![blocked_report]
-);
+let persisted = store
+    .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+    .expect("persisted attempt");
+assert_eq!(persisted.status, CodingAttemptStatus::WaitingForHuman);
+assert!(persisted.completed_at.is_none());
 ```
 
-- [ ] **Step 5：运行 legacy group RED 测试**
+该测试不验证 TestingReport gate；它只证明本 change 没有放宽 group terminal binding 不变量。
 
-运行：
+- [ ] **Step 5：运行 legacy group RED 与 terminal invariant 测试**
+
+在尚未应用 Task 2 生产改动的基线运行：
 
 ```bash
-cargo test --locked --test it_product group_final_confirm_completes_without_passed_testing_reports_for_required_plans -- --nocapture
+cargo test --locked --lib legacy_group_completion_gates_ignore_non_passed_testing_reports -- --nocapture
 ```
 
-预期：FAIL，错误为 `VerificationGateResultMissing`，不得是 unit、handoff、lock 或 worktree 门禁失败。
+预期：FAIL，错误为 `VerificationGateResultMissing`。随后运行：
+
+```bash
+cargo test --locked --test it_product group_final_confirm_without_authoritative_plan_binding_fails_closed -- --nocapture
+```
+
+预期：PASS，错误内容由测试断言为 `coding_attempt_plan_binding`；该测试不是 RED 行为测试，而是生产不变量保护测试。
 
 - [ ] **Step 6：扩展 single-attempt final-confirm 测试**
 
@@ -318,7 +474,7 @@ rg -n 'passed_testing_report_for_plan' tests/it_product/product_coding_workspace
 cargo check --locked
 ```
 
-预期：编译通过；三个新语义测试仍因生产门禁返回 `VerificationGateResultMissing` 而失败。
+预期：编译通过；schema v2、legacy gate-level 与 single-attempt 三个行为测试仍因生产门禁返回 `VerificationGateResultMissing`，legacy terminal invariant 测试保持 PASS。
 
 ---
 
@@ -328,12 +484,12 @@ cargo check --locked
 
 - 修改：`src/product/coding_workspace_engine/gates.rs:213-387`
 - 修改：`src/product/coding_workspace_engine/gates/schema_v2.rs:142-167`
-- 测试：Task 1 修改的三个测试文件
+- 测试：Task 1 修改/新增的 completion gate 与 terminal invariant 测试文件
 
 **接口：**
 
 - Consumes：`run_completion_gates(&CodingExecutionAttempt)`、`run_group_completion_gates(&CodingExecutionAttempt)`、`validate_changed_files_for_work_item`、`validate_changed_files_for_runtime`。
-- Produces：三条完成路径不读取 TestingReport，但仍返回原 `CompletionGateReport` 并执行所有非 testing 门禁。
+- Produces：三条 completion gate 不读取 TestingReport，但仍返回原 `CompletionGateReport` 并执行所有非 testing gate；schema v2 group 与 single-attempt 完整 final-confirm 转 GREEN，legacy gate-level 转 GREEN，legacy terminal binding 失败关闭测试保持 GREEN。
 
 - [ ] **Step 1：修改 single-attempt completion gate**
 
@@ -412,17 +568,18 @@ pub(super) fn verify_schema_v2_required_gates_satisfied(
 
 不得删除 `src/product/coding_workspace_engine/mod.rs` 中 Testing 相关 import；其他 testing 模块和测试仍使用这些类型。不得删除 `VerificationGateResultMissing` 错误变体。
 
-- [ ] **Step 4：运行四条 GREEN 测试**
+- [ ] **Step 4：运行 completion gate GREEN 与 terminal invariant 测试**
 
 运行：
 
 ```bash
 cargo test --locked --lib schema_v2_group_completion_gates_pass_without_testing_reports -- --nocapture
-cargo test --locked --test it_product group_final_confirm_completes_without_passed_testing_reports_for_required_plans -- --nocapture
+cargo test --locked --lib legacy_group_completion_gates_ignore_non_passed_testing_reports -- --nocapture
 cargo test --locked --test it_product handle_final_confirm_completes_without_testing_report_for_required_plan -- --nocapture
+cargo test --locked --test it_product group_final_confirm_without_authoritative_plan_binding_fails_closed -- --nocapture
 ```
 
-预期：三个命令全部 PASS。
+预期：四个命令全部 PASS；前三个证明 TestingReport gate 已移除，第四个证明 group terminal binding 不变量未被放宽。
 
 - [ ] **Step 5：确认完成门禁已完全解除 TestingReport 读取**
 
@@ -448,6 +605,7 @@ rg -n 'VerificationGateResultMissing' src/product/coding_workspace_engine
 git add \
   src/product/coding_workspace_engine/tests.rs \
   src/product/coding_workspace_engine/tests/schema_v2_runtime.rs \
+  src/product/coding_workspace_engine/tests/legacy_completion_gate.rs \
   src/product/coding_workspace_engine/gates.rs \
   src/product/coding_workspace_engine/gates/schema_v2.rs \
   tests/it_product/product_coding_workspace_engine/part_08.rs \
@@ -478,11 +636,12 @@ git commit -m "fix: complete coding attempts without testing reports"
 cargo test --locked --test it_product group_final_confirm_rejects_unit_handoff_outside_exclusive_scope -- --nocapture
 cargo test --locked --test it_product group_final_confirm_rejects_when_any_unit_not_completed -- --nocapture
 cargo test --locked --test it_product final_confirm_owner_conflict_does_not_complete_attempt -- --nocapture
+cargo test --locked --test it_product group_final_confirm_without_authoritative_plan_binding_fails_closed -- --nocapture
 cargo test --locked --lib schema_v2_group_completion_gates_pass_without_testing_reports -- --nocapture
 cargo test --locked --lib later_group_code_review_rejects_missing_head_commit -- --nocapture
 ```
 
-预期：全部 PASS；分别证明 changed-file scope、unit 状态、lock owner、schema v2 runtime binding 与 completion commit 校验仍生效。
+预期：全部 PASS；分别证明 changed-file scope、unit 状态、lock owner、legacy group terminal binding、schema v2 runtime binding 与 completion commit 校验仍生效。
 
 - [ ] **Step 2：运行全量 lib 与标准静态检查**
 
