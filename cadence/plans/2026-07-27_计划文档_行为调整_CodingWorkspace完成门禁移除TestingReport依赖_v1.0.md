@@ -29,7 +29,7 @@
 | 文件 | 本 change 的责任 |
 |---|---|
 | `src/product/coding_workspace_engine/tests.rs` | 为 schema v2 fixture 增加从源头注入 `VerificationCheck` 的测试入口，保持 immutable revision 语义。 |
-| `src/product/coding_workspace_engine/tests/schema_v2_runtime.rs` | 覆盖 schema v2 required check 存在但没有 TestingReport 时完成门禁成功。 |
+| `src/product/coding_workspace_engine/tests/schema_v2_runtime.rs` | 覆盖 schema v2 required check 存在但没有 TestingReport 时完整 `handle_final_confirm` 返回 `Completed`、写入 `completed_at`，且 coding units 保持完成。 |
 | `tests/it_product/product_coding_workspace_engine/part_08.rs` | 覆盖 single-attempt required legacy verification plan 存在但没有 TestingReport 时 final confirm 成功。 |
 | `tests/it_product/product_coding_workspace_engine/part_13.rs` | 保留既有 legacy terminal binding 失败关闭回归；删除错误假设为 legacy 的 final-confirm testing 门禁测试。 |
 | `src/product/coding_workspace_engine/tests/legacy_completion_gate.rs`（新增） | crate 内直接覆盖无 lineage legacy group completion gate：Blocked/no report 不阻塞且 report 原样保留。 |
@@ -130,14 +130,14 @@ wc -l src/product/coding_workspace_engine/tests.rs
 
 预期：不超过 800 行；若超过，优先压缩本次新增参数排版或删除本次附近冗余空行，不重构无关测试。
 
-- [ ] **Step 2：将既有 schema v2 completion 测试升级为 required-check/no-report 测试**
+- [ ] **Step 2：将既有 schema v2 completion 测试升级为 required-check/no-report 完整 final-confirm 测试**
 
 在 `src/product/coding_workspace_engine/tests/schema_v2_runtime.rs`：
 
 1. 将测试改名：
 
 ```rust
-async fn schema_v2_group_completion_gates_pass_without_testing_reports()
+async fn schema_v2_group_final_confirm_completes_without_testing_reports()
 ```
 
 2. 在调用 seed 前创建 required check，并把原调用增加第五个参数：
@@ -165,16 +165,29 @@ assert!(
 );
 ```
 
-5. 将结尾成功信息改为：
+5. 构造 engine 时保留 store clone，调用完整 final-confirm，并断言 attempt 已完成：
 
 ```rust
-engine
-    .run_group_completion_gates(&attempt)
+let (tx, _rx) = mpsc::channel(8);
+let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+let updated = engine
+    .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
     .await
     .expect("required checks must not require testing reports");
+
+assert_eq!(updated.status, CodingAttemptStatus::Completed);
+assert!(updated.completed_at.is_some());
+assert!(
+    store
+        .list_coding_units(&updated.project_id, &updated.issue_id, &updated.id)
+        .expect("units")
+        .iter()
+        .all(|unit| unit.status == CodingExecutionUnitStatus::Completed)
+);
 ```
 
-6. 同文件 `schema_v2_group_handoff_ignores_legacy_work_item_records` 对 seed helper 的调用追加 `&[]`，保持原测试语义：
+6. 不得退回仅调用 `run_group_completion_gates`；该测试必须覆盖 `handle_final_confirm -> Completed` 的完整状态流转。
+7. 同文件 `schema_v2_group_handoff_ignores_legacy_work_item_records` 对 seed helper 的调用追加 `&[]`，保持原测试语义：
 
 ```rust
 seed_schema_v2_group_attempt_fixture(&store, &attempt, true, false, &[]);
@@ -185,7 +198,7 @@ seed_schema_v2_group_attempt_fixture(&store, &attempt, true, false, &[]);
 运行：
 
 ```bash
-cargo test --locked --lib schema_v2_group_completion_gates_pass_without_testing_reports -- --nocapture
+cargo test --locked --lib schema_v2_group_final_confirm_completes_without_testing_reports -- --nocapture
 ```
 
 预期：测试 FAIL，错误链包含 `VerificationGateResultMissing`。如果失败原因是 immutable revision identity mismatch、runtime binding mismatch、handoff missing 或 worktree dirty，先修正 fixture，不得进入实现。
@@ -573,7 +586,7 @@ pub(super) fn verify_schema_v2_required_gates_satisfied(
 运行：
 
 ```bash
-cargo test --locked --lib schema_v2_group_completion_gates_pass_without_testing_reports -- --nocapture
+cargo test --locked --lib schema_v2_group_final_confirm_completes_without_testing_reports -- --nocapture
 cargo test --locked --lib legacy_group_completion_gates_ignore_non_passed_testing_reports -- --nocapture
 cargo test --locked --test it_product handle_final_confirm_completes_without_testing_report_for_required_plan -- --nocapture
 cargo test --locked --test it_product group_final_confirm_without_authoritative_plan_binding_fails_closed -- --nocapture
@@ -637,7 +650,7 @@ cargo test --locked --test it_product group_final_confirm_rejects_unit_handoff_o
 cargo test --locked --test it_product group_final_confirm_rejects_when_any_unit_not_completed -- --nocapture
 cargo test --locked --test it_product final_confirm_owner_conflict_does_not_complete_attempt -- --nocapture
 cargo test --locked --test it_product group_final_confirm_without_authoritative_plan_binding_fails_closed -- --nocapture
-cargo test --locked --lib schema_v2_group_completion_gates_pass_without_testing_reports -- --nocapture
+cargo test --locked --lib schema_v2_group_final_confirm_completes_without_testing_reports -- --nocapture
 cargo test --locked --lib later_group_code_review_rejects_missing_head_commit -- --nocapture
 ```
 

@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn schema_v2_group_completion_gates_pass_without_testing_reports() {
+async fn schema_v2_group_final_confirm_completes_without_testing_reports() {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -173,11 +173,21 @@ async fn schema_v2_group_completion_gates_pass_without_testing_reports() {
             .is_empty()
     );
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
-    engine
-        .run_group_completion_gates(&attempt)
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let updated = engine
+        .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .await
         .expect("required checks must not require testing reports");
+
+    assert_eq!(updated.status, CodingAttemptStatus::Completed);
+    assert!(updated.completed_at.is_some());
+    assert!(
+        store
+            .list_coding_units(&updated.project_id, &updated.issue_id, &updated.id)
+            .expect("units")
+            .iter()
+            .all(|unit| unit.status == CodingExecutionUnitStatus::Completed)
+    );
 }
 
 #[tokio::test]
