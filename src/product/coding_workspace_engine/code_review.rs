@@ -210,9 +210,49 @@ impl CodingWorkspaceEngine {
                 description: report.summary.clone(),
                 reason_code: "code_review_blocked",
                 evidence_refs: vec![report.id.clone()],
-                raw_provider_output_ref: Some(raw_provider_output_ref),
+                raw_provider_output_ref: Some(raw_provider_output_ref.clone()),
             })
             .await?;
+        }
+        // 既有的 code_review_blocked 门禁已落地时，不再重复落地分诊门禁。
+        // 既有分支硬条件是 verdict==Blocked && !actionable，该情形已被 plan_defect.rs
+        // 判定为 StopForHumanTriage（plan_defect.rs:177-178），由上面分支统一落
+        // code_review_blocked gate；新分诊门禁必须跳过，避免 double-gate。
+        let code_review_blocked_landed = report.verdict == ReviewVerdict::Blocked
+            && !code_review_report_has_actionable_findings(&report);
+        if !code_review_blocked_landed {
+            // 仅处理三个分诊决策；RunCoderFix / StartPlanRepair /
+            // ContinueAfterApprove / StartStoryAmendment / StartDesignAmendment 由
+            // runner 后续处理，不在此落门禁。门禁动作不触发 plan repair。
+            let triage_reason_code: Option<(&'static str, &'static str)> = match plan_defect_route {
+                CodeReviewFlowDecision::StopForHumanTriage => Some((
+                    "code_review_output_human_triage",
+                    "Code Review 结论需人工分诊",
+                )),
+                CodeReviewFlowDecision::RetryVerification => Some((
+                    "code_review_verification_incomplete",
+                    "Code Review 验证证据不完整",
+                )),
+                CodeReviewFlowDecision::OpenOperationalGate => Some((
+                    "code_review_operational_blocker",
+                    "Code Review 命中运维阻塞",
+                )),
+                _ => None,
+            };
+            if let Some((reason_code, title)) = triage_reason_code {
+                self.create_review_blocked_gate(ReviewBlockedGateInput {
+                    attempt: &attempt,
+                    node_id: &node.id,
+                    stage: CodingExecutionStage::CodeReview,
+                    role: CodingProviderRole::CodeReviewer,
+                    title: title.to_string(),
+                    description: report.summary.clone(),
+                    reason_code,
+                    evidence_refs: vec![report.id.clone()],
+                    raw_provider_output_ref: Some(raw_provider_output_ref.clone()),
+                })
+                .await?;
+            }
         }
         Ok(report)
     }

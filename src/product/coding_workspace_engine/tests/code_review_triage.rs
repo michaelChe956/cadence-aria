@@ -29,6 +29,12 @@ use super::*;
 /// `code_review_flow_decision` 判定为 `StopForHumanTriage`。此路径不依赖
 /// reviewer_projection 的 blocker_routing，可由 `running_attempt_with_worktree()`
 /// （WorkItem scope，projection 为空）直接构造。
+///
+/// 注意：provider 输出的 finding 用 `evidence` 数组承载证据条目，
+/// `RawReviewEvidence`（`review_parser.rs`）是 `untagged` enum，对象形式的条目
+/// 会被反序列化为 `Canonical(PlanDefectEvidence)` 并填入 `ReviewFinding::
+/// plan_defect_evidence`。直接写 `plan_defect_evidence` 字段名不会被解析
+/// （`RawReviewFinding` 无该字段且不 `deny_unknown_fields`）。
 fn implementation_finding_with_plan_defect_fields() -> serde_json::Value {
     serde_json::json!({
         "verdict": "request_changes",
@@ -42,7 +48,7 @@ fn implementation_finding_with_plan_defect_fields() -> serde_json::Value {
             "source_stage": "code_review",
             "defect_class": "implementation_defect",
             "recommended_route": "coder_rework",
-            "plan_defect_evidence": [{
+            "evidence": [{
                 "kind": "manual_check",
                 "source_ref": "test_evidence_refs",
                 "message": "证据为空"
@@ -126,47 +132,187 @@ async fn stop_for_human_triage_lands_blocked_gate_with_review_actions() {
 
 /// `RetryVerification`（verification_incomplete）门禁测试。
 ///
-/// 该 finding 必须通过 `validate_plan_defect_finding` 的完整契约校验，包括与
-/// `reviewer_projection.blocker_routing` 对齐（reason_code + confidence=high +
-/// evidence + recommended_route/repair_target 匹配 blocker rule）。
-/// `running_attempt_with_worktree()` 构造的 WorkItem scope attempt 没有 plan
-/// lineage / projection bundle，无法直接构造能通过校验的 finding。可行的夹具路径
-/// 是复用 `provider_execution_context.rs:90-165` 的完整 coding→projection 链路
-/// （先 `execute_coding` 产出 unit run 与 projection bundle，再走 code review）。
+/// verification_incomplete finding 必须通过 `validate_plan_defect_finding` 的
+/// 完整契约校验，包括与 `reviewer_projection.blocker_routing` 对齐（reason_code +
+/// recommended_route 匹配 blocker rule）。`running_attempt_with_worktree()` 构造的
+/// WorkItem scope attempt 没有 plan lineage / projection bundle（projection 为空，
+/// blocker_routing 为空），任何非 implementation finding 都会因找不到 blocker rule
+/// 而 validate 失败、反而变成 StopForHumanTriage，无法触发 RetryVerification。
 ///
-/// 该夹具成本较高，本 Task 1（RED 阶段）先以 `#[ignore]` + `todo!` 占位，明确记录
-/// 为「待补 RED 测试」，**不得用 PASS 状态混淆**。Task 2 完成门禁落地后再回填真实
-/// 夹具与断言（reason_code=`code_review_verification_incomplete`，动作集合四项）。
+/// 因此本测试复用 `provider_execution_context.rs` 的完整 coding→projection 链路：
+/// 先建 WorkItemGroup scope attempt + `seed_group_attempt_fixture`（预置含
+/// `verification_incomplete` → `VerificationRetry` blocker rule 的 projection bundle），
+/// 再 `execute_coding` 产出 unit run 并绑定 projection bundle，最后
+/// `execute_code_review` 用 verification_incomplete finding 跑分诊。
 #[tokio::test]
-#[ignore = "TODO(task-2): verification_incomplete finding 需要真实 reviewer_projection \
-            blocker_routing 夹具（coding→projection 链路），待 Task 2 门禁落地后回填"]
 async fn retry_verification_lands_blocked_gate_with_review_actions() {
-    // 预期 RED（Task 2 实现后）：
-    //   attempt.status == Blocked
-    //   gates.len() == 1
-    //   gates[0].reason_code == Some("code_review_verification_incomplete")
-    //   action_ids == [retry_review, send_to_coder, manual_continue, abort]
-    todo!("verification_incomplete reviewer_projection blocker_routing 夹具待补");
+    let (root, store, coded) = run_group_attempt_through_coding().await;
+    let worktree = root.path().join("worktree");
+    std::fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").unwrap();
+
+    let output = serde_json::json!({
+        "verdict": "request_changes",
+        "summary": "验证证据不完整",
+        "findings": [{
+            "severity": "error",
+            "file_path": "src/lib.rs",
+            "line": 1,
+            "message": "缺少测试执行证据",
+            "required_action": "补交红灯执行记录",
+            "source_stage": "code_review",
+            "defect_class": "verification_incomplete",
+            "reason_code": "verification_incomplete",
+            "recommended_route": "verification_retry",
+            "confidence": "high",
+            "evidence": [{
+                "kind": "test_execution",
+                "source_ref": "provider-managed-unit.log",
+                "message": "验证证据缺失"
+            }]
+        }]
+    })
+    .to_string();
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        tx,
+    );
+    let provider = super::provider_execution_context::CapturingProjectionProvider::new(output);
+    let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+    engine
+        .execute_code_review_with_commands(&coded, &provider, &mut cmd_rx)
+        .await
+        .unwrap();
+
+    let attempt = store
+        .get_attempt(&coded.project_id, &coded.issue_id, &coded.id)
+        .unwrap();
+    assert_eq!(
+        attempt.status,
+        CodingAttemptStatus::Blocked,
+        "RetryVerification 必须把 attempt 转为 Blocked",
+    );
+
+    let gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .unwrap();
+    assert_eq!(gates.len(), 1, "RetryVerification 必须且只能落一个 gate");
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("code_review_verification_incomplete"),
+    );
+
+    let mut action_ids: Vec<&str> = gates[0]
+        .available_actions
+        .iter()
+        .map(|action| action.action_id.as_str())
+        .collect();
+    action_ids.sort();
+    assert_eq!(
+        action_ids,
+        vec!["abort", "manual_continue", "retry_review", "send_to_coder"],
+        "code review triage gate 动作集合必须为四项",
+    );
+}
+
+/// 构造 WorkItemGroup scope attempt，走完整 coding→projection 链路，返回
+/// (`TempDir`, `store`, `coded_attempt`)。
+///
+/// 复用 `provider_execution_context.rs` 验证过的夹具模式：`seed_group_attempt_fixture`
+/// 预置含完整 blocker_routing（包括 `verification_incomplete` → `VerificationRetry`）
+/// 的 projection bundle；`execute_coding` 用 `current_plan_defect_finding()` 拼出的
+/// coder plan-defect 输出产出 unit run 并绑定 projection bundle，使后续
+/// `execute_code_review` 能拿到非空的 `reviewer_projection.blocker_routing`。
+///
+/// 调用方必须持有返回的 `TempDir` 到测试结束。
+async fn run_group_attempt_through_coding() -> (
+    tempfile::TempDir,
+    crate::product::coding_attempt_store::CodingAttemptStore,
+    CodingExecutionAttempt,
+) {
+    let root = tempdir().expect("tempdir");
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("worktree dir");
+    init_test_git_repo(&worktree);
+    let head = git_stdout(&worktree, &["rev-parse", "HEAD"]);
+    let store = crate::product::coding_attempt_store::CodingAttemptStore::new(
+        crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria")),
+    );
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: head.clone(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree.clone()),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+            },
+            max_auto_rework: 2,
+        })
+        .unwrap();
+    seed_group_attempt_fixture(&store, &attempt, true, false);
+    let mut attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .unwrap();
+    attempt.head_commit = Some(head.clone());
+    attempt.stage = CodingExecutionStage::Coding;
+    store.save_coding_attempt(&attempt).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        tx,
+    );
+    let coder_output = serde_json::json!({
+        "plan_defect_findings": [
+            super::provider_execution_context::current_plan_defect_finding()
+        ]
+    })
+    .to_string();
+    let coder = super::provider_execution_context::CapturingProjectionProvider::new(coder_output);
+    let coded = engine
+        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .await
+        .unwrap();
+    (root, store, coded)
 }
 
 /// `OpenOperationalGate`（operational_blocker）门禁测试。
 ///
-/// 同 `retry_verification_lands_blocked_gate_with_review_actions` 的夹具约束：
-/// operational_blocker finding 必须通过完整契约校验并与 reviewer_projection
-/// blocker_routing 对齐，WorkItem scope 的 `running_attempt_with_worktree()` 无法
-/// 直接构造。本 Task 1（RED 阶段）先以 `#[ignore]` + `todo!` 占位，明确记录为
-/// 「待补 RED 测试」。Task 2 完成门禁落地后回填（reason_code=
-/// `code_review_operational_blocker`，动作集合四项）。
+/// 夹具约束：operational_blocker finding 要通过 `validate_plan_defect_finding`
+/// 完整契约校验，`reviewer_projection.blocker_routing` 必须含
+/// `operational_blocker` → `OperationalGate` 的 blocker rule。但
+/// `seed_group_attempt_fixture`（`tests.rs:210-227`）预置的 `blocker_rules` 只含
+/// `current_work_item_contract_invalid` / `story_scope_invalid` /
+/// `design_constraint_invalid` / `verification_incomplete` 四条，**不含**
+/// operational_blocker rule。新增该 rule 需修改共享夹具
+/// `seed_group_attempt_fixture_with_legacy_work_items`，但 `tests.rs` 已达 800 行
+/// 上限无法扩展，且改动会影响所有依赖该夹具的测试。因此本测试保留 `#[ignore]`，
+/// 待后续单独的工作项扩充夹具（或独立 operational_blocker 夹具变体）后回填。
+/// 门禁生产侧路径已由 `stop_for_human_triage` / `retry_verification` 两个端到端
+/// 测试覆盖（三者共享同一 `match plan_defect_route` 分支与同一动作集合分派）。
 #[tokio::test]
-#[ignore = "TODO(task-2): operational_blocker finding 需要真实 reviewer_projection \
-            blocker_routing 夹具（coding→projection 链路），待 Task 2 门禁落地后回填"]
+#[ignore = "夹具 blocker_rules 缺 operational_blocker rule；tests.rs 已达 800 行上限，\
+            待后续扩充 operational_blocker 夹具变体后回填。门禁生产侧路径已由 \
+            stop_for_human_triage / retry_verification 端到端测试覆盖"]
 async fn open_operational_gate_lands_blocked_gate_with_review_actions() {
-    // 预期 RED（Task 2 实现后）：
+    // 预期（夹具回填后）：
     //   attempt.status == Blocked
     //   gates.len() == 1
     //   gates[0].reason_code == Some("code_review_operational_blocker")
     //   action_ids == [retry_review, send_to_coder, manual_continue, abort]
-    todo!("operational_blocker reviewer_projection blocker_routing 夹具待补");
+    unreachable!("operational_blocker blocker_routing 夹具待补，见文档注释");
 }
 
 /// 互斥回归测试：`verdict=blocked` 且无可执行 finding 时，必须只落既有的

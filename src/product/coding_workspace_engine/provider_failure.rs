@@ -50,6 +50,18 @@ impl CodingWorkspaceEngine {
                 retry_action,
                 coding_gate_action_for_id("abort").expect("abort action"),
             ]
+        } else if matches!(
+            reason_code,
+            "code_review_output_human_triage"
+                | "code_review_verification_incomplete"
+                | "code_review_operational_blocker"
+        ) {
+            vec![
+                retry_action,
+                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
+                coding_gate_action_for_id("manual_continue").expect("manual continue action"),
+                coding_gate_action_for_id("abort").expect("abort action"),
+            ]
         } else {
             vec![
                 retry_action,
