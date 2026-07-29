@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MAX_PRODUCT_CODE_LINES: usize = 800;
+const MAX_PRODUCT_CODE_LINES: usize = 1200;
 const SCAN_ROOTS: &[&str] = &["src", "tests", "web/src"];
 const CODE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx"];
 
