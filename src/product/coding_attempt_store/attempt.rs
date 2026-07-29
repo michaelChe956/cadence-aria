@@ -236,6 +236,28 @@ impl super::CodingAttemptStore {
         Ok(attempts)
     }
 
+    /// 列出某 issue 下的全部 coding attempt（不限 work_item / scope）。
+    ///
+    /// 用于 issue 级清理判定（如 attempt 删除后是否还有其他 attempt 记录）。
+    /// 与 `list_attempts_for_work_item` 不同：不做 work_item 过滤，覆盖该 issue 下
+    /// 所有 attempt 记录（含 group / single / 不同 work_item）。
+    pub fn list_attempts_for_issue(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<CodingExecutionAttempt>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let mut attempts: Vec<CodingExecutionAttempt> =
+            super::list_json_records(&self.coding_attempts_root(project_id, issue_id))?;
+        attempts.sort_by(|left, right| {
+            left.attempt_no
+                .cmp(&right.attempt_no)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(attempts)
+    }
+
     pub fn get_active_attempt(
         &self,
         project_id: &str,

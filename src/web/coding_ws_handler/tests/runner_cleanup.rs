@@ -506,10 +506,17 @@ fn assert_issue_lease_released(
 ) {
     let shared = LifecycleStore::new(app_paths.clone())
         .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
-        .expect("shared worktree")
-        .expect("shared worktree record");
-    assert!(shared.current_active_work_item_id.is_none());
-    assert!(shared.current_lock_owner_id.is_none());
+        .expect("shared worktree lookup");
+    // DELETE 路径下若该 issue 无其他 attempt 记录，会一并清理 shared-worktree.json
+    // （spec `harden-coding-attempt-deletion`：条件清理 shared-worktree）。此时记录
+    // 不存在视为已彻底释放。abort 路径仅释放 lock_owner、保留 json，仍按原断言校验。
+    match shared {
+        None => {}
+        Some(record) => {
+            assert!(record.current_active_work_item_id.is_none());
+            assert!(record.current_lock_owner_id.is_none());
+        }
+    }
 }
 
 fn plan_amendment_event(event_id: &str) -> CodingWsOutMessage {

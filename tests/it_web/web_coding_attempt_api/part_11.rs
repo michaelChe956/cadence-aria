@@ -226,10 +226,17 @@ async fn group_retry_and_delete_are_serialized_by_initialization_arbitration() {
     );
     let shared = LifecycleStore::new(app_paths)
         .get_issue_shared_worktree("project_0001", "issue_0001")
-        .expect("shared worktree after delete")
-        .expect("shared worktree after delete");
-    assert_eq!(shared.current_active_work_item_id, None);
-    assert_eq!(shared.current_lock_owner_id, None);
+        .expect("shared worktree lookup after delete");
+    // DELETE 后该 issue 无其他 attempt 记录时，shared-worktree.json 一并被条件清理
+    // （spec `harden-coding-attempt-deletion`）。无论是「json 已删」还是「json 保留但
+    // lock 已释放」，都视为删除路径正确收敛。
+    match shared {
+        None => {}
+        Some(record) => {
+            assert_eq!(record.current_active_work_item_id, None);
+            assert_eq!(record.current_lock_owner_id, None);
+        }
+    }
 }
 
 fn assert_creation_winner_state(

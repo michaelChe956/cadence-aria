@@ -714,9 +714,7 @@ pub(crate) async fn delete_coding_attempt(
     cleanup_coding_attempt_workspace(&repository, &attempt).await?;
     cleanup_attempt_handoff_revisions(&app_paths, &coding_store, &attempt)
         .map_err(product_store_api_error)?;
-    coding_store
-        .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .map_err(product_store_api_error)?;
+    finalize_coding_attempt_deletion(&coding_store, &app_paths, &attempt)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
