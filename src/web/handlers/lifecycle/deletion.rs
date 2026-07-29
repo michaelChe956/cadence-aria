@@ -287,14 +287,24 @@ fn purge_attempt_lock_residue(
     }
     // 锁目录本身保留：其他 plan 的 work_item 锁可能仍在其中，不能整目录清空。
 
-    // 顶层 `.lock` 残留：attempt json 已不存在，对应的 `.<attempt_id>.json.lock` 是孤儿。
+    // 顶层 `.*.lock` 孤儿清理：lock 名由 `lock_path_for` 生成（`.<target>.lock`），
+    // 反推目标名 = 去前导 `.` 与尾部 `.lock`。只在目标文件已不存在时删锁（孤儿），
+    // 保留 active attempt 的运行时锁——多 plan 共 issue 时其他 plan 的 active attempt
+    // （json 在）的锁不能误删（spec「删除不得误伤其他 plan」，Task 5 精确化）。
     if let Ok(entries) = std::fs::read_dir(&coding_attempts_root) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|value| value.to_str())
-                && name.starts_with('.')
-                && name.ends_with(".lock")
-            {
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Some(target_name) = name
+                .strip_prefix('.')
+                .and_then(|suffix| suffix.strip_suffix(".lock"))
+            else {
+                continue;
+            };
+            // 目标存在 → active（运行时锁保留）；目标不存在 → 孤儿锁，删除。
+            if !coding_attempts_root.join(target_name).exists() {
                 let _ = std::fs::remove_file(&path);
             }
         }

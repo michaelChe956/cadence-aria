@@ -471,3 +471,85 @@ async fn delete_work_item_plan_preserves_other_work_items_attempt_locks() {
         "other plan work item lock sidecar must be preserved"
     );
 }
+
+#[tokio::test]
+async fn delete_work_item_plan_top_level_attempt_locks_purge_orphans_only() {
+    // Task 5 端到端测试：顶层 `.*.lock` 只清理孤儿锁，保留 active attempt 的运行时锁。
+    //
+    // 真实场景：多 plan 共 issue 时，coding-attempts 顶层目录里其他 plan 可能有 active
+    // coding attempt（json + 运行时 lock 同时存在）。整删顶层 `.*.lock` 会误删其锁，
+    // 违反 spec「删除不得误伤其他 plan」。修正后只删对应 json 已不存在的孤儿锁。
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+
+    // 先创建一个真实 group attempt，拿到合法的 CodingExecutionAttempt JSON 主体
+    // （直接写 `{}` 会被门禁的 list_json_records 解析失败，必须用真实记录）。
+    let (create_status, created) =
+        request_json(app.clone(), Method::POST, group_attempt_uri(), json!({})).await;
+    assert_eq!(create_status, StatusCode::OK, "group attempt create: {created}");
+    let attempt_id = assert_global_attempt_id(&created);
+    let attempt = prepare_attempt_with_worktree(
+        &CodingAttemptStore::new(app_paths.clone()),
+        repo.path(),
+        GROUP_PROJECT_ID,
+        GROUP_ISSUE_ID,
+        &attempt_id,
+    );
+
+    let lifecycle_root = app_paths.issue_lifecycle_root(GROUP_PROJECT_ID, GROUP_ISSUE_ID);
+    let coding_root = lifecycle_root.join("coding-attempts");
+    let original_json = coding_root.join(format!("{attempt_id}.json"));
+
+    // 改写为「另一个 plan 的 active attempt」：换 id + 换 work_item_group_id。
+    // 门禁按 work_item_group_id == plan_id 过滤，会跳过这条记录从而放行本 plan 删除。
+    // json 合法且存在 → 其运行时锁不可误删（spec「删除不得误伤其他 plan」）。
+    let mut record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&original_json).expect("read attempt json"))
+            .expect("parse attempt json");
+    record["id"] = json!("other_plan_active_attempt");
+    record["work_item_group_id"] = json!("work_item_plan_other");
+    let other_json = coding_root.join("other_plan_active_attempt.json");
+    fs::write(&other_json, record.to_string()).expect("seed other plan active attempt json");
+    let active_lock = coding_root.join(".other_plan_active_attempt.json.lock");
+    fs::write(&active_lock, "").expect("seed other plan active attempt runtime lock");
+
+    // 孤儿锁：对应 json 已不存在（attempt 主体被删后留下的残锁，应清理）。
+    let orphan_lock = coding_root.join(".ghost_attempt.json.lock");
+    fs::write(&orphan_lock, "").expect("seed orphan attempt lock");
+
+    // 删掉本 group 的真实 attempt 主体（门禁放行），并清掉 worktree 目录避免外部状态残留。
+    fs::remove_file(&original_json).expect("remove original attempt json");
+    let attempt_dir = coding_root.join(&attempt_id);
+    if attempt_dir.exists() {
+        fs::remove_dir_all(&attempt_dir).expect("remove original attempt dir");
+    }
+    if let Some(worktree_path) = attempt.worktree_path.as_ref().filter(|p| p.exists()) {
+        fs::remove_dir_all(worktree_path).expect("remove original attempt worktree");
+    }
+
+    let (status, body) =
+        request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "delete body: {body}");
+    assert_eq!(body["status"], "deleted");
+
+    // active attempt 的 json 与运行时锁都必须保留——spec「删除不得误伤其他 plan」。
+    assert!(
+        other_json.exists(),
+        "other plan active attempt json must be untouched"
+    );
+    assert!(
+        active_lock.exists(),
+        "other plan active attempt runtime lock must be preserved while its json exists"
+    );
+    // 孤儿锁必须被清理。
+    assert!(
+        !orphan_lock.exists(),
+        "orphan attempt lock (no corresponding json) must be purged"
+    );
+}
