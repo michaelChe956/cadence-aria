@@ -119,6 +119,16 @@ fn canonical_work_item_validation_ignores_incomplete_or_observable_process_evide
         ("用户提交表单后，结果按创建时间顺序展示", "AC-FORM-ORDER"),
         ("事务按提交顺序持久化", "ac_transaction_commit"),
         ("验证命令实际运行了非零数量的测试", "AC-OBSERVABLE"),
+        // 真实误报：中文「提交」在前端语境指提交按钮/控件，不是 git commit。
+        // 该 statement 同时含「提交控件」「代码」「链路」，旧规则三条件全中。
+        (
+            "在任意 HTTP 静态服务器下打开 demo/index.html，于秒数输入框输入 3661 后无需点击任何提交控件，结果区即显示 01:01:01；页面中不存在参与该更新链路的提交按钮",
+            "ac_demo_realtime_result",
+        ),
+        (
+            "表单提交按钮在测试代码校验失败时保持禁用，且按提交顺序展示错误",
+            "ac_form_submit_guard",
+        ),
     ];
 
     for (statement, criterion_id) in cases {
@@ -373,17 +383,59 @@ fn canonical_work_item_validation_rejects_overlapping_write_scopes() {
     );
 }
 
+/// required check 必须有可执行依据，但人工核对以 manual_instruction 为依据。
+///
+/// 实测缺陷：校验把「required」等同于「必须有 command」，于是没有测试框架的
+/// outline（如纯静态页面）无法把任何人工核对设为必需——而 reviewer 按 outline 的
+/// verification_intent 要求它们必需，author 与校验层因此互相否决。
 #[test]
-fn canonical_work_item_validation_rejects_required_check_without_command() {
+fn canonical_work_item_validation_rejects_required_check_without_command_or_manual_instruction() {
     let mut contract = canonical_contract_fixture("WI-01");
     contract.verification_checks[0].command = None;
-    contract.verification_checks[0].manual_instruction = Some("Inspect output".to_string());
+    contract.verification_checks[0].manual_instruction = None;
 
     let report = validate_canonical_contract(&contract);
     let finding = finding(&report, "missing_required_verification_command");
 
     assert_eq!(finding.logical_work_item_id.as_deref(), Some("WI-01"));
     assert_eq!(finding.contract_ref.as_deref(), Some("check_canonical"));
+}
+
+#[test]
+fn canonical_work_item_validation_allows_required_manual_check_without_command() {
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.verification_checks[0].command = None;
+    contract.verification_checks[0].manual_instruction =
+        Some("在静态服务器下打开页面并核对 7 条示例".to_string());
+    contract.verification_checks[0].required = true;
+
+    let report = validate_canonical_contract(&contract);
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|item| item.code != "missing_required_verification_command"),
+        "required manual check with a manual_instruction must be accepted: {:?}",
+        report.findings
+    );
+    assert!(report.is_valid());
+}
+
+#[test]
+fn canonical_work_item_validation_rejects_required_check_with_blank_manual_instruction() {
+    let mut contract = canonical_contract_fixture("WI-01");
+    contract.verification_checks[0].command = None;
+    contract.verification_checks[0].manual_instruction = Some("   ".to_string());
+
+    let report = validate_canonical_contract(&contract);
+
+    assert_eq!(
+        finding(&report, "missing_required_verification_command")
+            .contract_ref
+            .as_deref(),
+        Some("check_canonical")
+    );
 }
 
 #[test]

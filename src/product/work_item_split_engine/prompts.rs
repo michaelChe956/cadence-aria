@@ -570,7 +570,7 @@ pub(crate) fn build_work_item_draft_prompt(
         })
         .unwrap_or_else(|_| "{}".to_string());
     let trusted_command_catalog = if current_outline.trusted_verification_commands.is_empty() {
-        "(empty: do not invent required commands; use an operational_gate blocker when verification cannot be grounded)"
+        "(empty: no trusted commands available; do not invent any. Manual checks with command=null may still be required=true. Use an operational_gate blocker only when verification cannot be grounded even by manual checks.)"
             .to_string()
     } else {
         crate::product::models::trusted_draft_verification_command_catalog_prompt_projection(
@@ -639,9 +639,11 @@ pub(crate) fn build_work_item_draft_prompt(
          [registration]\n\
          内部登记 acceptance criterion ID、traceability requirement ID、input/output contract ID 与上列可信命令；不输出该登记表。\n\n\
          [projection]\n\
-         done_when_refs 只能引用 criterion_id；requirement_refs 只能引用登记的 requirement_id；reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致；blocker target 只能引用 input/output contract_id；required=true 的 command 必须逐字来自可信目录。\n\n\
+         done_when_refs 只能引用 criterion_id；requirement_refs 只能引用登记的 requirement_id；reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致；blocker target 只能引用 input/output contract_id；required=true 的 command 必须逐字来自可信目录。\n\
+         input_contracts 的 contract_id 与 required_capabilities 元素都是对上游的引用而非新命名：必须逐字取自 [直接依赖的可消费交接合同] 中该 provider 的 output_contracts（含标点空格），不得改写前缀（如 oc_ 换成 ic_）、意译或自行描述——两者均按字符串精确匹配，任何差异都会失配；provider_logical_work_item_id 必须是真正声明该 contract 的上游 logical_work_item_id。被消费的 output_contracts.contract_id 还须出现在其 handoff_contract.provided_contract_refs 中。\n\n\
          [self_check]\n\
-         输出前逐项验证上述集合关系、verification_plan 与 canonical checks 的逐字段同序相等。可信目录为空时，所有 verification_checks 必须 required=false 且 command=null，并且必须输出有说明的 operational_gate blocker；不得输出 required=true 或伪造 required command。\n\n\
+         输出前逐项验证上述集合关系、verification_plan 与 canonical checks 的逐字段同序相等。可信目录为空时所有 check 必须 command=null。需人工操作或目视确认的 verification_intent 必须表达为 acceptance_criteria 的 required_evidence=[manual_check]；verification_checks 的 required=true 仅限 Coder 可自行执行的命令或只读检查。人工事项由末端人工确认，不构成自动阶段阻塞，不得因缺人工环境输出 operational_gate blocker。\n\
+         输出前把每个 input_contracts 的 contract_id 与 required_capabilities 元素在 [直接依赖的可消费交接合同] 中做字面量查找，找不到即为错误。\n\n\
          [canonical_field_contract]\n\
          封闭类型契约（非示例）：记号 str+=非空 string，[T]=T 数组，obj=object；每个 obj 必须且只能含所列字段，所列字段全部必填，数组可空但元素不得缺/加字段。\n\
          - draft: obj{{outline_id: str+, logical_work_item_id: str+, canonical_contract: obj, verification_plan: obj}}。\n\

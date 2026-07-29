@@ -3,7 +3,8 @@
 //! 对应 change `remove-work-item-handoff` 工作包 1.10、1.11。
 
 use super::super::super::prompts::{
-    code_review_material_protocol, coding_delta_execution_protocol, coding_execution_protocol,
+    code_review_material_protocol, coding_completion_report_contract,
+    coding_delta_execution_protocol, coding_execution_protocol,
     group_final_review_material_protocol,
 };
 
@@ -105,5 +106,64 @@ fn coder_protocols_retain_tdd_requirements() {
     assert!(
         coding_execution_protocol().contains("TDD/测试要求"),
         "coding_execution 协议必须保留执行清单覆盖 TDD/测试要求"
+    );
+}
+
+/// 人工事项是交接内容，不是阻塞理由。
+///
+/// 实测死机：Coder 因执行环境无浏览器、无法完成三项人工核对，输出
+/// operational_gate blocker 并停在 stage=coding/status=running，而该决策在 coding
+/// 阶段没有任何门禁落地，用户无按钮可点。人工核对本就不该由 Coder 执行。
+#[test]
+fn coder_protocol_excludes_manual_items_from_its_own_scope() {
+    let protocol = coding_execution_protocol();
+    assert!(
+        protocol.contains("人工事项不属于你的执行范围"),
+        "Coder 执行协议必须声明人工事项不在其执行范围内"
+    );
+    assert!(
+        protocol.contains("不得因无法执行它们而报阻塞、拒绝完成或降低完成度"),
+        "Coder 执行协议必须禁止把人工事项当成阻塞理由"
+    );
+    assert!(
+        protocol.contains("缺少浏览器、设备、外部账号等人工环境不是运维阻塞"),
+        "Coder 执行协议必须排除人工环境缺失作为 operational_gate 理由"
+    );
+}
+
+/// 完成报告必须单列待人工处理清单。
+#[test]
+fn coding_completion_report_requires_pending_manual_section() {
+    let contract = coding_completion_report_contract();
+    assert!(
+        contract.contains("待人工处理"),
+        "完成报告契约必须要求单列待人工处理小节"
+    );
+    assert!(
+        contract.contains("该清单是交接内容，不是未完成项"),
+        "完成报告契约必须明确待人工清单不是未完成项"
+    );
+}
+
+/// 两个 reviewer 协议都不得因待人工事项否决。
+#[test]
+fn reviewer_protocols_do_not_reject_pending_manual_items() {
+    for (name, protocol) in [
+        ("code_review", code_review_material_protocol()),
+        ("group_final_review", group_final_review_material_protocol()),
+    ] {
+        assert!(
+            protocol.contains("待人工处理事项不是缺陷"),
+            "{name} 协议必须声明待人工事项不是缺陷"
+        );
+        assert!(
+            protocol.contains("manual_check"),
+            "{name} 协议必须点明 manual_check 类验收标准的归属"
+        );
+    }
+    assert!(
+        group_final_review_material_protocol()
+            .contains("必须在 summary 中汇总整组的待人工处理清单"),
+        "group final review 必须把待人工清单汇总给人工接手"
     );
 }

@@ -354,19 +354,25 @@ pub fn validate_canonical_contract(
     }
 
     for check in &contract.verification_checks {
-        if check.required
-            && check
-                .command
-                .as_deref()
-                .is_none_or(|command| command.trim().is_empty())
-        {
+        // required check 必须有可执行依据，但依据有两种：自动化命令，或人工核对说明。
+        // 只认 command 会让没有可信命令目录的 work item（如纯静态页面）无法把任何
+        // 人工核对设为必需，与 outline 的 verification_intent 直接冲突。
+        let has_command = check
+            .command
+            .as_deref()
+            .is_some_and(|command| !command.trim().is_empty());
+        let has_manual_instruction = check
+            .manual_instruction
+            .as_deref()
+            .is_some_and(|instruction| !instruction.trim().is_empty());
+        if check.required && !has_command && !has_manual_instruction {
             findings.push(error_finding(
                 "missing_required_verification_command",
                 logical_work_item_id,
                 Some(&check.check_id),
                 None,
                 format!(
-                    "required verification check {} must define a command",
+                    "required verification check {} must define a command or a manual_instruction",
                     check.check_id
                 ),
             ));
@@ -475,7 +481,27 @@ fn is_process_evidence_acceptance_criterion(criterion_id: &str, statement: &str)
     let has_ascii_commit_word = ["commit", "commits", "committed"]
         .into_iter()
         .any(|word| ascii_words.contains(word));
-    let has_chinese_commit_word = criterion_text.contains("提交");
+    // 中文「提交」有歧义：既指版本控制的 commit，也指表单/按钮的提交动作。
+    // 只有出现在版本控制语境的组合词里才算 commit，否则「无需点击提交控件」这类
+    // 完全合法的可观测结果状态会被误判为过程证据。
+    // 白名单只收版本控制语境下无歧义的组合词。「提交顺序」「提交信息」被有意排除：
+    // 前者可指表单提交次序，后者可指用户提交的信息。
+    let has_chinese_commit_word = [
+        "提交记录",
+        "提交历史",
+        "提交序列",
+        "提交树",
+        "提交链",
+        "次提交",
+        "个提交",
+        "条提交",
+    ]
+    .into_iter()
+    .any(|phrase| criterion_text.contains(phrase))
+        || (criterion_text.contains("提交")
+            && ["git", "commit", "commits", "committed", "tdd", "red"]
+                .into_iter()
+                .any(|word| ascii_words.contains(word)));
     let has_development_context = [
         "git", "tdd", "test", "tests", "testing", "red", "code", "branch", "branches", "rebase",
     ]

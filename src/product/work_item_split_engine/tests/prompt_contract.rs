@@ -293,8 +293,14 @@ fn single_item_prompt_requires_registration_projection_and_self_check() {
     }
 }
 
+/// 可信目录为空时禁止伪造命令，但人工核对仍可 required=true。
+///
+/// 实测死循环：旧规则要求「可信目录为空时所有 verification_checks 必须
+/// required=false」，把人工核对也一起禁掉。纯静态页面这类没有测试框架的 outline
+/// 因此无法把任何验收标准设为必需，而 reviewer 按 outline 的 verification_intent
+/// 反复要求 required=true——author 与 reviewer 各自遵守指令，结论必然冲突。
 #[test]
-fn single_item_prompt_forbids_required_checks_without_a_trusted_command() {
+fn single_item_prompt_routes_manual_items_to_acceptance_criteria() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
         .outline
@@ -309,11 +315,62 @@ fn single_item_prompt_forbids_required_checks_without_a_trusted_command() {
     )
     .expect("draft invocation");
 
+    for required in [
+        "可信目录为空时所有 check 必须 command=null",
+        "需人工操作或目视确认的 verification_intent 必须表达为 acceptance_criteria 的 required_evidence=[manual_check]",
+        "verification_checks 的 required=true 仅限 Coder 可自行执行的命令或只读检查",
+        "人工事项由末端人工确认，不构成自动阶段阻塞",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "draft prompt must route manual items to acceptance criteria, not Coder execution; missing {required}"
+        );
+    }
+    assert!(
+        !invocation
+            .prompt
+            .contains("所有 verification_checks 必须 required=false"),
+        "draft prompt must not force every check to be optional when the catalog is empty"
+    );
+    assert!(
+        !invocation
+            .prompt
+            .contains("人工核对必须 required=true"),
+        "draft prompt must not make manual checks a Coder delivery precondition"
+    );
+}
+
+/// 空可信目录的占位文本也不得暗示「人工核对只能可选」。
+#[test]
+fn empty_trusted_command_catalog_placeholder_allows_required_manual_checks() {
+    let mut outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    outline.work_item_outlines[0]
+        .trusted_verification_commands
+        .clear();
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    assert!(
+        invocation
+            .prompt
+            .contains("Manual checks with command=null may still be required=true"),
+        "empty-catalog placeholder must state that manual checks can remain required"
+    );
     assert!(
         invocation.prompt.contains(
-            "可信目录为空时，所有 verification_checks 必须 required=false 且 command=null"
+            "Use an operational_gate blocker only when verification cannot be grounded even by manual checks."
         ),
-        "draft prompt must forbid required checks without a trusted command"
+        "empty-catalog placeholder must narrow the operational_gate trigger"
     );
 }
 
@@ -450,4 +507,38 @@ fn single_item_prompt_relaxes_handoff_provided_contract_refs_for_terminal_items(
         "draft prompt must remain below the quality budget: {} bytes",
         invocation.prompt.len()
     );
+}
+
+/// input_contracts.contract_id 是对上游的引用而非新命名。
+///
+/// 实测缺陷：prompt 只说 input_contracts 有 contract_id 字段，未约束它必须逐字等于
+/// 上游 output_contracts 的 ID，provider 因此按 ic_/oc_ 前缀自行命名，导致依赖契约图
+/// 校验报 required_contract_missing + unconsumed_required_handoff。
+#[test]
+fn draft_prompt_requires_input_contract_ids_to_reference_upstream_output_contracts() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    for required in [
+        "input_contracts 的 contract_id 与 required_capabilities 元素都是对上游的引用而非新命名",
+        "不得改写前缀（如 oc_ 换成 ic_）、意译或自行描述",
+        "provider_logical_work_item_id 必须是真正声明该 contract 的上游 logical_work_item_id",
+        "输出前把每个 input_contracts 的 contract_id 与 required_capabilities 元素在 [直接依赖的可消费交接合同] 中做字面量查找",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "draft prompt must constrain input contract references; missing {required}"
+        );
+    }
 }

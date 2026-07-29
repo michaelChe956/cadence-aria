@@ -301,6 +301,8 @@ pub(crate) fn coding_execution_protocol() -> String {
      - 如果执行材料没有给出语言、构建系统、包管理器或测试框架相关要求，不得臆造具体技术栈命令。\n\
      - 需要判断环境或依赖问题时，必须优先根据 Work Item、Verification Plan、仓库文件和项目规则判断。\n\
      - 如果判断依据不足，必须在最终报告中说明“不足以确定”，并列出需要人工确认的问题。\n\
+     - 人工事项不属于你的执行范围：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，都由人工在流程末端确认。必须在最终报告中单列“待人工处理”清单（逐项写明事项与人工执行方式），但不得因无法执行它们而报阻塞、拒绝完成或降低完成度。\n\
+     - 缺少浏览器、设备、外部账号等人工环境不是运维阻塞：只有当你自己该执行的命令或代码修改无法进行时，才输出 operational_gate。\n\
      - 不得用平台默认技术栈假设替代 Work Item 内容。\n"
     ))
 }
@@ -327,7 +329,8 @@ pub(crate) fn coding_completion_report_contract() -> &'static str {
      - 报告 git status --short（含未跟踪文件）与 git diff --stat。\n\
      - 基于两者明确说明是否触碰 Forbidden Write Scopes；若出现允许范围外的已修改或未跟踪文件，必须报告，不得声称未触碰。\n\
      - 如果测试命令显示没有测试被执行或没有实际测试被执行，包括 \"0 tests\" 或 \"running 0 tests\"，不能直接视为已覆盖；必须说明处理方式或风险。\n\
-     - 如果某项要求无法执行，说明阻塞原因、已尝试的诊断步骤和需要人工确认的内容。\n"
+     - 如果某项要求无法执行，说明阻塞原因、已尝试的诊断步骤和需要人工确认的内容。\n\
+     - 必须单列“待人工处理”小节：逐项写明需要人工核对、人工测试或人工操作的事项及其执行方式；无此类事项时明确写“无”。该清单是交接内容，不是未完成项。\n"
 }
 
 pub(crate) fn code_review_material_protocol() -> String {
@@ -344,6 +347,7 @@ pub(crate) fn code_review_material_protocol() -> String {
      - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
      - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和交接契约。\n\
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
+     - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在流程末端确认。coder 如实登记这些事项即为正确交付，不得因其“尚未验证”创建 finding、给出 request_changes 或 blocked；缺少浏览器等人工环境同理。\n\
      - 如果测试输出显示没有实际测试被执行，不能把它当作有效覆盖；必须结合 Work Item 要求判断是否需要修复。\n\
      - EvidenceKind 仅表示当前可观测证据：source_diff 表示最终代码状态；non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。manual_check 仅表示人工检查结果；handoff_field 仅表示交接字段的存在与内容。\n\
      - 不得提出执行材料之外的技术栈默认要求。\n\
@@ -366,6 +370,7 @@ pub(crate) fn group_final_review_material_protocol() -> String {
      - 必须检查依赖交接是否断裂：上游 unit 声明的契约与能力（API、状态、文件）是否被下游正确消费。\n\
      - 必须检查整组 diff 是否越过任何 unit 的 Forbidden Write Scopes。\n\
      - 如果某个 unit 的验证证据缺失、声明的契约与能力未在 diff 中落地、或最终 PR 描述遗漏关键影响，必须 request_changes 或 blocked。\n\
+     - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在本流程之后确认。这些事项尚未验证不得成为 finding、request_changes 或 blocked 的理由；必须在 summary 中汇总整组的待人工处理清单，供人工接手。\n\
      - 如果 ReviewRequest 已 push 的 commit 与 completed units、diff 或验证证据不一致，必须 request_changes 或 blocked。\n\
      - impact_scope、pr_description、commit_message_suggestion 必须基于实际 diff、completed units 和 HandoffRevision，不得编造未实现内容。\n\
      - 不得用平台默认技术栈假设替代 HandoffRevision 或 Work Item 内容。\n\
