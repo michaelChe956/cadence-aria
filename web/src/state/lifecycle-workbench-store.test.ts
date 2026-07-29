@@ -36,17 +36,13 @@ function lifecycleWorkItem(
     context_budget: {
       target_context_k: "30-50",
       max_summary_chars: 20000,
-      max_handoff_chars: 12000,
       max_code_context_chars: 30000,
       max_context_file_refs: 80,
       max_traceability_refs: 40,
-      max_dependency_handoffs: 3,
     },
-    required_handoff_from: [],
     verification_plan_ref: null,
     require_execution_plan_confirm: false,
     execution_plan_status: "not_started",
-    handoff_summary_ref: null,
     completion_commit: null,
     completion_diff_summary_ref: null,
     ...overrides,
@@ -395,13 +391,12 @@ describe("lifecycle workbench store", () => {
     );
   });
 
-  it("does not block work item when dependencies are completed and handoffs exist", () => {
+  it("does not block work item when dependencies are completed", () => {
     const backend = lifecycleWorkItem({
       work_item_id: "work_item_0001",
       title: "后端 API",
       kind: "backend",
       execution_status: "completed",
-      handoff_summary_ref: "handoffs/work_item_0001.json",
     });
     const frontend = lifecycleWorkItem({
       work_item_id: "work_item_0002",
@@ -409,7 +404,6 @@ describe("lifecycle workbench store", () => {
       kind: "frontend",
       execution_status: "pending",
       depends_on: ["work_item_0001"],
-      required_handoff_from: ["work_item_0001"],
     });
 
     expect(workItemWaitingReason(frontend, [backend, frontend])).toBeNull();

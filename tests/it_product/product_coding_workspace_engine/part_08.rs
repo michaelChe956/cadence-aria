@@ -370,7 +370,7 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
         .list_open_blocked_gates("project_0001", "issue_0001", &attempt.id)
         .expect("open blocked gates");
     assert_eq!(gates.len(), 1);
-    assert_eq!(gates[0].title, "Internal review requires human triage");
+    assert_eq!(gates[0].title, "GroupFinalReview requires human triage");
     assert_eq!(
         gates[0].reason_code.as_deref(),
         Some("internal_review_human_triage")
@@ -415,8 +415,6 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Fake,
-                tester_plan: ProviderName::Fake,
-                tester_execute: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Codex,
                 review_rounds: 1,
@@ -484,7 +482,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
 }
 
 #[tokio::test]
-async fn handle_final_confirm_completes_without_testing_report_for_required_plan() {
+async fn handle_final_confirm_completes_when_required_plan_is_satisfied() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -566,12 +564,6 @@ async fn handle_final_confirm_completes_without_testing_report_for_required_plan
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
-    assert!(
-        store
-            .list_testing_reports("project_0001", "issue_0001", &attempt.id)
-            .expect("testing reports")
-            .is_empty()
-    );
     let updated = engine
         .handle_final_confirm("project_0001", "issue_0001", &attempt.id)
         .await

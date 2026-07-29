@@ -177,20 +177,7 @@ export type WorkItemExecutionPlanStatus =
 
 export type WorkItemDependencyHandoffRef = {
   work_item_id: string;
-  summary_ref: string | null;
-  summary: string | null;
   commit_sha: string | null;
-};
-
-export type WorkItemHandoff = {
-  handoff_id: string;
-  work_item_id: string;
-  summary: string;
-  handoff_summary_ref: string | null;
-  dependency_handoffs: WorkItemDependencyHandoffRef[];
-  verification_summary: string | null;
-  created_at: string;
-  updated_at: string;
 };
 
 export type WorkItemExecutionPlan = {
@@ -219,11 +206,9 @@ export type WorkItemExecutionPlan = {
 export type WorkItemContextBudget = {
   target_context_k: string;
   max_summary_chars: number;
-  max_handoff_chars: number;
   max_code_context_chars: number;
   max_context_file_refs: number;
   max_traceability_refs: number;
-  max_dependency_handoffs: number;
 };
 
 export type WorkspaceProviderName = RealProviderName | "fake";

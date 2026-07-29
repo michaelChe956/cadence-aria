@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -12,9 +11,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::provider_adapter::{
-    DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapter, ProviderAdapterError,
-};
+use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
 use crate::cross_cutting::streaming_provider::{
     ChoiceRequestData, PermissionRequestData, ProviderCommand, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
@@ -28,7 +25,7 @@ use crate::product::coding_attempt_store::{
     CreateQualityBypassAuditInput, PrepareCodingGitOperationInput,
 };
 use crate::product::coding_evaluation_context::{
-    EvaluationContextRole, build_evaluation_context_pack, build_tester_execution_context_pack,
+    EvaluationContextRole, build_evaluation_context_pack,
 };
 use crate::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingChoiceOption,
@@ -37,9 +34,7 @@ use crate::product::coding_models::{
     CodingProviderRole, CodingReworkInstruction, CodingRoleRun, CodingRoleRunEventType,
     CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
     FindingSeverity, InternalPrReview, PushStatus, ReviewFinding, ReviewRequest, ReviewRequestKind,
-    ReviewVerdict, TestCommand, TestCommandStatus, TestPlan, TestPlanRiskLevel,
-    TestingOverallStatus, TestingReport, TestingStepResult, TestingUnplannedEvidence,
-    WorkItemHandoff,
+    ReviewVerdict,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::{GitWorkspaceError, GitWorkspaceService};
@@ -49,13 +44,6 @@ use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{
     LifecycleWorkItemRecord, ProviderConversationRef, ProviderConversationRole, ProviderName,
     WorkItemStatus,
-};
-use crate::product::test_executor::{TestCommandSpec, TestExecutorError, run_all_tests};
-use crate::product::tester_agent_loop::{
-    ProviderTestExecutionPayload, TestContextLoader, TesterAgentOptions,
-    build_plan_based_testing_report, build_tester_execute_repair_prompt, build_tester_plan_prompt,
-    build_tester_plan_repair_prompt, build_testing_report, execute_tester_tool_call_with_context,
-    format_test_plan_chat_summary, format_testing_report_chat_summary, parse_test_plan_payload,
 };
 use crate::protocol::contracts::ProviderType;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
@@ -90,9 +78,6 @@ mod reviewer_context;
 mod rework;
 mod runtime_handoff_authority;
 mod runtime_impact;
-mod testing;
-mod testing_parser;
-mod testing_provider;
 mod timeline;
 mod tool_format;
 mod types;
@@ -120,12 +105,8 @@ pub use runtime_impact::{
     HandoffDeltaKind, RuntimeHandoffImpactPropagator, RuntimeHandoffImpactResult,
     compare_handoff_revisions,
 };
-pub use testing_parser::{
-    testing_report_has_execution_evidence, testing_report_needs_blocked_gate,
-};
 pub use types::{
-    CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError,
-    CompletionGateReport, ProviderTestingAdapters, TESTING_RESULT_REVIEW_REASON_CODE,
+    CodingExecutionContext, CodingWorkspaceEngine, CodingWorkspaceEngineError, CompletionGateReport,
 };
 
 pub(crate) fn code_review_report_has_actionable_findings(report: &CodeReviewReport) -> bool {
@@ -181,12 +162,6 @@ fn balanced_json_object_end(output: &str, start: usize) -> Option<usize> {
     None
 }
 
-pub(crate) fn extract_json_object(output: &str) -> Option<&str> {
-    let start = output.find('{')?;
-    let end = balanced_json_object_end(output, start)?;
-    Some(&output[start..end])
-}
-
 /// 按出现顺序提取输出中的全部顶层平衡 JSON 对象。
 ///
 /// Provider 输出可能在路由回执、证据表格或示例中夹带与结论无关的 JSON
@@ -231,8 +206,6 @@ pub(crate) use provider_failure::*;
 pub(crate) use reports::*;
 #[allow(unused_imports)]
 pub(crate) use review_parser::*;
-#[allow(unused_imports)]
-pub(crate) use testing_parser::*;
 #[allow(unused_imports)]
 pub(crate) use tool_format::*;
 #[allow(unused_imports)]

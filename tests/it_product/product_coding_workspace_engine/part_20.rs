@@ -2,7 +2,7 @@
 //
 // 对应 change `remove-work-item-handoff` 工作包 1.8、1.9。
 // 这两个测试替代 part_13.rs 的 group_final_confirm_rejects_unit_handoff_outside_exclusive_scope
-// —— 原测试靠覆写 WorkItemHandoff.files_changed 触发违规，模型移除后无法构造。
+// —— 原测试靠覆写摘要中的 files_changed 触发违规，模型移除后无法构造。
 
 /// 在共享 worktree 中提交指定文件，返回 commit sha。
 fn commit_unit_change(worktree: &Path, relative_path: &str, contents: &str) -> String {
@@ -24,10 +24,12 @@ fn commit_unit_change(worktree: &Path, relative_path: &str, contents: &str) -> S
 
 /// 构造一个等待最终确认的 group attempt：两个已完成 unit，各自有真实 completion commit。
 ///
-/// `unit2_relative_path` 决定第二个 unit 实际改了哪个文件，用于分别覆盖越界与合规两种情形。
-/// work_item_0002 的 exclusive_write_scopes 固定为 `src/frontend.rs`。
+/// `unit2_relative_path` 决定第二个 unit 实际改了哪个文件；scope 参数用于分别隔离
+/// `forbidden_scopes` 拒绝、`exclusive_scopes` 放行与 worktree 缺失三种行为。
 fn group_attempt_with_committed_unit_changes(
     unit2_relative_path: &str,
+    unit2_exclusive_scope: &str,
+    unit2_forbidden_scopes: &[&str],
 ) -> (
     tempfile::TempDir,
     ProductAppPaths,
@@ -42,9 +44,16 @@ fn group_attempt_with_committed_unit_changes(
         .clone()
         .expect("group attempt worktree path");
 
-    for (work_item_id, scope) in [
-        ("work_item_0001", "src/backend.rs"),
-        ("work_item_0002", "src/frontend.rs"),
+    for (work_item_id, scope, forbidden_scopes) in [
+        ("work_item_0001", "src/backend.rs", Vec::new()),
+        (
+            "work_item_0002",
+            unit2_exclusive_scope,
+            unit2_forbidden_scopes
+                .iter()
+                .map(|scope| (*scope).to_string())
+                .collect(),
+        ),
     ] {
         lifecycle
             .create_work_item(CreateWorkItemInput {
@@ -56,7 +65,7 @@ fn group_attempt_with_committed_unit_changes(
                 design_spec_ids: Vec::new(),
                 title: format!("title for {work_item_id}"),
                 exclusive_write_scopes: vec![scope.to_string()],
-                forbidden_write_scopes: Vec::new(),
+                forbidden_write_scopes: forbidden_scopes,
                 ..Default::default()
             })
             .expect("create scoped work item");
@@ -141,10 +150,15 @@ fn group_attempt_with_committed_unit_changes(
 }
 
 #[tokio::test]
-async fn group_completion_gate_rejects_changed_files_outside_exclusive_scope_from_git() {
-    // unit2 的 exclusive scope 是 src/frontend.rs，但实际提交改了 web/src/app.tsx。
+async fn group_completion_gate_rejects_changed_files_in_forbidden_scope_from_git() {
+    // unit2 的 exclusive scope 允许 web/src/app.tsx，但 forbidden scope 明确禁止它；
+    // 因此该用例只可能由 forbidden_scopes 分支拒绝。
     let (_root, _paths, _store, engine, attempt) =
-        group_attempt_with_committed_unit_changes("web/src/app.tsx");
+        group_attempt_with_committed_unit_changes(
+            "web/src/app.tsx",
+            "web/src/app.tsx",
+            &["web/src/app.tsx"],
+        );
 
     let error = engine
         .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -166,15 +180,42 @@ async fn group_completion_gate_rejects_changed_files_outside_exclusive_scope_fro
 async fn group_completion_gate_allows_changed_files_within_exclusive_scope_from_git() {
     // unit2 实际提交只改了自己的 exclusive scope，门禁必须放行，不得因改数据源而误拒。
     let (_root, _paths, _store, engine, attempt) =
-        group_attempt_with_committed_unit_changes("src/frontend.rs");
+        group_attempt_with_committed_unit_changes("src/frontend.rs", "src/frontend.rs", &[]);
 
-    let report = engine
+    let error = engine
         .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .await;
+        .await
+        .expect_err("fixture stops after the write-scope gate");
 
     assert!(
-        report.is_ok(),
-        "合规写入不得被写入范围门禁拒绝，实际: {:?}",
-        report.err()
+        error.to_string().contains("coding_attempt_plan_binding"),
+        "合规写入必须越过写入范围门禁，随后才因夹具未绑定计划而停止，实际: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn group_completion_gate_fails_closed_when_worktree_is_missing() {
+    // 写入范围门禁无法读取 completion commit 的 git 事实时，必须失败关闭；
+    // 返回空 changed_files 会让 exclusive scope 校验零次迭代并静默放行。
+    let (_root, _paths, _store, engine, attempt) =
+        group_attempt_with_committed_unit_changes("web/src/app.tsx", "web/src/app.tsx", &[]);
+    let worktree = attempt
+        .worktree_path
+        .as_ref()
+        .expect("group attempt worktree path");
+    fs::remove_dir_all(worktree).expect("remove worktree to simulate missing git facts");
+
+    let error = engine
+        .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect_err("missing worktree must fail the group completion gate closed");
+
+    assert!(
+        matches!(
+            error,
+            cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::MissingWorktree(ref attempt_id)
+                if attempt_id == &attempt.id
+        ),
+        "缺少 git 事实时必须报告 MissingWorktree，实际: {error:?}"
     );
 }

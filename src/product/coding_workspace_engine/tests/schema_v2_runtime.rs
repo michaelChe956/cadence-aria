@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn schema_v2_group_final_confirm_completes_without_testing_reports() {
+async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts() {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -120,8 +120,6 @@ async fn schema_v2_group_final_confirm_completes_without_testing_reports() {
                 .collect(),
             contract_hash: format!("handoff_contract_hash_{}", unit.order_index + 1),
             commit_sha: head.clone(),
-            tests: Vec::new(),
-            artifacts: Vec::new(),
             created_at: "2026-07-27T00:00:00Z".to_string(),
         };
         revision_store
@@ -166,12 +164,6 @@ async fn schema_v2_group_final_confirm_completes_without_testing_reports() {
         .save_coding_attempt(&attempt)
         .expect("final review attempt");
 
-    assert!(
-        store
-            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("testing reports")
-            .is_empty()
-    );
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let updated = engine
@@ -187,56 +179,5 @@ async fn schema_v2_group_final_confirm_completes_without_testing_reports() {
             .expect("units")
             .iter()
             .all(|unit| unit.status == CodingExecutionUnitStatus::Completed)
-    );
-}
-
-#[tokio::test]
-async fn schema_v2_group_handoff_ignores_legacy_work_item_records() {
-    let root = tempdir().expect("tempdir");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            current_work_item_id: "work_item_0001".to_string(),
-            base_branch: "main".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: None,
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Codex,
-                reviewer: Some(ProviderName::ClaudeCode),
-                review_rounds: 1,
-            },
-            max_auto_rework: 2,
-        })
-        .expect("group attempt");
-    seed_schema_v2_group_attempt_fixture(&store, &attempt, true, false, &[]);
-    let lifecycle = LifecycleStore::new(store.paths());
-    let legacy_root = lifecycle.work_items_root(&attempt.project_id, &attempt.issue_id);
-    fs::create_dir_all(&legacy_root).expect("legacy work item root");
-    fs::write(legacy_root.join("stale.json"), "not valid json").expect("corrupt legacy item");
-
-    let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    engine
-        .generate_and_save_work_item_handoff_if_missing(&attempt)
-        .await
-        .expect("schema v2 handoff must not inspect legacy work item records");
-
-    let active = store
-        .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("active unit lookup")
-        .expect("active unit");
-    assert!(
-        store
-            .get_coding_unit_handoff(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &active.id,
-            )
-            .expect("coding unit handoff")
-            .is_some()
     );
 }

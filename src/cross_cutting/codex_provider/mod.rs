@@ -61,10 +61,6 @@ impl CodexProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for CodexProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
     async fn start(
         &self,
         input: StreamingProviderInput,

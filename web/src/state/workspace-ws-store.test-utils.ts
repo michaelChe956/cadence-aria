@@ -56,13 +56,10 @@ export function makeOutlineArtifactPayload() {
           context_budget: {
             target_context_k: "medium",
             max_summary_chars: 4000,
-            max_handoff_chars: 2000,
             max_code_context_chars: 12000,
             max_context_file_refs: 12,
             max_traceability_refs: 12,
-            max_dependency_handoffs: 4,
           },
-          required_handoff_from_outline_ids: [],
           verification_strategy: "cargo test --locked",
           risk_notes: [],
         },

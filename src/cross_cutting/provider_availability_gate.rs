@@ -192,10 +192,6 @@ impl StreamingProviderAdapter for GatedStreamingProviderAdapter {
         self.inner.supports_tool_calls()
     }
 
-    fn supports_provider_driven_testing(&self) -> bool {
-        self.inner.supports_provider_driven_testing()
-    }
-
     async fn start(
         &self,
         input: StreamingProviderInput,

@@ -343,14 +343,10 @@ fn coder_evidence_pack(
         .find(|run| {
             run.role == CodingProviderRole::Coder && run.stage == CodingExecutionStage::Coding
         });
-    let handoff = coding_store.get_visible_work_item_handoff(attempt)?;
     let mut evidence_warnings = Vec::new();
 
     if latest_run.is_none() {
         evidence_warnings.push("coder_role_run_missing".to_string());
-    }
-    if handoff.is_none() && matches!(provider_role, EvaluationContextRole::InternalReviewer) {
-        evidence_warnings.push("work_item_handoff_missing".to_string());
     }
 
     let completion_report_excerpt = match latest_run.as_ref() {
@@ -380,14 +376,6 @@ fn coder_evidence_pack(
             .map(|run| run.artifact_refs.clone())
             .unwrap_or_default(),
         completion_report_excerpt,
-        handoff_tests_run: handoff
-            .as_ref()
-            .map(|handoff| handoff.tests_run.clone())
-            .unwrap_or_default(),
-        handoff_test_result_summary: handoff
-            .as_ref()
-            .map(|handoff| handoff.test_result_summary.trim().to_string())
-            .filter(|summary| !summary.is_empty()),
         evidence_warnings,
     }))
 }
@@ -467,8 +455,7 @@ pub(super) fn build_group_context(
     {
         warnings.push("group_plan_mapping_mismatch".to_string());
     }
-    let dependency_handoff_refs =
-        dependency_handoff_refs_for_current(work_items, current_work_item_id).unwrap_or_default();
+    let dependency_handoff_refs = Vec::new();
     let current_work_item = work_items
         .iter()
         .find(|record| record.id == current_work_item_id);
@@ -493,27 +480,6 @@ pub(super) fn build_group_context(
         source_outline_id,
         source_draft_id,
     }))
-}
-
-fn dependency_handoff_refs_for_current(
-    work_items: &[LifecycleWorkItemRecord],
-    current_work_item_id: &str,
-) -> Option<Vec<String>> {
-    let current = work_items
-        .iter()
-        .find(|item| item.id == current_work_item_id)?;
-    Some(
-        current
-            .required_handoff_from
-            .iter()
-            .filter_map(|dependency_id| {
-                work_items
-                    .iter()
-                    .find(|item| item.id == *dependency_id)
-                    .and_then(|item| item.handoff_summary_ref.clone())
-            })
-            .collect(),
-    )
 }
 
 fn resolve_group_draft_context(

@@ -187,7 +187,6 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
             &ReviewerExecutionEnvelope {
                 unit_run_id: rebound.id.clone(),
                 diff_ref: format!("{}..worktree", head),
-                test_evidence_refs: Vec::new(),
                 handoff_revision_ids: Vec::new(),
                 contract_delta_refs: Vec::new(),
                 completion_commit: head,
@@ -356,33 +355,6 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
                 },
             )
             .unwrap();
-        store
-            .save_coding_unit_handoff(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &unit.id,
-                &WorkItemHandoff {
-                    id: format!("work_item_handoff_{:04}", index + 1),
-                    project_id: attempt.project_id.clone(),
-                    issue_id: attempt.issue_id.clone(),
-                    work_item_id: unit.logical_work_item_id.clone(),
-                    attempt_id: attempt.id.clone(),
-                    provider_run_ref: None,
-                    summary: format!("completed {}", unit.logical_work_item_id),
-                    files_changed: Vec::new(),
-                    commit_sha: Some(head.clone()),
-                    diff_summary: String::new(),
-                    tests_run: Vec::new(),
-                    test_result_summary: "passed".to_string(),
-                    review_summary: None,
-                    api_or_contract_changes: Vec::new(),
-                    open_risks: Vec::new(),
-                    next_work_item_notes: Vec::new(),
-                    created_at: "2026-07-19T00:00:00Z".to_string(),
-                },
-            )
-            .unwrap();
     }
 
     let (tx, _rx) = mpsc::channel(64);
@@ -465,7 +437,6 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
                 &ReviewerExecutionEnvelope {
                     unit_run_id: run.id.clone(),
                     diff_ref: format!("{head}..{head}"),
-                    test_evidence_refs: Vec::new(),
                     handoff_revision_ids: Vec::new(),
                     contract_delta_refs: Vec::new(),
                     completion_commit: head.clone(),
@@ -572,8 +543,6 @@ async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_
         provided_capabilities: BTreeMap::new(),
         contract_hash: "contract_hash".to_string(),
         commit_sha: head.clone(),
-        tests: Vec::new(),
-        artifacts: Vec::new(),
         created_at: "2026-07-18T00:00:00Z".to_string(),
     };
     revision_store

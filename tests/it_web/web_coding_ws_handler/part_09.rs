@@ -166,8 +166,8 @@ async fn coding_ws_stage_gate_confirm_resolves_persisted_gate() {
     let gate = store
         .create_stage_gate(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             "2026-05-28T00:00:05Z".to_string(),
             CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
                 author: ProviderName::Codex,
@@ -189,7 +189,7 @@ async fn coding_ws_stage_gate_confirm_resolves_persisted_gate() {
     send_json(
         &mut ws,
         &CodingWsInMessage::StageGateConfirm {
-            stage: CodingExecutionStage::Testing,
+            stage: CodingExecutionStage::CodeReview,
         },
     )
     .await;

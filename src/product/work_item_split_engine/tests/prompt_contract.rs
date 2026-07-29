@@ -233,6 +233,35 @@ fn single_item_prompt_projects_planning_discipline_into_canonical_fields() {
 }
 
 #[test]
+fn single_item_prompt_requires_observable_acceptance_criteria_and_forbids_process_evidence() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    for required in [
+        "acceptance criterion 的 statement 必须描述从最终代码状态、验证命令输出、人工检查结果或 handoff 字段可观测的结果状态",
+        "禁止把提交历史、提交顺序、开发时序、分支操作历史作为 acceptance criterion",
+        "non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "draft prompt must define observable acceptance-criterion boundaries; missing {required}: {}",
+            invocation.prompt
+        );
+    }
+}
+
+#[test]
 fn single_item_prompt_requires_registration_projection_and_self_check() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")

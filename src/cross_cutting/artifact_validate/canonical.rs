@@ -169,7 +169,6 @@ fn required_json_fields(artifact_kind: ArtifactKind) -> &'static [RequiredField]
         ArtifactKind::ReadinessCheck => &READINESS_CHECK_FIELDS,
         ArtifactKind::DispatchPackage => &DISPATCH_PACKAGE_FIELDS,
         ArtifactKind::CodingReport => &CODING_REPORT_FIELDS,
-        ArtifactKind::TestingReport => &TESTING_REPORT_FIELDS,
         ArtifactKind::CodeReviewReport => &CODE_REVIEW_REPORT_FIELDS,
         ArtifactKind::IntegrationReport => &INTEGRATION_REPORT_FIELDS,
         ArtifactKind::FinalReview => &FINAL_REVIEW_FIELDS,
@@ -228,14 +227,6 @@ const CODING_REPORT_FIELDS: [RequiredField; 5] = [
     field("commands_run", RequiredFieldKind::Array),
     field("candidate_traceability_refs", RequiredFieldKind::Array),
     field("status", RequiredFieldKind::String),
-];
-
-const TESTING_REPORT_FIELDS: [RequiredField; 5] = [
-    field("worktask_id", RequiredFieldKind::String),
-    field("commands_run", RequiredFieldKind::Array),
-    field("tests_passed", RequiredFieldKind::Bool),
-    field("failures", RequiredFieldKind::Array),
-    field("candidate_traceability_refs", RequiredFieldKind::Array),
 ];
 
 const CODE_REVIEW_REPORT_FIELDS: [RequiredField; 4] = [

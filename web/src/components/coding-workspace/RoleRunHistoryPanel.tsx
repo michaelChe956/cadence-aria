@@ -182,7 +182,6 @@ export function roleRunStatusLabel(status: CodingRoleRun["status"]) {
 function roleLabel(role: CodingRoleRun["role"]) {
   const labels: Record<CodingRoleRun["role"], string> = {
     coder: "Coder",
-    tester: "Tester",
     code_reviewer: "Code Reviewer",
     internal_reviewer: "GroupFinalReview",
   };

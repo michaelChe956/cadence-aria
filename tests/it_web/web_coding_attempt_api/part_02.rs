@@ -554,7 +554,6 @@ async fn bootstrap_completed_dependency_without_handoff(
             sequence_hint: Some(20),
             depends_on: vec!["work_item_0001".to_string()],
             exclusive_write_scopes: vec!["src/".to_string()],
-            required_handoff_from: vec!["work_item_0001".to_string()],
             plan_status: WorkItemPlanStatus::Confirmed,
             ..Default::default()
         })

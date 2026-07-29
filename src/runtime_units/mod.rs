@@ -26,7 +26,6 @@ pub mod session_closeout;
 pub mod spec_authoring;
 pub mod spec_gate_review;
 pub mod task_init;
-pub mod testing;
 
 use serde_json::Value;
 use std::future::Future;

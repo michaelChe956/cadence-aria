@@ -755,7 +755,6 @@ pub fn is_coding_ws_message_allowed(
             )
         }
         CodingExecutionStage::Coding
-        | CodingExecutionStage::Testing
         | CodingExecutionStage::CodeReview
         | CodingExecutionStage::InternalPrReview => matches!(
             message,

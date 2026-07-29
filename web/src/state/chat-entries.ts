@@ -19,7 +19,6 @@ export type ChatEntryRole =
   | "author"
   | "reviewer"
   | "coder"
-  | "tester"
   | "code_reviewer"
   | "internal_reviewer"
   | "system";

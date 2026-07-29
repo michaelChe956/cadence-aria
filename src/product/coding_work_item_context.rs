@@ -168,12 +168,6 @@ fn needs_source_draft_supplement(work_item: &LifecycleWorkItemRecord) -> bool {
         .map(str::trim)
         .unwrap_or_default()
         .is_empty()
-        || work_item
-            .planned_handoff_summary
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
 }
 
 fn final_compile_draft_supplement(
@@ -290,19 +284,9 @@ fn compiled_work_item_markdown(
         "Planned Implementation Context",
         work_item.planned_implementation_context.as_deref(),
     );
-    push_markdown_section(
-        &mut markdown,
-        "Planned Handoff Summary",
-        work_item.planned_handoff_summary.as_deref(),
-    );
     push_string_list(&mut markdown, "Story Spec IDs", &work_item.story_spec_ids);
     push_string_list(&mut markdown, "Design Spec IDs", &work_item.design_spec_ids);
     push_string_list(&mut markdown, "Depends On", &work_item.depends_on);
-    push_string_list(
-        &mut markdown,
-        "Required Handoff From",
-        &work_item.required_handoff_from,
-    );
     push_string_list(
         &mut markdown,
         "Exclusive Write Scopes",

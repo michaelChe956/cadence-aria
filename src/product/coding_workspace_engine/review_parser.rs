@@ -90,7 +90,6 @@ where
         "prepare_context" => Ok(Some(CodingExecutionStage::PrepareContext)),
         "worktree_prepare" => Ok(Some(CodingExecutionStage::WorktreePrepare)),
         "coding" => Ok(Some(CodingExecutionStage::Coding)),
-        "testing" => Ok(Some(CodingExecutionStage::Testing)),
         "code_review" => Ok(Some(CodingExecutionStage::CodeReview)),
         "review_request" => Ok(Some(CodingExecutionStage::ReviewRequest)),
         "internal_pr_review" | "group_final_review" => {
@@ -103,7 +102,6 @@ where
                 "prepare_context",
                 "worktree_prepare",
                 "coding",
-                "testing",
                 "code_review",
                 "review_request",
                 "internal_pr_review",

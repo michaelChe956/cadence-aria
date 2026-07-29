@@ -114,26 +114,6 @@ pub async fn create_coding_attempt(
         ));
     }
 
-    let missing_handoffs: Vec<String> = work_item
-        .required_handoff_from
-        .iter()
-        .filter(|handoff_id| {
-            work_items
-                .iter()
-                .find(|item| &item.id == *handoff_id)
-                .map(|item| item.handoff_summary_ref.is_none())
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect();
-    if !missing_handoffs.is_empty() {
-        return Err(ApiError::validation_with_details(
-            "work_item_handoff_missing",
-            "required dependency handoff summary is missing",
-            json!({ "missing_handoffs": missing_handoffs }),
-        ));
-    }
-
     if work_item.require_execution_plan_confirm
         && work_item.execution_plan_status != WorkItemExecutionPlanStatus::Confirmed
     {
@@ -302,7 +282,7 @@ pub(crate) fn save_work_item_execution_plan_for_attempt(
         });
 
     let dependency_handoffs: Vec<WorkItemDependencyHandoffRef> = work_item
-        .required_handoff_from
+        .depends_on
         .iter()
         .filter_map(|dep_id| {
             all_work_items
@@ -310,11 +290,6 @@ pub(crate) fn save_work_item_execution_plan_for_attempt(
                 .find(|item| &item.id == dep_id)
                 .map(|dep| WorkItemDependencyHandoffRef {
                     work_item_id: dep.id.clone(),
-                    summary_ref: dep.handoff_summary_ref.clone(),
-                    summary: dep
-                        .handoff_summary_ref
-                        .clone()
-                        .map(|r| format!("handoff summary available at {}", r)),
                     commit_sha: dep.completion_commit.clone(),
                 })
         })
@@ -548,11 +523,6 @@ pub(crate) async fn get_coding_attempt(
     let timeline_nodes = coding_store
         .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
-    let testing_report = coding_store
-        .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .last();
     let code_review_reports = coding_store
         .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -572,9 +542,6 @@ pub(crate) async fn get_coding_attempt(
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
     let work_item_execution_plan = coding_store
         .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .map_err(product_store_api_error)?;
-    let work_item_handoff = coding_store
-        .get_visible_work_item_handoff(&attempt)
         .map_err(product_store_api_error)?;
     let units = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
         coding_store
@@ -597,14 +564,12 @@ pub(crate) async fn get_coding_attempt(
         provider_config_snapshot: attempt.provider_config_snapshot,
         timeline_nodes,
         active_node_id,
-        testing_report,
         code_review_reports,
         review_request,
         internal_pr_review,
         pending_gates: Vec::new(),
         pending_choices,
         work_item_execution_plan,
-        work_item_handoff,
     }))
 }
 

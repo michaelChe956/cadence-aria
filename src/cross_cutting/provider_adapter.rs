@@ -253,7 +253,6 @@ fn default_structured_output_for_role(role: &AdapterRole) -> Option<Value> {
                 "depends_on": [],
                 "exclusive_write_scopes": ["src/"],
                 "forbidden_write_scopes": [],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],

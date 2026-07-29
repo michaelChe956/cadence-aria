@@ -34,8 +34,6 @@ pub(super) fn provider_node_id_for_schema(output_schema: &str) -> &'static str {
         "N12"
     } else if output_schema.contains("coding_report") {
         "N16"
-    } else if output_schema.contains("testing_report") {
-        "N17"
     } else if output_schema.contains("code_review_report") {
         "N18"
     } else if output_schema.contains("final_review") {

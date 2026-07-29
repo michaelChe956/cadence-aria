@@ -317,7 +317,7 @@ fn delete_work_item_removes_record_session_and_timeline() {
 
 /// change `remove-work-item-handoff` 工作包 1.12：
 /// 移除交接摘要引用后，work item 的完成 commit 记录必须仍可写入并读取。
-/// `update_work_item_handoff_summary` 是 `completion_commit` 的唯一写入点，
+/// 原摘要更新函数曾是 `completion_commit` 的唯一写入点，
 /// 不能随交接摘要一并删除。
 #[test]
 fn work_item_completion_commit_is_persisted_and_readable() {

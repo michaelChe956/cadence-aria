@@ -86,8 +86,8 @@ async fn coding_amendment_completed_replay_allows_completed_unit_run() {
 #[tokio::test]
 async fn coding_amendment_completed_replay_preserves_later_attempt_stage() {
     for stage in [
-        CodingExecutionStage::Testing,
         CodingExecutionStage::CodeReview,
+        CodingExecutionStage::ReviewRequest,
     ] {
         let fixture = amendment_fixture().await;
         let applied = fixture
@@ -259,7 +259,6 @@ async fn coding_amendment_completed_replay_accepts_provider_renderer_context_evo
             &ReviewerExecutionEnvelope {
                 unit_run_id: run.id.clone(),
                 diff_ref: format!("{repository_state_ref}..worktree"),
-                test_evidence_refs: Vec::new(),
                 handoff_revision_ids: run.resolved_handoff_revision_ids,
                 contract_delta_refs: Vec::new(),
                 completion_commit: repository_state_ref,

@@ -161,7 +161,6 @@ where
                     "report_path": outcome.report_path,
                     "openspec_change_dir": outcome.openspec_change_dir,
                     "provider_run_refs": outcome.provider_run_refs,
-                    "testing_report_path": outcome.testing_report_path,
                     "final_summary_path": outcome.final_summary_path,
                     "blocked_report_path": outcome.blocked_report_path,
                 }))

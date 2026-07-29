@@ -187,7 +187,7 @@ fn phase1_smoke_runs_from_planning_dispatch_to_final_summary() {
         nodes,
         vec![
             "N04", "N05", "N06", "N07", "N08", "N10", "N11", "N12", "N13", "N14", "N15", "N16",
-            "N17", "N18", "N20", "N21", "N22", "N23", "N24", "N25", "N27", "N28",
+            "N18", "N20", "N21", "N22", "N23", "N24", "N25", "N27", "N28",
         ]
     );
     assert_eq!(integration_execute.next_decision, "verify");
@@ -266,15 +266,6 @@ impl ProviderAdapter for SmokeProvider {
                 "commands_run": ["cargo test --test phase1_end_to_end_smoke"],
                 "candidate_traceability_refs": [],
                 "status": "completed"
-            }),
-            "schema://aria/artifacts/testing_report/v1" => json!({
-                "artifact_kind": "testing_report",
-                "artifact_ref": "testing_report_work_wt_001_0001",
-                "worktask_id": "work_wt_001",
-                "commands_run": ["cargo test --test phase1_end_to_end_smoke"],
-                "tests_passed": true,
-                "failures": [],
-                "candidate_traceability_refs": []
             }),
             "schema://aria/artifacts/code_review_report/v1" => json!({
                 "artifact_kind": "code_review_report",

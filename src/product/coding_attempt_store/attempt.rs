@@ -2,11 +2,11 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::product::coding_attempt_store::CreateCodingAttemptInput;
+use crate::product::coding_models::WorkItemExecutionPlan;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
     CodingRoleProviderConfigSnapshot,
 };
-use crate::product::coding_models::{WorkItemExecutionPlan, WorkItemHandoff};
 use crate::product::json_store::{
     ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
 };
@@ -205,110 +205,6 @@ impl super::CodingAttemptStore {
         plan.updated_at = Utc::now().to_rfc3339();
         self.save_work_item_execution_plan(&plan)?;
         Ok(plan)
-    }
-
-    pub fn save_work_item_handoff(
-        &self,
-        handoff: &WorkItemHandoff,
-    ) -> Result<(), ProductStoreError> {
-        validate_relative_id(&handoff.project_id)?;
-        validate_relative_id(&handoff.issue_id)?;
-        validate_relative_id(&handoff.attempt_id)?;
-        write_json(
-            &self.work_item_handoff_path(
-                &handoff.project_id,
-                &handoff.issue_id,
-                &handoff.attempt_id,
-            ),
-            handoff,
-        )
-    }
-
-    pub fn save_coding_unit_handoff(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
-        unit_id: &str,
-        handoff: &WorkItemHandoff,
-    ) -> Result<(), ProductStoreError> {
-        validate_relative_id(project_id)?;
-        validate_relative_id(issue_id)?;
-        validate_relative_id(attempt_id)?;
-        validate_relative_id(unit_id)?;
-        write_json(
-            &self.coding_unit_handoff_path(project_id, issue_id, attempt_id, unit_id),
-            handoff,
-        )
-    }
-
-    pub fn get_work_item_handoff(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
-    ) -> Result<Option<WorkItemHandoff>, ProductStoreError> {
-        validate_relative_id(project_id)?;
-        validate_relative_id(issue_id)?;
-        validate_relative_id(attempt_id)?;
-        let path = self.work_item_handoff_path(project_id, issue_id, attempt_id);
-        if !super::path_is_regular_file(&path)? {
-            return Ok(None);
-        }
-        read_json(&path).map(Some)
-    }
-
-    pub fn get_coding_unit_handoff(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
-        unit_id: &str,
-    ) -> Result<Option<WorkItemHandoff>, ProductStoreError> {
-        validate_relative_id(project_id)?;
-        validate_relative_id(issue_id)?;
-        validate_relative_id(attempt_id)?;
-        validate_relative_id(unit_id)?;
-        let path = self.coding_unit_handoff_path(project_id, issue_id, attempt_id, unit_id);
-        if !super::path_is_regular_file(&path)? {
-            return Ok(None);
-        }
-        read_json(&path).map(Some)
-    }
-
-    pub fn get_visible_work_item_handoff(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<Option<WorkItemHandoff>, ProductStoreError> {
-        if attempt.scope != CodingAttemptScope::WorkItemGroup {
-            return self.get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id);
-        }
-        if let Some(active_unit) =
-            self.get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        {
-            return self.get_coding_unit_handoff(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &active_unit.id,
-            );
-        }
-        let last_completed = self
-            .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .filter(|unit| {
-                unit.status == crate::product::coding_models::CodingExecutionUnitStatus::Completed
-            })
-            .max_by_key(|unit| unit.order_index);
-        let Some(last_completed) = last_completed else {
-            return Ok(None);
-        };
-        self.get_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &last_completed.id,
-        )
     }
 
     pub fn get_attempt_by_id(

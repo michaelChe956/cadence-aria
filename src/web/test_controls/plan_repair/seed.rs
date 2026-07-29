@@ -403,8 +403,6 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
         )]),
         contract_hash: "contract_hash_v1".to_string(),
         commit_sha: "commit_core_v1".to_string(),
-        tests: vec!["cargo test --locked".to_string()],
-        artifacts: vec!["src/core.rs".to_string()],
         created_at: CREATED_AT.to_string(),
     };
     revision_store

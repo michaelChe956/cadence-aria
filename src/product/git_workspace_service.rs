@@ -344,6 +344,38 @@ impl GitWorkspaceService {
         })
     }
 
+    /// 某个 commit 相对其第一父提交所改动的文件路径清单。
+    ///
+    /// 用于组完成写入范围门禁：每个已完成 unit 的 `completion_commit` 决定该 unit
+    /// 实际改了哪些文件，从而保住 per-unit 的归属判定。根提交（无父）返回该提交
+    /// 引入的全部文件。
+    pub async fn git_commit_changed_files(
+        &self,
+        worktree_path: &Path,
+        commit_sha: &str,
+    ) -> Result<Vec<String>, GitWorkspaceError> {
+        self.ensure_git_repo(worktree_path).await?;
+        let output = self
+            .run_git(
+                worktree_path,
+                &[
+                    "show",
+                    "--name-only",
+                    "--pretty=format:",
+                    "--no-renames",
+                    commit_sha,
+                ],
+            )
+            .await?;
+        Ok(output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     pub async fn git_diff(
         &self,
         worktree_path: &Path,

@@ -51,7 +51,6 @@ fn failed_review_recovery_requires_the_complete_historical_shape() {
     let cases = [
         ("completed attempt", FixtureCase::CompletedAttempt),
         ("aborted attempt", FixtureCase::AbortedAttempt),
-        ("testing stage", FixtureCase::TestingStage),
         ("missing completed_at", FixtureCase::MissingCompletedAt),
         (
             "group without active unit",

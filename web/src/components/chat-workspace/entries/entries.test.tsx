@@ -79,19 +79,7 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("支持手机号登录。")).toBeInTheDocument();
   });
 
-  it("labels tester and code reviewer provider stream entries by role", () => {
-    render(
-      <ProviderStreamEntry
-        entry={makeEntry({
-          id: "tester-stream",
-          type: "provider_stream",
-          role: "tester",
-          content: "测试计划",
-        })}
-      />,
-    );
-    expect(screen.getByText("Tester")).toBeInTheDocument();
-
+  it("labels code reviewer provider stream entries by role", () => {
     render(
       <ProviderStreamEntry
         entry={makeEntry({
@@ -158,118 +146,6 @@ describe("chat workspace entries", () => {
       "href",
       "https://example.com/design",
     );
-  });
-
-  it("renders tester plan summaries as readable markdown", () => {
-    render(
-      <ProviderStreamEntry
-        entry={makeEntry({
-          id: "tester-plan",
-          type: "provider_stream",
-          role: "tester",
-          content:
-            "## Tester 测试计划\n\nunit plan\n\n### 步骤\n- unit · Unit · required · low\n  - 证据预期：unit evidence",
-          node_id: "coding_node_0003",
-          metadata: {
-            phase: "test_plan",
-            role_run_id: "coding_role_run_0001",
-          },
-        })}
-      />,
-    );
-
-    expect(screen.getByRole("heading", { name: "Tester 测试计划" })).toBeInTheDocument();
-    expect(screen.getByText(/unit plan/)).toBeInTheDocument();
-    expect(screen.getByText(/证据预期/)).toBeInTheDocument();
-  });
-
-  it("formats raw tester TestPlan JSON streams instead of showing escaped JSON", () => {
-    const testPlanJson = JSON.stringify({
-      summary: "覆盖 work item 的 provider 门禁变更",
-      context_warnings: [],
-      assumptions: [],
-      steps: [
-        {
-          id: "step_001_gate",
-          title: "验证 Provider 门禁",
-          intent: "检查不可用 provider 不会被静默默认使用",
-          required: true,
-          tool: "run_command",
-          risk_level: "high",
-          command_or_tool_input: { command: "cargo test --locked --lib provider_gate" },
-          evidence_expectation: "provider_unavailable / provider_fallback 契约稳定",
-          related_requirements: ["REQ-014"],
-          related_design_constraints: ["DEC-014"],
-          related_work_item_tasks: ["TASK-007"],
-        },
-      ],
-    });
-
-    const { container } = render(
-      <ProviderStreamEntry
-        entry={makeEntry({
-          id: "tester-raw-json",
-          type: "provider_stream",
-          role: "tester",
-          content: testPlanJson,
-          metadata: {
-            phase: "plan_tests",
-          },
-        })}
-      />,
-    );
-
-    expect(screen.getByText("Tester 测试计划")).toBeInTheDocument();
-    expect(screen.getByText(/覆盖 work item 的 provider 门禁变更/)).toBeInTheDocument();
-    expect(screen.getByText(/step_001_gate/)).toBeInTheDocument();
-    expect(screen.getByText(/REQ-014/)).toBeInTheDocument();
-    expect(screen.getByText(/TASK-007/)).toBeInTheDocument();
-    expect(container.textContent).not.toContain("&quot;");
-    expect(container.textContent).not.toContain('"summary"');
-  });
-
-  it("formats HTML entity escaped tester TestPlan JSON streams", () => {
-    const testPlanJson = JSON.stringify({
-      summary: "针对本次 diff 生成后端 Provider 依赖自检验证计划",
-      context_warnings: ["context_truncated"],
-      assumptions: ["当前阶段仅生成 TestPlan，不直接执行命令。"],
-      steps: [
-        {
-          id: "step_001_rules_context",
-          title: "读取仓库验证规则",
-          intent: "确认本 worktree 的语言、TDD、Rust 构建测试命令和禁止项。",
-          required: true,
-          tool: "read_file",
-          risk_level: "low",
-          command_or_tool_input: { paths: ["CLAUDE.md"] },
-          evidence_expectation: "读取到规则文件内容。",
-          related_requirements: ["REQ-provider-gate"],
-          related_design_constraints: ["DEC-provider-gate"],
-          related_work_item_tasks: ["TASK-007"],
-        },
-      ],
-    }).replaceAll('"', "&quot;");
-
-    const { container } = render(
-      <ProviderStreamEntry
-        entry={makeEntry({
-          id: "tester-entity-json",
-          type: "provider_stream",
-          role: "tester",
-          content: testPlanJson,
-          metadata: {
-            phase: "plan_tests",
-          },
-        })}
-      />,
-    );
-
-    expect(screen.getByText("Tester 测试计划")).toBeInTheDocument();
-    expect(screen.getByText(/针对本次 diff 生成后端 Provider 依赖自检验证计划/)).toBeInTheDocument();
-    expect(screen.getByText(/step_001_rules_context/)).toBeInTheDocument();
-    expect(screen.getByText(/TASK-007/)).toBeInTheDocument();
-    expect(container.textContent).not.toContain("&quot;");
-    expect(container.textContent).not.toContain('"summary"');
   });
 
   it("hides reviewer trailing JSON contract from provider stream bubbles", () => {

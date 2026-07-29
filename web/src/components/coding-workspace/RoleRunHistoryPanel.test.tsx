@@ -14,15 +14,15 @@ describe("RoleRunHistoryPanel", () => {
         roleRuns={[
           roleRun({
             id: "coding_role_run_0001",
-            role: "tester",
-            stage: "testing",
+            role: "code_reviewer",
+            stage: "code_review",
             run_no: 1,
             status: "superseded",
             trigger: "initial",
             node_id: "coding_node_0003",
             superseded_by_run_id: "coding_role_run_0002",
-            reason_code: "test_plan_missing_json",
-            raw_provider_output_refs: ["provider-raw/testing/plan_tests_0001.txt"],
+            reason_code: "review_payload_parse_error",
+            raw_provider_output_refs: ["provider-raw/code-review/review_0001.txt"],
             event_summary: {
               event_count: 3,
               last_event_at: "2026-06-13T00:00:03Z",
@@ -30,7 +30,7 @@ describe("RoleRunHistoryPanel", () => {
               last_event_title: "Task update",
               last_event_status: "running",
               terminal_event_type: "timeout",
-              terminal_reason: "plan_tests_timeout",
+              terminal_reason: "review_timeout",
             },
             recent_events: [
               {
@@ -49,7 +49,7 @@ describe("RoleRunHistoryPanel", () => {
                 created_at: "2026-06-13T00:00:03Z",
                 title: "Task update",
                 status: "running",
-                detail: "Planning tests",
+                detail: "Reviewing changes",
                 truncated: true,
                 artifact_ref:
                   "artifacts/role-run-events/coding_role_run_0001/0003_output.txt",
@@ -58,18 +58,18 @@ describe("RoleRunHistoryPanel", () => {
           }),
           roleRun({
             id: "coding_role_run_0002",
-            role: "tester",
-            stage: "testing",
+            role: "code_reviewer",
+            stage: "code_review",
             run_no: 2,
             status: "completed",
-            trigger: "retry_test_plan",
+            trigger: "retry_review",
             node_id: "coding_node_0004",
-            artifact_refs: ["provider-raw/testing/testing_report_0002.json"],
+            artifact_refs: ["provider-raw/code-review/review_0002.json"],
           }),
         ]}
         timelineNodes={[
-          node("coding_node_0003", "执行测试"),
-          node("coding_node_0004", "执行测试重跑"),
+          node("coding_node_0003", "代码审查"),
+          node("coding_node_0004", "代码审查重跑"),
         ]}
         selectedNodeId={null}
         onSelectNode={vi.fn()}
@@ -78,34 +78,34 @@ describe("RoleRunHistoryPanel", () => {
 
     const panel = screen.getByTestId("coding-role-run-history");
     expect(panel).toHaveTextContent("角色运行历史");
-    expect(panel).toHaveTextContent("Tester #1");
+    expect(panel).toHaveTextContent("Code Reviewer #1");
     expect(panel).toHaveTextContent("已被替代");
     expect(panel).toHaveTextContent("initial");
-    expect(panel).toHaveTextContent("test_plan_missing_json");
+    expect(panel).toHaveTextContent("review_payload_parse_error");
     expect(panel).toHaveTextContent("3 events");
     expect(panel).toHaveTextContent("Task update");
     expect(panel).toHaveTextContent("running");
-    expect(panel).toHaveTextContent("Tester #2");
+    expect(panel).toHaveTextContent("Code Reviewer #2");
     expect(panel).toHaveTextContent("已完成");
-    expect(panel).toHaveTextContent("retry_test_plan");
-    expect(panel).toHaveTextContent("执行测试重跑");
-    expect(panel).not.toHaveTextContent("plan_tests_timeout");
+    expect(panel).toHaveTextContent("retry_review");
+    expect(panel).toHaveTextContent("代码审查重跑");
+    expect(panel).not.toHaveTextContent("review_timeout");
     expect(panel).not.toHaveTextContent("No tasks found");
     expect(panel).not.toHaveTextContent(
       "artifacts/role-run-events/coding_role_run_0001/0003_output.txt",
     );
-    expect(panel).not.toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
+    expect(panel).not.toHaveTextContent("provider-raw/code-review/review_0001.txt");
 
-    fireEvent.click(screen.getByRole("button", { name: /Tester #1/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Code Reviewer #1/ }));
 
-    expect(panel).toHaveTextContent("plan_tests_timeout");
+    expect(panel).toHaveTextContent("review_timeout");
     expect(panel).toHaveTextContent("#2");
     expect(panel).toHaveTextContent("#3");
     expect(panel).toHaveTextContent("No tasks found");
     expect(panel).toHaveTextContent(
       "artifacts/role-run-events/coding_role_run_0001/0003_output.txt",
     );
-    expect(panel).toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
+    expect(panel).toHaveTextContent("provider-raw/code-review/review_0001.txt");
   });
 
   it("selects the linked timeline node", () => {

@@ -129,6 +129,7 @@ async fn coding_plan_repair_entrypoints_internal_review_execution_persists_safe_
         gates[0].reason_code.as_deref(),
         Some("internal_review_human_triage")
     );
+    assert_eq!(gates[0].title, "Internal PR review requires human triage");
     assert!(
         gates[0]
             .available_actions
@@ -307,27 +308,178 @@ fn coding_plan_repair_group_reviewer_rejects_stale_completed_run_when_latest_is_
 }
 
 #[test]
-fn coding_plan_repair_internal_review_plan_routes_do_not_create_generic_gates() {
+fn coding_plan_repair_internal_review_gate_reasons_follow_one_decision_mapping() {
     for decision in [
         CodeReviewFlowDecision::StartPlanRepair,
         CodeReviewFlowDecision::StartStoryAmendment,
         CodeReviewFlowDecision::StartDesignAmendment,
-        CodeReviewFlowDecision::RetryVerification,
+        CodeReviewFlowDecision::ContinueAfterApprove,
     ] {
         assert_eq!(internal_review_blocked_gate_reason(decision, true), None);
     }
+    assert_eq!(
+        internal_review_blocked_gate_reason(CodeReviewFlowDecision::RetryVerification, true),
+        Some("internal_review_verification_incomplete")
+    );
     assert_eq!(
         internal_review_blocked_gate_reason(CodeReviewFlowDecision::RunCoderFix, true),
         Some("group_final_review_blocked")
     );
     assert_eq!(
+        internal_review_blocked_gate_reason(CodeReviewFlowDecision::RunCoderFix, false),
+        Some("internal_review_change_requested")
+    );
+    assert_eq!(
         internal_review_blocked_gate_reason(CodeReviewFlowDecision::StopForHumanTriage, true),
         Some("internal_review_human_triage")
     );
+    assert_eq!(
+        internal_review_blocked_gate_reason(CodeReviewFlowDecision::OpenOperationalGate, true),
+        Some("internal_review_operational_blocker")
+    );
+
+    let distinct_reasons = [
+        internal_review_blocked_gate_reason(CodeReviewFlowDecision::RunCoderFix, true).unwrap(),
+        internal_review_blocked_gate_reason(CodeReviewFlowDecision::RetryVerification, true)
+            .unwrap(),
+        internal_review_blocked_gate_reason(CodeReviewFlowDecision::StopForHumanTriage, true)
+            .unwrap(),
+        internal_review_blocked_gate_reason(CodeReviewFlowDecision::OpenOperationalGate, true)
+            .unwrap(),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(distinct_reasons.len(), 4);
 }
 
 #[tokio::test]
-async fn coding_plan_repair_group_review_execution_safe_stops_without_generic_gates() {
+async fn coding_plan_repair_group_review_non_gate_routes_and_verification_gate_stay_distinct() {
+    let (_root, store, attempt, engine, _event_rx) = prepared_group_review_fixture();
+
+    for (
+        defect_class,
+        reason_code,
+        route,
+        repair_target,
+        expected,
+        expected_gate_reason,
+        expected_gate_title,
+    ) in [
+        (
+            "story_amendment_required",
+            "story_scope_invalid",
+            "story_amendment",
+            serde_json::Value::Null,
+            CodeReviewFlowDecision::StartStoryAmendment,
+            None,
+            None,
+        ),
+        (
+            "design_amendment_required",
+            "design_constraint_invalid",
+            "design_amendment",
+            serde_json::Value::Null,
+            CodeReviewFlowDecision::StartDesignAmendment,
+            None,
+            None,
+        ),
+        (
+            "current_work_item_invalid",
+            "current_work_item_contract_invalid",
+            "plan_repair",
+            serde_json::json!({
+                "kind": "current_work_item",
+                "logical_work_item_ids": ["work_item_0001"],
+                "work_item_revision_ids": ["work_item_revision_0001"]
+            }),
+            CodeReviewFlowDecision::StartPlanRepair,
+            None,
+            None,
+        ),
+        (
+            "verification_incomplete",
+            "verification_incomplete",
+            "verification_retry",
+            serde_json::Value::Null,
+            CodeReviewFlowDecision::RetryVerification,
+            Some("internal_review_verification_incomplete"),
+            Some("GroupFinalReview verification incomplete"),
+        ),
+    ] {
+        let provider = super::provider_execution_context::CapturingProjectionProvider::new(
+            serde_json::json!({
+                "verdict": "blocked",
+                "summary": "safe stop",
+                "findings": [{
+                    "source_stage": "group_final_review",
+                    "severity": "error",
+                    "defect_class": defect_class,
+                    "reason_code": reason_code,
+                    "message": "repair outside coding",
+                    "contract_refs": [],
+                    "capability_refs": [],
+                    "repair_target": repair_target,
+                    "recommended_route": route,
+                    "confidence": "high",
+                    "evidence": []
+                }],
+                "impact_scope": [],
+                "pr_description": "",
+                "commit_message_suggestion": ""
+            })
+            .to_string(),
+        );
+
+        let review = engine
+            .execute_internal_pr_review(&attempt, &provider)
+            .await
+            .expect("group review route");
+
+        assert_eq!(review.verdict, ReviewVerdict::Blocked);
+        let persisted = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("persisted attempt");
+        assert_eq!(persisted.stage, CodingExecutionStage::InternalPrReview);
+        let gates = store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("blocked gates");
+        match expected_gate_reason {
+            Some(expected_gate_reason) => {
+                assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
+                assert_eq!(gates.len(), 1);
+                assert_eq!(gates[0].reason_code.as_deref(), Some(expected_gate_reason));
+                assert_eq!(gates[0].title, expected_gate_title.unwrap());
+            }
+            None => {
+                assert_eq!(persisted.status, CodingAttemptStatus::Running);
+                assert!(gates.is_empty());
+            }
+        }
+        let entry = store
+            .list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("chat entries")
+            .into_iter()
+            .rfind(|entry| {
+                entry.metadata.as_ref().is_some_and(|metadata| {
+                    metadata.get("source").and_then(|value| value.as_str())
+                        == Some("internal_pr_review")
+                })
+            })
+            .expect("group review chat entry");
+        assert_eq!(
+            entry.metadata.as_ref().expect("metadata")["plan_defect_route"],
+            expected.label()
+        );
+    }
+}
+
+pub(super) fn prepared_group_review_fixture() -> (
+    tempfile::TempDir,
+    CodingAttemptStore,
+    CodingExecutionAttempt,
+    CodingWorkspaceEngine,
+    mpsc::Receiver<CodingWsOutMessage>,
+) {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("worktree");
@@ -381,98 +533,7 @@ async fn coding_plan_repair_group_review_execution_safe_stops_without_generic_ga
         .expect("review request");
     let (tx, _rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-
-    for (defect_class, reason_code, route, repair_target, expected) in [
-        (
-            "story_amendment_required",
-            "story_scope_invalid",
-            "story_amendment",
-            serde_json::Value::Null,
-            CodeReviewFlowDecision::StartStoryAmendment,
-        ),
-        (
-            "design_amendment_required",
-            "design_constraint_invalid",
-            "design_amendment",
-            serde_json::Value::Null,
-            CodeReviewFlowDecision::StartDesignAmendment,
-        ),
-        (
-            "current_work_item_invalid",
-            "current_work_item_contract_invalid",
-            "plan_repair",
-            serde_json::json!({
-                "kind": "current_work_item",
-                "logical_work_item_ids": ["work_item_0001"],
-                "work_item_revision_ids": ["work_item_revision_0001"]
-            }),
-            CodeReviewFlowDecision::StartPlanRepair,
-        ),
-        (
-            "verification_incomplete",
-            "verification_incomplete",
-            "verification_retry",
-            serde_json::Value::Null,
-            CodeReviewFlowDecision::RetryVerification,
-        ),
-    ] {
-        let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-            serde_json::json!({
-                "verdict": "blocked",
-                "summary": "safe stop",
-                "findings": [{
-                    "source_stage": "group_final_review",
-                    "severity": "error",
-                    "defect_class": defect_class,
-                    "reason_code": reason_code,
-                    "message": "repair outside coding",
-                    "contract_refs": [],
-                    "capability_refs": [],
-                    "repair_target": repair_target,
-                    "recommended_route": route,
-                    "confidence": "high",
-                    "evidence": []
-                }],
-                "impact_scope": [],
-                "pr_description": "",
-                "commit_message_suggestion": ""
-            })
-            .to_string(),
-        );
-
-        let review = engine
-            .execute_internal_pr_review(&attempt, &provider)
-            .await
-            .expect("group review safe stop");
-
-        assert_eq!(review.verdict, ReviewVerdict::Blocked);
-        let persisted = store
-            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("persisted attempt");
-        assert_eq!(persisted.status, CodingAttemptStatus::Running);
-        assert_eq!(persisted.stage, CodingExecutionStage::InternalPrReview);
-        assert!(
-            store
-                .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
-                .expect("blocked gates")
-                .is_empty()
-        );
-        let entry = store
-            .list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("chat entries")
-            .into_iter()
-            .rfind(|entry| {
-                entry.metadata.as_ref().is_some_and(|metadata| {
-                    metadata.get("source").and_then(|value| value.as_str())
-                        == Some("internal_pr_review")
-                })
-            })
-            .expect("group review chat entry");
-        assert_eq!(
-            entry.metadata.as_ref().expect("metadata")["plan_defect_route"],
-            expected.label()
-        );
-    }
+    (root, store, attempt, engine, _rx)
 }
 
 fn complete_group_units_with_authoritative_runs(
@@ -541,33 +602,6 @@ fn complete_group_units_with_authoritative_runs(
                 },
             )
             .expect("unit run");
-        store
-            .save_coding_unit_handoff(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &unit.id,
-                &WorkItemHandoff {
-                    id: format!("work_item_handoff_{}", unit.order_index + 1),
-                    project_id: attempt.project_id.clone(),
-                    issue_id: attempt.issue_id.clone(),
-                    work_item_id: unit.logical_work_item_id.clone(),
-                    attempt_id: attempt.id.clone(),
-                    provider_run_ref: None,
-                    summary: "completed unit".to_string(),
-                    files_changed: Vec::new(),
-                    commit_sha: Some("commit_0001".to_string()),
-                    diff_summary: String::new(),
-                    tests_run: Vec::new(),
-                    test_result_summary: "passed".to_string(),
-                    review_summary: None,
-                    api_or_contract_changes: Vec::new(),
-                    open_risks: Vec::new(),
-                    next_work_item_notes: Vec::new(),
-                    created_at: "2026-07-19T00:00:00Z".to_string(),
-                },
-            )
-            .expect("unit handoff");
         store
             .update_coding_unit_status(
                 &attempt.project_id,

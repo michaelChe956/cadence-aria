@@ -53,11 +53,9 @@ export interface DrawerEntity {
   exclusiveWriteScopes?: string[];
   forbiddenWriteScopes?: string[];
   contextBudget?: WorkItemContextBudget;
-  requiredHandoffFrom?: string[];
   verificationPlanRef?: string | null;
   requireExecutionPlanConfirm?: boolean;
   executionPlanStatus?: WorkItemExecutionPlanStatus;
-  handoffSummaryRef?: string | null;
   completionCommit?: string | null;
   completionDiffSummaryRef?: string | null;
   allWorkItems?: LifecycleWorkItem[];
@@ -617,24 +615,18 @@ function WorkItemDetail({ entity }: { entity: DrawerEntity }) {
       context_budget: entity.contextBudget ?? {
         target_context_k: "30-50",
         max_summary_chars: 20000,
-        max_handoff_chars: 12000,
         max_code_context_chars: 30000,
         max_context_file_refs: 80,
         max_traceability_refs: 40,
-        max_dependency_handoffs: 3,
       },
-      required_handoff_from: entity.requiredHandoffFrom ?? [],
       verification_plan_ref: entity.verificationPlanRef ?? null,
       require_execution_plan_confirm: entity.requireExecutionPlanConfirm ?? false,
       execution_plan_status: entity.executionPlanStatus ?? "not_started",
-      handoff_summary_ref: entity.handoffSummaryRef ?? null,
       completion_commit: entity.completionCommit ?? null,
       completion_diff_summary_ref: entity.completionDiffSummaryRef ?? null,
     };
     return workItemWaitingReason(synthetic, entity.allWorkItems);
   }, [entity]);
-
-  const hasHandoff = entity.handoffSummaryRef && entity.handoffSummaryRef.length > 0;
 
   return (
     <section className="space-y-3 border-t border-[var(--aria-line)] px-4 py-3">
@@ -663,19 +655,6 @@ function WorkItemDetail({ entity }: { entity: DrawerEntity }) {
           <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">依赖</div>
           <ul className="space-y-1">
             {entity.dependsOn.map((id) => (
-              <li key={id} className="font-mono text-xs text-[var(--aria-ink)]">
-                {titleMap[id] ? `${titleMap[id]} (${id})` : id}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
-      {entity.requiredHandoffFrom && entity.requiredHandoffFrom.length > 0 ? (
-        <div>
-          <div className="mb-1 text-xs font-medium text-[var(--aria-ink-muted)]">需要交接摘要</div>
-          <ul className="space-y-1">
-            {entity.requiredHandoffFrom.map((id) => (
               <li key={id} className="font-mono text-xs text-[var(--aria-ink)]">
                 {titleMap[id] ? `${titleMap[id]} (${id})` : id}
               </li>
@@ -722,23 +701,8 @@ function WorkItemDetail({ entity }: { entity: DrawerEntity }) {
           预算: <span className="font-medium text-[var(--aria-ink)]">{entity.contextBudget.target_context_k}K</span>
           {" · "}
           文件引用上限 {entity.contextBudget.max_context_file_refs}
-          {" · "}
-          依赖交接上限 {entity.contextBudget.max_dependency_handoffs}
         </div>
       ) : null}
-
-      <div className="text-xs text-[var(--aria-ink-muted)]">
-        交接状态:
-        {" "}
-        <span
-          className={[
-            "font-medium",
-            hasHandoff ? "text-emerald-700" : "text-amber-700",
-          ].join(" ")}
-        >
-          {hasHandoff ? "交接摘要已生成" : "等待交接摘要"}
-        </span>
-      </div>
 
       {entity.verificationPlanRef ? (
         <div className="text-xs text-[var(--aria-ink-muted)]">

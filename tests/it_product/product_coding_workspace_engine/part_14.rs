@@ -31,38 +31,3 @@ fn create_required_verification_plan(
         })
         .expect("create verification plan");
 }
-
-fn save_minimal_unit_handoff(
-    store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-    unit_id: &str,
-    work_item_id: &str,
-) {
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            unit_id,
-            &WorkItemHandoff {
-                id: format!("work_item_handoff_{unit_id}"),
-                project_id: attempt.project_id.clone(),
-                issue_id: attempt.issue_id.clone(),
-                work_item_id: work_item_id.to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: format!("handoff summary for {work_item_id}"),
-                files_changed: Vec::new(),
-                commit_sha: Some(format!("{work_item_id}-sha")),
-                diff_summary: String::new(),
-                tests_run: vec!["cargo test --locked --lib unit".to_string()],
-                test_result_summary: "passed".to_string(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: Vec::new(),
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit handoff");
-}

@@ -15,7 +15,6 @@ use futures_util::Sink;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
-use crate::cross_cutting::streaming_provider::ProviderToolCall;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
@@ -24,7 +23,6 @@ use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::lifecycle_store::{LifecycleStore, UpsertIssueSharedWorktreeInput};
 use crate::product::models::{AmendmentResumeMode, AmendmentResumeTarget, PlanAmendmentManifest};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
-use crate::product::tester_agent_loop::execute_tester_tool_call_with_context;
 use crate::web::app::build_web_router;
 use crate::web::coding_ws_handler::delivery_ack::register_plan_amendment_socket_write;
 use crate::web::coding_ws_handler::runner::{
@@ -294,16 +292,6 @@ async fn http_delete_cancels_full_event_queue_runner_and_removes_attempt() {
 }
 
 #[tokio::test]
-async fn http_abort_cancels_real_tester_command_without_late_files_or_store_artifacts() {
-    assert_http_cancels_real_tester_command(Method::POST, "/abort", StatusCode::OK).await;
-}
-
-#[tokio::test]
-async fn http_delete_cancels_real_tester_command_without_late_files_or_store_recreation() {
-    assert_http_cancels_real_tester_command(Method::DELETE, "", StatusCode::NO_CONTENT).await;
-}
-
-#[tokio::test]
 async fn http_abort_is_not_blocked_by_pending_socket_writer_or_acknowledges_delivery() {
     let (tmp, app_paths, state, attempt) = seed_http_attempt_with_lease();
     let (event_tx, _event_rx) = mpsc::channel(1);
@@ -485,111 +473,6 @@ fn seed_http_attempt_with_lease() -> (
         WebRuntime::new_fake(tmp.path().to_path_buf()),
     );
     (tmp, app_paths, state, attempt)
-}
-
-async fn assert_http_cancels_real_tester_command(
-    method: Method,
-    suffix: &str,
-    expected_status: StatusCode,
-) {
-    let (tmp, app_paths, state, attempt) = seed_http_attempt_with_lease();
-    let worktree = tmp.path().join("tester-worktree");
-    fs::create_dir_all(&worktree).expect("tester worktree");
-    let entered = worktree.join("http-tester-entered");
-    let late = worktree.join("http-tester-late");
-    let shell = format!(
-        "printf entered > {}; sleep 1; printf late > {}",
-        entered.display(),
-        late.display()
-    );
-    let artifact_root = CodingAttemptStore::new(app_paths.clone()).attempt_test_output_root(
-        &attempt.project_id,
-        &attempt.issue_id,
-        &attempt.id,
-    );
-    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
-    let (command_tx, command_rx) = mpsc::channel(1);
-    let registration = state
-        .coding_runs
-        .insert_cancellable(&attempt_key, command_tx)
-        .expect("tester command registration");
-    let run_id = registration.run_id();
-    let registry = state.coding_runs.clone();
-    let task_key = attempt_key.clone();
-    let task_artifact_root = artifact_root.clone();
-    let task = tokio::spawn(async move {
-        let _command_rx = command_rx;
-        let result = execute_tester_tool_call_with_context(
-            &ProviderToolCall {
-                id: "http_tool_call_0001".to_string(),
-                tool_name: "run_command".to_string(),
-                input: serde_json::json!({
-                    "step_id": "planned_001",
-                    "command": ["sh", "-c", shell]
-                }),
-            },
-            worktree,
-            task_artifact_root,
-            None,
-            registration.cancellation(),
-        )
-        .await;
-        registry.remove(&task_key, run_id);
-        result
-    });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !entered.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("tester command entered");
-
-    let response = send_attempt_request(&state, &attempt, method.clone(), suffix).await;
-
-    assert_eq!(response.status(), expected_status);
-    let outcome = task.await.expect("tester command task");
-    assert!(
-        outcome.is_err(),
-        "cancelled tester command must not return ToolResult"
-    );
-    tokio::time::sleep(Duration::from_millis(1200)).await;
-    assert!(
-        !late.exists(),
-        "HTTP cancellation allowed a late file side effect"
-    );
-    assert!(
-        !artifact_root
-            .join("http_tool_call_0001.stdout.log")
-            .exists()
-    );
-    assert!(
-        !artifact_root
-            .join("http_tool_call_0001.stderr.log")
-            .exists()
-    );
-    assert_eq!(state.coding_runs.runner_count(&attempt_key), 0);
-    let store = CodingAttemptStore::new(app_paths.clone());
-    if method == Method::DELETE {
-        assert!(
-            store
-                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-                .is_err()
-        );
-        assert!(
-            !artifact_root.exists(),
-            "delete must not be recreated by late output"
-        );
-    } else {
-        assert_eq!(
-            store
-                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-                .expect("aborted attempt")
-                .status,
-            CodingAttemptStatus::Aborted
-        );
-    }
-    drop(tmp);
 }
 
 async fn send_attempt_request(

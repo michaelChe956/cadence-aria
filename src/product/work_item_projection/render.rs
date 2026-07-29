@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::product::coding_workspace_engine::reviewer_process_evidence_boundary_contract;
 use crate::product::models::ProviderName;
 use crate::product::plan_repair::plan_defect_structured_output_contract;
 
@@ -53,6 +54,7 @@ enum ProjectionSectionId {
     OutputContractChecks,
     VerificationEvidenceRules,
     ReviewExecutionEvidence,
+    ReviewerProcessEvidenceBoundary,
 }
 
 const CODER_MANDATORY_SECTIONS: &[ProjectionSectionId] = &[
@@ -78,6 +80,7 @@ const REVIEWER_MANDATORY_SECTIONS: &[ProjectionSectionId] = &[
     ProjectionSectionId::VerificationEvidenceRules,
     ProjectionSectionId::BlockerRouting,
     ProjectionSectionId::ReviewExecutionEvidence,
+    ProjectionSectionId::ReviewerProcessEvidenceBoundary,
 ];
 
 impl ProjectionSectionId {
@@ -107,6 +110,7 @@ impl ProjectionSectionId {
             Self::OutputContractChecks => "Output Contract Checks",
             Self::VerificationEvidenceRules => "Verification Evidence Rules",
             Self::ReviewExecutionEvidence => "Review Execution Evidence",
+            Self::ReviewerProcessEvidenceBoundary => "Reviewer Process Evidence Boundary",
         }
     }
 }
@@ -451,6 +455,11 @@ fn reviewer_sections(
             },
         )?,
         typed_section(ProjectionSectionId::ReviewExecutionEvidence, envelope)?,
+        ProjectionSection::new(
+            ProjectionSectionId::ReviewerProcessEvidenceBoundary,
+            ProjectionSectionId::ReviewerProcessEvidenceBoundary.title(),
+            reviewer_process_evidence_boundary_contract(),
+        ),
     ])
 }
 

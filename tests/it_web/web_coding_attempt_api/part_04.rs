@@ -22,13 +22,9 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     let persisted_attempt = store
         .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("persisted attempt");
-    let testing_report = sample_testing_report(&attempt_id);
     let code_review = sample_code_review_report(&attempt_id);
     let review_request = sample_review_request(&attempt_id);
     let internal_review = sample_internal_review(&attempt_id, &review_request.id);
-    store
-        .save_testing_report(&persisted_attempt, &testing_report)
-        .expect("save testing report");
     store
         .save_code_review_report(&persisted_attempt, &code_review)
         .expect("save code review");
@@ -77,7 +73,6 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     assert_eq!(snapshot["attempt"]["stage"], "prepare_context");
     assert_eq!(snapshot["active_node_id"], "coding_node_0002");
     assert_eq!(snapshot["timeline_nodes"].as_array().unwrap().len(), 2);
-    assert_eq!(snapshot["testing_report"]["id"], testing_report.id.as_str());
     assert_eq!(
         snapshot["code_review_reports"][0]["summary"],
         code_review.summary.as_str()
@@ -225,9 +220,6 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
         store.attempt_test_output_root("project_0001", "issue_0001", &attempt_id);
     fs::create_dir_all(&artifact_dir).expect("artifact dir");
     fs::write(artifact_dir.join("unit.stdout.log"), "unit stdout\n").expect("artifact");
-    store
-        .save_testing_report(&attempt, &sample_testing_report(&attempt_id))
-        .expect("save testing report");
     store
         .save_timeline_node(&attempt, sample_running_node(&attempt_id))
         .expect("save timeline node");

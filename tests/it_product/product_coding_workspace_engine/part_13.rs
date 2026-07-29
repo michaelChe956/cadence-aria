@@ -1,203 +1,3 @@
-fn group_attempt_waiting_for_final_confirm_with_scoped_work_items() -> (
-    tempfile::TempDir,
-    ProductAppPaths,
-    CodingAttemptStore,
-    CodingWorkspaceEngine,
-    CodingExecutionAttempt,
-) {
-    let (root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
-    let lifecycle = LifecycleStore::new(paths.clone());
-    let shared_worktree = paths.root().join("shared-worktree");
-    std::fs::create_dir_all(&shared_worktree).expect("create shared worktree dir");
-    std::fs::create_dir_all(shared_worktree.join("src")).expect("create src dir");
-    std::fs::create_dir_all(shared_worktree.join("web/src")).expect("create web src dir");
-    std::fs::write(shared_worktree.join("src/backend.rs"), "// backend\n")
-        .expect("write backend file");
-    std::fs::write(shared_worktree.join("src/frontend.rs"), "// frontend\n")
-        .expect("write frontend file");
-    std::fs::write(shared_worktree.join("web/src/app.tsx"), "// app\n")
-        .expect("write invalid app file");
-    Command::new("git")
-        .arg("init")
-        .current_dir(&shared_worktree)
-        .output()
-        .expect("git init shared worktree");
-    for (work_item_id, scope) in [
-        ("work_item_0001", "src/backend.rs"),
-        ("work_item_0002", "src/frontend.rs"),
-    ] {
-        lifecycle
-            .create_work_item(CreateWorkItemInput {
-                id: Some(work_item_id.to_string()),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                repository_id: "repository_0001".to_string(),
-                story_spec_ids: Vec::new(),
-                design_spec_ids: Vec::new(),
-                title: format!("title for {work_item_id}"),
-                exclusive_write_scopes: vec![scope.to_string()],
-                forbidden_write_scopes: Vec::new(),
-                ..Default::default()
-            })
-            .expect("create scoped work item");
-        lifecycle
-            .update_work_item_execution_status(
-                "project_0001",
-                "issue_0001",
-                work_item_id,
-                WorkItemStatus::Coding,
-            )
-            .expect("set coding status");
-    }
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0001",
-            &WorkItemHandoff {
-                id: "work_item_handoff_0001".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0001".to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: "handoff summary for backend".to_string(),
-                files_changed: vec!["src/backend.rs".to_string()],
-                commit_sha: Some("backend-sha".to_string()),
-                diff_summary: String::new(),
-                tests_run: vec!["cargo test --locked --lib backend".to_string()],
-                test_result_summary: "passed".to_string(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: vec!["backend risk".to_string()],
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit1 handoff");
-    store
-        .update_coding_unit_latest_handoff_revision_id(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0001",
-            Some("handoff_revision_0001".to_string()),
-        )
-        .expect("set unit1 handoff ref");
-    store
-        .update_coding_unit_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            CodingExecutionUnitStatus::Completed,
-            Some("frontend done".to_string()),
-        )
-        .expect("complete last unit");
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            &WorkItemHandoff {
-                id: "work_item_handoff_0002".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0002".to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: "handoff summary for frontend".to_string(),
-                files_changed: vec!["src/frontend.rs".to_string()],
-                commit_sha: Some("frontend-sha".to_string()),
-                diff_summary: String::new(),
-                tests_run: vec!["cargo test --locked --lib frontend".to_string()],
-                test_result_summary: "passed".to_string(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: vec!["frontend risk".to_string()],
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit2 handoff");
-    store
-        .update_coding_unit_latest_handoff_revision_id(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            Some("handoff_revision_0002".to_string()),
-        )
-        .expect("set unit2 handoff ref");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("set running");
-    let attempt = store
-        .update_attempt_stage(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingExecutionStage::FinalConfirm,
-        )
-        .expect("final confirm stage");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::WaitingForHuman,
-        )
-        .expect("waiting for human");
-    let attempt = store
-        .update_attempt_head_commit(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            Some("deadbeef".to_string()),
-        )
-        .expect("set head commit");
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: shared_worktree,
-            base_branch: "HEAD".to_string(),
-        })
-        .expect("upsert shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
-            "project_0001",
-            "issue_0001",
-            "work_item_0002",
-            &attempt.id,
-        )
-        .expect("acquire shared worktree lock");
-    store
-        .save_timeline_node(&attempt, CodingTimelineNode {
-            id: "coding_node_0001".to_string(),
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::FinalConfirm,
-            title: "最终确认".to_string(),
-            status: CodingTimelineNodeStatus::Running,
-            agent_role: Some(CodingAgentRole::System),
-            summary: None,
-            started_at: "2026-06-27T00:00:00Z".to_string(),
-            completed_at: None,
-            artifact_refs: Vec::new(),
-        })
-        .expect("save final confirm node");
-    (root, paths, store, engine, attempt)
-}
-
 #[tokio::test]
 async fn completing_group_unit_marks_current_unit_completed_and_next_running() {
     let (_root, paths, store, engine, attempt) = group_engine_with_two_units();
@@ -282,8 +82,8 @@ async fn completing_last_group_unit_enters_review_request_stage() {
 }
 
 #[tokio::test]
-async fn completing_group_units_saves_distinct_handoffs_per_unit() {
-    let (_root, _paths, store, engine, attempt) = group_engine_with_two_units();
+async fn completing_group_units_publishes_revisions_without_legacy_handoff_artifacts() {
+    let (_root, paths, store, engine, attempt) = group_engine_with_two_units();
     seed_authoritative_group_terminal_fixture(&store, &attempt);
     create_active_coding_unit_run(&store, &attempt);
 
@@ -291,223 +91,75 @@ async fn completing_group_units_saves_distinct_handoffs_per_unit() {
         .complete_group_unit_after_code_review(&attempt)
         .await
         .expect("complete first unit");
-    let unit1_handoff = store
-        .get_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0001",
-        )
-        .expect("load unit1 handoff")
-        .expect("unit1 handoff exists");
-    assert_eq!(unit1_handoff.work_item_id, "work_item_0001");
-    assert!(store
-        .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("attempt handoff")
-        .is_none());
 
     create_active_coding_unit_run(&store, &after_first);
     let after_second = engine
         .complete_group_unit_after_code_review(&after_first)
         .await
         .expect("complete second unit");
-    let unit2_handoff = store
-        .get_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-        )
-        .expect("load unit2 handoff")
-        .expect("unit2 handoff exists");
     let units = store
         .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("units");
+    let revision_store = WorkItemRevisionStore::new(store.paths());
+    let lineage = revision_store
+        .get_plan_lineage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_plan_0001",
+        )
+        .expect("plan lineage");
+    let unit1_handoff_id = units[0]
+        .latest_handoff_revision_id
+        .as_deref()
+        .expect("unit1 handoff revision id");
+    let unit2_handoff_id = units[1]
+        .latest_handoff_revision_id
+        .as_deref()
+        .expect("unit2 handoff revision id");
+    let unit1_handoff = revision_store
+        .get_handoff_revision(&lineage, "work_item_0001", unit1_handoff_id)
+        .expect("unit1 handoff revision");
+    let unit2_handoff = revision_store
+        .get_handoff_revision(&lineage, "work_item_0002", unit2_handoff_id)
+        .expect("unit2 handoff revision");
 
     assert_eq!(after_second.stage, CodingExecutionStage::ReviewRequest);
-    assert_eq!(unit2_handoff.work_item_id, "work_item_0002");
+    assert_eq!(unit1_handoff.logical_work_item_id, "work_item_0001");
+    assert_eq!(unit2_handoff.logical_work_item_id, "work_item_0002");
     assert_eq!(
-        units[0].latest_handoff_revision_id.as_deref(),
+        Some(unit1_handoff_id),
         Some("handoff_revision_coding_unit_run_coding_unit_0001")
     );
     assert_eq!(
-        units[1].latest_handoff_revision_id.as_deref(),
+        Some(unit2_handoff_id),
         Some("handoff_revision_coding_unit_run_coding_unit_0002")
     );
-    assert_ne!(unit1_handoff.work_item_id, unit2_handoff.work_item_id);
-}
+    assert_ne!(unit1_handoff.id, unit2_handoff.id);
 
-struct ParseFailingHandoffProvider;
-
-impl cadence_aria::cross_cutting::provider_adapter::ProviderAdapter
-    for ParseFailingHandoffProvider
-{
-    fn run(
-        &self,
-        input: &AdapterInput,
-    ) -> Result<cadence_aria::protocol::contracts::AdapterOutput, ProviderAdapterError> {
-        assert_eq!(input.role, AdapterRole::Handoff);
-        Err(ProviderAdapterError::parse_error(
-            "missing structured output sentinel",
-            "plain handoff summary",
-            "",
-        ))
+    let attempt_root = paths
+        .issue_lifecycle_root(&attempt.project_id, &attempt.issue_id)
+        .join("coding-attempts")
+        .join(&attempt.id);
+    assert!(
+        !attempt_root.join("work-item-handoff.json").exists(),
+        "unit 完成不得生成 attempt 级交接摘要；旧 provider/占位路径会写入该文件"
+    );
+    for unit in &units {
+        assert!(
+            !attempt_root
+                .join("units")
+                .join(&unit.id)
+                .join("work-item-handoff.json")
+                .exists(),
+            "unit 完成不得生成 unit 级交接摘要；旧 provider/占位路径会写入该文件"
+        );
     }
 }
 
 #[tokio::test]
-async fn group_handoff_provider_parse_failure_falls_back_and_advances_next_unit() {
-    let (_root, paths, store, _engine, attempt) = group_engine_with_two_units();
-    seed_authoritative_group_terminal_fixture(&store, &attempt);
-    let shared_worktree = paths.root().join("shared-worktree");
-    std::fs::create_dir_all(&shared_worktree).expect("create shared worktree");
-    let lifecycle = LifecycleStore::new(paths);
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: shared_worktree,
-            base_branch: "HEAD".to_string(),
-        })
-        .expect("upsert shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
-            "project_0001",
-            "issue_0001",
-            "work_item_0001",
-            &attempt.id,
-        )
-        .expect("acquire shared lock for first unit");
-    let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::with_provider(
-        store.clone(),
-        GitWorkspaceService::new(),
-        Arc::new(ParseFailingHandoffProvider),
-        tx,
-    );
-    create_active_coding_unit_run(&store, &attempt);
-
-    let updated = engine
-        .complete_group_unit_after_code_review(&attempt)
-        .await
-        .expect("complete unit with fallback handoff");
-
-    let unit1_handoff = store
-        .get_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0001",
-        )
-        .expect("load unit1 handoff")
-        .expect("fallback handoff exists");
-    let units = store
-        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("units");
-
-    assert_eq!(updated.stage, CodingExecutionStage::PrepareContext);
-    assert_eq!(updated.current_work_item_id.as_deref(), Some("work_item_0002"));
-    assert_eq!(updated.active_unit_id.as_deref(), Some("coding_unit_0002"));
-    assert_eq!(unit1_handoff.work_item_id, "work_item_0001");
-    assert_eq!(
-        unit1_handoff.summary,
-        "Handoff generated from attempt artifacts"
-    );
-    assert_eq!(
-        units[0].latest_handoff_revision_id.as_deref(),
-        Some("handoff_revision_coding_unit_run_coding_unit_0001")
-    );
-    assert_eq!(units[0].status, CodingExecutionUnitStatus::Completed);
-    assert_eq!(units[1].status, CodingExecutionUnitStatus::Running);
-}
-
-#[test]
-fn group_visible_handoff_returns_last_completed_unit_when_no_active_unit_exists() {
-    let (_root, _paths, store, _engine, attempt) = group_engine_with_last_running_unit();
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0001",
-            &WorkItemHandoff {
-                id: "work_item_handoff_0001".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0001".to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: "unit1".to_string(),
-                files_changed: Vec::new(),
-                commit_sha: None,
-                diff_summary: String::new(),
-                tests_run: Vec::new(),
-                test_result_summary: String::new(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: Vec::new(),
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit1 handoff");
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            &WorkItemHandoff {
-                id: "work_item_handoff_0002".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0002".to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: "unit2".to_string(),
-                files_changed: Vec::new(),
-                commit_sha: None,
-                diff_summary: String::new(),
-                tests_run: Vec::new(),
-                test_result_summary: String::new(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: Vec::new(),
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit2 handoff");
-    store
-        .update_coding_unit_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            CodingExecutionUnitStatus::Completed,
-            Some("done".to_string()),
-        )
-        .expect("complete last unit");
-    let updated = store
-        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("updated");
-
-    let visible = store
-        .get_visible_work_item_handoff(&updated)
-        .expect("visible handoff")
-        .expect("last completed handoff exists");
-
-    assert!(updated.active_unit_id.is_none());
-    assert!(updated.current_work_item_id.is_none());
-    assert_eq!(visible.work_item_id, "work_item_0002");
-    assert_eq!(visible.summary, "unit2");
-}
-
-#[tokio::test]
 async fn group_final_review_prompt_includes_all_unit_handoffs() {
-    let (_root, _paths, _store, engine, attempt) = completed_group_attempt_with_handoffs();
+    let (_root, _paths, _store, engine, attempt) =
+        completed_group_attempt_with_handoff_revisions();
 
     let prompt = engine
         .build_group_internal_pr_review_prompt_for_test(&attempt)
@@ -520,8 +172,13 @@ async fn group_final_review_prompt_includes_all_unit_handoffs() {
     assert!(!prompt.contains("Coding Workspace InternalReviewer"));
     assert!(prompt.contains("work_item_0001"));
     assert!(prompt.contains("work_item_0002"));
-    assert!(prompt.contains("handoff summary for backend"));
-    assert!(prompt.contains("handoff summary for frontend"));
+    assert!(prompt.contains("Handoff Revision"));
+    assert!(prompt.contains("Provided Contracts"));
+    assert!(prompt.contains("Provided Capabilities"));
+    assert!(prompt.contains("HandoffRevision 契约与能力汇总"));
+    assert!(!prompt.contains("completed units 的 handoff 汇总"));
+    assert!(!prompt.contains("Handoff Summary"));
+    assert!(!prompt.contains("Tests Run"));
     assert!(prompt.contains("Reviewer 非 E2E 测试边界"));
     assert!(prompt.contains("Playwright"));
     assert!(prompt.contains("单元测试"));
@@ -535,6 +192,38 @@ async fn group_final_review_prompt_includes_all_unit_handoffs() {
     assert!(prompt.contains(
         "即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试及其所需浏览器环境"
     ));
+}
+
+#[tokio::test]
+async fn group_final_review_prompt_rejects_dangling_published_handoff_revision() {
+    let (_root, _paths, store, engine, attempt) =
+        completed_group_attempt_with_handoff_revisions();
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("completed units");
+    let final_unit = units
+        .iter()
+        .max_by_key(|unit| unit.order_index)
+        .expect("final completed unit");
+    store
+        .update_coding_unit_latest_handoff_revision_id(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &final_unit.id,
+            Some("handoff_revision_missing".to_string()),
+        )
+        .expect("set dangling published handoff revision id");
+
+    let error = engine
+        .build_group_internal_pr_review_prompt_for_test(&attempt)
+        .await
+        .expect_err("published handoff revision read failures must not be rendered as absent");
+
+    assert!(
+        error.to_string().contains("handoff_revision_missing"),
+        "已有 revision id 但记录缺失时必须失败关闭，实际: {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -567,44 +256,6 @@ async fn group_final_confirm_completes_attempt_after_all_units_completed() {
 }
 
 #[tokio::test]
-async fn group_final_confirm_rejects_unit_handoff_outside_exclusive_scope() {
-    let (_root, _paths, store, engine, attempt) =
-        group_attempt_waiting_for_final_confirm_with_scoped_work_items();
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            &WorkItemHandoff {
-                files_changed: vec!["web/src/app.tsx".to_string()],
-                ..store
-                    .get_coding_unit_handoff(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &attempt.id,
-                        "coding_unit_0002",
-                    )
-                    .expect("get unit2 handoff")
-                    .expect("existing unit2 handoff")
-            },
-        )
-        .expect("overwrite unit2 handoff");
-
-    let error = engine
-        .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .await
-        .expect_err("group final confirm should fail");
-
-    match error {
-        cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::WorkItemDiffScopeViolation(path) => {
-            assert_eq!(path, "web/src/app.tsx");
-        }
-        other => panic!("expected diff scope violation, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
     let (_root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
     let lifecycle = LifecycleStore::new(paths.clone());
@@ -622,11 +273,7 @@ async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
             })
             .expect("create work item");
     }
-    for (unit_id, work_item_id) in [
-        ("coding_unit_0001", "work_item_0001"),
-        ("coding_unit_0002", "work_item_0002"),
-    ] {
-        save_minimal_unit_handoff(&store, &attempt, unit_id, work_item_id);
+    for unit_id in ["coding_unit_0001", "coding_unit_0002"] {
         store
             .update_coding_unit_latest_handoff_revision_id(
                 &attempt.project_id,
@@ -636,6 +283,15 @@ async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
                 Some(format!("handoff_revision_{unit_id}")),
             )
             .expect("set handoff ref");
+        store
+            .update_coding_unit_completion_commit(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                unit_id,
+                Some("seed-commit".to_string()),
+            )
+            .expect("set completion commit");
     }
     store
         .update_coding_unit_status(
@@ -723,7 +379,10 @@ async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
         .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .await
         .expect_err("legacy group without authoritative binding must fail closed");
-    assert!(error.to_string().contains("coding_attempt_plan_binding"));
+    assert!(
+        error.to_string().contains("coding_attempt_plan_binding"),
+        "unexpected failure-closed error: {error}"
+    );
 
     let persisted = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)

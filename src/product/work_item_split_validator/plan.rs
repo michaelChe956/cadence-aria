@@ -211,11 +211,9 @@ pub(crate) fn validate_scopes_and_budgets(
     findings: &mut Vec<WorkItemSplitFinding>,
 ) {
     const MAX_SUMMARY_CHARS: usize = 50_000;
-    const MAX_HANDOFF_CHARS: usize = 20_000;
     const MAX_CODE_CONTEXT_CHARS: usize = 50_000;
     const MAX_CONTEXT_FILE_REFS: usize = 120;
     const MAX_TRACEABILITY_REFS: usize = 80;
-    const MAX_DEPENDENCY_HANDOFFS: usize = 5;
 
     for item in work_items {
         if item.exclusive_write_scopes.is_empty() {
@@ -231,11 +229,9 @@ pub(crate) fn validate_scopes_and_budgets(
 
         let budget = &item.context_budget;
         if budget.max_summary_chars > MAX_SUMMARY_CHARS
-            || budget.max_handoff_chars > MAX_HANDOFF_CHARS
             || budget.max_code_context_chars > MAX_CODE_CONTEXT_CHARS
             || budget.max_context_file_refs > MAX_CONTEXT_FILE_REFS
             || budget.max_traceability_refs > MAX_TRACEABILITY_REFS
-            || budget.max_dependency_handoffs > MAX_DEPENDENCY_HANDOFFS
         {
             findings.push(error(
                 "context_budget_over_limit",

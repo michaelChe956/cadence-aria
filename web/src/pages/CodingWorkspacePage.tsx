@@ -641,7 +641,6 @@ function displayCodingStage(stage: string) {
     prepare_context: "准备上下文",
     worktree_prepare: "准备 Worktree",
     coding: "Coder",
-    testing: "Tester",
     code_review: "Code Reviewer",
     review_request: "准备 PR",
     internal_pr_review: "GroupFinalReview",

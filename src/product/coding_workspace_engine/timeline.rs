@@ -24,29 +24,6 @@ impl CodingWorkspaceEngine {
         Ok(node)
     }
 
-    pub(crate) fn create_testing_timeline_node(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<CodingTimelineNode, ProductStoreError> {
-        let existing =
-            self.store
-                .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let node = CodingTimelineNode {
-            id: format!("coding_node_{:04}", existing.len() + 1),
-            attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            title: "执行测试".to_string(),
-            status: CodingTimelineNodeStatus::Running,
-            agent_role: Some(CodingAgentRole::Tester),
-            summary: None,
-            started_at: Utc::now().to_rfc3339(),
-            completed_at: None,
-            artifact_refs: Vec::new(),
-        };
-        self.store.save_timeline_node(attempt, node.clone())?;
-        Ok(node)
-    }
-
     pub(crate) fn create_coding_timeline_node(
         &self,
         attempt: &CodingExecutionAttempt,

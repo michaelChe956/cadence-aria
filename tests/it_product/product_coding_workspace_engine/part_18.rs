@@ -18,23 +18,23 @@ async fn handle_abort_marks_attempt_aborted_and_closes_active_timeline_node() {
             "project_0001",
             "issue_0001",
             &attempt.id,
-            CodingExecutionStage::Testing,
+            CodingExecutionStage::CodeReview,
         )
-        .expect("testing stage");
+        .expect("code review stage");
     store
         .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            title: "执行测试".to_string(),
+            stage: CodingExecutionStage::CodeReview,
+            title: "代码审查".to_string(),
             status: CodingTimelineNodeStatus::Running,
-            agent_role: Some(CodingAgentRole::Tester),
+            agent_role: Some(CodingAgentRole::Reviewer),
             summary: None,
             started_at: "2026-05-23T00:00:00Z".to_string(),
             completed_at: None,
             artifact_refs: Vec::new(),
         })
-        .expect("save testing node");
+        .expect("save code review node");
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -44,7 +44,7 @@ async fn handle_abort_marks_attempt_aborted_and_closes_active_timeline_node() {
         .expect("handle abort");
 
     assert_eq!(updated.status, CodingAttemptStatus::Aborted);
-    assert_eq!(updated.stage, CodingExecutionStage::Testing);
+    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
     assert!(updated.completed_at.is_some());
     let nodes = store
         .get_timeline_nodes("project_0001", "issue_0001", &attempt.id)

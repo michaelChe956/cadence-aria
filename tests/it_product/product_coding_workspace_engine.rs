@@ -1,5 +1,4 @@
 include!("product_coding_workspace_engine/part_01.rs");
-include!("product_coding_workspace_engine/part_02.rs");
 include!("product_coding_workspace_engine/part_03.rs");
 include!("product_coding_workspace_engine/part_04.rs");
 include!("product_coding_workspace_engine/part_05.rs");

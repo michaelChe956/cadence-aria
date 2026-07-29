@@ -13,7 +13,6 @@ pub struct CoderExecutionEnvelope {
 pub struct ReviewerExecutionEnvelope {
     pub unit_run_id: String,
     pub diff_ref: String,
-    pub test_evidence_refs: Vec<String>,
     pub handoff_revision_ids: Vec<String>,
     pub contract_delta_refs: Vec<String>,
     pub completion_commit: String,

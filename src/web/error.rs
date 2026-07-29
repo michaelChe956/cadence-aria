@@ -94,7 +94,6 @@ impl IntoResponse for ApiError {
             | "coding_plan_revision_binding_missing"
             | "coding_group_attempt_incomplete"
             | "work_item_dependency_not_completed"
-            | "work_item_handoff_missing"
             | "work_item_execution_plan_not_confirmed"
             | "work_item_group_empty"
             | "repository_path_not_git_repo"

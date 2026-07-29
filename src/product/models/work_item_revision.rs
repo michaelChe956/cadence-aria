@@ -193,8 +193,6 @@ pub struct HandoffRevision {
     pub provided_capabilities: BTreeMap<String, Vec<String>>,
     pub contract_hash: String,
     pub commit_sha: String,
-    pub tests: Vec<String>,
-    pub artifacts: Vec<String>,
     pub created_at: String,
 }
 

@@ -16,7 +16,7 @@ use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use crate::web::state::WebAppState;
 
-use super::{ReviewFixture, TestControls, TestingFixture, TestingFixtureRun, TestingFixtureState};
+use super::{ReviewFixture, TestControls};
 
 #[derive(Debug, Deserialize)]
 pub struct PermissionFixtureRequest {
@@ -53,18 +53,6 @@ pub async fn enable_review_fixture(
     Json(json!({"status": "ok"}))
 }
 
-pub async fn enable_testing_fixture(
-    State(state): State<WebAppState>,
-    Path(attempt_id): Path<String>,
-    Json(request): Json<TestingFixture>,
-) -> Json<serde_json::Value> {
-    state
-        .test_controls
-        .enable_testing_fixture(attempt_id, request)
-        .await;
-    Json(json!({"status": "ok"}))
-}
-
 pub async fn set_permission_timeout(
     State(state): State<WebAppState>,
     Json(request): Json<PermissionTimeoutRequest>,
@@ -95,20 +83,6 @@ impl TestControls {
             .push_back(fixture);
     }
 
-    pub async fn enable_testing_fixture(&self, session_id: String, fixture: TestingFixture) {
-        self.inner
-            .testing_fixture_sessions
-            .lock()
-            .expect("test controls testing fixture lock")
-            .insert(
-                session_id,
-                TestingFixtureState {
-                    fixture,
-                    plan_consumed: false,
-                },
-            );
-    }
-
     pub async fn consume_permission_fixture(&self, session_id: &str) -> bool {
         self.inner
             .permission_fixture_sessions
@@ -129,41 +103,6 @@ impl TestControls {
             fixtures.remove(session_id);
         }
         fixture
-    }
-
-    async fn testing_fixture_run(
-        &self,
-        session_id: &str,
-        prompt: &str,
-    ) -> Option<TestingFixtureRun> {
-        let mut fixtures = self
-            .inner
-            .testing_fixture_sessions
-            .lock()
-            .expect("test controls testing fixture lock");
-        let state = fixtures.get_mut(session_id)?;
-        if prompt.contains("execute_test_plan") && state.plan_consumed {
-            let state = fixtures.remove(session_id)?;
-            if let Some(message) = state.fixture.provider_failure {
-                return Some(TestingFixtureRun::Failure(message));
-            }
-            return Some(TestingFixtureRun::Output(
-                json!({ "step_results": state.fixture.step_results }).to_string(),
-            ));
-        }
-        if prompt.contains("plan_tests") {
-            state.plan_consumed = true;
-            if let Some(message) = state.fixture.provider_failure.clone() {
-                return Some(TestingFixtureRun::Failure(message));
-            }
-            let output = state
-                .fixture
-                .malformed_plan_output
-                .clone()
-                .unwrap_or_else(|| state.fixture.plan_output.to_string());
-            return Some(TestingFixtureRun::Output(output));
-        }
-        None
     }
 
     pub fn permission_timeout(&self) -> Duration {
@@ -203,26 +142,12 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
         true
     }
 
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
     async fn start(
         &self,
         input: StreamingProviderInput,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let structured_output_contract = input.structured_output_contract.clone();
-        if input.role == AdapterRole::Reviewer
-            && let Some(session_id) = input.workspace_session_id.as_deref()
-            && let Some(run) = self
-                .controls
-                .testing_fixture_run(session_id, &input.prompt)
-                .await
-        {
-            return Ok(start_testing_fixture_session(run, cancel));
-        }
-
         if input.role == AdapterRole::Reviewer
             && let Some(session_id) = input.workspace_session_id.as_deref()
             && let Some(fixture) = self.controls.consume_review_fixture(session_id).await
@@ -351,49 +276,6 @@ fn review_fixture_output_parts(output: &str) -> (&str, &str) {
         .unwrap_or(&before_end[start + 3..])
         .trim();
     (output[..start].trim_end(), json)
-}
-
-fn start_testing_fixture_session(
-    run: TestingFixtureRun,
-    cancel: tokio_util::sync::CancellationToken,
-) -> ProviderSession {
-    let (event_tx, event_rx) = mpsc::channel(8);
-    let (command_tx, _command_rx) = mpsc::channel(8);
-
-    tokio::spawn(async move {
-        match run {
-            TestingFixtureRun::Failure(message) => {
-                let _ = event_tx.send(ProviderEvent::Failed { message }).await;
-            }
-            TestingFixtureRun::Output(output) => {
-                if cancel.is_cancelled() {
-                    return;
-                }
-                if event_tx
-                    .send(ProviderEvent::TextDelta {
-                        content: output.clone(),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if cancel.is_cancelled() {
-                    return;
-                }
-                let _ = event_tx
-                    .send(ProviderEvent::Completed(ProviderCompletion::plain(
-                        output, None,
-                    )))
-                    .await;
-            }
-        }
-    });
-
-    ProviderSession {
-        events: event_rx,
-        commands: command_tx,
-    }
 }
 
 fn start_permission_fixture_session(

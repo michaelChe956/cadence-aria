@@ -130,11 +130,7 @@ async fn coding_role_run_fixture_seed_route_creates_attempt_with_runs() {
     let runs = store
         .list_role_runs("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("role runs");
-    assert_eq!(runs.len(), 2);
-    assert!(
-        runs.iter()
-            .any(|run| run.role == CodingProviderRole::Tester)
-    );
+    assert_eq!(runs.len(), 1);
     assert!(
         runs.iter()
             .any(|run| run.role == CodingProviderRole::CodeReviewer)

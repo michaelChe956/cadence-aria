@@ -4,6 +4,52 @@ mod schema_v2;
 
 pub(crate) const CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE: &str = "coding_output_human_triage";
 
+pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAction> {
+    match action_id {
+        "provide_context" => Some(CodingGateAction {
+            action_id: "provide_context".to_string(),
+            label: "补充上下文".to_string(),
+            action_type: CodingGateActionType::ProvideContext,
+        }),
+        "send_to_coder" => Some(CodingGateAction {
+            action_id: "send_to_coder".to_string(),
+            label: "提交给 Coder 修复".to_string(),
+            action_type: CodingGateActionType::SendToCoder,
+        }),
+        "manual_continue" => Some(CodingGateAction {
+            action_id: "manual_continue".to_string(),
+            label: "人工继续".to_string(),
+            action_type: CodingGateActionType::ManualContinue,
+        }),
+        "accept_risk" => Some(CodingGateAction {
+            action_id: "accept_risk".to_string(),
+            label: "接受风险".to_string(),
+            action_type: CodingGateActionType::AcceptRisk,
+        }),
+        "retry_coding" => Some(CodingGateAction {
+            action_id: "retry_coding".to_string(),
+            label: "重新启动 Coder".to_string(),
+            action_type: CodingGateActionType::RetryCoding,
+        }),
+        "retry_review" => Some(CodingGateAction {
+            action_id: "retry_review".to_string(),
+            label: "重试审查".to_string(),
+            action_type: CodingGateActionType::RetryReview,
+        }),
+        "retry_internal_review" => Some(CodingGateAction {
+            action_id: "retry_internal_review".to_string(),
+            label: "重试 Internal Review".to_string(),
+            action_type: CodingGateActionType::RetryInternalReview,
+        }),
+        "abort" => Some(CodingGateAction {
+            action_id: "abort".to_string(),
+            label: "终止".to_string(),
+            action_type: CodingGateActionType::Abort,
+        }),
+        _ => None,
+    }
+}
+
 impl CodingWorkspaceEngine {
     /// 当 Coder 输出无法进入任何自动化路由（plan defect 契约校验失败，
     /// 或 finding 校验后仍只能人工分诊）时，落地人工分诊 blocked gate，
@@ -234,14 +280,7 @@ impl CodingWorkspaceEngine {
             &changed_files,
             worktree_path.as_ref(),
         )?;
-        // Testing is not orchestrated by the production pipeline and is intentionally
-        // not a completion prerequisite. All non-testing gates below remain required.
-
-        if self.store.get_visible_work_item_handoff(attempt)?.is_none() {
-            return Err(CodingWorkspaceEngineError::WorkItemHandoffMissing(
-                attempt.id.clone(),
-            ));
-        }
+        // 所有保留的完成门禁仍必须通过。
 
         self.ensure_issue_shared_worktree_clean(attempt, &attempt.work_item_id)
             .await?;
@@ -264,8 +303,7 @@ impl CodingWorkspaceEngine {
             ));
         }
 
-        // Testing is not orchestrated by the production pipeline and is intentionally
-        // not a completion prerequisite. All non-testing gates below remain required.
+        // 所有保留的 group 完成门禁仍必须通过。
         let worktree_path = self.attempt_worktree_path(attempt).await.ok();
         let completed_work_item_ids = self
             .store
@@ -277,28 +315,50 @@ impl CodingWorkspaceEngine {
             .map(|unit| unit.logical_work_item_id)
             .collect::<Vec<_>>();
 
+        // 写入范围门禁的 changed_files 必须来自 git 事实：每个已完成 unit 的
+        // completion_commit 决定它实际改了哪些文件，从而保住 per-unit 归属判定。
+        // 不得依赖交接摘要字段——那会让门禁随摘要移除而空转、越界写入静默放行。
         if self.schema_v2_group_plan_lineage(attempt)?.is_some() {
             for facts in self.schema_v2_group_completion_gate_facts(attempt)? {
+                let changed_files = self
+                    .changed_files_for_unit_completion_commit(attempt, &facts.handoff.commit_sha)
+                    .await?;
                 self.validate_changed_files_for_runtime(
                     &facts.runtime,
-                    &facts.handoff.artifacts,
+                    &changed_files,
                     worktree_path.as_ref(),
                 )?;
             }
         } else {
-            let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
             let lifecycle = LifecycleStore::new(self.store.paths());
             let work_items = lifecycle.list_work_items(&attempt.project_id, &attempt.issue_id)?;
-            for (unit, handoff) in &handoffs {
+            let completed_units = self
+                .store
+                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                .into_iter()
+                .filter(|unit| {
+                    unit.status
+                        == crate::product::coding_models::CodingExecutionUnitStatus::Completed
+                })
+                .collect::<Vec<_>>();
+            for unit in &completed_units {
                 let work_item = work_items
                     .iter()
                     .find(|item| item.id == unit.logical_work_item_id)
                     .ok_or_else(|| {
                         CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone())
                     })?;
+                let Some(completion_commit) = unit.completion_commit.as_deref() else {
+                    return Err(CodingWorkspaceEngineError::CompletionCommitMissing(
+                        format!("{}:{}", attempt.id, unit.id),
+                    ));
+                };
+                let changed_files = self
+                    .changed_files_for_unit_completion_commit(attempt, completion_commit)
+                    .await?;
                 self.validate_changed_files_for_work_item(
                     work_item,
-                    &handoff.files_changed,
+                    &changed_files,
                     worktree_path.as_ref(),
                 )?;
             }
@@ -555,29 +615,6 @@ impl CodingWorkspaceEngine {
                 )?;
                 self.resume_blocked_attempt_at_stage(&cleared, CodingExecutionStage::Coding)?
             }
-            CodingGateActionType::RetryTestPlan
-            | CodingGateActionType::RerunMissingSteps
-            | CodingGateActionType::RerunTesting => {
-                let trigger = match action.action_type {
-                    CodingGateActionType::RetryTestPlan => CodingRoleRunTrigger::RetryTestPlan,
-                    CodingGateActionType::RerunMissingSteps => {
-                        CodingRoleRunTrigger::RerunMissingSteps
-                    }
-                    CodingGateActionType::RerunTesting => CodingRoleRunTrigger::ManualRerun,
-                    _ => CodingRoleRunTrigger::ManualRerun,
-                };
-                let resumed =
-                    self.resume_blocked_attempt_at_stage(&current, CodingExecutionStage::Testing)?;
-                self.store.supersede_latest_role_run_and_create(
-                    &resumed,
-                    CodingExecutionStage::Testing,
-                    CodingProviderRole::Tester,
-                    trigger,
-                    None,
-                    gate.reason_code.clone(),
-                )?;
-                resumed
-            }
             CodingGateActionType::RetryReview => {
                 if gate.stage == Some(CodingExecutionStage::InternalPrReview)
                     || gate.role == Some(CodingProviderRole::InternalReviewer)
@@ -625,27 +662,6 @@ impl CodingWorkspaceEngine {
                     gate.reason_code.clone(),
                 )?;
                 resumed
-            }
-            CodingGateActionType::AcceptTestingResult => {
-                let running = if matches!(
-                    current.status,
-                    CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
-                ) {
-                    self.store.update_attempt_status(
-                        project_id,
-                        issue_id,
-                        attempt_id,
-                        CodingAttemptStatus::Running,
-                    )?
-                } else {
-                    current
-                };
-                self.store.update_attempt_stage(
-                    &running.project_id,
-                    &running.issue_id,
-                    &running.id,
-                    CodingExecutionStage::CodeReview,
-                )?
             }
             CodingGateActionType::SendToCoder => {
                 if is_code_review_feedback_gate(&gate) {
@@ -695,7 +711,6 @@ impl CodingWorkspaceEngine {
                         gate_id: gate.gate_id.clone(),
                         stage: gate.stage.clone().unwrap_or_else(|| current.stage.clone()),
                         reason_code: gate.reason_code.clone(),
-                        skipped_required_steps: self.latest_missing_required_steps(&current)?,
                         operator_context,
                     },
                 )?;

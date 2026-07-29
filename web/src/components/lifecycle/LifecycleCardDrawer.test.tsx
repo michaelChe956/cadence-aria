@@ -151,7 +151,7 @@ describe("LifecycleCardDrawer", () => {
     expect(screen.getByText("创建时间: 2026-05-16")).toBeInTheDocument();
   });
 
-  it("renders work item scopes budget and handoff state in drawer", () => {
+  it("renders work item scopes and budget in drawer", () => {
     render(
       <LifecycleCardDrawer
         entity={{
@@ -163,15 +163,12 @@ describe("LifecycleCardDrawer", () => {
           workItemKind: "backend",
           exclusiveWriteScopes: ["src/product/**"],
           forbiddenWriteScopes: ["web/**"],
-          handoffSummaryRef: "handoffs/work_item_0001.json",
           contextBudget: {
             target_context_k: "30-50",
             max_summary_chars: 20000,
-            max_handoff_chars: 12000,
             max_code_context_chars: 30000,
             max_context_file_refs: 80,
             max_traceability_refs: 40,
-            max_dependency_handoffs: 3,
           },
           allWorkItems: [],
         }}
@@ -182,7 +179,6 @@ describe("LifecycleCardDrawer", () => {
 
     expect(screen.getByText("src/product/**")).toBeInTheDocument();
     expect(screen.getByText("web/**")).toBeInTheDocument();
-    expect(screen.getByText("交接摘要已生成")).toBeInTheDocument();
   });
 
   it("switches spec artifact versions and compares an older version to latest", () => {

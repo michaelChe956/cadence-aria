@@ -86,16 +86,16 @@ describe("CodingWorkspacePage reports and history", () => {
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "running",
-      stage: "testing",
+      stage: "code_review",
       chatEntries: [],
       timelineNodes: [
         {
-          id: "coding_node_testing_0001",
+          id: "coding_node_review_0001",
           attempt_id: "coding_attempt_0001",
-          stage: "testing",
-          title: "执行测试",
+          stage: "code_review",
+          title: "Code Review",
           status: "running",
-          agent_role: "tester",
+          agent_role: "reviewer",
           summary: null,
           started_at: "2026-07-04T00:00:00Z",
           completed_at: null,
@@ -106,12 +106,12 @@ describe("CodingWorkspacePage reports and history", () => {
         {
           id: "coding_role_run_0001",
           attempt_id: "coding_attempt_0001",
-          stage: "testing",
-          role: "tester",
+          stage: "code_review",
+          role: "code_reviewer",
           run_no: 1,
           status: "running",
           trigger: "initial",
-          node_id: "coding_node_testing_0001",
+          node_id: "coding_node_review_0001",
           started_at: "2026-07-04T00:00:00Z",
           completed_at: null,
           supersedes_run_id: null,
@@ -123,8 +123,6 @@ describe("CodingWorkspacePage reports and history", () => {
       ],
       roleProviderConfigSnapshot: {
         coder: "fake",
-        tester_plan: "codex",
-        tester_execute: "claude_code",
         code_reviewer: "fake",
         internal_reviewer: "fake",
         review_rounds: 1,
@@ -144,39 +142,6 @@ describe("CodingWorkspacePage reports and history", () => {
     expect(screen.getByRole("button", { name: "角色运行历史" })).toBeInTheDocument();
     expect(screen.queryByTestId("coding-provider-config-panel")).not.toBeInTheDocument();
     expect(screen.queryByTestId("coding-role-run-history")).not.toBeInTheDocument();
-  });
-
-  it("renders legacy testing report without plan fields", async () => {
-    mockCodingWs();
-    useCodingWorkspaceStore.setState({
-      attemptId: "coding_attempt_0001",
-      status: "running",
-      stage: "testing",
-      activeTab: "tests",
-      testingReport: {
-        id: "testing_report_0001",
-        attempt_id: "coding_attempt_0001",
-        commands: [],
-        overall_status: "passed",
-        provider_claim: null,
-        backend_verified: true,
-        started_at: "2026-06-10T00:00:00Z",
-        completed_at: "2026-06-10T00:00:01Z",
-      },
-    });
-
-    render(
-      <CodingWorkspacePage
-        address={CODING_ATTEMPT_ADDRESS}
-        onBack={vi.fn()}
-      />
-    );
-
-    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
-
-    const tabs = screen.getByTestId("coding-artifact-tabs");
-    expect(tabs).toHaveTextContent("passed");
-    expect(tabs).not.toHaveTextContent("Test Plan");
   });
 
   it("renders blocked gate metadata and sends recovery action", async () => {
@@ -389,11 +354,11 @@ describe("CodingWorkspacePage reports and history", () => {
         {
           id: "coding_node_0003",
           attempt_id: "coding_attempt_0001",
-          stage: "testing",
-          title: "执行测试",
+          stage: "coding",
+          title: "代码编写",
           status: "completed",
-          agent_role: "tester",
-          summary: "测试阻塞",
+          agent_role: "author",
+          summary: "代码编写完成",
           started_at: "2026-06-13T00:00:00Z",
           completed_at: "2026-06-13T00:00:01Z",
           artifact_refs: [],
@@ -415,8 +380,8 @@ describe("CodingWorkspacePage reports and history", () => {
         {
           id: "coding_role_run_0001",
           attempt_id: "coding_attempt_0001",
-          stage: "testing",
-          role: "tester",
+          stage: "coding",
+          role: "coder",
           run_no: 1,
           status: "completed",
           trigger: "initial",
@@ -424,7 +389,7 @@ describe("CodingWorkspacePage reports and history", () => {
           started_at: "2026-06-13T00:00:00Z",
           completed_at: "2026-06-13T00:00:01Z",
           reason_code: null,
-          raw_provider_output_refs: ["provider-raw/testing/plan_tests_0001.txt"],
+          raw_provider_output_refs: ["provider-raw/coding/coder_output_0001.txt"],
           artifact_refs: [],
         },
         {
@@ -455,13 +420,13 @@ describe("CodingWorkspacePage reports and history", () => {
     await userEvent.click(screen.getByRole("button", { name: "角色运行历史" }));
 
     const panel = screen.getByTestId("coding-role-run-history");
-    expect(panel).toHaveTextContent("Tester #1");
+    expect(panel).toHaveTextContent("Coder #1");
     expect(panel).toHaveTextContent("Code Reviewer #1");
     expect(panel).toHaveTextContent("code_review_blocked");
-    expect(panel).not.toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
+    expect(panel).not.toHaveTextContent("provider-raw/coding/coder_output_0001.txt");
 
-    await userEvent.click(screen.getByRole("button", { name: /Tester #1/ }));
-    expect(panel).toHaveTextContent("provider-raw/testing/plan_tests_0001.txt");
+    await userEvent.click(screen.getByRole("button", { name: /Coder #1/ }));
+    expect(panel).toHaveTextContent("provider-raw/coding/coder_output_0001.txt");
 
     await userEvent.click(screen.getByRole("button", { name: /Code Reviewer #1/ }));
 

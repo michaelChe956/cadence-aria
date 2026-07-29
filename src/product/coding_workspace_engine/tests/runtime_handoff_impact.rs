@@ -38,8 +38,6 @@ fn handoff(
             .collect::<BTreeMap<_, _>>(),
         contract_hash: contract_hash.to_string(),
         commit_sha: format!("commit_{id}"),
-        tests: vec![format!("test_{id}")],
-        artifacts: vec![format!("artifact_{id}")],
         created_at: "2026-07-20T00:00:00Z".to_string(),
     }
 }

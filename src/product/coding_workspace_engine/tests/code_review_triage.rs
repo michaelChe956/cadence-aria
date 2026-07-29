@@ -1,22 +1,18 @@
-//! Code review triage gate RED tests (Task 1, TDD RED phase).
+//! Code review triage gate regression tests.
 //!
 //! 这些测试覆盖 OpenSpec 变更 `open-code-review-triage-gate` 的 spec requirements：
 //! - requirement 1: StopForHumanTriage 落 blocked gate（reason_code=
 //!   `code_review_output_human_triage`）。
 //! - requirement 2: RetryVerification 落 blocked gate（reason_code=
-//!   `code_review_verification_incomplete`）。【夹具待补，见下】
+//!   `code_review_verification_incomplete`）。
 //! - requirement 3: OpenOperationalGate 落 blocked gate（reason_code=
-//!   `code_review_operational_blocker`）。【夹具待补，见下】
+//!   `code_review_operational_blocker`）。
 //! - requirement 4: 三类 gate 的动作集合均为
 //!   `[retry_review, send_to_coder, manual_continue, abort]`。
 //! - requirement 6: 互斥——同一 stage 不得 double-gate。
 //!
-//! 当前生产实现（`code_review.rs`）仅在 `verdict == Blocked &&
-//! !has_actionable_findings` 时落 `code_review_blocked` gate；对
-//! `code_review_flow_decision` 返回的 StopForHumanTriage / RetryVerification /
-//! OpenOperationalGate 三个分诊决策静默退出，既不改 attempt 状态为 Blocked，
-//! 也不落任何 gate，attempt 停留 Running。Task 1 在此写入失败测试，Task 2 才
-//! 做生产实现。
+//! 生产实现按 `code_review_flow_decision` 的分诊结果创建门禁；这些测试确保
+//! StopForHumanTriage、RetryVerification 与 OpenOperationalGate 不会回退为静默退出。
 
 use super::*;
 
@@ -43,15 +39,15 @@ fn implementation_finding_with_plan_defect_fields() -> serde_json::Value {
             "severity": "error",
             "file_path": "src/lib.rs",
             "line": 1,
-            "message": "缺少测试执行证据",
-            "required_action": "补交红灯执行记录",
+            "message": "实现缺少必需的错误处理",
+            "required_action": "补齐错误处理",
             "source_stage": "code_review",
             "defect_class": "implementation_defect",
             "recommended_route": "coder_rework",
             "evidence": [{
                 "kind": "manual_check",
-                "source_ref": "test_evidence_refs",
-                "message": "证据为空"
+                "source_ref": "src/lib.rs",
+                "message": "错误分支未覆盖"
             }]
         }]
     })
@@ -101,7 +97,7 @@ async fn stop_for_human_triage_lands_blocked_gate_with_review_actions() {
         run_code_review_with_provider_output(implementation_finding_with_plan_defect_fields())
             .await;
 
-    // 当前实现：三个分诊决策静默退出，attempt 仍为 Running（应转为 Blocked）。
+    // 分诊决策必须使 attempt 进入 Blocked，并落下对应的 gate。
     assert_eq!(
         attempt.status,
         CodingAttemptStatus::Blocked,
@@ -290,29 +286,65 @@ async fn run_group_attempt_through_coding() -> (
 
 /// `OpenOperationalGate`（operational_blocker）门禁测试。
 ///
-/// 夹具约束：operational_blocker finding 要通过 `validate_plan_defect_finding`
-/// 完整契约校验，`reviewer_projection.blocker_routing` 必须含
-/// `operational_blocker` → `OperationalGate` 的 blocker rule。但
-/// `seed_group_attempt_fixture`（`tests.rs:210-227`）预置的 `blocker_rules` 只含
-/// `current_work_item_contract_invalid` / `story_scope_invalid` /
-/// `design_constraint_invalid` / `verification_incomplete` 四条，**不含**
-/// operational_blocker rule。新增该 rule 需修改共享夹具
-/// `seed_group_attempt_fixture_with_legacy_work_items`，但 `tests.rs` 已达 800 行
-/// 上限无法扩展，且改动会影响所有依赖该夹具的测试。因此本测试保留 `#[ignore]`，
-/// 待后续单独的工作项扩充夹具（或独立 operational_blocker 夹具变体）后回填。
-/// 门禁生产侧路径已由 `stop_for_human_triage` / `retry_verification` 两个端到端
-/// 测试覆盖（三者共享同一 `match plan_defect_route` 分支与同一动作集合分派）。
+/// 复用完整 coding→projection 链路，使 operational finding 能与权威
+/// `operational_blocker` → `OperationalGate` blocker rule 对齐。
 #[tokio::test]
-#[ignore = "夹具 blocker_rules 缺 operational_blocker rule；tests.rs 已达 800 行上限，\
-            待后续扩充 operational_blocker 夹具变体后回填。门禁生产侧路径已由 \
-            stop_for_human_triage / retry_verification 端到端测试覆盖"]
 async fn open_operational_gate_lands_blocked_gate_with_review_actions() {
-    // 预期（夹具回填后）：
-    //   attempt.status == Blocked
-    //   gates.len() == 1
-    //   gates[0].reason_code == Some("code_review_operational_blocker")
-    //   action_ids == [retry_review, send_to_coder, manual_continue, abort]
-    unreachable!("operational_blocker blocker_routing 夹具待补，见文档注释");
+    let (root, store, coded) = run_group_attempt_through_coding().await;
+    let worktree = root.path().join("worktree");
+    std::fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").unwrap();
+
+    let output = serde_json::json!({
+        "verdict": "request_changes",
+        "summary": "运行环境阻塞",
+        "findings": [{
+            "severity": "error",
+            "file_path": "src/lib.rs",
+            "line": 1,
+            "message": "所需 provider 当前不可用",
+            "required_action": "恢复 provider 可用性后重试",
+            "source_stage": "code_review",
+            "defect_class": "operational_blocker",
+            "reason_code": "operational_blocker",
+            "recommended_route": "operational_gate",
+            "confidence": "high",
+            "evidence": []
+        }]
+    })
+    .to_string();
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        tx,
+    );
+    let provider = super::provider_execution_context::CapturingProjectionProvider::new(output);
+    let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+    engine
+        .execute_code_review_with_commands(&coded, &provider, &mut cmd_rx)
+        .await
+        .unwrap();
+
+    let attempt = store
+        .get_attempt(&coded.project_id, &coded.issue_id, &coded.id)
+        .unwrap();
+    assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
+    let gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .unwrap();
+    assert_eq!(gates.len(), 1);
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("code_review_operational_blocker")
+    );
+    assert_eq!(
+        gates[0]
+            .available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["retry_review", "send_to_coder", "manual_continue", "abort"]
+    );
 }
 
 /// 互斥回归测试：`verdict=blocked` 且无可执行 finding 时，必须只落既有的

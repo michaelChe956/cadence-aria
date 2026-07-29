@@ -154,18 +154,6 @@ impl ReviewerTriggeredReworkProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for ReviewerTriggeredReworkProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
-    }
-
     async fn run_streaming(
         &self,
         input: &AdapterInput,

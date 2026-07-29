@@ -23,8 +23,7 @@ use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChoiceOption, CodingExecutionAttempt,
     CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestingOverallStatus, TestingReport, WorkItemHandoff,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkItemInput,
@@ -499,131 +498,6 @@ async fn returns_group_coding_attempt_snapshot_with_units() {
     assert_eq!(snapshot["units"][1]["status"], "pending");
 }
 #[tokio::test]
-async fn group_coding_attempt_snapshot_uses_visible_handoff_instead_of_attempt_level_file() {
-    let root = tempdir().expect("root");
-    let repo = git_repo();
-    let app = build_web_router(WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    ));
-    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            current_work_item_id: "work_item_0001".to_string(),
-            base_branch: "HEAD".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: None,
-            provider_config_snapshot: cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
-                review_rounds: 1,
-            },
-            max_auto_rework: 2,
-        })
-        .expect("create group attempt");
-    store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            logical_work_item_id: "work_item_0001".to_string(),
-            work_item_revision_id: "work_item_revision_0001".to_string(),
-            dependency_logical_work_item_ids: Vec::new(),
-            order_index: 0,
-            status: CodingExecutionUnitStatus::Running,
-        })
-        .expect("create unit1");
-    store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            logical_work_item_id: "work_item_0002".to_string(),
-            work_item_revision_id: "work_item_revision_0002".to_string(),
-            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
-            order_index: 1,
-            status: CodingExecutionUnitStatus::Pending,
-        })
-        .expect("create unit2");
-    store
-        .save_work_item_handoff(&WorkItemHandoff {
-            id: "work_item_handoff_stale".to_string(),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            work_item_id: "work_item_9999".to_string(),
-            attempt_id: attempt.id.clone(),
-            provider_run_ref: None,
-            summary: "stale attempt-level handoff".to_string(),
-            files_changed: Vec::new(),
-            commit_sha: None,
-            diff_summary: String::new(),
-            tests_run: Vec::new(),
-            test_result_summary: String::new(),
-            review_summary: None,
-            api_or_contract_changes: Vec::new(),
-            open_risks: Vec::new(),
-            next_work_item_notes: Vec::new(),
-            created_at: "2026-06-27T00:00:00Z".to_string(),
-        })
-        .expect("save stale attempt handoff");
-    store
-        .save_coding_unit_handoff(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            "coding_unit_0001",
-            &WorkItemHandoff {
-                id: "work_item_handoff_0001".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0001".to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: "unit1 handoff".to_string(),
-                files_changed: Vec::new(),
-                commit_sha: None,
-                diff_summary: String::new(),
-                tests_run: Vec::new(),
-                test_result_summary: String::new(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: Vec::new(),
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit1 handoff");
-    store
-        .update_coding_unit_latest_handoff_revision_id(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            "coding_unit_0001",
-            Some("handoff_revision_0001".to_string()),
-        )
-        .expect("set handoff ref");
-
-    let (status, snapshot) = request_json(
-        app,
-        Method::GET,
-        &scoped_attempt_uri(&attempt.id, ""),
-        json!({}),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(snapshot["attempt_scope"], "work_item_group");
-    assert_eq!(snapshot["work_item_handoff"]["work_item_id"], "work_item_0001");
-    assert_eq!(snapshot["work_item_handoff"]["summary"], "unit1 handoff");
-}
-
-#[tokio::test]
 async fn rejects_group_coding_attempt_for_unconfirmed_plan() {
     let root = tempdir().expect("root");
     let repo = git_repo();
@@ -727,7 +601,7 @@ async fn group_coding_attempt_retry_is_not_blocked_after_unit_creation_failure()
 }
 
 #[tokio::test]
-async fn rejects_coding_attempt_when_required_dependency_handoff_is_missing() {
+async fn creates_coding_attempt_when_completed_dependency_has_no_handoff_summary() {
     let root = tempdir().expect("root");
     let repo = git_repo();
     let app = build_web_router(WebAppState::new(
@@ -744,12 +618,8 @@ async fn rejects_coding_attempt_when_required_dependency_handoff_is_missing() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "work_item_handoff_missing");
-    assert_eq!(
-        body["details"]["missing_handoffs"],
-        json!(["work_item_0001"])
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_global_attempt_id(&body);
 }
 
 #[tokio::test]
@@ -1034,8 +904,6 @@ async fn seed_group_attempt_with_published_handoffs(
             provided_capabilities: BTreeMap::new(),
             contract_hash: format!("hash_{}", handoff.handoff_revision_id),
             commit_sha: format!("commit_{}", handoff.handoff_revision_id),
-            tests: Vec::new(),
-            artifacts: Vec::new(),
             created_at: "2026-07-29T00:00:00Z".to_string(),
         };
         revision_store

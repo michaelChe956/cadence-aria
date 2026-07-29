@@ -26,10 +26,6 @@ pub(crate) fn build_coding_session_state(
     let timeline_nodes =
         coding_store.get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
-    let testing_report = coding_store
-        .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        .into_iter()
-        .last();
     let code_review_reports = coding_store.list_code_review_reports(
         &attempt.project_id,
         &attempt.issue_id,
@@ -89,7 +85,6 @@ pub(crate) fn build_coding_session_state(
         &attempt.issue_id,
         &attempt.id,
     )?;
-    let work_item_handoff = coding_store.get_visible_work_item_handoff(&attempt)?;
     let linked_plan_repair = reconciliation.snapshot;
     let units = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
         coding_store
@@ -124,7 +119,6 @@ pub(crate) fn build_coding_session_state(
         chat_entries: Box::new(chat_entries),
         timeline_nodes: Box::new(timeline_nodes),
         active_node_id: Box::new(active_node_id),
-        testing_report: Box::new(testing_report),
         code_review_reports: Box::new(code_review_reports),
         review_request: Box::new(review_request),
         internal_pr_review: Box::new(internal_pr_review),
@@ -134,7 +128,6 @@ pub(crate) fn build_coding_session_state(
         work_item_markdown: Box::new(execution_context.work_item_markdown),
         verification_commands: Box::new(execution_context.verification_commands),
         work_item_execution_plan: Box::new(work_item_execution_plan),
-        work_item_handoff: Box::new(work_item_handoff),
         linked_plan_repair: Box::new(linked_plan_repair),
     })
 }

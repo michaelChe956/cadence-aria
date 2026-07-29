@@ -20,7 +20,7 @@ fn controller_pauses_before_manual_write_provider_step() {
             write_class: NodeWriteClass::WritesWorkspace,
             allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
             forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-            verification_commands: vec!["cargo test --locked -j 1".to_string()],
+            verification_commands: vec!["cargo test --locked".to_string()],
             checkpoint_id: Some("ckpt_0001".to_string()),
         }),
     };
@@ -43,17 +43,17 @@ fn controller_runs_readonly_step_automatically_under_manual_write() {
     let workspace = tempdir().expect("workspace");
     let runner = FakeRunner {
         next: Some(PendingProviderStep {
-            node_id: "N17".to_string(),
+            node_id: "N18".to_string(),
             provider_type: "codex".to_string(),
-            runtime_role: "executor".to_string(),
-            adapter_role: "executor".to_string(),
-            prompt: "运行测试".to_string(),
+            runtime_role: "reviewer".to_string(),
+            adapter_role: "reviewer".to_string(),
+            prompt: "代码审查".to_string(),
             input_summary: json!({}),
-            output_schema: "schema://aria/artifacts/testing_report/v1".to_string(),
+            output_schema: "schema://aria/artifacts/code_review_report/v1".to_string(),
             write_class: NodeWriteClass::ReadOnly,
             allowed_write_scope: Vec::new(),
             forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-            verification_commands: vec!["cargo test --locked -j 1".to_string()],
+            verification_commands: vec!["cargo test --locked".to_string()],
             checkpoint_id: Some("ckpt_0001".to_string()),
         }),
     };
@@ -157,22 +157,22 @@ impl StepRunner for TwoStepRunner {
                 write_class: NodeWriteClass::WritesWorkspace,
                 allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
                 forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-                verification_commands: vec!["cargo test --locked -j 1".to_string()],
+                verification_commands: vec!["cargo test --locked".to_string()],
                 checkpoint_id: Some("ckpt_0001".to_string()),
             }
         } else {
             PendingProviderStep {
-                node_id: "N17".to_string(),
+                node_id: "N18".to_string(),
                 provider_type: "codex".to_string(),
-                runtime_role: "executor".to_string(),
-                adapter_role: "executor".to_string(),
-                prompt: "运行测试".to_string(),
+                runtime_role: "reviewer".to_string(),
+                adapter_role: "reviewer".to_string(),
+                prompt: "代码审查".to_string(),
                 input_summary: json!({}),
-                output_schema: "schema://aria/artifacts/testing_report/v1".to_string(),
+                output_schema: "schema://aria/artifacts/code_review_report/v1".to_string(),
                 write_class: NodeWriteClass::ReadOnly,
                 allowed_write_scope: Vec::new(),
                 forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-                verification_commands: vec!["cargo test --locked -j 1".to_string()],
+                verification_commands: vec!["cargo test --locked".to_string()],
                 checkpoint_id: Some("ckpt_0001".to_string()),
             }
         };

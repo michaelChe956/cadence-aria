@@ -65,59 +65,6 @@ fn provider_projection_renderer_coding_prompt_integration_preserves_normative_co
     }
 }
 
-#[test]
-fn derive_reason_code_prefers_explicit() {
-    let report = blocked_report_with(Vec::new(), vec!["S018".to_string()]);
-    let reason = derive_testing_blocked_reason_code(
-        Some("high_risk_test_step_requires_permission".to_string()),
-        &report,
-    );
-    assert_eq!(reason, "high_risk_test_step_requires_permission");
-}
-
-#[test]
-fn derive_reason_code_uses_missing_when_present() {
-    let report = blocked_report_with(vec!["unit".to_string()], vec!["S018".to_string()]);
-    assert_eq!(
-        derive_testing_blocked_reason_code(None, &report),
-        "missing_required_steps"
-    );
-}
-
-#[test]
-fn derive_reason_code_uses_skipped_when_only_skipped() {
-    let report = blocked_report_with(Vec::new(), vec!["S018".to_string(), "S027".to_string()]);
-    assert_eq!(
-        derive_testing_blocked_reason_code(None, &report),
-        "skipped_required_steps"
-    );
-}
-
-#[test]
-fn derive_reason_code_falls_back_to_testing_blocked() {
-    let report = blocked_report_with(Vec::new(), Vec::new());
-    assert_eq!(
-        derive_testing_blocked_reason_code(None, &report),
-        "testing_blocked"
-    );
-}
-
-#[test]
-fn testing_result_review_gate_copy_routes_to_code_reviewer() {
-    let accept_action = testing_result_review_gate_actions()
-        .into_iter()
-        .find(|action| action.action_id == "accept_testing_result")
-        .expect("accept testing result action");
-    assert_eq!(accept_action.label, "结果可用，进入 Code Reviewer");
-
-    let mut report = blocked_report_with(Vec::new(), Vec::new());
-    report.overall_status = TestingOverallStatus::Passed;
-    report.plan_summary = None;
-    let description = testing_result_review_description(&report);
-    assert!(description.contains("进入 Code Reviewer"));
-    assert!(!description.contains("Analyst"));
-}
-
 const FIXED_STACK_TERMS: &[&str] = &[
     "pnpm",
     "node_modules",
@@ -297,6 +244,47 @@ fn reviewer_test_scope_contract_forbids_e2e_findings_without_restricting_other_t
 }
 
 #[test]
+fn reviewer_process_evidence_boundary_contract_excludes_unobservable_unrepairable_process_facts() {
+    let contract = reviewer_process_evidence_boundary_contract();
+
+    assert!(contract.contains("无法从当前 diff、验证命令输出、handoff 字段或人工检查结果观测"));
+    assert!(contract.contains("实现完成后即使 Coder 返修也无法产出该证据"));
+    assert!(contract.contains("不得创建以过程事实为目的的 finding"));
+    assert!(contract.contains("不得作为 verdict 或 summary 中的否决理由"));
+    assert!(contract.contains("不得成为 Coder required_action 或任何返修要求"));
+    assert!(contract.contains(
+        "即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述过程事实，也不得转换"
+    ));
+    assert!(contract.contains("测试文件是否存在"));
+    assert!(contract.contains("测试是否覆盖需求场景"));
+    assert!(contract.contains("验证命令是否真实执行且非零"));
+    assert!(contract.contains("测试输出是否与实现自相矛盾"));
+    assert!(contract.contains("Forbidden Write Scopes 是否被越过"));
+}
+
+#[test]
+fn reviewer_material_protocols_define_evidence_kinds_without_weakening_verification_findings() {
+    const NON_ZERO_TEST_EXECUTION_SEMANTICS: &str = "non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。";
+
+    let code_review = code_review_material_protocol();
+    let group_final_review = group_final_review_material_protocol();
+
+    for protocol in [&code_review, &group_final_review] {
+        assert!(protocol.contains(NON_ZERO_TEST_EXECUTION_SEMANTICS));
+        assert!(protocol.contains("source_diff 表示最终代码状态"));
+        assert!(protocol.contains("manual_check 仅表示人工检查结果"));
+        assert!(protocol.contains("handoff_field 仅表示交接字段的存在与内容"));
+    }
+
+    assert!(code_review.contains("缺少 required 验证命令的执行证据，必须作为 finding 记录"));
+    assert!(code_review.contains("测试输出显示没有实际测试被执行，不能把它当作有效覆盖"));
+    assert!(group_final_review.contains("验证证据缺失"));
+    assert!(group_final_review.contains("必须 request_changes 或 blocked"));
+    assert!(coding_execution_protocol().contains("写代码前调用 test-driven-development"));
+    assert!(coding_delta_execution_protocol().contains("写代码前调用 test-driven-development"));
+}
+
+#[test]
 fn code_review_material_protocol_requires_material_derived_checklist() {
     let protocol = code_review_material_protocol();
 
@@ -308,11 +296,8 @@ fn code_review_material_protocol_requires_material_derived_checklist() {
     assert!(protocol.contains("required 验证命令的执行证据"));
     assert!(protocol.contains("测试输出显示没有实际测试被执行"));
     assert!(protocol.contains("不得提出执行材料之外的技术栈默认要求"));
-    assert!(
-        protocol.contains(
-            "completion commit 与平台 final unit handoff 在 Code Review approve 后才生成"
-        )
-    );
+    assert!(protocol.contains("当前 Unit 的 completion commit 与 HandoffRevision"));
+    assert!(protocol.contains("在 Code Review approve 后才生成"));
     assert!(protocol.contains("Code Review 前为空是正常状态"));
     assert!(protocol.contains("不得据此创建 finding、request_changes 或 blocked"));
     assert!(protocol.contains("首个用户可见消息必须是工作流路由回执"));
@@ -369,7 +354,6 @@ async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
             repository_id: "repository_0001".to_string(),
             title: "Compiled reviewer context".to_string(),
             planned_implementation_context: Some("compiled implementation context".to_string()),
-            planned_handoff_summary: Some("compiled handoff context".to_string()),
             kind: WorkItemKind::Backend,
             exclusive_write_scopes: vec!["src/product/**".to_string()],
             forbidden_write_scopes: vec!["tests/**".to_string()],
@@ -425,11 +409,65 @@ async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
     assert!(prompt.contains("requesting-code-review"));
     assert!(prompt.contains("首个用户可见消息必须是工作流路由回执"));
     assert!(prompt.contains("最终审查结论必须只输出一个 JSON 对象"));
+    assert!(prompt.contains("Reviewer 过程证据边界"));
+    assert!(prompt.contains("不得创建以过程事实为目的的 finding"));
     assert!(!prompt.contains("\n只输出 JSON："));
     assert!(!prompt.contains("cadence-workflow"));
     assert!(prompt.contains("tests/**"));
     assert!(prompt.contains("cargo test --locked --lib compiled_context"));
     assert!(!prompt.contains("未找到 Work Item markdown"));
+}
+
+#[tokio::test]
+async fn non_group_internal_review_prompt_includes_both_reviewer_boundaries() {
+    let tmp = tempdir().expect("tempdir");
+    let worktree = tmp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree dir");
+    init_prompt_git_repo(&worktree);
+
+    let store = CodingAttemptStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+    let (tx, _rx) = mpsc::channel(1);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let attempt = test_attempt("coding_attempt_internal_review_boundary");
+    let review_request = ReviewRequest {
+        id: "review_request_internal_review_boundary".to_string(),
+        attempt_id: attempt.id.clone(),
+        kind: ReviewRequestKind::GitBranchOnly,
+        remote_kind: RemoteKind::GenericGit,
+        remote: "origin".to_string(),
+        base_branch: attempt.base_branch.clone(),
+        branch_name: attempt.branch_name.clone(),
+        commit_sha: "deadbeef".to_string(),
+        push_status: PushStatus::Pushed,
+        external_url: None,
+        manual_instructions: Vec::new(),
+        created_at: "2026-07-28T00:00:00Z".to_string(),
+        updated_at: "2026-07-28T00:00:00Z".to_string(),
+    };
+
+    let prompt = engine
+        .build_internal_pr_review_prompt(&attempt, &review_request, &worktree, None)
+        .await
+        .expect("non-group internal review prompt");
+
+    assert!(prompt.contains("Reviewer 非 E2E 测试边界"));
+    assert!(prompt.contains("Reviewer 过程证据边界"));
+    assert!(prompt.contains("不得创建以过程事实为目的的 finding"));
+}
+
+#[tokio::test]
+async fn group_final_review_prompt_includes_process_evidence_boundary() {
+    let (_root, _store, attempt, engine, _event_rx) =
+        super::plan_defect_entrypoints::prepared_group_review_fixture();
+
+    let prompt = engine
+        .build_group_internal_pr_review_prompt_for_test(&attempt)
+        .await
+        .expect("group final review prompt");
+
+    assert!(prompt.contains("Reviewer 过程证据边界"));
+    assert!(prompt.contains("不得创建以过程事实为目的的 finding"));
+    assert!(prompt.contains("non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。"));
 }
 
 #[tokio::test]
@@ -450,7 +488,6 @@ async fn first_group_code_review_uses_base_branch_without_head_commit() {
             repository_id: "repository_0001".to_string(),
             title: "First unit".to_string(),
             planned_implementation_context: Some("review first unit".to_string()),
-            planned_handoff_summary: Some("first unit handoff".to_string()),
             ..Default::default()
         })
         .expect("create first work item");
@@ -496,7 +533,6 @@ async fn group_code_review_uses_previous_unit_head_commit_as_diff_base() {
             repository_id: "repository_0001".to_string(),
             title: "Current unit".to_string(),
             planned_implementation_context: Some("review current unit only".to_string()),
-            planned_handoff_summary: Some("current unit handoff".to_string()),
             ..Default::default()
         })
         .expect("create current work item");
@@ -536,7 +572,6 @@ async fn later_group_code_review_rejects_missing_head_commit() {
             repository_id: "repository_0001".to_string(),
             title: "Current unit".to_string(),
             planned_implementation_context: Some("review current unit only".to_string()),
-            planned_handoff_summary: Some("current unit handoff".to_string()),
             ..Default::default()
         })
         .expect("create current work item");
@@ -578,7 +613,6 @@ async fn group_attempt_prompts_use_current_work_item_id() {
             repository_id: "repository_0001".to_string(),
             title: "First stale work item".to_string(),
             planned_implementation_context: Some("stale context".to_string()),
-            planned_handoff_summary: Some("stale handoff".to_string()),
             ..Default::default()
         })
         .expect("create stale work item");
@@ -590,7 +624,6 @@ async fn group_attempt_prompts_use_current_work_item_id() {
             repository_id: "repository_0001".to_string(),
             title: "Current active work item".to_string(),
             planned_implementation_context: Some("current implementation context".to_string()),
-            planned_handoff_summary: Some("current handoff".to_string()),
             ..Default::default()
         })
         .expect("create current work item");
@@ -694,11 +727,13 @@ async fn group_attempt_prompts_use_current_work_item_id() {
 }
 
 #[test]
-fn group_final_review_material_protocol_requires_group_handoff_checks() {
+fn group_final_review_material_protocol_requires_handoff_revision_checks() {
     let protocol = group_final_review_material_protocol();
 
     assert!(protocol.contains("Completed Units"));
-    assert!(protocol.contains("unit handoff"));
+    assert!(protocol.contains("HandoffRevision"));
+    assert!(protocol.contains("Provided Contracts"));
+    assert!(protocol.contains("Provided Capabilities"));
     assert!(protocol.contains("ReviewRequest 已 push 的 commit"));
     assert!(protocol.contains("Forbidden Write Scopes"));
     assert!(protocol.contains("source_stage=group_final_review"));
@@ -710,49 +745,6 @@ fn internal_review_prompt_requires_openspec_and_superpowers() {
     assert!(internal_contract.contains("InternalReviewer"));
     assert!(internal_contract.contains("[openspec_contract]"));
     assert!(internal_contract.contains("[superpowers_contract]"));
-}
-
-#[test]
-fn dangerous_test_plan_step_requires_permission_or_blocks() {
-    let plan = TestPlan {
-        id: "test_plan_0001".to_string(),
-        attempt_id: "coding_attempt_0001".to_string(),
-        role_run_id: None,
-        run_no: None,
-        summary: "dangerous checks".to_string(),
-        context_warnings: Vec::new(),
-        assumptions: Vec::new(),
-        steps: vec![crate::product::coding_models::TestPlanStep {
-            id: "destructive".to_string(),
-            title: "destructive command".to_string(),
-            intent: "should require approval".to_string(),
-            required: true,
-            tool: crate::product::coding_models::TestPlanTool::RunCommand,
-            risk_level: crate::product::coding_models::TestPlanRiskLevel::High,
-            command_or_tool_input: serde_json::json!({
-                "command": ["rm", "-rf", "/tmp/some-target"]
-            }),
-            evidence_expectation: "must not run without approval".to_string(),
-            related_requirements: Vec::new(),
-            related_design_constraints: Vec::new(),
-            related_work_item_tasks: Vec::new(),
-        }],
-        created_at: "2026-06-10T00:00:00Z".to_string(),
-        raw_provider_output_ref: None,
-    };
-    let call = ProviderToolCall {
-        id: "run_command_0001".to_string(),
-        tool_name: "run_command".to_string(),
-        input: serde_json::json!({
-            "step_id": "destructive",
-            "command": ["rm", "-rf", "/tmp/some-target"]
-        }),
-    };
-
-    assert_eq!(
-        high_risk_test_step_block_reason(&plan, &call),
-        Some("high_risk_test_step_requires_permission")
-    );
 }
 
 fn init_prompt_git_repo(repo: &std::path::Path) {

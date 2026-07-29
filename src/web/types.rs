@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::product::coding_models::{
     CodeReviewReport, CodingChoiceGate, CodingGateRequired, CodingTimelineNode, InternalPrReview,
-    ReviewRequest, TestingReport, WorkItemExecutionPlan, WorkItemHandoff,
+    ReviewRequest, WorkItemExecutionPlan,
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -446,18 +446,15 @@ pub struct LifecycleWorkItemDto {
     pub source_outline_id: Option<String>,
     pub source_draft_id: Option<String>,
     pub planned_implementation_context: Option<String>,
-    pub planned_handoff_summary: Option<String>,
     pub kind: String,
     pub sequence_hint: Option<u32>,
     pub depends_on: Vec<String>,
     pub exclusive_write_scopes: Vec<String>,
     pub forbidden_write_scopes: Vec<String>,
     pub context_budget: WorkItemContextBudgetDto,
-    pub required_handoff_from: Vec<String>,
     pub verification_plan_ref: Option<String>,
     pub require_execution_plan_confirm: bool,
     pub execution_plan_status: String,
-    pub handoff_summary_ref: Option<String>,
     pub completion_commit: Option<String>,
     pub completion_diff_summary_ref: Option<String>,
 }
@@ -467,11 +464,9 @@ pub struct LifecycleWorkItemDto {
 pub struct WorkItemContextBudgetDto {
     pub target_context_k: String,
     pub max_summary_chars: usize,
-    pub max_handoff_chars: usize,
     pub max_code_context_chars: usize,
     pub max_context_file_refs: usize,
     pub max_traceability_refs: usize,
-    pub max_dependency_handoffs: usize,
 }
 
 impl Default for WorkItemContextBudgetDto {
@@ -479,11 +474,9 @@ impl Default for WorkItemContextBudgetDto {
         Self {
             target_context_k: "30-50".to_string(),
             max_summary_chars: 20_000,
-            max_handoff_chars: 12_000,
             max_code_context_chars: 30_000,
             max_context_file_refs: 80,
             max_traceability_refs: 40,
-            max_dependency_handoffs: 3,
         }
     }
 }
@@ -547,7 +540,6 @@ pub struct CodingAttemptSnapshotResponse {
     pub provider_config_snapshot: ProviderConfigSnapshot,
     pub timeline_nodes: Vec<CodingTimelineNode>,
     pub active_node_id: Option<String>,
-    pub testing_report: Option<TestingReport>,
     pub code_review_reports: Vec<CodeReviewReport>,
     pub review_request: Option<ReviewRequest>,
     pub internal_pr_review: Option<InternalPrReview>,
@@ -555,8 +547,6 @@ pub struct CodingAttemptSnapshotResponse {
     pub pending_choices: Vec<CodingChoiceGate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item_execution_plan: Option<WorkItemExecutionPlan>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_item_handoff: Option<WorkItemHandoff>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -8,8 +8,8 @@ fn role_run_retry_diagnostic_summary_preserves_refs_when_inline_detail_is_long()
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0005".to_string()),
         )
@@ -33,7 +33,7 @@ fn role_run_retry_diagnostic_summary_preserves_refs_when_inline_detail_is_long()
             "issue_0001",
             &attempt.id,
             &run.id,
-            vec!["provider-raw/testing/long_detail_0001.txt".to_string()],
+            vec!["provider-raw/code_review/long_detail_0001.txt".to_string()],
             vec!["artifacts/role-run-events/coding_role_run_0001/0001_detail.txt".to_string()],
         )
         .expect("refs");
@@ -55,7 +55,7 @@ fn role_run_retry_diagnostic_summary_preserves_refs_when_inline_detail_is_long()
 
     assert!(summary.contains("Long diagnostic detail"));
     assert!(summary.contains("reason_code: long_detail_blocked"));
-    assert!(summary.contains("provider-raw/testing/long_detail_0001.txt"));
+    assert!(summary.contains("provider-raw/code_review/long_detail_0001.txt"));
     assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0001_detail.txt"));
     assert!(!summary.contains("DETAIL_SHOULD_BE_TRUNCATED"));
     assert!(
@@ -103,110 +103,6 @@ fn saves_and_loads_work_item_execution_plan() {
         .expect("plan exists");
     assert_eq!(loaded.goal, "实现后端 API");
     assert_eq!(loaded.status, WorkItemExecutionPlanStatus::Draft);
-}
-
-#[test]
-fn saves_and_loads_work_item_handoff() {
-    let root = tempdir().expect("tempdir");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let handoff = WorkItemHandoff {
-        id: "work_item_handoff_0001".to_string(),
-        project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        work_item_id: "work_item_0001".to_string(),
-        attempt_id: "coding_attempt_0001".to_string(),
-        provider_run_ref: Some("provider-raw/handoff/work_item_0001.txt".to_string()),
-        summary: "后端 API 已完成，前端可调用 /api/session".to_string(),
-        files_changed: vec!["src/web/handlers.rs".to_string()],
-        commit_sha: Some("abc123".to_string()),
-        diff_summary: "新增 session API".to_string(),
-        tests_run: vec!["provider gate verify_session_api passed".to_string()],
-        test_result_summary: "全部通过".to_string(),
-        review_summary: Some("无阻塞问题".to_string()),
-        api_or_contract_changes: vec!["GET /api/session".to_string()],
-        open_risks: Vec::new(),
-        next_work_item_notes: vec!["前端处理 401".to_string()],
-        created_at: "2026-06-16T00:00:00Z".to_string(),
-    };
-
-    store
-        .save_work_item_handoff(&handoff)
-        .expect("save handoff");
-
-    let loaded = store
-        .get_work_item_handoff("project_0001", "issue_0001", "coding_attempt_0001")
-        .expect("load handoff")
-        .expect("handoff exists");
-    assert_eq!(loaded.summary, handoff.summary);
-}
-
-#[test]
-fn saves_and_loads_group_unit_work_item_handoff() {
-    let root = tempdir().expect("tempdir");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            current_work_item_id: "work_item_0001".to_string(),
-            base_branch: "main".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: None,
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
-                review_rounds: 1,
-            },
-            max_auto_rework: 2,
-        })
-        .expect("create group attempt");
-    store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            logical_work_item_id: "work_item_0001".to_string(),
-            work_item_revision_id: "work_item_revision_0001".to_string(),
-            dependency_logical_work_item_ids: Vec::new(),
-            order_index: 0,
-            status: CodingExecutionUnitStatus::Running,
-        })
-        .expect("create unit");
-    let handoff = WorkItemHandoff {
-        id: "work_item_handoff_0001".to_string(),
-        project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        work_item_id: "work_item_0001".to_string(),
-        attempt_id: attempt.id.clone(),
-        provider_run_ref: None,
-        summary: "group unit handoff".to_string(),
-        files_changed: vec!["src/lib.rs".to_string()],
-        commit_sha: Some("abc123".to_string()),
-        diff_summary: "group unit diff".to_string(),
-        tests_run: vec!["cargo test".to_string()],
-        test_result_summary: "passed".to_string(),
-        review_summary: Some("ok".to_string()),
-        api_or_contract_changes: Vec::new(),
-        open_risks: Vec::new(),
-        next_work_item_notes: vec!["next".to_string()],
-        created_at: "2026-06-27T00:00:00Z".to_string(),
-    };
-
-    store
-        .save_coding_unit_handoff("project_0001", "issue_0001", &attempt.id, "coding_unit_0001", &handoff)
-        .expect("save unit handoff");
-
-    let loaded = store
-        .get_coding_unit_handoff("project_0001", "issue_0001", &attempt.id, "coding_unit_0001")
-        .expect("load unit handoff")
-        .expect("unit handoff exists");
-    assert_eq!(loaded.summary, handoff.summary);
-    assert!(store
-        .get_work_item_handoff("project_0001", "issue_0001", &attempt.id)
-        .expect("attempt handoff")
-        .is_none());
 }
 
 #[test]
@@ -286,7 +182,6 @@ fn scoped_writes_target_only_exact_legacy_attempt_identity() {
                 gate_id: "coding_stage_gate_0001".to_string(),
                 stage: CodingExecutionStage::Coding,
                 reason_code: Some("accepted_risk".to_string()),
-                skipped_required_steps: Vec::new(),
                 operator_context: "target audit".to_string(),
             },
         )
@@ -300,26 +195,6 @@ fn scoped_writes_target_only_exact_legacy_attempt_identity() {
             "target raw output",
         )
         .expect("target raw output");
-    store
-        .save_test_plan(
-            &target,
-            &TestPlan {
-                id: "test_plan_0001".to_string(),
-                attempt_id: target.id.clone(),
-                role_run_id: None,
-                run_no: None,
-                summary: "target plan".to_string(),
-                context_warnings: Vec::new(),
-                assumptions: Vec::new(),
-                steps: Vec::new(),
-                created_at: "2026-07-16T00:00:00Z".to_string(),
-                raw_provider_output_ref: Some(raw_ref.clone()),
-            },
-        )
-        .expect("target test plan");
-    store
-        .save_testing_report(&target, &sample_testing_report(&target.id))
-        .expect("target testing report");
     store
         .save_code_review_report(&target, &sample_code_review_report(&target.id))
         .expect("target code review");
@@ -382,20 +257,6 @@ fn scoped_writes_target_only_exact_legacy_attempt_identity() {
     );
     assert_eq!(
         store
-            .list_test_plans("project_0001", "issue_0001", &target.id)
-            .expect("target test plans")
-            .len(),
-        1
-    );
-    assert_eq!(
-        store
-            .list_testing_reports("project_0001", "issue_0001", &target.id)
-            .expect("target testing reports")
-            .len(),
-        1
-    );
-    assert_eq!(
-        store
             .list_code_review_reports("project_0001", "issue_0001", &target.id)
             .expect("target code reviews")
             .len(),
@@ -431,12 +292,6 @@ fn scoped_writes_target_only_exact_legacy_attempt_identity() {
         store
             .list_open_choice_gates("project_0001", "issue_0002", &target.id)
             .expect("other choice gates")
-            .is_empty()
-    );
-    assert!(
-        store
-            .list_testing_reports("project_0001", "issue_0002", &target.id)
-            .expect("other testing reports")
             .is_empty()
     );
     assert!(

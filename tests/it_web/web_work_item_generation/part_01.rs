@@ -73,7 +73,6 @@ pub(crate) fn valid_split_output() -> Value {
                 "depends_on": [],
                 "exclusive_write_scopes": ["src/product/session.rs"],
                 "forbidden_write_scopes": ["web/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             },
             {
@@ -83,7 +82,6 @@ pub(crate) fn valid_split_output() -> Value {
                 "depends_on": [0],
                 "exclusive_write_scopes": ["web/src/session/**"],
                 "forbidden_write_scopes": ["src/product/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             },
             {
@@ -93,7 +91,6 @@ pub(crate) fn valid_split_output() -> Value {
                 "depends_on": [1],
                 "exclusive_write_scopes": ["tests/session/**"],
                 "forbidden_write_scopes": [],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],
@@ -302,7 +299,6 @@ pub(crate) fn valid_revision_redo_output() -> Value {
                 "depends_on": [],
                 "exclusive_write_scopes": ["src/product/session.rs"],
                 "forbidden_write_scopes": ["web/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],
@@ -352,7 +348,6 @@ pub(crate) fn invalid_split_output_missing_e2e() -> Value {
                 "depends_on": [],
                 "exclusive_write_scopes": ["src/product/session.rs"],
                 "forbidden_write_scopes": ["web/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],

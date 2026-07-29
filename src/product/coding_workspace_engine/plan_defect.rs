@@ -18,7 +18,6 @@ use crate::product::work_item_revision_store::WorkItemRevisionStore;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlanDefectSource {
     Coder,
-    Tester,
     CodeReviewer,
     GroupReviewer,
 }
@@ -27,7 +26,6 @@ impl PlanDefectSource {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::Coder => "coder",
-            Self::Tester => "tester",
             Self::CodeReviewer => "code_reviewer",
             Self::GroupReviewer => "group_reviewer",
         }
@@ -422,19 +420,12 @@ impl CodingWorkspaceEngine {
             .head_commit
             .clone()
             .unwrap_or_else(|| attempt.base_branch.clone());
-        let test_evidence_refs = self
-            .store
-            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .map(|report| report.id)
-            .collect();
         let rendered = renderer_for(provider)
             .render_reviewer(
                 &bundle.reviewer_projection,
                 &ReviewerExecutionEnvelope {
                     unit_run_id: run.id.clone(),
                     diff_ref: format!("{repository_state_ref}..worktree"),
-                    test_evidence_refs,
                     handoff_revision_ids: run.resolved_handoff_revision_ids.clone(),
                     contract_delta_refs: Vec::new(),
                     completion_commit: repository_state_ref,

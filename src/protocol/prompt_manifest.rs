@@ -92,11 +92,6 @@ pub fn phase1_prompt_manifest() -> PromptManifest {
             "schema://aria/artifacts/coding_report/v1",
         ),
         entry(
-            "N17",
-            "tpl_n17_testing_v1",
-            "schema://aria/artifacts/testing_report/v1",
-        ),
-        entry(
             "N18",
             "tpl_n18_code_review_v1",
             "schema://aria/artifacts/code_review_report/v1",

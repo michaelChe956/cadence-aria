@@ -42,8 +42,6 @@ async fn coding_runtime_handoff_group_completion_resumes_and_starts_waiting_cons
                     "5d1465e86ea2fbad8df040b5eac6ab52130ce6b06d2bd3b6403305c3b3e83b23"
                         .to_string(),
                 commit_sha: fixture.original_head.clone(),
-                tests: vec!["old test evidence".to_string()],
-                artifacts: vec!["old artifact".to_string()],
                 created_at: "2026-07-18T00:00:00Z".to_string(),
             },
         )
@@ -276,8 +274,6 @@ async fn coding_runtime_handoff_group_completion_rejects_non_authoritative_previ
                         provided_capabilities: std::collections::BTreeMap::new(),
                         contract_hash: "other_hash".to_string(),
                         commit_sha: fixture.original_head.clone(),
-                        tests: Vec::new(),
-                        artifacts: Vec::new(),
                         created_at: "2026-07-18T00:00:00Z".to_string(),
                     },
                 )
@@ -533,8 +529,6 @@ async fn coding_runtime_handoff_authority_group_previous_is_zero_write() {
                             })
                             .unwrap_or_else(|| fixture.original_head.clone())
                     },
-                    tests: Vec::new(),
-                    artifacts: Vec::new(),
                     created_at: "2026-07-18T00:00:00Z".to_string(),
                 },
             )

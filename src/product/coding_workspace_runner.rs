@@ -32,7 +32,6 @@ pub enum CodingRunnerCommand {
 pub fn coding_provider_role_for_stage(stage: &CodingExecutionStage) -> Option<CodingProviderRole> {
     match stage {
         CodingExecutionStage::Coding => Some(CodingProviderRole::Coder),
-        CodingExecutionStage::Testing => Some(CodingProviderRole::Tester),
         CodingExecutionStage::CodeReview => Some(CodingProviderRole::CodeReviewer),
         CodingExecutionStage::InternalPrReview => Some(CodingProviderRole::InternalReviewer),
         CodingExecutionStage::PrepareContext
@@ -45,7 +44,6 @@ pub fn coding_provider_role_for_stage(stage: &CodingExecutionStage) -> Option<Co
 pub fn parse_coding_provider_role(role: &str) -> Option<CodingProviderRole> {
     match role {
         "author" | "coder" => Some(CodingProviderRole::Coder),
-        "tester" | "tester_plan" | "tester_execute" => Some(CodingProviderRole::Tester),
         "reviewer" | "code_reviewer" => Some(CodingProviderRole::CodeReviewer),
         "internal_reviewer" => Some(CodingProviderRole::InternalReviewer),
         _ => None,
@@ -61,9 +59,7 @@ pub fn apply_provider_selection_to_snapshots(
     match role {
         "author" => {
             legacy_snapshot.author = provider.clone();
-            role_snapshot.coder = provider.clone();
-            role_snapshot.tester_plan = provider.clone();
-            role_snapshot.tester_execute = provider;
+            role_snapshot.coder = provider;
             Ok(CodingProviderRole::Coder)
         }
         "reviewer" => {
@@ -76,14 +72,6 @@ pub fn apply_provider_selection_to_snapshots(
             legacy_snapshot.author = provider.clone();
             role_snapshot.coder = provider;
             Ok(CodingProviderRole::Coder)
-        }
-        "tester_plan" => {
-            role_snapshot.set_tester_plan_provider(provider);
-            Ok(CodingProviderRole::Tester)
-        }
-        "tester_execute" => {
-            role_snapshot.set_tester_execute_provider(provider);
-            Ok(CodingProviderRole::Tester)
         }
         "code_reviewer" => {
             legacy_snapshot.reviewer = Some(provider.clone());

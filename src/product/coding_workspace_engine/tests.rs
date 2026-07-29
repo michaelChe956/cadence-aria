@@ -34,31 +34,6 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
-fn blocked_report_with(missing: Vec<String>, skipped: Vec<String>) -> TestingReport {
-    TestingReport {
-        id: "testing_report_0001".to_string(),
-        attempt_id: "coding_attempt_0001".to_string(),
-        role_run_id: None,
-        run_no: None,
-        commands: Vec::new(),
-        overall_status: TestingOverallStatus::Blocked,
-        provider_claim: None,
-        backend_verified: true,
-        started_at: "2026-06-10T00:00:00Z".to_string(),
-        completed_at: Some("2026-06-10T00:00:01Z".to_string()),
-        plan_id: Some("test_plan_0001".to_string()),
-        plan_summary: Some("plan".to_string()),
-        steps: Vec::new(),
-        unplanned_commands: Vec::new(),
-        unplanned_evidence: Vec::new(),
-        missing_required_steps: missing,
-        skipped_required_steps: skipped,
-        context_warnings: Vec::new(),
-        raw_provider_output_ref: None,
-        plan_defect_findings: Vec::new(),
-    }
-}
-
 fn seed_group_attempt_fixture(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
@@ -226,6 +201,11 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
                 BlockerRule {
                     reason_code: "verification_incomplete".to_string(),
                     route: BlockerRoute::VerificationRetry,
+                    target_contract_refs: Vec::new(),
+                },
+                BlockerRule {
+                    reason_code: "operational_blocker".to_string(),
+                    route: BlockerRoute::OperationalGate,
                     target_contract_refs: Vec::new(),
                 },
             ],
@@ -464,7 +444,7 @@ mod gate_rework;
 mod git_operation_reconcile;
 mod group_completion_authority;
 mod group_terminal;
-mod legacy_completion_gate;
+mod internal_review_triage;
 mod parser_prompt;
 mod plan_amendment;
 mod plan_defect_entrypoints;
@@ -477,8 +457,6 @@ mod runtime_handoff_compatibility;
 mod runtime_handoff_delta;
 mod runtime_handoff_impact;
 mod schema_v2_runtime;
-mod tester_cancellation;
-mod tester_repair_plan_defect;
 
 #[tokio::test]
 async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node() {
@@ -683,12 +661,6 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
     assert_eq!(completed.scope, CodingAttemptScope::WorkItem);
     assert_eq!(completed.status, CodingAttemptStatus::Completed);
     assert_eq!(completed.stage, CodingExecutionStage::ReviewRequest);
-    assert!(
-        store
-            .get_work_item_handoff(&completed.project_id, &completed.issue_id, &completed.id)
-            .expect("work item handoff")
-            .is_some()
-    );
     assert!(
         store
             .get_timeline_nodes(&completed.project_id, &completed.issue_id, &completed.id)

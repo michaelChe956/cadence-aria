@@ -1,21 +1,16 @@
-use std::path::PathBuf;
-
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
     CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput, CreateCodingAttemptInput,
-    CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
-    CreateQualityBypassAuditInput,
+    CreateGroupCodingAttemptInput, CreateQualityBypassAuditInput,
 };
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
     CodingChoiceGateStatus, CodingChoiceOption, CodingContextNote, CodingEntryType,
-    CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole, CodingReworkInstruction,
+    CodingExecutionStage, CodingProviderRole, CodingReworkInstruction,
     CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
     CodingRoleRunStatus, CodingRoleRunTrigger, CodingStageGateStatus, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, TestCommand,
-    TestCommandStatus, TestPlan, TestingOverallStatus, TestingReport, WorkItemExecutionPlan,
-    WorkItemHandoff,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict, WorkItemExecutionPlan,
 };
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::{
@@ -294,15 +289,11 @@ fn store_persists_reports_reviews_and_timeline_for_snapshot_recovery() {
         .create_attempt(create_input("work_item_0001"))
         .expect("create attempt");
 
-    let testing = sample_testing_report(&attempt.id);
     let code_review = sample_code_review_report(&attempt.id);
     let review_request = sample_review_request(&attempt.id);
     let internal_review = sample_internal_review(&attempt.id, &review_request.id);
     let node = sample_node(&attempt.id);
 
-    store
-        .save_testing_report(&attempt, &testing)
-        .expect("save testing report");
     store
         .save_code_review_report(&attempt, &code_review)
         .expect("save code review");
@@ -316,17 +307,6 @@ fn store_persists_reports_reviews_and_timeline_for_snapshot_recovery() {
         .save_timeline_node(&attempt, node.clone())
         .expect("save node");
 
-    assert_eq!(
-        store
-            .get_testing_report(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &testing.id
-            )
-            .expect("load testing"),
-        testing
-    );
     assert_eq!(
         store
             .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -536,7 +516,7 @@ fn saves_reads_and_consumes_latest_coding_rework_instruction() {
     let first = CodingReworkInstruction {
         id: "coding_rework_instruction_0001".to_string(),
         attempt_id: attempt.id.clone(),
-        source_stage: CodingExecutionStage::Testing,
+        source_stage: CodingExecutionStage::CodeReview,
         rework_round: 1,
         summary: "测试失败".to_string(),
         fix_hints: vec!["修复 failing test".to_string()],
@@ -628,8 +608,8 @@ fn saves_reads_and_supersedes_coding_role_runs() {
     let first = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0003".to_string()),
         )
@@ -637,16 +617,16 @@ fn saves_reads_and_supersedes_coding_role_runs() {
     assert_eq!(first.id, "coding_role_run_0001");
     assert_eq!(first.run_no, 1);
     assert_eq!(first.status, CodingRoleRunStatus::Running);
-    assert_eq!(first.role, CodingProviderRole::Tester);
+    assert_eq!(first.role, CodingProviderRole::CodeReviewer);
 
     let second = store
         .supersede_latest_role_run_and_create(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
-            CodingRoleRunTrigger::RetryTestPlan,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::RetryReview,
             Some("coding_node_0004".to_string()),
-            Some("plan_tests_timeout".to_string()),
+            Some("code_review_timeout".to_string()),
         )
         .expect("second role run");
 
@@ -673,8 +653,8 @@ fn saves_reads_and_supersedes_coding_role_runs() {
             "project_0001",
             "issue_0001",
             &attempt.id,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
         )
         .expect("latest")
         .expect("latest role run");
@@ -693,14 +673,10 @@ fn store_persists_role_provider_config_snapshot_in_attempt_scope() {
         .get_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id)
         .expect("initial role provider snapshot");
     assert_eq!(initial.coder, ProviderName::Fake);
-    assert_eq!(initial.tester_plan, ProviderName::Fake);
-    assert_eq!(initial.tester_execute, ProviderName::Fake);
     assert_eq!(initial.code_reviewer, ProviderName::Fake);
 
     let updated = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Fake,
-        tester_plan: ProviderName::ClaudeCode,
-        tester_execute: ProviderName::Codex,
         code_reviewer: ProviderName::Codex,
         internal_reviewer: ProviderName::Fake,
         review_rounds: 1,
@@ -739,8 +715,8 @@ fn store_persists_and_resolves_stage_gates_in_attempt_scope() {
     let gate = store
         .create_stage_gate(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             "2026-05-28T00:00:05Z".to_string(),
             provider_snapshot.clone(),
         )
@@ -748,8 +724,8 @@ fn store_persists_and_resolves_stage_gates_in_attempt_scope() {
 
     assert_eq!(gate.gate_id, "coding_stage_gate_0001");
     assert_eq!(gate.attempt_id, attempt.id);
-    assert_eq!(gate.stage, CodingExecutionStage::Testing);
-    assert_eq!(gate.role, CodingProviderRole::Tester);
+    assert_eq!(gate.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(gate.role, CodingProviderRole::CodeReviewer);
     assert_eq!(gate.provider_snapshot, provider_snapshot);
     assert_eq!(gate.status, CodingStageGateStatus::Open);
     assert_eq!(

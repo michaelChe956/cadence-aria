@@ -93,7 +93,7 @@ fn status_and_stage_transitions_reject_invalid_backwards_moves() {
             "project_0001",
             "issue_0001",
             &attempt.id,
-            CodingExecutionStage::Testing,
+            CodingExecutionStage::ReviewRequest,
         )
         .expect("forward stage");
     assert!(
@@ -160,39 +160,6 @@ fn group_create_input(current_work_item_id: &str) -> CreateGroupCodingAttemptInp
     }
 }
 
-fn sample_testing_report(attempt_id: &str) -> TestingReport {
-    TestingReport {
-        id: "testing_report_0001".to_string(),
-        attempt_id: attempt_id.to_string(),
-        role_run_id: None,
-        run_no: None,
-        commands: vec![TestCommand {
-            command: vec!["cargo".to_string(), "test".to_string()],
-            cwd: PathBuf::from("/tmp/worktree"),
-            exit_code: Some(0),
-            duration_ms: 100,
-            stdout_ref: "artifacts/stdout.txt".to_string(),
-            stderr_ref: "artifacts/stderr.txt".to_string(),
-            status: TestCommandStatus::Passed,
-        }],
-        overall_status: TestingOverallStatus::Passed,
-        provider_claim: None,
-        backend_verified: true,
-        started_at: "2026-05-23T00:00:00Z".to_string(),
-        completed_at: Some("2026-05-23T00:01:00Z".to_string()),
-        plan_id: None,
-        plan_summary: None,
-        steps: Vec::new(),
-        unplanned_commands: Vec::new(),
-        unplanned_evidence: Vec::new(),
-        missing_required_steps: Vec::new(),
-        skipped_required_steps: Vec::new(),
-        context_warnings: Vec::new(),
-        raw_provider_output_ref: None,
-        plan_defect_findings: Vec::new(),
-    }
-}
-
 fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
     CodeReviewReport {
         id: "code_review_0001".to_string(),
@@ -200,7 +167,7 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         round: 1,
         verdict: ReviewVerdict::Approve,
         findings: vec![sample_finding()],
-        tested_evidence_refs: vec!["testing_report_0001".to_string()],
+        tested_evidence_refs: vec!["verification_log_0001".to_string()],
         diff_refs: vec!["diff_0001".to_string()],
         summary: "通过".to_string(),
         created_at: "2026-05-23T00:01:00Z".to_string(),
@@ -238,7 +205,7 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         impact_scope: vec!["src/lib.rs".to_string()],
         pr_description: "实现 work item".to_string(),
         commit_message_suggestion: "feat: implement work item".to_string(),
-        tested_evidence_refs: vec!["testing_report_0001".to_string()],
+        tested_evidence_refs: vec!["verification_log_0001".to_string()],
         diff_refs: vec!["diff_0001".to_string()],
         summary: "最终审查通过".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
@@ -275,10 +242,10 @@ fn sample_node(attempt_id: &str) -> CodingTimelineNode {
     CodingTimelineNode {
         id: "coding_node_0001".to_string(),
         attempt_id: attempt_id.to_string(),
-        stage: CodingExecutionStage::Testing,
+        stage: CodingExecutionStage::CodeReview,
         title: "测试".to_string(),
         status: CodingTimelineNodeStatus::Running,
-        agent_role: Some(CodingAgentRole::Tester),
+        agent_role: Some(CodingAgentRole::Reviewer),
         summary: None,
         started_at: "2026-05-23T00:01:00Z".to_string(),
         completed_at: None,
@@ -343,8 +310,8 @@ fn appends_and_lists_coding_role_run_events_in_sequence() {
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0003".to_string()),
         )
@@ -377,8 +344,8 @@ fn appends_and_lists_coding_role_run_events_in_sequence() {
     assert_eq!(first.attempt_id, attempt.id);
     assert_eq!(first.role_run_id, run.id);
     assert_eq!(first.node_id.as_deref(), Some("coding_node_0003"));
-    assert_eq!(first.stage, CodingExecutionStage::Testing);
-    assert_eq!(first.role, CodingProviderRole::Tester);
+    assert_eq!(first.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(first.role, CodingProviderRole::CodeReviewer);
     assert_eq!(second.node_id.as_deref(), Some("coding_node_0003"));
 
     let events = store
@@ -388,8 +355,8 @@ fn appends_and_lists_coding_role_run_events_in_sequence() {
     assert_eq!(events[0].attempt_id, attempt.id);
     assert_eq!(events[0].role_run_id, run.id);
     assert_eq!(events[0].node_id.as_deref(), Some("coding_node_0003"));
-    assert_eq!(events[0].stage, CodingExecutionStage::Testing);
-    assert_eq!(events[0].role, CodingProviderRole::Tester);
+    assert_eq!(events[0].stage, CodingExecutionStage::CodeReview);
+    assert_eq!(events[0].role, CodingProviderRole::CodeReviewer);
     assert_eq!(events[0].event_type, CodingRoleRunEventType::ProviderPrompt);
     assert_eq!(events[1].event_type, CodingRoleRunEventType::TextDelta);
     assert_eq!(events[1].payload["content"], "No tasks found");
@@ -457,8 +424,8 @@ fn role_run_event_truncates_each_large_payload_field() {
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0011".to_string()),
         )
@@ -531,8 +498,8 @@ fn role_run_retry_diagnostic_summary_compacts_events_and_refs() {
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0003".to_string()),
         )
@@ -555,8 +522,8 @@ fn role_run_retry_diagnostic_summary_compacts_events_and_refs() {
             &run,
             CodingRoleRunEventType::Timeout,
             serde_json::json!({
-                "reason_code": "plan_tests_timeout",
-                "message": "Tester provider timed out"
+                "reason_code": "code_review_timeout",
+                "message": "Code Reviewer provider timed out"
             }),
         )
         .expect("timeout");
@@ -566,7 +533,7 @@ fn role_run_retry_diagnostic_summary_compacts_events_and_refs() {
             "issue_0001",
             &attempt.id,
             &run.id,
-            vec!["provider-raw/testing/plan_tests_0001.txt".to_string()],
+            vec!["provider-raw/code_review/plan_tests_0001.txt".to_string()],
             vec!["artifacts/role-run-events/coding_role_run_0001/0001_output.txt".to_string()],
         )
         .expect("refs");
@@ -577,7 +544,7 @@ fn role_run_retry_diagnostic_summary_compacts_events_and_refs() {
             &attempt.id,
             &run.id,
             CodingRoleRunStatus::Blocked,
-            Some("plan_tests_timeout".to_string()),
+            Some("code_review_timeout".to_string()),
         )
         .expect("blocked");
 
@@ -587,11 +554,11 @@ fn role_run_retry_diagnostic_summary_compacts_events_and_refs() {
         .expect("summary text");
 
     assert!(summary.contains("role_run_id: coding_role_run_0001"));
-    assert!(summary.contains("reason_code: plan_tests_timeout"));
+    assert!(summary.contains("reason_code: code_review_timeout"));
     assert!(summary.contains("terminal_event: timeout"));
     assert!(summary.contains("Task update"));
     assert!(summary.contains("No tasks found"));
-    assert!(summary.contains("provider-raw/testing/plan_tests_0001.txt"));
+    assert!(summary.contains("provider-raw/code_review/plan_tests_0001.txt"));
     assert!(summary.contains("artifacts/role-run-events/coding_role_run_0001/0001_output.txt"));
     assert!(
         summary.len() < 8_000,
@@ -609,8 +576,8 @@ fn role_run_retry_diagnostic_summary_keeps_recent_metadata_and_payload_refs() {
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0004".to_string()),
         )
@@ -646,7 +613,7 @@ fn role_run_retry_diagnostic_summary_keeps_recent_metadata_and_payload_refs() {
             serde_json::json!({
                 "title": "Recent setup",
                 "status": "running",
-                "detail": "Preparing test run"
+                "detail": "Preparing code review"
             }),
         )
         .expect("recent setup");

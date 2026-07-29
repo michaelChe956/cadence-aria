@@ -79,7 +79,7 @@ impl super::CodingAttemptStore {
                 AmendmentResumeMode::Reexecute | AmendmentResumeMode::AwaitHandoff => {
                     CodingExecutionStage::Coding
                 }
-                AmendmentResumeMode::Revalidate => CodingExecutionStage::Testing,
+                AmendmentResumeMode::Revalidate => CodingExecutionStage::CodeReview,
             };
             latest.current_work_item_id = Some(target.logical_work_item_id.clone());
             latest.active_unit_id = Some(target.id.clone());

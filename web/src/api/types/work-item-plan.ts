@@ -156,7 +156,6 @@ export type WorkItemPlanOutlineItem = {
   exclusive_write_scopes: string[];
   forbidden_write_scopes: string[];
   context_budget?: WorkItemContextBudget;
-  required_handoff_from_outline_ids?: string[];
   verification_strategy?: string;
   risk_notes?: string[];
 };

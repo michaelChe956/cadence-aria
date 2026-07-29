@@ -1,5 +1,5 @@
 use super::{
-    compiled_fixture, exact_json_sections, large_contract_fixture,
+    compiled_fixture, exact_json_sections, large_contract_fixture, ordered_section_bodies,
     reviewer_execution_envelope_fixture,
 };
 use crate::product::models::ProviderName;
@@ -28,6 +28,8 @@ const REVIEWER_SECTION_TITLES: &[&str] = &[
     "Blocker Routing",
     "Review Execution Evidence",
 ];
+
+const REVIEWER_PROCESS_EVIDENCE_BOUNDARY_SECTION_TITLE: &str = "Reviewer Process Evidence Boundary";
 
 fn expected_reviewer_sections(
     projection: &ReviewerWorkItemProjection,
@@ -89,7 +91,36 @@ fn assert_reviewer_section_oracle(
     projection: &ReviewerWorkItemProjection,
     envelope: &ReviewerExecutionEnvelope,
 ) -> Vec<(String, String)> {
-    let actual = exact_json_sections(text, REVIEWER_SECTION_TITLES);
+    let sections = ordered_section_bodies(text);
+    let expected_titles = REVIEWER_SECTION_TITLES
+        .iter()
+        .copied()
+        .chain(std::iter::once(
+            REVIEWER_PROCESS_EVIDENCE_BOUNDARY_SECTION_TITLE,
+        ))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sections.iter().map(|(title, _)| title).collect::<Vec<_>>(),
+        expected_titles,
+        "reviewer mandatory section order/title drift"
+    );
+
+    let process_evidence_boundary = sections
+        .last()
+        .expect("process evidence boundary section")
+        .1
+        .as_str();
+    assert!(
+        process_evidence_boundary.contains("不得创建以过程事实为目的的 finding"),
+        "reviewer projection must include the process-evidence boundary"
+    );
+
+    let json_sections = sections
+        .into_iter()
+        .filter(|(title, _)| title != REVIEWER_PROCESS_EVIDENCE_BOUNDARY_SECTION_TITLE)
+        .map(|(title, body)| format!("## {title}\n\n{body}\n"))
+        .collect::<String>();
+    let actual = exact_json_sections(&json_sections, REVIEWER_SECTION_TITLES);
     let expected = expected_reviewer_sections(projection, envelope);
     assert_eq!(actual.len(), expected.len());
 
@@ -239,7 +270,6 @@ fn provider_projection_renderer_reviewer_empty_lists_keep_explicit_sections() {
 #[test]
 fn provider_projection_renderer_reviewer_empty_execution_envelope_lists_remain_explicit() {
     let mut envelope = reviewer_execution_envelope_fixture();
-    envelope.test_evidence_refs.clear();
     envelope.handoff_revision_ids.clear();
     envelope.contract_delta_refs.clear();
 
@@ -253,6 +283,32 @@ fn provider_projection_renderer_reviewer_empty_execution_envelope_lists_remain_e
             .render_reviewer(&projection, &envelope)
             .unwrap();
         assert_reviewer_section_oracle(&rendered.text, &projection, &envelope);
+    }
+}
+
+#[test]
+fn provider_projection_renderer_reviewer_process_evidence_boundary_is_mandatory() {
+    for provider in [
+        ProviderName::Codex,
+        ProviderName::ClaudeCode,
+        ProviderName::Fake,
+    ] {
+        let compiled = compiled_fixture();
+        let envelope = reviewer_execution_envelope_fixture();
+        let rendered = renderer_for(&provider)
+            .render_reviewer(&compiled.reviewer, &envelope)
+            .expect("reviewer projection must render");
+        let sections = ordered_section_bodies(&rendered.text);
+        assert!(
+            sections
+                .iter()
+                .any(|(title, _)| title == REVIEWER_PROCESS_EVIDENCE_BOUNDARY_SECTION_TITLE),
+            "{provider:?} reviewer projection must render the process-evidence boundary section"
+        );
+        assert!(
+            rendered.text.contains("non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。"),
+            "{provider:?} reviewer projection must state non_zero_test_execution semantics"
+        );
     }
 }
 

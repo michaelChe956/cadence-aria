@@ -26,6 +26,32 @@ fn work_item_plan_draft_validator_maps_canonical_contract_findings() {
 }
 
 #[test]
+fn work_item_plan_draft_validator_keeps_process_evidence_warning_non_blocking() {
+    let outline = valid_outline();
+    let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    candidate.canonical_contract_candidate.acceptance_criteria[0].criterion_id =
+        "ac_tdd_red_evidence".to_string();
+    candidate.canonical_contract_candidate.acceptance_criteria[0].statement =
+        "先失败的测试提交必须存在".to_string();
+    candidate.canonical_contract_candidate.tasks[0].done_when_refs =
+        vec!["ac_tdd_red_evidence".to_string()];
+    candidate
+        .canonical_contract_candidate
+        .handoff_contract
+        .reviewer_check_refs = vec!["ac_tdd_red_evidence".to_string()];
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.code == "process_evidence_acceptance_criterion")
+        .expect("process-evidence warning must be visible in the local validator report");
+
+    assert_eq!(finding.severity, WorkItemSplitFindingSeverity::Warning);
+    assert!(!report.has_errors());
+}
+
+#[test]
 fn work_item_plan_draft_validator_rejects_missing_output_provider() {
     let outline = valid_outline();
     let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[1]);

@@ -562,7 +562,6 @@ function WorkItemOutlineCard({ item, index }: { item: WorkItemPlanOutlineItem; i
           ],
           ["Session fit", item.session_fit ? [item.session_fit] : []],
           ["Depends on", item.depends_on ?? item.depends_on_outline_ids ?? []],
-          ["Required handoff", item.required_handoff_from_outline_ids ?? []],
           ["Write scopes", item.exclusive_write_scopes],
           ["Forbidden scopes", item.forbidden_write_scopes],
           [

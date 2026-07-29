@@ -202,11 +202,11 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
     ))
 }
 
-fn app_with_running_testing_attempt(root_path: &std::path::Path) -> axum::Router {
-    app_with_running_testing_attempt_and_state(root_path).0
+fn app_with_running_code_review_attempt(root_path: &std::path::Path) -> axum::Router {
+    app_with_running_code_review_attempt_and_state(root_path).0
 }
 
-fn app_with_running_testing_attempt_and_state(
+fn app_with_running_code_review_attempt_and_state(
     root_path: &std::path::Path,
 ) -> (axum::Router, WebAppState) {
     let store = CodingAttemptStore::new(ProductAppPaths::new(root_path.join(".aria")));
@@ -240,23 +240,23 @@ fn app_with_running_testing_attempt_and_state(
             "project_0001",
             "issue_0001",
             &attempt.id,
-            CodingExecutionStage::Testing,
+            CodingExecutionStage::CodeReview,
         )
-        .expect("testing stage");
+        .expect("code review stage");
     store
         .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
             attempt_id: attempt.id.clone(),
-            stage: CodingExecutionStage::Testing,
-            title: "执行测试".to_string(),
+            stage: CodingExecutionStage::CodeReview,
+            title: "Code Review".to_string(),
             status: CodingTimelineNodeStatus::Running,
-            agent_role: Some(CodingAgentRole::Tester),
+            agent_role: Some(CodingAgentRole::Reviewer),
             summary: None,
             started_at: "2026-05-23T00:00:00Z".to_string(),
             completed_at: None,
             artifact_refs: Vec::new(),
         })
-        .expect("save testing node");
+        .expect("save code review node");
     let state = WebAppState::new(
         root_path.to_path_buf(),
         WebRuntime::new_fake(root_path.to_path_buf()),
@@ -532,18 +532,6 @@ struct FullChainStreamingProvider;
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for FullChainStreamingProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
-    }
-
     async fn run_streaming(
         &self,
         input: &AdapterInput,

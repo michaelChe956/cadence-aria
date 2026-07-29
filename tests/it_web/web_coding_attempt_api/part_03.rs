@@ -1,36 +1,3 @@
-fn sample_testing_report(attempt_id: &str) -> TestingReport {
-    TestingReport {
-        id: "testing_report_0001".to_string(),
-        attempt_id: attempt_id.to_string(),
-        role_run_id: None,
-        run_no: None,
-        commands: vec![TestCommand {
-            command: vec!["cargo".to_string(), "test".to_string()],
-            cwd: PathBuf::from("/tmp/worktree"),
-            exit_code: Some(0),
-            duration_ms: 100,
-            stdout_ref: "artifacts/stdout.txt".to_string(),
-            stderr_ref: "artifacts/stderr.txt".to_string(),
-            status: TestCommandStatus::Passed,
-        }],
-        overall_status: TestingOverallStatus::Passed,
-        provider_claim: None,
-        backend_verified: true,
-        started_at: "2026-05-23T00:00:00Z".to_string(),
-        completed_at: Some("2026-05-23T00:01:00Z".to_string()),
-        plan_id: None,
-        plan_summary: None,
-        steps: Vec::new(),
-        unplanned_commands: Vec::new(),
-        unplanned_evidence: Vec::new(),
-        missing_required_steps: Vec::new(),
-        skipped_required_steps: Vec::new(),
-        context_warnings: Vec::new(),
-        raw_provider_output_ref: None,
-        plan_defect_findings: Vec::new(),
-    }
-}
-
 fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
     CodeReviewReport {
         id: "code_review_0001".to_string(),
@@ -38,7 +5,7 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         round: 1,
         verdict: ReviewVerdict::Approve,
         findings: vec![sample_finding()],
-        tested_evidence_refs: vec!["testing_report_0001".to_string()],
+        tested_evidence_refs: vec!["code_review_command.log".to_string()],
         diff_refs: vec!["diff_0001".to_string()],
         summary: "基础 code review 通过".to_string(),
         created_at: "2026-05-23T00:01:00Z".to_string(),
@@ -76,7 +43,7 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         impact_scope: vec!["src/lib.rs".to_string()],
         pr_description: "实现 work item".to_string(),
         commit_message_suggestion: "feat: implement work item".to_string(),
-        tested_evidence_refs: vec!["testing_report_0001".to_string()],
+        tested_evidence_refs: vec!["internal_review_command.log".to_string()],
         diff_refs: vec!["diff_0001".to_string()],
         summary: "最终审查通过".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
@@ -113,14 +80,14 @@ fn sample_completed_node(attempt_id: &str) -> CodingTimelineNode {
     CodingTimelineNode {
         id: "coding_node_0001".to_string(),
         attempt_id: attempt_id.to_string(),
-        stage: CodingExecutionStage::Testing,
-        title: "测试".to_string(),
+        stage: CodingExecutionStage::Coding,
+        title: "代码编写".to_string(),
         status: CodingTimelineNodeStatus::Completed,
-        agent_role: Some(CodingAgentRole::Tester),
-        summary: Some("测试通过".to_string()),
+        agent_role: Some(CodingAgentRole::Author),
+        summary: Some("代码编写完成".to_string()),
         started_at: "2026-05-23T00:01:00Z".to_string(),
         completed_at: Some("2026-05-23T00:02:00Z".to_string()),
-        artifact_refs: vec!["testing_report_0001".to_string()],
+        artifact_refs: vec!["coding_output_0001".to_string()],
     }
 }
 

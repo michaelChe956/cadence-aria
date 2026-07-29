@@ -122,7 +122,7 @@ async fn api_runtime_info_reports_build_and_gate_features() {
         info["workspace_root"],
         workspace.path().display().to_string()
     );
-    assert_eq!(info["features"]["testing_result_review_gate"], true);
+    assert!(info["features"].get("testing_result_review_gate").is_none());
     assert_eq!(info["features"]["coding_choice_gate"], true);
     assert!(info["git_sha"].is_string());
     assert!(info["package_version"].is_string());

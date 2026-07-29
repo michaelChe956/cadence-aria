@@ -488,8 +488,6 @@ fn work_item_revision_models_shared_records_roundtrip() {
         )]),
         contract_hash: "sha256:contract".to_string(),
         commit_sha: "0123456789abcdef".to_string(),
-        tests: vec!["cargo test --locked".to_string()],
-        artifacts: vec!["target/report.json".to_string()],
         created_at: "2026-07-17T00:00:00Z".to_string(),
     });
     assert_serde_roundtrip(&DependencyGraphRevision {

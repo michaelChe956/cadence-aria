@@ -47,7 +47,7 @@ fn canonical_validator_rejects_missing_required_field_and_artifact_kind_mismatch
     let mismatch = canonical_validator(
         ArtifactKind::CodingReport,
         &ArtifactContent::Json(json!({
-            "artifact_kind": "testing_report",
+            "artifact_kind": "unexpected_report",
             "worktask_id": "work_001",
             "files_modified": ["src/lib.rs"],
             "commands_run": [],
@@ -61,7 +61,7 @@ fn canonical_validator_rejects_missing_required_field_and_artifact_kind_mismatch
         ArtifactValidateError::CanonicalTypeMismatch {
             field: "artifact_kind".to_string(),
             expected: "coding_report".to_string(),
-            got: "testing_report".to_string()
+            got: "unexpected_report".to_string()
         }
     );
 }

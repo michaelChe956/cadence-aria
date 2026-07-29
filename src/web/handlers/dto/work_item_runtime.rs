@@ -49,7 +49,6 @@ pub(crate) fn lifecycle_work_item_runtime_dto(
                 .clone(),
         ),
         planned_implementation_context: None,
-        planned_handoff_summary: None,
         kind: input
             .runtime
             .work_item_revision
@@ -66,13 +65,9 @@ pub(crate) fn lifecycle_work_item_runtime_dto(
             .forbidden_scopes
             .clone(),
         context_budget: WorkItemContextBudgetDto::default(),
-        required_handoff_from: input.human_projection.depends_on.clone(),
         verification_plan_ref: Some(input.runtime.verification_plan_revision.id.clone()),
         require_execution_plan_confirm: input.require_execution_plan_confirm,
         execution_plan_status: "not_started".to_string(),
-        handoff_summary_ref: input
-            .unit
-            .and_then(|unit| unit.latest_handoff_revision_id.clone()),
         completion_commit: input.unit.and_then(|unit| unit.completion_commit.clone()),
         completion_diff_summary_ref: None,
     })

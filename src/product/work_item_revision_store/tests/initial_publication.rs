@@ -1,10 +1,9 @@
 use super::*;
-use crate::cross_cutting::streaming_provider::ProviderToolCall;
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
 };
 use crate::product::coding_evaluation_context::{
-    EvaluationContextRole, build_evaluation_context_pack, build_tester_execution_context_pack,
+    EvaluationContextRole, build_evaluation_context_pack,
 };
 use crate::product::coding_models::{
     CodingAttemptPlanBinding, CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRun,
@@ -18,7 +17,6 @@ use crate::product::models::{
     WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
-use crate::product::tester_agent_loop::{TestContextLoader, execute_tester_tool_call_with_context};
 use crate::product::work_item_contract::{
     ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
     build_dependency_contract_graph, canonical_contract_hash,
@@ -36,7 +34,6 @@ use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 use crate::web::coding_ws_handler::repository_path_for_attempt;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use sha2::Digest;
-use tokio_util::sync::CancellationToken;
 
 #[test]
 fn initial_plan_publication_store_allocates_ids_deterministically_without_live_writes() {
@@ -735,7 +732,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
     assert!(!markdown.contains("Canonical Contract"));
 
     let evaluation =
-        build_evaluation_context_pack(paths.clone(), &attempt, EvaluationContextRole::Tester)
+        build_evaluation_context_pack(paths.clone(), &attempt, EvaluationContextRole::CodeReviewer)
             .unwrap();
     assert_eq!(
         evaluation.work_item.artifact_id,
@@ -766,64 +763,9 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
             .any(|warning| warning == "missing_work_item")
     );
 
-    let tester = build_tester_execution_context_pack(paths.clone(), &attempt).unwrap();
-    assert_eq!(tester.work_item.artifact_id, binding.logical_work_item_id);
-    assert_eq!(tester.work_item.repository_id, repository.id);
-    assert_eq!(
-        tester.work_item.title,
-        resolved.projection_bundle.human_projection.title
-    );
-    assert_eq!(
-        tester
-            .group_context
-            .as_ref()
-            .map(|context| &context.plan_id),
-        Some(&binding.plan_id)
-    );
-    assert!(
-        !tester
-            .context_warnings
-            .iter()
-            .any(|warning| warning == "missing_work_item")
-    );
     assert_eq!(
         repository_path_for_attempt(&paths, &attempt).unwrap(),
         repository.path
-    );
-
-    let selector = resolved
-        .work_item_revision
-        .canonical_contract
-        .goal
-        .summary
-        .clone();
-    let context_loader = TestContextLoader::new(paths.clone(), attempt.clone());
-    let loaded = execute_tester_tool_call_with_context(
-        &ProviderToolCall {
-            id: "tool_load_test_context_0001".to_string(),
-            tool_name: "load_test_context".to_string(),
-            input: serde_json::json!({
-                "step_id": "test_context_step_0001",
-                "reason": "Need the bound work item goal",
-                "artifact_refs": [binding.logical_work_item_id],
-                "selectors": [selector]
-            }),
-        },
-        temp.path(),
-        temp.path(),
-        Some(&context_loader),
-        CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    assert!(!loaded.result.is_error, "{}", loaded.result.output);
-    let loaded: serde_json::Value = serde_json::from_str(&loaded.result.output).unwrap();
-    assert_eq!(loaded["snippets"][0]["artifact_ref"], WORK_ITEM_ID);
-    assert!(
-        loaded["snippets"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains(&resolved.work_item_revision.canonical_contract.goal.summary)
     );
 
     let mut different_hash = run;

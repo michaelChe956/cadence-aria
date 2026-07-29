@@ -65,7 +65,6 @@ struct GroupCompletionStateSnapshot {
     attempt: CodingExecutionAttempt,
     units: Vec<crate::product::coding_models::CodingExecutionUnit>,
     runs: Vec<Vec<CodingUnitRun>>,
-    legacy_handoffs: Vec<Option<WorkItemHandoff>>,
     canonical_handoffs: Vec<HandoffRevision>,
     head: String,
     status: String,
@@ -95,18 +94,6 @@ fn snapshot_group_completion_state(
                 .expect("run snapshot")
         })
         .collect();
-    let legacy_handoffs = units
-        .iter()
-        .map(|unit| {
-            fixture.store.get_coding_unit_handoff(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &unit.id,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .expect("legacy handoff snapshot");
     let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
     let lineage = revision_store
         .get_plan_lineage(
@@ -132,7 +119,6 @@ fn snapshot_group_completion_state(
         attempt,
         units,
         runs,
-        legacy_handoffs,
         canonical_handoffs,
         head: git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
             .trim()
@@ -350,19 +336,6 @@ fn cleared_active_recovery_fixture_at_stage(
         Some(fixture.original_head.clone()),
         None,
     );
-    save_active_legacy_handoff(
-        &fixture,
-        vec![
-            "cargo test --locked".to_string(),
-            "cargo check --locked".to_string(),
-            "cargo test --locked".to_string(),
-        ],
-        vec![
-            "src/z.rs".to_string(),
-            "src/a.rs".to_string(),
-            "src/z.rs".to_string(),
-        ],
-    );
     let active = fixture
         .store
         .get_active_coding_unit(
@@ -470,7 +443,6 @@ async fn coding_plan_repair_group_completion_running_wrong_stages_are_zero_write
         CodingExecutionStage::PrepareContext,
         CodingExecutionStage::WorktreePrepare,
         CodingExecutionStage::Coding,
-        CodingExecutionStage::Testing,
         CodingExecutionStage::CodeReview,
         CodingExecutionStage::InternalPrReview,
         CodingExecutionStage::FinalConfirm,
@@ -517,7 +489,6 @@ async fn coding_plan_repair_group_completion_completed_retry_wrong_stages_are_ze
         CodingExecutionStage::PrepareContext,
         CodingExecutionStage::WorktreePrepare,
         CodingExecutionStage::Coding,
-        CodingExecutionStage::Testing,
         CodingExecutionStage::CodeReview,
         CodingExecutionStage::InternalPrReview,
         CodingExecutionStage::FinalConfirm,

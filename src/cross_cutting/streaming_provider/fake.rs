@@ -17,10 +17,6 @@ pub struct FakeStreamingProvider;
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for FakeStreamingProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
     async fn start(
         &self,
         input: StreamingProviderInput,
@@ -167,36 +163,6 @@ async fn fake_streaming_send_event(
 }
 
 fn fake_workspace_markdown(prompt: &str) -> String {
-    if prompt.contains("Tester Provider Runtime") && prompt.contains("Phase: plan_tests") {
-        return serde_json::json!({
-            "summary": "fake provider smoke test plan",
-            "steps": [{
-                "id": "fake_smoke",
-                "title": "Fake provider smoke",
-                "intent": "prove fake provider can satisfy provider-driven testing",
-                "required": true,
-                "tool": "provider_managed",
-                "risk_level": "low",
-                "command_or_tool_input": {},
-                "evidence_expectation": "fake provider emits deterministic step evidence",
-                "related_requirements": ["REQ-FAKE"],
-                "related_design_constraints": ["DEC-FAKE"],
-                "related_work_item_tasks": ["TASK-FAKE"]
-            }]
-        })
-        .to_string();
-    }
-    if prompt.contains("Tester Provider Runtime") && prompt.contains("Phase: execute_test_plan") {
-        return serde_json::json!({
-            "step_results": [{
-                "step_id": "fake_smoke",
-                "status": "passed",
-                "evidence_refs": ["fake-provider-smoke.log"],
-                "provider_analysis": "fake provider deterministic testing passed"
-            }]
-        })
-        .to_string();
-    }
     if prompt.contains("Work Item Splitter") || prompt.contains("IssueWorkItemPlan") {
         let structured_output = if prompt.contains("局部重做（revision）") {
             serde_json::json!({
@@ -219,7 +185,6 @@ fn fake_workspace_markdown(prompt: &str) -> String {
                     "depends_on": [],
                     "exclusive_write_scopes": ["src/product/workspace_engine.rs"],
                     "forbidden_write_scopes": [],
-                    "required_handoff_from": [],
                     "require_execution_plan_confirm": false
                 }],
                 "verification_plans": [{
@@ -273,13 +238,10 @@ fn fake_workspace_markdown(prompt: &str) -> String {
                         "context_budget": {
                             "target_context_k": "30-50",
                             "max_summary_chars": 20000,
-                            "max_handoff_chars": 12000,
                             "max_code_context_chars": 30000,
                             "max_context_file_refs": 80,
-                            "max_traceability_refs": 40,
-                            "max_dependency_handoffs": 3
+                            "max_traceability_refs": 40
                         },
-                        "required_handoff_from": [],
                         "require_execution_plan_confirm": false
                     },
                     {
@@ -289,7 +251,6 @@ fn fake_workspace_markdown(prompt: &str) -> String {
                         "depends_on": [0],
                         "exclusive_write_scopes": ["web/src/state/workspace-ws-store.ts"],
                         "forbidden_write_scopes": [],
-                        "required_handoff_from": [],
                         "require_execution_plan_confirm": false
                     },
                     {
@@ -299,7 +260,6 @@ fn fake_workspace_markdown(prompt: &str) -> String {
                         "depends_on": [1],
                         "exclusive_write_scopes": ["tests/it_web/web_work_item_plan_author.rs"],
                         "forbidden_write_scopes": [],
-                        "required_handoff_from": [],
                         "require_execution_plan_confirm": false
                     }
                 ],

@@ -17,11 +17,8 @@ pub enum CodingRoleRunStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CodingRoleRunTrigger {
     Initial,
-    RetryTestPlan,
-    RerunMissingSteps,
     RetryReview,
     RetryInternalReview,
-    ManualRerun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

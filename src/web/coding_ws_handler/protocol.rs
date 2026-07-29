@@ -6,8 +6,8 @@ use crate::product::coding_models::{
     CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingChoiceGate, CodingExecutionStage,
     CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunSnapshot,
-    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, ReviewRequest, TestingReport,
-    WorkItemExecutionPlan, WorkItemHandoff,
+    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, ReviewRequest,
+    WorkItemExecutionPlan,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
@@ -45,7 +45,6 @@ pub enum CodingWsOutMessage {
         chat_entries: Box<Vec<CodingChatEntry>>,
         timeline_nodes: Box<Vec<CodingTimelineNode>>,
         active_node_id: Box<Option<String>>,
-        testing_report: Box<Option<TestingReport>>,
         code_review_reports: Box<Vec<CodeReviewReport>>,
         review_request: Box<Option<ReviewRequest>>,
         internal_pr_review: Box<Option<InternalPrReview>>,
@@ -55,7 +54,6 @@ pub enum CodingWsOutMessage {
         work_item_markdown: Box<Option<String>>,
         verification_commands: Box<Vec<String>>,
         work_item_execution_plan: Box<Option<WorkItemExecutionPlan>>,
-        work_item_handoff: Box<Option<WorkItemHandoff>>,
         linked_plan_repair: Box<Option<PlanRepairSessionSnapshotDto>>,
     },
     CodingStageChange {
@@ -98,9 +96,6 @@ pub enum CodingWsOutMessage {
     },
     CodingMessageComplete {
         node_id: Option<String>,
-    },
-    TestingReportUpdate {
-        report: Box<TestingReport>,
     },
     CodeReviewComplete {
         report: Box<CodeReviewReport>,

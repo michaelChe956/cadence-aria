@@ -14,7 +14,6 @@ pub enum ProviderConversationRole {
     Author,
     Reviewer,
     Coder,
-    Tester,
     Analyst,
     CodeReviewer,
     InternalReviewer,

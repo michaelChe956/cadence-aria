@@ -35,16 +35,6 @@ impl super::CodingAttemptStore {
             .join("work-item-execution-plan.json")
     }
 
-    pub(crate) fn work_item_handoff_path(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
-    ) -> PathBuf {
-        self.attempt_dir(project_id, issue_id, attempt_id)
-            .join("work-item-handoff.json")
-    }
-
     pub(crate) fn coding_git_operation_path(
         &self,
         project_id: &str,
@@ -192,28 +182,6 @@ impl super::CodingAttemptStore {
     ) -> PathBuf {
         self.coding_unit_runs_root(project_id, issue_id, attempt_id, unit_id)
             .join(format!("{unit_run_id}.json"))
-    }
-
-    pub(crate) fn coding_unit_handoff_path(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
-        unit_id: &str,
-    ) -> PathBuf {
-        self.coding_units_root(project_id, issue_id, attempt_id)
-            .join(unit_id)
-            .join("work-item-handoff.json")
-    }
-
-    pub(crate) fn test_plans_root(
-        &self,
-        project_id: &str,
-        issue_id: &str,
-        attempt_id: &str,
-    ) -> PathBuf {
-        self.attempt_dir(project_id, issue_id, attempt_id)
-            .join("test-plans")
     }
 
     pub(crate) fn role_runs_root(

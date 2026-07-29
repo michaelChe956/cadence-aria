@@ -127,7 +127,6 @@ const ROLE_LABELS: Record<string, string> = {
   author: "作者",
   reviewer: "审核者",
   coder: "Coder",
-  tester: "Tester",
   code_reviewer: "Code Reviewer",
   internal_reviewer: "Internal Reviewer",
   system: "系统",

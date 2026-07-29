@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
     CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
@@ -7,7 +5,7 @@ use cadence_aria::product::coding_models::{
     CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateState,
     CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
     InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
-    ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus, TestingReport,
+    ReviewVerdict,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -20,10 +18,6 @@ fn coding_provider_roles_use_stable_wire_values_and_display_names() {
         json!("coder")
     );
     assert_eq!(
-        serde_json::to_value(CodingProviderRole::Tester).expect("serialize tester"),
-        json!("tester")
-    );
-    assert_eq!(
         serde_json::to_value(CodingProviderRole::CodeReviewer).expect("serialize code reviewer"),
         json!("code_reviewer")
     );
@@ -34,7 +28,6 @@ fn coding_provider_roles_use_stable_wire_values_and_display_names() {
     );
 
     assert_eq!(CodingProviderRole::Coder.to_string(), "Coder");
-    assert_eq!(CodingProviderRole::Tester.to_string(), "Tester");
     assert_eq!(
         CodingProviderRole::CodeReviewer.to_string(),
         "Code Reviewer"
@@ -54,8 +47,6 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
     });
 
     assert_eq!(snapshot.coder, ProviderName::Codex);
-    assert_eq!(snapshot.tester_plan, ProviderName::Codex);
-    assert_eq!(snapshot.tester_execute, ProviderName::Codex);
     assert_eq!(snapshot.code_reviewer, ProviderName::Fake);
     assert_eq!(snapshot.internal_reviewer, ProviderName::Fake);
     assert_eq!(snapshot.review_rounds, 2);
@@ -65,14 +56,11 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
         value,
         json!({
             "coder": "codex",
-            "tester_plan": "codex",
-            "tester_execute": "codex",
             "code_reviewer": "fake",
             "internal_reviewer": "fake",
             "review_rounds": 2,
             "permission_modes": {
                 "coder": "supervised",
-                "tester": "auto",
                 "code_reviewer": "supervised",
                 "internal_reviewer": "supervised"
             }
@@ -89,8 +77,6 @@ fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_mi
     });
 
     assert_eq!(snapshot.coder, ProviderName::ClaudeCode);
-    assert_eq!(snapshot.tester_plan, ProviderName::ClaudeCode);
-    assert_eq!(snapshot.tester_execute, ProviderName::ClaudeCode);
     assert_eq!(snapshot.code_reviewer, ProviderName::ClaudeCode);
     assert_eq!(snapshot.internal_reviewer, ProviderName::ClaudeCode);
 }
@@ -148,13 +134,11 @@ fn coding_stage_gate_state_serializes_open_gate_contract() {
     let gate = CodingStageGateState {
         gate_id: "coding_stage_gate_0001".to_string(),
         attempt_id: "coding_attempt_0001".to_string(),
-        stage: CodingExecutionStage::Testing,
-        role: CodingProviderRole::Tester,
+        stage: CodingExecutionStage::CodeReview,
+        role: CodingProviderRole::CodeReviewer,
         expires_at: "2026-05-28T00:00:05Z".to_string(),
         provider_snapshot: CodingRoleProviderConfigSnapshot {
             coder: ProviderName::Codex,
-            tester_plan: ProviderName::Fake,
-            tester_execute: ProviderName::Fake,
             code_reviewer: ProviderName::Fake,
             internal_reviewer: ProviderName::Fake,
             review_rounds: 1,
@@ -168,10 +152,8 @@ fn coding_stage_gate_state_serializes_open_gate_contract() {
     let value = serde_json::to_value(&gate).expect("serialize stage gate");
 
     assert_eq!(value["status"], "open");
-    assert_eq!(value["stage"], "testing");
-    assert_eq!(value["role"], "tester");
-    assert_eq!(value["provider_snapshot"]["tester_plan"], "fake");
-    assert_eq!(value["provider_snapshot"]["tester_execute"], "fake");
+    assert_eq!(value["stage"], "code_review");
+    assert_eq!(value["role"], "code_reviewer");
     assert_eq!(
         serde_json::from_value::<CodingStageGateState>(value).expect("deserialize stage gate"),
         gate
@@ -224,38 +206,7 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
 }
 
 #[test]
-fn testing_and_review_reports_preserve_backend_evidence() {
-    let command = TestCommand {
-        command: vec!["cargo".to_string(), "test".to_string()],
-        cwd: PathBuf::from("/tmp/worktree"),
-        exit_code: Some(0),
-        duration_ms: 1234,
-        stdout_ref: "artifacts/stdout.txt".to_string(),
-        stderr_ref: "artifacts/stderr.txt".to_string(),
-        status: TestCommandStatus::Passed,
-    };
-    let testing = TestingReport {
-        id: "testing_report_0001".to_string(),
-        attempt_id: "coding_attempt_0001".to_string(),
-        role_run_id: None,
-        run_no: None,
-        commands: vec![command],
-        overall_status: TestingOverallStatus::Passed,
-        provider_claim: Some(json!({"claimed": true})),
-        backend_verified: true,
-        started_at: "2026-05-23T00:01:00Z".to_string(),
-        completed_at: Some("2026-05-23T00:02:00Z".to_string()),
-        plan_id: None,
-        plan_summary: None,
-        steps: Vec::new(),
-        unplanned_commands: Vec::new(),
-        unplanned_evidence: Vec::new(),
-        missing_required_steps: Vec::new(),
-        skipped_required_steps: Vec::new(),
-        context_warnings: Vec::new(),
-        raw_provider_output_ref: None,
-        plan_defect_findings: Vec::new(),
-    };
+fn review_reports_preserve_backend_evidence() {
     let finding = ReviewFinding {
         severity: FindingSeverity::Warning,
         file_path: Some("src/lib.rs".to_string()),
@@ -282,7 +233,7 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         round: 1,
         verdict: ReviewVerdict::RequestChanges,
         findings: vec![finding.clone()],
-        tested_evidence_refs: vec!["testing_report_0001".to_string()],
+        tested_evidence_refs: vec!["verification_log_0001".to_string()],
         diff_refs: vec!["diff_0001".to_string()],
         summary: "需要返工".to_string(),
         created_at: "2026-05-23T00:03:00Z".to_string(),
@@ -299,7 +250,7 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         impact_scope: vec!["src/lib.rs".to_string()],
         pr_description: "实现 work item".to_string(),
         commit_message_suggestion: "feat: implement work item".to_string(),
-        tested_evidence_refs: vec!["testing_report_0001".to_string()],
+        tested_evidence_refs: vec!["verification_log_0001".to_string()],
         diff_refs: vec!["diff_0001".to_string()],
         summary: "可以合入".to_string(),
         created_at: "2026-05-23T00:04:00Z".to_string(),
@@ -308,10 +259,6 @@ fn testing_and_review_reports_preserve_backend_evidence() {
         run_no: None,
     };
 
-    assert_eq!(
-        serde_json::to_value(&testing).unwrap()["backend_verified"],
-        true
-    );
     assert_eq!(
         serde_json::to_value(&code_review).unwrap()["verdict"],
         "request_changes"

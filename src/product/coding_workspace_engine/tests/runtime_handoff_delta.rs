@@ -19,21 +19,21 @@ fn delta_handoff(id: &str, capabilities: &[&str], contract_hash: &str) -> Handof
         )]),
         contract_hash: contract_hash.to_string(),
         commit_sha: format!("commit_{id}"),
-        tests: vec![format!("test_{id}")],
-        artifacts: vec![format!("artifact_{id}")],
         created_at: "2026-07-20T00:00:00Z".to_string(),
     }
 }
 
+/// delta 判定只依据 contract_hash 与 provided_*，与 commit 无关。
+///
+/// 原测试同时断言 `tests` / `artifacts` 变化不影响判定；两字段随交接摘要移除后
+/// 该断言失去对象，但判定口径本身未变，故保留 commit 维度的覆盖。
 #[test]
-fn coding_runtime_handoff_ignores_commit_tests_and_artifacts_for_unchanged_contract() {
+fn coding_runtime_handoff_ignores_commit_for_unchanged_contract() {
     let previous = delta_handoff("0001", &["registration_ready"], "same_contract_hash");
     let mut next = previous.clone();
     next.id = "handoff_revision_0002".to_string();
     next.coding_unit_run_id = "coding_unit_run_0002".to_string();
     next.commit_sha = "different_commit".to_string();
-    next.tests = vec!["different test explanation".to_string()];
-    next.artifacts = vec!["different artifact explanation".to_string()];
 
     assert_eq!(
         compare_handoff_revisions(Some(&previous), &next),

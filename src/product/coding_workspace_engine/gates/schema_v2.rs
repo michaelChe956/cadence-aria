@@ -107,6 +107,27 @@ impl CodingWorkspaceEngine {
         Ok(SchemaV2GroupCompletionGateFacts { runtime, handoff })
     }
 
+    /// 某个已完成 unit 的 completion commit 实际改动的文件清单。
+    ///
+    /// 组完成写入范围门禁的唯一数据源。worktree 缺失时必须失败关闭；commit
+    /// 存在时必须取到真实 git 事实，不得用空清单让范围校验静默空转。
+    pub(crate) async fn changed_files_for_unit_completion_commit(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        completion_commit: &str,
+    ) -> Result<Vec<String>, CodingWorkspaceEngineError> {
+        let worktree_path = self.attempt_worktree_path(attempt).await?;
+        if !worktree_path.exists() {
+            return Err(CodingWorkspaceEngineError::MissingWorktree(
+                attempt.id.clone(),
+            ));
+        }
+        Ok(self
+            ._git_service
+            .git_commit_changed_files(&worktree_path, completion_commit)
+            .await?)
+    }
+
     pub(super) fn validate_changed_files_for_runtime(
         &self,
         runtime: &ResolvedWorkItemRuntime,

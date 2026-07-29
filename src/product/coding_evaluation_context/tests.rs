@@ -10,7 +10,6 @@ use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingEntryType, CodingExecutionAttempt,
     CodingExecutionStage, CodingProviderRole, CodingRoleRunStatus, CodingRoleRunTrigger,
-    WorkItemHandoff,
 };
 use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
@@ -30,7 +29,6 @@ use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion, ProviderC
 
 mod group_context;
 mod schema_v2_runtime;
-mod tester_execution;
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
@@ -53,7 +51,6 @@ fn evaluation_context_uses_compiled_work_item_without_artifact_version() {
             planned_implementation_context: Some(
                 "compiled evaluation implementation context".to_string(),
             ),
-            planned_handoff_summary: Some("compiled evaluation handoff".to_string()),
             kind: WorkItemKind::Backend,
             forbidden_write_scopes: vec!["tests/**".to_string()],
             verification_plan_ref: Some(verification_plan_id.to_string()),
@@ -260,7 +257,7 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
-        stage: CodingExecutionStage::Testing,
+        stage: CodingExecutionStage::CodeReview,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
         worktree_path: None,
@@ -283,8 +280,8 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
         completed_at: None,
     };
 
-    let pack =
-        build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::Tester).unwrap();
+    let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
+        .unwrap();
 
     assert!(
         pack.story_specs[0]
@@ -300,7 +297,8 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
     assert!(pack.openspec_context.enabled);
     assert!(pack.superpowers_context.enabled);
     assert!(
-        pack.superpowers_context
+        !pack
+            .superpowers_context
             .required_methods_by_role
             .contains_key("tester")
     );
@@ -348,7 +346,7 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
-        stage: CodingExecutionStage::Testing,
+        stage: CodingExecutionStage::CodeReview,
         base_branch: "HEAD".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
         worktree_path: Some(worktree),
@@ -371,8 +369,8 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
         completed_at: None,
     };
 
-    let pack =
-        build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::Tester).unwrap();
+    let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
+        .unwrap();
 
     assert_eq!(pack.repo_context.changed_files, vec!["new.txt", "src.txt"]);
     assert!(pack.repo_context.diff_stat.contains("src.txt"));
@@ -382,7 +380,7 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
 }
 
 #[test]
-fn code_reviewer_does_not_require_final_handoff_before_approval() {
+fn reviewers_do_not_require_work_item_handoff_summary() {
     let tmp = TempDir::new().expect("tempdir");
     let paths = ProductAppPaths::new(tmp.path().join(".aria"));
     let lifecycle = LifecycleStore::new(paths.clone());
@@ -441,7 +439,7 @@ fn code_reviewer_does_not_require_final_handoff_before_approval() {
         build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::InternalReviewer)
             .expect("internal reviewer pack");
     assert!(
-        final_pack
+        !final_pack
             .coder_evidence
             .expect("internal reviewer evidence")
             .evidence_warnings
@@ -550,27 +548,6 @@ fn code_reviewer_context_pack_includes_coder_evidence() {
             },
         )
         .expect("chat entry");
-    store
-        .save_work_item_handoff(&WorkItemHandoff {
-            id: "work_item_handoff_0001".to_string(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            work_item_id: work_item.id.clone(),
-            attempt_id: attempt.id.clone(),
-            provider_run_ref: None,
-            summary: "handoff".to_string(),
-            files_changed: Vec::new(),
-            commit_sha: Some("abc123".to_string()),
-            diff_summary: String::new(),
-            tests_run: vec!["./verify".to_string()],
-            test_result_summary: "passed".to_string(),
-            review_summary: None,
-            api_or_contract_changes: Vec::new(),
-            open_risks: Vec::new(),
-            next_work_item_notes: Vec::new(),
-            created_at: "2026-06-10T00:00:02Z".to_string(),
-        })
-        .expect("handoff");
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
         .expect("context pack");
@@ -591,11 +568,6 @@ fn code_reviewer_context_pack_includes_coder_evidence() {
             .completion_report_excerpt
             .as_deref()
             .is_some_and(|excerpt| excerpt.contains("验证命令输出"))
-    );
-    assert_eq!(evidence.handoff_tests_run, vec!["./verify"]);
-    assert_eq!(
-        evidence.handoff_test_result_summary.as_deref(),
-        Some("passed")
     );
 }
 
@@ -666,7 +638,7 @@ fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
-        stage: CodingExecutionStage::Testing,
+        stage: CodingExecutionStage::CodeReview,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
         worktree_path: None,
@@ -689,8 +661,8 @@ fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
         completed_at: None,
     };
 
-    let pack =
-        build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::Tester).unwrap();
+    let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
+        .unwrap();
     let markdown = &pack.work_item.raw_markdown_or_sections;
     assert!(markdown.contains("normal requirement"));
     assert!(!markdown.contains("should-not-leak"));

@@ -17,7 +17,6 @@ export const CODING_ATTEMPT_ADDRESS = {
 
 export const DEFAULT_PERMISSION_MODES = {
   coder: "supervised",
-  tester: "auto",
   code_reviewer: "supervised",
   internal_reviewer: "supervised",
 } as const;

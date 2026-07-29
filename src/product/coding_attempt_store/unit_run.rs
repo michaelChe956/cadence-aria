@@ -258,12 +258,6 @@ impl super::CodingAttemptStore {
                     run.internal_reviewer_execution_context_hash =
                         Some(rendered.content_hash.clone());
                 }
-                CodingProviderRole::Tester => {
-                    return Err(identity_mismatch(
-                        "coding_unit_run_execution_context_role",
-                        unit_run_id,
-                    ));
-                }
             }
             run.updated_at = Utc::now().to_rfc3339();
             write_json(&path, &run)?;
@@ -298,7 +292,11 @@ impl super::CodingAttemptStore {
                 }
                 return Err(identity_mismatch("coding_unit_run", unit_run_id));
             }
-            if run.status != CodingUnitRunStatus::Running || run.completion_commit.is_some() {
+            if !matches!(
+                run.status,
+                CodingUnitRunStatus::Running | CodingUnitRunStatus::NeedsRevalidation
+            ) || run.completion_commit.is_some()
+            {
                 return Err(identity_mismatch("coding_unit_run", unit_run_id));
             }
             run.status = CodingUnitRunStatus::Completed;

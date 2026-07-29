@@ -262,10 +262,6 @@ pub fn build_web_router(state: WebAppState) -> Router {
                 post(test_controls::enable_review_fixture),
             )
             .route(
-                "/api/test/coding-attempts/{attempt_id}/testing-fixture",
-                post(test_controls::enable_testing_fixture),
-            )
-            .route(
                 "/api/test/coding-attempts/{attempt_id}/review-fixture",
                 post(test_controls::enable_review_fixture),
             )

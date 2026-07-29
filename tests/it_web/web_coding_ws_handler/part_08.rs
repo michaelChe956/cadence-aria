@@ -201,18 +201,6 @@ impl GroupFinalReviewPlanDefectProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for GroupFinalReviewPlanDefectProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
-    }
-
     async fn run_streaming(
         &self,
         input: &AdapterInput,
@@ -662,38 +650,11 @@ async fn coding_ws_group_attempt_recovers_review_request_running_unit_without_re
 }
 
 #[tokio::test]
-async fn coding_ws_group_session_state_hides_completed_unit_handoff_from_active_unit_snapshot() {
+async fn coding_ws_group_session_state_omits_work_item_handoff_summary() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let app = app_with_group_attempt(root.path());
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    store
-        .save_coding_unit_handoff(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            "coding_unit_0001",
-            &cadence_aria::product::coding_models::WorkItemHandoff {
-                id: "work_item_handoff_0001".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0001".to_string(),
-                attempt_id: "coding_attempt_0001".to_string(),
-                provider_run_ref: None,
-                summary: "unit1 done".to_string(),
-                files_changed: Vec::new(),
-                commit_sha: None,
-                diff_summary: String::new(),
-                tests_run: Vec::new(),
-                test_result_summary: String::new(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: Vec::new(),
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit1 handoff");
     store
         .update_coding_unit_latest_handoff_revision_id(
             "project_0001",
@@ -740,7 +701,7 @@ async fn coding_ws_group_session_state_hides_completed_unit_handoff_from_active_
     };
 
     assert_eq!(state["current_work_item_id"], "work_item_0002");
-    assert!(state["work_item_handoff"].is_null());
+    assert!(state.get("work_item_handoff").is_none());
     assert_eq!(
         state["units"][0]["latest_handoff_revision_id"],
         "handoff_revision_0001"

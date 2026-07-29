@@ -6,7 +6,6 @@ const GATE_COUNTDOWN_MS = 5_000;
 
 const ROLE_LABELS = {
   coder: "Coder",
-  tester: "Tester",
   code_reviewer: "Code Reviewer",
   internal_reviewer: "GroupFinalReview",
 } as const;
@@ -99,7 +98,6 @@ export function StageGateEntry({
 
 function providerSnapshotKeyForRole(
   role: CodingProviderRole,
-): "coder" | "tester_execute" | "code_reviewer" | "internal_reviewer" {
-  if (role === "tester") return "tester_execute";
+): "coder" | "code_reviewer" | "internal_reviewer" {
   return role;
 }

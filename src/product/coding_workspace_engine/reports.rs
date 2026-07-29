@@ -1,66 +1,44 @@
 use super::*;
 use crate::product::coding_models::{CodingExecutionUnit, CodingExecutionUnitStatus};
+use crate::product::models::work_item_revision::HandoffRevision;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 impl CodingWorkspaceEngine {
-    pub(crate) fn latest_missing_required_steps(
+    /// 已完成 unit 及其 `HandoffRevision`（若已发布）。
+    ///
+    /// 交接摘要移除后，跨 unit 交接语义完全由 `HandoffRevision` 承担。尚未发布
+    /// 交接的 unit 以 `None` 表示，不再因缺少摘要而失败关闭。
+    pub(crate) fn collect_completed_group_unit_handoff_revisions(
         &self,
         attempt: &CodingExecutionAttempt,
-    ) -> Result<Vec<String>, ProductStoreError> {
-        let Some(report) = self
-            .store
-            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .last()
-        else {
-            return Ok(Vec::new());
-        };
-        let mut steps = Vec::new();
-        for step in report
-            .missing_required_steps
-            .into_iter()
-            .chain(report.skipped_required_steps)
-        {
-            if !steps.contains(&step) {
-                steps.push(step);
-            }
-        }
-        Ok(steps)
-    }
-
-    pub(crate) fn collect_completed_group_unit_handoffs(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<Vec<(CodingExecutionUnit, WorkItemHandoff)>, CodingWorkspaceEngineError> {
+    ) -> Result<Vec<(CodingExecutionUnit, Option<HandoffRevision>)>, CodingWorkspaceEngineError>
+    {
         let units =
             self.store
                 .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let lineage = self.schema_v2_group_plan_lineage(attempt)?;
+        let revision_store = WorkItemRevisionStore::new(self.store.paths());
         let mut handoffs = Vec::new();
         for unit in units
             .into_iter()
             .filter(|unit| unit.status == CodingExecutionUnitStatus::Completed)
         {
-            let handoff = self
-                .store
-                .get_coding_unit_handoff(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                    &unit.id,
-                )?
-                .ok_or_else(|| {
-                    CodingWorkspaceEngineError::WorkItemHandoffMissing(format!(
-                        "{}:{}",
-                        attempt.id, unit.id
-                    ))
-                })?;
-            handoffs.push((unit, handoff));
+            let revision = match (lineage.as_ref(), unit.latest_handoff_revision_id.as_deref()) {
+                (Some(lineage), Some(handoff_id)) => Some(revision_store.get_handoff_revision(
+                    lineage,
+                    &unit.logical_work_item_id,
+                    handoff_id,
+                )?),
+                _ => None,
+            };
+            handoffs.push((unit, revision));
         }
         Ok(handoffs)
     }
 
     pub(crate) fn format_group_unit_handoff_section(
         &self,
-        handoffs: &[(CodingExecutionUnit, WorkItemHandoff)],
+        handoffs: &[(CodingExecutionUnit, Option<HandoffRevision>)],
     ) -> String {
         if handoffs.is_empty() {
             return "- 无 completed units".to_string();
@@ -68,31 +46,43 @@ impl CodingWorkspaceEngine {
 
         handoffs
             .iter()
-            .map(|(unit, handoff)| {
+            .map(|(unit, revision)| {
                 let completion_commit = unit
                     .completion_commit
                     .as_deref()
-                    .or(handoff.commit_sha.as_deref())
+                    .or_else(|| revision.as_ref().map(|r| r.commit_sha.as_str()))
                     .unwrap_or("无");
-                let tests_run = if handoff.tests_run.is_empty() {
-                    "无".to_string()
-                } else {
-                    handoff.tests_run.join("; ")
-                };
-                let risk_notes = if handoff.open_risks.is_empty() {
-                    "无".to_string()
-                } else {
-                    handoff.open_risks.join("; ")
-                };
+                let handoff_revision_id = unit
+                    .latest_handoff_revision_id
+                    .as_deref()
+                    .unwrap_or("未发布");
+                let provided_contracts = revision
+                    .as_ref()
+                    .filter(|r| !r.provided_contracts.is_empty())
+                    .map(|r| r.provided_contracts.join("; "))
+                    .unwrap_or_else(|| "无".to_string());
+                let provided_capabilities = revision
+                    .as_ref()
+                    .filter(|r| !r.provided_capabilities.is_empty())
+                    .map(|r| {
+                        r.provided_capabilities
+                            .iter()
+                            .map(|(contract, capabilities)| {
+                                format!("{contract}=[{}]", capabilities.join(", "))
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .unwrap_or_else(|| "无".to_string());
                 format!(
-                    "- Unit: {}\n  Work Item: {}\n  Status: {:?}\n  Completion Commit: {}\n  Handoff Summary: {}\n  Tests Run: {}\n  Risk Notes: {}",
+                    "- Unit: {}\n  Work Item: {}\n  Status: {:?}\n  Completion Commit: {}\n  Handoff Revision: {}\n  Provided Contracts: {}\n  Provided Capabilities: {}",
                     unit.id,
                     unit.logical_work_item_id,
                     unit.status,
                     completion_commit,
-                    handoff.summary,
-                    tests_run,
-                    risk_notes
+                    handoff_revision_id,
+                    provided_contracts,
+                    provided_capabilities
                 )
             })
             .collect::<Vec<_>>()
@@ -312,35 +302,5 @@ impl CodingWorkspaceEngine {
             .event_tx
             .send(CodingWsOutMessage::CodingChatEntryCreated { entry })
             .await;
-    }
-
-    pub(crate) async fn emit_tester_tool_result_entry(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        node_id: &str,
-        sequence: &mut usize,
-        role_run: Option<&CodingRoleRun>,
-        result: ProviderToolResult,
-    ) {
-        let metadata = role_run.map(|role_run| {
-            serde_json::json!({
-                "tool_use_id": result.tool_use_id.clone(),
-                "role_run_id": role_run.id.clone(),
-                "run_no": role_run.run_no
-            })
-        });
-        let entry = tester_chat_entry(
-            attempt,
-            node_id,
-            sequence,
-            CodingEntryType::ToolResult {
-                tool_use_id: result.tool_use_id,
-                output: result.output,
-                is_error: result.is_error,
-            },
-            None,
-            metadata,
-        );
-        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 }

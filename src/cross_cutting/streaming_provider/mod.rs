@@ -281,10 +281,6 @@ pub trait StreamingProviderAdapter: Send + Sync {
         false
     }
 
-    fn supports_provider_driven_testing(&self) -> bool {
-        false
-    }
-
     async fn start(
         &self,
         _input: StreamingProviderInput,

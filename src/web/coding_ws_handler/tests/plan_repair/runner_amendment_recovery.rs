@@ -70,10 +70,9 @@ async fn assert_runner_recovers_amendment_before_provider(state: RunnerRecoveryS
     let runner_attempt = attempt.clone();
     let runner_event_tx = event_tx.clone();
     let task = tokio::spawn(async move {
-        let engine = CodingWorkspaceEngine::with_provider(
+        let engine = CodingWorkspaceEngine::new(
             runner_store.clone(),
             GitWorkspaceService::new(),
-            runner_state.provider_adapter.clone(),
             runner_event_tx.clone(),
         );
         execute_start_coding_flow(
@@ -178,10 +177,9 @@ async fn coding_ws_plan_repair_await_handoff_stays_blocked_after_stage_gate_cont
         })
         .await
         .unwrap();
-    let engine = CodingWorkspaceEngine::with_provider(
+    let engine = CodingWorkspaceEngine::new(
         fixture.store.clone(),
         GitWorkspaceService::new(),
-        web_state.provider_adapter.clone(),
         event_tx.clone(),
     );
 
@@ -231,10 +229,9 @@ async fn coding_ws_plan_repair_await_handoff_stays_blocked_after_stage_gate_cont
         }
     });
     let (_replay_command_tx, replay_command_rx) = mpsc::channel(8);
-    let replay_engine = CodingWorkspaceEngine::with_provider(
+    let replay_engine = CodingWorkspaceEngine::new(
         fixture.store.clone(),
         GitWorkspaceService::new(),
-        web_state.provider_adapter.clone(),
         replay_event_tx.clone(),
     );
     let replay_attempt = fixture

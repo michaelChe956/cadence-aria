@@ -539,8 +539,6 @@ pub(super) fn persist_completed_core_handoff(
         )]),
         contract_hash: "contract_hash_v2".to_string(),
         commit_sha: "commit_core_v2".to_string(),
-        tests: vec!["cargo test --locked".to_string()],
-        artifacts: vec!["src/core.rs".to_string()],
         created_at: "2026-07-20T00:00:12Z".to_string(),
     };
     revision_store

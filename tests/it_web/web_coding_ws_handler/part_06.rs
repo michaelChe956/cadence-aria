@@ -24,18 +24,6 @@ impl ReviewerBlockedProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for ReviewerBlockedProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
-    }
-
     async fn run_streaming(
         &self,
         input: &AdapterInput,
@@ -111,18 +99,6 @@ struct InternalReviewReworkState {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for InternalReviewReworkProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
-    }
-
     async fn run_streaming(
         &self,
         input: &AdapterInput,
@@ -220,18 +196,6 @@ impl CodeReviewReworkProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for CodeReviewReworkProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
-    }
-
     async fn run_streaming(
         &self,
         input: &AdapterInput,
@@ -311,88 +275,6 @@ impl StreamingProviderAdapter for CodeReviewReworkProvider {
         }
         Ok(rx)
     }
-}
-
-fn start_web_test_provider_driven_testing_session(
-    prompt: &str,
-    cancel: CancellationToken,
-) -> Result<ProviderSession, ProviderAdapterError> {
-    let Some(output) = web_test_provider_driven_testing_output(prompt) else {
-        return Err(ProviderAdapterError::execution_failed(
-            None,
-            String::new(),
-            "streaming provider start is not implemented",
-            0,
-        ));
-    };
-    let (event_tx, event_rx) = mpsc::channel(8);
-    let (command_tx, _command_rx) = mpsc::channel(8);
-
-    tokio::spawn(async move {
-        if cancel.is_cancelled() {
-            return;
-        }
-        if event_tx
-            .send(ProviderEvent::TextDelta {
-                content: output.clone(),
-            })
-            .await
-            .is_err()
-        {
-            return;
-        }
-        if cancel.is_cancelled() {
-            return;
-        }
-        let _ = event_tx
-            .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
-            .await;
-    });
-
-    Ok(ProviderSession {
-        events: event_rx,
-        commands: command_tx,
-    })
-}
-
-fn web_test_provider_driven_testing_output(prompt: &str) -> Option<String> {
-    if prompt.contains("Tester Provider Runtime") && prompt.contains("Phase: plan_tests") {
-        return Some(
-            json!({
-                "summary": "web integration provider-driven test plan",
-                "steps": [{
-                    "id": "cargo_test",
-                    "title": "Cargo test",
-                    "intent": "verify the coding worktree with the provider-managed test fixture",
-                    "required": true,
-                    "tool": "provider_managed",
-                    "risk_level": "low",
-                    "command_or_tool_input": {
-                        "command": "cargo test --locked"
-                    },
-                    "evidence_expectation": "provider reports deterministic cargo test evidence",
-                    "related_requirements": ["REQ-CARGO"],
-                    "related_design_constraints": ["DEC-CARGO"],
-                    "related_work_item_tasks": ["TASK-CARGO"]
-                }]
-            })
-            .to_string(),
-        );
-    }
-    if prompt.contains("Tester Provider Runtime") && prompt.contains("Phase: execute_test_plan") {
-        return Some(
-            json!({
-                "step_results": [{
-                    "step_id": "cargo_test",
-                    "status": "passed",
-                    "evidence_refs": ["web-it-provider-driven-testing.log"],
-                    "provider_analysis": "web integration fixture completed deterministic provider-managed testing"
-                }]
-            })
-            .to_string(),
-        );
-    }
-    None
 }
 
 struct HangingCodingProvider;

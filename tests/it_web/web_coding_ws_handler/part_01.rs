@@ -105,7 +105,7 @@ fn rewrite_as_legacy_coding_attempt_fixture(
 #[test]
 fn coding_ws_out_messages_serialize_with_coding_message_type_names() {
     let message = CodingWsOutMessage::CodingStageChange {
-        stage: CodingExecutionStage::Testing,
+        stage: CodingExecutionStage::CodeReview,
     };
 
     let value = serde_json::to_value(message).expect("serialize");
@@ -114,7 +114,7 @@ fn coding_ws_out_messages_serialize_with_coding_message_type_names() {
         value,
         json!({
             "type": "coding_stage_change",
-            "stage": "testing"
+            "stage": "code_review"
         })
     );
 
@@ -169,14 +169,14 @@ fn coding_ws_in_messages_deserialize_client_commands() {
 
     let stage_gate_confirm: CodingWsInMessage = serde_json::from_value(json!({
         "type": "stage_gate_confirm",
-        "stage": "testing"
+        "stage": "code_review"
     }))
     .expect("deserialize stage gate confirm");
 
     assert_eq!(
         stage_gate_confirm,
         CodingWsInMessage::StageGateConfirm {
-            stage: CodingExecutionStage::Testing,
+            stage: CodingExecutionStage::CodeReview,
         }
     );
 
@@ -201,7 +201,7 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Running,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::ContextNote {
             content: "补充背景".to_string()
         },
@@ -264,7 +264,7 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Running,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::ProviderSelect {
             role: "author".to_string(),
             provider: ProviderName::Codex,
@@ -272,9 +272,9 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Running,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::StageGateConfirm {
-            stage: CodingExecutionStage::Testing,
+            stage: CodingExecutionStage::CodeReview,
         },
     ));
 }
@@ -283,16 +283,16 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
 fn blocked_attempt_allows_gate_response_messages() {
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Blocked,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::GateResponse {
             gate_id: "coding_blocked_gate_0001".to_string(),
-            action_id: "retry_test_plan".to_string(),
+            action_id: "retry_review".to_string(),
             extra_context: None,
         },
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Blocked,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::AbortAttempt,
     ));
 }
@@ -305,15 +305,6 @@ fn waiting_for_human_code_review_allows_blocked_gate_responses() {
         &CodingWsInMessage::GateResponse {
             gate_id: "coding_blocked_gate_0007".to_string(),
             action_id: "send_to_coder".to_string(),
-            extra_context: None,
-        },
-    ));
-    assert!(is_coding_ws_message_allowed(
-        &CodingAttemptStatus::WaitingForHuman,
-        &CodingExecutionStage::Testing,
-        &CodingWsInMessage::GateResponse {
-            gate_id: "coding_blocked_gate_0008".to_string(),
-            action_id: "accept_testing_result".to_string(),
             extra_context: None,
         },
     ));
@@ -373,7 +364,6 @@ async fn coding_ws_sends_session_state_on_connect_and_responds_to_ping() {
             branch_name,
             role_provider_config_snapshot,
             timeline_nodes,
-            testing_report,
             ..
         } => {
             assert_eq!(attempt_id, "coding_attempt_0001");
@@ -386,7 +376,6 @@ async fn coding_ws_sends_session_state_on_connect_and_responds_to_ping() {
                 ProviderName::Fake
             );
             assert!(timeline_nodes.is_empty());
-            assert!(testing_report.is_none());
         }
         other => panic!("expected coding session state, got {other:?}"),
     }
@@ -409,8 +398,8 @@ async fn coding_session_snapshot_includes_role_runs() {
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0003".to_string()),
         )
@@ -421,8 +410,8 @@ async fn coding_session_snapshot_includes_role_runs() {
             &run,
             CodingRoleRunEventType::ProviderPrompt,
             serde_json::json!({
-                "mode": "plan_tests",
-                "prompt": "plan tests"
+                "mode": "review",
+                "prompt": "review changes"
             }),
         )
         .expect("prompt event");
@@ -473,13 +462,13 @@ async fn coding_session_snapshot_includes_role_runs() {
     let (mut ws, _) = connect_async(url).await.expect("connect ws");
 
     let raw_state = recv_json_value(&mut ws).await;
-    assert_eq!(raw_state["role_runs"][0]["role"], "tester");
+    assert_eq!(raw_state["role_runs"][0]["role"], "code_reviewer");
     assert!(raw_state["role_runs"][0].get("run").is_none());
 
     match serde_json::from_value(raw_state).expect("coding session state") {
         CodingWsOutMessage::CodingSessionState { role_runs, .. } => {
             assert_eq!(role_runs.len(), 1);
-            assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
+            assert_eq!(role_runs[0].role, CodingProviderRole::CodeReviewer);
             assert_eq!(role_runs[0].run_no, 1);
             assert_eq!(role_runs[0].node_id.as_deref(), Some("coding_node_0003"));
             let summary = role_runs[0].event_summary.as_ref().expect("event summary");
@@ -528,8 +517,8 @@ async fn coding_session_snapshot_ignores_corrupt_role_run_events() {
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0003".to_string()),
         )
@@ -564,7 +553,7 @@ async fn coding_session_snapshot_ignores_corrupt_role_run_events() {
     match recv_json(&mut ws).await {
         CodingWsOutMessage::CodingSessionState { role_runs, .. } => {
             assert_eq!(role_runs.len(), 1);
-            assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
+            assert_eq!(role_runs[0].role, CodingProviderRole::CodeReviewer);
             assert!(role_runs[0].event_summary.is_none());
             assert!(role_runs[0].recent_events.is_empty());
         }
@@ -587,8 +576,8 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
     store
         .create_stage_gate(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             "2026-05-28T00:00:05Z".to_string(),
             CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
                 author: ProviderName::Codex,
@@ -611,13 +600,13 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
             assert_eq!(pending_gates.len(), 1);
             assert_eq!(pending_gates[0].gate_id, "coding_stage_gate_0001");
             assert_eq!(pending_gates[0].kind, CodingGateKind::StageGate);
-            assert_eq!(pending_gates[0].stage, Some(CodingExecutionStage::Testing));
-            assert_eq!(pending_gates[0].role, Some(CodingProviderRole::Tester));
+            assert_eq!(pending_gates[0].stage, Some(CodingExecutionStage::CodeReview));
+            assert_eq!(pending_gates[0].role, Some(CodingProviderRole::CodeReviewer));
             assert_eq!(
                 pending_gates[0].expires_at.as_deref(),
                 Some("2026-05-28T00:00:05Z")
             );
-            assert!(pending_gates[0].title.contains("Testing"));
+            assert!(pending_gates[0].title.contains("CodeReview"));
             assert_eq!(
                 pending_gates[0].available_actions[0].action_type,
                 CodingGateActionType::ConfirmStage

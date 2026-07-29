@@ -10,7 +10,7 @@ fn coding_runner_commands_use_stable_ws_command_contract() {
         provider: ProviderName::Codex,
     };
     let stage_confirm = CodingRunnerCommand::StageGateConfirm {
-        stage: CodingExecutionStage::Testing,
+        stage: CodingExecutionStage::CodeReview,
     };
 
     assert_eq!(
@@ -25,7 +25,7 @@ fn coding_runner_commands_use_stable_ws_command_contract() {
         serde_json::to_value(stage_confirm).expect("serialize stage confirm command"),
         json!({
             "type": "stage_gate_confirm",
-            "stage": "testing"
+            "stage": "code_review"
         })
     );
     assert_eq!(

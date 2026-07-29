@@ -481,11 +481,6 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
       });
       break;
     }
-    case "testing_report_update":
-      store.setTestingReport(
-        (message as Extract<CodingWsOutMessage, { type: "testing_report_update" }>).report,
-      );
-      break;
     case "code_review_complete":
       store.addCodeReviewReport(
         (message as Extract<CodingWsOutMessage, { type: "code_review_complete" }>).report,

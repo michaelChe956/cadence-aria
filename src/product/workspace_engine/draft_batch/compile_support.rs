@@ -115,7 +115,6 @@ impl WorkspaceEngine {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let required_handoff_from = depends_on.clone();
             work_items.push(LifecycleWorkItemRecord {
                 id: work_item_id.clone(),
                 project_id: previous_plan.project_id.clone(),
@@ -136,7 +135,6 @@ impl WorkspaceEngine {
                 source_outline_id: Some(record.outline_id.clone()),
                 source_draft_id: Some(record.draft_id.clone()),
                 planned_implementation_context: None,
-                planned_handoff_summary: None,
                 kind: crate::product::work_item_split_engine::types::parse_work_item_kind(
                     &candidate.canonical_contract_candidate.identity.kind,
                 ),
@@ -153,14 +151,12 @@ impl WorkspaceEngine {
                     .forbidden_scopes
                     .clone(),
                 context_budget: crate::product::models::WorkItemContextBudget::default(),
-                required_handoff_from,
                 verification_plan_ref: Some(verification_plan_id.clone()),
                 require_execution_plan_confirm: previous_plan
                     .options
                     .require_execution_plan_confirm,
                 execution_plan_status:
                     crate::product::models::WorkItemExecutionPlanStatus::NotStarted,
-                handoff_summary_ref: None,
                 completion_commit: None,
                 completion_diff_summary_ref: None,
                 created_at: now.to_string(),

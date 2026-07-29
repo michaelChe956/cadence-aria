@@ -45,7 +45,6 @@ pub(super) const FAILED_NODE_ID: &str = "coding_node_0009";
 pub(super) enum FixtureCase {
     CompletedAttempt,
     AbortedAttempt,
-    TestingStage,
     MissingCompletedAt,
     GroupWithoutActiveUnit,
     GroupActiveUnitIdMismatch,
@@ -459,11 +458,7 @@ pub(super) fn failed_review_fixture(
         FixtureCase::AbortedAttempt => CodingAttemptStatus::Aborted,
         _ => CodingAttemptStatus::Failed,
     };
-    attempt.stage = if matches!(case, FixtureCase::TestingStage) {
-        CodingExecutionStage::Testing
-    } else {
-        CodingExecutionStage::CodeReview
-    };
+    attempt.stage = CodingExecutionStage::CodeReview;
     attempt.completed_at = (!matches!(case, FixtureCase::MissingCompletedAt))
         .then(|| "2026-07-12T04:30:59Z".to_string());
     attempt.work_item_group_id = matches!(scope, CodingAttemptScope::WorkItemGroup)

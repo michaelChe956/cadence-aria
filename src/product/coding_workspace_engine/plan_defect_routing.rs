@@ -308,7 +308,6 @@ pub(crate) fn execution_finding_adapter(
         required_action: None,
         source_stage: match source {
             PlanDefectSource::Coder => CodingExecutionStage::Coding,
-            PlanDefectSource::Tester => CodingExecutionStage::Testing,
             PlanDefectSource::CodeReviewer => CodingExecutionStage::CodeReview,
             PlanDefectSource::GroupReviewer => CodingExecutionStage::InternalPrReview,
         },

@@ -8,7 +8,7 @@ import {
   useCodingWorkspaceStore,
 } from "../state/coding-workspace-store";
 import { errorMessage } from "./CodingWorkspaceControls";
-import { GitPanel, LogsPanel, ReviewPanel, TestsPanel } from "./CodingWorkspaceReports";
+import { GitPanel, LogsPanel, ReviewPanel } from "./CodingWorkspaceReports";
 
 type CodingDiffState = {
   addressKey: string | null;
@@ -35,7 +35,7 @@ export function CodingArtifactTabs({
     diff: "",
     error: null,
   });
-  const tabs: CodingArtifactTab[] = ["diff", "tests", "review", "git", "logs"];
+  const tabs: CodingArtifactTab[] = ["diff", "review", "git", "logs"];
 
   useEffect(() => {
     if (activeTab !== "diff") {
@@ -110,9 +110,7 @@ export function CodingArtifactTabs({
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3 text-sm">
-        {activeTab === "tests" ? (
-          <TestsPanel />
-        ) : activeTab === "review" ? (
+        {activeTab === "review" ? (
           <ReviewPanel />
         ) : activeTab === "git" ? (
           <GitPanel />

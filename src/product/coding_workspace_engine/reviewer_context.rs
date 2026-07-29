@@ -13,14 +13,6 @@ impl CodingWorkspaceEngine {
         provider: &ProviderName,
     ) -> Result<PreparedGroupReviewerContext, CodingWorkspaceEngineError> {
         let authoritative_bindings = self.authoritative_group_reviewer_bindings(attempt)?;
-        let mut test_evidence_refs = self
-            .store
-            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .map(|report| report.id)
-            .collect::<Vec<_>>();
-        test_evidence_refs.sort();
-        test_evidence_refs.dedup();
 
         let renderer = renderer_for(provider);
         let mut sections = Vec::with_capacity(authoritative_bindings.len());
@@ -39,7 +31,6 @@ impl CodingWorkspaceEngine {
                     &ReviewerExecutionEnvelope {
                         unit_run_id: binding.run.id.clone(),
                         diff_ref: format!("{diff_base}..{completion_commit}"),
-                        test_evidence_refs: test_evidence_refs.clone(),
                         handoff_revision_ids: binding.run.resolved_handoff_revision_ids.clone(),
                         contract_delta_refs: Vec::new(),
                         completion_commit,

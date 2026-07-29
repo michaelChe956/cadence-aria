@@ -39,8 +39,7 @@ impl CodingWorkspaceEngine {
                 self.run_group_completion_gates(&current).await?;
             }
             CodingAttemptScope::WorkItem => {
-                self.generate_and_save_work_item_handoff_if_missing(&current)
-                    .await?;
+                self.record_work_item_completion_commit_if_present(&current)?;
                 self.run_completion_gates(&current).await?;
             }
         }
@@ -227,78 +226,14 @@ impl CodingWorkspaceEngine {
         Ok(())
     }
 
-    pub(crate) async fn generate_and_save_work_item_handoff_if_missing(
+    /// 记录 work item 的完成 commit。
+    ///
+    /// 交接摘要移除后，`completion_commit` 仍需写入：它由依赖交接引用展示消费，
+    /// 与被移除的摘要无关。
+    pub(crate) fn record_work_item_completion_commit_if_present(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), CodingWorkspaceEngineError> {
-        if attempt.scope == CodingAttemptScope::WorkItemGroup {
-            let Some(active) = self.store.get_active_coding_unit(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-            )?
-            else {
-                if self.store.get_visible_work_item_handoff(attempt)?.is_some() {
-                    return Ok(());
-                }
-                return Err(CodingWorkspaceEngineError::WorkItemHandoffMissing(
-                    attempt.id.clone(),
-                ));
-            };
-            if self
-                .store
-                .get_coding_unit_handoff(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                    &active.id,
-                )?
-                .is_some()
-            {
-                return Ok(());
-            }
-
-            let handoff = self.generate_work_item_handoff(attempt).await?;
-            self.store.save_coding_unit_handoff(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &active.id,
-                &handoff,
-            )?;
-            if self.schema_v2_group_plan_lineage(attempt)?.is_none() {
-                let lifecycle = LifecycleStore::new(self.store.paths());
-                let current_work_item_id = self.active_work_item_id_for_attempt(attempt);
-                if lifecycle
-                    .list_work_items(&attempt.project_id, &attempt.issue_id)?
-                    .iter()
-                    .any(|item| item.id == current_work_item_id)
-                {
-                    lifecycle.update_work_item_handoff_summary(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        current_work_item_id,
-                        Some(format!("units/{}/work-item-handoff.json", active.id)),
-                        handoff.commit_sha.clone(),
-                    )?;
-                }
-            }
-
-            return Ok(());
-        }
-
-        if self
-            .store
-            .get_work_item_handoff(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .is_some()
-        {
-            return Ok(());
-        }
-
-        let handoff = self.generate_work_item_handoff(attempt).await?;
-
-        self.store.save_work_item_handoff(&handoff)?;
-
         let lifecycle = LifecycleStore::new(self.store.paths());
         let current_work_item_id = self.active_work_item_id_for_attempt(attempt);
         if lifecycle
@@ -306,227 +241,14 @@ impl CodingWorkspaceEngine {
             .iter()
             .any(|item| item.id == current_work_item_id)
         {
-            lifecycle.update_work_item_handoff_summary(
+            lifecycle.update_work_item_completion_commit(
                 &attempt.project_id,
                 &attempt.issue_id,
                 current_work_item_id,
-                Some(format!(
-                    "projects/{}/issues/{}/coding-attempts/{}/work-item-handoff.json",
-                    attempt.project_id, attempt.issue_id, attempt.id
-                )),
                 attempt.head_commit.clone(),
             )?;
         }
-
         Ok(())
-    }
-
-    pub(crate) async fn generate_work_item_handoff(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<WorkItemHandoff, CodingWorkspaceEngineError> {
-        let Some(provider) = self.provider.as_ref() else {
-            return self.generate_placeholder_work_item_handoff(attempt).await;
-        };
-
-        match self
-            .generate_work_item_handoff_from_provider(provider, attempt)
-            .await
-        {
-            Ok(handoff) => Ok(handoff),
-            Err(
-                error @ (CodingWorkspaceEngineError::ProviderAdapter(_)
-                | CodingWorkspaceEngineError::ProviderStream(_)
-                | CodingWorkspaceEngineError::MissingWorktree(_)),
-            ) => {
-                tracing::warn!(
-                    attempt_id = %attempt.id,
-                    work_item_id = %self.active_work_item_id_for_attempt(attempt),
-                    error = %error,
-                    "work item handoff provider failed; falling back to placeholder handoff"
-                );
-                self.generate_placeholder_work_item_handoff(attempt).await
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    pub(crate) async fn generate_placeholder_work_item_handoff(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<WorkItemHandoff, CodingWorkspaceEngineError> {
-        let testing_reports =
-            self.store
-                .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let tests_run: Vec<String> = testing_reports
-            .iter()
-            .flat_map(|report| report.commands.iter().map(|cmd| cmd.command.join(" ")))
-            .collect();
-        let test_result_summary = testing_reports
-            .last()
-            .map(|report| format!("{:?}", report.overall_status))
-            .unwrap_or_else(|| "no testing report".to_string());
-
-        let review_requests =
-            self.store
-                .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let review_summary = review_requests
-            .last()
-            .map(|r| format!("{:?}", r.push_status));
-
-        Ok(WorkItemHandoff {
-            id: format!(
-                "work_item_handoff_{}_{}_{}",
-                attempt.project_id, attempt.issue_id, attempt.id
-            ),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            work_item_id: self.active_work_item_id_for_attempt(attempt).to_string(),
-            attempt_id: attempt.id.clone(),
-            provider_run_ref: None,
-            summary: "Handoff generated from attempt artifacts".to_string(),
-            files_changed: Vec::new(),
-            commit_sha: attempt.head_commit.clone(),
-            diff_summary: String::new(),
-            tests_run,
-            test_result_summary,
-            review_summary,
-            api_or_contract_changes: Vec::new(),
-            open_risks: Vec::new(),
-            next_work_item_notes: Vec::new(),
-            created_at: Utc::now().to_rfc3339(),
-        })
-    }
-
-    pub(crate) async fn generate_work_item_handoff_from_provider(
-        &self,
-        provider: &Arc<dyn ProviderAdapter + Send + Sync>,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<WorkItemHandoff, CodingWorkspaceEngineError> {
-        let worktree_path = self.attempt_worktree_path(attempt).await?;
-        let provider_type = provider_type_for_name(&attempt.provider_config_snapshot.author);
-        let output_schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string"},
-                "files_changed": {"type": "array", "items": {"type": "string"}},
-                "diff_summary": {"type": "string"},
-                "tests_run": {"type": "array", "items": {"type": "string"}},
-                "test_result_summary": {"type": "string"},
-                "api_or_contract_changes": {"type": "array", "items": {"type": "string"}},
-                "next_work_item_notes": {"type": "array", "items": {"type": "string"}}
-            },
-            "required": ["summary"]
-        });
-        let prompt = format!(
-            "Generate a concise handoff summary for the completed work item.\n\
-             Project: {}\n\
-             Issue: {}\n\
-             Work Item: {}\n\
-             Attempt: {}\n\
-             \n\
-             Output requirements:\n\
-             - Return exactly one JSON object inside the sentinel tags.\n\
-             - Do not include Markdown code fences.\n\
-             - Missing array fields must be [].\n\
-             - Use this shape:\n\
-             <ARIA_STRUCTURED_OUTPUT>{{\"summary\":\"...\",\"files_changed\":[],\"diff_summary\":\"\",\"tests_run\":[],\"test_result_summary\":\"\",\"api_or_contract_changes\":[],\"next_work_item_notes\":[]}}</ARIA_STRUCTURED_OUTPUT>\n\
-             \n\
-             JSON schema:\n\
-             {}\n",
-            attempt.project_id,
-            attempt.issue_id,
-            self.active_work_item_id_for_attempt(attempt),
-            attempt.id,
-            output_schema
-        );
-        let input = AdapterInput {
-            provider_type,
-            role: AdapterRole::Handoff,
-            prompt,
-            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            // 流日志落在 attempt 目录下，与 provider-raw 同根；不得写入目标 worktree。
-            provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
-            context_files: Vec::new(),
-            output_schema: output_schema.to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-            max_retries: 0,
-        };
-
-        let output = tokio::task::spawn_blocking({
-            let provider = Arc::clone(provider);
-            move || provider.run(&input)
-        })
-        .await
-        .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))??;
-
-        let structured = output.structured_output.unwrap_or_default();
-        Ok(WorkItemHandoff {
-            id: format!(
-                "work_item_handoff_{}_{}_{}",
-                attempt.project_id, attempt.issue_id, attempt.id
-            ),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            work_item_id: self.active_work_item_id_for_attempt(attempt).to_string(),
-            attempt_id: attempt.id.clone(),
-            provider_run_ref: None,
-            summary: structured
-                .get("summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Completed work item")
-                .to_string(),
-            files_changed: structured
-                .get("files_changed")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            commit_sha: attempt.head_commit.clone(),
-            diff_summary: structured
-                .get("diff_summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            tests_run: structured
-                .get("tests_run")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            test_result_summary: structured
-                .get("test_result_summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            review_summary: None,
-            api_or_contract_changes: structured
-                .get("api_or_contract_changes")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            open_risks: Vec::new(),
-            next_work_item_notes: structured
-                .get("next_work_item_notes")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            created_at: Utc::now().to_rfc3339(),
-        })
     }
 
     pub(crate) async fn complete_attempt_after_final_rework(
@@ -534,8 +256,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
-        self.generate_and_save_work_item_handoff_if_missing(attempt)
-            .await?;
+        self.record_work_item_completion_commit_if_present(attempt)?;
         self.run_completion_gates(attempt).await?;
         let staged = self.store.update_attempt_stage(
             &attempt.project_id,
@@ -569,8 +290,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
-        self.generate_and_save_work_item_handoff_if_missing(attempt)
-            .await?;
+        self.record_work_item_completion_commit_if_present(attempt)?;
         self.run_completion_gates(attempt).await?;
         let completed = self.store.update_attempt_status(
             &attempt.project_id,
@@ -620,7 +340,24 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        let completed_units = self
+            .store
+            .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .filter(|unit| {
+                unit.status == crate::product::coding_models::CodingExecutionUnitStatus::Completed
+            })
+            .collect::<Vec<_>>();
         if self.schema_v2_group_plan_lineage(attempt)?.is_some() {
+            if let Some(last_completed) = completed_units.iter().max_by_key(|unit| unit.order_index)
+            {
+                self.mark_issue_shared_worktree_completed_if_present(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &last_completed.logical_work_item_id,
+                    &attempt.id,
+                )?;
+            }
             return Ok(());
         }
         let lifecycle = LifecycleStore::new(self.store.paths());
@@ -629,12 +366,7 @@ impl CodingWorkspaceEngine {
             .into_iter()
             .map(|work_item| work_item.id)
             .collect::<std::collections::HashSet<_>>();
-        let completed_units =
-            self.store
-                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        for unit in completed_units.into_iter().filter(|unit| {
-            unit.status == crate::product::coding_models::CodingExecutionUnitStatus::Completed
-        }) {
+        for unit in completed_units {
             if existing_work_item_ids.contains(&unit.logical_work_item_id) {
                 lifecycle.update_work_item_execution_status(
                     &attempt.project_id,

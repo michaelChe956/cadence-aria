@@ -304,6 +304,20 @@ pub fn validate_canonical_contract(
             ));
         }
     }
+    for criterion in &contract.acceptance_criteria {
+        if is_process_evidence_acceptance_criterion(&criterion.criterion_id, &criterion.statement) {
+            findings.push(warning_finding(
+                "process_evidence_acceptance_criterion",
+                logical_work_item_id,
+                Some(&criterion.criterion_id),
+                None,
+                format!(
+                    "acceptance criterion {} must describe an observable result, not process evidence",
+                    criterion.criterion_id
+                ),
+            ));
+        }
+    }
 
     for scope in &contract.write_policy.exclusive_scopes {
         if scope.trim().is_empty() {
@@ -432,6 +446,56 @@ pub(crate) fn error_finding(
         capability_ref: capability_ref.map(str::to_string),
         message,
     }
+}
+
+pub(crate) fn warning_finding(
+    code: &str,
+    logical_work_item_id: &str,
+    contract_ref: Option<&str>,
+    capability_ref: Option<&str>,
+    message: String,
+) -> ContractValidationFinding {
+    ContractValidationFinding {
+        code: code.to_string(),
+        severity: ContractFindingSeverity::Warning,
+        logical_work_item_id: Some(logical_work_item_id.to_string()),
+        contract_ref: contract_ref.map(str::to_string),
+        capability_ref: capability_ref.map(str::to_string),
+        message,
+    }
+}
+
+fn is_process_evidence_acceptance_criterion(criterion_id: &str, statement: &str) -> bool {
+    let criterion_text = format!("{criterion_id} {statement}");
+    let lowercase = criterion_text.to_ascii_lowercase();
+    let ascii_words = lowercase
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<BTreeSet<_>>();
+    let has_ascii_commit_word = ["commit", "commits", "committed"]
+        .into_iter()
+        .any(|word| ascii_words.contains(word));
+    let has_chinese_commit_word = criterion_text.contains("提交");
+    let has_development_context = [
+        "git", "tdd", "test", "tests", "testing", "red", "code", "branch", "branches", "rebase",
+    ]
+    .into_iter()
+    .any(|word| ascii_words.contains(word))
+        || ["测试", "代码", "分支"]
+            .into_iter()
+            .any(|word| criterion_text.contains(word));
+    let has_process_word = criterion_text.contains("先失败")
+        || ascii_words.contains("red")
+        || ["history", "order", "sequence", "timing"]
+            .into_iter()
+            .any(|word| ascii_words.contains(word))
+        || criterion_text.contains("历史")
+        || criterion_text.contains("顺序")
+        || criterion_text.contains("时序");
+
+    (has_ascii_commit_word || has_chinese_commit_word)
+        && has_development_context
+        && has_process_word
 }
 
 fn report_duplicate_ids<'a>(

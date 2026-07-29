@@ -50,14 +50,11 @@ pub(crate) const WORK_ITEM_SPLIT_OUTPUT_SCHEMA: &str = r#"{
             "properties": {
               "target_context_k": { "type": "string" },
               "max_summary_chars": { "type": "integer" },
-              "max_handoff_chars": { "type": "integer" },
               "max_code_context_chars": { "type": "integer" },
               "max_context_file_refs": { "type": "integer" },
-              "max_traceability_refs": { "type": "integer" },
-              "max_dependency_handoffs": { "type": "integer" }
+              "max_traceability_refs": { "type": "integer" }
             }
           },
-          "required_handoff_from": { "type": "array", "items": { "type": "string" } },
           "require_execution_plan_confirm": { "type": "boolean" }
         },
         "required": ["title", "kind"]

@@ -2,9 +2,9 @@ use cadence_aria::product::coding_models::{
     CodingAttemptPlanBinding, CodingUnitRun, CodingUnitRunStatus,
 };
 use cadence_aria::product::models::{
-    DependencyGraphRevision, HandoffRevision, LogicalWorkItem, PlanRevisionReason,
-    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle,
-    WorkItemRevision,
+    DependencyGraphRevision, HandoffRevision, HumanPresentationRevision, LogicalWorkItem,
+    PlanProjectionBundle, PlanRevisionReason, VerificationPlanRevision, WorkItemPlanLineage,
+    WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
 };
 use cadence_aria::product::work_item_contract::{
     CanonicalWorkItemContract, HandoffContract, WorkItemContractIdentity, WorkItemGoal,
@@ -12,7 +12,8 @@ use cadence_aria::product::work_item_contract::{
 };
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::product::work_item_projection::{
-    WorkItemProjectionCompiler, projection_hashes, renderer_for,
+    CoderGroupContext, HumanGroupProjection, ReviewerGroupMatrix, WorkItemProjectionCompiler,
+    projection_hashes, renderer_for,
 };
 
 fn group_engine_with_two_units() -> (
@@ -142,6 +143,7 @@ fn init_group_worktree(worktree: &Path) {
     fs::write(worktree.join("src/frontend.rs"), "// frontend\n").expect("write frontend file");
     run_git(worktree, &["add", "."]);
     run_git(worktree, &["commit", "-m", "seed group files"]);
+    run_git(worktree, &["tag", "seed-commit"]);
 }
 
 fn seed_authoritative_group_terminal_fixture(
@@ -164,6 +166,7 @@ fn seed_authoritative_group_terminal_fixture(
         .put_plan_lineage(&lineage)
         .expect("put group plan lineage");
     let mut bindings = std::collections::BTreeMap::new();
+    let mut projection_bundle_refs = Vec::new();
     for (logical_id, revision_id) in [
         ("work_item_0001", "work_item_revision_0001"),
         ("work_item_0002", "work_item_revision_0002"),
@@ -218,6 +221,18 @@ fn seed_authoritative_group_terminal_fixture(
             created_at: "2026-06-27T00:00:00Z".to_string(),
         };
         revision_store
+            .put_verification_plan_revision(
+                &lineage,
+                &VerificationPlanRevision {
+                    id: revision.verification_plan_revision_id.clone(),
+                    logical_work_item_id: logical.id.clone(),
+                    source_draft_revision_id: revision.source_draft_revision_id.clone(),
+                    verification_checks: revision.canonical_contract.verification_checks.clone(),
+                    created_at: "2026-06-27T00:00:00Z".to_string(),
+                },
+            )
+            .expect("put verification plan revision");
+        revision_store
             .put_work_item_revision(&lineage, &revision)
             .expect("put work item revision");
         let projections = WorkItemProjectionCompiler
@@ -243,6 +258,28 @@ fn seed_authoritative_group_terminal_fixture(
                 },
             )
             .expect("put work item projection bundle");
+        projection_bundle_refs.push(revision.work_item_projection_bundle_id.clone());
+        revision_store
+            .put_human_presentation_revision(
+                &lineage,
+                &HumanPresentationRevision {
+                    id: format!("human_presentation_{logical_id}"),
+                    source_plan_projection_bundle_id: None,
+                    source_work_item_projection_bundle_id: Some(
+                        revision.work_item_projection_bundle_id.clone(),
+                    ),
+                    supersedes: None,
+                    human_summary: logical.title.clone(),
+                    why_split: None,
+                    dependency_explanation: Vec::new(),
+                    risk_explanation: Vec::new(),
+                    source_refs: Vec::new(),
+                    normative: false,
+                    used_by_provider: false,
+                    created_at: "2026-06-27T00:00:00Z".to_string(),
+                },
+            )
+            .expect("put human presentation revision");
         revision_store
             .set_active_work_item_revision(&lineage, &logical, None, &revision.id)
             .expect("activate work item revision");
@@ -261,6 +298,46 @@ fn seed_authoritative_group_terminal_fixture(
     revision_store
         .put_dependency_graph_revision(&lineage, &graph)
         .expect("put dependency graph revision");
+    let ordered_logical_work_item_ids = bindings.keys().cloned().collect::<Vec<_>>();
+    revision_store
+        .put_plan_projection_bundle(
+            &lineage,
+            &PlanProjectionBundle {
+                id: "plan_projection_bundle_0001".to_string(),
+                plan_revision_id: "plan_revision_0001".to_string(),
+                dependency_graph_revision_id: graph.id.clone(),
+                work_item_projection_bundle_refs: projection_bundle_refs,
+                human_group_projection: HumanGroupProjection {
+                    plan_id: lineage.id.clone(),
+                    goal: "group terminal fixture".to_string(),
+                    split_reason: "authoritative runtime fixture".to_string(),
+                    work_items: Vec::new(),
+                    contract_flow: Vec::new(),
+                    risks: Vec::new(),
+                    source_refs: Vec::new(),
+                    normative: false,
+                    used_by_provider: false,
+                },
+                coder_group_context: CoderGroupContext {
+                    plan_id: lineage.id.clone(),
+                    ordered_logical_work_item_ids,
+                    dependency_edges: graph.edges.clone(),
+                    group_write_scopes: std::collections::BTreeMap::new(),
+                },
+                reviewer_group_matrix: ReviewerGroupMatrix {
+                    plan_id: lineage.id.clone(),
+                    work_items: Vec::new(),
+                    dependency_edges: graph.edges.clone(),
+                    design_traceability_refs: Vec::new(),
+                },
+                human_group_projection_hash: "fixture-human-group-hash".to_string(),
+                coder_group_context_hash: "fixture-coder-group-hash".to_string(),
+                reviewer_group_matrix_hash: "fixture-reviewer-group-hash".to_string(),
+                compiler_version: "plan-projection-compiler-v1".to_string(),
+                created_at: "2026-06-27T00:00:00Z".to_string(),
+            },
+        )
+        .expect("put plan projection bundle");
     let plan_revision = WorkItemPlanRevision {
         id: "plan_revision_0001".to_string(),
         plan_id: lineage.id.clone(),
@@ -359,8 +436,6 @@ fn seed_authoritative_group_coder_fixture(
         provided_capabilities: std::collections::BTreeMap::new(),
         contract_hash: revision.canonical_contract_hash,
         commit_sha: "seed-commit".to_string(),
-        tests: Vec::new(),
-        artifacts: Vec::new(),
         created_at: "2026-06-27T00:00:00Z".to_string(),
     };
     revision_store
@@ -386,158 +461,42 @@ fn seed_authoritative_group_coder_fixture(
         .expect("source handoff binding");
 }
 
-fn completed_group_attempt_with_handoffs() -> (
+fn completed_group_attempt_with_handoff_revisions() -> (
     tempfile::TempDir,
     ProductAppPaths,
     CodingAttemptStore,
     CodingWorkspaceEngine,
     CodingExecutionAttempt,
 ) {
-    let (root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
-    let lifecycle = LifecycleStore::new(paths.clone());
-    for (index, work_item_id) in ["work_item_0001", "work_item_0002"]
-        .into_iter()
-        .enumerate()
-    {
-        lifecycle
-            .create_work_item(CreateWorkItemInput {
-                id: Some(work_item_id.to_string()),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                repository_id: "repository_0001".to_string(),
-                story_spec_ids: Vec::new(),
-                design_spec_ids: Vec::new(),
-                title: format!("title for {work_item_id}"),
-                work_item_set_id: Some("work_item_plan_0001".to_string()),
-                sequence_hint: Some(((index + 1) * 10) as u32),
-                plan_status: WorkItemPlanStatus::Confirmed,
-                ..Default::default()
-            })
-            .expect("create work item");
-        lifecycle
-            .create_workspace_session(CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: work_item_id.to_string(),
-                workspace_type: WorkspaceType::WorkItem,
-                author_provider: ProviderName::Fake,
-                reviewer_provider: ProviderName::Fake,
-                review_rounds: 1,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            })
-            .expect("create workspace session");
-    }
-    lifecycle
-        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
-            id: Some("work_item_plan_0001".to_string()),
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("group-worktree");
+    init_group_worktree(&worktree);
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_group_work_items_and_plan(&paths);
+    let store = CodingAttemptStore::new(paths.clone());
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            source_story_spec_ids: Vec::new(),
-            source_design_spec_ids: Vec::new(),
-            options: IssueWorkItemPlanOptions {
-                include_integration_tests: false,
-                include_e2e_tests: false,
-                force_frontend_backend_split: false,
-                require_execution_plan_confirm: false,
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
             },
-            status: IssueWorkItemPlanStatus::Confirmed,
-            work_item_ids: vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
-            repository_profile_ref: None,
-            verification_plan_ids: Vec::new(),
-            dependency_graph: Vec::new(),
-            created_from_provider_run: None,
-            validator_findings: Vec::new(),
+            max_auto_rework: 2,
         })
-        .expect("create issue work item plan");
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0001",
-            &WorkItemHandoff {
-                id: "work_item_handoff_0001".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0001".to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: "handoff summary for backend".to_string(),
-                files_changed: vec!["src/backend.rs".to_string()],
-                commit_sha: Some("backend-sha".to_string()),
-                diff_summary: "backend diff".to_string(),
-                tests_run: vec!["cargo test --locked --lib backend".to_string()],
-                test_result_summary: "passed".to_string(),
-                review_summary: Some("backend review summary".to_string()),
-                api_or_contract_changes: vec!["POST /api/backend".to_string()],
-                open_risks: vec!["backend risk".to_string()],
-                next_work_item_notes: vec!["backend note".to_string()],
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit1 handoff");
-    store
-        .update_coding_unit_latest_handoff_revision_id(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0001",
-            Some("handoff_revision_0001".to_string()),
-        )
-        .expect("set unit1 handoff ref");
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            &WorkItemHandoff {
-                id: "work_item_handoff_0002".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0002".to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: "handoff summary for frontend".to_string(),
-                files_changed: vec!["src/frontend.rs".to_string()],
-                commit_sha: Some("frontend-sha".to_string()),
-                diff_summary: "frontend diff".to_string(),
-                tests_run: vec!["cargo test --locked --lib frontend".to_string()],
-                test_result_summary: "passed".to_string(),
-                review_summary: Some("frontend review summary".to_string()),
-                api_or_contract_changes: vec!["GET /api/frontend".to_string()],
-                open_risks: vec!["frontend risk".to_string()],
-                next_work_item_notes: vec!["frontend note".to_string()],
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit2 handoff");
-    store
-        .update_coding_unit_latest_handoff_revision_id(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            Some("handoff_revision_0002".to_string()),
-        )
-        .expect("set unit2 handoff ref");
-    store
-        .update_coding_unit_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            CodingExecutionUnitStatus::Completed,
-            Some("frontend done".to_string()),
-        )
-        .expect("complete last unit");
+        .expect("create group attempt");
+    seed_authoritative_group_final_review_fixture(&store, &attempt);
     store
         .save_review_request(&attempt, &sample_review_request(&attempt.id))
         .expect("save review request");
-    let attempt = store
-        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("updated attempt");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     (root, paths, store, engine, attempt)
 }
 
@@ -548,27 +507,10 @@ fn group_attempt_waiting_for_final_confirm() -> (
     CodingWorkspaceEngine,
     CodingExecutionAttempt,
 ) {
-    let (root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
+    let (root, paths, store, engine, attempt) =
+        completed_group_attempt_with_handoff_revisions();
     let lifecycle = LifecycleStore::new(paths.clone());
-    for (index, work_item_id) in ["work_item_0001", "work_item_0002"]
-        .into_iter()
-        .enumerate()
-    {
-        lifecycle
-            .create_work_item(CreateWorkItemInput {
-                id: Some(work_item_id.to_string()),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                repository_id: "repository_0001".to_string(),
-                story_spec_ids: Vec::new(),
-                design_spec_ids: Vec::new(),
-                title: format!("title for {work_item_id}"),
-                work_item_set_id: Some("work_item_plan_0001".to_string()),
-                sequence_hint: Some(((index + 1) * 10) as u32),
-                plan_status: WorkItemPlanStatus::Confirmed,
-                ..Default::default()
-            })
-            .expect("create work item");
+    for work_item_id in ["work_item_0001", "work_item_0002"] {
         lifecycle
             .update_work_item_execution_status(
                 "project_0001",
@@ -578,111 +520,22 @@ fn group_attempt_waiting_for_final_confirm() -> (
             )
             .expect("set coding status");
     }
-    lifecycle
-        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
-            id: Some("work_item_plan_0001".to_string()),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            source_story_spec_ids: Vec::new(),
-            source_design_spec_ids: Vec::new(),
-            options: IssueWorkItemPlanOptions {
-                include_integration_tests: false,
-                include_e2e_tests: false,
-                force_frontend_backend_split: false,
-                require_execution_plan_confirm: false,
-            },
-            status: IssueWorkItemPlanStatus::Confirmed,
-            work_item_ids: vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
-            repository_profile_ref: None,
-            verification_plan_ids: Vec::new(),
-            dependency_graph: Vec::new(),
-            created_from_provider_run: None,
-            validator_findings: Vec::new(),
-        })
-        .expect("create issue work item plan");
-    seed_authoritative_group_terminal_fixture(&store, &attempt);
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0001",
-            &WorkItemHandoff {
-                id: "work_item_handoff_0001".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0001".to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: "handoff summary for backend".to_string(),
-                files_changed: Vec::new(),
-                commit_sha: Some("backend-sha".to_string()),
-                diff_summary: String::new(),
-                tests_run: vec!["cargo test --locked --lib backend".to_string()],
-                test_result_summary: "passed".to_string(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: vec!["backend risk".to_string()],
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit1 handoff");
-    store
-        .update_coding_unit_latest_handoff_revision_id(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0001",
-            Some("handoff_revision_0001".to_string()),
-        )
-        .expect("set unit1 handoff ref");
+    let last_unit = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("group coding units")
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == "work_item_0002")
+        .expect("last coding unit");
     store
         .update_coding_unit_status(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-            "coding_unit_0002",
+            &last_unit.id,
             CodingExecutionUnitStatus::Completed,
             Some("frontend done".to_string()),
         )
-        .expect("complete last unit");
-    store
-        .save_coding_unit_handoff(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            &WorkItemHandoff {
-                id: "work_item_handoff_0002".to_string(),
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                work_item_id: "work_item_0002".to_string(),
-                attempt_id: attempt.id.clone(),
-                provider_run_ref: None,
-                summary: "handoff summary for frontend".to_string(),
-                files_changed: Vec::new(),
-                commit_sha: Some("frontend-sha".to_string()),
-                diff_summary: String::new(),
-                tests_run: vec!["cargo test --locked --lib frontend".to_string()],
-                test_result_summary: "passed".to_string(),
-                review_summary: None,
-                api_or_contract_changes: Vec::new(),
-                open_risks: vec!["frontend risk".to_string()],
-                next_work_item_notes: Vec::new(),
-                created_at: "2026-06-27T00:00:00Z".to_string(),
-            },
-        )
-        .expect("save unit2 handoff");
-    store
-        .update_coding_unit_latest_handoff_revision_id(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            "coding_unit_0002",
-            Some("handoff_revision_0002".to_string()),
-        )
-        .expect("set unit2 handoff ref");
+        .expect("refresh terminal attempt pointers");
     let attempt = store
         .update_attempt_status(
             &attempt.project_id,
@@ -712,16 +565,20 @@ fn group_attempt_waiting_for_final_confirm() -> (
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
-            Some("deadbeef".to_string()),
+            Some("seed-commit".to_string()),
         )
         .expect("set head commit");
+    let worktree_path = attempt
+        .worktree_path
+        .clone()
+        .expect("group attempt worktree");
     lifecycle
         .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: paths.root().join("shared-worktree"),
+            worktree_path,
             base_branch: "HEAD".to_string(),
         })
         .expect("upsert shared worktree");

@@ -98,8 +98,6 @@ fn handoff_for(logical_id: &str, handoff_id: &str) -> HandoffRevision {
         provided_capabilities: BTreeMap::new(),
         contract_hash: "contract_hash_handoff".to_string(),
         commit_sha: "deadbeef".to_string(),
-        tests: Vec::new(),
-        artifacts: Vec::new(),
         created_at: "2026-07-28T00:00:02Z".to_string(),
     }
 }

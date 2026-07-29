@@ -165,14 +165,7 @@ pub(crate) fn should_resume_runner_after_gate_response(
 ) -> bool {
     matches!(
         action_id,
-        "retry_test_plan"
-            | "retry_coding"
-            | "send_to_coder"
-            | "rerun_missing_steps"
-            | "retry_review"
-            | "retry_internal_review"
-            | "accept_testing_result"
-            | "rerun_testing"
+        "retry_coding" | "send_to_coder" | "retry_review" | "retry_internal_review"
     ) && matches!(
         previous_attempt.status,
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
@@ -630,9 +623,7 @@ pub(crate) async fn execute_start_coding_flow(
             }
         }
         match current.stage {
-            CodingExecutionStage::Coding
-            | CodingExecutionStage::Testing
-            | CodingExecutionStage::CodeReview => continue 'pipeline,
+            CodingExecutionStage::Coding | CodingExecutionStage::CodeReview => continue 'pipeline,
             CodingExecutionStage::ReviewRequest => {}
             _ => {
                 return emit_current_session_state(

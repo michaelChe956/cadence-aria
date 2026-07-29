@@ -82,10 +82,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         report: &ExecutionPlanDefectReport,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-        if !matches!(
-            report.source,
-            PlanDefectSource::Coder | PlanDefectSource::Tester
-        ) {
+        if !matches!(report.source, PlanDefectSource::Coder) {
             return Err(plan_repair_start_error(
                 "execution Plan Repair source is not supported".to_string(),
             ));

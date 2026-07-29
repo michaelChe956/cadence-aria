@@ -15,8 +15,8 @@ use crate::product::lifecycle_store::LifecycleStore;
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
 use super::{
-    ReviewFixture, TestControlledFakeStreamingProvider, TestControls, TestingFixture,
-    WorkspaceSocketControl, create_large_workspace_fixture, test_controls_enabled,
+    ReviewFixture, TestControlledFakeStreamingProvider, TestControls, WorkspaceSocketControl,
+    create_large_workspace_fixture, test_controls_enabled,
 };
 
 mod plan_repair_consistency;
@@ -445,96 +445,6 @@ async fn review_fixture_raw_text_preserves_structured_output_failure() {
         }
     }
     panic!("raw review fixture did not complete");
-}
-
-#[tokio::test]
-async fn testing_fixture_fake_provider_emits_plan_and_step_results() {
-    let controls = TestControls::default();
-    controls
-        .enable_testing_fixture(
-            "coding_attempt_0001".to_string(),
-            TestingFixture {
-                plan_output: json!({
-                    "summary": "controlled QA plan",
-                    "steps": [
-                        {
-                            "id": "unit",
-                            "title": "Unit tests",
-                            "intent": "prove unit behavior",
-                            "required": true,
-                            "tool": "run_command",
-                            "risk_level": "low",
-                            "command_or_tool_input": {"command": ["true"]},
-                            "evidence_expectation": "exit 0",
-                            "related_requirements": ["REQ-UNIT"],
-                            "related_design_constraints": ["DEC-UNIT"],
-                            "related_work_item_tasks": ["TASK-UNIT"]
-                        },
-                        {
-                            "id": "security",
-                            "title": "Security check",
-                            "intent": "prove security checklist",
-                            "required": true,
-                            "tool": "provider_managed",
-                            "risk_level": "medium",
-                            "command_or_tool_input": {"note": "controlled missing step"},
-                            "evidence_expectation": "provider evidence",
-                            "related_requirements": ["REQ-SECURITY"],
-                            "related_design_constraints": ["DEC-SECURITY"],
-                            "related_work_item_tasks": ["TASK-SECURITY"]
-                        }
-                    ]
-                }),
-                step_results: vec![json!({"step_id": "unit", "status": "passed"})],
-                malformed_plan_output: None,
-                provider_failure: None,
-            },
-        )
-        .await;
-    let provider = TestControlledFakeStreamingProvider::new(controls);
-    assert!(provider.supports_tool_calls());
-    let mut plan_session = provider
-        .start(
-            StreamingProviderInput {
-                provider_type: ProviderType::Codex,
-                role: AdapterRole::Reviewer,
-                prompt: "plan_tests".to_string(),
-                working_dir: std::env::current_dir().expect("current dir"),
-                workspace_session_id: Some("coding_attempt_0001".to_string()),
-                resume_provider_session_id: None,
-                permission_mode: ProviderPermissionMode::Supervised,
-                structured_output_contract: None,
-                env_vars: Default::default(),
-                timeout_secs: 60,
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .expect("plan fixture provider session");
-    let plan_output = completed_output(&mut plan_session).await;
-    assert!(plan_output.contains("controlled QA plan"));
-
-    let mut execute_session = provider
-        .start(
-            StreamingProviderInput {
-                provider_type: ProviderType::Codex,
-                role: AdapterRole::Reviewer,
-                prompt: "Phase: plan_tests -> execute_test_plan\nexecute_test_plan".to_string(),
-                working_dir: std::env::current_dir().expect("current dir"),
-                workspace_session_id: Some("coding_attempt_0001".to_string()),
-                resume_provider_session_id: None,
-                permission_mode: ProviderPermissionMode::Supervised,
-                structured_output_contract: None,
-                env_vars: Default::default(),
-                timeout_secs: 60,
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .expect("execute fixture provider session");
-    let execute_output = completed_output(&mut execute_session).await;
-    assert!(execute_output.contains("\"step_id\":\"unit\""));
-    assert!(execute_output.contains("\"status\":\"passed\""));
 }
 
 #[tokio::test]

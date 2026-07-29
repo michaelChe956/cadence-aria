@@ -47,10 +47,6 @@ pub(super) fn reviewer_execution_envelope_fixture() -> ReviewerExecutionEnvelope
     ReviewerExecutionEnvelope {
         unit_run_id: "unit_run_0001".to_string(),
         diff_ref: "diff_ref_0001".to_string(),
-        test_evidence_refs: vec![
-            "test_evidence_0001".to_string(),
-            "test_evidence_0002".to_string(),
-        ],
         handoff_revision_ids: vec!["handoff_revision_0001".to_string()],
         contract_delta_refs: vec!["contract_delta_0001".to_string()],
         completion_commit: "2222222222222222222222222222222222222222".to_string(),

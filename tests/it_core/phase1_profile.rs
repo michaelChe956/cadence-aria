@@ -90,7 +90,7 @@ fn profile_validator_rejects_unknown_projection_and_constraint_refs() {
 #[test]
 fn report_profile_requires_daemon_normalized_traceability_refs() {
     let artifact = json!({
-        "artifact_kind": "testing_report",
+        "artifact_kind": "code_review_report",
         "_aria": {
             "profile_version": "phase1.v1",
             "constraint_check_ref": "chk_001",
@@ -101,7 +101,7 @@ fn report_profile_requires_daemon_normalized_traceability_refs() {
 
     let error = phase1_profile_validator(
         &artifact,
-        ArtifactKind::TestingReport,
+        ArtifactKind::CodeReviewReport,
         &ProjectionIndex::default(),
         &ConstraintBundleIndex::with_checks(vec!["chk_001".to_string()]),
         &TraceabilityIndex::with_known_refs(vec!["req-001".to_string()]),

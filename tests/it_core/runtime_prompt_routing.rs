@@ -34,10 +34,6 @@ fn runtime_prompts_directly_reference_rules_and_declare_their_actual_stage() {
                 "test-driven-development",
             ][..],
         ),
-        (
-            "N17",
-            &["测试执行与新鲜验证证据", "verification-before-completion"][..],
-        ),
         ("N18", &["代码审查", "requesting-code-review"][..]),
         (
             "N19",

@@ -8,11 +8,13 @@ pub(crate) fn internal_review_blocked_gate_reason(
         CodeReviewFlowDecision::RunCoderFix if is_group_final_review => {
             Some("group_final_review_blocked")
         }
-        CodeReviewFlowDecision::RunCoderFix => Some("internal_review_blocked"),
+        CodeReviewFlowDecision::RunCoderFix => Some("internal_review_change_requested"),
+        CodeReviewFlowDecision::RetryVerification => {
+            Some("internal_review_verification_incomplete")
+        }
         CodeReviewFlowDecision::OpenOperationalGate => Some("internal_review_operational_blocker"),
         CodeReviewFlowDecision::StopForHumanTriage => Some("internal_review_human_triage"),
-        CodeReviewFlowDecision::RetryVerification
-        | CodeReviewFlowDecision::StartPlanRepair
+        CodeReviewFlowDecision::StartPlanRepair
         | CodeReviewFlowDecision::StartStoryAmendment
         | CodeReviewFlowDecision::StartDesignAmendment
         | CodeReviewFlowDecision::ContinueAfterApprove => None,
@@ -59,7 +61,7 @@ impl CodingWorkspaceEngine {
         worktree_path: Option<&Path>,
         retry_diagnostic: Option<&str>,
     ) -> Result<String, CodingWorkspaceEngineError> {
-        let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
+        let handoffs = self.collect_completed_group_unit_handoff_revisions(attempt)?;
         let units_section = self.format_group_unit_handoff_section(&handoffs);
         let evaluation_context_json = self.group_final_review_evaluation_context_json(attempt)?;
         let diff = match worktree_path {
@@ -97,8 +99,9 @@ impl CodingWorkspaceEngine {
              {}\
              {}\
              {}\
+             {}\
              \n输出要求:\n\
-             - 基于所有 completed units 的 handoff 汇总评估整组风险、测试覆盖和剩余问题。\n\
+             - 基于所有 completed units 的 HandoffRevision 契约与能力汇总评估整组风险、测试覆盖和剩余问题。\n\
              - 分析影响范围（影响范围/impact_scope）。\n\
              - 给出 PR description 预览。\n\
              - 给出 commit message 建议。\n\
@@ -118,6 +121,7 @@ impl CodingWorkspaceEngine {
             truncate_prompt_section(&diff, 30_000),
             group_final_review_material_protocol(),
             reviewer_test_scope_contract(),
+            reviewer_process_evidence_boundary_contract(),
             no_default_stack_assumption_contract(),
             retry_diagnostic_section
         ))
@@ -382,29 +386,38 @@ impl CodingWorkspaceEngine {
             role_run_status,
             reason_code,
         )?;
-        let blocked_gate_reason = (review.verdict == ReviewVerdict::Blocked)
-            .then(|| {
-                internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review)
-            })
-            .flatten();
+        let blocked_gate_reason =
+            internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review);
         if let Some(blocked_gate_reason) = blocked_gate_reason {
-            let operational = blocked_gate_reason == "internal_review_operational_blocker";
-            let human_triage = blocked_gate_reason == "internal_review_human_triage";
+            let title = match (blocked_gate_reason, is_group_final_review) {
+                ("group_final_review_blocked", _) => "GroupFinalReview change requested",
+                ("internal_review_change_requested", false) => {
+                    "Internal PR review change requested"
+                }
+                ("internal_review_verification_incomplete", true) => {
+                    "GroupFinalReview verification incomplete"
+                }
+                ("internal_review_verification_incomplete", false) => {
+                    "Internal PR review verification incomplete"
+                }
+                ("internal_review_human_triage", true) => "GroupFinalReview requires human triage",
+                ("internal_review_human_triage", false) => {
+                    "Internal PR review requires human triage"
+                }
+                ("internal_review_operational_blocker", true) => {
+                    "GroupFinalReview operational blocker"
+                }
+                ("internal_review_operational_blocker", false) => {
+                    "Internal PR review operational blocker"
+                }
+                _ => "Internal PR review blocked",
+            };
             self.create_review_blocked_gate(ReviewBlockedGateInput {
                 attempt: &attempt,
                 node_id: &node.id,
                 stage: CodingExecutionStage::InternalPrReview,
                 role: CodingProviderRole::InternalReviewer,
-                title: if operational {
-                    "Internal review operational blocker"
-                } else if human_triage {
-                    "Internal review requires human triage"
-                } else if is_group_final_review {
-                    "GroupFinalReview blocked"
-                } else {
-                    "Internal PR review blocked"
-                }
-                .to_string(),
+                title: title.to_string(),
                 description: review.summary.clone(),
                 reason_code: blocked_gate_reason,
                 evidence_refs: vec![review.id.clone()],

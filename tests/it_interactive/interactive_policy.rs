@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 #[test]
 fn manual_all_pauses_every_provider_node() {
-    let meta = ProviderNodeMeta::new("N17", "codex", NodeWriteClass::ReadOnly);
+    let meta = ProviderNodeMeta::new("N18", "codex", NodeWriteClass::ReadOnly);
     assert_eq!(
         PolicyPreset::ManualAll.decision_for(&meta),
         ConfirmationDecision::PauseForConfirmation
@@ -48,10 +48,10 @@ fn auto_review_pauses_design_revision_and_integration_prepare_nodes() {
 }
 
 #[test]
-fn auto_review_pauses_planning_and_coding_but_runs_review_and_testing() {
+fn auto_review_pauses_planning_and_coding_but_runs_review() {
     let planning = ProviderNodeMeta::new("N11", "claude_code", NodeWriteClass::WritesRuntime);
     let coding = ProviderNodeMeta::new("N16", "codex", NodeWriteClass::WritesWorkspace);
-    let testing = ProviderNodeMeta::new("N17", "codex", NodeWriteClass::ReadOnly);
+    let review = ProviderNodeMeta::new("N18", "codex", NodeWriteClass::ReadOnly);
     assert_eq!(
         PolicyPreset::AutoReview.decision_for(&planning),
         ConfirmationDecision::PauseForConfirmation
@@ -61,7 +61,7 @@ fn auto_review_pauses_planning_and_coding_but_runs_review_and_testing() {
         ConfirmationDecision::PauseForConfirmation
     );
     assert_eq!(
-        PolicyPreset::AutoReview.decision_for(&testing),
+        PolicyPreset::AutoReview.decision_for(&review),
         ConfirmationDecision::RunAutomatically
     );
 }

@@ -30,14 +30,12 @@ fn lifecycle_work_item_deserializes_legacy_json_with_split_defaults() {
     assert!(record.exclusive_write_scopes.is_empty());
     assert!(record.forbidden_write_scopes.is_empty());
     assert_eq!(record.context_budget, WorkItemContextBudget::default());
-    assert!(record.required_handoff_from.is_empty());
     assert_eq!(record.verification_plan_ref, None);
     assert!(!record.require_execution_plan_confirm);
     assert_eq!(
         record.execution_plan_status,
         WorkItemExecutionPlanStatus::NotStarted
     );
-    assert_eq!(record.handoff_summary_ref, None);
     assert_eq!(record.completion_commit, None);
     assert_eq!(record.completion_diff_summary_ref, None);
 }
@@ -48,11 +46,9 @@ fn work_item_context_budget_defaults_to_single_session_budget_proxy() {
 
     assert_eq!(budget.target_context_k, "30-50");
     assert_eq!(budget.max_summary_chars, 20_000);
-    assert_eq!(budget.max_handoff_chars, 12_000);
     assert_eq!(budget.max_code_context_chars, 30_000);
     assert_eq!(budget.max_context_file_refs, 80);
     assert_eq!(budget.max_traceability_refs, 40);
-    assert_eq!(budget.max_dependency_handoffs, 3);
 }
 
 #[test]
@@ -73,18 +69,15 @@ fn lifecycle_work_item_serializes_new_split_fields_as_snake_case() {
         source_outline_id: Some("outline_backend".to_string()),
         source_draft_id: Some("draft_backend".to_string()),
         planned_implementation_context: Some("实现 Backend API".to_string()),
-        planned_handoff_summary: Some("交付 Backend API contract".to_string()),
         kind: WorkItemKind::Backend,
         sequence_hint: Some(10),
         depends_on: vec!["work_item_0001".to_string()],
         exclusive_write_scopes: vec!["src/product/**".to_string()],
         forbidden_write_scopes: vec!["web/**".to_string()],
         context_budget: WorkItemContextBudget::default(),
-        required_handoff_from: vec!["work_item_0001".to_string()],
         verification_plan_ref: Some("verification_plan_work_item_0002".to_string()),
         require_execution_plan_confirm: true,
         execution_plan_status: WorkItemExecutionPlanStatus::Draft,
-        handoff_summary_ref: Some("handoffs/work_item_0001.json".to_string()),
         completion_commit: Some("abc123".to_string()),
         completion_diff_summary_ref: Some("diffs/work_item_0002.json".to_string()),
         created_at: "2026-06-16T00:00:00Z".to_string(),
@@ -107,10 +100,6 @@ fn lifecycle_work_item_serializes_new_split_fields_as_snake_case() {
     assert_eq!(value["source_outline_id"], "outline_backend");
     assert_eq!(value["source_draft_id"], "draft_backend");
     assert_eq!(value["planned_implementation_context"], "实现 Backend API");
-    assert_eq!(
-        value["planned_handoff_summary"],
-        "交付 Backend API contract"
-    );
     assert_eq!(value["depends_on"], serde_json::json!(["work_item_0001"]));
     assert_eq!(
         value["exclusive_write_scopes"],
