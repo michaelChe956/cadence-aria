@@ -34,6 +34,16 @@ pub async fn delete_work_item_plan(
         .await?;
         return Ok(Json(json!({"status":"deleted"})));
     }
+    // legacy plan 级门禁：存在 group coding attempt 则拒绝（与 schema v2 路径语义一致）。
+    // legacy plan 的 coding 通常以 per-work-item attempt 形式存在，plan 级遍历删除下属 work
+    // item 时还会再过一次 work item 级门禁（见 delete_work_item_with_cleanup）。
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    if let Some(attempt) = coding_store
+        .get_attempt_for_work_item_group(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?
+    {
+        return Err(coding_workspace_exists_error(&plan_id, &attempt.id));
+    }
     for work_item_id in &plan.work_item_ids {
         delete_work_item_with_cleanup(&app_paths, &store, &project_id, &issue_id, work_item_id)
             .await?;
@@ -77,6 +87,20 @@ pub(crate) async fn delete_work_item_with_cleanup(
             "schema v2 work items must be deleted through their work item plan",
         ));
     }
+    // work item 级门禁：存在 coding attempt 则拒绝，要求先删 coding workspace。
+    // 覆盖 legacy plan 遍历删除下属 work item、以及独立 DELETE /work-items/{id} 两个入口。
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    if let Some(attempt) = coding_store
+        .list_attempts_for_work_item(project_id, issue_id, work_item_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .next()
+    {
+        return Err(coding_workspace_exists_for_work_item_error(
+            work_item_id,
+            &attempt.id,
+        ));
+    }
     let work_item = store
         .list_work_items(project_id, issue_id)
         .map_err(product_store_api_error)?
@@ -89,7 +113,6 @@ pub(crate) async fn delete_work_item_with_cleanup(
             })
         })?;
     let repository = find_repository(app_paths, project_id, &work_item.repository_id)?;
-    let coding_store = CodingAttemptStore::new(app_paths.clone());
     let attempts = coding_store
         .list_attempts_for_work_item(project_id, issue_id, work_item_id)
         .map_err(product_store_api_error)?;
@@ -168,6 +191,13 @@ async fn delete_schema_v2_work_item_plan_with_cleanup(
         return Err(coding_workspace_exists_error(plan_id, &attempt.id));
     }
 
+    // 取本 plan 的 work_item_ids：用于精确清理 work-item-attempt-locks（按 work_item 删，
+    // 不误伤同 issue 其他 plan 共享目录里的锁）。必须在删 plan 元数据之前取。
+    let work_item_ids = store
+        .get_issue_work_item_plan(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?
+        .work_item_ids;
+
     // 尽力清理 WorkItem 类型 session：扫描 session 自身的 plan_id 绑定，
     // 不依赖 plan revision 的 work_item_bindings 数量，半残状态也能定位。
     // 单项失败不阻断其余 session 的清理。
@@ -209,7 +239,7 @@ async fn delete_schema_v2_work_item_plan_with_cleanup(
         .map_err(product_store_api_error)?;
     // 5. coding attempt 初始化残留 lock（attempt json 已被门禁确认不存在，
     //    残留的 arbitration / journal / attempt lock 一并清理）
-    purge_attempt_lock_residue(app_paths, project_id, issue_id, plan_id)?;
+    purge_attempt_lock_residue(app_paths, project_id, issue_id, plan_id, &work_item_ids)?;
 
     Ok(())
 }
@@ -220,13 +250,17 @@ async fn delete_schema_v2_work_item_plan_with_cleanup(
 /// 但 arbitration 文件、group initialization journal、work item attempt 锁、
 /// attempt json 的 `.lock` 文件等可能残留（线上「半残」的典型形态）。
 /// 全程容错：文件不存在视为成功，单项失败不影响其余清理。
+///
+/// `work_item_ids` 限定 work-item-attempt-locks 的清理范围：只删本 plan 各 work_item
+/// 对应的锁文件，保留同 issue 其他 plan 共享目录里的锁（spec「删除不影响其他 plan」）。
 fn purge_attempt_lock_residue(
     app_paths: &ProductAppPaths,
     project_id: &str,
     issue_id: &str,
     plan_id: &str,
+    work_item_ids: &[String],
 ) -> ApiResult<()> {
-    use crate::product::lifecycle_store::{remove_dir_all_if_exists, remove_file_if_exists};
+    use crate::product::lifecycle_store::remove_file_if_exists;
 
     let coding_attempts_root = app_paths
         .issue_root(project_id, issue_id)
@@ -242,9 +276,16 @@ fn purge_attempt_lock_residue(
     let _ = remove_file_if_exists(&journal_dir.join(format!("{plan_id}.json")));
     let _ = remove_file_if_exists(&journal_dir.join(format!(".{plan_id}.json.lock")));
 
-    // work-item-attempt-locks/ 子目录：single coding attempt 创建时的 per-work-item 锁。
-    // group 删除重置 issue coding 状态，整目录清理。
-    let _ = remove_dir_all_if_exists(&coding_attempts_root.join("work-item-attempt-locks"));
+    // work-item-attempt-locks/：single coding attempt 创建时按 work_item_id 命名的锁。
+    // 这是 issue 级共享目录，多 plan 共 issue 时其他 plan 的 work_item 锁也在此，
+    // 因此按本 plan 的 work_item_ids 精确删除（锁目标 <wi> + flock 副车锁 .<wi>.lock），
+    // 绝不整目录清空，避免误伤其他 plan（Task 3 review 发现的 spec 风险）。
+    let locks_dir = coding_attempts_root.join("work-item-attempt-locks");
+    for work_item_id in work_item_ids {
+        let _ = remove_file_if_exists(&locks_dir.join(work_item_id));
+        let _ = remove_file_if_exists(&locks_dir.join(format!(".{work_item_id}.lock")));
+    }
+    // 锁目录本身保留：其他 plan 的 work_item 锁可能仍在其中，不能整目录清空。
 
     // 顶层 `.lock` 残留：attempt json 已不存在，对应的 `.<attempt_id>.json.lock` 是孤儿。
     if let Ok(entries) = std::fs::read_dir(&coding_attempts_root) {

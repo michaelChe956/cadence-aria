@@ -163,12 +163,21 @@ fn assert_plan_artifacts_purged(app_paths: &ProductAppPaths, attempt_id: Option<
             .exists(),
         "group initialization journal must be purged"
     );
-    assert!(
-        !coding_root
-            .join("work-item-attempt-locks")
-            .exists(),
-        "work-item-attempt-locks dir must be purged"
-    );
+    // work-item-attempt-locks 按 plan 的 work_item 精确清理：本 plan 的锁必须消失，
+    // 但共享目录里其他 plan 的 work_item 锁不能被误伤（见不误伤专项测试）。
+    let locks_dir = coding_root.join("work-item-attempt-locks");
+    for work_item_id in ["work_item_0001", "work_item_0002"] {
+        assert!(
+            !locks_dir.join(work_item_id).exists(),
+            "work item attempt lock for {work_item_id} must be purged"
+        );
+        assert!(
+            !locks_dir
+                .join(format!(".{work_item_id}.lock"))
+                .exists(),
+            "work item attempt lock sidecar for {work_item_id} must be purged"
+        );
+    }
 
     // sessions：WorkItem 与 WorkItemPlan 类型均不再能 list 到本 plan 的记录
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -407,4 +416,58 @@ async fn delete_work_item_plan_succeeds_on_half_deleted_state() {
 
     assert_plan_artifacts_purged(&app_paths, Some(&attempt_id));
     assert_issue_and_specs_preserved(&app_paths);
+}
+
+#[tokio::test]
+async fn delete_work_item_plan_preserves_other_work_items_attempt_locks() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+
+    // 共享的 issue 级 work-item-attempt-locks 目录里混入「另一个 plan 的 work_item」锁。
+    // 真实场景：多 plan 共用同一 issue 的 coding-attempts 目录，per-work-item 锁按 work_item_id 命名。
+    let lifecycle_root = app_paths.issue_lifecycle_root(GROUP_PROJECT_ID, GROUP_ISSUE_ID);
+    let locks_dir = lifecycle_root
+        .join("coding-attempts")
+        .join("work-item-attempt-locks");
+    fs::create_dir_all(&locks_dir).expect("attempt locks dir");
+    // 本 plan 的锁（删除时应被精确清掉）
+    fs::write(locks_dir.join("work_item_0001"), "{}").expect("seed own lock");
+    fs::write(locks_dir.join(".work_item_0001.lock"), "").expect("seed own sidecar");
+    // 不属于本 plan 的锁（删除后必须仍在——spec「删除不影响其他 plan」）
+    fs::write(locks_dir.join("other_work_item"), "{}").expect("seed other plan lock");
+    fs::write(locks_dir.join(".other_work_item.lock"), "").expect("seed other plan sidecar");
+
+    let (status, body) =
+        request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "delete body: {body}");
+    assert_eq!(body["status"], "deleted");
+
+    // 本 plan 的锁被清掉。
+    assert!(
+        !locks_dir.join("work_item_0001").exists(),
+        "own work item lock must be purged"
+    );
+    assert!(
+        !locks_dir
+            .join(".work_item_0001.lock")
+            .exists(),
+        "own work item lock sidecar must be purged"
+    );
+    // 其他 plan 的锁必须原样保留——这是 Task 3 review 发现的 spec 风险的核心断言。
+    assert!(
+        locks_dir.join("other_work_item").exists(),
+        "other plan work item lock must be preserved (spec: 删除不得误伤其他 plan)"
+    );
+    assert!(
+        locks_dir
+            .join(".other_work_item.lock")
+            .exists(),
+        "other plan work item lock sidecar must be preserved"
+    );
 }

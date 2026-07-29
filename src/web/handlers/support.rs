@@ -352,6 +352,22 @@ pub(crate) fn coding_workspace_exists_error(plan_id: &str, attempt_id: &str) -> 
     )
 }
 
+/// 当单个 work item 存在 coding workspace 时拒绝删除该 work item。
+///
+/// 与 `coding_workspace_exists_error` 共用错误码（前端按 `coding_workspace_exists` 统一处理），
+/// 但 details 用 `work_item_id` 而非 `plan_id`——work item 级删除入口没有 plan 上下文，
+/// 给出真实标识便于定位。同样映射到 409 CONFLICT。
+pub(crate) fn coding_workspace_exists_for_work_item_error(
+    work_item_id: &str,
+    attempt_id: &str,
+) -> ApiError {
+    ApiError::runtime(
+        "coding_workspace_exists",
+        "存在 coding workspace，请先删除 coding workspace 再删除 work item",
+        json!({ "work_item_id": work_item_id, "attempt_id": attempt_id }),
+    )
+}
+
 pub(crate) fn node_detail_store_api_error(error: ProductStoreError) -> ApiError {
     match error {
         ProductStoreError::NotFound {
@@ -537,6 +553,19 @@ mod tests {
             "存在 coding workspace，请先删除 coding workspace 再删除 work item group"
         );
         assert_eq!(error.details["plan_id"], "plan_1");
+        assert_eq!(error.details["attempt_id"], "attempt_1");
+    }
+
+    #[test]
+    fn coding_workspace_exists_for_work_item_error_returns_stable_contract() {
+        let error = coding_workspace_exists_for_work_item_error("work_item_1", "attempt_1");
+
+        assert_eq!(error.code, "coding_workspace_exists");
+        assert_eq!(
+            error.message,
+            "存在 coding workspace，请先删除 coding workspace 再删除 work item"
+        );
+        assert_eq!(error.details["work_item_id"], "work_item_1");
         assert_eq!(error.details["attempt_id"], "attempt_1");
     }
 }
