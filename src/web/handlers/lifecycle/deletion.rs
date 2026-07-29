@@ -32,6 +32,7 @@ pub async fn delete_work_item_plan(
             &lineage,
         )
         .await?;
+        purge_work_item_plan_store_artifacts(&app_paths, &project_id, &issue_id, &plan_id)?;
         return Ok(Json(json!({"status":"deleted"})));
     }
     for work_item_id in &plan.work_item_ids {
@@ -41,7 +42,24 @@ pub async fn delete_work_item_plan(
     store
         .delete_issue_work_item_plan(&project_id, &issue_id, &plan_id)
         .map_err(product_store_api_error)?;
+    purge_work_item_plan_store_artifacts(&app_paths, &project_id, &issue_id, &plan_id)?;
     Ok(Json(json!({"status":"deleted"})))
+}
+
+/// 清理 plan store 中该 plan 的 draft、compile transaction 与 outline context index。
+///
+/// 两条删除路径（schema v2 与 legacy）都必须调用：这些产物不属于 LifecycleStore，
+/// 不随 plan 记录一起消失。
+fn purge_work_item_plan_store_artifacts(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+) -> ApiResult<()> {
+    crate::product::work_item_plan_store::WorkItemPlanStore::new(app_paths.clone())
+        .purge_plan_artifacts(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
+    Ok(())
 }
 
 pub(crate) async fn delete_work_item_with_cleanup(
