@@ -10,7 +10,6 @@ pub fn classify_task_diagnostics(
 ) -> Result<Vec<Value>, TaskRunError> {
     let blocked = read_json_optional(&task_root.join("reports/blocked-report.json"))?;
     let final_report = read_json_optional(&task_root.join("reports/final-report.json"))?;
-    let testing = read_json_optional(&task_root.join("reports/testing-report.json"))?;
     let mut diagnostics = Vec::new();
 
     if let Some(blocked) = blocked {
@@ -19,20 +18,8 @@ pub fn classify_task_diagnostics(
             .and_then(Value::as_str)
             .unwrap_or("blocked_by_gate");
         let next_node = blocked.get("next_node").and_then(Value::as_str);
-        let testing_text = testing
-            .as_ref()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let category = if testing_text.contains("allowed_write_scope=[]")
-            || testing_text.contains("cadence/designs")
-            || testing_text.contains("cadence/reports")
-        {
-            "contract_write_scope_blocked"
-        } else {
-            "gate_blocked"
-        };
         diagnostics.push(json!({
-            "category": category,
+            "category": "gate_blocked",
             "severity": "blocking",
             "status": "blocked_by_gate",
             "reason": reason,

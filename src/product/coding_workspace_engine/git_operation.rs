@@ -141,6 +141,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         journal: &CodingGitOperationJournal,
         push_status: PushStatus,
+        push_error: Option<String>,
     ) -> Result<CodingGitOperationJournal, CodingWorkspaceEngineError> {
         let remote_kind = GitWorkspaceService::new()
             .detect_remote_kind(&journal.worktree_path)
@@ -158,6 +159,7 @@ impl CodingWorkspaceEngine {
                 journal,
                 CompleteReviewGitOperationInput {
                     push_status,
+                    push_error,
                     remote_kind,
                     review_request_id,
                 },
@@ -170,6 +172,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         journal: &CodingGitOperationJournal,
         remote_rejected: bool,
+        push_error: Option<String>,
     ) -> Result<CodingGitOperationJournal, CodingWorkspaceEngineError> {
         let remote =
             journal
@@ -197,11 +200,11 @@ impl CodingWorkspaceEngine {
             remote_rejected,
         ) {
             ReviewPushDecision::Pushed => {
-                self.finish_review_git_operation(attempt, journal, PushStatus::Pushed)
+                self.finish_review_git_operation(attempt, journal, PushStatus::Pushed, None)
                     .await
             }
             ReviewPushDecision::Failed => {
-                self.finish_review_git_operation(attempt, journal, PushStatus::Failed)
+                self.finish_review_git_operation(attempt, journal, PushStatus::Failed, push_error)
                     .await
             }
             ReviewPushDecision::Indeterminate => match remote_head {
@@ -245,7 +248,7 @@ impl CodingWorkspaceEngine {
             == Some(commit_sha)
         {
             return self
-                .finish_review_git_operation(attempt, journal, PushStatus::Pushed)
+                .finish_review_git_operation(attempt, journal, PushStatus::Pushed, None)
                 .await
                 .map(Some);
         }
@@ -294,6 +297,7 @@ impl CodingWorkspaceEngine {
                 }
             })?,
             external_url: None,
+            push_error: journal.push_error.clone(),
             manual_instructions: vec![format!(
                 "基于远端 {}/{} 发起代码审查",
                 journal.remote.as_deref().unwrap_or_default(),

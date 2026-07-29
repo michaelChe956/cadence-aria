@@ -1,6 +1,55 @@
 use super::*;
 
 #[tokio::test]
+async fn revalidated_unit_completes_after_code_review_approval() {
+    let fixture = amendment_fixture_with_resume_mode(AmendmentResumeMode::Revalidate).await;
+    let resumed = fixture
+        .engine
+        .apply_plan_amendment(&fixture.attempt, &fixture.manifest)
+        .await
+        .expect("apply revalidation amendment");
+    let active_unit = fixture
+        .store
+        .get_active_coding_unit(&resumed.project_id, &resumed.issue_id, &resumed.id)
+        .unwrap()
+        .expect("revalidation amendment must retain an active unit");
+    let review_ready = fixture
+        .store
+        .update_attempt_stage(
+            &resumed.project_id,
+            &resumed.issue_id,
+            &resumed.id,
+            CodingExecutionStage::ReviewRequest,
+        )
+        .unwrap();
+
+    let completed = fixture
+        .engine
+        .complete_group_unit_after_code_review(&review_ready)
+        .await
+        .expect("approved revalidation must complete the resumed unit");
+
+    let completed_unit = fixture
+        .store
+        .list_coding_units(&completed.project_id, &completed.issue_id, &completed.id)
+        .unwrap()
+        .into_iter()
+        .find(|unit| unit.id == active_unit.id)
+        .expect("resumed unit must remain addressable");
+    assert_eq!(completed_unit.status, CodingExecutionUnitStatus::Completed);
+    assert_eq!(
+        fixture
+            .store
+            .list_unit_runs_by_logical_id(&completed, &active_unit.logical_work_item_id)
+            .unwrap()
+            .last()
+            .expect("completed revalidation unit run must exist")
+            .status,
+        CodingUnitRunStatus::Completed
+    );
+}
+
+#[tokio::test]
 async fn coding_amendment_recovery_rejects_forged_deterministic_unit_run_without_writes() {
     let fixture = amendment_fixture().await;
     prepare_application_phase(

@@ -29,11 +29,6 @@ const ROLE_STYLES: Record<
     panel: "border-blue-200 bg-blue-50",
     title: "text-blue-600",
   },
-  tester: {
-    wrapper: "justify-start",
-    panel: "border-purple-200 bg-purple-50",
-    title: "text-purple-600",
-  },
   reviewer: {
     wrapper: "justify-start",
     panel: "border-green-200 bg-green-50",

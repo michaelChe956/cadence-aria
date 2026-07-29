@@ -31,6 +31,7 @@ impl CodingWorkspaceEngine {
              {}\
              {}\
              {}\
+             {}\
              \n代码规范:\n\
              - 优先检查正确性、边界条件、测试覆盖、安全、性能和可维护性。\n\
              - findings 必须包含 severity、file_path、line、message、required_action、source_stage=code_review。\n\
@@ -39,7 +40,9 @@ impl CodingWorkspaceEngine {
              \nEvaluationContextPack:\n````json\n{}\n````\n\
              \ngit diff:\n````diff\n{}\n````\n\
              {}\
-             \n只输出 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...]}}\n",
+             \n输出顺序与格式：\n\
+             - 首个用户可见消息必须是纯文本工作流路由回执，且不得包含 {{ 或 }}。\n\
+             - 完成必调 Skill 与原始规则读取后，最终审查结论仅输出裸 JSON：{{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[...]}}\n",
             provider_runtime_contract("CodeReviewer"),
             attempt.project_id,
             attempt.issue_id,
@@ -50,6 +53,7 @@ impl CodingWorkspaceEngine {
             code_review_material_protocol(),
             crate::product::plan_repair::plan_defect_structured_output_contract(),
             reviewer_test_scope_contract(),
+            reviewer_process_evidence_boundary_contract(),
             no_default_stack_assumption_contract(),
             work_item.unwrap_or_else(
                 || "未找到 Work Item markdown，上下文仅包含 attempt 元数据。".to_string()
@@ -96,6 +100,8 @@ impl CodingWorkspaceEngine {
              {}\
              {}\
              {}\
+             {}\
+             {}\
              \n输出要求:\n\
              - 分析影响范围（影响范围/impact_scope）。\n\
              - 给出 PR description 预览。\n\
@@ -118,6 +124,8 @@ impl CodingWorkspaceEngine {
             truncate_prompt_section(&diff, 30_000),
             group_final_review_material_protocol(),
             crate::product::plan_repair::plan_defect_structured_output_contract(),
+            reviewer_test_scope_contract(),
+            reviewer_process_evidence_boundary_contract(),
             no_default_stack_assumption_contract(),
             retry_diagnostic_section
         ))
@@ -273,6 +281,16 @@ pub(crate) fn reviewer_test_scope_contract() -> &'static str {
      - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试及其所需浏览器环境，也不得将其转换成 finding、verdict/summary 否决理由、Coder required_action 或任何返修要求。\n"
 }
 
+pub(crate) fn reviewer_process_evidence_boundary_contract() -> &'static str {
+    "\nReviewer 过程证据边界:\n\
+     - 过程事实同时满足两条：无法从当前 diff、验证命令输出、handoff 字段或人工检查结果观测；实现完成后即使 Coder 返修也无法产出该证据。\n\
+     - 典型过程事实包括 red commit 的存在、失败到通过的提交序列、开发时序、提交拆分粒度、分支创建与 rebase 历史以及 Coder 会话内操作顺序。\n\
+     - 不得创建以过程事实为目的的 finding。过程事实的缺失、不符合预期或缺少证据均不得成为 finding，不得导致 request_changes 或 blocked，不得作为 verdict 或 summary 中的否决理由，不得成为 Coder required_action 或任何返修要求。\n\
+     - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述过程事实，也不得转换为 finding、verdict 或 summary 中的否决理由、Coder required_action 或任何返修要求。\n\
+     - EvidenceKind 仅表示当前可观测证据：source_diff 表示最终代码状态；non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。manual_check 仅表示人工检查结果；handoff_field 仅表示交接字段的存在与内容。\n\
+     - 本边界不削弱可观测结果的审查：仍必须审查测试文件是否存在、测试是否覆盖需求场景、验证命令是否真实执行且非零、测试输出是否与实现自相矛盾，以及 Forbidden Write Scopes 是否被越过。\n"
+}
+
 pub(crate) fn coding_execution_protocol() -> String {
     with_cadence_routing_reference(concat!(
         "当前阶段：已确认 OpenSpec 与 Plan/Work Item 范围内实施。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
@@ -283,6 +301,8 @@ pub(crate) fn coding_execution_protocol() -> String {
      - 如果执行材料没有给出语言、构建系统、包管理器或测试框架相关要求，不得臆造具体技术栈命令。\n\
      - 需要判断环境或依赖问题时，必须优先根据 Work Item、Verification Plan、仓库文件和项目规则判断。\n\
      - 如果判断依据不足，必须在最终报告中说明“不足以确定”，并列出需要人工确认的问题。\n\
+     - 人工事项不属于你的执行范围：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，都由人工在流程末端确认。必须在最终报告中单列“待人工处理”清单（逐项写明事项与人工执行方式），但不得因无法执行它们而报阻塞、拒绝完成或降低完成度。\n\
+     - 缺少浏览器、设备、外部账号等人工环境不是运维阻塞：只有当你自己该执行的命令或代码修改无法进行时，才输出 operational_gate。\n\
      - 不得用平台默认技术栈假设替代 Work Item 内容。\n"
     ))
 }
@@ -306,32 +326,36 @@ pub(crate) fn coding_completion_report_contract() -> &'static str {
      - 列出实际修改文件。\n\
      - 列出实际执行的验证命令。\n\
      - 粘贴每条验证命令的完整输出。\n\
-     - 报告 git diff --stat。\n\
-     - 明确说明是否触碰 Forbidden Write Scopes。\n\
+     - 报告 git status --short（含未跟踪文件）与 git diff --stat。\n\
+     - 基于两者明确说明是否触碰 Forbidden Write Scopes；若出现允许范围外的已修改或未跟踪文件，必须报告，不得声称未触碰。\n\
      - 如果测试命令显示没有测试被执行或没有实际测试被执行，包括 \"0 tests\" 或 \"running 0 tests\"，不能直接视为已覆盖；必须说明处理方式或风险。\n\
-     - 如果某项要求无法执行，说明阻塞原因、已尝试的诊断步骤和需要人工确认的内容。\n"
+     - 如果某项要求无法执行，说明阻塞原因、已尝试的诊断步骤和需要人工确认的内容。\n\
+     - 必须单列“待人工处理”小节：逐项写明需要人工核对、人工测试或人工操作的事项及其执行方式；无此类事项时明确写“无”。该清单是交接内容，不是未完成项。\n"
 }
 
 pub(crate) fn code_review_material_protocol() -> String {
     with_cadence_routing_reference(concat!(
         "当前阶段：只读代码审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
-        "CRITICAL: Return ONLY a single JSON object. No markdown, no explanations, no validation reports, no tables.\n\
+        "首个用户可见消息必须是工作流路由回执；该回执不属于最终审查结论，不能因 JSON 合同省略。完成必调 Skill 与原始规则读取后，最终审查结论必须只输出一个 JSON 对象，不要输出 Markdown、解释、验证报告或表格。\n\
      CodeReviewer 审查协议:\n\
      - 只分析当前变更 diff，不修改代码、不执行写操作。\n\
      - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
-     - 审查清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、验证命令与证据、完成前自检要求、handoff 承诺、需求/设计追踪关系。\n\
-     - EvaluationContextPack.CoderEvidencePack 是 coder 已执行工作的证据包；必须优先审查其中的 role run、raw/artifact refs、completion report、handoff tests_run/test_result_summary 和 evidence_warnings。\n\
-     - WorkItemGroup 当前 Unit 的 completion commit 与平台 final unit handoff 在 Code Review approve 后才生成；Code Review 前为空是正常状态，不得据此创建 finding、request_changes 或 blocked。\n\
+     - 审查清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、验证命令与证据、完成前自检要求、交接契约与能力、需求/设计追踪关系。\n\
+     - EvaluationContextPack.CoderEvidencePack 是 coder 已执行工作的证据包；必须优先审查其中的 role run、raw/artifact refs、completion report 和 evidence_warnings。\n\
+     - WorkItemGroup 当前 Unit 的 completion commit 与 HandoffRevision 在 Code Review approve 后才生成；Code Review 前为空是正常状态，不得据此创建 finding、request_changes 或 blocked。\n\
      - Code Review 阶段应以 Coder completion report、raw/artifact refs、实际测试输出和当前 Unit diff 判断验证证据；真正缺失或自相矛盾的 required verification evidence 仍必须记录。\n\
      - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
-     - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和 handoff 承诺。\n\
+     - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和交接契约。\n\
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
+     - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在流程末端确认。coder 如实登记这些事项即为正确交付，不得因其“尚未验证”创建 finding、给出 request_changes 或 blocked；缺少浏览器等人工环境同理。\n\
      - 如果测试输出显示没有实际测试被执行，不能把它当作有效覆盖；必须结合 Work Item 要求判断是否需要修复。\n\
+     - EvidenceKind 仅表示当前可观测证据：source_diff 表示最终代码状态；non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。manual_check 仅表示人工检查结果；handoff_field 仅表示交接字段的存在与内容。\n\
      - 不得提出执行材料之外的技术栈默认要求。\n\
      - verdict 只能使用 approve、request_changes、blocked。\n\
      - finding.severity 只能使用 error、warning、info。\n\
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
+     - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n\
      - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
     ))
 }
@@ -340,19 +364,23 @@ pub(crate) fn group_final_review_material_protocol() -> String {
     with_cadence_routing_reference(concat!(
         "当前阶段：组级 PR 最终只读审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
         "WorkItemGroup GroupFinalReview 审查协议:\n\
-     - 你必须从 Completed Units、unit handoff、EvaluationContextPack 和完整 diff 中提取整组审查清单。\n\
-     - 必须确认每个 completed unit 的 handoff 承诺是否体现在最终 diff 或最终报告中。\n\
-     - 必须检查依赖 handoff 是否断裂：上游 unit 承诺的 API、状态、文件、测试证据是否被下游正确消费。\n\
+     - 你必须从 Completed Units、HandoffRevision、EvaluationContextPack 和完整 diff 中提取整组审查清单。\n\
+     - 跨 unit 交接的审查对象是 HandoffRevision 的契约与能力语义：Completed Units 段落中每个 unit 的 Provided Contracts 与 Provided Capabilities。不存在自然语言交接摘要，不得要求或期待它。\n\
+     - 必须确认每个 completed unit 的 HandoffRevision 所声明的契约与能力是否体现在最终 diff 中。\n\
+     - 必须检查依赖交接是否断裂：上游 unit 声明的契约与能力（API、状态、文件）是否被下游正确消费。\n\
      - 必须检查整组 diff 是否越过任何 unit 的 Forbidden Write Scopes。\n\
-     - 如果某个 unit 的验证证据缺失、handoff 未闭环、或最终 PR 描述遗漏关键影响，必须 request_changes 或 blocked。\n\
+     - 如果某个 unit 的验证证据缺失、声明的契约与能力未在 diff 中落地、或最终 PR 描述遗漏关键影响，必须 request_changes 或 blocked。\n\
+     - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在本流程之后确认。这些事项尚未验证不得成为 finding、request_changes 或 blocked 的理由；必须在 summary 中汇总整组的待人工处理清单，供人工接手。\n\
      - 如果 ReviewRequest 已 push 的 commit 与 completed units、diff 或验证证据不一致，必须 request_changes 或 blocked。\n\
-     - impact_scope、pr_description、commit_message_suggestion 必须基于实际 diff、completed units 和 handoff，不得编造未实现内容。\n\
-     - 不得用平台默认技术栈假设替代 unit handoff 或 Work Item 内容。\n\
+     - impact_scope、pr_description、commit_message_suggestion 必须基于实际 diff、completed units 和 HandoffRevision，不得编造未实现内容。\n\
+     - 不得用平台默认技术栈假设替代 HandoffRevision 或 Work Item 内容。\n\
+     - EvidenceKind 仅表示当前可观测证据：source_diff 表示最终代码状态；non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。manual_check 仅表示人工检查结果；handoff_field 仅表示交接字段的存在与内容。\n\
      - verdict 只能使用 approve、request_changes、blocked。\n\
      - finding.severity 只能使用 error、warning、info。\n\
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 source_stage=group_final_review。\n\
-     - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n"
+     - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
+     - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n"
     ))
 }
 
@@ -435,45 +463,6 @@ pub(crate) fn streaming_input_from_adapter(
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,
     }
-}
-
-pub(crate) fn build_tester_execute_plan_prompt(
-    attempt: &CodingExecutionAttempt,
-    plan: &TestPlan,
-    execution_context_json: &str,
-) -> String {
-    let plan_json = serde_json::to_string_pretty(plan).unwrap_or_else(|_| "{}".to_string());
-    format!(
-        "{}\
-         当前阶段：执行既有测试计划并收集新鲜验证证据。必调 Skill：using-superpowers → verification-before-completion。保持最终 JSON schema，不在 JSON 字段中伪造路由回执。\n\
-         Tester Provider Runtime\n\
-         Phase: execute_test_plan\n\
-         Attempt: {}\n\
-         Work Item: {}\n\
-         \n\
-         Execute the following TestPlan. You may execute commands or inspect files yourself.\n\
-         Every required TestPlan step must have exactly one corresponding step_results item.\n\
-         If you cannot run a required step, emit status=\"blocked\" or status=\"skipped\" with provider_analysis explaining why.\n\
-         Do not claim overall success in prose without step_results JSON.\n\
-         Tool calls meant to satisfy a plan step must include the exact step_id in their input. Tool calls without step_id are unplanned evidence and cannot satisfy required steps.\n\
-         If TestPlan is insufficient, do not redesign it inside execute_test_plan.\n\
-         Use load_test_context only for targeted source artifact snippets; load_test_context is read-only and cannot satisfy a required step by itself.\n\
-         If the plan is wrong, out of scope, or impossible to execute reliably, mark the affected required step blocked.\n\
-         Do not generate new TestPlan steps during execute_test_plan.\n\
-         If the current TestPlan is wrong, out of scope, or impossible to execute reliably, return blocked step_results for affected required steps with provider_analysis prefixed by \"test_plan_insufficient:\".\n\
-         At the end of execute_test_plan, output only the canonical ProviderTestExecutionPayload JSON object:\n\
-         {{\"step_results\":[{{\"step_id\":\"...\",\"status\":\"passed|failed|blocked|skipped\",\"evidence_refs\":[\"...\"],\"provider_analysis\":\"...\"}}],\"plan_defect_findings\":[]}}\n\
-         plan_defect_findings 使用 canonical 字段 finding_id、severity、defect_class、reason_code、message、evidence、contract_refs、capability_refs、repair_target、recommended_route、confidence；普通 implementation defect 不放入该数组，而是通过 failed/blocked step_results 表达；普通 legacy output 缺少该数组时按空数组处理，不伪造 plan defect。\n\
-         \n\
-         TestPlan:\n```json\n{}\n```\n\
-         \n\
-         Execution Context JSON:\n```json\n{}\n```\n",
-        direct_cadence_routing_rules_reference(),
-        attempt.id,
-        active_work_item_id_for_prompt(attempt),
-        plan_json,
-        execution_context_json
-    )
 }
 
 pub(crate) fn active_work_item_id_for_prompt(attempt: &CodingExecutionAttempt) -> &str {

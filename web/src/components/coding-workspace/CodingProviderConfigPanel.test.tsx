@@ -58,14 +58,11 @@ function roleSnapshot(
 ): CodingRoleProviderConfigSnapshot {
   return {
     coder: "claude_code",
-    tester_plan: "codex",
-    tester_execute: "codex",
     code_reviewer: "codex",
     internal_reviewer: "claude_code",
     review_rounds: 1,
     permission_modes: {
       coder: "supervised",
-      tester: "auto",
       code_reviewer: "supervised",
       internal_reviewer: "supervised",
     },
@@ -82,7 +79,7 @@ function renderPanel({
 }: {
   snapshot?: CodingRoleProviderConfigSnapshot;
   attemptScope?: "work_item" | "work_item_group";
-  lockedRole?: "coder" | "tester" | "code_reviewer" | "internal_reviewer" | null;
+  lockedRole?: "coder" | "code_reviewer" | "internal_reviewer" | null;
   configLocked?: boolean;
   onSelect?: ReturnType<typeof vi.fn>;
 } = {}) {

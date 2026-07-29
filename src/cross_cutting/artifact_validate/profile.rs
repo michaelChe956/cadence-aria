@@ -90,7 +90,6 @@ pub fn phase1_profile_validator(
             validate_coverage_summary(aria.get("coverage_summary"))?;
         }
         ArtifactKind::CodingReport
-        | ArtifactKind::TestingReport
         | ArtifactKind::CodeReviewReport
         | ArtifactKind::IntegrationReport
             if traceability_refs.is_empty() =>

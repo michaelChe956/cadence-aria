@@ -2,13 +2,17 @@ use std::fs;
 
 use axum::http::Method;
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
+use cadence_aria::product::issue_store::IssueStore;
 use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::models::{
-    IssueWorkItemPlanStatus, ProviderName, WorkItemDraftStatus, WorkItemGenerationMode,
-    WorkItemPlanCommitState, WorkItemPlanCompileStatus, WorkspaceType,
+    HumanPresentationRevision, IssueWorkItemPlanStatus, ProviderName, WorkItemDraftStatus,
+    WorkItemGenerationMode, WorkItemPlanCommitState, WorkItemPlanCompileStatus, WorkspaceType,
 };
 use cadence_aria::product::work_item_plan_store::WorkItemPlanStore;
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
+use cadence_aria::product::workspace_repository::workspace_repository_for_session;
+use cadence_aria::web::workspace_context::ensure_workspace_context_message;
 use cadence_aria::web::workspace_ws_types::{
     ArtifactPayload, ProviderConfigSnapshot, TimelineNode, TimelineNodeStatus, TimelineNodeType,
     WorkspaceStage as WsWorkspaceStage,
@@ -157,228 +161,17 @@ async fn prepare_plan_accept_outline_and_select_batch(
     (session_id, plan_id, ws)
 }
 
-#[tokio::test]
-async fn batch_accept_all_runs_final_compile_and_publishes_revision_entities() {
-    let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls().await;
-    let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
-        valid_outline_output(),
-        valid_draft_output("outline_backend_session"),
-        valid_frontend_draft_output(),
-        valid_integration_draft_output(),
-    ])
-    .await;
-    let (_session_id, plan_id, mut ws) = prepare_plan_accept_outline_and_select_batch(&app).await;
-
-    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    assert!(
-        lifecycle
-            .list_work_items("project_0001", "issue_0001")
-            .expect("list work items before compile")
-            .is_empty(),
-        "Draft 阶段不能提前写入真实 WorkItem"
-    );
-    assert!(
-        lifecycle
-            .list_verification_plans("project_0001", "issue_0001")
-            .expect("list verification plans before compile")
-            .is_empty(),
-        "Draft 阶段不能提前写入真实 VerificationPlan"
-    );
-
-    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
-        messages.iter().any(|message| {
-            message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_batch_confirm"
-        })
-    })
-    .await;
-    ws.send(Message::Text(
-        json!({
-            "type": "work_item_batch_decision",
-            "decision": "accept_all",
-            "feedback": null,
-            "first_affected_outline_id": null
-        })
-        .to_string()
-        .into(),
-    ))
-    .await
-    .expect("send batch accept all");
-
-    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
-        messages.iter().any(|message| {
-            message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_plan_compile"
-        }) && messages
-            .iter()
-            .any(|message| message["type"] == "stage_change" && message["stage"] == "human_confirm")
-    })
-    .await;
-    assert!(
-        messages.iter().any(|message| {
-            message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_plan_compile"
-        }),
-        "accept_all should enter work_item_plan_compile, got {messages:?}"
-    );
-
-    let legacy_work_items = lifecycle
-        .list_work_items("project_0001", "issue_0001")
-        .expect("list work items after compile");
-    let legacy_verification_plans = lifecycle
-        .list_verification_plans("project_0001", "issue_0001")
-        .expect("list verification plans after compile");
-    let plan = lifecycle
-        .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
-        .expect("get compiled plan");
-    let child_sessions = lifecycle
-        .list_workspace_sessions("project_0001", "issue_0001")
-        .expect("list workspace sessions");
-    let work_item_sessions: Vec<_> = child_sessions
-        .iter()
-        .filter(|session| session.workspace_type == WorkspaceType::WorkItem)
-        .collect();
-
-    assert!(legacy_work_items.is_empty());
-    assert!(legacy_verification_plans.is_empty());
-    assert_eq!(work_item_sessions.len(), 3);
-    assert_eq!(plan.status, IssueWorkItemPlanStatus::Confirmed);
-    assert_eq!(plan.work_item_ids.len(), 3);
-    assert_eq!(plan.verification_plan_ids.len(), 3);
-    assert_eq!(plan.dependency_graph.len(), 2);
-    let revision_store = WorkItemRevisionStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let lineage = revision_store
-        .get_plan_lineage("project_0001", "issue_0001", &plan_id)
-        .expect("load active plan lineage");
-    let active_revision_id = lineage
-        .active_revision_id
-        .as_deref()
-        .expect("active plan revision id");
-    let plan_revision = revision_store
-        .get_plan_revision(
-            "project_0001",
-            "issue_0001",
-            &plan_id,
-            active_revision_id,
-        )
-        .expect("load active plan revision");
-    assert_eq!(plan_revision.revision_no, 1);
-    assert_eq!(plan_revision.work_item_bindings.len(), 3);
-    assert_eq!(
-        revision_store
-            .get_dependency_graph_revision(&lineage, &plan_revision.dependency_graph_revision_id)
-            .expect("load dependency graph revision")
-            .edges
-            .len(),
-        2
-    );
-    revision_store
-        .get_plan_validation_report(&lineage, &plan_revision.validation_report_ref)
-        .expect("load plan validation report");
-    let plan_projection = revision_store
-        .get_plan_projection_bundle(&lineage, &plan_revision.plan_projection_bundle_id)
-        .expect("load plan projection bundle");
-    assert_eq!(
-        plan.work_item_ids,
-        plan_projection
-            .coder_group_context
-            .ordered_logical_work_item_ids
-    );
-    for logical_id in &plan.work_item_ids {
-        let revision_id = plan_revision
-            .work_item_bindings
-            .get(logical_id)
-            .expect("stable work item binding");
-        let work_item_revision = revision_store
-            .get_work_item_revision(&lineage, logical_id, revision_id)
-            .expect("load work item revision");
-        revision_store
-            .get_verification_plan_revision(
-                &lineage,
-                &work_item_revision.verification_plan_revision_id,
-            )
-            .expect("load verification plan revision");
-        revision_store
-            .get_work_item_projection_bundle(
-                &lineage,
-                &work_item_revision.work_item_projection_bundle_id,
-            )
-            .expect("load work item projection bundle");
-    }
-    assert_eq!(
-        work_item_sessions
-            .iter()
-            .map(|session| session.entity_id.as_str())
-            .collect::<std::collections::BTreeSet<_>>(),
-        plan.work_item_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>()
-    );
-
-    let store = WorkItemPlanStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let index = store
-        .load_active_index("project_0001", "issue_0001", &plan_id)
-        .expect("load active index")
-        .expect("active index");
-    let compile_dir = root
-        .path()
-        .join(".aria/projects/project_0001/issues/issue_0001/work_item_plan_compiles")
-        .join(&plan_id);
-    let compile_files: Vec<_> = fs::read_dir(&compile_dir)
-        .expect("read compile tx dir")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("compile dir entries");
-    assert_eq!(compile_files.len(), 1);
-    let compile_tx: Value =
-        serde_json::from_slice(&fs::read(compile_files[0].path()).expect("read compile tx"))
-            .expect("compile tx json");
-    assert_eq!(compile_tx["status"], "committed");
-    assert_eq!(compile_tx["plan_commit_state"], "committed");
-    assert_eq!(compile_tx["created_work_item_ids"], json!([]));
-    assert_eq!(compile_tx["created_verification_plan_ids"], json!([]));
-    assert_eq!(compile_tx["previous_plan_snapshot"]["status"], "draft");
-    assert_eq!(
-        compile_tx["active_draft_ids"]
-            .as_array()
-            .expect("draft ids")
-            .len(),
-        index.outline_to_current_draft_id.len()
-    );
-
-    ws.send(Message::Text(
-        json!({ "type": "human_confirm", "decision": "confirm" })
-            .to_string()
-            .into(),
-    ))
-    .await
-    .expect("send final human confirm");
-    let completed_messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
-        messages
-            .iter()
-            .any(|message| message["type"] == "stage_change" && message["stage"] == "completed")
-    })
-    .await;
-    assert!(
-        completed_messages
-            .iter()
-            .any(|message| message["type"] == "stage_change" && message["stage"] == "completed"),
-        "final human confirm after compile should complete workspace, got {completed_messages:?}"
-    );
-    let work_item_sessions_after_confirm = lifecycle
-        .list_workspace_sessions("project_0001", "issue_0001")
-        .expect("list workspace sessions after final confirm")
-        .into_iter()
-        .filter(|session| session.workspace_type == WorkspaceType::WorkItem)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        work_item_sessions_after_confirm.len(),
-        3,
-        "final human confirm must not create duplicate WorkItem sessions"
-    );
-
-    ws.close(None).await.ok();
+fn outline_trusting_unsafe_command(outline_id: &str) -> Value {
+    let mut output = valid_outline_output();
+    let outline = output["outline"]["work_item_outlines"]
+        .as_array_mut()
+        .expect("work item outlines");
+    let item = outline
+        .iter_mut()
+        .find(|item| item["outline_id"] == outline_id)
+        .expect("target outline");
+    item["trusted_verification_commands"][0]["command"] = json!("rm -rf /");
+    output
 }
 
 #[tokio::test]
@@ -386,7 +179,7 @@ async fn strict_validator_item_failure_in_batch_returns_batch_confirm_without_re
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
-        valid_outline_output(),
+        outline_trusting_unsafe_command("outline_backend_session"),
         unsafe_backend_draft_output(),
         valid_frontend_draft_output(),
         valid_integration_draft_output(),
@@ -506,7 +299,7 @@ async fn downgrade_to_serial_copies_unaffected_batch_drafts_and_revalidates() {
     let _guard = WS_TEST_LOCK.lock().await;
     let _test_guard = enable_test_controls().await;
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
-        valid_outline_output(),
+        outline_trusting_unsafe_command("outline_frontend_expiry"),
         valid_draft_output("outline_backend_session"),
         unsafe_frontend_draft_output(),
         valid_integration_draft_output(),

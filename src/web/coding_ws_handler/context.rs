@@ -14,12 +14,14 @@ use crate::product::coding_workspace_runner::{
     apply_provider_selection_to_snapshots, coding_provider_role_for_stage,
     parse_coding_provider_role,
 };
+use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 
 use super::active_coding_timeline_node_id;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{ProviderName, WorkItemExecutionPlanStatus};
 use crate::product::repository_store::RepositoryStore;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 pub(crate) fn current_work_item_id_for_attempt(attempt: &CodingExecutionAttempt) -> &str {
     attempt
@@ -44,6 +46,9 @@ pub(crate) fn ensure_work_item_execution_plan_confirmed(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<(), CodingWorkspaceEngineError> {
+    if is_schema_v2_group_attempt(app_paths, attempt)? {
+        return Ok(());
+    }
     let current_work_item_id = current_work_item_id_for_attempt(attempt);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let work_items = lifecycle.list_work_items(&attempt.project_id, &attempt.issue_id)?;
@@ -71,28 +76,60 @@ pub(crate) fn ensure_work_item_execution_plan_confirmed(
     }
 }
 
+fn is_schema_v2_group_attempt(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<bool, ProductStoreError> {
+    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+        return Ok(false);
+    };
+    match WorkItemRevisionStore::new(app_paths.clone()).get_plan_lineage(
+        &attempt.project_id,
+        &attempt.issue_id,
+        plan_id,
+    ) {
+        Ok(_) => Ok(true),
+        Err(ProductStoreError::NotFound {
+            kind: "work_item_plan_lineage",
+            ..
+        }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn repository_path_for_attempt(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<PathBuf, CodingWorkspaceEngineError> {
-    let current_work_item_id = current_work_item_id_for_attempt(attempt);
-    let work_item = LifecycleStore::new(app_paths.clone())
-        .list_work_items(&attempt.project_id, &attempt.issue_id)?
-        .into_iter()
-        .find(|work_item| work_item.id == current_work_item_id)
-        .ok_or_else(|| ProductStoreError::NotFound {
-            kind: "work_item",
-            id: current_work_item_id.to_string(),
-        })?;
+    let repository_id = if is_schema_v2_group_attempt(app_paths, attempt)? {
+        IssueStore::new(app_paths.clone())
+            .get(&attempt.project_id, &attempt.issue_id)?
+            .repo_id
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "repository",
+                id: format!("issue:{}:repo_id", attempt.issue_id),
+            })?
+    } else {
+        let current_work_item_id = current_work_item_id_for_attempt(attempt);
+        LifecycleStore::new(app_paths.clone())
+            .list_work_items(&attempt.project_id, &attempt.issue_id)?
+            .into_iter()
+            .find(|work_item| work_item.id == current_work_item_id)
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "work_item",
+                id: current_work_item_id.to_string(),
+            })?
+            .repository_id
+    };
     RepositoryStore::new(app_paths.clone())
         .list(&attempt.project_id)?
         .into_iter()
-        .find(|repository| repository.id == work_item.repository_id)
+        .find(|repository| repository.id == repository_id)
         .map(|repository| repository.path)
         .ok_or({
             CodingWorkspaceEngineError::Store(ProductStoreError::NotFound {
                 kind: "repository",
-                id: work_item.repository_id,
+                id: repository_id,
             })
         })
 }

@@ -1,6 +1,7 @@
 use cadence_aria::cross_cutting::provider_context_builder::{
     ProviderContextBuildError, ProviderContextBuilderInput, build_provider_context,
 };
+use cadence_aria::protocol::artifacts::ArtifactKind;
 use cadence_aria::protocol::contracts::{
     AdapterRole, CommandClass, PromptSection, ProviderType, RuntimeRole,
     execution_contract_for_node, phase1_node_contract_table, workflow_discipline_for_node,
@@ -88,15 +89,23 @@ fn context_builder_renders_each_planning_prompt_and_maps_adapter_input() {
             result
                 .adapter_input
                 .prompt
-                .contains("agent-routing-kernel.md"),
-            "{node_id} prompt must directly reference the Cadence routing kernel"
+                .contains("[cadence_project_rules]"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
         );
         assert!(
-            result
+            result.adapter_input.prompt.contains("AGENTS.md")
+                && result.adapter_input.prompt.contains("CLAUDE.md"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
+        );
+        assert!(
+            !result
                 .adapter_input
                 .prompt
-                .contains("openspec-superpowers-workflow.md"),
-            "{node_id} prompt must directly reference the Cadence OpenSpec/Superpowers workflow"
+                .contains(&["Cadence-", "skills/"].concat()),
+            "{node_id}: {}",
+            result.adapter_input.prompt
         );
         assert!(
             !result.adapter_input.prompt.contains("cadence-workflow"),
@@ -219,9 +228,7 @@ fn context_builder_renders_each_planning_prompt_and_maps_adapter_input() {
 #[test]
 fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes() {
     let provider_nodes = all_phase1_provider_node_ids();
-    for node_id in [
-        "N16", "N17", "N18", "N19", "N20", "N24", "N25", "N26", "N27",
-    ] {
+    for node_id in ["N16", "N18", "N19", "N20", "N24", "N25", "N26", "N27"] {
         assert!(
             provider_nodes.contains(&node_id),
             "{node_id} missing from provider node registry"
@@ -229,9 +236,7 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
     }
 
     let manifest = phase1_prompt_manifest();
-    for node_id in [
-        "N16", "N17", "N18", "N19", "N20", "N24", "N25", "N26", "N27",
-    ] {
+    for node_id in ["N16", "N18", "N19", "N20", "N24", "N25", "N26", "N27"] {
         let contract = execution_contract_for_node(node_id).expect("contract");
         let workflow = workflow_discipline_for_node(node_id).expect("workflow");
         let template = prompt_template_for_node(node_id).expect("template");
@@ -292,23 +297,26 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
             .contains(&"test-driven-development".to_string())
     );
 
-    let n17 = execution_contract_for_node("N17").expect("N17 contract");
-    assert_eq!(n17.provider_type, ProviderType::Codex);
-    assert_eq!(n17.runtime_role, RuntimeRole::Executor);
-    assert_eq!(n17.adapter_role, AdapterRole::Executor);
-    assert_eq!(n17.allowed_write_scope, Vec::<String>::new());
-    assert!(n17.allowed_command_classes.contains(&CommandClass::Test));
-    assert!(
-        workflow_discipline_for_node("N17")
-            .expect("N17 workflow")
-            .superpowers_optional
-            .contains(&"systematic-debugging".to_string())
-    );
+    assert!(execution_contract_for_node("N17").is_none());
+    assert!(workflow_discipline_for_node("N17").is_none());
+    assert!(!manifest.entries.iter().any(|entry| entry.node_id == "N17"));
 
     let n18 = execution_contract_for_node("N18").expect("N18 contract");
     assert_eq!(n18.runtime_role, RuntimeRole::Reviewer);
     assert_eq!(n18.adapter_role, AdapterRole::Reviewer);
     assert_eq!(n18.allowed_command_classes, vec![CommandClass::ReadOnly]);
+    assert_eq!(
+        n18.required_canonical_inputs,
+        vec![ArtifactKind::CodingReport, ArtifactKind::DispatchPackage]
+    );
+    assert!(!n18.failure_routes.iter().any(|route| route == "N17"));
+
+    let n19 = execution_contract_for_node("N19").expect("N19 contract");
+    assert_eq!(
+        n19.required_canonical_inputs,
+        vec![ArtifactKind::CodeReviewReport]
+    );
+    assert_eq!(n19.failure_routes, vec!["N18", "M20"]);
 
     let n20 = execution_contract_for_node("N20").expect("N20 contract");
     assert_eq!(n20.runtime_role, RuntimeRole::AdvisoryReviewer);
@@ -318,6 +326,11 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
         n20.output_schema_ref,
         "schema://aria/advisory/ready_advisory/v1"
     );
+    assert_eq!(
+        n20.required_canonical_inputs,
+        vec![ArtifactKind::CodingReport, ArtifactKind::CodeReviewReport]
+    );
+    assert!(!n20.failure_routes.iter().any(|route| route == "N17"));
 
     let n24 = execution_contract_for_node("N24").expect("N24 contract");
     assert_eq!(n24.runtime_role, RuntimeRole::AdvisoryReviewer);
@@ -338,7 +351,8 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
     let rows = phase1_node_contract_table();
     assert_eq!(rows.first().expect("first row").node_id, "N13");
     assert_eq!(rows.last().expect("last row").node_id, "N28");
-    assert_eq!(rows.len(), 16);
+    assert_eq!(rows.len(), 15);
+    assert!(!rows.iter().any(|row| row.node_id == "N17"));
     assert!(
         rows.iter()
             .find(|row| row.node_id == "N23")
@@ -358,9 +372,7 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
 
 #[test]
 fn context_builder_renders_p4_provider_nodes_and_rejects_missing_required_inputs() {
-    for node_id in [
-        "N16", "N17", "N18", "N19", "N20", "N24", "N25", "N26", "N27",
-    ] {
+    for node_id in ["N16", "N18", "N19", "N20", "N24", "N25", "N26", "N27"] {
         let result = build_provider_context(p4_builder_input(node_id)).expect("context package");
         let contract = execution_contract_for_node(node_id).expect("contract");
 
@@ -368,15 +380,23 @@ fn context_builder_renders_p4_provider_nodes_and_rejects_missing_required_inputs
             result
                 .adapter_input
                 .prompt
-                .contains("agent-routing-kernel.md"),
-            "{node_id} prompt must directly reference the Cadence routing kernel"
+                .contains("[cadence_project_rules]"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
         );
         assert!(
-            result
+            result.adapter_input.prompt.contains("AGENTS.md")
+                && result.adapter_input.prompt.contains("CLAUDE.md"),
+            "{node_id}: {}",
+            result.adapter_input.prompt
+        );
+        assert!(
+            !result
                 .adapter_input
                 .prompt
-                .contains("openspec-superpowers-workflow.md"),
-            "{node_id} prompt must directly reference the Cadence OpenSpec/Superpowers workflow"
+                .contains(&["Cadence-", "skills/"].concat()),
+            "{node_id}: {}",
+            result.adapter_input.prompt
         );
         assert!(
             !result.adapter_input.prompt.contains("cadence-workflow"),
@@ -475,7 +495,7 @@ fn context_builder_renders_p4_provider_nodes_and_rejects_missing_required_inputs
 
 #[test]
 fn context_builder_uses_worktask_verification_commands_for_execution_nodes() {
-    let mut input = p4_builder_input("N17");
+    let mut input = p4_builder_input("N18");
     input.canonical_inputs["worktask_routing"]["verification_commands"] =
         json!(["node tests/fibonacciSquareSum.test.js"]);
 
@@ -505,10 +525,6 @@ fn node_specific_fields_snapshot_fixtures_round_trip_minimal_fields() {
             ),
             ("N15", &["dispatch_package_ref", "worktask_routing"][..]),
             ("N16", &["coding_report_ref", "changed_files"][..]),
-            (
-                "N17",
-                &["testing_report_ref", "test_results", "coverage_summary"][..],
-            ),
             ("N18", &["code_review_report_ref", "findings"][..]),
             ("N19", &["rework_scope", "superseded_report_refs"][..]),
             (

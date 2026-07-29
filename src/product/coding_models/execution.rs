@@ -11,7 +11,6 @@ pub enum CodingExecutionStage {
     PrepareContext,
     WorktreePrepare,
     Coding,
-    Testing,
     CodeReview,
     ReviewRequest,
     InternalPrReview,
@@ -24,11 +23,10 @@ impl CodingExecutionStage {
             Self::PrepareContext => 0,
             Self::WorktreePrepare => 1,
             Self::Coding => 2,
-            Self::Testing => 3,
-            Self::CodeReview => 4,
-            Self::ReviewRequest => 5,
-            Self::InternalPrReview => 6,
-            Self::FinalConfirm => 7,
+            Self::CodeReview => 3,
+            Self::ReviewRequest => 4,
+            Self::InternalPrReview => 5,
+            Self::FinalConfirm => 6,
         }
     }
 }
@@ -67,7 +65,6 @@ impl CodingAttemptStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CodingProviderRole {
     Coder,
-    Tester,
     CodeReviewer,
     InternalReviewer,
 }
@@ -76,7 +73,6 @@ pub enum CodingProviderRole {
 #[serde(rename_all = "snake_case")]
 pub enum CodingAgentRole {
     Author,
-    Tester,
     Reviewer,
     Git,
     System,

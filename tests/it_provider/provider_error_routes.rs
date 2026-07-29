@@ -111,6 +111,7 @@ fn adapter_input(timeout: u64) -> AdapterInput {
         provider_type: ProviderType::Fake,
         role: AdapterRole::Orchestrator,
         worktree_path: None,
+        provider_stream_log_dir: None,
         prompt: "fixture prompt".to_string(),
         context_files: Vec::new(),
         output_schema: "clarification_record.v1".to_string(),

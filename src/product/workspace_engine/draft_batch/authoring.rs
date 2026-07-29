@@ -1,10 +1,48 @@
 use super::*;
+use crate::product::models::WorkItemDraftGenerationDiagnostics;
+use crate::product::workspace_engine::types::WorkItemDraftRepairState;
 
 impl WorkspaceEngine {
-    pub async fn complete_work_item_draft_author(
+    pub(crate) fn remember_one_draft_repair(
+        &mut self,
+        outline_id: &str,
+        findings: Vec<WorkItemSplitFinding>,
+        prior_user_feedback: Option<String>,
+    ) {
+        let original_user_feedback = self
+            .work_item_draft_repair_states
+            .get(outline_id)
+            .and_then(|state| state.original_user_feedback.clone())
+            .or(prior_user_feedback);
+        self.work_item_draft_repair_states.insert(
+            outline_id.to_string(),
+            WorkItemDraftRepairState {
+                initial_validation_findings: Some(findings),
+                original_user_feedback,
+            },
+        );
+    }
+
+    pub(crate) fn remember_draft_rewrite_user_feedback(
+        &mut self,
+        outline_id: &str,
+        user_feedback: Option<String>,
+    ) {
+        let state = self
+            .work_item_draft_repair_states
+            .entry(outline_id.to_string())
+            .or_insert(WorkItemDraftRepairState {
+                initial_validation_findings: None,
+                original_user_feedback: None,
+            });
+        state.original_user_feedback = user_feedback;
+    }
+
+    pub(crate) async fn complete_work_item_draft_author(
         &mut self,
         candidate: WorkItemDraftCandidate,
-    ) -> Result<(), String> {
+        prior_user_feedback: Option<&str>,
+    ) -> Result<WorkItemDraftAuthorOutcome, String> {
         if self.active_node_type() != Some(TimelineNodeType::WorkItemDraftRun) {
             return Err("work item draft author completion requires active draft run".to_string());
         }
@@ -32,6 +70,65 @@ impl WorkspaceEngine {
                 candidate.outline_id, active_outline_id
             ));
         }
+
+        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
+        let accepted_drafts = self.accepted_work_item_plan_draft_records(&store, &index)?;
+        let accepted_candidates: Vec<WorkItemDraftCandidate> = accepted_drafts
+            .iter()
+            .map(|record| record.candidate.clone())
+            .collect();
+        let report = WorkItemDraftLocalValidator::validate(
+            &candidate,
+            &accepted_candidates,
+            &outline_candidate.outline,
+        );
+        let initial_repair_attempted = self
+            .work_item_draft_repair_states
+            .get(&active_outline_id)
+            .and_then(|state| state.initial_validation_findings.as_ref())
+            .is_some();
+        if report.has_errors() && !initial_repair_attempted {
+            let findings = work_item_split_findings_to_dto(&report.findings);
+            let original_user_feedback = self
+                .work_item_draft_repair_states
+                .get(&active_outline_id)
+                .and_then(|state| state.original_user_feedback.as_deref())
+                .or(prior_user_feedback);
+            let feedback = combine_draft_validation_feedback(original_user_feedback, &findings);
+            let diagnostics = WorkItemDraftGenerationDiagnostics {
+                auto_repair_attempted: true,
+                initial_validation_findings: report.findings.clone(),
+                final_validation_findings: Vec::new(),
+            };
+            self.remember_one_draft_repair(
+                &active_outline_id,
+                report.findings,
+                original_user_feedback.map(str::to_string),
+            );
+            return Ok(WorkItemDraftAuthorOutcome::RetryOnce {
+                feedback,
+                diagnostics,
+            });
+        }
+
+        let repair_state = self
+            .work_item_draft_repair_states
+            .remove(&active_outline_id);
+        let diagnostics = repair_state.and_then(|state| {
+            state
+                .initial_validation_findings
+                .map(
+                    |initial_validation_findings| WorkItemDraftGenerationDiagnostics {
+                        auto_repair_attempted: true,
+                        initial_validation_findings,
+                        final_validation_findings: if report.has_errors() {
+                            report.findings.clone()
+                        } else {
+                            Vec::new()
+                        },
+                    },
+                )
+        });
         let previous_draft_record = match index
             .outline_to_current_draft_id
             .get(&active_outline_id)
@@ -50,18 +147,6 @@ impl WorkspaceEngine {
             ),
             None => None,
         };
-
-        let outline_candidate = self.latest_work_item_plan_outline_candidate()?;
-        let accepted_drafts = self.accepted_work_item_plan_draft_records(&store, &index)?;
-        let accepted_candidates: Vec<WorkItemDraftCandidate> = accepted_drafts
-            .iter()
-            .map(|record| record.candidate.clone())
-            .collect();
-        let report = WorkItemDraftLocalValidator::validate(
-            &candidate,
-            &accepted_candidates,
-            &outline_candidate.outline,
-        );
         let status = if report.has_errors() {
             WorkItemDraftStatus::ValidationFailed
         } else {
@@ -83,6 +168,7 @@ impl WorkspaceEngine {
                 .unwrap_or(1),
             outline_version_ref: outline_candidate.outline.id.clone(),
             generation_mode: WorkItemGenerationMode::Serial,
+            generation_diagnostics: diagnostics,
             candidate,
             status: status.clone(),
             active: true,
@@ -140,13 +226,14 @@ impl WorkspaceEngine {
         self.complete_active_node(Some(completion_summary)).await;
         self.enter_work_item_draft_confirm(Some("请确认当前 Work Item Draft".to_string()))
             .await;
-        Ok(())
+        Ok(WorkItemDraftAuthorOutcome::AwaitConfirmation)
     }
 
-    pub async fn complete_work_item_batch_draft_author(
+    pub(crate) async fn complete_work_item_batch_draft_author(
         &mut self,
         candidate: WorkItemDraftCandidate,
-    ) -> Result<(), String> {
+        prior_user_feedback: Option<&str>,
+    ) -> Result<WorkItemDraftAuthorOutcome, String> {
         if self.active_node_type() != Some(TimelineNodeType::WorkItemBatchRun) {
             return Err("batch draft author completion requires active batch run".to_string());
         }
@@ -186,18 +273,53 @@ impl WorkspaceEngine {
             &batch_candidates,
             &outline_candidate.outline,
         );
-        if report.has_errors() {
-            let retry_count = self
-                .work_item_batch_retry_counts
-                .entry(active_outline_id.clone())
-                .or_default();
-            if *retry_count == 0 {
-                *retry_count += 1;
-                return Ok(());
-            }
-        } else {
-            self.work_item_batch_retry_counts.remove(&active_outline_id);
+        let initial_repair_attempted = self
+            .work_item_draft_repair_states
+            .get(&active_outline_id)
+            .and_then(|state| state.initial_validation_findings.as_ref())
+            .is_some();
+        if report.has_errors() && !initial_repair_attempted {
+            let findings = work_item_split_findings_to_dto(&report.findings);
+            let original_user_feedback = self
+                .work_item_draft_repair_states
+                .get(&active_outline_id)
+                .and_then(|state| state.original_user_feedback.as_deref())
+                .or(prior_user_feedback);
+            let feedback = combine_draft_validation_feedback(original_user_feedback, &findings);
+            let diagnostics = WorkItemDraftGenerationDiagnostics {
+                auto_repair_attempted: true,
+                initial_validation_findings: report.findings.clone(),
+                final_validation_findings: Vec::new(),
+            };
+            self.remember_one_draft_repair(
+                &active_outline_id,
+                report.findings,
+                original_user_feedback.map(str::to_string),
+            );
+            return Ok(WorkItemDraftAuthorOutcome::RetryOnce {
+                feedback,
+                diagnostics,
+            });
         }
+
+        let diagnostics = self
+            .work_item_draft_repair_states
+            .remove(&active_outline_id)
+            .and_then(|state| {
+                state
+                    .initial_validation_findings
+                    .map(
+                        |initial_validation_findings| WorkItemDraftGenerationDiagnostics {
+                            auto_repair_attempted: true,
+                            initial_validation_findings,
+                            final_validation_findings: if report.has_errors() {
+                                report.findings.clone()
+                            } else {
+                                Vec::new()
+                            },
+                        },
+                    )
+            });
         let status = if report.has_errors() {
             WorkItemDraftStatus::ValidationFailed
         } else {
@@ -216,6 +338,7 @@ impl WorkspaceEngine {
             attempt_index: 1,
             outline_version_ref: outline_candidate.outline.id.clone(),
             generation_mode: WorkItemGenerationMode::Batch,
+            generation_diagnostics: diagnostics,
             candidate,
             status: status.clone(),
             active: true,
@@ -251,9 +374,7 @@ impl WorkspaceEngine {
                 WorkItemDraftStatus::ValidationFailed => {
                     batch.validation_failed_ids.push(draft_id.clone());
                 }
-                _ => {
-                    batch.item_draft_ids.push(draft_id.clone());
-                }
+                _ => batch.item_draft_ids.push(draft_id.clone()),
             }
             if next_outline_id.is_none() {
                 batch.status = WorkItemBatchStatus::Completed;
@@ -286,6 +407,6 @@ impl WorkspaceEngine {
             self.enter_work_item_batch_confirm(Some("请确认整组 Work Item Draft".to_string()))
                 .await;
         }
-        Ok(())
+        Ok(WorkItemDraftAuthorOutcome::AwaitConfirmation)
     }
 }

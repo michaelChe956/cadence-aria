@@ -16,6 +16,7 @@ import {
   generateStorySpecs,
   getProviderStatus,
   getIssueLifecycle,
+  getRepositoryInitialization,
   prepareWorkItemPlan,
   listProductIssues,
   listProjects,
@@ -23,6 +24,88 @@ import {
   normalizeApiError,
   recheckProviders,
 } from "./client";
+import type {
+  CreateRepositoryResponse,
+  RepositoryInitializationOperationSnapshot,
+  RepositoryInitializationStep,
+} from "./types";
+
+function repositoryInitializationResult(): CreateRepositoryResponse {
+  return {
+    repository: {
+      repository_id: "repository_0001",
+      project_id: "project_0001",
+      name: "Aria",
+      path: "/work/aria",
+      repo_hash: "repo-hash",
+      runtime_root: "/work/aria/.aria",
+      default_policy_preset: "balanced",
+      default_provider_mode: "claude_code",
+      created_at: "2026-07-22T00:00:00Z",
+      updated_at: "2026-07-22T00:00:00Z",
+    },
+    initialization: {
+      source: "offline",
+      commands: [
+        { index: 1, command: "/pre-check --no-interrupt", status: "completed" },
+        {
+          index: 2,
+          command: "/rule-config --no-interrupt",
+          status: "completed",
+        },
+        {
+          index: 3,
+          command: "/mcp-configuration --no-interrupt",
+          status: "completed",
+        },
+        {
+          index: 4,
+          command: "/project-rules-examples --no-interrupt",
+          status: "completed",
+        },
+      ],
+      warnings: [],
+      changed_paths: [],
+      git_finalize_warning: null,
+      completed_at: "2026-07-22T00:01:00Z",
+    },
+  };
+}
+
+function repositoryInitializationSteps(
+  status: RepositoryInitializationStep["status"],
+): RepositoryInitializationStep[] {
+  return [
+    { step_id: "cadence_skills", status },
+    { step_id: "pre_check", status },
+    { step_id: "rule_config", status },
+    { step_id: "mcp_configuration", status },
+    { step_id: "project_rules_examples", status },
+    { step_id: "git_finalize", status },
+  ];
+}
+
+function completedRepositoryInitializationSteps(): RepositoryInitializationStep[] {
+  return repositoryInitializationSteps("completed");
+}
+
+function repositoryInitializationSnapshot(
+  overrides: Partial<RepositoryInitializationOperationSnapshot> = {},
+): RepositoryInitializationOperationSnapshot {
+  return {
+    operation_id: "repository_initialization_0001",
+    status: "created",
+    steps: repositoryInitializationSteps("pending"),
+    current_step: null,
+    failed_step: null,
+    result: null,
+    error: null,
+    created_at: "2026-07-22T00:00:00Z",
+    updated_at: "2026-07-22T00:00:00Z",
+    completed_at: null,
+    ...overrides,
+  };
+}
 
 describe("api client", () => {
   it("normalizes standard api error", async () => {
@@ -106,52 +189,99 @@ describe("api client", () => {
     expect(calls[1].init?.method).toBe("POST");
   });
 
-  it("returns the complete repository initialization envelope from HTTP 201", async () => {
-    const response = {
-      repository: {
-        repository_id: "repository_0001",
-        project_id: "project_0001",
-        name: "Aria",
-        path: "/work/aria",
-        repo_hash: "repo-hash",
-        runtime_root: "/work/aria/.aria",
-        default_policy_preset: "balanced",
-        default_provider_mode: "claude_code",
-        created_at: "2026-07-14T00:00:00Z",
-        updated_at: "2026-07-14T00:00:00Z",
+  it("starts repository initialization with HTTP 202 and reads a project-scoped operation", async () => {
+    const accepted = repositoryInitializationSnapshot({ status: "created" });
+    const completed = repositoryInitializationSnapshot({
+      status: "completed",
+      steps: completedRepositoryInitializationSteps(),
+      result: repositoryInitializationResult(),
+      completed_at: "2026-07-22T00:01:00Z",
+    });
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(
+          JSON.stringify(calls.length === 1 ? accepted : completed),
+          { status: calls.length === 1 ? 202 : 200 },
+        );
+      }),
+    );
+
+    await expect(
+      createRepository("project_0001", { name: "Aria", path: "/work/aria" }),
+    ).resolves.toEqual(accepted);
+    await expect(
+      getRepositoryInitialization("project/with space", "operation/with space"),
+    ).resolves.toEqual(completed);
+
+    expect(calls[0]).toMatchObject({
+      input: "/api/projects/project_0001/repositories",
+    });
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[1]).toMatchObject({
+      input:
+        "/api/projects/project%2Fwith%20space/repository-initializations/operation%2Fwith%20space",
+    });
+    expect(calls[1].init?.method).toBeUndefined();
+  });
+
+  it("resolves a failed repository initialization snapshot returned with HTTP 200", async () => {
+    const failed = repositoryInitializationSnapshot({
+      status: "failed",
+      steps: [
+        { step_id: "cadence_skills", status: "completed" },
+        { step_id: "pre_check", status: "failed" },
+        { step_id: "rule_config", status: "pending" },
+        { step_id: "mcp_configuration", status: "pending" },
+        { step_id: "project_rules_examples", status: "pending" },
+        { step_id: "git_finalize", status: "pending" },
+      ],
+      failed_step: "pre_check",
+      error: {
+        code: "repository_init_command_failed",
+        message: "repository initialization failed",
+        details: {
+          stage: "repository_init_command",
+          command: "/pre-check --no-interrupt",
+          reason_code: "repository_init_command_failed",
+          retryable: true,
+        },
       },
-      initialization: {
-        source: "offline",
-        commands: [
-          { index: 1, command: "/pre-check", status: "completed" },
-          { index: 2, command: "/rule-config", status: "completed" },
-          { index: 3, command: "/mcp-configuration", status: "completed" },
-          {
-            index: 4,
-            command: "/project-rules-examples",
-            status: "completed",
-          },
-        ],
-        warnings: ["cadence_skills_conflict:<path>"],
-        changed_paths: [".claude/rules/project.md"],
-        completed_at: "2026-07-14T00:01:00Z",
-      },
-    } as const;
+      completed_at: "2026-07-22T00:01:00Z",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(failed), { status: 200 })),
+    );
+
+    await expect(
+      getRepositoryInitialization("project_0001", "repository_initialization_0001"),
+    ).resolves.toEqual(failed);
+  });
+
+  it("throws ApiRequestError for a non-2xx repository initialization query", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        new Response(JSON.stringify(response), { status: 201 }),
+        new Response(
+          JSON.stringify({
+            code: "repository_initialization_operation_not_found",
+            message: "repository initialization operation not found",
+            details: {},
+          }),
+          { status: 404 },
+        ),
       ),
     );
 
     await expect(
-      createRepository("project_0001", {
-        name: "Aria",
-        path: "/work/aria",
-        default_policy_preset: "balanced",
-        default_provider_mode: "claude_code",
-      }),
-    ).resolves.toEqual(response);
+      getRepositoryInitialization("project_0001", "unknown_operation"),
+    ).rejects.toMatchObject({
+      name: "ApiRequestError",
+      code: "repository_initialization_operation_not_found",
+    });
   });
 
   it("preserves structured repository registration error details", async () => {

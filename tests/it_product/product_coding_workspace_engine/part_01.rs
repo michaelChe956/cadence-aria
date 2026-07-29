@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
 use cadence_aria::cross_cutting::streaming_provider::{
@@ -14,22 +13,20 @@ use cadence_aria::cross_cutting::streaming_provider::{
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
-    CodingAttemptStore, CreateBlockedGateInput, CreateCodingAttemptInput,
-    CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
+    CodingAttemptStore, CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
+    CreateGroupCodingAttemptInput,
 };
 use cadence_aria::product::coding_models::{
     CodingAgentRole, CodingAttemptScope, CodingAttemptStatus, CodingChoiceGateStatus,
     CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus,
-    CodingGateAction, CodingGateActionType, CodingProviderPermissionMode, CodingProviderRole,
-    CodingReworkInstruction, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+    CodingProviderPermissionMode, CodingProviderRole, CodingReworkInstruction,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
     CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict, TestCommand, TestCommandStatus, TestingOverallStatus,
-    TestingReport, TestingStepResult, WorkItemHandoff,
+    ReviewRequestKind, ReviewVerdict,
 };
 use cadence_aria::product::coding_workspace_engine::{
-    CodingExecutionContext, CodingWorkspaceEngine, ProviderTestingAdapters,
-    testing_report_needs_blocked_gate,
+    CodingExecutionContext, CodingWorkspaceEngine,
 };
 use cadence_aria::product::git_workspace_service::GitWorkspaceService;
 use cadence_aria::product::lifecycle_store::{
@@ -42,8 +39,6 @@ use cadence_aria::product::models::{
     VerificationCommandSafety, VerificationCommandSource, VerificationFallbackPolicy,
     VerificationScope, WorkItemStatus, WorkspaceType,
 };
-use cadence_aria::product::test_executor::TestCommandSpec;
-use cadence_aria::product::tester_agent_loop::TesterAgentOptions;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use cadence_aria::web::coding_ws_handler::CodingWsOutMessage;
 use cadence_aria::web::workspace_ws_types::{
@@ -134,57 +129,6 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
         saved.permission_mode_for_role(&CodingProviderRole::CodeReviewer),
         CodingProviderPermissionMode::Auto
     );
-}
-
-#[test]
-fn testing_report_failed_or_blocked_needs_blocked_gate() {
-    let blocked = TestingReport {
-        id: "testing_report_0001".to_string(),
-        attempt_id: "coding_attempt_0001".to_string(),
-        role_run_id: None,
-        run_no: None,
-        commands: Vec::new(),
-        overall_status: TestingOverallStatus::Blocked,
-        provider_claim: None,
-        backend_verified: true,
-        started_at: "2026-06-11T00:00:00Z".to_string(),
-        completed_at: Some("2026-06-11T00:00:01Z".to_string()),
-        plan_id: None,
-        plan_summary: None,
-        steps: Vec::new(),
-        unplanned_commands: Vec::new(),
-        unplanned_evidence: Vec::new(),
-        missing_required_steps: Vec::new(),
-        skipped_required_steps: Vec::new(),
-        context_warnings: vec!["test_plan_parse_error".to_string()],
-        raw_provider_output_ref: Some("provider-raw/testing/plan_tests_0001.txt".to_string()),
-        plan_defect_findings: Vec::new(),
-    };
-    assert!(testing_report_needs_blocked_gate(&blocked));
-
-    let mut failed_without_evidence = blocked.clone();
-    failed_without_evidence.overall_status = TestingOverallStatus::Failed;
-    assert!(testing_report_needs_blocked_gate(&failed_without_evidence));
-
-    let mut failed_with_evidence = blocked.clone();
-    failed_with_evidence.overall_status = TestingOverallStatus::Failed;
-    failed_with_evidence.plan_id = Some("test_plan_0001".to_string());
-    failed_with_evidence.steps = vec![TestingStepResult {
-        step_id: "unit".to_string(),
-        status: TestCommandStatus::Failed,
-        evidence_refs: vec!["unit.stderr.log".to_string()],
-        command: Some(vec![
-            "cargo".to_string(),
-            "test".to_string(),
-            "--locked".to_string(),
-        ]),
-        provider_analysis: Some("unit failed".to_string()),
-    }];
-    assert!(testing_report_needs_blocked_gate(&failed_with_evidence));
-
-    let mut passed = blocked.clone();
-    passed.overall_status = TestingOverallStatus::Passed;
-    assert!(!testing_report_needs_blocked_gate(&passed));
 }
 
 #[tokio::test]

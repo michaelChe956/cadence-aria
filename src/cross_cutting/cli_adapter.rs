@@ -83,9 +83,11 @@ impl ProviderAdapter for CliProviderAdapter {
                 output_schema: input.output_schema.clone(),
                 sink: Arc::clone(sink),
             });
+        let stream_log_dir = input.provider_stream_log_dir.as_deref().map(Path::new);
         let raw = run_command_capture_with_stream(
             &command,
             worktree_path,
+            stream_log_dir,
             Some(&input.prompt),
             Some(Duration::from_secs(input.timeout)),
             stream_context,
@@ -193,12 +195,16 @@ pub fn run_command_capture(
     stdin_text: Option<&str>,
     timeout: Option<Duration>,
 ) -> Result<CapturedCommandOutput, ProviderAdapterError> {
-    run_command_capture_with_stream(command_spec, current_dir, stdin_text, timeout, None)
+    run_command_capture_with_stream(command_spec, current_dir, None, stdin_text, timeout, None)
 }
 
+/// `current_dir` 是 provider 子进程的工作目录（目标仓库），`stream_log_dir` 是
+/// 流日志落盘目录（Aria 侧）。两者语义独立：`stream_log_dir` 为 `None` 时不写
+/// 流日志，且不得回退到 `current_dir`。
 fn run_command_capture_with_stream(
     command_spec: &CommandSpec,
     current_dir: Option<&Path>,
+    stream_log_dir: Option<&Path>,
     stdin_text: Option<&str>,
     timeout: Option<Duration>,
     stream_context: Option<OutputStreamContext>,
@@ -237,9 +243,9 @@ fn run_command_capture_with_stream(
     })?;
 
     let stdout_stream_path =
-        provider_stream_path(current_dir, &command_spec.program, child.id(), "stdout");
+        provider_stream_path(stream_log_dir, &command_spec.program, child.id(), "stdout");
     let stderr_stream_path =
-        provider_stream_path(current_dir, &command_spec.program, child.id(), "stderr");
+        provider_stream_path(stream_log_dir, &command_spec.program, child.id(), "stderr");
     let stdout_reader = child.stdout.take().map(|reader| {
         spawn_output_reader(reader, stdout_stream_path, "stdout", stream_context.clone())
     });
@@ -411,13 +417,21 @@ where
     }
 }
 
+/// 生成流日志文件路径。`stream_log_dir` 由调用方提供 Aria 侧目录；为 `None`
+/// 时返回 `None`（不写流日志），MUST NOT 回退到 provider 的工作目录，否则会在
+/// 被开发的目标代码库中创建目录（change `fix-provider-stream-log-location`）。
 fn provider_stream_path(
-    current_dir: Option<&Path>,
+    stream_log_dir: Option<&Path>,
     program: &str,
     child_id: u32,
     stream_name: &str,
 ) -> Option<PathBuf> {
-    let current_dir = current_dir?;
+    let stream_log_dir = stream_log_dir?;
+    // 非绝对路径（含空串）会把日志写到 Aria 进程的 cwd——后端若正好在用户仓库中
+    // 启动，缺陷会以另一种形式复现。此处按缺省处理而不是猜测目录。
+    if !stream_log_dir.is_absolute() {
+        return None;
+    }
     let provider_name = Path::new(program)
         .file_name()
         .and_then(|name| name.to_str())
@@ -431,11 +445,7 @@ fn provider_stream_path(
             }
         })
         .collect::<String>();
-    Some(
-        current_dir
-            .join(".aria/runtime/provider-streams")
-            .join(format!("{provider_name}-{child_id}-{stream_name}.log")),
-    )
+    Some(stream_log_dir.join(format!("{provider_name}-{child_id}-{stream_name}.log")))
 }
 
 fn open_provider_stream(path: &PathBuf) -> std::io::Result<std::fs::File> {
@@ -553,3 +563,70 @@ fn diff_files(before: &BTreeMap<String, String>, after: &BTreeMap<String, String
 
 #[allow(dead_code)]
 fn _prompt_input_mode(_mode: PromptInputMode) {}
+
+#[cfg(test)]
+mod provider_stream_tests {
+    use super::*;
+
+    /// 追加语义只能在同一路径上验证：跨进程执行的 child_id 不同，落到不同文件，
+    /// 因此集成测试无法区分 append 与 truncate。这里直接锁住写入模式。
+    #[test]
+    fn open_provider_stream_appends_instead_of_truncating() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("provider-1-stdout.log");
+
+        {
+            let mut file = open_provider_stream(&path).expect("first open");
+            file.write_all(b"first run\n").expect("first write");
+        }
+        {
+            let mut file = open_provider_stream(&path).expect("second open");
+            file.write_all(b"second run\n").expect("second write");
+        }
+
+        let contents = std::fs::read_to_string(&path).expect("read stream log");
+        assert!(
+            contents.contains("first run"),
+            "reopening must not truncate earlier content: {contents:?}"
+        );
+        assert!(contents.contains("second run"));
+    }
+
+    #[test]
+    fn open_provider_stream_creates_missing_parent_directories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested/deeper/provider-1-stdout.log");
+
+        open_provider_stream(&path).expect("open must create parents");
+
+        assert!(path.exists());
+    }
+
+    /// 未提供目录、或提供了非绝对路径（含空串）时都不得写流日志，更不得回退到
+    /// provider 的工作目录或 Aria 进程的 cwd。
+    #[test]
+    fn provider_stream_path_rejects_missing_and_relative_dirs() {
+        assert!(provider_stream_path(None, "claude", 1, "stdout").is_none());
+        assert!(provider_stream_path(Some(Path::new("")), "claude", 1, "stdout").is_none());
+        assert!(
+            provider_stream_path(Some(Path::new("relative/logs")), "claude", 1, "stdout").is_none()
+        );
+    }
+
+    #[test]
+    fn provider_stream_path_sanitizes_provider_name_and_keeps_naming_shape() {
+        let path = provider_stream_path(
+            Some(Path::new("/tmp/aria-logs")),
+            "/usr/bin/cl@ude",
+            42,
+            "stderr",
+        )
+        .expect("absolute dir yields a path");
+
+        assert_eq!(path.parent(), Some(Path::new("/tmp/aria-logs")));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("cl_ude-42-stderr.log")
+        );
+    }
+}

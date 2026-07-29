@@ -24,6 +24,12 @@ fn valid_outline_author_output() -> serde_json::Value {
                     "forbidden_write_scopes": ["web/**"],
                     "depends_on": [],
                     "verification_intent": ["cargo test --locked --lib api"],
+                    "trusted_verification_commands": [{
+                        "command": "cargo test --locked --lib canonical_work_item_",
+                        "cwd": ".",
+                        "purpose": "验证 canonical contract",
+                        "source_ref": "design_spec_0001#verification"
+                    }],
                     "handoff_notes": "提供 API contract"
                 },
                 {
@@ -42,6 +48,12 @@ fn valid_outline_author_output() -> serde_json::Value {
                     "forbidden_write_scopes": ["src/product/**"],
                     "depends_on": ["outline_backend"],
                     "verification_intent": ["pnpm -C web test"],
+                    "trusted_verification_commands": [{
+                        "command": "pnpm -C web test",
+                        "cwd": ".",
+                        "purpose": "验证前端接入",
+                        "source_ref": "design_spec_0001#verification"
+                    }],
                     "handoff_notes": "消费 API contract"
                 }
             ],
@@ -78,6 +90,7 @@ fn sample_draft_record(
         attempt_index: 1,
         outline_version_ref: "artifact://outline/1".to_string(),
         generation_mode: WorkItemGenerationMode::Serial,
+        generation_diagnostics: None,
         candidate,
         status: WorkItemDraftStatus::Accepted,
         active: true,

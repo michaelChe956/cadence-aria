@@ -46,6 +46,7 @@ fn work_item_plan_models_roundtrip() {
             forbidden_write_scopes: vec!["web".to_string()],
             depends_on: vec![],
             verification_intent: vec!["cargo test --locked --test it_product".to_string()],
+            trusted_verification_commands: Vec::new(),
             handoff_notes: "生成给后续 item 的摘要".to_string(),
         }],
         dependency_graph: vec![WorkItemOutlineDependencyEdge {
@@ -73,6 +74,7 @@ fn work_item_plan_models_roundtrip() {
         attempt_index: 1,
         outline_version_ref: "artifact://outline/1".to_string(),
         generation_mode: WorkItemGenerationMode::Serial,
+        generation_diagnostics: None,
         candidate: sample_draft_candidate("outline_001"),
         status: WorkItemDraftStatus::Draft,
         active: true,
@@ -607,6 +609,7 @@ fn sample_draft_record(draft_id: &str, generation_round_id: &str) -> WorkItemDra
         attempt_index: 1,
         outline_version_ref: "artifact://outline/1".to_string(),
         generation_mode: WorkItemGenerationMode::Serial,
+        generation_diagnostics: None,
         candidate: sample_draft_candidate("outline_001"),
         status: WorkItemDraftStatus::Draft,
         active: true,
@@ -740,6 +743,7 @@ fn sample_outline(outline_id: &str, kind: WorkItemKind) -> WorkItemOutline {
         forbidden_write_scopes: Vec::new(),
         depends_on: Vec::new(),
         verification_intent: vec!["cargo test --locked".to_string()],
+        trusted_verification_commands: Vec::new(),
         handoff_notes: "handoff".to_string(),
     }
 }

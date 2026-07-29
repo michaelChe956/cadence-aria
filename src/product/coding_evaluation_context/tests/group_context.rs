@@ -186,15 +186,12 @@ fn create_group_plan_fixture(
             source_draft_id: with_explicit_source.then(|| "draft_explicit".to_string()),
             planned_implementation_context: with_explicit_source
                 .then(|| "explicit planned context".to_string()),
-            planned_handoff_summary: with_explicit_source
-                .then(|| "explicit planned handoff".to_string()),
             kind: Default::default(),
             sequence_hint: Some(10),
             depends_on: Vec::new(),
             exclusive_write_scopes: Vec::new(),
             forbidden_write_scopes: Vec::new(),
             context_budget: Default::default(),
-            required_handoff_from: Vec::new(),
             verification_plan_ref: None,
             require_execution_plan_confirm: false,
             plan_status: WorkItemPlanStatus::Confirmed,
@@ -214,28 +211,20 @@ fn create_group_plan_fixture(
             source_outline_id: None,
             source_draft_id: None,
             planned_implementation_context: None,
-            planned_handoff_summary: None,
             kind: Default::default(),
             sequence_hint: Some(20),
             depends_on: vec!["work_item_0001".to_string()],
             exclusive_write_scopes: Vec::new(),
             forbidden_write_scopes: Vec::new(),
             context_budget: Default::default(),
-            required_handoff_from: vec!["work_item_0001".to_string()],
             verification_plan_ref: None,
             require_execution_plan_confirm: false,
             plan_status: WorkItemPlanStatus::Confirmed,
         })
         .expect("create work item 2");
     lifecycle
-        .update_work_item_handoff_summary(
-            PROJECT_ID,
-            ISSUE_ID,
-            "work_item_0001",
-            Some("handoff/work_item_0001.md".to_string()),
-            None,
-        )
-        .expect("update handoff ref");
+        .update_work_item_completion_commit(PROJECT_ID, ISSUE_ID, "work_item_0001", None)
+        .expect("update completion commit");
     lifecycle
         .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
             id: Some("work_item_plan_0001".to_string()),
@@ -325,6 +314,7 @@ fn draft_record(
         attempt_index: 1,
         outline_version_ref: "outline_version_0001".to_string(),
         generation_mode: WorkItemGenerationMode::Serial,
+        generation_diagnostics: None,
         candidate: {
             let logical_work_item_id = format!("wi_{outline_id}");
             let mut contract = crate::product::work_item_contract::canonical_contract_fixture(

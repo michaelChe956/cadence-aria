@@ -47,6 +47,7 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         review_rounds: 1,
         superpowers_enabled: true,
         openspec_enabled: true,
+        work_item_runtime_binding: None,
         provider_conversations: Vec::new(),
         messages: vec![WorkspaceMessageRecord {
             role: "assistant".to_string(),
@@ -172,7 +173,6 @@ fn coding_execution_context_supplements_source_draft_when_final_compile_context_
             source_outline_id: Some("outline_sparse_backend".to_string()),
             source_draft_id: Some(draft_id.to_string()),
             planned_implementation_context: None,
-            planned_handoff_summary: None,
             verification_plan_ref: None,
             plan_status: WorkItemPlanStatus::Confirmed,
             ..Default::default()
@@ -191,6 +191,7 @@ fn coding_execution_context_supplements_source_draft_when_final_compile_context_
             attempt_index: 1,
             outline_version_ref: "outline_version_001".to_string(),
             generation_mode: WorkItemGenerationMode::Serial,
+            generation_diagnostics: None,
             candidate: {
                 let mut contract = crate::product::work_item_contract::canonical_contract_fixture(
                     "wi_sparse_backend",
@@ -488,16 +489,16 @@ fn coding_session_state_does_not_reactivate_historical_blocked_node() {
 fn blocked_attempt_allows_gate_response_messages() {
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Blocked,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::GateResponse {
             gate_id: "coding_blocked_gate_0001".to_string(),
-            action_id: "retry_test_plan".to_string(),
+            action_id: "retry_review".to_string(),
             extra_context: None,
         },
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Blocked,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::AbortAttempt,
     ));
 }
@@ -543,7 +544,7 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
         "accept_risk",
         &attempt
     ));
-    assert!(should_resume_runner_after_gate_response(
+    assert!(!should_resume_runner_after_gate_response(
         "retry_test_plan",
         &attempt
     ));
@@ -555,7 +556,7 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
         "send_to_coder",
         &attempt
     ));
-    assert!(should_resume_runner_after_gate_response(
+    assert!(!should_resume_runner_after_gate_response(
         "accept_testing_result",
         &attempt
     ));
@@ -620,15 +621,11 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
                 "planned implementation context for coder\n- touch src/web/coding_ws_handler/context.rs"
                     .to_string(),
             ),
-            planned_handoff_summary: Some(
-                "planned handoff summary for dependent work items".to_string(),
-            ),
             kind: WorkItemKind::Backend,
             sequence_hint: Some(1),
             depends_on: vec!["work_item_compile_dependency_001".to_string()],
             exclusive_write_scopes: vec!["src/web/coding_ws_handler/context.rs".to_string()],
             forbidden_write_scopes: vec!["forbidden/path".to_string()],
-            required_handoff_from: vec!["work_item_compile_dependency_001".to_string()],
             verification_plan_ref: Some(verification_plan_id.to_string()),
             plan_status: WorkItemPlanStatus::Confirmed,
             ..Default::default()

@@ -6,8 +6,8 @@ use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    PlanRepairSessionSnapshotDto, ProviderConversationRef, WorkspaceMessageRecord,
-    WorkspaceSessionLink, WorkspaceSessionRecord, WorkspaceSessionStatus,
+    PlanRepairSessionSnapshotDto, ProviderConversationRef, WorkItemRuntimeBinding,
+    WorkspaceMessageRecord, WorkspaceSessionLink, WorkspaceSessionRecord, WorkspaceSessionStatus,
     WorkspaceSessionSummaryRecord, WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
@@ -240,6 +240,7 @@ impl LifecycleStore {
             review_rounds: input.review_rounds,
             superpowers_enabled: input.superpowers_enabled,
             openspec_enabled: input.openspec_enabled,
+            work_item_runtime_binding: None,
             provider_conversations: Vec::new(),
             messages: Vec::new(),
             created_at: now.clone(),
@@ -283,6 +284,37 @@ impl LifecycleStore {
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
         validate_relative_id(session_id)?;
         read_json(&self.find_workspace_session_path(session_id)?)
+    }
+
+    pub fn ensure_work_item_runtime_binding(
+        &self,
+        session_id: &str,
+        binding: &WorkItemRuntimeBinding,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        with_exclusive_lock(&session_path, || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            if session.workspace_type != WorkspaceType::WorkItem {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "workspace_session_type",
+                    id: session.id.clone(),
+                });
+            }
+            match &session.work_item_runtime_binding {
+                Some(existing) if existing == binding => Ok(session),
+                Some(_) => Err(ProductStoreError::IdentityMismatch {
+                    kind: "work_item_runtime_binding",
+                    id: session.id.clone(),
+                }),
+                None => {
+                    session.work_item_runtime_binding = Some(binding.clone());
+                    session.updated_at = Utc::now().to_rfc3339();
+                    write_json(&session_path, &session)?;
+                    Ok(session)
+                }
+            }
+        })
     }
 
     pub fn append_workspace_message(

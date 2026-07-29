@@ -250,6 +250,14 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ProductStoreError::NotFound {
             kind: "repository", ..
         } => ApiError::runtime("repository_not_found", "repository not found", json!({})),
+        ProductStoreError::NotFound {
+            kind: "repository_initialization_operation",
+            ..
+        } => ApiError::runtime(
+            "repository_initialization_operation_not_found",
+            "repository initialization operation not found",
+            json!({}),
+        ),
         ProductStoreError::NotFound { kind: "issue", .. } => {
             ApiError::runtime("issue_not_found", "issue not found", json!({}))
         }
@@ -314,12 +322,50 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ProductStoreError::PathEscape(_) => {
             ApiError::validation("invalid_project_id", "invalid project id")
         }
-        _ => ApiError::runtime(
-            "product_store_error",
-            "product store operation failed",
-            json!({}),
-        ),
+        other => {
+            let details = match &other {
+                ProductStoreError::NotFound { kind, id }
+                | ProductStoreError::Ambiguous { kind, id }
+                | ProductStoreError::Conflict { kind, id }
+                | ProductStoreError::IdentityMismatch { kind, id } => {
+                    json!({ "kind": kind, "id": id })
+                }
+                ProductStoreError::Io(message)
+                | ProductStoreError::Json(message)
+                | ProductStoreError::PathEscape(message) => json!({ "message": message }),
+            };
+            ApiError::runtime(
+                "product_store_error",
+                "product store operation failed",
+                details,
+            )
+        }
     }
+}
+
+/// 当 work item group 存在 coding workspace 时拒绝删除，提示先删除 coding workspace。
+pub(crate) fn coding_workspace_exists_error(plan_id: &str, attempt_id: &str) -> ApiError {
+    ApiError::runtime(
+        "coding_workspace_exists",
+        "存在 coding workspace，请先删除 coding workspace 再删除 work item group",
+        json!({ "plan_id": plan_id, "attempt_id": attempt_id }),
+    )
+}
+
+/// 当单个 work item 存在 coding workspace 时拒绝删除该 work item。
+///
+/// 与 `coding_workspace_exists_error` 共用错误码（前端按 `coding_workspace_exists` 统一处理），
+/// 但 details 用 `work_item_id` 而非 `plan_id`——work item 级删除入口没有 plan 上下文，
+/// 给出真实标识便于定位。同样映射到 409 CONFLICT。
+pub(crate) fn coding_workspace_exists_for_work_item_error(
+    work_item_id: &str,
+    attempt_id: &str,
+) -> ApiError {
+    ApiError::runtime(
+        "coding_workspace_exists",
+        "存在 coding workspace，请先删除 coding workspace 再删除 work item",
+        json!({ "work_item_id": work_item_id, "attempt_id": attempt_id }),
+    )
 }
 
 pub(crate) fn node_detail_store_api_error(error: ProductStoreError) -> ApiError {
@@ -364,6 +410,120 @@ pub(crate) async fn cleanup_coding_attempt_workspace(
     git.delete_local_branch(&repository.path, &attempt.branch_name)
         .await
         .map_err(git_workspace_api_error)?;
+    Ok(())
+}
+
+/// 收集 attempt 持有 work-item-attempt-locks 的 work_item 集合。
+///
+/// 必须在 `delete_attempt` 之前调用（依赖 attempt 的 unit 目录可读）。
+/// - single scope：直接取 `attempt.work_item_id`。
+/// - group scope：取各 coding unit 的 `logical_work_item_id`（与 group 删除路径一致）。
+///   unit 列表为空（未进入 plan 阶段或目录缺失）时回退到 `attempt.work_item_id`
+///   以兜底清理 anchor 的锁，避免遗漏。
+pub(crate) fn collect_attempt_work_item_ids(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Vec<String> {
+    if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
+        let unit_ids: Vec<String> = coding_store
+            .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .map(|units| {
+                units
+                    .into_iter()
+                    .map(|unit| unit.logical_work_item_id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if unit_ids.is_empty() {
+            vec![attempt.work_item_id.clone()]
+        } else {
+            unit_ids
+        }
+    } else {
+        vec![attempt.work_item_id.clone()]
+    }
+}
+
+/// 清理 attempt 删除后的残留 lock（spec「清理残留 lock」）。
+///
+/// 每步 NotFound=OK（`remove_file_if_exists`），单项失败不中断其余清理：
+/// - `.coding_attempt_<id>.json.lock`：attempt 自身运行时 lock（孤儿）。
+/// - `.group-initialization-arbitration.lock`：仅 group scope（single 不持有）。
+/// - `work-item-attempt-locks/<wi>` + `.<wi>.lock`：按 `work_item_ids` 精确删，
+///   **不整目录**（其他 attempt 的 work_item lock 可能共存——spec「不误删」）。
+pub(crate) fn purge_coding_attempt_lock_residue(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+    work_item_ids: &[String],
+) {
+    use crate::product::lifecycle_store::remove_file_if_exists;
+
+    let coding_attempts_root = app_paths
+        .issue_root(&attempt.project_id, &attempt.issue_id)
+        .join("coding-attempts");
+
+    let _ = remove_file_if_exists(&coding_attempts_root.join(format!(".{}.json.lock", attempt.id)));
+
+    if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
+        let _ = remove_file_if_exists(
+            &coding_attempts_root.join(".group-initialization-arbitration.lock"),
+        );
+    }
+
+    let locks_dir = coding_attempts_root.join("work-item-attempt-locks");
+    for work_item_id in work_item_ids {
+        let _ = remove_file_if_exists(&locks_dir.join(work_item_id));
+        let _ = remove_file_if_exists(&locks_dir.join(format!(".{work_item_id}.lock")));
+    }
+}
+
+/// 删除 attempt 后条件清理 issue shared-worktree（spec「条件清理 shared-worktree」）。
+///
+/// 该 issue 无其他 attempt 记录（`list_attempts_for_issue` 为空，当前 attempt 已删）
+/// → 删 `issue-shared-worktree.json` + `.lock`（复用 `delete_issue_shared_worktree`，
+/// NotFound=OK）。有其他 attempt（仍持有 shared-worktree）→ 保留，避免误伤。
+pub(crate) fn cleanup_issue_shared_worktree_if_no_attempts(
+    coding_store: &CodingAttemptStore,
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<()> {
+    let remaining = coding_store
+        .list_attempts_for_issue(project_id, issue_id)
+        .map_err(product_store_api_error)?;
+    if !remaining.is_empty() {
+        return Ok(());
+    }
+    LifecycleStore::new(app_paths.clone())
+        .delete_issue_shared_worktree(project_id, issue_id)
+        .map_err(product_store_api_error)?;
+    Ok(())
+}
+
+/// 完成 attempt 删除的尾部清理（worktree/handoff 清理之后）。
+///
+/// 顺序（spec `harden-coding-attempt-deletion`）：
+/// 1. 先取该 attempt 的 work_item 集合（依赖 attempt 的 unit 目录可读，必须在
+///    `delete_attempt` 之前）。
+/// 2. `delete_attempt` 删 attempt 数据（json + 目录）。
+/// 3. `purge_coding_attempt_lock_residue` 清残留 lock（NotFound=OK，按 work_item 精确）。
+/// 4. `cleanup_issue_shared_worktree_if_no_attempts` 条件清 shared-worktree。
+pub(crate) fn finalize_coding_attempt_deletion(
+    coding_store: &CodingAttemptStore,
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> ApiResult<()> {
+    let attempt_work_item_ids = collect_attempt_work_item_ids(coding_store, attempt);
+    coding_store
+        .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
+    purge_coding_attempt_lock_residue(app_paths, attempt, &attempt_work_item_ids);
+    cleanup_issue_shared_worktree_if_no_attempts(
+        coding_store,
+        app_paths,
+        &attempt.project_id,
+        &attempt.issue_id,
+    )?;
     Ok(())
 }
 
@@ -470,5 +630,56 @@ mod tests {
         assert_eq!(error.code, "coding_attempt_active");
         assert_eq!(error.details["attempt_id"], "coding_attempt_winner");
         assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn product_store_api_error_fallback_includes_kind_and_id_for_identity_mismatch() {
+        // IdentityMismatch 只有 kind=="coding_attempt" 被精确映射；其他 kind 命中兜底，
+        // 兜底必须把 kind/id 带进 details 以便定位失败对象。
+        let error = product_store_api_error(ProductStoreError::IdentityMismatch {
+            kind: "runtime_binding_missing",
+            id: "plan_1".to_string(),
+        });
+
+        assert_eq!(error.code, "product_store_error");
+        assert_eq!(error.message, "product store operation failed");
+        assert_eq!(error.details["kind"], "runtime_binding_missing");
+        assert_eq!(error.details["id"], "plan_1");
+    }
+
+    #[test]
+    fn product_store_api_error_fallback_includes_message_for_io() {
+        // 未被精确映射的 Io/Json/PathEscape 兜底应带 message 进 details。
+        let error =
+            product_store_api_error(ProductStoreError::Io("remove tmp: broken pipe".to_string()));
+
+        assert_eq!(error.code, "product_store_error");
+        assert_eq!(error.details["message"], "remove tmp: broken pipe");
+    }
+
+    #[test]
+    fn coding_workspace_exists_error_returns_stable_contract() {
+        let error = coding_workspace_exists_error("plan_1", "attempt_1");
+
+        assert_eq!(error.code, "coding_workspace_exists");
+        assert_eq!(
+            error.message,
+            "存在 coding workspace，请先删除 coding workspace 再删除 work item group"
+        );
+        assert_eq!(error.details["plan_id"], "plan_1");
+        assert_eq!(error.details["attempt_id"], "attempt_1");
+    }
+
+    #[test]
+    fn coding_workspace_exists_for_work_item_error_returns_stable_contract() {
+        let error = coding_workspace_exists_for_work_item_error("work_item_1", "attempt_1");
+
+        assert_eq!(error.code, "coding_workspace_exists");
+        assert_eq!(
+            error.message,
+            "存在 coding workspace，请先删除 coding workspace 再删除 work item"
+        );
+        assert_eq!(error.details["work_item_id"], "work_item_1");
+        assert_eq!(error.details["attempt_id"], "attempt_1");
     }
 }

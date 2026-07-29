@@ -165,14 +165,7 @@ pub(crate) fn should_resume_runner_after_gate_response(
 ) -> bool {
     matches!(
         action_id,
-        "retry_test_plan"
-            | "retry_coding"
-            | "send_to_coder"
-            | "rerun_missing_steps"
-            | "retry_review"
-            | "retry_internal_review"
-            | "accept_testing_result"
-            | "rerun_testing"
+        "retry_coding" | "send_to_coder" | "retry_review" | "retry_internal_review"
     ) && matches!(
         previous_attempt.status,
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
@@ -630,9 +623,7 @@ pub(crate) async fn execute_start_coding_flow(
             }
         }
         match current.stage {
-            CodingExecutionStage::Coding
-            | CodingExecutionStage::Testing
-            | CodingExecutionStage::CodeReview => continue 'pipeline,
+            CodingExecutionStage::Coding | CodingExecutionStage::CodeReview => continue 'pipeline,
             CodingExecutionStage::ReviewRequest => {}
             _ => {
                 return emit_current_session_state(
@@ -674,7 +665,7 @@ pub(crate) async fn execute_start_coding_flow(
         }
 
         {
-            let review_request = engine
+            let _review_request = engine
                 .execute_review_request(&current, "origin", "feat: implement work item")
                 .await?;
             current =
@@ -690,15 +681,8 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            if review_request.push_status != crate::product::coding_models::PushStatus::Pushed {
-                return emit_current_session_state(
-                    event_tx,
-                    coding_store,
-                    &current,
-                    engine.cancellation_token(),
-                )
-                .await;
-            }
+            // push 失败不再阻断主流程：review_request.push_status=Failed + push_error 已记录，
+            // 后续流转（WorkItem 直接完成 / Group 经 stage gate 进 GroupFinalReview）照常推进。
             if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItem {
                 current = engine
                     .complete_attempt_after_review_request(&current)

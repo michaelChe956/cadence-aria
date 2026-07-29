@@ -1,22 +1,29 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use uuid::Uuid;
+
 use super::initializer::ClaudeRepositoryInitializer;
 use super::types::{
-    CadenceSkillsPreparationSummary, RepositoryInitializationCommandSummary,
-    RepositoryInitializationSummary, RepositoryRegistrationError, RepositoryRegistrationInput,
-    RepositoryRegistrationSuccess,
+    RepositoryInitializationCommandSummary, RepositoryInitializationOperation,
+    RepositoryInitializationOperationInput, RepositoryInitializationProgress,
+    RepositoryInitializationStepKind, RepositoryInitializationSummary, RepositoryRegistrationError,
+    RepositoryRegistrationInput, RepositoryRegistrationSuccess,
 };
-use super::{CreateRepositoryInput, RepositoryStore, canonicalize_repo_path};
+use super::{
+    CreateRepositoryInput, RepositoryInitializationOperationStore, RepositoryStore,
+    canonicalize_repo_path,
+};
 use crate::cross_cutting::bounded_command_runner::{
     BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
 };
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::cadence_skills::{
     CadenceSkillsError, CadenceSkillsManager, CadenceSkillsPreparationResult,
 };
@@ -43,6 +50,10 @@ pub trait RepositoryPersistence: Send + Sync {
         path: &Path,
     ) -> Result<Option<RepositoryRecord>, ProductStoreError>;
 
+    fn initialization_operation_store(&self) -> Option<RepositoryInitializationOperationStore> {
+        None
+    }
+
     fn create_repository(
         &self,
         input: CreateRepositoryInput,
@@ -56,6 +67,10 @@ impl RepositoryPersistence for RepositoryStore {
         path: &Path,
     ) -> Result<Option<RepositoryRecord>, ProductStoreError> {
         RepositoryStore::find_by_path(self, project_id, path)
+    }
+
+    fn initialization_operation_store(&self) -> Option<RepositoryInitializationOperationStore> {
+        Some(RepositoryStore::initialization_operation_store(self))
     }
 
     fn create_repository(
@@ -91,6 +106,7 @@ pub trait RepositoryInitializer: Send + Sync {
         git_root: &Path,
         command_timeout: Duration,
         cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError>;
 }
 
@@ -101,8 +117,9 @@ impl RepositoryInitializer for ClaudeRepositoryInitializer {
         git_root: &Path,
         command_timeout: Duration,
         cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
-        self.initialize(git_root, command_timeout, cancellation)
+        self.initialize(git_root, command_timeout, cancellation, progress)
             .await
     }
 }
@@ -110,9 +127,131 @@ impl RepositoryInitializer for ClaudeRepositoryInitializer {
 type HostReadiness = dyn Fn() -> Result<(), String> + Send + Sync;
 type Clock = dyn Fn() -> String + Send + Sync;
 
+#[allow(dead_code)]
+pub(crate) struct RepositoryInitializationLaunch {
+    operation_id: String,
+    project_id: String,
+    input: RepositoryRegistrationInput,
+    git_root: PathBuf,
+    snapshot: RepositoryInitializationOperation,
+    _guard: InitializationGuard,
+}
+
+impl RepositoryInitializationLaunch {
+    #[allow(dead_code)]
+    pub(crate) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn snapshot(&self) -> &RepositoryInitializationOperation {
+        &self.snapshot
+    }
+}
+
+struct OperationProgressReporter {
+    operations: RepositoryInitializationOperationStore,
+    project_id: String,
+    operation_id: String,
+    clock: Arc<Clock>,
+    current_step: Arc<Mutex<Option<RepositoryInitializationStepKind>>>,
+}
+
+impl OperationProgressReporter {
+    fn new(
+        operations: RepositoryInitializationOperationStore,
+        project_id: String,
+        operation_id: String,
+        clock: Arc<Clock>,
+    ) -> Self {
+        Self {
+            operations,
+            project_id,
+            operation_id,
+            clock,
+            current_step: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn current_step(&self) -> Option<RepositoryInitializationStepKind> {
+        *self
+            .current_step
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn operation_store_error(error: ProductStoreError) -> RepositoryRegistrationError {
+        registration_error(
+            "repository_initialization_operation",
+            "repository_initialization_operation_store_failed",
+            &error.to_string(),
+            true,
+            "Repository initialization state could not be persisted; query the operation after recovery.",
+        )
+    }
+
+    fn checkpoint_git_finalize_result(
+        &self,
+        result: RepositoryRegistrationSuccess,
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
+        self.operations
+            .checkpoint_git_finalize_result(&self.project_id, &self.operation_id, result)
+            .map(|_| ())
+            .map_err(Self::operation_store_error)
+            .map_err(Box::new)
+    }
+
+    fn update_git_finalize_checkpoint_warning(
+        &self,
+        warning: String,
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
+        self.operations
+            .update_git_finalize_checkpoint_warning(&self.project_id, &self.operation_id, warning)
+            .map(|_| ())
+            .map_err(Self::operation_store_error)
+            .map_err(Box::new)
+    }
+}
+
+impl RepositoryInitializationProgress for OperationProgressReporter {
+    fn step_started(
+        &self,
+        step: RepositoryInitializationStepKind,
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
+        self.operations
+            .mark_step_running(&self.project_id, &self.operation_id, step, (self.clock)())
+            .map_err(Self::operation_store_error)
+            .map_err(Box::new)?;
+        *self
+            .current_step
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(step);
+        Ok(())
+    }
+
+    fn step_completed(
+        &self,
+        step: RepositoryInitializationStepKind,
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
+        self.operations
+            .mark_step_completed(&self.project_id, &self.operation_id, step, (self.clock)())
+            .map_err(Self::operation_store_error)
+            .map_err(Box::new)?;
+        let mut current_step = self
+            .current_step
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *current_step == Some(step) {
+            *current_step = None;
+        }
+        Ok(())
+    }
+}
+
 pub struct RepositoryRegistrationCoordinator {
     projects: Arc<dyn ProjectLookup>,
     repositories: Arc<dyn RepositoryPersistence>,
+    operations: RepositoryInitializationOperationStore,
     provider_gate: Arc<ProviderAvailabilityGate>,
     provider_registry: Arc<ProviderRegistry>,
     cadence_skills: Arc<dyn CadenceSkillsPreparation>,
@@ -122,6 +261,7 @@ pub struct RepositoryRegistrationCoordinator {
     initializer: Arc<dyn RepositoryInitializer>,
     git_command_timeout: Duration,
     initialization_timeout: Duration,
+    git_environment: BTreeMap<String, String>,
 }
 
 impl RepositoryRegistrationCoordinator {
@@ -139,9 +279,20 @@ impl RepositoryRegistrationCoordinator {
         git_command_timeout: Duration,
         initialization_timeout: Duration,
     ) -> Self {
-        Self {
+        let operations = repositories
+            .initialization_operation_store()
+            .unwrap_or_else(|| {
+                RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+                    std::env::temp_dir().join(format!(
+                        "repository-registration-operations-{}",
+                        Uuid::new_v4()
+                    )),
+                ))
+            });
+        Self::new_with_operations(
             projects,
             repositories,
+            operations,
             provider_gate,
             provider_registry,
             cadence_skills,
@@ -151,14 +302,56 @@ impl RepositoryRegistrationCoordinator {
             initializer,
             git_command_timeout,
             initialization_timeout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_operations(
+        projects: Arc<dyn ProjectLookup>,
+        repositories: Arc<dyn RepositoryPersistence>,
+        operations: RepositoryInitializationOperationStore,
+        provider_gate: Arc<ProviderAvailabilityGate>,
+        provider_registry: Arc<ProviderRegistry>,
+        cadence_skills: Arc<dyn CadenceSkillsPreparation>,
+        host_readiness: Arc<HostReadiness>,
+        runner: Arc<dyn BoundedCommandRunner>,
+        clock: Arc<Clock>,
+        initializer: Arc<dyn RepositoryInitializer>,
+        git_command_timeout: Duration,
+        initialization_timeout: Duration,
+    ) -> Self {
+        Self {
+            projects,
+            repositories,
+            operations,
+            provider_gate,
+            provider_registry,
+            cadence_skills,
+            host_readiness,
+            runner,
+            clock,
+            initializer,
+            git_command_timeout,
+            initialization_timeout,
+            git_environment: default_git_environment(|key| std::env::var_os(key)),
         }
     }
 
-    pub async fn register(
+    pub(crate) fn with_git_environment(mut self, environment: BTreeMap<String, String>) -> Self {
+        self.git_environment = environment;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn git_environment(&self) -> &BTreeMap<String, String> {
+        &self.git_environment
+    }
+
+    pub(crate) async fn begin_initialization(
         &self,
         input: RepositoryRegistrationInput,
         cancellation: CancellationToken,
-    ) -> Result<RepositoryRegistrationSuccess, RepositoryRegistrationError> {
+    ) -> Result<RepositoryInitializationLaunch, RepositoryRegistrationError> {
         self.projects
             .get_project(&input.project_id)
             .map_err(|error| {
@@ -181,136 +374,303 @@ impl RepositoryRegistrationCoordinator {
             )
         })?;
         let git_root = self
-            .resolve_git_root(&canonical_input, cancellation.clone())
+            .resolve_git_root(&canonical_input, cancellation)
             .await?;
 
         self.reject_duplicate(&input.project_id, &git_root)
             .map_err(|error| *error)?;
-        let _initialization_guard =
-            InitializationGuard::try_acquire(git_root.clone()).map_err(|error| *error)?;
+        let guard = InitializationGuard::try_acquire(git_root.clone()).map_err(|error| *error)?;
         self.reject_duplicate(&input.project_id, &git_root)
             .map_err(|error| *error)?;
 
-        self.provider_gate
-            .ensure_available(&ProviderName::ClaudeCode)
-            .map_err(|error| {
-                claude_error(
-                    "provider_gate",
-                    error.code(),
-                    error.reason(),
+        let operation_id = format!("repository_initialization_{}", Uuid::new_v4().simple());
+        let snapshot = self
+            .operations
+            .create(RepositoryInitializationOperation::new(
+                operation_id.clone(),
+                input.project_id.clone(),
+                RepositoryInitializationOperationInput {
+                    name: input.name.clone(),
+                    git_root: git_root.clone(),
+                    default_policy_preset: input.default_policy_preset.clone(),
+                    default_provider_mode: input.default_provider_mode.clone(),
+                },
+                (self.clock)(),
+            ))
+            .map_err(OperationProgressReporter::operation_store_error)?;
+
+        Ok(RepositoryInitializationLaunch {
+            operation_id,
+            project_id: input.project_id.clone(),
+            input,
+            git_root,
+            snapshot,
+            _guard: guard,
+        })
+    }
+
+    pub(crate) async fn execute_initialization(
+        &self,
+        launch: RepositoryInitializationLaunch,
+        cancellation: CancellationToken,
+    ) -> Result<RepositoryInitializationOperation, RepositoryRegistrationError> {
+        let RepositoryInitializationLaunch {
+            operation_id,
+            project_id,
+            input,
+            git_root,
+            snapshot: _,
+            _guard,
+        } = launch;
+        let reporter = Arc::new(OperationProgressReporter::new(
+            self.operations.clone(),
+            project_id.clone(),
+            operation_id.clone(),
+            self.clock.clone(),
+        ));
+
+        self.operations
+            .mark_running(&project_id, &operation_id, (self.clock)())
+            .map_err(OperationProgressReporter::operation_store_error)?;
+
+        let mut before = None;
+        let execution = async {
+            reporter
+                .step_started(RepositoryInitializationStepKind::CadenceSkills)
+                .map_err(|error| *error)?;
+            let prepared = self
+                .cadence_skills
+                .prepare_skills(cancellation.clone())
+                .await
+                .map_err(cadence_error)?;
+            reporter
+                .step_completed(RepositoryInitializationStepKind::CadenceSkills)
+                .map_err(|error| *error)?;
+
+            reporter
+                .step_started(RepositoryInitializationStepKind::PreCheck)
+                .map_err(|error| *error)?;
+            self.provider_gate
+                .ensure_available(&ProviderName::ClaudeCode)
+                .map_err(|error| {
+                    claude_error(
+                        "provider_gate",
+                        error.code(),
+                        error.reason(),
+                        true,
+                        "Restore Claude Code availability, then retry repository registration.",
+                    )
+                })?;
+            if self
+                .provider_registry
+                .get(&ProviderName::ClaudeCode)
+                .is_none()
+            {
+                return Err(claude_error(
+                    "provider_registry",
+                    "provider_unavailable",
+                    "Claude Code provider is not registered",
                     true,
-                    "Restore Claude Code availability, then retry repository registration.",
+                    "Register the gated Claude Code provider, then retry.",
+                ));
+            }
+            (self.host_readiness)().map_err(|reason| {
+                claude_error(
+                    "host_readiness",
+                    "host_real_workflow_blocked",
+                    &reason,
+                    true,
+                    "Restore host readiness for real workflows, then retry.",
                 )
             })?;
-        if self
-            .provider_registry
-            .get(&ProviderName::ClaudeCode)
-            .is_none()
-        {
-            return Err(claude_error(
-                "provider_registry",
-                "provider_unavailable",
-                "Claude Code provider is not registered",
-                true,
-                "Register the gated Claude Code provider, then retry.",
-            ));
+            before = Some(
+                self.git_status(&git_root, cancellation.clone(), "git_status_before")
+                    .await?,
+            );
+
+            let commands = self
+                .initializer
+                .initialize_repository(
+                    &git_root,
+                    self.initialization_timeout,
+                    cancellation.clone(),
+                    reporter.clone(),
+                )
+                .await?;
+            let after = self
+                .git_status(&git_root, cancellation.clone(), "git_status_after")
+                .await?;
+            let changed_paths = changed_paths(
+                before
+                    .as_ref()
+                    .expect("git status before exists before initialization"),
+                &after,
+            );
+            let initialization = RepositoryInitializationSummary {
+                provider: "claude_code".to_string(),
+                source: prepared.source_root.clone(),
+                source_mode: prepared.source_mode.as_str().to_string(),
+                skills_root: prepared.skills_root.clone(),
+                git_updated: prepared.git_updated,
+                link_sync_status: prepared.link_sync_status.as_str().to_string(),
+                commands,
+            };
+            let repository = self
+                .repositories
+                .create_repository(CreateRepositoryInput {
+                    project_id: input.project_id,
+                    name: input.name,
+                    path: git_root.clone(),
+                    default_policy_preset: input.default_policy_preset,
+                    default_provider_mode: input.default_provider_mode,
+                })
+                .map_err(|error| {
+                    let mut mapped = registration_error(
+                        "repository_persist",
+                        "repository_persist_failed",
+                        &error.to_string(),
+                        true,
+                        "Initialization files may exist, but no product Repository record was created; inspect the repository and retry persistence.",
+                    );
+                    mapped.changed_paths = Some(changed_paths.clone());
+                    mapped
+                })?;
+
+            let mut success = RepositoryRegistrationSuccess {
+                repository,
+                cadence_skills: preparation_summary(&prepared),
+                initialization,
+                warnings: prepared.warnings,
+                changed_paths,
+                git_finalize_warning: None,
+                completed_at: (self.clock)(),
+            };
+
+            reporter
+                .step_started(RepositoryInitializationStepKind::GitFinalize)
+                .map_err(|error| *error)?;
+            reporter
+                .checkpoint_git_finalize_result(success.clone())
+                .map_err(|error| *error)?;
+            let (git_finalize_warning, git_finalize_succeeded) =
+                match self.git_finalize(&git_root, cancellation.clone()).await {
+                    Ok(warning) => (warning, true),
+                    Err(reason) => (Some(format!(
+                    "git_finalize: {}；请手动提交推送",
+                    sanitize_summary(&reason, 4 * 1024),
+                )), false),
+                };
+            if let Some(warning) = git_finalize_warning.as_ref() {
+                reporter
+                    .update_git_finalize_checkpoint_warning(warning.clone())
+                    .map_err(|error| *error)?;
+            }
+            if git_finalize_succeeded {
+                reporter
+                    .step_completed(RepositoryInitializationStepKind::GitFinalize)
+                    .map_err(|error| *error)?;
+            }
+            success.git_finalize_warning = git_finalize_warning;
+
+            Ok(success)
         }
-        (self.host_readiness)().map_err(|reason| {
-            claude_error(
-                "host_readiness",
-                "host_real_workflow_blocked",
-                &reason,
-                true,
-                "Restore host readiness for real workflows, then retry.",
-            )
-        })?;
+        .await;
 
-        let prepared = self
-            .cadence_skills
-            .prepare_skills(cancellation.clone())
-            .await
-            .map_err(cadence_error)?;
-        let before = self
-            .git_status(&git_root, cancellation.clone(), "git_status_before")
-            .await?;
-
-        let commands = match self
-            .initializer
-            .initialize_repository(&git_root, self.initialization_timeout, cancellation.clone())
-            .await
-        {
-            Ok(commands) => commands,
+        match execution {
+            Ok(success) => self
+                .operations
+                .finish_completed(&project_id, &operation_id, success, (self.clock)())
+                .map_err(OperationProgressReporter::operation_store_error),
             Err(mut error) => {
-                match self
-                    .git_status(&git_root, cancellation.clone(), "git_status_after_failure")
-                    .await
+                if let Some(before) = before.as_ref()
+                    && error.changed_paths.is_none()
+                    && error.stage != "git_status_after"
                 {
-                    Ok(after) => error.changed_paths = Some(changed_paths(&before, &after)),
-                    Err(status_error) => {
-                        error.changed_paths = None;
-                        let final_state = status_error
-                            .stderr_summary
-                            .as_deref()
-                            .unwrap_or("unknown final Git state error");
-                        let combined = match error.stderr_summary.as_deref() {
-                            Some(initializer) => {
-                                format!("{initializer}; final_git_state: {final_state}")
-                            }
-                            None => format!("final_git_state: {final_state}"),
-                        };
-                        error.stderr_summary = Some(sanitize_summary(&combined, 4 * 1024));
-                        error.action.push_str(
-                            " Final Git state could not be collected; inspect the repository manually.",
-                        );
+                    match self
+                        .git_status(&git_root, cancellation, "git_status_after_failure")
+                        .await
+                    {
+                        Ok(after) => error.changed_paths = Some(changed_paths(before, &after)),
+                        Err(status_error) => {
+                            error.changed_paths = None;
+                            let final_state = status_error
+                                .stderr_summary
+                                .as_deref()
+                                .unwrap_or("unknown final Git state error");
+                            let combined = match error.stderr_summary.as_deref() {
+                                Some(initializer) => {
+                                    format!("{initializer}; final_git_state: {final_state}")
+                                }
+                                None => format!("final_git_state: {final_state}"),
+                            };
+                            error.stderr_summary = Some(sanitize_summary(&combined, 4 * 1024));
+                            error.action.push_str(
+                                " Final Git state could not be collected; inspect the repository manually.",
+                            );
+                        }
                     }
                 }
-                return Err(error);
+
+                let failed_step = reporter.current_step();
+                self.operations
+                    .finish_failed(
+                        &project_id,
+                        &operation_id,
+                        failed_step,
+                        error.clone(),
+                        (self.clock)(),
+                    )
+                    .map_err(OperationProgressReporter::operation_store_error)?;
+                Err(error)
             }
-        };
+        }
+    }
 
-        let after = self
-            .git_status(&git_root, cancellation.clone(), "git_status_after")
+    pub fn get_initialization_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<RepositoryInitializationOperation, ProductStoreError> {
+        self.operations.get(project_id, operation_id)
+    }
+
+    pub fn recover_interrupted_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<RepositoryInitializationOperation, ProductStoreError> {
+        self.operations
+            .recover_interrupted(project_id, operation_id, (self.clock)())
+    }
+
+    pub async fn register(
+        &self,
+        input: RepositoryRegistrationInput,
+        cancellation: CancellationToken,
+    ) -> Result<RepositoryRegistrationSuccess, RepositoryRegistrationError> {
+        let launch = self
+            .begin_initialization(input, cancellation.clone())
             .await?;
-        let changed_paths = changed_paths(&before, &after);
-        let preparation_summary = preparation_summary(&prepared);
-        let initialization = RepositoryInitializationSummary {
-            provider: "claude_code".to_string(),
-            source: prepared.source_root.clone(),
-            source_mode: prepared.source_mode.as_str().to_string(),
-            skills_root: prepared.skills_root.clone(),
-            git_updated: prepared.git_updated,
-            link_sync_status: prepared.link_sync_status.as_str().to_string(),
-            commands,
-        };
-        let repository = self
-            .repositories
-            .create_repository(CreateRepositoryInput {
-                project_id: input.project_id,
-                name: input.name,
-                path: git_root,
-                default_policy_preset: input.default_policy_preset,
-                default_provider_mode: input.default_provider_mode,
-            })
-            .map_err(|error| {
-                let mut mapped = registration_error(
-                    "repository_persist",
-                    "repository_persist_failed",
-                    &error.to_string(),
+        let project_id = launch.project_id.clone();
+        let operation_id = launch.operation_id.clone();
+        match self.execute_initialization(launch, cancellation).await {
+            Ok(operation) => operation.result.ok_or_else(|| {
+                registration_error(
+                    "repository_initialization_operation",
+                    "repository_initialization_operation_result_missing",
+                    "completed repository initialization operation did not contain a result",
                     true,
-                    "Initialization files may exist, but no product Repository record was created; inspect the repository and retry persistence.",
-                );
-                mapped.changed_paths = Some(changed_paths.clone());
-                mapped
-            })?;
-
-        Ok(RepositoryRegistrationSuccess {
-            repository,
-            cadence_skills: preparation_summary,
-            initialization,
-            warnings: prepared.warnings,
-            changed_paths,
-            completed_at: (self.clock)(),
-        })
+                    "Query the operation again after recovery.",
+                )
+            }),
+            Err(execution_error) => {
+                let error = match self.operations.get(&project_id, &operation_id) {
+                    Ok(operation) => operation.error.unwrap_or(execution_error),
+                    Err(_) => execution_error,
+                };
+                Err(error)
+            }
+        }
     }
 
     fn reject_duplicate(
@@ -426,7 +786,7 @@ impl RepositoryRegistrationCoordinator {
                 working_dir: working_dir.to_path_buf(),
                 timeout: self.git_command_timeout,
                 cancellation,
-                environment: BTreeMap::from([("LC_ALL".to_string(), "C".to_string())]),
+                environment: self.git_environment.clone(),
                 stdout_limit: GIT_OUTPUT_LIMIT,
                 stderr_limit: GIT_OUTPUT_LIMIT,
             })
@@ -435,204 +795,21 @@ impl RepositoryRegistrationCoordinator {
     }
 }
 
-fn command_succeeded(result: &BoundedCommandResult) -> bool {
-    result.exit_code == Some(0) && !result.timed_out && !result.cancelled
-}
-
-fn command_diagnostic(result: &BoundedCommandResult) -> String {
-    let message = if result.stderr.trim().is_empty() {
-        result.stdout.trim()
-    } else {
-        result.stderr.trim()
-    };
-    if result.timed_out {
-        format!("git command timed out: {message}")
-    } else if result.cancelled {
-        format!("git command cancelled: {message}")
-    } else {
-        format!("git command exited {:?}: {message}", result.exit_code)
-    }
-}
-
-fn parse_porcelain_status(output: &str) -> BTreeMap<String, String> {
-    let records = output.split('\0').collect::<Vec<_>>();
-    let mut status = BTreeMap::new();
-    let mut index = 0;
-    while index < records.len() {
-        let record = records[index];
-        if record.len() < 4 {
-            index += 1;
-            continue;
-        }
-        let code = record[..2].to_string();
-        let path = record[3..].to_string();
-        status.insert(path, code.clone());
-        if code.contains('R') || code.contains('C') {
-            index += 1;
-            if let Some(original) = records.get(index)
-                && !original.is_empty()
-            {
-                status.insert((*original).to_string(), code);
-            }
-        }
-        index += 1;
-    }
-    status
-}
-
-fn changed_paths(
-    before: &BTreeMap<String, String>,
-    after: &BTreeMap<String, String>,
-) -> Vec<String> {
-    before
-        .keys()
-        .chain(after.keys())
-        .filter(|path| before.get(*path) != after.get(*path))
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-fn preparation_summary(
-    prepared: &CadenceSkillsPreparationResult,
-) -> CadenceSkillsPreparationSummary {
-    CadenceSkillsPreparationSummary {
-        source_mode: prepared.source_mode.as_str().to_string(),
-        source_root: prepared.source_root.clone(),
-        skills_root: prepared.skills_root.clone(),
-        git_updated: prepared.git_updated,
-        link_sync_status: prepared.link_sync_status.as_str().to_string(),
-        warnings: prepared.warnings.clone(),
-    }
-}
-
-fn cadence_error(error: CadenceSkillsError) -> RepositoryRegistrationError {
-    claude_error(
-        "cadence_skills_prepare",
-        error.code(),
-        &error.to_string(),
-        true,
-        "Repair Cadence-skills availability or synchronization, then retry.",
-    )
-}
-
-fn claude_error(
-    stage: &str,
-    reason_code: &str,
-    reason: &str,
-    retryable: bool,
-    action: &str,
-) -> RepositoryRegistrationError {
-    let mut error = registration_error(stage, reason_code, reason, retryable, action);
-    error.provider = Some("claude_code".to_string());
-    error
-}
-
-fn git_state_error(stage: &str, reason: &str) -> RepositoryRegistrationError {
-    registration_error(
-        stage,
-        "repository_git_state_failed",
-        reason,
-        true,
-        "Git state could not be determined; inspect the repository manually before retrying.",
-    )
-}
-
-fn registration_error(
-    stage: &str,
-    reason_code: &str,
-    reason: &str,
-    retryable: bool,
-    action: &str,
-) -> RepositoryRegistrationError {
-    RepositoryRegistrationError::new(
-        stage,
-        reason_code,
-        Some(sanitize_summary(reason, 4 * 1024)),
-        retryable,
-        action,
-    )
-}
-
-fn sanitize_summary(value: &str, limit: usize) -> String {
-    let mut summary = String::new();
-    let mut in_escape = false;
-    for character in value.chars() {
-        if in_escape {
-            if character.is_ascii_alphabetic() {
-                in_escape = false;
-            }
-            continue;
-        }
-        if character == '\u{1b}' {
-            in_escape = true;
-            continue;
-        }
-        if character.is_control() && !matches!(character, '\n' | '\r' | '\t') {
-            continue;
-        }
-        if summary.len() + character.len_utf8() > limit {
-            summary.push_str("…[truncated]");
-            break;
-        }
-        summary.push(character);
-    }
-    summary
-        .split_whitespace()
-        .map(|token| {
-            let Some((key, _)) = token.split_once('=') else {
-                return token.to_string();
-            };
-            let upper = key.to_ascii_uppercase();
-            if ["KEY", "TOKEN", "SECRET", "PASSWORD"]
-                .iter()
-                .any(|marker| upper.contains(marker))
-            {
-                format!("{key}=[REDACTED]")
-            } else {
-                token.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-static INITIALIZING_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-
-struct InitializationGuard {
-    path: PathBuf,
-}
-
-impl InitializationGuard {
-    fn try_acquire(path: PathBuf) -> Result<Self, Box<RepositoryRegistrationError>> {
-        let paths = INITIALIZING_PATHS.get_or_init(|| Mutex::new(HashSet::new()));
-        let mut paths = paths
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !paths.insert(path.clone()) {
-            return Err(Box::new(registration_error(
-                "repository_initialization_lock",
-                "repository_initialization_in_progress",
-                "repository initialization is already in progress for this canonical Git root",
-                true,
-                "Wait for the active initialization to finish, then retry.",
-            )));
-        }
-        Ok(Self { path })
-    }
-}
-
-impl Drop for InitializationGuard {
-    fn drop(&mut self) {
-        if let Some(paths) = INITIALIZING_PATHS.get() {
-            paths
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&self.path);
+fn default_git_environment(
+    read: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> BTreeMap<String, String> {
+    let mut environment = BTreeMap::from([("LC_ALL".to_string(), "C".to_string())]);
+    for key in ["HOME", "SSH_AUTH_SOCK"] {
+        if let Some(value) = read(key).filter(|value| !value.is_empty()) {
+            environment.insert(key.to_string(), value.to_string_lossy().into_owned());
         }
     }
+    environment
 }
+
+mod helpers;
+use helpers::*;
+mod git_finalize;
 
 #[cfg(test)]
 mod tests;

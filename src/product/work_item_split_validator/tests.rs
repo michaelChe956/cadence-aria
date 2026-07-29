@@ -1,7 +1,7 @@
 use super::*;
 use crate::product::models::{
-    WorkItemDraftCandidate, WorkItemOutline, WorkItemOutlineDependencyEdge,
-    WorkItemOutlineSessionFit,
+    TrustedDraftVerificationCommand, WorkItemDraftCandidate, WorkItemOutline,
+    WorkItemOutlineDependencyEdge, WorkItemOutlineSessionFit,
 };
 
 type VerificationMutation = fn(&mut WorkItemDraftCandidate);
@@ -23,6 +23,32 @@ fn work_item_plan_draft_validator_maps_canonical_contract_findings() {
         .find(|finding| finding.code == "duplicate_task_id")
         .expect("canonical validator finding must be mapped");
     assert_eq!(finding.severity, WorkItemSplitFindingSeverity::Error);
+}
+
+#[test]
+fn work_item_plan_draft_validator_keeps_process_evidence_warning_non_blocking() {
+    let outline = valid_outline();
+    let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    candidate.canonical_contract_candidate.acceptance_criteria[0].criterion_id =
+        "ac_tdd_red_evidence".to_string();
+    candidate.canonical_contract_candidate.acceptance_criteria[0].statement =
+        "先失败的测试提交必须存在".to_string();
+    candidate.canonical_contract_candidate.tasks[0].done_when_refs =
+        vec!["ac_tdd_red_evidence".to_string()];
+    candidate
+        .canonical_contract_candidate
+        .handoff_contract
+        .reviewer_check_refs = vec!["ac_tdd_red_evidence".to_string()];
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.code == "process_evidence_acceptance_criterion")
+        .expect("process-evidence warning must be visible in the local validator report");
+
+    assert_eq!(finding.severity, WorkItemSplitFindingSeverity::Warning);
+    assert!(!report.has_errors());
 }
 
 #[test]
@@ -96,6 +122,168 @@ fn work_item_plan_draft_validator_accepts_clean_canonical_candidate() {
         !report.has_errors(),
         "expected clean candidate, got {:?}",
         report.findings
+    );
+}
+
+#[test]
+fn work_item_plan_draft_validator_rejects_required_command_outside_confirmed_catalog() {
+    let outline = valid_outline();
+    let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    candidate.canonical_contract_candidate.verification_checks[0].command =
+        Some("pnpm --dir web test".to_string());
+    candidate.verification_plan.checks = candidate
+        .canonical_contract_candidate
+        .verification_checks
+        .clone();
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    assert_has_code(&report, "untrusted_required_verification_command");
+}
+
+#[test]
+fn work_item_plan_draft_validator_trusted_command_matrix_has_one_target_finding() {
+    type Mutation = fn(&mut WorkItemPlanOutline, &mut WorkItemDraftCandidate);
+
+    let cases: [(&str, Mutation); 2] = [
+        ("untrusted_required_verification_command", |outline, _| {
+            outline.work_item_outlines[0].trusted_verification_commands[0].command =
+                "pnpm --dir web test".to_string();
+        }),
+        (
+            "missing_trusted_verification_command_catalog",
+            |outline, _| {
+                outline.work_item_outlines[0]
+                    .trusted_verification_commands
+                    .clear();
+            },
+        ),
+    ];
+
+    for (expected_code, mutate) in cases {
+        let mut outline = valid_outline();
+        let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+        mutate(&mut outline, &mut candidate);
+
+        let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+        assert!(report.has_errors(), "{expected_code} must reject the Draft");
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.code == expected_code)
+                .count(),
+            1,
+            "expected exactly one {expected_code}, got {:?}",
+            report.findings
+        );
+        for unrelated_identity_code in [
+            "unknown_provider_logical_work_item",
+            "draft_outline_identity_mismatch",
+            "verification_plan_not_derived_from_contract",
+        ] {
+            assert!(
+                !has_code(&report, unrelated_identity_code),
+                "{expected_code} must not create unrelated identity finding {unrelated_identity_code}: {:?}",
+                report.findings
+            );
+        }
+    }
+}
+
+#[test]
+fn work_item_plan_draft_validator_requires_operational_gate_when_catalog_is_empty() {
+    let mut outline = valid_outline();
+    outline.work_item_outlines[0]
+        .trusted_verification_commands
+        .clear();
+    let candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    assert_has_code(&report, "missing_trusted_verification_command_catalog");
+}
+
+#[test]
+fn work_item_plan_draft_validator_allows_empty_catalog_with_operational_gate() {
+    let mut outline = valid_outline();
+    outline.work_item_outlines[0]
+        .trusted_verification_commands
+        .clear();
+    let mut candidate = canonical_draft_candidate(&outline.work_item_outlines[0]);
+    for check in &mut candidate.canonical_contract_candidate.verification_checks {
+        check.command = None;
+        check.required = false;
+        check.non_zero_test_execution_required = false;
+    }
+    candidate.canonical_contract_candidate.blocker_rules[0].route =
+        crate::product::work_item_contract::BlockerRoute::OperationalGate;
+    candidate.canonical_contract_candidate.blocker_rules[0]
+        .target_contract_refs
+        .clear();
+    candidate.verification_plan.checks = candidate
+        .canonical_contract_candidate
+        .verification_checks
+        .clone();
+
+    let report = WorkItemDraftLocalValidator::validate(&candidate, &[], &outline);
+
+    assert!(
+        !has_code(&report, "missing_trusted_verification_command_catalog"),
+        "operational gate must make an empty catalog routable: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn work_item_plan_outline_validator_rejects_trusted_command_catalog_over_budget() {
+    let mut outline = valid_outline();
+    let command = outline.work_item_outlines[0].trusted_verification_commands[0].clone();
+    outline.work_item_outlines[0].trusted_verification_commands = vec![command; 4];
+
+    let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+    assert_has_code(&report, "trusted_verification_command_catalog_too_large");
+}
+
+#[test]
+fn work_item_plan_outline_validator_rejects_overlong_trusted_command_catalog_fields() {
+    for field in ["command", "cwd", "purpose", "source_ref"] {
+        let mut outline = valid_outline();
+        let command = &mut outline.work_item_outlines[0].trusted_verification_commands[0];
+        match field {
+            "command" => command.command = "c".repeat(49),
+            "cwd" => command.cwd = "w".repeat(17),
+            "purpose" => command.purpose = "p".repeat(33),
+            "source_ref" => command.source_ref = "s".repeat(33),
+            _ => unreachable!("only trusted catalog fields are checked"),
+        }
+
+        let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+        assert_has_code(
+            &report,
+            "trusted_verification_command_catalog_field_too_large",
+        );
+    }
+}
+
+#[test]
+fn work_item_plan_outline_validator_rejects_trusted_catalog_utf8_projection_over_budget() {
+    let mut outline = valid_outline();
+    let mut command = outline.work_item_outlines[0].trusted_verification_commands[0].clone();
+    command.command = "界".repeat(48);
+    command.cwd.clear();
+    command.purpose.clear();
+    command.source_ref.clear();
+    outline.work_item_outlines[0].trusted_verification_commands = vec![command; 3];
+
+    let report = WorkItemPlanOutlineValidator::validate(&outline);
+
+    assert_has_code(
+        &report,
+        "trusted_verification_command_catalog_projection_too_large",
     );
 }
 
@@ -371,6 +559,12 @@ fn valid_outline() -> WorkItemPlanOutline {
                 forbidden_write_scopes: vec!["web/**".to_string()],
                 depends_on: vec![],
                 verification_intent: vec!["cargo test --locked --lib api".to_string()],
+                trusted_verification_commands: vec![TrustedDraftVerificationCommand {
+                    command: "cargo test --locked --lib canonical_work_item_".to_string(),
+                    cwd: ".".to_string(),
+                    purpose: "验证 canonical contract".to_string(),
+                    source_ref: "design_spec_0001#verification".to_string(),
+                }],
                 handoff_notes: "提供 API contract".to_string(),
             },
             WorkItemOutline {
@@ -389,6 +583,12 @@ fn valid_outline() -> WorkItemPlanOutline {
                 forbidden_write_scopes: vec!["src/product/**".to_string()],
                 depends_on: vec!["outline_backend".to_string()],
                 verification_intent: vec!["pnpm -C web test".to_string()],
+                trusted_verification_commands: vec![TrustedDraftVerificationCommand {
+                    command: "cargo test --locked --lib canonical_work_item_".to_string(),
+                    cwd: ".".to_string(),
+                    purpose: "验证 canonical contract".to_string(),
+                    source_ref: "design_spec_0001#verification".to_string(),
+                }],
                 handoff_notes: "消费 API contract".to_string(),
             },
         ],

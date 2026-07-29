@@ -38,7 +38,7 @@ export function workItemPlanArtifactUpdateSummary(
         artifact_type: artifact.type,
         artifact_label: "Draft",
         object_id: record.outline_id,
-        object_title: record.candidate.title,
+        object_title: record.candidate.canonical_contract_candidate.identity.title,
         draft_id: record.draft_id,
         status_label: record.status,
       },

@@ -81,13 +81,13 @@ fn fake_provider_task_run_completes_planning_and_writes_openspec_tasks() {
         .contains("TASK-001")
     );
 
-    let testing_report = read_json(
+    let coding_report = read_json(
         &workspace
             .path()
-            .join(".aria/runtime/tasks/task_0001/reports/testing-report.json"),
+            .join(".aria/runtime/tasks/task_0001/artifacts/execution/0000.json"),
     );
     assert!(
-        testing_report["_aria"]["projection_refs"]
+        coding_report["_aria"]["projection_refs"]
             .as_array()
             .expect("projection refs")
             .iter()
@@ -95,6 +95,19 @@ fn fake_provider_task_run_completes_planning_and_writes_openspec_tasks() {
                 .as_str()
                 .is_some_and(|value| value.starts_with("proj_spec_projection_"))),
         "execution artifacts must carry the spec projection ref"
+    );
+    assert!(
+        !workspace
+            .path()
+            .join(".aria/runtime/tasks/task_0001/reports/testing-report.json")
+            .exists(),
+        "task run must not write a removed testing report"
+    );
+
+    let final_report = read_json(&outcome.report_path);
+    assert!(
+        final_report.get("testing_report_path").is_none(),
+        "final report must not expose a removed testing report path"
     );
 
     let final_summary = read_json(
@@ -158,7 +171,6 @@ fn task_run_persists_execution_and_final_provider_records() {
         .join(".aria/runtime/tasks/task_0001/provider-runs");
     for provider_run_id in [
         "run_n16_0001",
-        "run_n17_0001",
         "run_n18_0001",
         "run_n25_0001",
         "run_n27_0001",
@@ -171,19 +183,13 @@ fn task_run_persists_execution_and_final_provider_records() {
             "{provider_run_id} should be persisted"
         );
     }
-    assert!(
-        outcome
-            .testing_report_path
-            .expect("testing report")
-            .exists()
-    );
     assert!(outcome.final_summary_path.expect("final summary").exists());
 }
 
 #[test]
 fn non_interactive_task_run_writes_blocked_report_when_rework_limit_is_exceeded() {
     let workspace = prepare_workspace();
-    let provider = ScriptedTaskRunProvider::testing_always_fails();
+    let provider = ScriptedTaskRunProvider::review_always_blocks();
     let outcome = TaskRunOrchestrator::run_with_provider(task_request(workspace.path()), &provider)
         .expect("task run");
 
@@ -207,7 +213,7 @@ fn non_interactive_task_run_writes_blocked_report_when_rework_limit_is_exceeded(
 #[test]
 fn non_interactive_task_run_writes_blocked_report_when_execution_provider_errors() {
     let workspace = prepare_workspace();
-    let provider = ScriptedTaskRunProvider::testing_provider_errors();
+    let provider = ScriptedTaskRunProvider::review_provider_errors();
     let outcome = TaskRunOrchestrator::run_with_provider(task_request(workspace.path()), &provider)
         .expect("provider execution error should become blocked task run");
 
@@ -232,17 +238,10 @@ fn non_interactive_task_run_writes_blocked_report_when_execution_provider_errors
     let failed_run = read_json(
         &workspace
             .path()
-            .join(".aria/runtime/tasks/task_0001/provider-runs/run_n17_0001/run.json"),
+            .join(".aria/runtime/tasks/task_0001/provider-runs/run_n18_0001/run.json"),
     );
     assert_eq!(failed_run["status"], "failed");
     assert_eq!(failed_run["error_code"], "provider_execution_failed");
-    assert!(
-        outcome
-            .testing_report_path
-            .as_ref()
-            .is_none_or(|path| path.exists()),
-        "blocked outcome must not point at a missing testing report"
-    );
 }
 
 fn prepare_workspace() -> tempfile::TempDir {
@@ -273,8 +272,8 @@ fn task_request(workspace: &std::path::Path) -> TaskRunRequest {
 struct ScriptedTaskRunProvider {
     output_schemas: Mutex<Vec<String>>,
     seen_timeouts: Mutex<Vec<u64>>,
-    testing_passes: Mutex<VecDeque<bool>>,
-    fail_testing_with_provider_error: bool,
+    review_blocks: Mutex<VecDeque<bool>>,
+    fail_review_with_provider_error: bool,
 }
 
 impl ScriptedTaskRunProvider {
@@ -282,23 +281,23 @@ impl ScriptedTaskRunProvider {
         Self {
             output_schemas: Mutex::new(Vec::new()),
             seen_timeouts: Mutex::new(Vec::new()),
-            testing_passes: Mutex::new([true].into_iter().collect()),
-            fail_testing_with_provider_error: false,
+            review_blocks: Mutex::new([false].into_iter().collect()),
+            fail_review_with_provider_error: false,
         }
     }
 
-    fn testing_always_fails() -> Self {
+    fn review_always_blocks() -> Self {
         Self {
             output_schemas: Mutex::new(Vec::new()),
             seen_timeouts: Mutex::new(Vec::new()),
-            testing_passes: Mutex::new([false, false, false, false].into_iter().collect()),
-            fail_testing_with_provider_error: false,
+            review_blocks: Mutex::new([true, true, true, true].into_iter().collect()),
+            fail_review_with_provider_error: false,
         }
     }
 
-    fn testing_provider_errors() -> Self {
+    fn review_provider_errors() -> Self {
         Self {
-            fail_testing_with_provider_error: true,
+            fail_review_with_provider_error: true,
             ..Self::happy()
         }
     }
@@ -368,8 +367,8 @@ impl ProviderAdapter for ScriptedTaskRunProvider {
                 "candidate_traceability_refs": [],
                 "status": "completed"
             }),
-            "schema://aria/artifacts/testing_report/v1" => {
-                if self.fail_testing_with_provider_error {
+            "schema://aria/artifacts/code_review_report/v1" => {
+                if self.fail_review_with_provider_error {
                     return Err(ProviderAdapterError::execution_failed(
                         Some(1),
                         "",
@@ -378,23 +377,14 @@ impl ProviderAdapter for ScriptedTaskRunProvider {
                     ));
                 }
                 json!({
-                    "artifact_kind": "testing_report",
-                    "artifact_ref": "testing_report_work_wt_001_0001",
+                    "artifact_kind": "code_review_report",
+                    "artifact_ref": "code_review_report_work_wt_001_0001",
                     "worktask_id": "work_wt_001",
-                    "commands_run": ["pnpm test"],
-                    "tests_passed": self.testing_passes.lock().expect("testing").pop_front().unwrap_or(true),
-                    "failures": [],
+                    "findings": [],
+                    "blocking": self.review_blocks.lock().expect("review blocks").pop_front().unwrap_or(false),
                     "candidate_traceability_refs": []
                 })
             }
-            "schema://aria/artifacts/code_review_report/v1" => json!({
-                "artifact_kind": "code_review_report",
-                "artifact_ref": "code_review_report_work_wt_001_0001",
-                "worktask_id": "work_wt_001",
-                "findings": [],
-                "blocking": false,
-                "candidate_traceability_refs": []
-            }),
             "schema://aria/artifacts/final_review/v1" => json!({
                 "artifact_kind": "final_review",
                 "overall_decision": "pass",

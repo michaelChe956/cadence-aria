@@ -16,9 +16,7 @@ impl CodingWorkspaceEngine {
         let active = self
             .store
             .get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .ok_or_else(|| {
-                CodingWorkspaceEngineError::WorkItemHandoffMissing(attempt.id.clone())
-            })?;
+            .ok_or_else(|| CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone()))?;
         self.store.update_coding_unit_status(
             &attempt.project_id,
             &attempt.issue_id,

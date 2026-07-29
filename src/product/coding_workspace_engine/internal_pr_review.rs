@@ -1,5 +1,40 @@
 use super::*;
 
+pub(crate) fn summarize_push_error(
+    remote: &str,
+    branch: &str,
+    stderr: Option<&str>,
+) -> Option<String> {
+    let stderr = stderr?.trim();
+    if stderr.is_empty() {
+        return None;
+    }
+    let lower = stderr.to_ascii_lowercase();
+    const MAX_LEN: usize = 500;
+    let detail = if lower.contains("non-fast-forward") || lower.contains("[rejected]") {
+        format!(
+            "远端 {}/{} 已存在冲突提交（non-fast-forward / rejected），请确认远端分支状态后再推送",
+            remote, branch
+        )
+    } else {
+        let trimmed = if stderr.len() > MAX_LEN {
+            // 按 char boundary 截断：直接 &stderr[..MAX_LEN] 在多字节 UTF-8（本地化 git
+            // 报错、含 unicode 的文件名/分支名）上会切到字符中间而 panic，而本函数正落在
+            // push 失败的容错路径里，panic 会以崩溃方式重新引入失败。回退到 ≤MAX_LEN 的
+            // 最大字符边界。
+            let mut boundary = MAX_LEN;
+            while !stderr.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            format!("{}…", &stderr[..boundary])
+        } else {
+            stderr.to_string()
+        };
+        format!("推送到 {}/{} 失败：{}", remote, branch, trimmed)
+    };
+    Some(detail)
+}
+
 pub(crate) fn internal_review_blocked_gate_reason(
     decision: CodeReviewFlowDecision,
     is_group_final_review: bool,
@@ -8,11 +43,13 @@ pub(crate) fn internal_review_blocked_gate_reason(
         CodeReviewFlowDecision::RunCoderFix if is_group_final_review => {
             Some("group_final_review_blocked")
         }
-        CodeReviewFlowDecision::RunCoderFix => Some("internal_review_blocked"),
+        CodeReviewFlowDecision::RunCoderFix => Some("internal_review_change_requested"),
+        CodeReviewFlowDecision::RetryVerification => {
+            Some("internal_review_verification_incomplete")
+        }
         CodeReviewFlowDecision::OpenOperationalGate => Some("internal_review_operational_blocker"),
         CodeReviewFlowDecision::StopForHumanTriage => Some("internal_review_human_triage"),
-        CodeReviewFlowDecision::RetryVerification
-        | CodeReviewFlowDecision::StartPlanRepair
+        CodeReviewFlowDecision::StartPlanRepair
         | CodeReviewFlowDecision::StartStoryAmendment
         | CodeReviewFlowDecision::StartDesignAmendment
         | CodeReviewFlowDecision::ContinueAfterApprove => None,
@@ -47,6 +84,7 @@ impl CodingWorkspaceEngine {
                 manual_instructions: Vec::new(),
                 created_at: Utc::now().to_rfc3339(),
                 updated_at: Utc::now().to_rfc3339(),
+                push_error: None,
             });
         self.build_group_internal_pr_review_prompt(attempt, &review_request, None, None)
             .await
@@ -59,10 +97,9 @@ impl CodingWorkspaceEngine {
         worktree_path: Option<&Path>,
         retry_diagnostic: Option<&str>,
     ) -> Result<String, CodingWorkspaceEngineError> {
-        let handoffs = self.collect_completed_group_unit_handoffs(attempt)?;
+        let handoffs = self.collect_completed_group_unit_handoff_revisions(attempt)?;
         let units_section = self.format_group_unit_handoff_section(&handoffs);
-        let evaluation_context_json = self
-            .evaluation_context_json_for_role(attempt, EvaluationContextRole::InternalReviewer)?;
+        let evaluation_context_json = self.group_final_review_evaluation_context_json(attempt)?;
         let diff = match worktree_path {
             Some(path) => {
                 self._git_service
@@ -98,8 +135,9 @@ impl CodingWorkspaceEngine {
              {}\
              {}\
              {}\
+             {}\
              \n输出要求:\n\
-             - 基于所有 completed units 的 handoff 汇总评估整组风险、测试覆盖和剩余问题。\n\
+             - 基于所有 completed units 的 HandoffRevision 契约与能力汇总评估整组风险、测试覆盖和剩余问题。\n\
              - 分析影响范围（影响范围/impact_scope）。\n\
              - 给出 PR description 预览。\n\
              - 给出 commit message 建议。\n\
@@ -119,6 +157,7 @@ impl CodingWorkspaceEngine {
             truncate_prompt_section(&diff, 30_000),
             group_final_review_material_protocol(),
             reviewer_test_scope_contract(),
+            reviewer_process_evidence_boundary_contract(),
             no_default_stack_assumption_contract(),
             retry_diagnostic_section
         ))
@@ -236,6 +275,7 @@ impl CodingWorkspaceEngine {
             provider_type: provider_type_for_name(&reviewer),
             role: AdapterRole::Reviewer,
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+            provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(&attempt)),
             prompt,
             context_files: Vec::new(),
             output_schema: "coding_workspace_internal_pr_review_json".to_string(),
@@ -382,29 +422,38 @@ impl CodingWorkspaceEngine {
             role_run_status,
             reason_code,
         )?;
-        let blocked_gate_reason = (review.verdict == ReviewVerdict::Blocked)
-            .then(|| {
-                internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review)
-            })
-            .flatten();
+        let blocked_gate_reason =
+            internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review);
         if let Some(blocked_gate_reason) = blocked_gate_reason {
-            let operational = blocked_gate_reason == "internal_review_operational_blocker";
-            let human_triage = blocked_gate_reason == "internal_review_human_triage";
+            let title = match (blocked_gate_reason, is_group_final_review) {
+                ("group_final_review_blocked", _) => "GroupFinalReview change requested",
+                ("internal_review_change_requested", false) => {
+                    "Internal PR review change requested"
+                }
+                ("internal_review_verification_incomplete", true) => {
+                    "GroupFinalReview verification incomplete"
+                }
+                ("internal_review_verification_incomplete", false) => {
+                    "Internal PR review verification incomplete"
+                }
+                ("internal_review_human_triage", true) => "GroupFinalReview requires human triage",
+                ("internal_review_human_triage", false) => {
+                    "Internal PR review requires human triage"
+                }
+                ("internal_review_operational_blocker", true) => {
+                    "GroupFinalReview operational blocker"
+                }
+                ("internal_review_operational_blocker", false) => {
+                    "Internal PR review operational blocker"
+                }
+                _ => "Internal PR review blocked",
+            };
             self.create_review_blocked_gate(ReviewBlockedGateInput {
                 attempt: &attempt,
                 node_id: &node.id,
                 stage: CodingExecutionStage::InternalPrReview,
                 role: CodingProviderRole::InternalReviewer,
-                title: if operational {
-                    "Internal review operational blocker"
-                } else if human_triage {
-                    "Internal review requires human triage"
-                } else if is_group_final_review {
-                    "GroupFinalReview blocked"
-                } else {
-                    "Internal PR review blocked"
-                }
-                .to_string(),
+                title: title.to_string(),
                 description: review.summary.clone(),
                 reason_code: blocked_gate_reason,
                 evidence_refs: vec![review.id.clone()],
@@ -608,7 +657,7 @@ impl CodingWorkspaceEngine {
             };
             if matches!(remote_head.as_ref(), Ok(Some(head)) if head == commit_sha) {
                 journal = self
-                    .finish_review_git_operation(&attempt, &journal, PushStatus::Pushed)
+                    .finish_review_git_operation(&attempt, &journal, PushStatus::Pushed, None)
                     .await?;
             } else if matches!(remote_head, Err(GitWorkspaceError::Cancelled { .. })) {
                 let Some(completed) = self
@@ -627,13 +676,24 @@ impl CodingWorkspaceEngine {
                 {
                     Ok(push) => {
                         journal = if push.status == PushStatus::Pushed {
-                            self.finish_review_git_operation(&attempt, &journal, PushStatus::Pushed)
-                                .await?
+                            self.finish_review_git_operation(
+                                &attempt,
+                                &journal,
+                                PushStatus::Pushed,
+                                None,
+                            )
+                            .await?
                         } else {
+                            let push_error = summarize_push_error(
+                                remote,
+                                &attempt.branch_name,
+                                push.stderr.as_deref(),
+                            );
                             self.finish_nonzero_review_push(
                                 &attempt,
                                 &journal,
                                 push.remote_rejected,
+                                push_error,
                             )
                             .await?
                         };
@@ -672,23 +732,14 @@ impl CodingWorkspaceEngine {
                 Some("review request 已创建".to_string()),
             )
         } else {
-            self.store.update_attempt_status(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                CodingAttemptStatus::Blocked,
-            )?;
-            self.release_active_lock_if_shared_worktree_clean(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                self.active_work_item_id_for_attempt(&attempt),
-            )
-            .await?;
-            (
-                CodingTimelineNodeStatus::Failed,
-                Some("review request 推送失败".to_string()),
-            )
+            // push 失败不阻断主流程：attempt 保持当前状态，让后续 stage gate / GroupFinalReview 继续
+            // 推进。失败原因已记录在 review_request.push_error，这里仅在 timeline node 标 Failed。
+            let base = "review request 推送失败".to_string();
+            let summary = match request.push_error.as_ref() {
+                Some(error) => format!("{base}：{error}"),
+                None => base,
+            };
+            (CodingTimelineNodeStatus::Failed, Some(summary))
         };
         let completed_at = Utc::now().to_rfc3339();
         self.store.update_timeline_node_status(
@@ -710,5 +761,24 @@ impl CodingWorkspaceEngine {
             })
             .await;
         Ok(request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarize_push_error_handles_multibyte_stderr_without_panic() {
+        // 多字节 UTF-8 stderr：字节长度 >500 且第 500 字节落在字符中间。
+        // 旧实现 &stderr[..MAX_LEN] 会 panic（byte index not a char boundary），
+        // 而本函数正落在 push 失败的容错路径里，panic 会重新引入崩溃。
+        let stderr = "推送失败原因".repeat(100);
+        let summary =
+            summarize_push_error("origin", "aria/issues/issue_0001", Some(&stderr)).unwrap();
+        assert!(summary.contains("origin/aria/issues/issue_0001"));
+        assert!(summary.contains('…'));
+        // 已截断，不应含完整原串
+        assert!(!summary.contains(&stderr));
     }
 }

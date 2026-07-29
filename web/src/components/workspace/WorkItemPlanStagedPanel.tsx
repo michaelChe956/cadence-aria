@@ -7,6 +7,7 @@ import type {
   WorkItemPlanArtifactPayload,
   WorkItemPlanCompileRecoveryAction,
 } from "../../api/types";
+import { DraftValidationFailureNotice } from "./DraftValidationFailureNotice";
 
 export interface WorkItemPlanStagedPanelProps {
   activeNodeType: string | null;
@@ -71,13 +72,16 @@ export function WorkItemPlanStagedPanel({
     const outlineId = draftPayload?.draft_record.outline_id ?? "";
     return (
       <PanelShell title="Draft 确认" testId="work-item-plan-staged-panel">
+        {!draftPayload?.can_accept ? (
+          <DraftValidationFailureNotice findings={draftPayload?.validator_findings} />
+        ) : null}
         {draftPayload?.can_accept ? (
           <ActionButton icon={<Check />} onClick={() => onDraftDecision(outlineId, "accept")}>
             接受
           </ActionButton>
         ) : null}
         <ActionButton icon={<RefreshCw />} onClick={() => onDraftDecision(outlineId, "rewrite")}>
-          重写
+          {draftPayload?.can_accept ? "重写" : "根据校验错误重写"}
         </ActionButton>
         <ActionButton icon={<Pause />} onClick={() => onDraftDecision(outlineId, "pause")}>
           暂停

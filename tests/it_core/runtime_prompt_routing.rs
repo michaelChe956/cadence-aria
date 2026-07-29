@@ -34,10 +34,6 @@ fn runtime_prompts_directly_reference_rules_and_declare_their_actual_stage() {
                 "test-driven-development",
             ][..],
         ),
-        (
-            "N17",
-            &["测试执行与新鲜验证证据", "verification-before-completion"][..],
-        ),
         ("N18", &["代码审查", "requesting-code-review"][..]),
         (
             "N19",
@@ -70,12 +66,16 @@ fn runtime_prompts_directly_reference_rules_and_declare_their_actual_stage() {
             .prompt;
 
         assert!(
-            prompt.contains("/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"),
-            "{node_id} must render the complete routing-kernel path"
+            prompt.contains("[cadence_project_rules]"),
+            "{node_id}: {prompt}"
         );
         assert!(
-            prompt.contains("/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"),
-            "{node_id} must render the complete OpenSpec/Superpowers workflow path"
+            prompt.contains("AGENTS.md") && prompt.contains("CLAUDE.md"),
+            "{node_id}: {prompt}"
+        );
+        assert!(
+            !prompt.contains(&["Cadence-", "skills/"].concat()),
+            "{node_id}: {prompt}"
         );
         assert!(!prompt.contains("cadence-workflow"));
         for fragment in required_stage_fragments {

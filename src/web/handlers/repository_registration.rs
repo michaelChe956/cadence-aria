@@ -1,5 +1,5 @@
-use super::dto::repository_registration_response;
-use super::support::product_app_paths;
+use super::dto::repository_initialization_operation_dto;
+use super::support::{product_app_paths, product_store_api_error};
 use super::*;
 
 use std::collections::BTreeMap;
@@ -23,28 +23,12 @@ use crate::product::cadence_skills::{
 use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::{
     CadenceSkillsPreparation, ClaudeRepositoryInitializer, ProjectLookup,
-    RepositoryInitializationCommandSummary, RepositoryInitializer, RepositoryPersistence,
-    RepositoryRegistrationCoordinator, RepositoryRegistrationError, RepositoryRegistrationInput,
-    RepositoryRegistrationSuccess, RepositoryStore,
+    RepositoryInitializationCommandSummary, RepositoryInitializationOperation,
+    RepositoryInitializationOperationStatus, RepositoryInitializationOperationStore,
+    RepositoryInitializationProgress, RepositoryInitializationStepKind, RepositoryInitializer,
+    RepositoryPersistence, RepositoryRegistrationCoordinator, RepositoryRegistrationError,
+    RepositoryRegistrationInput, RepositoryStore,
 };
-
-#[async_trait::async_trait]
-trait RepositoryRegistrar: Send + Sync {
-    async fn register(
-        &self,
-        input: RepositoryRegistrationInput,
-    ) -> Result<RepositoryRegistrationSuccess, RepositoryRegistrationError>;
-}
-
-#[async_trait::async_trait]
-impl RepositoryRegistrar for RepositoryRegistrationCoordinator {
-    async fn register(
-        &self,
-        input: RepositoryRegistrationInput,
-    ) -> Result<RepositoryRegistrationSuccess, RepositoryRegistrationError> {
-        RepositoryRegistrationCoordinator::register(self, input, CancellationToken::new()).await
-    }
-}
 
 /// Repository POST 路由可注入、可克隆的协调器依赖。
 ///
@@ -53,7 +37,7 @@ impl RepositoryRegistrar for RepositoryRegistrationCoordinator {
 /// 仍只调用 `RepositoryRegistrationCoordinator`。
 #[derive(Clone)]
 pub struct RepositoryRegistrationDependencies {
-    registrar: Arc<dyn RepositoryRegistrar>,
+    coordinator: Arc<RepositoryRegistrationCoordinator>,
 }
 
 pub type RepositoryRegistrationBuildResult<T> = Result<T, Box<RepositoryRegistrationError>>;
@@ -67,6 +51,47 @@ impl RepositoryRegistrationDependencies {
         registry: Arc<ProviderRegistry>,
     ) -> RepositoryRegistrationDependenciesBuilder {
         RepositoryRegistrationDependenciesBuilder::new(app_paths, home, runner, gate, registry)
+    }
+
+    async fn begin_initialization(
+        &self,
+        input: RepositoryRegistrationInput,
+        cancellation: CancellationToken,
+    ) -> Result<
+        crate::product::repository_store::RepositoryInitializationLaunch,
+        RepositoryRegistrationError,
+    > {
+        self.coordinator
+            .begin_initialization(input, cancellation)
+            .await
+    }
+
+    async fn execute_initialization(
+        &self,
+        launch: crate::product::repository_store::RepositoryInitializationLaunch,
+        cancellation: CancellationToken,
+    ) -> Result<RepositoryInitializationOperation, RepositoryRegistrationError> {
+        self.coordinator
+            .execute_initialization(launch, cancellation)
+            .await
+    }
+
+    fn get_initialization_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<RepositoryInitializationOperation, ProductStoreError> {
+        self.coordinator
+            .get_initialization_operation(project_id, operation_id)
+    }
+
+    fn recover_interrupted_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<RepositoryInitializationOperation, ProductStoreError> {
+        self.coordinator
+            .recover_interrupted_operation(project_id, operation_id)
     }
 }
 
@@ -109,7 +134,7 @@ impl RepositoryRegistrationDependenciesBuilder {
             initializer: None,
             clock: Arc::new(|| Utc::now().to_rfc3339()),
             git_command_timeout: Duration::from_secs(180),
-            initialization_timeout: Duration::from_secs(300),
+            initialization_timeout: Duration::from_secs(1800),
         }
     }
 
@@ -169,19 +194,22 @@ impl RepositoryRegistrationDependenciesBuilder {
 
     pub fn build(self) -> RepositoryRegistrationBuildResult<RepositoryRegistrationDependencies> {
         let home = validate_user_home(self.home)?;
+        let app_paths = self.app_paths.clone();
         let projects = self
             .projects
-            .unwrap_or_else(|| Arc::new(ProjectStore::new(self.app_paths.clone())));
+            .unwrap_or_else(|| Arc::new(ProjectStore::new(app_paths.clone())));
         let repositories = self
             .repositories
-            .unwrap_or_else(|| Arc::new(RepositoryStore::new(self.app_paths)));
+            .unwrap_or_else(|| Arc::new(RepositoryStore::new(app_paths.clone())));
+        let operations = RepositoryInitializationOperationStore::new(app_paths);
         let cadence_skills = self.cadence_skills.unwrap_or_else(|| {
             Arc::new(CadenceSkillsManager::with_dependencies(
-                home,
+                home.clone(),
                 self.runner.clone(),
                 self.command_environment,
             ))
         });
+        let git_environment = git_finalize_environment(&home);
         let host_readiness = self.host_readiness.unwrap_or_else(|| {
             Arc::new(|| {
                 crate::web::provider_availability::host_real_workflow_ready()
@@ -195,22 +223,39 @@ impl RepositoryRegistrationDependenciesBuilder {
                 4 * 1024,
             ))
         });
+        let coordinator = RepositoryRegistrationCoordinator::new_with_operations(
+            projects,
+            repositories,
+            operations,
+            self.gate,
+            self.registry,
+            cadence_skills,
+            host_readiness,
+            self.runner,
+            self.clock,
+            initializer,
+            self.git_command_timeout,
+            self.initialization_timeout,
+        )
+        .with_git_environment(git_environment);
         Ok(RepositoryRegistrationDependencies {
-            registrar: Arc::new(RepositoryRegistrationCoordinator::new(
-                projects,
-                repositories,
-                self.gate,
-                self.registry,
-                cadence_skills,
-                host_readiness,
-                self.runner,
-                self.clock,
-                initializer,
-                self.git_command_timeout,
-                self.initialization_timeout,
-            )),
+            coordinator: Arc::new(coordinator),
         })
     }
+}
+
+fn git_finalize_environment(home: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    let mut environment = std::collections::BTreeMap::from([
+        ("LC_ALL".to_string(), "C".to_string()),
+        ("HOME".to_string(), home.to_string_lossy().into_owned()),
+    ]);
+    if let Some(value) = std::env::var_os("SSH_AUTH_SOCK").filter(|value| !value.is_empty()) {
+        environment.insert(
+            "SSH_AUTH_SOCK".to_string(),
+            value.to_string_lossy().into_owned(),
+        );
+    }
+    environment
 }
 
 pub async fn create_repository(
@@ -222,22 +267,73 @@ pub async fn create_repository(
         Some(dependencies) => dependencies,
         None => default_dependencies(&state).map_err(|error| ApiError::from(*error))?,
     };
-    let success = dependencies
-        .registrar
-        .register(RepositoryRegistrationInput {
-            project_id,
-            name: request.name,
-            path: request.path.into(),
-            default_policy_preset: request.default_policy_preset,
-            default_provider_mode: request.default_provider_mode,
-        })
+    let launch = dependencies
+        .begin_initialization(
+            RepositoryRegistrationInput {
+                project_id,
+                name: request.name,
+                path: request.path.into(),
+                default_policy_preset: request.default_policy_preset,
+                default_provider_mode: request.default_provider_mode,
+            },
+            CancellationToken::new(),
+        )
         .await
         .map_err(ApiError::from)?;
+    let snapshot = launch.snapshot().clone();
+    let lease = state
+        .repository_initialization_runs
+        .register(snapshot.operation_id.clone())
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "repository_initialization_in_progress",
+                "repository initialization is already in progress",
+                serde_json::json!({}),
+            )
+        })?;
+    let worker_dependencies = dependencies.clone();
+    tokio::spawn(async move {
+        let _lease = lease;
+        if let Err(error) = worker_dependencies
+            .execute_initialization(launch, CancellationToken::new())
+            .await
+        {
+            tracing::error!(reason_code = %error.reason_code, "repository initialization worker failed");
+        }
+    });
     Ok((
-        StatusCode::CREATED,
-        Json(repository_registration_response(success)),
+        StatusCode::ACCEPTED,
+        Json(repository_initialization_operation_dto(snapshot)),
     )
         .into_response())
+}
+
+pub async fn get_repository_initialization(
+    State(state): State<WebAppState>,
+    Path((project_id, operation_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let dependencies = match state.repository_registration_dependencies() {
+        Some(dependencies) => dependencies,
+        None => default_dependencies(&state).map_err(|error| ApiError::from(*error))?,
+    };
+    let operation = dependencies
+        .get_initialization_operation(&project_id, &operation_id)
+        .map_err(product_store_api_error)?;
+    let operation = if matches!(
+        operation.status,
+        RepositoryInitializationOperationStatus::Created
+            | RepositoryInitializationOperationStatus::Running
+    ) && !state
+        .repository_initialization_runs
+        .is_active(&operation_id)
+    {
+        dependencies
+            .recover_interrupted_operation(&project_id, &operation_id)
+            .map_err(product_store_api_error)?
+    } else {
+        operation
+    };
+    Ok(Json(repository_initialization_operation_dto(operation)).into_response())
 }
 
 fn default_dependencies(
@@ -387,22 +483,25 @@ impl RepositoryInitializer for CompletedRepositoryInitializer {
         _git_root: &StdPath,
         _command_timeout: Duration,
         _cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
-        Ok([
-            "/pre-check",
-            "/rule-config",
-            "/mcp-configuration",
-            "/project-rules-examples",
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(offset, command)| RepositoryInitializationCommandSummary {
-            command_index: offset + 1,
-            command: command.to_string(),
-            status: "completed".to_string(),
-            output_summary: None,
-        })
-        .collect())
+        let mut summaries = Vec::with_capacity(4);
+        for (offset, step) in RepositoryInitializationStepKind::ALL
+            .into_iter()
+            .filter(|step| step.command().is_some())
+            .enumerate()
+        {
+            let command = step.command().expect("Claude initialization command");
+            progress.step_started(step).map_err(|error| *error)?;
+            progress.step_completed(step).map_err(|error| *error)?;
+            summaries.push(RepositoryInitializationCommandSummary {
+                command_index: offset + 1,
+                command: command.to_string(),
+                status: "completed".to_string(),
+                output_summary: None,
+            });
+        }
+        Ok(summaries)
     }
 }
 
@@ -423,5 +522,30 @@ mod tests {
         .expect_err("relative HOME");
         assert_eq!(error.stage, "cadence_skills_home");
         assert_eq!(error.reason_code, "cadence_skills_unavailable");
+    }
+
+    #[test]
+    fn built_coordinator_carries_validated_home_in_git_environment() {
+        let dependencies = RepositoryRegistrationDependencies::builder(
+            ProductAppPaths::new(std::env::temp_dir().join("git-env-test")),
+            "/home/tester",
+            Arc::new(crate::cross_cutting::bounded_command_runner::TokioBoundedCommandRunner),
+            fake_repository_registration_gate(),
+            Arc::new(ProviderRegistry::default()),
+        )
+        .build()
+        .expect("build");
+        let environment = dependencies.coordinator.git_environment();
+        assert_eq!(
+            environment.get("HOME").map(String::as_str),
+            Some("/home/tester")
+        );
+        assert_eq!(environment.get("LC_ALL").map(String::as_str), Some("C"));
+        for key in environment.keys() {
+            assert!(
+                matches!(key.as_str(), "LC_ALL" | "HOME" | "SSH_AUTH_SOCK"),
+                "unexpected key {key}"
+            );
+        }
     }
 }

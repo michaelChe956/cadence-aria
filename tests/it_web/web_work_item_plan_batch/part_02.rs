@@ -280,6 +280,143 @@ async fn batch_confirm_rewrite_batch_supersedes_current_batch_drafts() {
     ws.close(None).await.ok();
 }
 
+#[tokio::test]
+async fn batch_oversized_review_feedback_fails_batch_run_node() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let _test_guard = enable_test_controls().await;
+    let (app, _root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
+        valid_outline_output(),
+        valid_draft_output("outline_backend_session"),
+        valid_frontend_draft_output(),
+        valid_integration_draft_output(),
+    ])
+    .await;
+    let (session_id, _plan_id, mut ws) =
+        prepare_plan_accept_outline_and_select_batch_with_reviewer(&app, true).await;
+
+    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_created"
+                && message["node"]["node_type"] == "work_item_batch_confirm"
+        })
+    })
+    .await;
+
+    // 可选通过的 batch review：summary 约 72KB。`apply_optional_findings` 会把
+    // `format_review_feedback(verdict)` 写入 `pending_revision_context`，重写 batch 时
+    // prompt 构建必然触发 64KB provider-context 硬兜底 fail-closed。
+    let oversized = "超".repeat(24_000);
+    enable_work_item_plan_review_fixture(
+        &app,
+        &session_id,
+        json!({
+            "verdict": "pass",
+            "review_scope": "batch",
+            "summary": oversized,
+            "generation_round_id": "round_001",
+            "affects_items": [
+                { "target_outline_id": "outline_backend_session" },
+                { "target_outline_id": "outline_frontend_expiry" },
+                { "target_outline_id": "outline_integration_session" }
+            ],
+            "findings": [
+                {
+                    "severity": "suggestion",
+                    "message": "可选建议：补充边界用例",
+                    "evidence": "",
+                    "impact": "",
+                    "required_action": ""
+                }
+            ]
+        }),
+    )
+    .await;
+
+    ws.send(Message::Text(
+        json!({
+            "type": "work_item_batch_decision",
+            "decision": "accept_all",
+            "feedback": null,
+            "first_affected_outline_id": null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send batch accept all");
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        messages
+            .iter()
+            .any(|message| message["type"] == "review_decision_required")
+    })
+    .await;
+    let decision_required = messages
+        .iter()
+        .find(|message| message["type"] == "review_decision_required")
+        .expect("review_decision_required for optional batch review");
+    let options = decision_required["options"]
+        .as_array()
+        .expect("options array");
+    assert!(
+        options.contains(&json!("apply_optional_findings")),
+        "optional batch review must offer apply_optional_findings, got {options:?}"
+    );
+
+    ws.send(Message::Text(
+        json!({
+            "type": "review_decision_response",
+            "decision": "apply_optional_findings",
+            "extra_context": null
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send apply_optional_findings");
+
+    // `timeline_node_updated` 不带完整 node，仅含 node_id/status，
+    // 需与先前 `timeline_node_created` 的 work_item_batch_run 节点关联。
+    let batch_run_failed = |messages: &[Value]| {
+        let batch_run_node_id = messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message["type"] == "timeline_node_created"
+                    && message["node"]["node_type"] == "work_item_batch_run"
+            })
+            .and_then(|message| message["node"]["node_id"].as_str());
+        let Some(batch_run_node_id) = batch_run_node_id else {
+            return false;
+        };
+        messages.iter().any(|message| {
+            message["type"] == "timeline_node_updated"
+                && message["node_id"].as_str() == Some(batch_run_node_id)
+                && message["status"] == "failed"
+        })
+    };
+
+    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
+        batch_run_failed(messages)
+    })
+    .await;
+    assert!(
+        batch_run_failed(&messages),
+        "batch run node must transition to failed instead of hanging active: {messages:#?}"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message["type"] == "error"
+                && message["message"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("provider-context"))
+        }),
+        "client must receive the prompt-too-large error: {messages:#?}"
+    );
+
+    ws.close(None).await.ok();
+}
+
 fn valid_draft_output(outline_id: &str) -> Value {
     valid_draft_output_with_title(outline_id, "实现后端登录会话 API")
 }

@@ -193,6 +193,7 @@ fn adapter_input(prompt: &str) -> AdapterInput {
         provider_type: ProviderType::Fake,
         role: AdapterRole::Orchestrator,
         worktree_path: None,
+        provider_stream_log_dir: None,
         prompt: prompt.to_string(),
         context_files: vec!["tests/fixtures/artifacts/spec.md".to_string()],
         output_schema: "clarification_record.v1".to_string(),

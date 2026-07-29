@@ -8,7 +8,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::{WorkspaceMessageRecord, WorkspaceSessionRecord};
+use crate::product::models::{WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceType};
+use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 use chrono::Utc;
 
 pub fn ensure_workspace_context_message(
@@ -17,6 +18,7 @@ pub fn ensure_workspace_context_message(
     session: WorkspaceSessionRecord,
 ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
     let has_generation_brief = session.messages.iter().any(is_generation_brief_message);
+    let has_runtime_context = session.messages.iter().any(is_runtime_context_message);
     let has_legacy_brief = session.messages.iter().any(is_legacy_context_message);
 
     if has_generation_brief {
@@ -55,6 +57,32 @@ pub fn ensure_workspace_context_message(
         return lifecycle.replace_workspace_messages(&session.id, messages);
     }
 
+    if has_runtime_context {
+        let content = build_workspace_context_message(app_paths, lifecycle, &session)?;
+        if !has_legacy_brief
+            && session
+                .messages
+                .iter()
+                .any(|message| is_runtime_context_message(message) && message.content == content)
+        {
+            return Ok(session);
+        }
+        let mut messages: Vec<WorkspaceMessageRecord> = session
+            .messages
+            .clone()
+            .into_iter()
+            .filter(|message| !is_legacy_context_message(message))
+            .collect();
+        if let Some(message) = messages
+            .iter_mut()
+            .find(|message| is_runtime_context_message(message))
+        {
+            message.content = content;
+            message.created_at = Utc::now().to_rfc3339();
+        }
+        return lifecycle.replace_workspace_messages(&session.id, messages);
+    }
+
     let content = build_workspace_context_message(app_paths, lifecycle, &session)?;
     let mut messages: Vec<WorkspaceMessageRecord> = session
         .messages
@@ -77,8 +105,11 @@ fn build_workspace_context_message(
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
 ) -> Result<String, ProductStoreError> {
+    if session.workspace_type == WorkspaceType::WorkItem {
+        WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
+    }
     let issue = IssueStore::new(app_paths.clone()).get(&session.project_id, &session.issue_id)?;
-    let entity = workspace_entity_context(lifecycle, session, &issue)?;
+    let entity = workspace_entity_context(app_paths, lifecycle, session, &issue)?;
     let repository = repository_for(app_paths, &session.project_id, &entity.repository_id)?;
     let issue_description = issue
         .description
@@ -91,7 +122,7 @@ fn build_workspace_context_message(
         entity.linked_context.join("\n")
     };
 
-    let work_item_context = work_item_context_summary(lifecycle, session)?;
+    let work_item_context = work_item_context_summary(app_paths, lifecycle, session)?;
     let work_item_context_block = if work_item_context.is_empty() {
         String::new()
     } else {
@@ -161,4 +192,8 @@ fn is_generation_brief_message(message: &WorkspaceMessageRecord) -> bool {
 
 fn is_legacy_context_message(message: &WorkspaceMessageRecord) -> bool {
     message.role == "system" && message.content.starts_with("Workspace 上下文已准备")
+}
+
+fn is_runtime_context_message(message: &WorkspaceMessageRecord) -> bool {
+    message.role == "system" && message.content.starts_with("Workspace 生成任务已准备")
 }

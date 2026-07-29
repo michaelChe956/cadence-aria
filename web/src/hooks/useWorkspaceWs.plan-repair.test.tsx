@@ -52,7 +52,7 @@ describe("useWorkspaceWs plan repair projection", () => {
               id: "unit_run_0001",
               logical_work_item_id: "work_item_0001",
               related_revision_id: "work_item_revision_0001",
-              summary: "Tester 发现契约不匹配",
+              summary: "Coder 发现契约不匹配",
               created_at: "2026-07-18T00:00:00Z",
             },
           ],

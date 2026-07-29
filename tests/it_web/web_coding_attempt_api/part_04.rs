@@ -22,13 +22,9 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     let persisted_attempt = store
         .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("persisted attempt");
-    let testing_report = sample_testing_report(&attempt_id);
     let code_review = sample_code_review_report(&attempt_id);
     let review_request = sample_review_request(&attempt_id);
     let internal_review = sample_internal_review(&attempt_id, &review_request.id);
-    store
-        .save_testing_report(&persisted_attempt, &testing_report)
-        .expect("save testing report");
     store
         .save_code_review_report(&persisted_attempt, &code_review)
         .expect("save code review");
@@ -77,7 +73,6 @@ async fn returns_coding_attempt_snapshot_with_persisted_execution_state() {
     assert_eq!(snapshot["attempt"]["stage"], "prepare_context");
     assert_eq!(snapshot["active_node_id"], "coding_node_0002");
     assert_eq!(snapshot["timeline_nodes"].as_array().unwrap().len(), 2);
-    assert_eq!(snapshot["testing_report"]["id"], testing_report.id.as_str());
     assert_eq!(
         snapshot["code_review_reports"][0]["summary"],
         code_review.summary.as_str()
@@ -226,9 +221,6 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
     fs::create_dir_all(&artifact_dir).expect("artifact dir");
     fs::write(artifact_dir.join("unit.stdout.log"), "unit stdout\n").expect("artifact");
     store
-        .save_testing_report(&attempt, &sample_testing_report(&attempt_id))
-        .expect("save testing report");
-    store
         .save_timeline_node(&attempt, sample_running_node(&attempt_id))
         .expect("save timeline node");
     let attempt_dir = artifact_dir
@@ -288,7 +280,7 @@ async fn deletes_coding_attempt_and_preserves_work_item() {
 }
 
 #[tokio::test]
-async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
+async fn delete_work_item_rejected_preserves_coding_attempts_worktrees_and_branches() {
     let root = tempdir().expect("root");
     let repo = git_repo();
     let app = build_web_router(WebAppState::new(
@@ -298,7 +290,8 @@ async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
     bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
 
-    let (status, first_created) = request_json(
+    // work_item_0001 上有一个活跃 coding attempt（含 worktree + 分支）。
+    let (status, created) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
@@ -306,58 +299,30 @@ async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let first_attempt_id = assert_global_attempt_id(&first_created);
-    let first = prepare_attempt_with_worktree(
+    let attempt_id = assert_global_attempt_id(&created);
+    let attempt = prepare_attempt_with_worktree(
         &store,
         repo.path(),
         "project_0001",
         "issue_0001",
-        &first_attempt_id,
+        &attempt_id,
     );
-    let first_artifact_dir =
-        store.attempt_test_output_root("project_0001", "issue_0001", &first_attempt_id);
-    fs::create_dir_all(&first_artifact_dir).expect("first artifact dir");
-    fs::write(first_artifact_dir.join("unit.stdout.log"), "first\n").expect("first artifact");
-    let (status, _) = request_json(
-        app.clone(),
-        Method::POST,
-        &scoped_attempt_uri(&first_attempt_id, "/abort"),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let (status, second_created) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let second_attempt_id = assert_global_attempt_id(&second_created);
-    let second = prepare_attempt_with_worktree(
-        &store,
-        repo.path(),
-        "project_0001",
-        "issue_0001",
-        &second_attempt_id,
-    );
-    let second_artifact_dir =
-        store.attempt_test_output_root("project_0001", "issue_0001", &second_attempt_id);
-    fs::create_dir_all(&second_artifact_dir).expect("second artifact dir");
-    fs::write(second_artifact_dir.join("unit.stdout.log"), "second\n").expect("second artifact");
-    let first_attempt_dir = first_artifact_dir
+    let artifact_dir = store.attempt_test_output_root("project_0001", "issue_0001", &attempt_id);
+    fs::create_dir_all(&artifact_dir).expect("artifact dir");
+    fs::write(artifact_dir.join("unit.stdout.log"), "log\n").expect("artifact");
+    let attempt_dir = artifact_dir
         .parent()
         .and_then(|path| path.parent())
-        .expect("first attempt dir")
+        .expect("attempt dir")
         .to_path_buf();
-    let second_attempt_dir = second_artifact_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("second attempt dir")
+    let worktree_path = attempt
+        .worktree_path
+        .as_ref()
+        .expect("attempt worktree")
         .to_path_buf();
 
+    // 新语义（spec `harden-work-item-group-deletion`）：存在 coding workspace 时拒绝删除
+    // work item，要求用户先删 coding workspace。拒绝时 attempt / worktree / 分支必须原样保留。
     let (status, body) = request_json(
         app.clone(),
         Method::DELETE,
@@ -365,27 +330,28 @@ async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
         json!({}),
     )
     .await;
+    assert_eq!(status, StatusCode::CONFLICT, "delete body: {body}");
+    assert_eq!(body["code"], "coding_workspace_exists");
+    assert_eq!(body["details"]["work_item_id"], "work_item_0001");
+    assert_eq!(body["details"]["attempt_id"], attempt_id);
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["status"], "deleted");
-    assert!(!first_attempt_dir.exists());
-    assert!(!second_attempt_dir.exists());
+    // 拒绝时 coding workspace 全部产物不动——用户要继续用或自行清理。
+    assert!(attempt_dir.exists(), "attempt dir must remain after rejection");
     assert!(
-        !first
-            .worktree_path
-            .as_ref()
-            .expect("first worktree")
-            .exists()
+        worktree_path.exists(),
+        "worktree must remain after rejection"
     );
     assert!(
-        !second
-            .worktree_path
-            .as_ref()
-            .expect("second worktree")
-            .exists()
+        branch_exists(repo.path(), &attempt.branch_name),
+        "branch must remain after rejection"
     );
-    assert!(!branch_exists(repo.path(), &first.branch_name));
-    assert!(!branch_exists(repo.path(), &second.branch_name));
+    assert!(
+        !store
+            .list_attempts_for_work_item("project_0001", "issue_0001", "work_item_0001")
+            .expect("list attempts")
+            .is_empty(),
+        "attempt must remain after rejection"
+    );
 
     let (status, lifecycle) = request_json(
         app,
@@ -395,6 +361,12 @@ async fn delete_work_item_cascades_coding_attempts_worktrees_and_branches() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(lifecycle["work_items"].as_array().unwrap().is_empty());
-    assert!(lifecycle["coding_attempts"].as_array().unwrap().is_empty());
+    assert!(
+        !lifecycle["work_items"].as_array().unwrap().is_empty(),
+        "work item must remain after rejection"
+    );
+    assert!(
+        !lifecycle["coding_attempts"].as_array().unwrap().is_empty(),
+        "coding attempt must remain after rejection"
+    );
 }

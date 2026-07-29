@@ -165,14 +165,12 @@ fn create_work_item_persists_split_fields() {
             source_outline_id: Some("outline_backend".to_string()),
             source_draft_id: Some("draft_backend".to_string()),
             planned_implementation_context: Some("实现后端 API".to_string()),
-            planned_handoff_summary: Some("交付后端 API contract".to_string()),
             kind: WorkItemKind::Backend,
             sequence_hint: Some(10),
             depends_on: Vec::new(),
             exclusive_write_scopes: vec!["src/product/**".to_string()],
             forbidden_write_scopes: vec!["web/**".to_string()],
             context_budget: WorkItemContextBudget::default(),
-            required_handoff_from: Vec::new(),
             verification_plan_ref: Some("verification_plan_work_item_0001".to_string()),
             require_execution_plan_confirm: false,
             id: None,
@@ -193,10 +191,6 @@ fn create_work_item_persists_split_fields() {
     assert_eq!(
         work_item.planned_implementation_context.as_deref(),
         Some("实现后端 API")
-    );
-    assert_eq!(
-        work_item.planned_handoff_summary.as_deref(),
-        Some("交付后端 API contract")
     );
     assert_eq!(work_item.kind, WorkItemKind::Backend);
     assert_eq!(work_item.exclusive_write_scopes, vec!["src/product/**"]);
@@ -533,18 +527,15 @@ fn new_split_output_with_ids(
                     source_outline_id: None,
                     source_draft_id: None,
                     planned_implementation_context: None,
-                    planned_handoff_summary: None,
                     kind: WorkItemKind::Backend,
                     sequence_hint: Some((index as u32 + 1) * 10),
                     depends_on: Vec::new(),
                     exclusive_write_scopes: Vec::new(),
                     forbidden_write_scopes: Vec::new(),
                     context_budget: WorkItemContextBudget::default(),
-                    required_handoff_from: Vec::new(),
                     verification_plan_ref: verification_plan_ids.get(index).map(|s| s.to_string()),
                     require_execution_plan_confirm: false,
                     execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
-                    handoff_summary_ref: None,
                     completion_commit: None,
                     completion_diff_summary_ref: None,
                     created_at: "2026-06-17T00:00:00Z".to_string(),

@@ -343,24 +343,59 @@ async fn compile_recovery_continue_finalizes_active_plan_without_new_compile_tra
 
 #[tokio::test]
 async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_after_restart() {
-    for (checkpoint, expected_cursor, expected_sessions, expected_reports) in [
+    for (
+        checkpoint,
+        expected_cursor,
+        expected_sessions,
+        expected_reports,
+        first_session_bound,
+        first_context_prepared,
+        expected_plan_status,
+    ) in [
         (
-            WorkItemPlanCompileFinalizerCheckpoint::PlanSummaryCommitted,
-            "plan_summary_committed",
+            WorkItemPlanCompileFinalizerCheckpoint::PlanSummaryPrepared,
+            "plan_summary_prepared",
             0,
             0,
+            false,
+            false,
+            crate::product::models::IssueWorkItemPlanStatus::Draft,
         ),
         (
             WorkItemPlanCompileFinalizerCheckpoint::FirstChildSessionEnsured,
             "child_session_001_ensured",
             1,
             0,
+            false,
+            false,
+            crate::product::models::IssueWorkItemPlanStatus::Draft,
+        ),
+        (
+            WorkItemPlanCompileFinalizerCheckpoint::FirstChildBindingEnsured,
+            "child_session_001_binding_ensured",
+            1,
+            0,
+            true,
+            false,
+            crate::product::models::IssueWorkItemPlanStatus::Draft,
+        ),
+        (
+            WorkItemPlanCompileFinalizerCheckpoint::FirstChildContextPrepared,
+            "child_session_001_context_prepared",
+            1,
+            0,
+            true,
+            true,
+            crate::product::models::IssueWorkItemPlanStatus::Draft,
         ),
         (
             WorkItemPlanCompileFinalizerCheckpoint::CompileReportPersisted,
             "compile_report_persisted",
             2,
             1,
+            true,
+            true,
+            crate::product::models::IssueWorkItemPlanStatus::Confirmed,
         ),
     ] {
         let (_tmp, lifecycle, plan_id, mut engine) =
@@ -417,13 +452,31 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
         assert_eq!(interrupted_tx.child_session_ids.len(), expected_sessions);
         assert_eq!(
             lifecycle
-                .list_workspace_sessions("project_0001", "issue_0001")
+                .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
                 .unwrap()
-                .into_iter()
-                .filter(|session| session.workspace_type == WorkspaceType::WorkItem)
-                .count(),
-            expected_sessions
+                .status,
+            expected_plan_status,
+            "Plan 只能在所有子 Workspace RuntimeBinding 与 Context 已准备后确认"
         );
+        let child_sessions = lifecycle
+            .list_workspace_sessions("project_0001", "issue_0001")
+            .unwrap()
+            .into_iter()
+            .filter(|session| session.workspace_type == WorkspaceType::WorkItem)
+            .collect::<Vec<_>>();
+        assert_eq!(child_sessions.len(), expected_sessions);
+        if let Some(first_session) = child_sessions.first() {
+            assert_eq!(
+                first_session.work_item_runtime_binding.is_some(),
+                first_session_bound
+            );
+            assert_eq!(
+                first_session.messages.first().is_some_and(|message| {
+                    message.role == "system" && message.content.contains("[work_item_context]")
+                }),
+                first_context_prepared
+            );
+        }
         assert_eq!(
             engine
                 .artifact_versions

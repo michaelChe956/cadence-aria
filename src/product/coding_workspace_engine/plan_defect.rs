@@ -18,7 +18,6 @@ use crate::product::work_item_revision_store::WorkItemRevisionStore;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlanDefectSource {
     Coder,
-    Tester,
     CodeReviewer,
     GroupReviewer,
 }
@@ -27,7 +26,6 @@ impl PlanDefectSource {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::Coder => "coder",
-            Self::Tester => "tester",
             Self::CodeReviewer => "code_reviewer",
             Self::GroupReviewer => "group_reviewer",
         }
@@ -46,19 +44,61 @@ struct ExecutionPlanDefectPayload {
     plan_defect_findings: Vec<serde_json::Value>,
 }
 
+/// 从 Provider 输出中挑出真正携带 `plan_defect_findings` 的结论对象。
+///
+/// Provider 正文常夹带与结论无关的花括号片段（JS 解构 `{ foo }`、示例
+/// `{"type": "module"}` 等），只信任第一个 `{` 会把散文误判为契约违规并把流程
+/// 卡在人工分诊。因此逐个遍历平衡候选，并且只接受显式声明
+/// `plan_defect_findings` 的对象：该字段带 `#[serde(default)]`，任何合法 JSON
+/// 对象都能反序列化成空 findings，仅凭反序列化成功会让无关片段静默吞掉真实结论。
+///
+/// 契约要求结论位于输出末尾（同 `review_parser`），因此取**最后**一个可用的
+/// 声明候选：Provider 可能先复述空示例 `{"plan_defect_findings": []}` 再给出
+/// 真实结论，取首个会让真实结论被静默吞掉。
+///
+/// 边界：`extract_json_object_candidates` 只产出顶层平衡对象，因此被包在更外层
+/// 花括号块中的结论不会被检查——契约要求结论为顶层对象，这里不做兼容。
+fn extract_plan_defect_payload(
+    provider_output: &str,
+) -> Result<Option<ExecutionPlanDefectPayload>, CodingWorkspaceEngineError> {
+    let mut selected = None;
+    let mut declared_error = None;
+    for json in extract_json_object_candidates(provider_output) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            continue;
+        };
+        let declares_findings = value
+            .as_object()
+            .is_some_and(|object| object.contains_key("plan_defect_findings"));
+        if !declares_findings {
+            continue;
+        }
+        match serde_json::from_value::<ExecutionPlanDefectPayload>(value) {
+            Ok(payload) => selected = Some(payload),
+            // 声明了 `plan_defect_findings` 但结构非法：这是真实的契约违规，
+            // 记录下来，待所有候选都不可用时报错。
+            Err(error) => declared_error = Some(error),
+        }
+    }
+    match (selected, declared_error) {
+        (Some(payload), _) => Ok(Some(payload)),
+        (None, Some(error)) => Err(CodingWorkspaceEngineError::ProviderStream(format!(
+            "plan_defect_output_invalid: {error}"
+        ))),
+        (None, None) => Ok(None),
+    }
+}
+
 pub(crate) fn parse_execution_plan_defects(
     source: PlanDefectSource,
     provider_output: &str,
 ) -> Result<ExecutionPlanDefectReport, CodingWorkspaceEngineError> {
-    let Some(json) = extract_json_object(provider_output) else {
+    let Some(payload) = extract_plan_defect_payload(provider_output)? else {
         return Ok(ExecutionPlanDefectReport {
             source,
             findings: Vec::new(),
         });
     };
-    let payload = serde_json::from_str::<ExecutionPlanDefectPayload>(json).map_err(|error| {
-        CodingWorkspaceEngineError::ProviderStream(format!("plan_defect_output_invalid: {error}"))
-    })?;
     let findings = payload
         .plan_defect_findings
         .into_iter()
@@ -380,19 +420,12 @@ impl CodingWorkspaceEngine {
             .head_commit
             .clone()
             .unwrap_or_else(|| attempt.base_branch.clone());
-        let test_evidence_refs = self
-            .store
-            .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .map(|report| report.id)
-            .collect();
         let rendered = renderer_for(provider)
             .render_reviewer(
                 &bundle.reviewer_projection,
                 &ReviewerExecutionEnvelope {
                     unit_run_id: run.id.clone(),
                     diff_ref: format!("{repository_state_ref}..worktree"),
-                    test_evidence_refs,
                     handoff_revision_ids: run.resolved_handoff_revision_ids.clone(),
                     contract_delta_refs: Vec::new(),
                     completion_commit: repository_state_ref,

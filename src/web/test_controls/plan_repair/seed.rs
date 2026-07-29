@@ -203,6 +203,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
         unrelated_contract(),
     ];
     let mut bindings = BTreeMap::new();
+    let mut published_work_items = Vec::new();
     for contract in &contracts {
         let logical_id = contract.identity.logical_work_item_id.clone();
         let revision_id = format!("work_item_revision_{logical_id}_0001");
@@ -258,43 +259,53 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             .set_active_work_item_revision(&plan, &logical, None, &revision_id)
             .map_err(fixture_error)?;
         bindings.insert(logical_id, revision_id);
+        published_work_items.push(compiled);
     }
 
+    let dependency_graph = DependencyGraphRevision {
+        id: "dependency_graph_revision_0001".to_string(),
+        plan_id: PLAN_ID.to_string(),
+        edges: vec![DependencyContractEdge {
+            from: "wi_core".to_string(),
+            to: "wi_registration".to_string(),
+            required_contracts: vec![RequiredDependencyContract {
+                contract_id: "contract.workflow".to_string(),
+                required_capabilities: vec!["finalization_failure".to_string()],
+                compatibility_policy: ContractCompatibilityPolicy::RequireAll,
+            }],
+        }],
+        created_at: CREATED_AT.to_string(),
+    };
+
     revision_store
-        .put_dependency_graph_revision(
-            &plan,
-            &DependencyGraphRevision {
-                id: "dependency_graph_revision_0001".to_string(),
-                plan_id: PLAN_ID.to_string(),
-                edges: vec![DependencyContractEdge {
-                    from: "wi_core".to_string(),
-                    to: "wi_registration".to_string(),
-                    required_contracts: vec![RequiredDependencyContract {
-                        contract_id: "contract.workflow".to_string(),
-                        required_capabilities: vec!["finalization_failure".to_string()],
-                        compatibility_policy: ContractCompatibilityPolicy::RequireAll,
-                    }],
-                }],
-                created_at: CREATED_AT.to_string(),
-            },
-        )
+        .put_dependency_graph_revision(&plan, &dependency_graph)
+        .map_err(fixture_error)?;
+    let plan_revision = WorkItemPlanRevision {
+        id: "plan_revision_0001".to_string(),
+        plan_id: PLAN_ID.to_string(),
+        revision_no: 1,
+        supersedes: None,
+        reason: PlanRevisionReason::InitialCompile,
+        work_item_bindings: bindings.clone(),
+        dependency_graph_revision_id: dependency_graph.id.clone(),
+        validation_report_ref: "plan_validation_report_0001".to_string(),
+        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        created_at: CREATED_AT.to_string(),
+    };
+    let plan_projection = super::seed_projection::compile_plan_projection_bundle(
+        &plan_revision,
+        &dependency_graph,
+        &published_work_items,
+        &story.id,
+        &design.id,
+        CREATED_AT,
+    )
+    .map_err(fixture_error)?;
+    revision_store
+        .put_plan_projection_bundle(&plan, &plan_projection)
         .map_err(fixture_error)?;
     revision_store
-        .put_plan_revision(
-            &plan,
-            &WorkItemPlanRevision {
-                id: "plan_revision_0001".to_string(),
-                plan_id: PLAN_ID.to_string(),
-                revision_no: 1,
-                supersedes: None,
-                reason: PlanRevisionReason::InitialCompile,
-                work_item_bindings: bindings,
-                dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
-                validation_report_ref: "plan_validation_report_0001".to_string(),
-                plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-                created_at: CREATED_AT.to_string(),
-            },
-        )
+        .put_plan_revision(&plan, &plan_revision)
         .map_err(fixture_error)?;
     plan = revision_store
         .set_active_plan_revision(&plan, "plan_revision_0001")
@@ -392,8 +403,6 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
         )]),
         contract_hash: "contract_hash_v1".to_string(),
         commit_sha: "commit_core_v1".to_string(),
-        tests: vec!["cargo test --locked".to_string()],
-        artifacts: vec!["src/core.rs".to_string()],
         created_at: CREATED_AT.to_string(),
     };
     revision_store

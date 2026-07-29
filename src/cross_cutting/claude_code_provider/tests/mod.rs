@@ -144,6 +144,7 @@ fn adapter_input(prompt: &str) -> AdapterInput {
                 .to_string_lossy()
                 .to_string(),
         ),
+        provider_stream_log_dir: None,
         prompt: prompt.to_string(),
         context_files: Vec::new(),
         output_schema: String::new(),

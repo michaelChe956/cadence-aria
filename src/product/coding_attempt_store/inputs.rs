@@ -80,6 +80,5 @@ pub struct CreateQualityBypassAuditInput {
     pub gate_id: String,
     pub stage: CodingExecutionStage,
     pub reason_code: Option<String>,
-    pub skipped_required_steps: Vec<String>,
     pub operator_context: String,
 }

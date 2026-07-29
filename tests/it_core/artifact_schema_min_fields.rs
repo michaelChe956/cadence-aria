@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 #[test]
 fn canonical_validator_accepts_minimal_positive_fixture_for_all_phase1_artifact_kinds() {
     let matrix = artifact_validation_matrix();
-    assert_eq!(matrix.len(), 17);
+    assert_eq!(matrix.len(), 16);
 
     for kind in ArtifactKind::all_phase1() {
         let content = minimal_positive_content(kind);
@@ -141,14 +141,6 @@ fn minimal_json(kind: ArtifactKind) -> Value {
             "candidate_traceability_refs": [],
             "status": "completed"
         }),
-        ArtifactKind::TestingReport => json!({
-            "artifact_kind": "testing_report",
-            "worktask_id": "work_001",
-            "commands_run": [],
-            "tests_passed": true,
-            "failures": [],
-            "candidate_traceability_refs": []
-        }),
         ArtifactKind::CodeReviewReport => json!({
             "artifact_kind": "code_review_report",
             "worktask_id": "work_001",
@@ -194,7 +186,6 @@ fn first_required_json_field(kind: ArtifactKind) -> &'static str {
         ArtifactKind::ReadinessCheck => "ready",
         ArtifactKind::DispatchPackage => "worktask_routing",
         ArtifactKind::CodingReport => "worktask_id",
-        ArtifactKind::TestingReport => "worktask_id",
         ArtifactKind::CodeReviewReport => "worktask_id",
         ArtifactKind::IntegrationReport => "integrated_worktasks",
         ArtifactKind::FinalReview => "overall_decision",

@@ -49,7 +49,6 @@ impl InteractiveTaskRunner {
                     "codex",
                     NodeWriteClass::WritesWorkspace,
                 ))),
-                InteractiveStep::Provider(Box::new(step("N17", "codex", NodeWriteClass::ReadOnly))),
                 InteractiveStep::Provider(Box::new(step(
                     "N25",
                     "claude_code",

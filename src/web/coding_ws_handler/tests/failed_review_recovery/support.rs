@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::process::Command;
 
@@ -15,8 +16,24 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::product::models::WorkItemPlanLineage;
+use crate::product::models::{
+    DependencyGraphRevision, LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason,
+    VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle,
+    WorkItemRevision,
+};
+use crate::product::work_item_contract::{
+    BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract,
+    WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
+};
+use crate::product::work_item_projection::{
+    CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
+    ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler,
+    plan_projection_hashes, projection_hashes,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+
+mod schema_v2;
+use schema_v2::seed_group_plan_facts;
 
 use super::super::{
     CodingWsOutMessage, build_coding_session_state, seed_compiled_work_item_fixture,
@@ -28,7 +45,6 @@ pub(super) const FAILED_NODE_ID: &str = "coding_node_0009";
 pub(super) enum FixtureCase {
     CompletedAttempt,
     AbortedAttempt,
-    TestingStage,
     MissingCompletedAt,
     GroupWithoutActiveUnit,
     GroupActiveUnitIdMismatch,
@@ -442,11 +458,7 @@ pub(super) fn failed_review_fixture(
         FixtureCase::AbortedAttempt => CodingAttemptStatus::Aborted,
         _ => CodingAttemptStatus::Failed,
     };
-    attempt.stage = if matches!(case, FixtureCase::TestingStage) {
-        CodingExecutionStage::Testing
-    } else {
-        CodingExecutionStage::CodeReview
-    };
+    attempt.stage = CodingExecutionStage::CodeReview;
     attempt.completed_at = (!matches!(case, FixtureCase::MissingCompletedAt))
         .then(|| "2026-07-12T04:30:59Z".to_string());
     attempt.work_item_group_id = matches!(scope, CodingAttemptScope::WorkItemGroup)
@@ -619,36 +631,4 @@ pub(super) fn failed_review_fixture(
         dirty_gate,
         stale_role_run_id: role_run.id,
     }
-}
-
-fn seed_group_plan_facts(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
-    let plan_id = attempt
-        .work_item_group_id
-        .as_deref()
-        .expect("group attempt plan id");
-    WorkItemRevisionStore::new(store.paths())
-        .put_plan_lineage(&WorkItemPlanLineage {
-            id: plan_id.to_string(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            story_spec_refs: Vec::new(),
-            design_spec_refs: Vec::new(),
-            active_revision_id: Some("plan_revision_0001".to_string()),
-            active_amendment_id: None,
-            created_at: "2026-07-12T00:00:00Z".to_string(),
-            updated_at: "2026-07-12T00:00:00Z".to_string(),
-        })
-        .expect("group plan lineage");
-    store
-        .save_plan_binding(
-            attempt,
-            &CodingAttemptPlanBinding {
-                attempt_id: attempt.id.clone(),
-                plan_id: plan_id.to_string(),
-                bound_plan_revision_id: "plan_revision_0001".to_string(),
-                applied_amendment_ids: Vec::new(),
-                updated_at: "2026-07-12T00:00:00Z".to_string(),
-            },
-        )
-        .expect("group plan binding");
 }

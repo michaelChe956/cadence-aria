@@ -6,7 +6,6 @@ import type {
 import type {
   ProviderConfigSnapshot,
   WorkItemExecutionPlan,
-  WorkItemHandoff,
   WorkspaceProviderName,
 } from "./common";
 import type {
@@ -58,7 +57,6 @@ export type CodingExecutionStage =
   | "prepare_context"
   | "worktree_prepare"
   | "coding"
-  | "testing"
   | "code_review"
   | "review_request"
   | "internal_pr_review"
@@ -114,18 +112,12 @@ export type CodingAttempt = {
 };
 
 export type CodingTimelineNodeStatus = "pending" | "running" | "completed" | "failed" | "blocked";
-export type CodingAgentRole = "author" | "tester" | "reviewer" | "git" | "system";
-export type CodingProviderRole =
-  | "coder"
-  | "tester"
-  | "code_reviewer"
-  | "internal_reviewer";
-export type CodingTesterProviderSelectRole = "tester_plan" | "tester_execute";
+export type CodingAgentRole = "author" | "reviewer" | "git" | "system";
+export type CodingProviderRole = "coder" | "code_reviewer" | "internal_reviewer";
 export type CodingProviderSelectRole =
   | "author"
   | "reviewer"
-  | Exclude<CodingProviderRole, "tester">
-  | CodingTesterProviderSelectRole;
+  | CodingProviderRole;
 export type CodingProviderPermissionMode = "auto" | "supervised";
 export type CodingRoleRunStatus =
   | "running"
@@ -136,11 +128,8 @@ export type CodingRoleRunStatus =
   | "aborted";
 export type CodingRoleRunTrigger =
   | "initial"
-  | "retry_test_plan"
-  | "rerun_missing_steps"
   | "retry_review"
-  | "retry_internal_review"
-  | "manual_rerun";
+  | "retry_internal_review";
 
 export type CodingRoleRunEventType =
   | "provider_prompt"
@@ -181,7 +170,6 @@ export type CodingRoleRunEventPreview = {
 
 export type CodingRolePermissionModes = {
   coder: CodingProviderPermissionMode;
-  tester: CodingProviderPermissionMode;
   code_reviewer: CodingProviderPermissionMode;
   internal_reviewer: CodingProviderPermissionMode;
 };
@@ -201,8 +189,6 @@ export type CodingTimelineNode = {
 
 export type CodingRoleProviderConfigSnapshot = {
   coder: WorkspaceProviderName;
-  tester_plan: WorkspaceProviderName;
-  tester_execute: WorkspaceProviderName;
   code_reviewer: WorkspaceProviderName;
   internal_reviewer: WorkspaceProviderName;
   review_rounds: number;
@@ -227,84 +213,6 @@ export type CodingRoleRun = {
   artifact_refs: string[];
   event_summary?: CodingRoleRunEventSummary | null;
   recent_events?: CodingRoleRunEventPreview[];
-};
-
-export type TestCommandStatus = "passed" | "failed" | "timed_out" | "blocked";
-export type TestingOverallStatus =
-  | "passed"
-  | "passed_with_warnings"
-  | "failed"
-  | "skipped_by_user_decision"
-  | "blocked";
-
-export type TestCommand = {
-  command: string[];
-  cwd: string;
-  exit_code: number | null;
-  duration_ms: number;
-  stdout_ref: string;
-  stderr_ref: string;
-  status: TestCommandStatus;
-};
-
-export type TestPlanTool =
-  | "run_command"
-  | "read_file"
-  | "list_files"
-  | "search_code"
-  | "provider_managed";
-export type TestPlanRiskLevel = "low" | "medium" | "high";
-
-export type TestPlanStep = {
-  id: string;
-  title: string;
-  intent: string;
-  required: boolean;
-  tool: TestPlanTool;
-  risk_level: TestPlanRiskLevel;
-  command_or_tool_input: unknown;
-  evidence_expectation: string;
-  related_requirements?: string[];
-  related_design_constraints?: string[];
-  related_work_item_tasks?: string[];
-};
-
-export type TestingStepResult = {
-  step_id: string;
-  status: TestCommandStatus;
-  evidence_refs?: string[];
-  command?: string[] | null;
-  provider_analysis?: string | null;
-};
-
-export type TestingUnplannedEvidence = {
-  tool_use_id: string;
-  tool_name: string;
-  status: TestCommandStatus;
-  evidence_refs?: string[];
-  provider_analysis?: string | null;
-};
-
-export type TestingReport = {
-  id: string;
-  attempt_id: string;
-  role_run_id?: string | null;
-  run_no?: number | null;
-  commands: TestCommand[];
-  overall_status: TestingOverallStatus;
-  provider_claim: unknown | null;
-  backend_verified: boolean;
-  started_at: string;
-  completed_at: string | null;
-  plan_id?: string | null;
-  plan_summary?: string | null;
-  steps?: TestingStepResult[];
-  unplanned_commands?: TestCommand[];
-  unplanned_evidence?: TestingUnplannedEvidence[];
-  missing_required_steps?: string[];
-  skipped_required_steps?: string[];
-  context_warnings?: string[];
-  raw_provider_output_ref?: string | null;
 };
 
 export type CodingReviewVerdict = "approve" | "request_changes" | "blocked";
@@ -358,6 +266,7 @@ export type ReviewRequest = {
   push_status: PushStatus;
   external_url: string | null;
   manual_instructions: string[];
+  push_error: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -407,15 +316,11 @@ export type CodingGateActionType =
   | "abort"
   | "retry_push"
   | "manual_fix"
-  | "retry_test_plan"
-  | "rerun_missing_steps"
   | "provide_context"
   | "manual_continue"
   | "retry_coding"
   | "retry_review"
-  | "retry_internal_review"
-  | "accept_testing_result"
-  | "rerun_testing";
+  | "retry_internal_review";
 export type CodingGateKind = "permission" | "stage_gate" | "blocked" | "final_confirm";
 
 export type CodingGateAction = {
@@ -476,7 +381,6 @@ export type CodingAttemptSnapshotResponse = {
   provider_config_snapshot: ProviderConfigSnapshot;
   timeline_nodes: CodingTimelineNode[];
   active_node_id: string | null;
-  testing_report: TestingReport | null;
   code_review_reports: CodeReviewReport[];
   review_request: ReviewRequest | null;
   internal_pr_review: InternalPrReview | null;
@@ -484,7 +388,6 @@ export type CodingAttemptSnapshotResponse = {
   pending_choices: CodingChoiceGate[];
   role_runs?: CodingRoleRun[];
   work_item_execution_plan: WorkItemExecutionPlan | null;
-  work_item_handoff: WorkItemHandoff | null;
   require_execution_plan_confirm: boolean;
 };
 
@@ -559,7 +462,6 @@ export type CodingWsOutMessage =
       work_item_markdown: string | null;
       verification_commands: string[];
       work_item_execution_plan: WorkItemExecutionPlan | null;
-      work_item_handoff: WorkItemHandoff | null;
       linked_plan_repair: PlanRepairSessionSnapshot | null;
       require_execution_plan_confirm: boolean;
     } & Omit<CodingAttemptSnapshotResponse, "attempt">)
@@ -597,7 +499,6 @@ export type CodingWsOutMessage =
     }
   | { type: "coding_stream_chunk"; content: string; node_id?: string | null }
   | { type: "coding_message_complete"; node_id?: string | null }
-  | { type: "testing_report_update"; report: TestingReport }
   | { type: "code_review_complete"; report: CodeReviewReport }
   | { type: "review_request_update"; review_request: ReviewRequest }
   | { type: "internal_pr_review_complete"; review: InternalPrReview }

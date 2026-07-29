@@ -42,8 +42,6 @@ async fn coding_runtime_handoff_without_amendment_keeps_normal_group_path_unchan
         )]),
         contract_hash: "contract_hash_v1".to_string(),
         commit_sha: "commit_v1".to_string(),
-        tests: Vec::new(),
-        artifacts: Vec::new(),
         created_at: "2026-07-20T00:00:00Z".to_string(),
     };
 

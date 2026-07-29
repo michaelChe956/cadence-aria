@@ -68,12 +68,51 @@ export type RepositoryInitializationSummary = {
   commands: RepositoryInitializationCommand[];
   warnings: string[];
   changed_paths: string[];
+  git_finalize_warning: string | null;
   completed_at: string;
 };
 
 export type CreateRepositoryResponse = {
   repository: Repository;
   initialization: RepositoryInitializationSummary;
+};
+
+export type RepositoryInitializationOperationStatus =
+  | "created"
+  | "running"
+  | "completed"
+  | "failed";
+
+export type RepositoryInitializationStepId =
+  | "cadence_skills"
+  | "pre_check"
+  | "rule_config"
+  | "mcp_configuration"
+  | "project_rules_examples"
+  | "git_finalize";
+
+export type RepositoryInitializationStepStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed";
+
+export type RepositoryInitializationStep = {
+  step_id: RepositoryInitializationStepId;
+  status: RepositoryInitializationStepStatus;
+};
+
+export type RepositoryInitializationOperationSnapshot = {
+  operation_id: string;
+  status: RepositoryInitializationOperationStatus;
+  steps: RepositoryInitializationStep[];
+  current_step: RepositoryInitializationStepId | null;
+  failed_step: RepositoryInitializationStepId | null;
+  result: CreateRepositoryResponse | null;
+  error: ApiError | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 };
 
 export type ProductIssue = {
@@ -138,20 +177,7 @@ export type WorkItemExecutionPlanStatus =
 
 export type WorkItemDependencyHandoffRef = {
   work_item_id: string;
-  summary_ref: string | null;
-  summary: string | null;
   commit_sha: string | null;
-};
-
-export type WorkItemHandoff = {
-  handoff_id: string;
-  work_item_id: string;
-  summary: string;
-  handoff_summary_ref: string | null;
-  dependency_handoffs: WorkItemDependencyHandoffRef[];
-  verification_summary: string | null;
-  created_at: string;
-  updated_at: string;
 };
 
 export type WorkItemExecutionPlan = {
@@ -180,11 +206,9 @@ export type WorkItemExecutionPlan = {
 export type WorkItemContextBudget = {
   target_context_k: string;
   max_summary_chars: number;
-  max_handoff_chars: number;
   max_code_context_chars: number;
   max_context_file_refs: number;
   max_traceability_refs: number;
-  max_dependency_handoffs: number;
 };
 
 export type WorkspaceProviderName = RealProviderName | "fake";

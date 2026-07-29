@@ -76,11 +76,9 @@ pub enum WorkItemExecutionPlanStatus {
 pub struct WorkItemContextBudget {
     pub target_context_k: String,
     pub max_summary_chars: usize,
-    pub max_handoff_chars: usize,
     pub max_code_context_chars: usize,
     pub max_context_file_refs: usize,
     pub max_traceability_refs: usize,
-    pub max_dependency_handoffs: usize,
 }
 
 impl Default for WorkItemContextBudget {
@@ -88,11 +86,9 @@ impl Default for WorkItemContextBudget {
         Self {
             target_context_k: "30-50".to_string(),
             max_summary_chars: 20_000,
-            max_handoff_chars: 12_000,
             max_code_context_chars: 30_000,
             max_context_file_refs: 80,
             max_traceability_refs: 40,
-            max_dependency_handoffs: 3,
         }
     }
 }
@@ -148,8 +144,6 @@ pub struct LifecycleWorkItemRecord {
     pub source_draft_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_implementation_context: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub planned_handoff_summary: Option<String>,
     #[serde(default)]
     pub kind: WorkItemKind,
     #[serde(default)]
@@ -163,15 +157,11 @@ pub struct LifecycleWorkItemRecord {
     #[serde(default)]
     pub context_budget: WorkItemContextBudget,
     #[serde(default)]
-    pub required_handoff_from: Vec<String>,
-    #[serde(default)]
     pub verification_plan_ref: Option<String>,
     #[serde(default)]
     pub require_execution_plan_confirm: bool,
     #[serde(default)]
     pub execution_plan_status: WorkItemExecutionPlanStatus,
-    #[serde(default)]
-    pub handoff_summary_ref: Option<String>,
     #[serde(default)]
     pub completion_commit: Option<String>,
     #[serde(default)]

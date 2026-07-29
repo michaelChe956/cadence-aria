@@ -208,7 +208,7 @@ fn artifact_retry_prompt_includes_validation_reasons() {
     assert!(prompt.contains("[REQ-"));
     assert!(prompt.contains("[AC-"));
     assert!(
-        !prompt.contains("[cadence_original_routing_rules]"),
+        !prompt.contains("[cadence_project_rules]"),
         "artifact retry must repair the current artifact instead of reopening the routing lifecycle"
     );
 }
@@ -375,12 +375,10 @@ fn reviewer_prompt_requires_nonce_sentinel() {
     assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
     assert!(input.prompt.contains("不得使用 Markdown code fence"));
     assert!(!input.prompt.contains("```json"));
-    assert!(input.prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
-    ));
-    assert!(input.prompt.contains(
-        "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
-    ));
+    assert!(input.prompt.contains("[cadence_project_rules]"));
+    assert!(input.prompt.contains("AGENTS.md"));
+    assert!(input.prompt.contains("CLAUDE.md"));
+    assert!(!input.prompt.contains(&["Cadence-", "skills/"].concat()));
     assert!(input.prompt.contains("当前阶段：候选产物审查"));
     assert!(input.prompt.contains("必调 Skill：using-superpowers。"));
     assert!(
@@ -422,7 +420,7 @@ fn reviewer_structured_output_repair_does_not_restart_routing() {
         .expect("repair input");
 
     assert!(repair.prompt.contains("只能修复 JSON 与 ARIA_STRUCTURED_OUTPUT 封装"));
-    assert!(!repair.prompt.contains("[cadence_original_routing_rules]"));
+    assert!(!repair.prompt.contains("[cadence_project_rules]"));
     assert!(!repair.prompt.contains("当前阶段："));
     assert!(!repair.prompt.contains("using-superpowers"));
 }

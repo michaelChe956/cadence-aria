@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
-use super::types::{RepositoryInitializationCommandSummary, RepositoryRegistrationError};
+use super::types::{
+    RepositoryInitializationCommandSummary, RepositoryInitializationProgress,
+    RepositoryInitializationStepKind, RepositoryRegistrationError,
+};
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::{
@@ -14,13 +17,6 @@ use crate::cross_cutting::streaming_provider::{
 };
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::{AdapterRole, ProviderType};
-
-const INITIALIZATION_COMMANDS: [&str; 4] = [
-    "/pre-check",
-    "/rule-config",
-    "/mcp-configuration",
-    "/project-rules-examples",
-];
 
 pub struct ClaudeRepositoryInitializer {
     gate: Arc<ProviderAvailabilityGate>,
@@ -46,10 +42,15 @@ impl ClaudeRepositoryInitializer {
         git_root: &Path,
         command_timeout: Duration,
         cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
-        let mut summaries = Vec::with_capacity(INITIALIZATION_COMMANDS.len());
-        for (offset, command) in INITIALIZATION_COMMANDS.iter().enumerate() {
+        let commands = RepositoryInitializationStepKind::ALL
+            .into_iter()
+            .filter_map(|step| step.command().map(|command| (step, command)));
+        let mut summaries = Vec::with_capacity(4);
+        for (offset, (step, command)) in commands.enumerate() {
             let command_index = offset + 1;
+            progress.step_started(step).map_err(|error| *error)?;
             self.gate
                 .ensure_available(&ProviderName::ClaudeCode)
                 .map_err(|error| {
@@ -80,7 +81,7 @@ impl ClaudeRepositoryInitializer {
             let input = StreamingProviderInput {
                 provider_type: ProviderType::ClaudeCode,
                 role: AdapterRole::Executor,
-                prompt: (*command).to_string(),
+                prompt: command.to_string(),
                 working_dir: git_root.to_path_buf(),
                 workspace_session_id: None,
                 resume_provider_session_id: None,
@@ -89,8 +90,8 @@ impl ClaudeRepositoryInitializer {
                 env_vars: BTreeMap::new(),
                 timeout_secs: command_timeout.as_secs().max(1),
             };
-            summaries.push(
-                self.run_turn(
+            let summary = self
+                .run_turn(
                     adapter,
                     input,
                     command_index,
@@ -98,8 +99,9 @@ impl ClaudeRepositoryInitializer {
                     command_timeout,
                     cancellation.clone(),
                 )
-                .await?,
-            );
+                .await?;
+            progress.step_completed(step).map_err(|error| *error)?;
+            summaries.push(summary);
         }
         Ok(summaries)
     }
@@ -287,7 +289,15 @@ fn command_failure_with_output(
     output: &LimitedOutput,
     retryable: bool,
 ) -> RepositoryRegistrationError {
-    let details = output.summary().unwrap_or_else(|| message.to_string());
+    // 失败原因 message 必须总是可见：output 非空时追加到末尾，
+    // 不得因 provider 已产生探索输出而把超时/错误原因覆盖丢失。
+    let mut details = output.summary().unwrap_or_else(|| message.to_string());
+    if !details.contains(message) {
+        if !details.is_empty() {
+            details.push('\n');
+        }
+        details.push_str(message);
+    }
     command_failure(command_index, command, &details, retryable, output.limit)
 }
 

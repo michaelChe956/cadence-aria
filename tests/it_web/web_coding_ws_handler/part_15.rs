@@ -154,18 +154,6 @@ impl ReviewerTriggeredReworkProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for ReviewerTriggeredReworkProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        start_web_test_provider_driven_testing_session(&input.prompt, cancel)
-    }
-
     async fn run_streaming(
         &self,
         input: &AdapterInput,
@@ -390,14 +378,30 @@ async fn run_reviewer_triggered_rework_case(
             "{} must not create Task 3 request",
             case.label()
         );
-        assert!(
-            store
+        if matches!(case, ReviewerTriggeredReworkCase::Invalid) {
+            let gates = store
                 .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
-                .expect("blocked gates")
-                .is_empty(),
-            "{} must not create a generic blocked gate",
-            case.label()
-        );
+                .expect("blocked gates");
+            assert_eq!(
+                gates.len(),
+                1,
+                "{} must open a human triage gate instead of stalling silently",
+                case.label()
+            );
+            assert_eq!(
+                gates[0].reason_code.as_deref(),
+                Some("coding_output_human_triage")
+            );
+        } else {
+            assert!(
+                store
+                    .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
+                    .expect("blocked gates")
+                    .is_empty(),
+                "{} must not create a generic blocked gate",
+                case.label()
+            );
+        }
     }
 
     ws.close(None).await.expect("close ws");
@@ -429,6 +433,8 @@ async fn coding_plan_repair_reviewer_triggered_rework_routes_plan_and_safe_stops
             attempt.status,
             if matches!(case, ReviewerTriggeredReworkCase::Plan) {
                 CodingAttemptStatus::AwaitingPlanAmendment
+            } else if matches!(case, ReviewerTriggeredReworkCase::Invalid) {
+                CodingAttemptStatus::Blocked
             } else {
                 CodingAttemptStatus::Running
             },

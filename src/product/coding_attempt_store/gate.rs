@@ -440,7 +440,6 @@ impl super::CodingAttemptStore {
             gate_id: input.gate_id,
             stage: input.stage,
             reason_code: input.reason_code,
-            skipped_required_steps: input.skipped_required_steps,
             operator_context: input.operator_context,
             created_at: Utc::now().to_rfc3339(),
         };

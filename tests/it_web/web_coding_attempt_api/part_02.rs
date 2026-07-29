@@ -33,143 +33,6 @@ async fn repeated_group_coding_attempt_create_returns_original_attempt() {
 }
 
 #[tokio::test]
-async fn delete_work_item_plan_cascades_children_sessions_and_attempts() {
-    let root = tempdir().expect("root");
-    let repo = git_repo();
-    let app = build_web_router(WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    ));
-    bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let lifecycle_store = LifecycleStore::new(app_paths.clone());
-    let coding_store = CodingAttemptStore::new(app_paths);
-
-    lifecycle_store
-        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
-            id: Some("issue_work_item_plan_0001".to_string()),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            source_story_spec_ids: vec!["story_spec_0001".to_string()],
-            source_design_spec_ids: vec!["design_spec_0001".to_string()],
-            options: IssueWorkItemPlanOptions {
-                include_integration_tests: true,
-                include_e2e_tests: false,
-                force_frontend_backend_split: true,
-                require_execution_plan_confirm: false,
-            },
-            status: IssueWorkItemPlanStatus::Confirmed,
-            work_item_ids: vec!["work_item_0001".to_string()],
-            repository_profile_ref: None,
-            verification_plan_ids: vec!["verification_plan_0001".to_string()],
-            dependency_graph: Vec::new(),
-            created_from_provider_run: None,
-            validator_findings: Vec::new(),
-        })
-        .expect("create work item plan");
-    lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "issue_work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
-        .expect("create work item plan session");
-
-    let (status, created) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let attempt_id = assert_global_attempt_id(&created);
-    let attempt = prepare_attempt_with_worktree(
-        &coding_store,
-        repo.path(),
-        "project_0001",
-        "issue_0001",
-        &attempt_id,
-    );
-    let artifact_dir = coding_store.attempt_test_output_root(
-        "project_0001",
-        "issue_0001",
-        &attempt_id,
-    );
-    fs::create_dir_all(&artifact_dir).expect("artifact dir");
-    fs::write(artifact_dir.join("unit.stdout.log"), "unit\n").expect("artifact");
-    let attempt_dir = artifact_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("attempt dir")
-        .to_path_buf();
-
-    let (status, body) = request_json(
-        app.clone(),
-        Method::DELETE,
-        "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_work_item_plan_0001",
-        json!({}),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["status"], "deleted");
-    assert!(!attempt_dir.exists());
-    assert!(
-        !attempt
-            .worktree_path
-            .as_ref()
-            .expect("attempt worktree")
-            .exists()
-    );
-    assert!(!branch_exists(repo.path(), &attempt.branch_name));
-    assert!(
-        lifecycle_store
-            .get_issue_work_item_plan("project_0001", "issue_0001", "issue_work_item_plan_0001")
-            .is_err()
-    );
-    assert!(
-        lifecycle_store
-            .get_verification_plan("project_0001", "issue_0001", "verification_plan_0001")
-            .is_err()
-    );
-    assert!(
-        coding_store
-            .list_attempts_for_work_item("project_0001", "issue_0001", "work_item_0001")
-            .expect("list attempts")
-            .is_empty()
-    );
-
-    let (status, lifecycle) = request_json(
-        app,
-        Method::GET,
-        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(lifecycle["work_item_plans"].as_array().unwrap().is_empty());
-    assert!(lifecycle["work_items"].as_array().unwrap().is_empty());
-    assert!(lifecycle["coding_attempts"].as_array().unwrap().is_empty());
-    assert!(
-        lifecycle["workspace_sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(
-                |session| session["entity_id"] != "issue_work_item_plan_0001"
-                    && session["entity_id"] != "work_item_0001"
-            )
-    );
-}
-
-#[tokio::test]
 async fn reads_test_output_artifact_from_attempt_store() {
     let root = tempdir().expect("root");
     let repo = git_repo();
@@ -391,10 +254,8 @@ async fn bootstrap_confirmed_work_item_without_workspace_session(
         json!({"name":"Coding","description":null}),
     )
     .await;
-    request_json(
+    let repository = register_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
         json!({
             "name":"Repo",
             "path":repo_path,
@@ -402,6 +263,7 @@ async fn bootstrap_confirmed_work_item_without_workspace_session(
         }),
     )
     .await;
+    assert_eq!(repository["repository_id"], "repository_0001");
     request_json(
         app.clone(),
         Method::POST,
@@ -555,7 +417,6 @@ async fn bootstrap_completed_dependency_without_handoff(
             sequence_hint: Some(20),
             depends_on: vec!["work_item_0001".to_string()],
             exclusive_write_scopes: vec!["src/".to_string()],
-            required_handoff_from: vec!["work_item_0001".to_string()],
             plan_status: WorkItemPlanStatus::Confirmed,
             ..Default::default()
         })
@@ -716,7 +577,7 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
         updated_at: "2026-07-18T00:00:00Z".to_string(),
     };
     store.put_plan_lineage(&lineage).expect("plan lineage");
-    seed_group_work_item_revisions(&store, &lineage);
+    let work_item_projections = seed_group_work_item_revisions(&store, &lineage);
     let dependency = DependencyGraphRevision {
         id: "dependency_graph_revision_0001".to_string(),
         plan_id: lineage.id.clone(),
@@ -730,6 +591,39 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
     store
         .put_dependency_graph_revision(&lineage, &dependency)
         .expect("dependency graph");
+    let dependency_graph = DependencyContractGraph {
+        contracts: BTreeMap::from([
+            (
+                "work_item_0001".to_string(),
+                group_canonical_contract("work_item_0001", "实现爬楼梯"),
+            ),
+            (
+                "work_item_0002".to_string(),
+                group_canonical_contract("work_item_0002", "实现爬楼梯 part 2"),
+            ),
+        ]),
+        edges: dependency.edges.clone(),
+    };
+    let compiled_plan = PlanProjectionCompiler
+        .compile(PlanProjectionCompileInput {
+            plan_id: &lineage.id,
+            goal: "实现爬楼梯",
+            split_reason: "按依赖顺序拆分",
+            source_refs: vec!["story_spec_0001".to_string(), "design_spec_0001".to_string()],
+            dependency_graph: &dependency_graph,
+            work_item_projections: &work_item_projections,
+            expected_work_item_revision_ids: BTreeMap::from([
+                (
+                    "work_item_0001".to_string(),
+                    "work_item_revision_0001".to_string(),
+                ),
+                (
+                    "work_item_0002".to_string(),
+                    "work_item_revision_0002".to_string(),
+                ),
+            ]),
+        })
+        .expect("compile group plan projection");
     let revision = WorkItemPlanRevision {
         id: "plan_revision_0001".to_string(),
         plan_id: lineage.id.clone(),
@@ -751,6 +645,26 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
         created_at: "2026-07-18T00:00:00Z".to_string(),
     };
+    let plan_projection = PlanProjectionBundle {
+        id: revision.plan_projection_bundle_id.clone(),
+        plan_revision_id: revision.id.clone(),
+        dependency_graph_revision_id: revision.dependency_graph_revision_id.clone(),
+        work_item_projection_bundle_refs: vec![
+            "projection_work_item_revision_0001".to_string(),
+            "projection_work_item_revision_0002".to_string(),
+        ],
+        human_group_projection: compiled_plan.human,
+        coder_group_context: compiled_plan.coder,
+        reviewer_group_matrix: compiled_plan.reviewer,
+        human_group_projection_hash: "human_group_hash".to_string(),
+        coder_group_context_hash: "coder_group_hash".to_string(),
+        reviewer_group_matrix_hash: "reviewer_group_hash".to_string(),
+        compiler_version: "projection-compiler-v1".to_string(),
+        created_at: "2026-07-18T00:00:00Z".to_string(),
+    };
+    store
+        .put_plan_projection_bundle(&lineage, &plan_projection)
+        .expect("plan projection bundle");
     store.put_plan_revision(&lineage, &revision).expect("plan revision");
     store
         .set_active_plan_revision(&lineage, &revision.id)

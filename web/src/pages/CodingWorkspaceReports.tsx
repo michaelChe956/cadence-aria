@@ -9,139 +9,10 @@ import type {
   CodeReviewReport,
   InternalPrReview,
   ReviewFinding,
-  TestingStepResult,
   WorkItemExecutionPlan,
 } from "../api/types";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { errorMessage } from "./CodingWorkspaceControls";
-
-export function TestsPanel() {
-  const report = useCodingWorkspaceStore((state) => state.testingReport);
-  if (!report) {
-    return <div className="text-[var(--aria-ink-muted)]">暂无测试报告</div>;
-  }
-  const steps = report.steps ?? [];
-  const missingRequiredSteps = report.missing_required_steps ?? [];
-  const skippedRequiredSteps = report.skipped_required_steps ?? [];
-  const contextWarnings = report.context_warnings ?? [];
-  const unplannedCommands = report.unplanned_commands ?? [];
-  const unplannedEvidence = report.unplanned_evidence ?? [];
-  const hasPlanDetails =
-    Boolean(report.plan_summary) ||
-    steps.length > 0 ||
-    missingRequiredSteps.length > 0 ||
-    skippedRequiredSteps.length > 0 ||
-    contextWarnings.length > 0 ||
-    Boolean(report.raw_provider_output_ref);
-
-  return (
-    <div className="space-y-3">
-      <StatusBadge value={report.overall_status} />
-      {hasPlanDetails ? (
-        <div data-testid="coding-test-plan-report" className="space-y-2">
-          {report.plan_summary ? (
-            <div>
-              <div className="text-xs font-semibold text-[var(--aria-ink-muted)]">
-                Test Plan
-              </div>
-              <div className="mt-0.5 break-words text-sm font-semibold">
-                {report.plan_summary}
-              </div>
-            </div>
-          ) : null}
-          {steps.length > 0 ? (
-            <div className="space-y-2">
-              {steps.map((step) => (
-                <TestingStepResultRow key={step.step_id} step={step} />
-              ))}
-            </div>
-          ) : null}
-          <TestingList label="missing required" values={missingRequiredSteps} />
-          <TestingList label="skipped required" values={skippedRequiredSteps} />
-          <TestingList label="context warning" values={contextWarnings} />
-          {report.raw_provider_output_ref ? (
-            <EvidencePath label="raw output" value={report.raw_provider_output_ref} />
-          ) : null}
-          {unplannedEvidence.length > 0 ? (
-            <div className="space-y-1">
-              <div className="text-xs font-semibold text-[var(--aria-ink-muted)]">
-                unplanned evidence
-              </div>
-              {unplannedEvidence.map((evidence) => (
-                <div
-                  key={evidence.tool_use_id}
-                  className="rounded-md border border-[var(--aria-line)] p-2 text-xs"
-                >
-                  <div className="font-mono">{evidence.tool_name}</div>
-                  <div className="text-[var(--aria-ink-muted)]">{evidence.status}</div>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-      {[...report.commands, ...unplannedCommands].map((command, index) => (
-        <div
-          key={`${command.command.join(" ")}-${index}`}
-          className="rounded-md border border-[var(--aria-line)] p-2"
-        >
-          <div className="break-words font-mono text-xs">{command.command.join(" ")}</div>
-          <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">
-            {command.status} · exit {command.exit_code ?? "-"} · {command.duration_ms}ms
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function TestingStepResultRow({ step }: { step: TestingStepResult }) {
-  return (
-    <div className="rounded-md border border-[var(--aria-line)] p-2">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <StatusBadge value={step.status} />
-        <span className="min-w-0 break-words font-mono text-xs">{step.step_id}</span>
-      </div>
-      {step.command?.length ? (
-        <div className="mt-1 break-words font-mono text-xs text-[var(--aria-ink-muted)]">
-          {step.command.join(" ")}
-        </div>
-      ) : null}
-      {step.evidence_refs?.length ? (
-        <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">
-          evidence: {step.evidence_refs.join(", ")}
-        </div>
-      ) : null}
-      {step.provider_analysis ? (
-        <div className="mt-1 break-words text-xs">{step.provider_analysis}</div>
-      ) : null}
-    </div>
-  );
-}
-
-function TestingList({ label, values }: { label: string; values: string[] }) {
-  if (values.length === 0) {
-    return null;
-  }
-  return (
-    <div className="space-y-1 text-xs">
-      {values.map((value) => (
-        <div key={`${label}:${value}`} className="break-words">
-          {label}: {value}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function EvidencePath({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="grid min-w-0 grid-cols-[5rem_minmax(0,1fr)] gap-2 text-xs text-[var(--aria-ink-muted)]">
-      <span className="font-semibold">{label}</span>
-      <span className="min-w-0 break-words font-mono">{value}</span>
-    </div>
-  );
-}
 
 export function ReviewPanel() {
   const codeReviews = useCodingWorkspaceStore((state) => state.codeReviewReports);
@@ -281,6 +152,14 @@ export function GitPanel() {
         <InfoRow label="push" value={request?.push_status ?? "-"} />
         <InfoRow label="request" value={request?.id ?? "-"} />
       </dl>
+      {request?.push_status === "failed" && request.push_error ? (
+        <p
+          data-testid="review-request-push-error"
+          className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-[var(--aria-ink-muted)]"
+        >
+          {request.push_error}
+        </p>
+      ) : null}
       {request?.external_url ? (
         <a
           href={request.external_url}
@@ -438,9 +317,6 @@ export function PrepareExecutionPlanPanel({
             {plan.dependency_handoffs.map((handoff) => (
               <dd key={handoff.work_item_id} className="min-w-0 break-words font-mono">
                 <span>{handoff.work_item_id}</span>
-                {handoff.summary ? (
-                  <span className="ml-2 text-[var(--aria-ink)]">{handoff.summary}</span>
-                ) : null}
                 {handoff.commit_sha ? (
                   <span className="ml-2 text-[var(--aria-ink-muted)]">{handoff.commit_sha}</span>
                 ) : null}

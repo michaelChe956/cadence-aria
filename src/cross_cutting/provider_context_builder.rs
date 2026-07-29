@@ -105,6 +105,8 @@ pub fn build_provider_context(
         provider_type: context_package.provider_type.clone(),
         role: context_package.adapter_role.clone(),
         worktree_path: context_package.worktree_path.clone(),
+        // runtime unit 无 coding attempt 上下文，按契约缺省不写流日志。
+        provider_stream_log_dir: None,
         prompt,
         context_files: context_package.context_files.clone(),
         output_schema: context_package.output_schema_ref.clone(),
@@ -197,12 +199,12 @@ fn resolve_verification_commands(
 fn requires_worktree(node_id: &str) -> bool {
     matches!(
         node_id,
-        "N16" | "N17" | "N18" | "N19" | "N20" | "N24" | "N25" | "N26" | "N27"
+        "N16" | "N18" | "N19" | "N20" | "N24" | "N25" | "N26" | "N27"
     )
 }
 
 fn requires_acceptance_targets(node_id: &str) -> bool {
-    matches!(node_id, "N16" | "N17" | "N18" | "N19")
+    matches!(node_id, "N16" | "N18" | "N19")
 }
 
 fn has_non_empty_array(value: &Value, key: &str) -> bool {
@@ -308,7 +310,6 @@ fn artifact_kind_for_node(node_id: &str) -> &'static str {
         "N11" => "plan",
         "N12" => "dispatch_package",
         "N16" => "coding_report",
-        "N17" => "testing_report",
         "N18" => "code_review_report",
         "N19" => "coding_report",
         "N20" => "ready_advisory",
@@ -343,9 +344,6 @@ fn output_schema_summary(node_id: &str, output_schema_ref: &str) -> String {
         "dispatch_package" => r#"{"artifact_kind":"dispatch_package","worktask_routing":[]}"#,
         "coding_report" => {
             r#"{"artifact_kind":"coding_report","worktask_id":"...","files_modified":[],"commands_run":[],"candidate_traceability_refs":[],"status":"completed"}"#
-        }
-        "testing_report" => {
-            r#"{"artifact_kind":"testing_report","worktask_id":"...","commands_run":[],"tests_passed":true,"failures":[],"candidate_traceability_refs":[]}"#
         }
         "code_review_report" => {
             r#"{"artifact_kind":"code_review_report","worktask_id":"...","findings":[],"blocking":false,"candidate_traceability_refs":[]}"#

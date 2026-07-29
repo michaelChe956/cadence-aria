@@ -101,6 +101,21 @@ pub struct WorkItemRevision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkItemRuntimeBinding {
+    pub plan_id: String,
+    pub plan_revision_id: String,
+    pub logical_work_item_id: String,
+    pub work_item_revision_id: String,
+    pub projection_bundle_id: String,
+    pub verification_plan_revision_id: String,
+    pub canonical_contract_hash: String,
+    pub projection_compiler_version: String,
+    pub human_projection_hash: String,
+    pub coder_projection_hash: String,
+    pub reviewer_projection_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationPlanRevision {
     pub id: String,
     pub logical_work_item_id: String,
@@ -178,8 +193,6 @@ pub struct HandoffRevision {
     pub provided_capabilities: BTreeMap<String, Vec<String>>,
     pub contract_hash: String,
     pub commit_sha: String,
-    pub tests: Vec<String>,
-    pub artifacts: Vec<String>,
     pub created_at: String,
 }
 

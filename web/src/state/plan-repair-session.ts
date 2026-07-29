@@ -735,7 +735,7 @@ function codingStageForTimelineNode(node: TimelineNode): CodingTimelineNode["sta
     return "final_confirm";
   }
   if (node.node_type.includes("validation")) {
-    return "testing";
+    return "code_review";
   }
   return "coding";
 }

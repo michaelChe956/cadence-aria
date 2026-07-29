@@ -79,7 +79,6 @@ fn valid_split_output() -> Value {
                 "depends_on": [],
                 "exclusive_write_scopes": ["src/product/session.rs"],
                 "forbidden_write_scopes": ["web/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             },
             {
@@ -89,7 +88,6 @@ fn valid_split_output() -> Value {
                 "depends_on": [0],
                 "exclusive_write_scopes": ["web/src/session/**"],
                 "forbidden_write_scopes": ["src/product/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],
@@ -161,7 +159,6 @@ fn valid_split_output_with_type_field() -> Value {
                 "depends_on": [],
                 "exclusive_write_scopes": ["src/product/session.rs"],
                 "forbidden_write_scopes": ["web/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             },
             {
@@ -171,7 +168,6 @@ fn valid_split_output_with_type_field() -> Value {
                 "depends_on": [0],
                 "exclusive_write_scopes": ["web/src/session/**"],
                 "forbidden_write_scopes": ["src/product/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],
@@ -240,7 +236,6 @@ fn redo_only_output() -> Value {
                 "depends_on": [],
                 "exclusive_write_scopes": ["web/src/session/**"],
                 "forbidden_write_scopes": ["src/product/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],
@@ -548,14 +543,12 @@ async fn generate_revision_keeps_retained_and_redoes_marked() {
                 source_outline_id: item.source_outline_id.clone(),
                 source_draft_id: item.source_draft_id.clone(),
                 planned_implementation_context: item.planned_implementation_context.clone(),
-                planned_handoff_summary: item.planned_handoff_summary.clone(),
                 kind: item.kind.clone(),
                 sequence_hint: item.sequence_hint,
                 depends_on: item.depends_on.clone(),
                 exclusive_write_scopes: item.exclusive_write_scopes.clone(),
                 forbidden_write_scopes: item.forbidden_write_scopes.clone(),
                 context_budget: item.context_budget.clone(),
-                required_handoff_from: item.required_handoff_from.clone(),
                 verification_plan_ref: item.verification_plan_ref.clone(),
                 require_execution_plan_confirm: item.require_execution_plan_confirm,
                 plan_status: WorkItemPlanStatus::Confirmed,

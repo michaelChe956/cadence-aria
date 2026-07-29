@@ -4,6 +4,7 @@ use crate::product::cadence_skills::routing_reference::direct_cadence_routing_ru
 mod review;
 mod review_context;
 mod review_repair;
+mod reviewer_context_filter;
 mod revision;
 
 pub(crate) fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {
@@ -29,6 +30,40 @@ pub(crate) fn normalize_generation_prompt(
     } else {
         trimmed.to_string()
     }
+}
+
+fn initial_author_runtime_contract(
+    workspace_type: &WorkspaceType,
+    include_direct_routing_reference: bool,
+) -> String {
+    let (phase, required_skill) = match workspace_type {
+        WorkspaceType::Story => (
+            "新需求/行为变化的 Story 候选探索",
+            "using-superpowers → brainstorming",
+        ),
+        WorkspaceType::Design => (
+            "已确认 Story 范围内的 Design 候选探索",
+            "using-superpowers → brainstorming",
+        ),
+        WorkspaceType::WorkItemPlan => (
+            "已确认 Story/Design 后的 Work Item Plan 候选规划",
+            "using-superpowers → writing-plans",
+        ),
+        WorkspaceType::WorkItem => (
+            "已确认 Work Item Plan 范围内的单项 Work Item 候选规划",
+            "using-superpowers → writing-plans",
+        ),
+    };
+
+    let routing_reference = if include_direct_routing_reference {
+        direct_cadence_routing_rules_reference()
+    } else {
+        ""
+    };
+
+    format!(
+        "{routing_reference}当前阶段：{phase}。\n必调 Skill：{required_skill}。\n前置 gate：仅生成候选产物；Aria 的人工确认与 daemon canonical writeback 边界保持不变。\n\n",
+    )
 }
 
 pub(crate) fn build_artifact_retry_prompt(
@@ -59,6 +94,9 @@ pub(crate) fn build_artifact_retry_prompt(
         prompt.push('\n');
     }
     prompt.push('\n');
+    if let Some(schema) = author_artifact_schema_contract_for(workspace_type) {
+        prompt.push_str(&schema);
+    }
     prompt.push_str(structured_interaction_artifact_decision_contract(
         workspace_type,
     ));
@@ -144,7 +182,15 @@ impl WorkspaceEngine {
     }
 
     pub(crate) fn build_prompt(&self, user_content: &str) -> String {
-        let mut prompt = String::new();
+        let mut prompt = initial_author_runtime_contract(
+            &self.session.workspace_type,
+            !self.has_direct_cadence_routing_rules_system_context(),
+        );
+        if !self.has_author_artifact_schema_system_context()
+            && let Some(schema) = author_artifact_schema_contract_for(&self.session.workspace_type)
+        {
+            prompt.push_str(&schema);
+        }
         let last_current_user_message_index =
             self.session.messages.len().checked_sub(1).filter(|index| {
                 let message = &self.session.messages[*index];
@@ -168,6 +214,21 @@ impl WorkspaceEngine {
             prompt.push_str(&format!("[user]: {user_content}\n"));
         }
         prompt
+    }
+
+    fn has_author_artifact_schema_system_context(&self) -> bool {
+        self.session.messages.iter().any(|message| {
+            message.role == "system" && message.content.contains(ARTIFACT_SCHEMA_CONTRACT_MARKER)
+        })
+    }
+
+    pub(crate) fn has_direct_cadence_routing_rules_system_context(&self) -> bool {
+        self.session.messages.iter().any(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .contains(direct_cadence_routing_rules_reference())
+        })
     }
 
     pub(crate) fn missing_context_note_summaries(&self) -> Vec<String> {
@@ -227,6 +288,11 @@ impl WorkspaceEngine {
             " 一级标题。正文内部包含 ``` 代码块时，外层使用四反引号 ````artifact ... ````，避免和内部代码块冲突。\
              过程说明必须放在 artifact fence 外，最终候选产物必须放在 artifact fence 内。",
         );
+        if !prompt.contains(ARTIFACT_SCHEMA_CONTRACT_MARKER)
+            && let Some(schema) = author_artifact_schema_contract_for(&self.session.workspace_type)
+        {
+            prompt.push_str(&schema);
+        }
         prompt.push_str(structured_interaction_artifact_decision_contract(
             &self.session.workspace_type,
         ));

@@ -94,3 +94,112 @@ P6 Task 4: complete (commits 98000bf..b09de47, review approved after three fix w
   Decision: recovery evidence verifies all nine durable fault points, raw Request/Amendment/Manifest uniqueness, unrelated active revision stability, Story/Design/WorkItem recovery, and real production Runner paths for four roles across Codex, ClaudeCode and Fake scripted adapters.
   Decision: linked protocol errors fail closed unless the complete Story/Design target context matches the pending identity; Work Item repair stays on its Plan Repair Child path.
   Verification boundary: browser E2E/Playwright and real external Provider CLIs were intentionally not run per user instruction; browser acceptance remains user-owned.
+
+# 代码库初始化真实进度
+
+Change: add-repository-initialization-progress
+Plan: cadence/plans/2026-07-22_计划文档_代码库初始化进度_v1.0.md
+Execution mode: subagent-driven-development
+Base: b0dedb9
+Baseline: web pnpm test PASS (89 files / 724 tests); Rust cargo test blocked before tests because build.rs requires missing web/dist/index.html.
+Task 1: complete (commits b0dedb9..d240efa, review approved)
+  Minor: 缺少 mark_step_running 同一步、不同时间戳下保持 started_at/updated_at 不变的直接幂等回归测试；最终全分支审查时复核。
+Task 2: complete (commits d240efa..72458da, review approved)
+  Minor: 全仓 Clippy 仍被 Task 1 既有 `result_large_err` 阻断（types.rs progress trait 和 operation tests helper）；非本任务引入，后续拥有类型/API 范围的任务或最终修复波需解决。
+Task 3: complete (commits 72458da..ac0de30, review approved after one fix wave)
+  Minor: legacy `new` with custom RepositoryPersistence may use UUID temp operation store; Task 4 must use explicit new_with_operations with same ProductAppPaths.
+  Minor: coordinator order test records only generic initializer, not four distinct command names.
+  Minor: no coordinator-level regression for finalization operation-store write failure/non-terminal recovery.
+Task 4: complete (commits ac0de30..f3d59ba, recovery audit and final review clean)
+  Recovery: retained and audited the interrupted candidate diff; comparison against HEAD with the acceptance test established actual 201-vs-202 RED, then fresh Task 4 verification passed.
+  Verification: cargo fmt --check; cargo test --locked --lib repository_initialization_run_registry; cargo test --locked --test it_web repository_initialization_; cargo check --locked.
+Task 4: complete (commits ac0de30..d671cab, review approved after two fix waves)
+  Decision: operation result uses a dedicated RepositoryDto projection with path/runtime_root `<path>`; ordinary repository GET remains unchanged.
+  Decision: operation completed/failed changed_paths use exact whole-path sanitization, preserving relative repository paths.
+  Minor: worker-panic behavior is not injected end-to-end; RAII lease drop plus inactive stale-operation recovery are covered.
+
+# 初始化命令顺序调整（rule_config 优先）
+
+Plan: cadence/plans/2026-07-23_计划文档_初始化命令顺序调整_v1.0.md
+Plan base commit: 7203884b
+Execution mode: subagent-driven-development
+Task 1: complete (commits 7203884b..513039b6, review clean)
+  Minor: registration 测试辅助函数名 running_pre_check_operation/failed_pre_check_operation 语义已变为 RuleConfig 场景，命名有歧义，留待最终审查裁定。
+  Note: Plan Task 1 定向命令 `--lib repository_initialization` 仅匹配 3 个测试，实际取证用 `--lib repository_store`。
+Task 2: complete (commits 513039b6..5ae3dbce, review clean)
+Task 3: complete (commits 5ae3dbce..HEAD, doc-only)
+  Caveat: cargo test --locked 全量在本宿主因既有 ETXTBSY flake（btrfs 写后 exec，前次 task-8 已取证）无法全绿；失败测试隔离单跑全过，与本改动无因果。有效验证：--lib repository_store 53/53、it_web web_repository_initialization 10/10、前端 732/732、fmt/clippy/tsc/openspec validate 全绿。
+Final review: approved (7203884b..0f60a118, Ready to merge=Yes); Minor 修复 ca6dab7（辅助函数改名 + 旧 Plan 冻结接口节同步）
+
+# 回退 rule-config 优先顺序（恢复 pre-check 先跑）
+
+Reason: 真机测试添加代码库时 /rule-config 作为第一步失败（Claude API 429 配额耗尽 + 5min/命令超时 + 目标仓库 eza 别名噪声），用户决定撤销顺序调整。
+Action: 代码/测试/web 还原到 7203884b；OpenSpec（已归档 change + 主 specs）与 2026-07-22 Plan 全部恢复 pre-check 先跑；删除 2026-07-23 顺序调整 Plan；tasks.md 移除第 5 节。
+
+# WorkItemDraftPrompt 开销瘦身与上限重论证
+
+Plan: cadence/plans/2026-07-25_计划文档_基线修复_WorkItemDraftPrompt开销瘦身与上限重论证_v1.0.md
+Plan commit: 5ccd91fd
+Execution mode: subagent-driven-development
+Task 1: complete (commits 5ccd91fd..f4a92f79, review approved)
+  Minor: 投影测试改用 QUALITY_BUDGET 断言、QUALITY_BUDGET 常量加 #[cfg(test)]（controller 修复，避免 clippy dead_code）。
+  Minor: 提交 8f514702 混合归因（含前序 Plan 的依赖投影与测试改写），原子性已论证，commit body 未注明。
+Task 2: complete (commits f4a92f79..e175f732, review approved after controller adjudication)
+  Decision: fixture 对齐 session_0003 实测锚点（outline JSON 1,891 B / 投影 1,119 B），阈值=实测 10,941+800=11,741；12,000 质量预算断言未动；实际节省 980 B（估值 2,690 B 系计划高估）。
+  Minor: verification_plan.checks 精确复制约束从 hard_rules 降为 self_check 提示（plan-mandated，断言已锁定）。
+  Minor: 两条断言更新为兼容子串（方向合理，语义由保留段落覆盖）。
+Task 3: complete (commits e175f732..06c3af2a, review approved)
+  Note: commit 裹挟并行 Plan（文件大小守卫）的纯移动产物（provider_run.rs 696 行、part_01 改名），全文 diff 证明除 3 行修复外零漂移；配套 run.rs 瘦身与 include 接线仍未提交（并行 Plan 范围）。
+  Minor: 新分支附带 transition_stage(PrepareContext) 副作用（plan-mandated 复用 helper 的必然结果）。
+Task 4: complete (design.md 双层模型修订；fmt/clippy/lib 1361/it_web serial 19/openspec validate/git diff --check 全绿；3.3/4.1 保持未勾选待 Case A/B 授权)
+Final review: With fixes → 修复波 b24b0ad0（batch 分支同类悬挂一行修复 + batch 回归 11/11）。Minors 留档：draft 循环其余 Err 分支悬挂属既存行为（后续统一审计）；clear_active_run_if_token 不对称属既存。
+Case A/B 真实验证（操作者授权）：Case A backend_session 10/10 pass（0 inconclusive）；Case B compact_duration 10/10 pass（2 次非连续 inconclusive 超时）。3.3/4.1 已勾选；pnpm tsc -b + pnpm test 736/736 补证。
+
+# 末端 WorkItem 交接契约引用可空
+
+Change: relax-terminal-handoff-contract-refs
+Plan: cadence/plans/2026-07-26_计划文档_基线修复_末端WorkItem交接契约引用可空_v1.0.md
+Plan commit: c7c99403
+Execution mode: subagent-driven-development
+Base: a7192b50
+Task 1: complete (commits a7192b50..66c53630, review approved)
+  Minor: Plan Task 1 Step 2 命令为双位置参数（cargo 拒绝），implementer 改用等价 --lib 精确过滤命令；后续 Plan 命令模板应只写单个 TESTNAME 过滤器。
+  Note: 并行会话的 task-brief 会覆盖 .superpowers/sdd/task-N-brief.md 固定路径；本 Plan 后续 brief 使用唯一文件名。
+Task 2: complete (commits 66c53630..9607f860, review approved)
+  Minor: schema 行仍用记号 `str+`（非空 string），hard_rules 行措辞为"非空白"，两处对元素约束的记号轻微不对称；留待最终审查裁定。
+  Note: 并行会话并发 cargo 构建曾致 3 个无关瞬态失败（[cadence_project_rules] 断言），stash 对照实验证明与本任务无关，重跑全绿。
+Task 3: complete (commit 8066e065, review approved; 父提交为并行会话 a2976742，diff 仅 tasks.md)
+  ⚠️ 已消解：1.1–2.2 勾选依据由 Task 1/2 审查结论覆盖。
+Final review: approved (66c53630/9607f860/8066e065, Ready to merge=Yes)。Minors 留档：str+ vs 非空白记号不对称（保留）；Plan Step 2 命令模板已订正（本次提交）；spec「两项链路通过 Final Compile」场景由 tasks 4.1 Case A/B 真实验证兜底（归档前必须完成）。
+
+# Provider Prompt 项目规则引用
+
+Change: use-project-rules-in-prompts
+Plan: cadence/plans/2026-07-26_计划文档_功能开发_ProviderPrompt项目规则引用_v1.0.md
+Execution mode: subagent-driven-development
+Task 1/2: complete (commits 9607f860..a2976742, review approved)
+  Minor: RED 阶段后半部分的逐条失败尾部因并发 Cargo 锁与输出截断未留存；实施报告已披露，且不影响最终契约或 GREEN 证据。
+Task 3: complete (commit d697cad, review approved)
+  Exception: `cargo test --locked` 已执行，1361 个 lib 测试通过、it_core 143/144 通过；唯一 `large_file_guard` 失败为操作者批准接受的既有基线超限。扫描、14 项定向契约测试、fmt、clippy、check、OpenSpec 严格验证与范围 diff 检查均通过。
+Plan tracking fix: complete (commit 48c750b, review clean)
+Spec sync: complete (commit b9a770a, project-rule-aware-prompts 主规格已创建并验证)
+Archive: complete (commit b6ddf8e, archived to openspec/changes/archive/2026-07-26-use-project-rules-in-prompts)
+Final review: core Change approved; whole branch not merge-ready because concurrent add-repository-initialization-git-finalize has two Important findings outside this Change.
+
+# git_finalize 命令环境注入
+
+Change: fix-git-finalize-command-environment
+Plan: cadence/plans/2026-07-26_计划文档_基线修复_gitFinalize命令环境注入_v1.0.md
+Plan commit: 8f9235a9
+Execution mode: subagent-driven-development
+Base: 8f9235a9
+Task 1: complete (commits 8f9235a9..28e77d3f, review approved)
+  Minor: `git init -b main` 依赖宿主 git ≥ 2.28（plan-mandated，留档）；未设 GIT_CONFIG_NOSYSTEM，/etc/gitconfig 理论可干扰（风险极低，留档）。
+Task 2: complete (commits 28e77d3f..9b0aa069, review approved)
+  Minor: `#[cfg(test)] git_environment()` 暂 dead_code warning（plan-mandated 预留给 Task 3，消费后自然消除）。
+Task 3: complete (commits 9b0aa069..a345bf8d, review approved)
+  Note: brief 测试示例 fixture 不可编译（FixedAvailableProviderHealth 为带参 tuple struct），按 brief 授权改用 fake_repository_registration_gate()，被测逻辑与断言未动。
+Task 4: BLOCKED（it_web 既有回归，二分定位 64869f47 引入）→ 操作者选 A 修复
+Regression fix: 134a4f2e（it_web fixture 适配 GitFinalize checkpoint 两阶段协议，10/10 转绿）
+Task 4: complete (15cd52c2；fmt/clippy/repository_store 67/67/it_web 10/10/openspec validate 全绿)
+Final review: With fixes → Important 修复（补对照测试，注入 {LC_ALL, GIT_CONFIG_NOSYSTEM} 无 HOME，断言 commit 身份失败确定性复现；68/68 绿）。Minors 5 条留档（见终审报告）。Ready to merge=Yes。

@@ -219,7 +219,6 @@ pub(crate) fn coding_stage_dir_name(stage: &CodingExecutionStage) -> &'static st
         CodingExecutionStage::PrepareContext => "prepare_context",
         CodingExecutionStage::WorktreePrepare => "worktree_prepare",
         CodingExecutionStage::Coding => "coding",
-        CodingExecutionStage::Testing => "testing",
         CodingExecutionStage::CodeReview => "code_review",
         CodingExecutionStage::ReviewRequest => "review_request",
         CodingExecutionStage::InternalPrReview => "internal_pr_review",

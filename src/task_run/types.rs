@@ -48,7 +48,6 @@ pub struct TaskRunOutcome {
     pub report_path: PathBuf,
     pub openspec_change_dir: PathBuf,
     pub provider_run_refs: Vec<String>,
-    pub testing_report_path: Option<PathBuf>,
     pub final_summary_path: Option<PathBuf>,
     pub blocked_report_path: Option<PathBuf>,
 }

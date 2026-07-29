@@ -58,41 +58,28 @@ fn execution_worktask_input(workspace_root: &std::path::Path) -> ExecutionWorkta
 struct ScriptedExecutionProvider {
     output_schemas: Mutex<Vec<String>>,
     seen_prompts: Mutex<Vec<(String, String)>>,
-    testing_passes: Mutex<VecDeque<bool>>,
     review_decisions: Mutex<VecDeque<String>>,
     candidate_refs: Vec<String>,
-    fail_testing_with_provider_error: bool,
-    testing_has_only_out_of_scope_failure: bool,
-    testing_artifact_ref: Option<String>,
+    fail_review_with_provider_error: bool,
+    review_artifact_ref: Option<String>,
 }
 
 impl ScriptedExecutionProvider {
     fn happy() -> Self {
-        Self::new([true], ["pass"])
-    }
-
-    fn testing_fails_then_passes() -> Self {
-        Self::new([false, true], ["pass"])
-    }
-
-    fn testing_has_only_out_of_scope_failure() -> Self {
-        Self {
-            testing_has_only_out_of_scope_failure: true,
-            ..Self::new([false], ["pass"])
-        }
+        Self::new(["pass"])
     }
 
     fn review_revises_then_passes() -> Self {
-        Self::new([true, true], ["revise", "pass"])
+        Self::new(["revise", "pass"])
     }
 
-    fn testing_always_fails() -> Self {
-        Self::new([false, false, false, false], ["pass"])
+    fn review_always_revises() -> Self {
+        Self::new(["revise", "revise", "revise", "revise"])
     }
 
-    fn testing_provider_errors() -> Self {
+    fn review_provider_errors() -> Self {
         Self {
-            fail_testing_with_provider_error: true,
+            fail_review_with_provider_error: true,
             ..Self::happy()
         }
     }
@@ -103,21 +90,19 @@ impl ScriptedExecutionProvider {
         provider
     }
 
-    fn with_testing_artifact_ref(mut self, artifact_ref: &str) -> Self {
-        self.testing_artifact_ref = Some(artifact_ref.to_string());
+    fn with_review_artifact_ref(mut self, artifact_ref: &str) -> Self {
+        self.review_artifact_ref = Some(artifact_ref.to_string());
         self
     }
 
-    fn new<const T: usize, const R: usize>(testing_passes: [bool; T], reviews: [&str; R]) -> Self {
+    fn new<const R: usize>(reviews: [&str; R]) -> Self {
         Self {
             output_schemas: Mutex::new(Vec::new()),
             seen_prompts: Mutex::new(Vec::new()),
-            testing_passes: Mutex::new(testing_passes.into_iter().collect()),
             review_decisions: Mutex::new(reviews.into_iter().map(ToOwned::to_owned).collect()),
             candidate_refs: Vec::new(),
-            fail_testing_with_provider_error: false,
-            testing_has_only_out_of_scope_failure: false,
-            testing_artifact_ref: None,
+            fail_review_with_provider_error: false,
+            review_artifact_ref: None,
         }
     }
 
@@ -156,8 +141,8 @@ impl ProviderAdapter for ScriptedExecutionProvider {
                 "candidate_traceability_refs": self.candidate_refs.clone(),
                 "status": "completed"
             }),
-            "schema://aria/artifacts/testing_report/v1" => {
-                if self.fail_testing_with_provider_error {
+            "schema://aria/artifacts/code_review_report/v1" => {
+                if self.fail_review_with_provider_error {
                     return Err(ProviderAdapterError::execution_failed(
                         Some(1),
                         "",
@@ -165,38 +150,6 @@ impl ProviderAdapter for ScriptedExecutionProvider {
                         1,
                     ));
                 }
-                let passed = self
-                    .testing_passes
-                    .lock()
-                    .expect("testing passes")
-                    .pop_front()
-                    .unwrap_or(true);
-                json!({
-                    "artifact_kind": "testing_report",
-                    "artifact_ref": self.testing_artifact_ref.as_deref().unwrap_or("testing_report_worktask_001_0001"),
-                    "worktask_id": "worktask_001",
-                    "commands_run": ["cargo test --test execution_chain_fake_provider"],
-                    "tests_passed": passed,
-                    "failures": if passed {
-                        json!([])
-                    } else if self.testing_has_only_out_of_scope_failure {
-                        json!([{
-                            "test": "future_acceptance_target",
-                            "failure_type": "out_of_scope_acceptance_failure",
-                            "message": "完整测试失败在后续 worktask 的 acceptance target，当前 worktask 范围验证已通过。"
-                        }])
-                    } else {
-                        json!([{"test": "execution_chain", "message": "fixture failure"}])
-                    },
-                    "scope_result": if self.testing_has_only_out_of_scope_failure {
-                        json!("worktask_001_scoped_verification_passed")
-                    } else {
-                        json!(null)
-                    },
-                    "candidate_traceability_refs": []
-                })
-            }
-            "schema://aria/artifacts/code_review_report/v1" => {
                 let decision = self
                     .review_decisions
                     .lock()
@@ -205,7 +158,7 @@ impl ProviderAdapter for ScriptedExecutionProvider {
                     .unwrap_or_else(|| "pass".to_string());
                 json!({
                     "artifact_kind": "code_review_report",
-                    "artifact_ref": "code_review_report_worktask_001_0001",
+                    "artifact_ref": self.review_artifact_ref.as_deref().unwrap_or("code_review_report_worktask_001_0001"),
                     "worktask_id": "worktask_001",
                     "findings": if decision == "revise" {
                         json!([{"finding_id": "finding-001", "summary": "补充失败项修复"}])

@@ -1,7 +1,7 @@
 use super::*;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRun,
-    CodingUnitRunStatus, WorkItemHandoff,
+    CodingUnitRunStatus,
 };
 use crate::product::models::{
     HandoffRevision, WorkItemPlanLineage, WorkItemProjectionBundle, WorkItemRevision,
@@ -81,31 +81,13 @@ impl CodingWorkspaceEngine {
                     .await?
             }
         };
-        self.generate_and_save_work_item_handoff_if_missing(&attempt)
-            .await?;
         let completion_commit = attempt.head_commit.as_deref().ok_or_else(|| {
             CodingWorkspaceEngineError::CompletionCommitMissing(attempt.id.clone())
         })?;
         let completed_run =
             self.store
                 .complete_coding_unit_run(&attempt, &facts.run.id, completion_commit)?;
-        let legacy_handoff = self
-            .store
-            .get_coding_unit_handoff(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &facts.active.id,
-            )?
-            .ok_or_else(|| {
-                CodingWorkspaceEngineError::WorkItemHandoffMissing(facts.active.id.clone())
-            })?;
-        let handoff = self.publish_group_unit_handoff_revision(
-            &attempt,
-            &facts,
-            &completed_run,
-            &legacy_handoff,
-        )?;
+        let handoff = self.publish_group_unit_handoff_revision(&attempt, &facts, &completed_run)?;
         let transition = self.authoritative_handoff_transition(
             &attempt,
             facts.previous_handoff.clone(),
@@ -126,7 +108,6 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         facts: &GroupUnitCompletionFacts,
         completed_run: &CodingUnitRun,
-        legacy_handoff: &WorkItemHandoff,
     ) -> Result<HandoffRevision, CodingWorkspaceEngineError> {
         if completed_run.id != facts.run.id
             || completed_run.unit_id != facts.active.id
@@ -144,13 +125,7 @@ impl CodingWorkspaceEngine {
         })?;
         let handoff_id = facts.handoff_id.clone();
         let build_handoff = |created_at: String| {
-            build_group_handoff_revision(
-                facts,
-                completed_run,
-                legacy_handoff,
-                completion_commit,
-                created_at,
-            )
+            build_group_handoff_revision(facts, completed_run, completion_commit, created_at)
         };
         let revision_store = WorkItemRevisionStore::new(self.store.paths());
         let handoff = match revision_store.get_handoff_revision(
@@ -217,7 +192,9 @@ impl CodingWorkspaceEngine {
             })?;
         let active_run_count = runs.iter().filter(|run| run.status.is_active()).count();
         let mode = match run.status {
-            CodingUnitRunStatus::Running if active_run_count == 1 => {
+            CodingUnitRunStatus::Running | CodingUnitRunStatus::NeedsRevalidation
+                if active_run_count == 1 =>
+            {
                 GroupUnitCompletionMode::Running
             }
             CodingUnitRunStatus::Completed if active_run_count == 0 => {
@@ -414,19 +391,9 @@ impl CodingWorkspaceEngine {
         let GroupUnitCompletionMode::CompletedRetry { completion_commit } = &facts.mode else {
             return Err(group_handoff_revision_conflict(&facts.handoff_id));
         };
-        let legacy_handoff = self
-            .store
-            .get_coding_unit_handoff(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &facts.active.id,
-            )?
-            .ok_or_else(|| group_handoff_revision_conflict(&facts.handoff_id))?;
         let expected = build_group_handoff_revision(
             facts,
             &facts.run,
-            &legacy_handoff,
             completion_commit,
             existing.created_at.clone(),
         );
@@ -576,16 +543,9 @@ fn group_handoff_contract_facts(
 fn build_group_handoff_revision(
     facts: &GroupUnitCompletionFacts,
     completed_run: &CodingUnitRun,
-    legacy_handoff: &WorkItemHandoff,
     completion_commit: &str,
     created_at: String,
 ) -> HandoffRevision {
-    let mut tests = legacy_handoff.tests_run.clone();
-    tests.sort();
-    tests.dedup();
-    let mut artifacts = legacy_handoff.files_changed.clone();
-    artifacts.sort();
-    artifacts.dedup();
     HandoffRevision {
         id: facts.handoff_id.clone(),
         logical_work_item_id: facts.active.logical_work_item_id.clone(),
@@ -595,8 +555,6 @@ fn build_group_handoff_revision(
         provided_capabilities: facts.provided_capabilities.clone(),
         contract_hash: facts.handoff_contract_hash.clone(),
         commit_sha: completion_commit.to_string(),
-        tests,
-        artifacts,
         created_at,
     }
 }

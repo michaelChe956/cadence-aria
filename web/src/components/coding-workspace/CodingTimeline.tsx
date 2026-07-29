@@ -1,7 +1,6 @@
 import {
   Circle,
   Code,
-  FlaskConical,
   GitBranch,
   GitPullRequest,
   SearchCode,
@@ -119,8 +118,6 @@ function iconForStage(stage: CodingExecutionStage): LucideIcon {
       return GitBranch;
     case "coding":
       return Code;
-    case "testing":
-      return FlaskConical;
     case "code_review":
       return SearchCode;
     case "review_request":

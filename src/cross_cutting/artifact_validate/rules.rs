@@ -16,7 +16,6 @@ pub fn artifact_validation_rule(artifact_kind: ArtifactKind) -> Option<ArtifactV
         artifact_kind,
         ArtifactKind::DispatchPackage
             | ArtifactKind::CodingReport
-            | ArtifactKind::TestingReport
             | ArtifactKind::CodeReviewReport
             | ArtifactKind::IntegrationReport
             | ArtifactKind::FinalReview

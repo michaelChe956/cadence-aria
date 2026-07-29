@@ -16,21 +16,21 @@ use tokio_tungstenite::tungstenite::Message;
 type TestWsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn receive_json(ws: &mut TestWsStream) -> Value {
+async fn receive_json(ws: &mut TestWsStream, phase: &str) -> Value {
     loop {
         match timeout(Duration::from_secs(3), ws.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => return serde_json::from_str(&text).unwrap(),
             Ok(Some(Ok(_))) => continue,
-            Ok(Some(Err(error))) => panic!("websocket receive failed: {error}"),
-            Ok(None) => panic!("websocket closed before expected message"),
-            Err(_) => panic!("websocket timed out before expected message"),
+            Ok(Some(Err(error))) => panic!("{phase}: websocket receive failed: {error}"),
+            Ok(None) => panic!("{phase}: websocket closed before expected message"),
+            Err(_) => panic!("{phase}: websocket timed out before expected message"),
         }
     }
 }
 
 async fn receive_type(ws: &mut TestWsStream, expected_type: &str) -> Value {
     loop {
-        let message = receive_json(ws).await;
+        let message = receive_json(ws, expected_type).await;
         if message["type"] == expected_type {
             return message;
         }
@@ -60,6 +60,8 @@ async fn repeated_confirmation_recovers_delivery_mark_failure_without_duplicate_
         .get_attempt_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
         .unwrap()
         .unwrap();
+    crate::web::coding_ws_handler::build_coding_session_state(&store, attempt.clone())
+        .expect("plan repair fixture must build the initial coding websocket state");
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     let failpoint =
         register_plan_amendment_delivery_mark_failpoint(&store, &attempt, &identity.amendment_id);
@@ -69,12 +71,17 @@ async fn repeated_confirmation_recovers_delivery_mark_failure_without_duplicate_
     );
     let (mut coding_ws, _) = connect_async(coding_url).await.unwrap();
     assert_eq!(
-        receive_json(&mut coding_ws).await["type"],
+        receive_json(&mut coding_ws, "initial coding state").await["type"],
         "coding_session_state"
     );
     let child_url = format!("ws://{addr}/api/ws/workspace/{}", identity.child_session_id);
     let (mut child_ws, _) = connect_async(child_url).await.unwrap();
-    assert_eq!(receive_json(&mut child_ws).await["type"], "session_state");
+    let initial_child = receive_json(&mut child_ws, "initial plan repair child state").await;
+    assert_eq!(initial_child["type"], "session_state");
+    assert_eq!(
+        initial_child["stage"], "human_confirm",
+        "plan amendment child must accept confirmation: {initial_child}"
+    );
     let confirmation = || {
         Message::Text(
             json!({

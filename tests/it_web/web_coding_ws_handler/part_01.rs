@@ -22,13 +22,14 @@ use cadence_aria::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput,
     LifecycleStore,
 };
+use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::WorkItemStatus;
 use cadence_aria::product::models::{
     DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
-    PlanRevisionReason, ProviderName, WorkItemPlanLineage, WorkItemPlanRevision,
-    WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision, WorkspaceSessionStatus,
-    WorkspaceType,
+    PlanProjectionBundle, PlanRevisionReason, ProviderName, VerificationPlanRevision,
+    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle,
+    WorkItemRevision, WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use cadence_aria::product::work_item_contract::{
@@ -37,7 +38,8 @@ use cadence_aria::product::work_item_contract::{
 };
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::product::work_item_projection::{
-    WorkItemProjectionCompiler, projection_hashes,
+    CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
+    ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler, projection_hashes,
 };
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
 use cadence_aria::web::app::build_web_router;
@@ -100,159 +102,10 @@ fn rewrite_as_legacy_coding_attempt_fixture(
     attempt
 }
 
-fn seed_authoritative_group_plan_fixture(
-    store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-) {
-    let revision_store = WorkItemRevisionStore::new(store.paths());
-    let lineage = WorkItemPlanLineage {
-        id: "work_item_plan_0001".to_string(),
-        project_id: attempt.project_id.clone(),
-        issue_id: attempt.issue_id.clone(),
-        story_spec_refs: Vec::new(),
-        design_spec_refs: Vec::new(),
-        active_revision_id: None,
-        active_amendment_id: None,
-        created_at: "2026-07-18T00:00:00Z".to_string(),
-        updated_at: "2026-07-18T00:00:00Z".to_string(),
-    };
-    revision_store
-        .put_plan_lineage(&lineage)
-        .expect("plan lineage");
-    let mut bindings = std::collections::BTreeMap::new();
-    for (logical_id, revision_id) in [
-        ("work_item_0001", "work_item_revision_0001"),
-        ("work_item_0002", "work_item_revision_0002"),
-    ] {
-        let logical = LogicalWorkItem {
-            id: logical_id.to_string(),
-            plan_id: lineage.id.clone(),
-            title: logical_id.to_string(),
-            active_revision_id: None,
-            created_at: "2026-07-18T00:00:00Z".to_string(),
-            updated_at: "2026-07-18T00:00:00Z".to_string(),
-        };
-        revision_store
-            .put_logical_work_item(&lineage, &logical)
-            .expect("logical work item");
-        let contract = CanonicalWorkItemContract {
-            schema_version: 1,
-            identity: WorkItemContractIdentity {
-                logical_work_item_id: logical.id.clone(),
-                title: logical.title.clone(),
-                kind: "implementation".to_string(),
-            },
-            goal: WorkItemGoal {
-                summary: logical.title.clone(),
-            },
-            non_goals: Vec::new(),
-            input_contracts: Vec::new(),
-            output_contracts: Vec::new(),
-            tasks: Vec::new(),
-            write_policy: WorkItemWritePolicy {
-                exclusive_scopes: Vec::new(),
-                forbidden_scopes: Vec::new(),
-            },
-            acceptance_criteria: Vec::new(),
-            verification_checks: Vec::new(),
-            handoff_contract: HandoffContract {
-                required_fields: Vec::new(),
-                provided_contract_refs: Vec::new(),
-                reviewer_check_refs: Vec::new(),
-            },
-            blocker_rules: authoritative_group_blocker_rules_fixture(),
-            design_traceability: Vec::new(),
-        };
-        let revision = WorkItemRevision {
-            id: revision_id.to_string(),
-            logical_work_item_id: logical.id.clone(),
-            source_draft_revision_id: format!("draft_{revision_id}"),
-            canonical_contract_hash: canonical_contract_hash(&contract).expect("contract hash"),
-            canonical_contract: contract,
-            work_item_projection_bundle_id: format!("projection_{revision_id}"),
-            verification_plan_revision_id: format!("verification_{revision_id}"),
-            created_at: "2026-07-18T00:00:00Z".to_string(),
-        };
-        revision_store
-            .put_work_item_revision(&lineage, &revision)
-            .expect("work item revision");
-        let projections = WorkItemProjectionCompiler
-            .compile(&revision.canonical_contract, &revision.id)
-            .expect("compile work item projections");
-        let hashes = projection_hashes(&projections).expect("projection hashes");
-        revision_store
-            .put_work_item_projection_bundle(
-                &lineage,
-                &WorkItemProjectionBundle {
-                    id: revision.work_item_projection_bundle_id.clone(),
-                    work_item_revision_id: revision.id.clone(),
-                    canonical_contract_hash: revision.canonical_contract_hash.clone(),
-                    projection_schema_version: 1,
-                    compiler_version: "work-item-projection-compiler-v1".to_string(),
-                    human_projection: projections.human,
-                    coder_projection: projections.coder,
-                    reviewer_projection: projections.reviewer,
-                    human_projection_hash: hashes.human,
-                    coder_projection_hash: hashes.coder,
-                    reviewer_projection_hash: hashes.reviewer,
-                    created_at: "2026-07-18T00:00:00Z".to_string(),
-                },
-            )
-            .expect("work item projection bundle");
-        revision_store
-            .set_active_work_item_revision(&lineage, &logical, None, revision_id)
-            .expect("active work item revision");
-        bindings.insert(logical.id, revision.id);
-    }
-    let graph = DependencyGraphRevision {
-        id: "dependency_graph_revision_0001".to_string(),
-        plan_id: lineage.id.clone(),
-        edges: vec![cadence_aria::product::work_item_contract::DependencyContractEdge {
-            from: "work_item_0001".to_string(),
-            to: "work_item_0002".to_string(),
-            required_contracts: Vec::new(),
-        }],
-        created_at: "2026-07-18T00:00:00Z".to_string(),
-    };
-    revision_store
-        .put_dependency_graph_revision(&lineage, &graph)
-        .expect("dependency graph");
-    let plan_revision = WorkItemPlanRevision {
-        id: "plan_revision_0001".to_string(),
-        plan_id: lineage.id.clone(),
-        revision_no: 1,
-        supersedes: None,
-        reason: PlanRevisionReason::InitialCompile,
-        work_item_bindings: bindings,
-        dependency_graph_revision_id: graph.id,
-        validation_report_ref: "validation_report_0001".to_string(),
-        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-        created_at: "2026-07-18T00:00:00Z".to_string(),
-    };
-    revision_store
-        .put_plan_revision(&lineage, &plan_revision)
-        .expect("plan revision");
-    revision_store
-        .set_active_plan_revision(&lineage, &plan_revision.id)
-        .expect("active plan revision");
-    store
-        .save_plan_binding(
-            attempt,
-            &CodingAttemptPlanBinding {
-                attempt_id: attempt.id.clone(),
-                plan_id: lineage.id,
-                bound_plan_revision_id: plan_revision.id,
-                applied_amendment_ids: Vec::new(),
-                updated_at: "2026-07-18T00:00:00Z".to_string(),
-            },
-        )
-        .expect("attempt plan binding");
-}
-
 #[test]
 fn coding_ws_out_messages_serialize_with_coding_message_type_names() {
     let message = CodingWsOutMessage::CodingStageChange {
-        stage: CodingExecutionStage::Testing,
+        stage: CodingExecutionStage::CodeReview,
     };
 
     let value = serde_json::to_value(message).expect("serialize");
@@ -261,7 +114,7 @@ fn coding_ws_out_messages_serialize_with_coding_message_type_names() {
         value,
         json!({
             "type": "coding_stage_change",
-            "stage": "testing"
+            "stage": "code_review"
         })
     );
 
@@ -316,14 +169,14 @@ fn coding_ws_in_messages_deserialize_client_commands() {
 
     let stage_gate_confirm: CodingWsInMessage = serde_json::from_value(json!({
         "type": "stage_gate_confirm",
-        "stage": "testing"
+        "stage": "code_review"
     }))
     .expect("deserialize stage gate confirm");
 
     assert_eq!(
         stage_gate_confirm,
         CodingWsInMessage::StageGateConfirm {
-            stage: CodingExecutionStage::Testing,
+            stage: CodingExecutionStage::CodeReview,
         }
     );
 
@@ -348,7 +201,7 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Running,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::ContextNote {
             content: "补充背景".to_string()
         },
@@ -411,7 +264,7 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Running,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::ProviderSelect {
             role: "author".to_string(),
             provider: ProviderName::Codex,
@@ -419,9 +272,9 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Running,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::StageGateConfirm {
-            stage: CodingExecutionStage::Testing,
+            stage: CodingExecutionStage::CodeReview,
         },
     ));
 }
@@ -430,16 +283,16 @@ fn coding_ws_stage_validation_matches_attempt_status_and_stage() {
 fn blocked_attempt_allows_gate_response_messages() {
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Blocked,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::GateResponse {
             gate_id: "coding_blocked_gate_0001".to_string(),
-            action_id: "retry_test_plan".to_string(),
+            action_id: "retry_review".to_string(),
             extra_context: None,
         },
     ));
     assert!(is_coding_ws_message_allowed(
         &CodingAttemptStatus::Blocked,
-        &CodingExecutionStage::Testing,
+        &CodingExecutionStage::CodeReview,
         &CodingWsInMessage::AbortAttempt,
     ));
 }
@@ -452,15 +305,6 @@ fn waiting_for_human_code_review_allows_blocked_gate_responses() {
         &CodingWsInMessage::GateResponse {
             gate_id: "coding_blocked_gate_0007".to_string(),
             action_id: "send_to_coder".to_string(),
-            extra_context: None,
-        },
-    ));
-    assert!(is_coding_ws_message_allowed(
-        &CodingAttemptStatus::WaitingForHuman,
-        &CodingExecutionStage::Testing,
-        &CodingWsInMessage::GateResponse {
-            gate_id: "coding_blocked_gate_0008".to_string(),
-            action_id: "accept_testing_result".to_string(),
             extra_context: None,
         },
     ));
@@ -520,7 +364,6 @@ async fn coding_ws_sends_session_state_on_connect_and_responds_to_ping() {
             branch_name,
             role_provider_config_snapshot,
             timeline_nodes,
-            testing_report,
             ..
         } => {
             assert_eq!(attempt_id, "coding_attempt_0001");
@@ -533,7 +376,6 @@ async fn coding_ws_sends_session_state_on_connect_and_responds_to_ping() {
                 ProviderName::Fake
             );
             assert!(timeline_nodes.is_empty());
-            assert!(testing_report.is_none());
         }
         other => panic!("expected coding session state, got {other:?}"),
     }
@@ -556,8 +398,8 @@ async fn coding_session_snapshot_includes_role_runs() {
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0003".to_string()),
         )
@@ -568,8 +410,8 @@ async fn coding_session_snapshot_includes_role_runs() {
             &run,
             CodingRoleRunEventType::ProviderPrompt,
             serde_json::json!({
-                "mode": "plan_tests",
-                "prompt": "plan tests"
+                "mode": "review",
+                "prompt": "review changes"
             }),
         )
         .expect("prompt event");
@@ -620,13 +462,13 @@ async fn coding_session_snapshot_includes_role_runs() {
     let (mut ws, _) = connect_async(url).await.expect("connect ws");
 
     let raw_state = recv_json_value(&mut ws).await;
-    assert_eq!(raw_state["role_runs"][0]["role"], "tester");
+    assert_eq!(raw_state["role_runs"][0]["role"], "code_reviewer");
     assert!(raw_state["role_runs"][0].get("run").is_none());
 
     match serde_json::from_value(raw_state).expect("coding session state") {
         CodingWsOutMessage::CodingSessionState { role_runs, .. } => {
             assert_eq!(role_runs.len(), 1);
-            assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
+            assert_eq!(role_runs[0].role, CodingProviderRole::CodeReviewer);
             assert_eq!(role_runs[0].run_no, 1);
             assert_eq!(role_runs[0].node_id.as_deref(), Some("coding_node_0003"));
             let summary = role_runs[0].event_summary.as_ref().expect("event summary");
@@ -675,8 +517,8 @@ async fn coding_session_snapshot_ignores_corrupt_role_run_events() {
     let run = store
         .create_role_run(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             CodingRoleRunTrigger::Initial,
             Some("coding_node_0003".to_string()),
         )
@@ -711,7 +553,7 @@ async fn coding_session_snapshot_ignores_corrupt_role_run_events() {
     match recv_json(&mut ws).await {
         CodingWsOutMessage::CodingSessionState { role_runs, .. } => {
             assert_eq!(role_runs.len(), 1);
-            assert_eq!(role_runs[0].role, CodingProviderRole::Tester);
+            assert_eq!(role_runs[0].role, CodingProviderRole::CodeReviewer);
             assert!(role_runs[0].event_summary.is_none());
             assert!(role_runs[0].recent_events.is_empty());
         }
@@ -734,8 +576,8 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
     store
         .create_stage_gate(
             &attempt,
-            CodingExecutionStage::Testing,
-            CodingProviderRole::Tester,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
             "2026-05-28T00:00:05Z".to_string(),
             CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
                 author: ProviderName::Codex,
@@ -758,13 +600,13 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
             assert_eq!(pending_gates.len(), 1);
             assert_eq!(pending_gates[0].gate_id, "coding_stage_gate_0001");
             assert_eq!(pending_gates[0].kind, CodingGateKind::StageGate);
-            assert_eq!(pending_gates[0].stage, Some(CodingExecutionStage::Testing));
-            assert_eq!(pending_gates[0].role, Some(CodingProviderRole::Tester));
+            assert_eq!(pending_gates[0].stage, Some(CodingExecutionStage::CodeReview));
+            assert_eq!(pending_gates[0].role, Some(CodingProviderRole::CodeReviewer));
             assert_eq!(
                 pending_gates[0].expires_at.as_deref(),
                 Some("2026-05-28T00:00:05Z")
             );
-            assert!(pending_gates[0].title.contains("Testing"));
+            assert!(pending_gates[0].title.contains("CodeReview"));
             assert_eq!(
                 pending_gates[0].available_actions[0].action_type,
                 CodingGateActionType::ConfirmStage

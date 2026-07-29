@@ -11,23 +11,6 @@ impl CodingWorkspaceEngine {
         Self {
             store,
             _git_service: git_service,
-            provider: None,
-            event_tx: CancellableCodingEventSender::new(event_tx, cancellation.clone()),
-            cancellation,
-        }
-    }
-
-    pub fn with_provider(
-        store: CodingAttemptStore,
-        git_service: GitWorkspaceService,
-        provider: Arc<dyn ProviderAdapter + Send + Sync>,
-        event_tx: mpsc::Sender<CodingWsOutMessage>,
-    ) -> Self {
-        let cancellation = CancellationToken::new();
-        Self {
-            store,
-            _git_service: git_service,
-            provider: Some(provider),
             event_tx: CancellableCodingEventSender::new(event_tx, cancellation.clone()),
             cancellation,
         }

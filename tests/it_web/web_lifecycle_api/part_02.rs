@@ -14,10 +14,9 @@ async fn issue_lifecycle_backfills_legacy_spec_versions_and_returns_markdown_pre
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -116,10 +115,9 @@ async fn lifecycle_returns_artifact_versions() {
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -285,10 +283,9 @@ async fn workspace_session_missing_message_and_run_next_return_not_found() {
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -344,10 +341,9 @@ async fn workspace_session_ambiguous_returns_conflict() {
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
@@ -414,10 +410,9 @@ async fn workspace_session_message_rejects_invalid_role_and_empty_content() {
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;

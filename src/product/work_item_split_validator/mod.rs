@@ -1,5 +1,5 @@
 mod draft;
-mod outline;
+pub(crate) mod outline;
 mod plan;
 mod types;
 mod utils;

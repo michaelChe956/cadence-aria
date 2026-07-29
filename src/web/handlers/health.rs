@@ -13,7 +13,6 @@ pub async fn runtime_info(State(state): State<WebAppState>) -> Json<serde_json::
         "built_at_unix": option_env!("ARIA_BUILT_AT_UNIX").unwrap_or("unknown"),
         "workspace_root": state.workspace_root.display().to_string(),
         "features": {
-            "testing_result_review_gate": true,
             "coding_choice_gate": true
         }
     }))

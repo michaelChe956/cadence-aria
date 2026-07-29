@@ -38,6 +38,8 @@ pub(crate) use coding_run_registry::CodingAttemptMutationLease;
 pub use coding_run_registry::{CodingAttemptRunKey, CodingRunRegistry, CodingRunReservation};
 mod coding_socket_registry;
 pub use coding_socket_registry::CodingSocketRegistry;
+mod repository_initialization_run_registry;
+pub use repository_initialization_run_registry::RepositoryInitializationRunRegistry;
 
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {
@@ -114,6 +116,7 @@ pub struct WebAppState {
     pub workspace_runs: WorkspaceRunRegistry,
     pub coding_runs: CodingRunRegistry,
     pub coding_sockets: CodingSocketRegistry,
+    pub repository_initialization_runs: RepositoryInitializationRunRegistry,
 }
 
 impl WebAppState {
@@ -164,6 +167,7 @@ impl WebAppState {
             workspace_runs: WorkspaceRunRegistry::default(),
             coding_runs: CodingRunRegistry::default(),
             coding_sockets: CodingSocketRegistry::default(),
+            repository_initialization_runs: RepositoryInitializationRunRegistry::default(),
         }
     }
 

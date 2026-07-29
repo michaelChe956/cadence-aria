@@ -1,10 +1,12 @@
 use super::builder::ensure_workspace_context_message;
-use super::prompts::{output_schema_for, runtime_contract_for, workflow_discipline_for};
+use super::prompts::{
+    constraint_summary_for, output_schema_for, runtime_contract_for, workflow_discipline_for,
+};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
-    CreateStorySpecInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+    CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
 use crate::product::models::{
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus, ProviderName,
@@ -13,6 +15,7 @@ use crate::product::models::{
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use tempfile::tempdir;
 
+mod linked_context;
 mod work_item_plan_context;
 
 #[test]
@@ -30,7 +33,6 @@ fn all_workspace_artifact_outputs_require_artifact_fence() {
         );
     }
 }
-
 #[test]
 fn design_output_schema_uses_canonical_projection_headings() {
     let schema = output_schema_for(&WorkspaceType::Design);
@@ -63,6 +65,95 @@ fn story_and_design_runtime_contracts_do_not_inherit_work_item_plan_discipline()
 }
 
 #[test]
+fn design_runtime_contract_allows_abstract_traceability_but_forbids_executable_testing() {
+    let contract = runtime_contract_for(&workspace_session_record(
+        WorkspaceType::Design,
+        ProviderName::Codex,
+    ));
+
+    for required in [
+        "抽象验收可追踪性",
+        "仅说明 ID/关联，不描述如何测试或分配组件/文件的测试或验证职责",
+    ] {
+        assert!(
+            contract.contains(required),
+            "missing `{required}`: {contract}"
+        );
+    }
+    for forbidden in [
+        "测试计划",
+        "测试范围或场景",
+        "测试文件或模块",
+        "测试框架或夹具",
+        "测试命令",
+        "构建命令",
+        "执行 checklist",
+        "组件或文件的测试或验证职责分配",
+    ] {
+        assert!(
+            contract.contains(forbidden),
+            "missing `{forbidden}`: {contract}"
+        );
+    }
+
+    let story_contract = runtime_contract_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Codex,
+    ));
+    assert!(story_contract.contains("任务拆分"));
+
+    let work_item_schema = output_schema_for(&WorkspaceType::WorkItem);
+    assert!(work_item_schema.contains("验证命令"));
+}
+
+#[test]
+fn story_openspec_constraint_summary_preserves_explicit_input_boundaries_as_requirements() {
+    let summary = constraint_summary_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Codex,
+    ));
+
+    for required in [
+        "文件/模块归属",
+        "复用/依赖关系",
+        "自动化验证责任",
+        "稳定 [REQ-*]",
+        "仅在范围段提及不足以覆盖",
+    ] {
+        assert!(
+            summary.contains(required),
+            "Story OpenSpec constraint summary must preserve `{required}`: {summary}"
+        );
+    }
+}
+
+#[test]
+fn story_openspec_constraint_summary_requires_explicit_api_ownership() {
+    let summary = constraint_summary_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Codex,
+    ));
+
+    assert!(
+        summary.contains("具体 API/行为"),
+        "Story OpenSpec constraint summary must bind an explicitly owned API or behavior to its file/module: {summary}"
+    );
+}
+
+#[test]
+fn story_openspec_constraint_summary_requires_exception_scope() {
+    let summary = constraint_summary_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Codex,
+    ));
+
+    assert!(
+        summary.contains("例外、优先级或集合包含关系"),
+        "Story OpenSpec constraint summary must preserve explicit exception scope: {summary}"
+    );
+}
+
+#[test]
 fn workspace_author_workflows_directly_reference_cadence_routing_rules() {
     for workspace_type in [
         WorkspaceType::Story,
@@ -76,16 +167,21 @@ fn workspace_author_workflows_directly_reference_cadence_routing_rules() {
         ));
 
         assert!(
-            workflow.contains(
-                "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md"
-            ),
-            "{workspace_type:?} must directly reference the Cadence routing kernel"
+            workflow.contains("[cadence_project_rules]"),
+            "{workspace_type:?}"
+        );
+        assert_eq!(
+            workflow.matches("[cadence_project_rules]").count(),
+            1,
+            "{workspace_type:?}"
         );
         assert!(
-            workflow.contains(
-                "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md"
-            ),
-            "{workspace_type:?} must directly reference the Cadence OpenSpec/Superpowers workflow"
+            workflow.contains("AGENTS.md") && workflow.contains("CLAUDE.md"),
+            "{workspace_type:?}"
+        );
+        assert!(
+            !workflow.contains(&["Cadence-", "skills/"].concat()),
+            "{workspace_type:?}"
         );
         assert!(
             !workflow.contains("cadence-workflow"),
@@ -128,7 +224,7 @@ fn workspace_runtime_contract_includes_codegraph_mcp_reading_guidance() {
 }
 
 #[test]
-fn work_item_output_schema_describes_single_task_not_issue_level_split() {
+fn work_item_output_schema_describes_single_task_and_forbids_issue_level_split() {
     let schema = output_schema_for(&WorkspaceType::WorkItem);
 
     assert!(schema.contains("实现步骤") || schema.contains("子步骤"));
@@ -137,7 +233,8 @@ fn work_item_output_schema_describes_single_task_not_issue_level_split() {
     assert!(schema.contains("单个可执行任务"));
     assert!(schema.contains("禁止跨任务"));
     assert!(!schema.contains("20k"));
-    assert!(!schema.contains("任务拆分"));
+    assert!(schema.contains("禁止 heading"));
+    assert!(schema.contains("任务拆分"));
 }
 
 #[test]
@@ -299,446 +396,10 @@ fn workspace_session_record(
         review_rounds: 1,
         superpowers_enabled: true,
         openspec_enabled: true,
+        work_item_runtime_binding: None,
         provider_conversations: Vec::new(),
         messages: Vec::new(),
         created_at: "2026-06-30T00:00:00Z".to_string(),
         updated_at: "2026-06-30T00:00:00Z".to_string(),
     }
-}
-
-#[test]
-fn story_workspace_context_codex_author_requires_request_user_input() {
-    let root = tempdir().expect("root");
-    let repo = tempdir().expect("repo");
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let repository = RepositoryStore::new(app_paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: "project_0001".to_string(),
-            name: "Repo".to_string(),
-            path: repo.path().to_path_buf(),
-            default_policy_preset: None,
-            default_provider_mode: None,
-        })
-        .expect("repository");
-    IssueStore::new(app_paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some(repository.id.clone()),
-            title: "爬楼梯问题".to_string(),
-            description: Some("使用 Python 实现 climb_stairs".to_string()),
-            change_id: None,
-        })
-        .expect("issue");
-
-    let lifecycle = LifecycleStore::new(app_paths.clone());
-    let story = lifecycle
-        .create_story_spec(CreateStorySpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
-            title: "爬楼梯问题 Story Spec".to_string(),
-        })
-        .expect("story");
-    let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: story.id,
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
-        .expect("session");
-
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .expect("workspace context");
-    let context = &session.messages[0].content;
-
-    assert!(context.contains("当前 author provider 是 Codex"));
-    assert!(context.contains("必须使用结构化 requestUserInput"));
-    assert!(context.contains("禁止输出文本 1/2/3 或 A/B/C 选择题"));
-    assert!(context.contains("text_fallback 异常兜底"));
-}
-
-#[test]
-fn design_workspace_context_includes_linked_story_markdown() {
-    let root = tempdir().expect("root");
-    let repo = tempdir().expect("repo");
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let repository = RepositoryStore::new(app_paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: "project_0001".to_string(),
-            name: "Repo".to_string(),
-            path: repo.path().to_path_buf(),
-            default_policy_preset: None,
-            default_provider_mode: None,
-        })
-        .expect("repository");
-    IssueStore::new(app_paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some(repository.id.clone()),
-            title: "爬楼梯问题".to_string(),
-            description: Some("使用 Python 实现 climb_stairs".to_string()),
-            change_id: None,
-        })
-        .expect("issue");
-
-    let lifecycle = LifecycleStore::new(app_paths.clone());
-    let story = lifecycle
-        .create_story_spec(CreateStorySpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
-            title: "爬楼梯问题 Story Spec".to_string(),
-        })
-        .expect("story");
-    lifecycle
-        .append_version(AppendSpecVersionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: story.id.clone(),
-            markdown: "# 爬楼梯问题 Story Spec\n\n[REQ-001] 返回爬楼梯方法数。".to_string(),
-            provider_run_refs: Vec::new(),
-            review_refs: Vec::new(),
-            confirmed_by: Some("human".to_string()),
-        })
-        .expect("story version");
-    lifecycle
-        .update_spec_confirmation_status(
-            "project_0001",
-            "issue_0001",
-            &story.id,
-            LifecycleConfirmationStatus::Confirmed,
-        )
-        .expect("confirm story");
-    let design = lifecycle
-        .create_design_spec(CreateDesignSpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            story_spec_ids: vec![story.id.clone()],
-            title: "爬楼梯问题 Design Spec".to_string(),
-        })
-        .expect("design");
-    let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: design.id,
-            workspace_type: WorkspaceType::Design,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
-        .expect("session");
-
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .expect("workspace context");
-    let context = &session.messages[0].content;
-
-    assert!(context.contains("- Story Spec: 爬楼梯问题 Story Spec (story_spec_0001)"));
-    assert!(context.contains("当前版本: v1"));
-    assert!(context.contains("````markdown"));
-    assert!(context.contains("# 爬楼梯问题 Story Spec"));
-    assert!(context.contains("[REQ-001] 返回爬楼梯方法数。"));
-}
-
-#[test]
-fn work_item_workspace_context_includes_linked_design_markdown() {
-    let root = tempdir().expect("root");
-    let repo = tempdir().expect("repo");
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let repository = RepositoryStore::new(app_paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: "project_0001".to_string(),
-            name: "Repo".to_string(),
-            path: repo.path().to_path_buf(),
-            default_policy_preset: None,
-            default_provider_mode: None,
-        })
-        .expect("repository");
-    IssueStore::new(app_paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some(repository.id.clone()),
-            title: "爬楼梯问题".to_string(),
-            description: Some("使用 Python 实现 climb_stairs".to_string()),
-            change_id: None,
-        })
-        .expect("issue");
-
-    let lifecycle = LifecycleStore::new(app_paths.clone());
-    let story = lifecycle
-        .create_story_spec(CreateStorySpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id.clone(),
-            title: "爬楼梯问题 Story Spec".to_string(),
-        })
-        .expect("story");
-    let design = lifecycle
-        .create_design_spec(CreateDesignSpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            story_spec_ids: vec![story.id.clone()],
-            title: "爬楼梯问题 Design Spec".to_string(),
-        })
-        .expect("design");
-    lifecycle
-        .append_version(AppendSpecVersionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: design.id.clone(),
-            markdown: "# 爬楼梯问题 Design Spec\n\n[DEC-001] 使用迭代动态规划。".to_string(),
-            provider_run_refs: Vec::new(),
-            review_refs: Vec::new(),
-            confirmed_by: Some("human".to_string()),
-        })
-        .expect("design version");
-    lifecycle
-        .update_spec_confirmation_status(
-            "project_0001",
-            "issue_0001",
-            &design.id,
-            LifecycleConfirmationStatus::Confirmed,
-        )
-        .expect("confirm design");
-    let work_item = lifecycle
-        .create_work_item(CreateWorkItemInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
-            story_spec_ids: vec![story.id],
-            design_spec_ids: vec![design.id],
-            title: "实现爬楼梯问题".to_string(),
-            ..Default::default()
-        })
-        .expect("work item");
-    let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: work_item.id,
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
-        .expect("session");
-
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .expect("workspace context");
-    let context = &session.messages[0].content;
-
-    assert!(context.contains("- Design Spec: 爬楼梯问题 Design Spec (design_spec_0001)"));
-    assert!(context.contains("# 爬楼梯问题 Design Spec"));
-    assert!(context.contains("[DEC-001] 使用迭代动态规划。"));
-    assert!(context.contains("只使用 writing-plans 的计划结构要求"));
-    assert!(context.contains("不要创建 docs/superpowers/plans 文件"));
-    assert!(context.contains("不要询问 Subagent-Driven 或 Inline Execution"));
-}
-
-#[test]
-fn work_item_workspace_context_includes_source_draft_plan_context() {
-    let root = tempdir().expect("root");
-    let repo = tempdir().expect("repo");
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let repository = RepositoryStore::new(app_paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: "project_0001".to_string(),
-            name: "Repo".to_string(),
-            path: repo.path().to_path_buf(),
-            default_policy_preset: None,
-            default_provider_mode: None,
-        })
-        .expect("repository");
-    IssueStore::new(app_paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some(repository.id.clone()),
-            title: "Provider 依赖安装".to_string(),
-            description: Some("检查并安装 provider CLI".to_string()),
-            change_id: None,
-        })
-        .expect("issue");
-
-    let lifecycle = LifecycleStore::new(app_paths.clone());
-    let story = lifecycle
-        .create_story_spec(CreateStorySpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id.clone(),
-            title: "Provider 依赖 Story Spec".to_string(),
-        })
-        .expect("story");
-    let design = lifecycle
-        .create_design_spec(CreateDesignSpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            story_spec_ids: vec![story.id.clone()],
-            title: "Provider 依赖 Design Spec".to_string(),
-        })
-        .expect("design");
-    let work_item = lifecycle
-        .create_work_item(CreateWorkItemInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
-            story_spec_ids: vec![story.id],
-            design_spec_ids: vec![design.id],
-            title: "Provider 依赖核心服务".to_string(),
-            work_item_set_id: Some("issue_work_item_plan_0001".to_string()),
-            source_work_item_plan_id: Some("issue_work_item_plan_0001".to_string()),
-            source_outline_id: Some("outline_backend".to_string()),
-            source_draft_id: Some("draft_backend".to_string()),
-            planned_implementation_context: Some(
-                "实现 provider dependency core，先写 TDD 单测。".to_string(),
-            ),
-            planned_handoff_summary: Some(
-                "交付 ProviderDependencyService 与 provider catalog。".to_string(),
-            ),
-            ..Default::default()
-        })
-        .expect("work item");
-    let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: work_item.id,
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
-        .expect("session");
-
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .expect("workspace context");
-    let context = &session.messages[0].content;
-
-    assert!(context.contains("[work_item_plan_source]"));
-    assert!(context.contains("source_work_item_plan_id: issue_work_item_plan_0001"));
-    assert!(context.contains("source_outline_id: outline_backend"));
-    assert!(context.contains("source_draft_id: draft_backend"));
-    assert!(context.contains("planned_implementation_context"));
-    assert!(context.contains("实现 provider dependency core"));
-    assert!(context.contains("planned_handoff_summary"));
-    assert!(context.contains("交付 ProviderDependencyService"));
-    assert!(context.contains("[openspec_contract]"));
-    assert!(context.contains("[superpowers_contract]"));
-}
-
-#[test]
-fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
-    let root = tempdir().expect("root");
-    let repo = tempdir().expect("repo");
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let repository = RepositoryStore::new(app_paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: "project_0001".to_string(),
-            name: "Repo".to_string(),
-            path: repo.path().to_path_buf(),
-            default_policy_preset: None,
-            default_provider_mode: None,
-        })
-        .expect("repository");
-    IssueStore::new(app_paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some(repository.id.clone()),
-            title: "爬楼梯问题".to_string(),
-            description: Some("使用 Python 实现 climb_stairs".to_string()),
-            change_id: None,
-        })
-        .expect("issue");
-
-    let lifecycle = LifecycleStore::new(app_paths.clone());
-    let story = lifecycle
-        .create_story_spec(CreateStorySpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
-            title: "爬楼梯问题 Story Spec".to_string(),
-        })
-        .expect("story");
-    lifecycle
-        .append_version(AppendSpecVersionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: story.id.clone(),
-            markdown: "# 爬楼梯问题 Story Spec\n\n[REQ-001] 返回爬楼梯方法数。".to_string(),
-            provider_run_refs: Vec::new(),
-            review_refs: Vec::new(),
-            confirmed_by: Some("human".to_string()),
-        })
-        .expect("story version");
-    lifecycle
-        .update_spec_confirmation_status(
-            "project_0001",
-            "issue_0001",
-            &story.id,
-            LifecycleConfirmationStatus::Confirmed,
-        )
-        .expect("confirm story");
-    let design = lifecycle
-        .create_design_spec(CreateDesignSpecInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            story_spec_ids: vec![story.id],
-            title: "爬楼梯问题 Design Spec".to_string(),
-        })
-        .expect("design");
-    let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: design.id,
-            workspace_type: WorkspaceType::Design,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
-        .expect("session");
-    let stale_messages = vec![
-        WorkspaceMessageRecord {
-            role: "system".to_string(),
-            content: "Workspace 生成任务已准备\n\n[system]\n你是 Aria 的候选 design 生成器。\n\n关联上下文:\n- Story Spec: 爬楼梯问题 Story Spec (story_spec_0001)".to_string(),
-            created_at: "2026-05-27T00:00:00Z".to_string(),
-        },
-        WorkspaceMessageRecord {
-            role: "user".to_string(),
-            content: "开始生成 Design Spec".to_string(),
-            created_at: "2026-05-27T00:00:01Z".to_string(),
-        },
-    ];
-    let session = lifecycle
-        .replace_workspace_messages(&session.id, stale_messages)
-        .expect("replace stale messages");
-
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .expect("workspace context");
-
-    assert_eq!(session.messages.len(), 2);
-    assert_eq!(session.messages[1].content, "开始生成 Design Spec");
-    assert!(
-        session.messages[0]
-            .content
-            .contains("# 爬楼梯问题 Story Spec")
-    );
-    assert!(
-        session.messages[0]
-            .content
-            .contains("[REQ-001] 返回爬楼梯方法数。")
-    );
 }

@@ -1,8 +1,13 @@
 use cadence_aria::product::coding_models::CodingAttemptPlanBinding;
-use cadence_aria::product::models::{LogicalWorkItem, WorkItemRevision};
+use cadence_aria::product::models::{
+    LogicalWorkItem, VerificationPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
+};
 use cadence_aria::product::work_item_contract::{
     CanonicalWorkItemContract, HandoffContract, WorkItemContractIdentity, WorkItemGoal,
     WorkItemWritePolicy, canonical_contract_hash,
+};
+use cadence_aria::product::work_item_projection::{
+    CompiledWorkItemProjections, WorkItemProjectionCompiler, projection_hashes,
 };
 
 fn group_canonical_contract(logical_id: &str, title: &str) -> CanonicalWorkItemContract {
@@ -39,7 +44,8 @@ fn group_canonical_contract(logical_id: &str, title: &str) -> CanonicalWorkItemC
 fn seed_group_work_item_revisions(
     store: &WorkItemRevisionStore,
     lineage: &WorkItemPlanLineage,
-) {
+) -> BTreeMap<String, CompiledWorkItemProjections> {
+    let mut projections = BTreeMap::new();
     for (logical_id, revision_id, title) in [
         (
             "work_item_0001",
@@ -64,6 +70,44 @@ fn seed_group_work_item_revisions(
             .put_logical_work_item(lineage, &logical)
             .expect("logical work item");
         let contract = group_canonical_contract(logical_id, title);
+        let compiled = WorkItemProjectionCompiler
+            .compile(&contract, revision_id)
+            .expect("compile work item projections");
+        let hashes = projection_hashes(&compiled).expect("projection hashes");
+        let canonical_contract_hash = canonical_contract_hash(&contract).expect("contract hash");
+        let verification_plan_revision_id = format!("verification_{revision_id}");
+        let projection_bundle_id = format!("projection_{revision_id}");
+        store
+            .put_verification_plan_revision(
+                lineage,
+                &VerificationPlanRevision {
+                    id: verification_plan_revision_id.clone(),
+                    logical_work_item_id: logical_id.to_string(),
+                    source_draft_revision_id: format!("draft_{revision_id}"),
+                    verification_checks: contract.verification_checks.clone(),
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("verification plan revision");
+        store
+            .put_work_item_projection_bundle(
+                lineage,
+                &WorkItemProjectionBundle {
+                    id: projection_bundle_id.clone(),
+                    work_item_revision_id: revision_id.to_string(),
+                    canonical_contract_hash: canonical_contract_hash.clone(),
+                    projection_schema_version: 1,
+                    compiler_version: "projection-compiler-v1".to_string(),
+                    human_projection: compiled.human.clone(),
+                    coder_projection: compiled.coder.clone(),
+                    reviewer_projection: compiled.reviewer.clone(),
+                    human_projection_hash: hashes.human,
+                    coder_projection_hash: hashes.coder,
+                    reviewer_projection_hash: hashes.reviewer,
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("work item projection bundle");
         store
             .put_work_item_revision(
                 lineage,
@@ -71,11 +115,10 @@ fn seed_group_work_item_revisions(
                     id: revision_id.to_string(),
                     logical_work_item_id: logical_id.to_string(),
                     source_draft_revision_id: format!("draft_{revision_id}"),
-                    canonical_contract_hash: canonical_contract_hash(&contract)
-                        .expect("contract hash"),
+                    canonical_contract_hash,
                     canonical_contract: contract,
-                    work_item_projection_bundle_id: format!("projection_{revision_id}"),
-                    verification_plan_revision_id: format!("verification_{revision_id}"),
+                    work_item_projection_bundle_id: projection_bundle_id,
+                    verification_plan_revision_id,
                     created_at: "2026-07-18T00:00:00Z".to_string(),
                 },
             )
@@ -83,7 +126,9 @@ fn seed_group_work_item_revisions(
         store
             .set_active_work_item_revision(lineage, &logical, None, revision_id)
             .expect("active work item revision");
+        projections.insert(logical_id.to_string(), compiled);
     }
+    projections
 }
 
 fn partial_group_attempt(store: &CodingAttemptStore) -> CodingExecutionAttempt {

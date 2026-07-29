@@ -17,6 +17,8 @@ use crate::product::work_item_contract::canonical_contract_fixture;
 use super::WorkItemRevisionStore;
 
 mod concurrency;
+#[path = "tests/handoff_deletion.rs"]
+mod handoff_deletion;
 mod initial_publication;
 mod projection_artifacts;
 mod publication;
@@ -709,4 +711,42 @@ fn work_item_revision_store_latest_presentation_compares_rfc3339_instants() {
         .unwrap();
 
     assert_eq!(latest.id, "human_presentation_revision_negative");
+}
+
+#[test]
+fn purge_plan_revisions_removes_revision_and_publication_dirs() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkItemRevisionStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    let issue_root = temp
+        .path()
+        .join(".aria")
+        .join("projects")
+        .join(PROJECT_ID)
+        .join("issues")
+        .join(ISSUE_ID);
+    let plan_root = issue_root.join("work-item-revisions").join(PLAN_ID);
+    std::fs::create_dir_all(plan_root.join("plan-revisions")).unwrap();
+    std::fs::write(plan_root.join("lineage.json"), "{}").unwrap();
+    let publications = issue_root
+        .join("work-item-revision-publications")
+        .join(PLAN_ID);
+    std::fs::create_dir_all(&publications).unwrap();
+    std::fs::write(publications.join("compile_0001.json"), "{}").unwrap();
+
+    store
+        .purge_plan_revisions(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
+
+    assert!(!plan_root.exists(), "plan_root 目录应被删除");
+    assert!(!publications.exists(), "publications 目录应被删除");
+}
+
+#[test]
+fn purge_plan_revisions_succeeds_when_dirs_absent() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkItemRevisionStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    // 不播种任何产物；NotFound 视为成功
+    store
+        .purge_plan_revisions(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
 }

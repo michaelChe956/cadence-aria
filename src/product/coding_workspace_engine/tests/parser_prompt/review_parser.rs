@@ -82,6 +82,18 @@ fn review_parser_distinguishes_schema_error_from_json_syntax_error() {
 }
 
 #[test]
+fn review_parser_rejects_removed_testing_source_stage() {
+    let parsed = parse_review_payload(
+        r#"{"verdict":"blocked","findings":[{"severity":"error","message":"stale stage","source_stage":"testing"}]}"#,
+        CodingExecutionStage::CodeReview,
+    );
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Blocked);
+    assert!(parsed.summary.contains("review JSON Schema 校验失败"));
+    assert!(parsed.summary.contains("unknown variant"));
+}
+
+#[test]
 fn review_parser_accepts_fenced_json_with_reviewer_blocker_severity() {
     let payload = r#"Reviewer summary before the structured payload.
 
@@ -113,6 +125,38 @@ fn review_parser_accepts_fenced_json_with_reviewer_blocker_severity() {
         parsed.findings[0].required_action.as_deref(),
         Some("declare the module")
     );
+}
+
+#[test]
+fn review_parser_skips_unrelated_json_fragments_before_final_verdict() {
+    let payload = "全部验证证据已收集完毕。以下为代码审查结果。\n\
+                   \n\
+                   | `check_scope_and_dependency_boundary` | ✅ 通过 | `package.json` 仅 `{\"type\": \"module\"}`，无依赖 |\n\
+                   \n\
+                   ```json\n\
+                   {\n\
+                     \"verdict\": \"approve\",\n\
+                     \"summary\": \"review complete\",\n\
+                     \"findings\": []\n\
+                   }\n\
+                   ```";
+
+    let parsed = parse_review_payload(payload, CodingExecutionStage::CodeReview);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Approve);
+    assert_eq!(parsed.summary, "review complete");
+    assert!(parsed.findings.is_empty());
+}
+
+#[test]
+fn review_parser_accepts_plain_text_routing_receipt_before_final_json() {
+    let payload = "工作流路由：阶段=只读代码审查；Change=无；Plan=work_item_0001；必调 Skill=using-superpowers → requesting-code-review。\n{\"verdict\":\"approve\",\"summary\":\"review complete\",\"findings\":[]}";
+
+    let parsed = parse_review_payload(payload, CodingExecutionStage::CodeReview);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Approve);
+    assert_eq!(parsed.summary, "review complete");
+    assert!(parsed.findings.is_empty());
 }
 
 #[test]
@@ -209,8 +253,138 @@ fn coding_plan_repair_parser_maps_legacy_review_finding_only_to_implementation()
     assert!(finding.confidence.is_none());
 }
 
+/// Coder 正文常出现 JS 解构、Rust 块等带花括号的片段（例如
+/// `import { formatCompactDuration } from '../src/x.js'`）。这些片段不是结构化
+/// 结论，不能因为它们无法反序列化就把整次执行判为契约违规并转人工分诊。
 #[test]
-fn coding_plan_repair_coding_and_tester_plan_defects_use_the_same_finding_schema() {
+fn coding_plan_repair_parser_ignores_prose_braces_without_plan_defect_findings() {
+    let output = "已完成实现。\n\
+        - **downstream_import_specifier**：从 `demo/compact-duration.js` 导入写作 \
+        `import { formatCompactDuration } from '../src/format-compact-duration.js';`\n\
+        - **package_manifest_module_semantics**：仓库根 `package.json` 声明 \
+        `\"type\": \"module\"`\n";
+
+    let parsed = parse_execution_plan_defects(PlanDefectSource::Coder, output)
+        .expect("正文花括号不构成 plan defect 契约违规");
+
+    assert_eq!(parsed.source, PlanDefectSource::Coder);
+    assert!(parsed.findings.is_empty());
+}
+
+/// 真实结论位于输出末尾，前面的散文片段不得遮蔽它。
+#[test]
+fn coding_plan_repair_parser_selects_plan_defect_findings_after_prose_braces() {
+    let findings = serde_json::json!({
+        "plan_defect_findings": [{
+            "severity": "error",
+            "defect_class": "upstream_contract_invalid",
+            "reason_code": "upstream_contract_capability_missing",
+            "message": "missing finalization_failure",
+            "contract_refs": ["repository_initialization_finalization"],
+            "capability_refs": ["finalization_failure"],
+            "repair_target": {
+                "kind": "upstream_work_item",
+                "logical_work_item_ids": ["wi_core"],
+                "work_item_revision_ids": ["work_item_revision_0001"]
+            },
+            "recommended_route": "plan_repair",
+            "confidence": "high",
+            "evidence": []
+        }]
+    })
+    .to_string();
+    let output = format!(
+        "示例写法 `import {{ formatCompactDuration }} from '../src/x.js';`\n\n{findings}\n"
+    );
+
+    let parsed = parse_execution_plan_defects(PlanDefectSource::Coder, &output)
+        .expect("散文片段之后的结论必须被识别");
+
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(
+        parsed.findings[0].defect_class,
+        crate::product::models::PlanDefectClass::UpstreamContractInvalid
+    );
+}
+
+/// `plan_defect_findings` 带 `#[serde(default)]`，任何合法 JSON 对象都能反序列化成
+/// 空 findings。因此不能只看「能否反序列化」，否则无关 JSON 片段会静默吞掉真实结论。
+/// 契约要求结论位于输出末尾（同 `review_parser`）。Provider 可能先复述一个空的
+/// `plan_defect_findings` 示例再给出真实结论；取首个声明候选会静默吞掉真实结论。
+#[test]
+fn coding_plan_repair_parser_prefers_the_last_declared_findings_candidate() {
+    let findings = serde_json::json!({
+        "plan_defect_findings": [{
+            "severity": "error",
+            "defect_class": "current_work_item_invalid",
+            "reason_code": "current_work_item_contract_invalid",
+            "message": "the current work item contract is not implementable",
+            "contract_refs": ["contract.current"],
+            "capability_refs": ["implementability"],
+            "repair_target": {
+                "kind": "current_work_item",
+                "logical_work_item_ids": ["work_item_0001"],
+                "work_item_revision_ids": ["work_item_revision_0001"]
+            },
+            "recommended_route": "plan_repair",
+            "confidence": "high",
+            "evidence": []
+        }]
+    })
+    .to_string();
+    let output = format!(
+        "无缺陷时的输出形如 {{\"plan_defect_findings\": []}}，本次结论如下：\n\n{findings}\n"
+    );
+
+    let parsed =
+        parse_execution_plan_defects(PlanDefectSource::Coder, &output).expect("末尾结论必须被识别");
+
+    assert_eq!(
+        parsed.findings.len(),
+        1,
+        "在前的空示例不得遮蔽末尾的真实结论"
+    );
+    assert_eq!(
+        parsed.findings[0].defect_class,
+        crate::product::models::PlanDefectClass::CurrentWorkItemInvalid
+    );
+}
+
+#[test]
+fn coding_plan_repair_parser_skips_unrelated_json_objects_before_findings() {
+    let findings = serde_json::json!({
+        "plan_defect_findings": [{
+            "severity": "error",
+            "defect_class": "current_work_item_invalid",
+            "reason_code": "current_work_item_contract_invalid",
+            "message": "the current work item contract is not implementable",
+            "contract_refs": ["contract.current"],
+            "capability_refs": ["implementability"],
+            "repair_target": {
+                "kind": "current_work_item",
+                "logical_work_item_ids": ["work_item_0001"],
+                "work_item_revision_ids": ["work_item_revision_0001"]
+            },
+            "recommended_route": "plan_repair",
+            "confidence": "high",
+            "evidence": []
+        }]
+    })
+    .to_string();
+    let output = format!("仓库根 package.json：{{\"type\": \"module\"}}\n\n{findings}\n");
+
+    let parsed = parse_execution_plan_defects(PlanDefectSource::Coder, &output)
+        .expect("无关 JSON 片段不得遮蔽真实结论");
+
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(
+        parsed.findings[0].defect_class,
+        crate::product::models::PlanDefectClass::CurrentWorkItemInvalid
+    );
+}
+
+#[test]
+fn coding_plan_repair_coder_plan_defects_use_the_canonical_finding_schema() {
     let output = serde_json::json!({
         "plan_defect_findings": [{
             "severity": "error",
@@ -231,71 +405,19 @@ fn coding_plan_repair_coding_and_tester_plan_defects_use_the_same_finding_schema
     })
     .to_string();
 
-    for source in [PlanDefectSource::Coder, PlanDefectSource::Tester] {
-        let parsed = parse_execution_plan_defects(source.clone(), &output).unwrap();
+    let parsed = parse_execution_plan_defects(PlanDefectSource::Coder, &output).unwrap();
 
-        assert_eq!(parsed.source, source);
-        assert_eq!(
-            parsed.findings[0].defect_class,
-            crate::product::models::PlanDefectClass::UpstreamContractInvalid
-        );
-        assert_eq!(
-            parsed.findings[0]
-                .repair_target
-                .as_ref()
-                .expect("repair target")
-                .kind,
-            crate::product::models::RepairTargetKind::UpstreamWorkItem
-        );
-    }
-}
-
-#[test]
-fn coding_plan_repair_tester_execution_parser_preserves_canonical_finding() {
-    let output = serde_json::json!({
-        "step_results": [{
-            "step_id": "unit",
-            "status": "blocked",
-            "evidence_refs": ["unit.log"],
-            "provider_analysis": "test_plan_insufficient: contract is invalid"
-        }],
-        "plan_defect_findings": [{
-            "finding_id": "tester_finding_0001",
-            "severity": "error",
-            "defect_class": "current_work_item_invalid",
-            "reason_code": "current_work_item_contract_invalid",
-            "message": "the current work item contract is not testable",
-            "evidence": [{
-                "kind": "test_execution",
-                "source_ref": "unit.log",
-                "message": "the required contract cannot be exercised"
-            }],
-            "contract_refs": ["contract.current"],
-            "capability_refs": ["testability"],
-            "repair_target": {
-                "kind": "current_work_item",
-                "logical_work_item_ids": ["work_item_0001"],
-                "work_item_revision_ids": ["work_item_revision_0001"]
-            },
-            "recommended_route": "plan_repair",
-            "confidence": "high"
-        }]
-    })
-    .to_string();
-
-    let payload = parse_test_execution_payload_from_provider_output(&output).unwrap();
-    let finding = &payload.plan_defect_findings[0];
-
-    assert_eq!(payload.step_results[0].step_id, "unit");
-    assert_eq!(finding.finding_id, "tester_finding_0001");
+    assert_eq!(parsed.source, PlanDefectSource::Coder);
     assert_eq!(
-        finding.defect_class,
-        crate::product::models::PlanDefectClass::CurrentWorkItemInvalid
+        parsed.findings[0].defect_class,
+        crate::product::models::PlanDefectClass::UpstreamContractInvalid
     );
     assert_eq!(
-        finding.repair_target.as_ref().expect("repair target").kind,
-        crate::product::models::RepairTargetKind::CurrentWorkItem
+        parsed.findings[0]
+            .repair_target
+            .as_ref()
+            .expect("repair target")
+            .kind,
+        crate::product::models::RepairTargetKind::UpstreamWorkItem
     );
-    assert_eq!(finding.evidence[0].kind, "test_execution");
-    assert_eq!(finding.evidence[0].source_ref, "unit.log");
 }

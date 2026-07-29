@@ -131,21 +131,6 @@ pub fn run_worktask_execution_chain(
     }
 
     loop {
-        let testing_report =
-            match state.run_report_node(provider, "N17", ArtifactKind::TestingReport, None) {
-                Ok(report) => report,
-                Err(ExecutionChainError::ProviderBlocked(_)) => return Ok(state.finish()),
-                Err(error) => return Err(error),
-            };
-        if testing_report_requires_current_worktask_rework(&testing_report) {
-            state.push_skill("systematic-debugging");
-            let testing_report_ref = artifact_ref(&testing_report);
-            if state.rework_or_hold(provider, &testing_report_ref)? {
-                continue;
-            }
-            break;
-        }
-
         let review_report =
             match state.run_report_node(provider, "N18", ArtifactKind::CodeReviewReport, None) {
                 Ok(report) => report,
@@ -217,7 +202,7 @@ impl ExecutionChainState {
                     "reason": "rework_limit_exceeded",
                     "rework_counter": self.rework_counter,
                     "worktask_id": self.input.worktask_id,
-                    "trigger_node": "N19",
+                    "trigger_node": "N18",
                 }),
             });
             return Ok(false);
@@ -467,7 +452,7 @@ impl ExecutionChainState {
         if !route_commands.is_empty() {
             return route_commands;
         }
-        if matches!(node_id, "N17" | "N18" | "N19") {
+        if matches!(node_id, "N18" | "N19") {
             let latest_commands = self.latest_coding_report_commands();
             if !latest_commands.is_empty() {
                 return latest_commands;
@@ -630,15 +615,6 @@ fn node_specific_fields(
             "coding_report_ref": artifact_ref(artifact),
             "changed_files": artifact.get("files_modified").cloned().unwrap_or_else(|| json!([])),
         }),
-        "N17" => json!({
-            "testing_report_ref": artifact_ref(artifact),
-            "test_results": artifact.get("failures").cloned().unwrap_or_else(|| json!([])),
-            "coverage_summary": {
-                "closed": artifact.pointer("/_aria/traceability_refs").cloned().unwrap_or_else(|| json!([])),
-                "uncovered": [],
-                "exempted": [],
-            },
-        }),
         "N18" => json!({
             "code_review_report_ref": artifact_ref(artifact),
             "findings": artifact.get("findings").cloned().unwrap_or_else(|| json!([])),
@@ -661,38 +637,6 @@ fn artifact_ref(artifact: &Value) -> String {
         .to_string()
 }
 
-fn testing_report_requires_current_worktask_rework(testing_report: &Value) -> bool {
-    if testing_report
-        .get("tests_passed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    !testing_report_has_only_out_of_scope_acceptance_failures(testing_report)
-}
-
-fn testing_report_has_only_out_of_scope_acceptance_failures(testing_report: &Value) -> bool {
-    let scope_result = testing_report
-        .get("scope_result")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !scope_result.ends_with("_scoped_verification_passed") {
-        return false;
-    }
-
-    let Some(failures) = testing_report.get("failures").and_then(Value::as_array) else {
-        return false;
-    };
-    !failures.is_empty()
-        && failures.iter().all(|failure| {
-            failure
-                .get("failure_type")
-                .and_then(Value::as_str)
-                .is_some_and(|failure_type| failure_type == "out_of_scope_acceptance_failure")
-        })
-}
-
 fn ensure_artifact_ref(artifact: &mut Value, node_id: &str, worktask_id: &str) {
     if artifact
         .get("artifact_ref")
@@ -710,7 +654,6 @@ fn ensure_artifact_ref(artifact: &mut Value, node_id: &str, worktask_id: &str) {
 fn artifact_kind_for_node(node_id: &str) -> &'static str {
     match node_id {
         "N16" | "N19" => "coding_report",
-        "N17" => "testing_report",
         "N18" => "code_review_report",
         _ => "artifact",
     }

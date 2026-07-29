@@ -20,6 +20,9 @@ use crate::cross_cutting::streaming_provider::{
     RiskLevel, StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::models::ProviderName;
+use crate::product::repository_store::{
+    RepositoryInitializationProgress, RepositoryInitializationStepKind, RepositoryRegistrationError,
+};
 
 struct FixedHealthSource(Arc<ProviderHealthSnapshot>);
 
@@ -63,6 +66,29 @@ impl ProviderHealthSource for MutableHealthSource {
 #[derive(Default)]
 struct RecordingProvider {
     inputs: Mutex<Vec<StreamingProviderInput>>,
+}
+
+#[derive(Default)]
+struct RecordingProgress {
+    events: Mutex<Vec<(RepositoryInitializationStepKind, &'static str)>>,
+}
+
+impl RepositoryInitializationProgress for RecordingProgress {
+    fn step_started(
+        &self,
+        step: RepositoryInitializationStepKind,
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
+        self.events.lock().unwrap().push((step, "started"));
+        Ok(())
+    }
+
+    fn step_completed(
+        &self,
+        step: RepositoryInitializationStepKind,
+    ) -> Result<(), Box<RepositoryRegistrationError>> {
+        self.events.lock().unwrap().push((step, "completed"));
+        Ok(())
+    }
 }
 
 enum SessionScript {
@@ -247,9 +273,15 @@ async fn repository_initializer_runs_four_independent_claude_turns_in_strict_ord
     registry.register(ProviderName::ClaudeCode, provider.clone());
     let initializer = ClaudeRepositoryInitializer::new(available_gate(), Arc::new(registry), 1024);
     let git_root = PathBuf::from("/tmp/example-repository");
+    let progress = Arc::new(RecordingProgress::default());
 
     let summaries = initializer
-        .initialize(&git_root, Duration::from_secs(1), CancellationToken::new())
+        .initialize(
+            &git_root,
+            Duration::from_secs(1),
+            CancellationToken::new(),
+            progress.clone(),
+        )
         .await
         .unwrap();
 
@@ -261,10 +293,10 @@ async fn repository_initializer_runs_four_independent_claude_turns_in_strict_ord
             .map(|input| input.prompt.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "/pre-check",
-            "/rule-config",
-            "/mcp-configuration",
-            "/project-rules-examples",
+            "/pre-check --no-interrupt",
+            "/rule-config --no-interrupt",
+            "/mcp-configuration --no-interrupt",
+            "/project-rules-examples --no-interrupt",
         ]
     );
     for input in inputs.iter() {
@@ -292,11 +324,71 @@ async fn repository_initializer_runs_four_independent_claude_turns_in_strict_ord
             ))
             .collect::<Vec<_>>(),
         vec![
-            (1, "/pre-check", "completed"),
-            (2, "/rule-config", "completed"),
-            (3, "/mcp-configuration", "completed"),
-            (4, "/project-rules-examples", "completed"),
+            (1, "/pre-check --no-interrupt", "completed"),
+            (2, "/rule-config --no-interrupt", "completed"),
+            (3, "/mcp-configuration --no-interrupt", "completed"),
+            (4, "/project-rules-examples --no-interrupt", "completed"),
         ]
+    );
+    assert_eq!(
+        progress.events.lock().unwrap().as_slice(),
+        &[
+            (RepositoryInitializationStepKind::PreCheck, "started"),
+            (RepositoryInitializationStepKind::PreCheck, "completed"),
+            (RepositoryInitializationStepKind::RuleConfig, "started"),
+            (RepositoryInitializationStepKind::RuleConfig, "completed"),
+            (
+                RepositoryInitializationStepKind::McpConfiguration,
+                "started"
+            ),
+            (
+                RepositoryInitializationStepKind::McpConfiguration,
+                "completed"
+            ),
+            (
+                RepositoryInitializationStepKind::ProjectRulesExamples,
+                "started"
+            ),
+            (
+                RepositoryInitializationStepKind::ProjectRulesExamples,
+                "completed"
+            ),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn repository_initializer_reports_only_started_steps_when_second_turn_fails() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        SessionScript::Events(vec![ProviderEvent::Completed(ProviderCompletion::plain(
+            "completed",
+            None,
+        ))]),
+        SessionScript::Events(vec![ProviderEvent::Failed {
+            message: "failed".to_string(),
+        }]),
+    ]));
+    let progress = Arc::new(RecordingProgress::default());
+
+    let error = scripted_initializer(provider.clone(), 1024)
+        .initialize(
+            &PathBuf::from("/tmp/repository"),
+            Duration::from_secs(1),
+            CancellationToken::new(),
+            progress.clone(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.command_index, Some(2));
+    assert_eq!(provider.inputs.lock().unwrap().len(), 2);
+    assert_eq!(
+        progress.events.lock().unwrap().as_slice(),
+        &[
+            (RepositoryInitializationStepKind::PreCheck, "started"),
+            (RepositoryInitializationStepKind::PreCheck, "completed"),
+            (RepositoryInitializationStepKind::RuleConfig, "started"),
+        ],
     );
 }
 
@@ -327,6 +419,7 @@ async fn repository_initializer_stops_after_terminal_failure_events() {
                 &PathBuf::from("/tmp/repository"),
                 Duration::from_secs(1),
                 CancellationToken::new(),
+                Arc::new(RecordingProgress::default()),
             )
             .await
             .unwrap_err();
@@ -346,6 +439,7 @@ async fn repository_initializer_rejects_stream_close_without_completed() {
             &PathBuf::from("/tmp/repository"),
             Duration::from_secs(1),
             CancellationToken::new(),
+            Arc::new(RecordingProgress::default()),
         )
         .await
         .unwrap_err();
@@ -368,6 +462,7 @@ async fn repository_initializer_times_out_and_aborts_the_current_turn() {
             &PathBuf::from("/tmp/repository"),
             Duration::from_millis(20),
             CancellationToken::new(),
+            Arc::new(RecordingProgress::default()),
         )
         .await
         .unwrap_err();
@@ -405,11 +500,13 @@ async fn repository_initializer_aborts_unexpected_permission_and_choice_requests
         let provider = Arc::new(ScriptedProvider::new(vec![SessionScript::Events(vec![
             event,
         ])]));
+        let progress = Arc::new(RecordingProgress::default());
         let error = scripted_initializer(provider.clone(), 1024)
             .initialize(
                 &PathBuf::from("/tmp/repository"),
                 Duration::from_secs(1),
                 CancellationToken::new(),
+                progress.clone(),
             )
             .await
             .unwrap_err();
@@ -421,6 +518,10 @@ async fn repository_initializer_aborts_unexpected_permission_and_choice_requests
             &[ProviderCommand::Abort]
         );
         assert_eq!(provider.inputs.lock().unwrap().len(), 1);
+        assert_eq!(
+            progress.events.lock().unwrap().as_slice(),
+            &[(RepositoryInitializationStepKind::PreCheck, "started")],
+        );
     }
 }
 
@@ -439,6 +540,7 @@ async fn repository_initializer_sanitizes_secrets_controls_and_long_output() {
             &PathBuf::from("/tmp/repository"),
             Duration::from_secs(1),
             CancellationToken::new(),
+            Arc::new(RecordingProgress::default()),
         )
         .await
         .unwrap_err();
@@ -449,6 +551,29 @@ async fn repository_initializer_sanitizes_secrets_controls_and_long_output() {
     assert!(!summary.contains('\u{0}'));
     assert!(summary.contains("[REDACTED]"));
     assert!(summary.contains("[truncated]"));
+}
+
+#[tokio::test]
+async fn repository_initializer_keeps_failure_message_when_output_is_non_empty() {
+    // 真实初始化场景：provider 已产生大探索输出后超时/流中断。
+    // command_failure_with_output 的失败原因 message 必须出现在 stderr_summary，
+    // 不得因 output 非空而被既有输出覆盖丢失。
+    use super::LimitedOutput;
+    use super::command_failure_with_output;
+
+    let mut output = LimitedOutput::new(1024);
+    output.push("正在执行 rule-config 探索阶段输出...");
+    let error = command_failure_with_output(
+        1,
+        "/rule-config --no-interrupt",
+        "initialization timed out",
+        &output,
+        true,
+    );
+
+    let summary = error.stderr_summary.unwrap();
+    assert!(summary.contains("正在执行 rule-config 探索阶段输出..."));
+    assert!(summary.contains("initialization timed out"));
 }
 
 #[tokio::test]
@@ -469,6 +594,7 @@ async fn repository_initializer_rechecks_claude_gate_before_every_turn() {
             &PathBuf::from("/tmp/repository"),
             Duration::from_secs(1),
             CancellationToken::new(),
+            Arc::new(RecordingProgress::default()),
         )
         .await
         .unwrap_err();
@@ -489,6 +615,7 @@ async fn repository_initializer_bounds_and_sanitizes_session_start_failures() {
             &PathBuf::from("/tmp/repository"),
             Duration::from_secs(1),
             CancellationToken::new(),
+            Arc::new(RecordingProgress::default()),
         )
         .await
         .unwrap_err();
@@ -515,6 +642,7 @@ async fn repository_initializer_does_not_block_when_best_effort_abort_channel_is
             &PathBuf::from("/tmp/repository"),
             Duration::from_secs(1),
             CancellationToken::new(),
+            Arc::new(RecordingProgress::default()),
         ),
     )
     .await

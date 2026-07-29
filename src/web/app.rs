@@ -53,6 +53,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
             delete(handlers::delete_repository),
         )
         .route(
+            "/api/projects/{project_id}/repository-initializations/{operation_id}",
+            get(handlers::get_repository_initialization),
+        )
+        .route(
             "/api/projects/{project_id}/issues",
             get(handlers::list_product_issues).post(handlers::create_product_issue),
         )
@@ -256,10 +260,6 @@ pub fn build_web_router(state: WebAppState) -> Router {
             .route(
                 "/api/test/workspace-sessions/{session_id}/review-fixture",
                 post(test_controls::enable_review_fixture),
-            )
-            .route(
-                "/api/test/coding-attempts/{attempt_id}/testing-fixture",
-                post(test_controls::enable_testing_fixture),
             )
             .route(
                 "/api/test/coding-attempts/{attempt_id}/review-fixture",

@@ -17,8 +17,6 @@ mod product_lifecycle_store;
 mod product_runtime_compat;
 #[path = "it_product/product_test_executor.rs"]
 mod product_test_executor;
-#[path = "it_product/product_tester_agent_loop.rs"]
-mod product_tester_agent_loop;
 #[path = "it_product/product_work_item_models.rs"]
 mod product_work_item_models;
 #[path = "it_product/product_work_item_plan_store.rs"]

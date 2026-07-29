@@ -192,10 +192,6 @@ impl StreamingProviderAdapter for GatedStreamingProviderAdapter {
         self.inner.supports_tool_calls()
     }
 
-    fn supports_provider_driven_testing(&self) -> bool {
-        self.inner.supports_provider_driven_testing()
-    }
-
     async fn start(
         &self,
         input: StreamingProviderInput,
@@ -382,6 +378,7 @@ mod tests {
             provider_type: ProviderType::ClaudeCode,
             role: AdapterRole::Executor,
             worktree_path: None,
+            provider_stream_log_dir: None,
             prompt: "probe".to_string(),
             context_files: Vec::new(),
             output_schema: String::new(),

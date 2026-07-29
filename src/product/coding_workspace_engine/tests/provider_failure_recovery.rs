@@ -541,73 +541,87 @@ async fn abort_during_provider_failure_prewrite_pause_is_stable() {
 }
 
 #[tokio::test]
-async fn internal_review_blocked_gate_uses_internal_review_retry_action() {
-    let root = tempdir().expect("tempdir");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_attempt(CreateCodingAttemptInput {
-            project_id: PROJECT_ID.to_string(),
-            issue_id: ISSUE_ID.to_string(),
-            work_item_id: WORK_ITEM_ID.to_string(),
-            base_branch: "HEAD".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: None,
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Codex,
-                reviewer: Some(ProviderName::ClaudeCode),
-                review_rounds: 1,
-            },
-            max_auto_rework: 2,
-        })
-        .expect("attempt");
-    let attempt = store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running attempt");
-    let attempt = store
-        .update_attempt_stage(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingExecutionStage::InternalPrReview,
-        )
-        .expect("internal review stage");
-    let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+async fn internal_review_blocked_gates_use_triage_actions_without_coder_rework() {
+    for reason_code in [
+        "group_final_review_blocked",
+        "internal_review_blocked",
+        "internal_review_change_requested",
+        "internal_review_verification_incomplete",
+        "internal_review_human_triage",
+        "internal_review_operational_blocker",
+    ] {
+        let root = tempdir().expect("tempdir");
+        let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: WORK_ITEM_ID.to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/issues/issue_0001".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                },
+                max_auto_rework: 2,
+            })
+            .expect("attempt");
+        let attempt = store
+            .update_attempt_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &attempt.id,
+                CodingAttemptStatus::Running,
+            )
+            .expect("running attempt");
+        let attempt = store
+            .update_attempt_stage(
+                PROJECT_ID,
+                ISSUE_ID,
+                &attempt.id,
+                CodingExecutionStage::InternalPrReview,
+            )
+            .expect("internal review stage");
+        let (tx, _rx) = mpsc::channel(8);
+        let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
-    engine
-        .create_review_blocked_gate(ReviewBlockedGateInput {
-            attempt: &attempt,
-            node_id: "coding_node_0010",
-            stage: CodingExecutionStage::InternalPrReview,
-            role: CodingProviderRole::InternalReviewer,
-            title: "Internal PR review blocked".to_string(),
-            description: "review interrupted".to_string(),
-            reason_code: "internal_review_blocked",
-            evidence_refs: Vec::new(),
-            raw_provider_output_ref: None,
-        })
-        .await
-        .expect("internal review blocked gate");
+        engine
+            .create_review_blocked_gate(ReviewBlockedGateInput {
+                attempt: &attempt,
+                node_id: "coding_node_0010",
+                stage: CodingExecutionStage::InternalPrReview,
+                role: CodingProviderRole::InternalReviewer,
+                title: "Internal PR review blocked".to_string(),
+                description: "review interrupted".to_string(),
+                reason_code,
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+            })
+            .await
+            .expect("internal review blocked gate");
 
-    let gate = store
-        .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
-        .expect("open gates")
-        .into_iter()
-        .next()
-        .expect("internal review gate");
-    assert_eq!(
-        gate.available_actions
-            .iter()
-            .map(|action| action.action_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["retry_internal_review", "send_to_coder", "abort"]
-    );
-    assert_eq!(gate.available_actions[0].label, "重试 Internal Review");
+        let persisted = store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("blocked attempt");
+        assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
+        let gate = store
+            .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("open gates")
+            .into_iter()
+            .next()
+            .expect("internal review gate");
+        assert_eq!(gate.reason_code.as_deref(), Some(reason_code));
+        assert_eq!(
+            gate.available_actions
+                .iter()
+                .map(|action| action.action_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["retry_internal_review", "manual_continue", "abort"]
+        );
+        assert_eq!(gate.available_actions[0].label, "重试 Internal Review");
+    }
 }
 
 #[tokio::test]

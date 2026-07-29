@@ -210,7 +210,7 @@ impl WorkspaceEngine {
             stream_buffers: HashMap::new(),
             work_item_plan_author_retry_count: 0,
             work_item_plan_revision_retry_count: 0,
-            work_item_batch_retry_counts: HashMap::new(),
+            work_item_draft_repair_states: HashMap::new(),
             outline_revision_recovery_error: None,
             outline_revision_crash_after: None,
             plan_repair_crash_after: None,
@@ -349,7 +349,7 @@ impl WorkspaceEngine {
             stream_buffers: HashMap::new(),
             work_item_plan_author_retry_count: 0,
             work_item_plan_revision_retry_count: 0,
-            work_item_batch_retry_counts: HashMap::new(),
+            work_item_draft_repair_states: HashMap::new(),
             outline_revision_recovery_error,
             outline_revision_crash_after: None,
             plan_repair_crash_after: None,
@@ -488,6 +488,12 @@ impl WorkspaceEngine {
     pub fn mark_active_run_finished(&mut self, run_id: &str) {
         if self.active_run_id.as_deref() == Some(run_id) {
             self.active_run_id = None;
+            if matches!(
+                self.active_node_type(),
+                Some(TimelineNodeType::WorkItemDraftRun | TimelineNodeType::WorkItemBatchRun)
+            ) {
+                self.work_item_draft_repair_states.clear();
+            }
         }
     }
 

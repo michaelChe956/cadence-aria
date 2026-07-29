@@ -1,17 +1,11 @@
-const AGENT_ROUTING_KERNEL_RULE_PATH: &str = "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md";
-const OPENSPEC_SUPERPOWERS_WORKFLOW_RULE_PATH: &str = "/home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md";
-
 pub(crate) fn direct_cadence_routing_rules_reference() -> &'static str {
     const REFERENCE: &str = concat!(
-        "[cadence_original_routing_rules]\n",
-        "以下两份 Cadence 原始规则是唯一流程权威，必须直接读取并遵守；\n",
-        "- /home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md\n",
-        "- /home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md\n",
-        "不得以本 prompt 摘要、内部状态机或伪造 Skill 记录替代原规则。规则不可用时停止并报告；不得依赖外部编排系统、Hook、插件或阅读状态机。\n",
+        "[cadence_project_rules]\n",
+        "当前目标仓库根目录的 AGENTS.md 与 CLAUDE.md 是本任务的流程规则依据，必须直接读取并遵守其中适用规则。\n",
+        "[cadence_rule_read_gate]\n",
+        "开始任务前必须使用当前 Provider 可用的原生文件读取工具完整读取 AGENTS.md 和 CLAUDE.md；不得以本 prompt 摘要、内部状态机、外部规则或声称已读替代工具读取。\n",
+        "任一文件或工具不可用时，只报告阻塞；不得继续输出候选 artifact、代码、审查结论或 JSON。\n",
     );
-
-    debug_assert!(REFERENCE.contains(AGENT_ROUTING_KERNEL_RULE_PATH));
-    debug_assert!(REFERENCE.contains(OPENSPEC_SUPERPOWERS_WORKFLOW_RULE_PATH));
 
     REFERENCE
 }
@@ -21,31 +15,34 @@ mod tests {
     use super::direct_cadence_routing_rules_reference;
 
     #[test]
-    fn direct_reference_points_to_the_two_authoritative_rules_only() {
+    fn direct_reference_requires_current_project_rule_files_and_fails_closed() {
         let prompt = direct_cadence_routing_rules_reference();
 
         assert_eq!(
             prompt,
             concat!(
-                "[cadence_original_routing_rules]\n",
-                "以下两份 Cadence 原始规则是唯一流程权威，必须直接读取并遵守；\n",
-                "- /home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/agent-routing-kernel.md\n",
-                "- /home/michaelche/workspace/github/Cadence-skills/cadence-init/skills/rule-config/references/rules/openspec-superpowers-workflow.md\n",
-                "不得以本 prompt 摘要、内部状态机或伪造 Skill 记录替代原规则。规则不可用时停止并报告；不得依赖外部编排系统、Hook、插件或阅读状态机。\n",
+                "[cadence_project_rules]\n",
+                "当前目标仓库根目录的 AGENTS.md 与 CLAUDE.md 是本任务的流程规则依据，必须直接读取并遵守其中适用规则。\n",
+                "[cadence_rule_read_gate]\n",
+                "开始任务前必须使用当前 Provider 可用的原生文件读取工具完整读取 AGENTS.md 和 CLAUDE.md；不得以本 prompt 摘要、内部状态机、外部规则或声称已读替代工具读取。\n",
+                "任一文件或工具不可用时，只报告阻塞；不得继续输出候选 artifact、代码、审查结论或 JSON。\n",
             )
         );
-        assert!(prompt.contains("agent-routing-kernel.md"));
-        assert!(prompt.contains("openspec-superpowers-workflow.md"));
-        assert!(prompt.contains("/home/michaelche/workspace/github/Cadence-skills/"));
-        assert!(prompt.contains("直接读取并遵守"));
-        assert!(prompt.contains("停止并报告"));
-        assert!(!prompt.contains("cadence-workflow"));
-        assert!(!prompt.contains("Cadence Workflow"));
-        assert!(!prompt.contains("cadence workflow"));
-        assert!(!prompt.contains("CADENCE-WORKFLOW"));
-        assert!(!prompt.contains("# OpenSpec 与 Superpowers 协作规则"));
-        assert!(!prompt.contains("WorkflowDisciplineSpec"));
-        assert!(!prompt.contains("state_machine"));
-        assert!(!prompt.contains('\\'));
+    }
+
+    #[test]
+    fn direct_reference_excludes_external_and_knowledge_base_constraints() {
+        let prompt = direct_cadence_routing_rules_reference();
+
+        for forbidden in [
+            ["Cadence-", "skills/"].concat(),
+            "KnowledgeBase".to_owned(),
+            "唯一流程权威".to_owned(),
+        ] {
+            assert!(
+                !prompt.contains(&forbidden),
+                "unexpected {forbidden}: {prompt}"
+            );
+        }
     }
 }

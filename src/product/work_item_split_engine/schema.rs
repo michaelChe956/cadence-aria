@@ -50,14 +50,11 @@ pub(crate) const WORK_ITEM_SPLIT_OUTPUT_SCHEMA: &str = r#"{
             "properties": {
               "target_context_k": { "type": "string" },
               "max_summary_chars": { "type": "integer" },
-              "max_handoff_chars": { "type": "integer" },
               "max_code_context_chars": { "type": "integer" },
               "max_context_file_refs": { "type": "integer" },
-              "max_traceability_refs": { "type": "integer" },
-              "max_dependency_handoffs": { "type": "integer" }
+              "max_traceability_refs": { "type": "integer" }
             }
           },
-          "required_handoff_from": { "type": "array", "items": { "type": "string" } },
           "require_execution_plan_confirm": { "type": "boolean" }
         },
         "required": ["title", "kind"]
@@ -110,7 +107,7 @@ pub(crate) const WORK_ITEM_SPLIT_OUTPUT_SCHEMA: &str = r#"{
   "required": ["repository_profile", "work_items", "verification_plans"]
 }"#;
 
-pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
+pub const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
     "draft": {
@@ -268,7 +265,14 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                   "required",
                   "non_zero_test_execution_required"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "allOf": [{
+                  "if": { "properties": { "required": { "const": true } } },
+                  "then": {
+                    "properties": { "command": { "type": "string", "minLength": 1 } },
+                    "required": ["command"]
+                  }
+                }]
               },
               "uniqueItems": true
             },
@@ -375,7 +379,14 @@ pub(crate) const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
                   "required",
                   "non_zero_test_execution_required"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "allOf": [{
+                  "if": { "properties": { "required": { "const": true } } },
+                  "then": {
+                    "properties": { "command": { "type": "string", "minLength": 1 } },
+                    "required": ["command"]
+                  }
+                }]
               },
               "uniqueItems": true
             }
@@ -464,6 +475,21 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
                 "type": "array",
                 "items": { "type": "string" }
               },
+              "trusted_verification_commands": {
+                "type": "array",
+                "maxItems": 3,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "command": { "type": "string", "maxLength": 48 },
+                    "cwd": { "type": "string", "maxLength": 16 },
+                    "purpose": { "type": "string", "maxLength": 32 },
+                    "source_ref": { "type": "string", "maxLength": 32 }
+                  },
+                  "required": ["command", "cwd", "purpose", "source_ref"],
+                  "additionalProperties": false
+                }
+              },
               "handoff_notes": { "type": "string" }
             },
             "required": [
@@ -482,6 +508,7 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
               "forbidden_write_scopes",
               "depends_on",
               "verification_intent",
+              "trusted_verification_commands",
               "handoff_notes"
             ],
             "additionalProperties": false

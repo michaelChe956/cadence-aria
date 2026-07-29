@@ -1,23 +1,52 @@
-import { useRef, useState, type FormEvent } from "react";
+import { Check, Circle, RefreshCw, TriangleAlert } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiRequestError } from "../../api/client";
 import type {
   CreateRepositoryRequest,
   CreateRepositoryResponse,
+  RepositoryInitializationOperationSnapshot,
+  RepositoryInitializationStep,
+  RepositoryInitializationStepId,
   RepositoryRegistrationErrorDetails,
   WorkspaceProviderName,
 } from "../../api/types";
 import { getProviderOptions } from "../../state/provider-options";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 
-export function CreateRepositoryDialog({
-  onCreate,
-  onClose,
-}: {
+const POLL_INTERVAL_MS = 1_000;
+
+const STEP_LABELS: Record<RepositoryInitializationStepId, string> = {
+  cadence_skills: "准备 Cadence Skills",
+  pre_check: "执行预检查",
+  rule_config: "配置规则",
+  mcp_configuration: "配置 MCP",
+  project_rules_examples: "生成项目规则示例",
+  git_finalize: "提交并推送",
+};
+
+type CreateRepositoryDialogProps = {
   onCreate: (
     payload: CreateRepositoryRequest,
-  ) => Promise<CreateRepositoryResponse> | CreateRepositoryResponse;
+  ) =>
+    | Promise<RepositoryInitializationOperationSnapshot>
+    | RepositoryInitializationOperationSnapshot;
+  onFetchOperation: (
+    operationId: string,
+  ) =>
+    | Promise<RepositoryInitializationOperationSnapshot>
+    | RepositoryInitializationOperationSnapshot;
+  onInitializationCompleted: (
+    result: CreateRepositoryResponse,
+  ) => void | Promise<void>;
   onClose: () => void;
-}) {
+};
+
+export function CreateRepositoryDialog({
+  onCreate,
+  onFetchOperation,
+  onInitializationCompleted,
+  onClose,
+}: CreateRepositoryDialogProps) {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [policyPreset, setPolicyPreset] = useState("manual-write");
@@ -28,9 +57,17 @@ export function CreateRepositoryDialog({
     message: string;
     details: RepositoryRegistrationErrorDetails;
   } | null>(null);
-  const [success, setSuccess] = useState<CreateRepositoryResponse | null>(null);
+  const [operation, setOperation] =
+    useState<RepositoryInitializationOperationSnapshot | null>(null);
+  const [pollingError, setPollingError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
+  const fetchOperationRef = useRef(onFetchOperation);
+  const initializationCompletedRef = useRef(onInitializationCompleted);
+  const dialogRef = useRef<HTMLFormElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const shouldFocusNameInputRef = useRef(false);
+  const completedOperationIdsRef = useRef(new Set<string>());
   const availabilitySnapshot = useProviderAvailabilityStore(
     (state) => state.snapshot,
   );
@@ -44,10 +81,104 @@ export function CreateRepositoryDialog({
   const claudeCode = providerOptions.find(
     (option) => option.value === "claude_code",
   )!;
+  const isOperationRunning =
+    operation?.status === "created" || operation?.status === "running";
+  const hasCompletedResult =
+    operation?.status === "completed" && operation.result !== null;
+  const operationId = operation?.operation_id;
+  const completedResult = hasCompletedResult ? operation.result : null;
+  const completedWithoutResultError =
+    operation?.status === "completed" && operation.result === null
+      ? {
+          message: "代码库初始化已完成，但服务未返回初始化结果",
+          details: {
+            reason: "初始化操作缺少结果",
+            action: "请重新填写并提交代码库信息",
+          },
+        }
+      : null;
+  const failedOperationError =
+    operation?.status === "failed"
+      ? operation.error
+        ? { message: operation.error.message, details: operation.error.details }
+        : { message: "代码库初始化失败", details: {} }
+      : null;
+
+  fetchOperationRef.current = onFetchOperation;
+  initializationCompletedRef.current = onInitializationCompleted;
+
+  useEffect(() => {
+    if (!operationId || !isOperationRunning) {
+      return;
+    }
+
+    let disposed = false;
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      try {
+        const snapshot = await fetchOperationRef.current(operationId);
+        if (!disposed) {
+          setOperation(snapshot);
+          setPollingError(null);
+        }
+      } catch (error) {
+        if (!disposed) {
+          setPollingError(
+            error instanceof Error ? error.message : "正在重试获取初始化状态",
+          );
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [operationId, isOperationRunning]);
+
+  useEffect(() => {
+    if (!operationId || !hasCompletedResult || !completedResult) {
+      return;
+    }
+    if (completedOperationIdsRef.current.has(operationId)) {
+      return;
+    }
+
+    completedOperationIdsRef.current.add(operationId);
+    void initializationCompletedRef.current(completedResult);
+  }, [completedResult, hasCompletedResult, operationId]);
+
+  useEffect(() => {
+    if (isOperationRunning) {
+      dialogRef.current?.focus();
+    }
+  }, [isOperationRunning]);
+
+  useEffect(() => {
+    if (shouldFocusNameInputRef.current && operation === null) {
+      shouldFocusNameInputRef.current = false;
+      nameInputRef.current?.focus();
+    }
+  }, [operation]);
 
   function clearErrors() {
     setValidationError(null);
     setRegistrationError(null);
+  }
+
+  function handleRefill() {
+    shouldFocusNameInputRef.current = true;
+    clearErrors();
+    setPollingError(null);
+    setOperation(null);
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -76,14 +207,15 @@ export function CreateRepositoryDialog({
     submittingRef.current = true;
     setSubmitting(true);
     clearErrors();
+    setPollingError(null);
     try {
-      const response = await onCreate({
+      const snapshot = await onCreate({
         name: trimmedName,
         path: trimmedPath,
         default_policy_preset: policyPreset,
         default_provider_mode: providerMode,
       });
-      setSuccess(response);
+      setOperation(snapshot);
     } catch (reason) {
       if (reason instanceof ApiRequestError) {
         setRegistrationError({
@@ -102,10 +234,14 @@ export function CreateRepositoryDialog({
     }
   }
 
+  const closeDisabled = submitting || isOperationRunning;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
       <form
+        ref={dialogRef}
         role="dialog"
+        tabIndex={-1}
         aria-label="添加代码库"
         aria-modal="true"
         onSubmit={handleSubmit}
@@ -118,20 +254,86 @@ export function CreateRepositoryDialog({
           <button
             type="button"
             onClick={onClose}
-            disabled={submitting}
-            className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]"
+            disabled={closeDisabled}
+            className="cursor-pointer rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] disabled:cursor-not-allowed"
           >
             关闭
           </button>
         </div>
-        {success ? (
-          <RepositoryInitializationSuccess response={success} />
+        {operation ? (
+          completedResult ? (
+            <>
+              <RepositoryInitializationProgress operation={operation} />
+              <RepositoryInitializationSuccess
+                response={completedResult}
+                operation={operation}
+              />
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="cursor-pointer rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white"
+                >
+                  完成
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <RepositoryInitializationProgress operation={operation} />
+              {isOperationRunning ? (
+                <p className="mt-3 text-sm text-[var(--aria-ink-muted)]">
+                  正在初始化，请保持此窗口打开
+                </p>
+              ) : null}
+              {pollingError ? (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className="mt-3 text-sm text-[var(--aria-danger)]"
+                >
+                  {pollingError}
+                </p>
+              ) : null}
+              {failedOperationError ? (
+                <div className="mt-3">
+                  <RepositoryRegistrationError error={failedOperationError} />
+                </div>
+              ) : null}
+              {completedWithoutResultError ? (
+                <div className="mt-3">
+                  <RepositoryRegistrationError error={completedWithoutResultError} />
+                </div>
+              ) : null}
+              <div className="mt-4 flex justify-end gap-2">
+                {isOperationRunning ? (
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    disabled
+                    className="cursor-pointer rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink-muted)] disabled:cursor-not-allowed"
+                  >
+                    取消
+                  </button>
+                ) : operation.status === "failed" || completedWithoutResultError ? (
+                  <button
+                    type="button"
+                    onClick={handleRefill}
+                    className="cursor-pointer rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white"
+                  >
+                    重新填写
+                  </button>
+                ) : null}
+              </div>
+            </>
+          )
         ) : (
           <>
             <div className="space-y-3">
               <label className="block text-sm font-semibold text-[var(--aria-ink)]">
                 代码库名称
                 <input
+                  ref={nameInputRef}
                   value={name}
                   onChange={(event) => {
                     setName(event.target.value);
@@ -175,9 +377,7 @@ export function CreateRepositoryDialog({
                 <select
                   value={providerMode}
                   onChange={(event) => {
-                    setProviderMode(
-                      event.target.value as WorkspaceProviderName,
-                    );
+                    setProviderMode(event.target.value as WorkspaceProviderName);
                     clearErrors();
                   }}
                   disabled={submitting}
@@ -229,43 +429,138 @@ export function CreateRepositoryDialog({
               <button
                 type="button"
                 onClick={onClose}
-                disabled={submitting}
-                className="rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink-muted)]"
+                disabled={closeDisabled}
+                className="cursor-pointer rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink-muted)] disabled:cursor-not-allowed"
               >
                 取消
               </button>
               <button
                 type="submit"
                 disabled={submitting || !claudeCode.available}
-                className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                className="cursor-pointer rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
               >
                 添加代码库
               </button>
             </div>
           </>
         )}
-        {success ? (
-          <div className="mt-4 flex justify-end">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white"
-            >
-              完成
-            </button>
-          </div>
-        ) : null}
       </form>
     </div>
   );
 }
 
+function RepositoryInitializationProgress({
+  operation,
+}: {
+  operation: RepositoryInitializationOperationSnapshot;
+}) {
+  const completedCount = operation.steps.filter(
+    (step) => step.status === "completed",
+  ).length;
+  const runningStep = operation.steps.find((step) => step.status === "running");
+  const currentStep = operation.current_step ?? runningStep?.step_id ?? null;
+  const failedStep = operation.failed_step;
+  const statusSummary =
+    operation.status === "completed" && operation.result === null
+      ? `初始化结果缺失。已完成 ${completedCount} / ${operation.steps.length}。`
+      : operation.status === "completed"
+      ? `初始化完成。已完成 ${completedCount} / ${operation.steps.length}。`
+      : operation.status === "failed"
+        ? `初始化失败：${failedStep ? STEP_LABELS[failedStep] : "未知步骤"}。已完成 ${completedCount} / ${operation.steps.length}。`
+        : currentStep
+          ? `正在执行：${STEP_LABELS[currentStep]}。已完成 ${completedCount} / ${operation.steps.length}。`
+          : `等待执行。已完成 ${completedCount} / ${operation.steps.length}。`;
+
+  return (
+    <section className="space-y-3" aria-label="代码库初始化进度">
+      <p
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="text-sm text-[var(--aria-ink-muted)]"
+      >
+        {statusSummary}
+      </p>
+      <ol aria-label="初始化步骤" className="space-y-2">
+        {operation.steps.map((step) => (
+          <li
+            key={step.step_id}
+            aria-current={step.status === "running" ? "step" : undefined}
+            className="flex items-center gap-2 text-sm text-[var(--aria-ink)]"
+          >
+            <RepositoryInitializationStepIcon step={step} />
+            <span className="min-w-0 flex-1">{STEP_LABELS[step.step_id]}</span>
+            <span className="text-xs text-[var(--aria-ink-muted)]">
+              {stepStatusLabel(step.status)}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function RepositoryInitializationStepIcon({
+  step,
+}: {
+  step: RepositoryInitializationStep;
+}) {
+  if (step.status === "completed") {
+    return (
+      <Check
+        aria-hidden="true"
+        className="h-4 w-4 shrink-0 text-[var(--aria-success)]"
+      />
+    );
+  }
+  if (step.status === "running") {
+    return (
+      <RefreshCw
+        aria-hidden="true"
+        className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none"
+      />
+    );
+  }
+  if (step.status === "failed") {
+    return (
+      <TriangleAlert
+        aria-hidden="true"
+        className="h-4 w-4 shrink-0 text-[var(--aria-danger)]"
+      />
+    );
+  }
+  return (
+    <Circle
+      aria-hidden="true"
+      className="h-4 w-4 shrink-0 text-[var(--aria-ink-muted)]"
+    />
+  );
+}
+
+function stepStatusLabel(status: RepositoryInitializationStep["status"]) {
+  switch (status) {
+    case "completed":
+      return "已完成";
+    case "running":
+      return "正在执行";
+    case "failed":
+      return "失败";
+    case "pending":
+      return "等待执行";
+  }
+}
+
 function RepositoryInitializationSuccess({
   response,
+  operation,
 }: {
   response: CreateRepositoryResponse;
+  operation: RepositoryInitializationOperationSnapshot;
 }) {
   const { initialization } = response;
+  const gitFinalizeFailed = operation.steps.some(
+    (step) => step.step_id === "git_finalize" && step.status === "failed",
+  );
   return (
     <section className="space-y-3 text-sm" aria-label="代码库初始化结果">
       <h3 className="font-semibold text-[var(--aria-ink)]">代码库初始化完成</h3>
@@ -303,6 +598,22 @@ function RepositoryInitializationSuccess({
               <li key={warning}>{warning}</li>
             ))}
           </ul>
+        </div>
+      ) : null}
+      {gitFinalizeFailed ? (
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="rounded-md border border-[var(--aria-danger)]/30 bg-red-50 px-3 py-2 text-[var(--aria-danger)]"
+        >
+          <p>自动提交推送未完成，请在目标仓库手动执行 git commit / git push</p>
+          {initialization.git_finalize_warning ? (
+            <p className="mt-1">{initialization.git_finalize_warning}</p>
+          ) : null}
+        </div>
+      ) : initialization.git_finalize_warning ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
+          {initialization.git_finalize_warning}
         </div>
       ) : null}
     </section>

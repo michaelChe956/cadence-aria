@@ -14,7 +14,7 @@ use crate::web::error::{ApiError, ApiResult};
 use crate::web::types::GenerateWorkItemsRequest;
 
 use super::WorkItemSplitEngine;
-use super::prompts::build_work_item_draft_prompt;
+use super::prompts::{WORK_ITEM_DRAFT_PROMPT_MAX_BYTES, build_work_item_draft_prompt};
 use super::types::{
     ProviderOutput, ProviderWorkItemDraftInput, WorkItemDraftInvocation,
     WorkItemSplitProviderOutput, parse_confidence, parse_fallback_policy, parse_safety,
@@ -159,6 +159,21 @@ pub fn build_work_item_draft_invocation(
                 json!({ "outline_id": current_outline_id }),
             )
         })?;
+    let mut catalog_findings = Vec::new();
+    crate::product::work_item_split_validator::outline::validate_trusted_verification_command_catalog(
+        current_outline,
+        &mut catalog_findings,
+    );
+    if let Some(finding) = catalog_findings.into_iter().next() {
+        return Err(ApiError::validation_with_details(
+            finding.code,
+            finding.message,
+            json!({
+                "outline_id": current_outline_id,
+                "work_item_ids": finding.work_item_ids,
+            }),
+        ));
+    }
     let dependency_ids: HashSet<&str> = current_outline
         .depends_on
         .iter()
@@ -182,6 +197,20 @@ pub fn build_work_item_draft_invocation(
         feedback,
         &nonce,
     );
+    if prompt.len() >= WORK_ITEM_DRAFT_PROMPT_MAX_BYTES {
+        return Err(ApiError::validation_with_details(
+            "work_item_draft_prompt_too_large",
+            format!(
+                "work item draft prompt exceeds the {}-byte provider-context hard backstop",
+                WORK_ITEM_DRAFT_PROMPT_MAX_BYTES
+            ),
+            json!({
+                "prompt_bytes": prompt.len(),
+                "max_prompt_bytes": WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
+                "outline_id": current_outline_id,
+            }),
+        ));
+    }
 
     Ok(WorkItemDraftInvocation {
         prompt,
@@ -382,18 +411,15 @@ pub(crate) fn parse_provider_output(
             source_outline_id: None,
             source_draft_id: None,
             planned_implementation_context: None,
-            planned_handoff_summary: None,
             kind: parse_work_item_kind(&item.kind),
             sequence_hint: item.sequence_hint,
             depends_on,
             exclusive_write_scopes: item.exclusive_write_scopes.clone(),
             forbidden_write_scopes: item.forbidden_write_scopes.clone(),
             context_budget: item.context_budget.clone().unwrap_or_default(),
-            required_handoff_from: item.required_handoff_from.clone(),
             verification_plan_ref: Some(verification_plan_ids[index].clone()),
             require_execution_plan_confirm: item.require_execution_plan_confirm,
             execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
-            handoff_summary_ref: None,
             completion_commit: None,
             completion_diff_summary_ref: None,
             created_at: String::new(),

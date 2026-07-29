@@ -20,10 +20,8 @@ import type {
   PlanRepairSessionSnapshot,
   ProviderConfigSnapshot,
   ReviewRequest,
-  TestingReport,
   TimelineNode as WorkspaceTimelineNode,
   WorkItemExecutionPlan,
-  WorkItemHandoff,
   WorkItemRevisionHistoryDto,
   WorkspaceProviderName,
 } from "../api/types";
@@ -44,7 +42,7 @@ import {
   type PlanRepairSessionState,
 } from "./plan-repair-session";
 
-export type CodingArtifactTab = "diff" | "tests" | "review" | "git" | "logs";
+export type CodingArtifactTab = "diff" | "review" | "git" | "logs";
 export type CodingConnectionStatus =
   | "connecting"
   | "connected"
@@ -97,7 +95,6 @@ export interface CodingWorkspaceState {
   activeStreamNodeId: string | null;
   activeTab: CodingArtifactTab;
   diffSummary: null;
-  testingReport: TestingReport | null;
   codeReviewReports: CodeReviewReport[];
   internalPrReview: InternalPrReview | null;
   reviewRequest: ReviewRequest | null;
@@ -108,7 +105,6 @@ export interface CodingWorkspaceState {
   protocolError: CodingProtocolError | null;
   tabLockedByUser: boolean;
   workItemExecutionPlan: WorkItemExecutionPlan | null;
-  workItemHandoff: WorkItemHandoff | null;
   activePlanRepair: PlanRepairSessionState | null;
   // 门禁开关唯一来源：work item / snapshot 上的 require_execution_plan_confirm
   requireExecutionPlanConfirm: boolean;
@@ -126,7 +122,6 @@ export interface CodingWorkspaceActions {
     summary?: string | null,
     completedAt?: string | null,
   ) => void;
-  setTestingReport: (report: TestingReport | null) => void;
   addCodeReviewReport: (report: CodeReviewReport) => void;
   setReviewRequest: (request: ReviewRequest | null) => void;
   setInternalPrReview: (review: InternalPrReview | null) => void;
@@ -137,7 +132,7 @@ export interface CodingWorkspaceActions {
   resolvePendingGate: (gateId: string) => void;
   markGateSubmitting: (gateId: string) => void;
   setGateError: (gateId: string, errorCode: string) => void;
-  updateProviderConfig: (role: CodingProviderSelectRole | "tester", provider: WorkspaceProviderName) => void;
+  updateProviderConfig: (role: CodingProviderSelectRole, provider: WorkspaceProviderName) => void;
   setMaxAutoRework: (maxAutoRework: number) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   completeStream: (nodeId?: string | null) => void;
@@ -199,7 +194,6 @@ const initialState: CodingWorkspaceState = {
   activeStreamNodeId: null,
   activeTab: "diff",
   diffSummary: null,
-  testingReport: null,
   codeReviewReports: [],
   internalPrReview: null,
   reviewRequest: null,
@@ -210,7 +204,6 @@ const initialState: CodingWorkspaceState = {
   protocolError: null,
   tabLockedByUser: false,
   workItemExecutionPlan: null,
-  workItemHandoff: null,
   activePlanRepair: null,
   requireExecutionPlanConfirm: false,
 };
@@ -266,14 +259,12 @@ export const useCodingWorkspaceStore = create<
           (snapshot.chat_entries ?? []).map(codingChatEntryToChatEntry),
           snapshot.pending_choices ?? [],
         ),
-        testingReport: snapshot.testing_report,
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
         roleRuns: snapshot.role_runs ?? [],
         pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
         workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,
-        workItemHandoff: snapshot.work_item_handoff ?? null,
         activePlanRepair,
         requireExecutionPlanConfirm: snapshot.require_execution_plan_confirm ?? false,
         protocolError: null,
@@ -312,8 +303,6 @@ export const useCodingWorkspaceStore = create<
           ? null
           : state.activeNodeId,
     })),
-
-  setTestingReport: (testingReport) => set({ testingReport }),
 
   addCodeReviewReport: (report) =>
     set((state) => ({
@@ -508,8 +497,6 @@ function stageToArtifactTab(stage: CodingExecutionStage): CodingArtifactTab | nu
       return "git";
     case "coding":
       return "diff";
-    case "testing":
-      return "tests";
     case "code_review":
     case "internal_pr_review":
       return "review";
@@ -527,8 +514,6 @@ function chatRoleForNode(
   switch (stage) {
     case "coding":
       return "coder";
-    case "testing":
-      return "tester";
     case "code_review":
       return "code_reviewer";
     case "internal_pr_review":
@@ -543,10 +528,10 @@ function chatRoleForNode(
 }
 
 function providerConfigKeyForRole(
-  role: CodingProviderSelectRole | "tester",
+  role: CodingProviderSelectRole,
 ): keyof Pick<
   CodingRoleProviderConfigSnapshot,
-  "coder" | "tester_plan" | "tester_execute" | "code_reviewer" | "internal_reviewer"
+  "coder" | "code_reviewer" | "internal_reviewer"
 > {
   switch (role) {
     case "author":
@@ -555,11 +540,6 @@ function providerConfigKeyForRole(
     case "reviewer":
     case "code_reviewer":
       return "code_reviewer";
-    case "tester":
-    case "tester_execute":
-      return "tester_execute";
-    case "tester_plan":
-      return "tester_plan";
     case "internal_reviewer":
       return "internal_reviewer";
   }
@@ -606,7 +586,7 @@ function isProviderPromptEvent(event: ExecutionEvent) {
 
 function updateLegacyProviderConfig(
   snapshot: ProviderConfigSnapshot | null,
-  role: CodingProviderSelectRole | "tester",
+  role: CodingProviderSelectRole,
   provider: WorkspaceProviderName,
 ): ProviderConfigSnapshot | null {
   if (!snapshot) return snapshot;
@@ -682,8 +662,6 @@ function chatRoleForChoiceRole(role: CodingProviderRole): ChatEntryRole {
   switch (role) {
     case "coder":
       return "coder";
-    case "tester":
-      return "tester";
     case "code_reviewer":
       return "code_reviewer";
     case "internal_reviewer":
@@ -760,7 +738,6 @@ function upsertRoleRunFromCompletedProviderEntry(
 function roleRunRoleForChatEntry(entry: ChatEntry): CodingProviderRole | null {
   switch (entry.role) {
     case "coder":
-    case "tester":
     case "code_reviewer":
     case "internal_reviewer":
       return entry.role;
@@ -776,8 +753,6 @@ function stageForRoleRunRole(role: CodingProviderRole): CodingExecutionStage {
   switch (role) {
     case "coder":
       return "coding";
-    case "tester":
-      return "testing";
     case "code_reviewer":
       return "code_review";
     case "internal_reviewer":

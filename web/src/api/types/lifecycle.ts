@@ -51,18 +51,15 @@ export type LifecycleWorkItem = {
   source_outline_id?: string | null;
   source_draft_id?: string | null;
   planned_implementation_context?: string | null;
-  planned_handoff_summary?: string | null;
   kind: WorkItemKind;
   sequence_hint: number | null;
   depends_on: string[];
   exclusive_write_scopes: string[];
   forbidden_write_scopes: string[];
   context_budget: WorkItemContextBudget;
-  required_handoff_from: string[];
   verification_plan_ref: string | null;
   require_execution_plan_confirm: boolean;
   execution_plan_status: WorkItemExecutionPlanStatus;
-  handoff_summary_ref: string | null;
   completion_commit: string | null;
   completion_diff_summary_ref: string | null;
   validator_findings?: WorkItemSplitFinding[];

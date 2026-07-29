@@ -141,6 +141,7 @@ fn review_git_operation_requires_commit_identity_and_durable_completion_outcome(
                 push_status: PushStatus::Pushed,
                 remote_kind: RemoteKind::GenericGit,
                 review_request_id: "review_request_0001".to_string(),
+                push_error: None,
             },
         )
         .expect("complete review journal");
@@ -159,6 +160,7 @@ fn review_git_operation_requires_commit_identity_and_durable_completion_outcome(
                 push_status: PushStatus::Pushed,
                 remote_kind: RemoteKind::GenericGit,
                 review_request_id: "review_request_0001".to_string(),
+                push_error: None,
             },
         )
         .expect("idempotent complete replay");
@@ -170,6 +172,7 @@ fn review_git_operation_requires_commit_identity_and_durable_completion_outcome(
             push_status: PushStatus::Failed,
             remote_kind: RemoteKind::GenericGit,
             review_request_id: "review_request_0001".to_string(),
+            push_error: None,
         },
     );
     assert!(matches!(

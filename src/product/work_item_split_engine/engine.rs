@@ -132,6 +132,8 @@ impl WorkItemSplitEngine {
             provider_type,
             role: AdapterRole::WorkItemSplitter,
             worktree_path: Some(worktree_path),
+            // work item split 阶段无 coding attempt 上下文，按契约缺省不写流日志。
+            provider_stream_log_dir: None,
             prompt: prompt.to_string(),
             context_files: Vec::new(),
             output_schema: WORK_ITEM_SPLIT_OUTPUT_SCHEMA.to_string(),

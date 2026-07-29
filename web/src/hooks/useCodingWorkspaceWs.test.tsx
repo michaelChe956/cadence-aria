@@ -181,14 +181,11 @@ describe("useCodingWorkspaceWs inbound events", () => {
         pushed_remote: null,
         role_provider_config_snapshot: {
           coder: "fake",
-          tester_plan: "fake",
-      tester_execute: "fake",
           code_reviewer: "fake",
           internal_reviewer: "fake",
           review_rounds: 1,
           permission_modes: {
             coder: "supervised",
-            tester: "auto",
             code_reviewer: "supervised",
             internal_reviewer: "supervised",
           },
@@ -197,7 +194,6 @@ describe("useCodingWorkspaceWs inbound events", () => {
         chat_entries: [],
         timeline_nodes: [],
         active_node_id: null,
-        testing_report: null,
         code_review_reports: [],
         review_request: null,
         internal_pr_review: null,
@@ -228,7 +224,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
       });
       harness.ws.receive({
         type: "coding_provider_config_updated",
-        role: "tester",
+        role: "code_reviewer",
         provider: "codex",
       });
     });
@@ -243,7 +239,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
       status: "completed",
       summary: "代码编写完成",
     });
-    expect(state.roleProviderConfigSnapshot?.tester_execute).toBe("codex");
+    expect(state.roleProviderConfigSnapshot?.code_reviewer).toBe("codex");
   });
 
   it("stores role runs from coding session snapshots", () => {
@@ -256,8 +252,8 @@ describe("useCodingWorkspaceWs inbound events", () => {
             {
               id: "coding_role_run_0001",
               attempt_id: "coding_attempt_0001",
-              stage: "testing",
-              role: "tester",
+              stage: "code_review",
+              role: "code_reviewer",
               run_no: 1,
               status: "running",
               trigger: "initial",
@@ -278,7 +274,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
     expect(useCodingWorkspaceStore.getState().roleRuns).toHaveLength(1);
     expect(useCodingWorkspaceStore.getState().roleRuns[0]).toMatchObject({
       id: "coding_role_run_0001",
-      role: "tester",
+      role: "code_reviewer",
       run_no: 1,
     });
   });
@@ -292,7 +288,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
         event: {
           event_id: "execution_event_0001",
           node_id: "coding_node_0001",
-          agent: "tester",
+          agent: "coder",
           kind: "command",
           status: "completed",
           title: "cargo test",
@@ -333,7 +329,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
         issue_id: "issue_0001",
         attempt_id: "coding_attempt_0001",
         status: "running",
-        stage: "testing",
+        stage: "code_review",
         branch_name: "aria/work-items/work_item_0001/attempt-1",
         base_branch: "main",
         worktree_path: "/tmp/worktree",
@@ -343,14 +339,11 @@ describe("useCodingWorkspaceWs inbound events", () => {
         pushed_remote: null,
         role_provider_config_snapshot: {
           coder: "fake",
-          tester_plan: "fake",
-      tester_execute: "fake",
           code_reviewer: "fake",
           internal_reviewer: "fake",
           review_rounds: 1,
           permission_modes: {
             coder: "supervised",
-            tester: "auto",
             code_reviewer: "supervised",
             internal_reviewer: "supervised",
           },
@@ -361,10 +354,10 @@ describe("useCodingWorkspaceWs inbound events", () => {
           {
             id: "coding_node_0003",
             attempt_id: "coding_attempt_0001",
-            stage: "testing",
-            title: "测试执行",
+            stage: "code_review",
+            title: "Code Review",
             status: "running",
-            agent_role: "tester",
+            agent_role: "reviewer",
             summary: null,
             started_at: "2026-06-14T00:00:00Z",
             completed_at: null,
@@ -372,7 +365,6 @@ describe("useCodingWorkspaceWs inbound events", () => {
           },
         ],
         active_node_id: "coding_node_0003",
-        testing_report: null,
         code_review_reports: [],
         review_request: null,
         internal_pr_review: null,
@@ -406,7 +398,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
     expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
       {
         type: "provider_stream",
-        role: "tester",
+        role: "code_reviewer",
         content: "hello",
         node_id: "coding_node_0003",
       },
@@ -546,14 +538,11 @@ describe("useCodingWorkspaceWs inbound events", () => {
         pushed_remote: null,
         role_provider_config_snapshot: {
           coder: "fake",
-          tester_plan: "fake",
-      tester_execute: "fake",
           code_reviewer: "fake",
           internal_reviewer: "fake",
           review_rounds: 1,
           permission_modes: {
             coder: "supervised",
-            tester: "auto",
             code_reviewer: "supervised",
             internal_reviewer: "supervised",
           },
@@ -562,7 +551,6 @@ describe("useCodingWorkspaceWs inbound events", () => {
         chat_entries: [],
         timeline_nodes: [],
         active_node_id: null,
-        testing_report: null,
         code_review_reports: [],
         review_request: null,
         internal_pr_review: null,
@@ -728,7 +716,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
     ]);
   });
 
-  it("maps coding tool calls and code reviewer chat entries to role-specific entries", () => {
+  it("maps coder tool calls and code reviewer chat entries to role-specific entries", () => {
     const harness = renderCodingHook();
 
     act(() => {
@@ -738,7 +726,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
           id: "coding_chat_entry_tool_0001",
           attempt_id: "coding_attempt_0001",
           node_id: "coding_node_0002",
-          role: "tester",
+          role: "author",
           entry_type: {
             type: "tool_call",
             tool_name: "run_command",
@@ -768,7 +756,7 @@ describe("useCodingWorkspaceWs inbound events", () => {
       {
         id: "coding_chat_entry_tool_0001",
         type: "execution_event",
-        role: "tester",
+        role: "coder",
         content: "run_command",
         metadata: {
           tool_name: "run_command",

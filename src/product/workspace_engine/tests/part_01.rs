@@ -111,6 +111,7 @@ fn test_work_item_plan_outline(
                 forbidden_write_scopes: Vec::new(),
                 depends_on: Vec::new(),
                 verification_intent: vec!["cargo test --locked --lib a".to_string()],
+                trusted_verification_commands: Vec::new(),
                 handoff_notes: "handoff A".to_string(),
             },
             WorkItemOutline {
@@ -129,6 +130,7 @@ fn test_work_item_plan_outline(
                 forbidden_write_scopes: Vec::new(),
                 depends_on: Vec::new(),
                 verification_intent: vec!["pnpm -C web test".to_string()],
+                trusted_verification_commands: Vec::new(),
                 handoff_notes: "handoff B".to_string(),
             },
             WorkItemOutline {
@@ -147,6 +149,7 @@ fn test_work_item_plan_outline(
                 forbidden_write_scopes: Vec::new(),
                 depends_on: Vec::new(),
                 verification_intent: vec!["cargo test --locked --test c".to_string()],
+                trusted_verification_commands: Vec::new(),
                 handoff_notes: "handoff C".to_string(),
             },
         ],

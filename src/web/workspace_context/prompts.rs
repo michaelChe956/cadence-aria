@@ -1,6 +1,8 @@
 use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 use crate::product::models::{ProviderName, WorkspaceSessionRecord, WorkspaceType};
-use crate::product::workspace_engine::{allowed_outputs_for, forbidden_outputs_for};
+use crate::product::workspace_engine::{
+    allowed_outputs_for, author_artifact_schema_contract_for, forbidden_outputs_for,
+};
 
 pub(super) fn workspace_type_label(workspace_type: &WorkspaceType) -> &'static str {
     match workspace_type {
@@ -50,7 +52,7 @@ pub(super) fn constraint_summary_for(session: &WorkspaceSessionRecord) -> String
     if session.openspec_enabled {
         match session.workspace_type {
             WorkspaceType::Story => {
-                "OpenSpec 已启用。必须覆盖 Issue 所表达的 proposal constraints；Markdown spec 中必须声明稳定 requirement IDs，供 daemon 在 review pass 后写回 OpenSpec 并编译 requirement_constraints。不要把 OpenSpec 当作 runtime truth。"
+                "OpenSpec 已启用。必须覆盖 Issue 所表达的 proposal constraints；Markdown spec 中必须声明稳定 requirement IDs，供 daemon 在 review pass 后写回 OpenSpec 并编译 requirement_constraints。若 Issue 明示文件/模块归属、公开 API、复用/依赖关系或自动化验证责任，必须把每项约束分别固化为带 source id 的稳定 [REQ-*]；文件/模块归属覆盖具体 API/行为时，需求必须将该具体 API/行为与所属文件/模块直接绑定，声明、重导出或范围概述不能替代。若明示规则之间存在例外、优先级或集合包含关系，需求必须保留该关系及适用范围，不得把带例外的规则写成无条件绝对规则。仅在范围段提及不足以覆盖这些约束。可观察行为的验收必须用 [AC-*] 关联相应 [REQ-*]。不要把 OpenSpec 当作 runtime truth。"
                     .to_string()
             }
             WorkspaceType::Design => {
@@ -127,39 +129,28 @@ fn structured_interaction_guidance_for(provider: &ProviderName) -> &'static str 
 }
 
 pub(super) fn output_schema_for(workspace_type: &WorkspaceType) -> String {
-    match workspace_type {
+    let mut schema = match workspace_type {
         WorkspaceType::Story => {
-            "Markdown Story Spec 必须包含以下 heading：\n\
-             - ## 范围\n\
-             - ## 用户故事\n\
-             - ## 功能需求\n\
-             - ## 成功标准\n\
-             - ## 待确认项\n\
-             - ## 非功能需求\n\n\
-             最终候选 Markdown 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Story Spec 一级标题，例如 # <名称> Story Spec；过程说明必须放在 fenced block 外。每条需求必须显式写稳定 ID，例如 [REQ-001]；每条验收标准必须显式写稳定 ID，例如 [AC-001]。必须在 ## 范围 或 ## 功能需求 中显式写出来源 source id，例如 Issue issue_0001，并说明需求追踪关系。如果通过 AskUserQuestion、requestUserInput 或 text_fallback 结构化交互解决了影响范围、需求、成功标准或验收口径的问题，必须在 artifact 正文加入 ## 用户确认决策，使用稳定 ID（例如 author-decision-001）记录问题、用户选择、来源机制，并把每条决策绑定到受影响的 [REQ-*]/[AC-*]；已解决的选择不得再写入 ## 待确认项。实现细节类选择只记录为 Design 阶段输入，不要固化成 Story 范围或验收标准。如果通过交互已解决所有疑问，## 待确认项 写“无”；不要为了填充该 heading 编造未决问题。"
+            "最终候选 Markdown 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Story Spec 一级标题，例如 # <名称> Story Spec；过程说明必须放在 fenced block 外。保留与上游 Issue 的需求追踪叙述；下方 parser schema 是唯一的 Markdown 结构、稳定 ID、追踪与禁止项合同。如果通过 AskUserQuestion、requestUserInput 或 text_fallback 结构化交互解决了影响范围、需求、成功标准或验收口径的问题，必须在 artifact 正文加入 ## 用户确认决策，使用稳定 ID（例如 author-decision-001）记录问题、用户选择、来源机制，并把每条决策绑定到受影响的 parser-required 需求/验收 ID；已解决的选择不得再写入 ## 待确认项。实现细节类选择只记录为 Design 阶段输入，不要固化成 Story 范围或验收标准。如果通过交互已解决所有疑问，## 待确认项 写“无”；不要为了填充该 heading 编造未决问题。"
                 .to_string()
         }
         WorkspaceType::Design => {
-            "Markdown Design Spec 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Design Spec 一级标题；内容必须包含以下 heading：\n\
-             - ## 设计范围\n\
-             - ## 设计决策\n\
-             - ## 公共组件\n\
-             - ## API 契约\n\
-             - ## 数据模型\n\
-             - ## 风险\n\
-             - ## 追踪关系\n\n\
-             设计决策使用 [DEC-001]，组件使用 [CMP-001]，API 使用 [API-001]。如果上游 Story 或本轮 author 通过结构化交互形成用户确认决策，必须在 ## 设计决策 中记录对应 author-decision-* 或将其映射到 [DEC-*]，并说明 AskUserQuestion/requestUserInput/text_fallback 来源；必须在 ## 追踪关系 中把这些用户确认决策绑定到来源 [REQ-*]/[AC-*]/[DEC-*]。必须在 ## 追踪关系 中显式写出来源 source ids，例如 Story Spec story_spec_0001、Issue issue_0001，并绑定到对应 [REQ-xxx]/[DEC-xxx]。"
+            "Markdown Design Spec 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Design Spec 一级标题。基于上游 Story Spec 保留设计追踪关系；下方 parser schema 是唯一的 Markdown 结构、稳定 ID、追踪与禁止项合同。如果上游 Story 或本轮 author 通过结构化交互形成用户确认决策，必须在 ## 设计决策 中记录对应 author-decision-* 或将其映射到 parser-required 设计决策 ID，并说明 AskUserQuestion/requestUserInput/text_fallback 来源；必须在 ## 追踪关系 中把这些用户确认决策绑定到来源需求、验收或设计决策 ID。"
                 .to_string()
         }
         WorkspaceType::WorkItem => {
-            "Markdown Work Item 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item 一级标题；内容必须描述单个可执行任务，包含目标、范围、实现步骤或子步骤、依赖、验证命令、风险和追踪关系。如果来源 Story/Design 或本轮 author 包含结构化交互形成的用户确认决策，必须在目标、范围或追踪关系中写明对应 author-decision-*，并绑定到来源需求/设计/验收 ID。必须在追踪关系中显式写出 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001，并绑定来源需求/设计 ID。内容规模不超过 40k 属正常范围，40001..=50000 必须仍能由单个会话完成编码、返修与验证，超过 50k 不得作为单个 Work Item；禁止跨任务内容、兄弟任务、Issue 级完整计划和其它任务的交叉内容。"
+            "Markdown Work Item 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item 一级标题；内容必须描述基于上游 Story/Design 的单个可执行任务。下方 parser schema 是唯一的 Markdown 结构、追踪与禁止项合同。如果来源 Story/Design 或本轮 author 包含结构化交互形成的用户确认决策，必须在目标、范围或追踪关系中写明对应 author-decision-*，并绑定到来源需求/设计/验收 ID。内容规模不超过 40k 属正常范围，40001..=50000 必须仍能由单个会话完成编码、返修与验证，超过 50k 不得作为单个 Work Item；禁止跨任务内容、兄弟任务、Issue 级完整计划和其它任务的交叉内容。"
                 .to_string()
         }
         WorkspaceType::WorkItemPlan => {
             "Markdown Work Item Plan 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item Plan 一级标题；内容必须包含计划范围、任务拆分（[TASK-001]）、依赖图、验证计划、执行顺序、风险与追踪关系；每个任务必须显式写出并绑定来源 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001。拆分目标是在单个 Claude Code 或 Codex 会话可完成的前提下最少拆分。每个任务必须最大内聚，优先合并目标一致、范围重叠且可在同一会话闭环的工作；不超过 40k 属正常范围，40001..=50000 需经 Reviewer 判断，超过 50k 必须继续拆分。"
                 .to_string()
         }
+    };
+    if let Some(contract) = author_artifact_schema_contract_for(workspace_type) {
+        schema.push_str(&contract);
     }
+    schema
 }
 
 pub(super) fn runtime_contract_for(session: &WorkspaceSessionRecord) -> String {

@@ -154,8 +154,6 @@ fn work_item_revision_store_persists_scoped_revision_artifacts() {
         )]),
         contract_hash: "contract_hash_0001".to_string(),
         commit_sha: "0123456789abcdef".to_string(),
-        tests: vec!["cargo test --locked".to_string()],
-        artifacts: vec!["artifact_0001".to_string()],
         created_at: "2026-07-17T00:00:11Z".to_string(),
     };
     store.put_handoff_revision(&plan, &handoff).unwrap();

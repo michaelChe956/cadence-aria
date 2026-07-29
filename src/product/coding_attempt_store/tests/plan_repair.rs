@@ -568,18 +568,6 @@ fn coding_unit_run_context_binding_preserves_facts_status_and_independent_counte
         bound.coder_execution_context_hash.as_deref(),
         Some("execution_context_hash")
     );
-    assert!(matches!(
-        store.bind_unit_run_execution_context(
-            &attempt,
-            &run.id,
-            CodingProviderRole::Tester,
-            &rendered,
-        ),
-        Err(ProductStoreError::IdentityMismatch {
-            kind: "coding_unit_run_execution_context_role",
-            ..
-        })
-    ));
 }
 
 #[test]

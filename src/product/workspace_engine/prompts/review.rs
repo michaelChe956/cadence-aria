@@ -1,3 +1,4 @@
+use super::reviewer_context_filter::reviewer_context_content;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::models::PlanProjectionBundle;
@@ -36,12 +37,15 @@ impl WorkspaceEngine {
             workspace_type_title(&self.session.workspace_type)
         ));
         prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
+        if let Some(gate) = reviewer_artifact_schema_gate_for(&self.session.workspace_type) {
+            prompt.push_str(&gate);
+        }
         prompt.push_str("会话上下文:\n");
         for msg in &self.session.messages {
-            if matches!(msg.role.as_str(), "assistant" | "provider") {
+            let Some(content) = reviewer_context_content(msg) else {
                 continue;
-            }
-            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
+            };
+            prompt.push_str(&format!("[{}]: {content}\n", msg.role));
         }
         self.append_missing_context_notes_to_prompt(&mut prompt);
         prompt.push_str("\n当前已提取 Artifact Markdown（daemon 已剥离外层 artifact fence）:\n\n");
@@ -151,10 +155,10 @@ impl WorkspaceEngine {
         prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
         prompt.push_str("会话上下文:\n");
         for msg in &self.session.messages {
-            if matches!(msg.role.as_str(), "assistant" | "provider") {
+            let Some(content) = reviewer_context_content(msg) else {
                 continue;
-            }
-            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
+            };
+            prompt.push_str(&format!("[{}]: {content}\n", msg.role));
         }
         self.append_missing_context_notes_to_prompt(&mut prompt);
 
@@ -445,10 +449,10 @@ impl WorkspaceEngine {
         prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
         prompt.push_str("会话上下文:\n");
         for msg in &self.session.messages {
-            if matches!(msg.role.as_str(), "assistant" | "provider") {
+            let Some(content) = reviewer_context_content(msg) else {
                 continue;
-            }
-            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
+            };
+            prompt.push_str(&format!("[{}]: {content}\n", msg.role));
         }
         self.append_missing_context_notes_to_prompt(&mut prompt);
 

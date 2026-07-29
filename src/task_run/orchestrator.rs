@@ -139,9 +139,6 @@ impl TaskRunOrchestrator {
                     &format!("artifacts/execution/{index:04}.json"),
                     artifact,
                 )?;
-                if artifact["artifact_kind"] == "testing_report" {
-                    store.write_json_report("testing-report.json", artifact)?;
-                }
                 if let Some(ref_id) = artifact.get("artifact_ref").and_then(Value::as_str) {
                     canonical_artifact_refs.push(ref_id.to_string());
                 }
@@ -156,9 +153,6 @@ impl TaskRunOrchestrator {
                     "openspec_bootstrap_status": "bootstrapped",
                     "current_worktask": current_worktask,
                 }))?;
-                let testing_report_path = store.task_root().join("reports/testing-report.json");
-                let testing_report_path =
-                    testing_report_path.exists().then_some(testing_report_path);
                 let blocked_path = store.write_json_report(
                     "blocked-report.json",
                     &json!({
@@ -184,7 +178,6 @@ impl TaskRunOrchestrator {
                     report_path,
                     openspec_change_dir: change_dir,
                     provider_run_refs,
-                    testing_report_path,
                     final_summary_path: None,
                     blocked_report_path: Some(blocked_path),
                 });
@@ -244,7 +237,6 @@ impl TaskRunOrchestrator {
         }))?;
         let final_summary_path =
             store.write_json_report("final-summary.json", &final_result.final_summary)?;
-        let testing_report_path = store.task_root().join("reports/testing-report.json");
         let report_path = store.write_json_report(
             "final-report.json",
             &json!({
@@ -253,7 +245,6 @@ impl TaskRunOrchestrator {
                 "status": "completed",
                 "openspec_change_dir": change_dir,
                 "provider_run_refs": provider_run_refs,
-                "testing_report_path": testing_report_path,
                 "integration_report_path": integration_report_path,
                 "final_summary_path": final_summary_path,
             }),
@@ -266,7 +257,6 @@ impl TaskRunOrchestrator {
             report_path,
             openspec_change_dir: change_dir,
             provider_run_refs,
-            testing_report_path: Some(testing_report_path),
             final_summary_path: Some(final_summary_path),
             blocked_report_path: None,
         })

@@ -20,21 +20,21 @@ fn scripted_step_runner_exposes_provider_steps_in_order() {
             write_class: NodeWriteClass::WritesWorkspace,
             allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
             forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-            verification_commands: vec!["cargo test --locked -j 1".to_string()],
+            verification_commands: vec!["cargo test --locked".to_string()],
             checkpoint_id: Some("ckpt_0001".to_string()),
         }),
         StepScriptItem::Provider(PendingProviderStep {
-            node_id: "N17".to_string(),
+            node_id: "N18".to_string(),
             provider_type: "codex".to_string(),
-            runtime_role: "executor".to_string(),
-            adapter_role: "executor".to_string(),
-            prompt: "测试".to_string(),
+            runtime_role: "reviewer".to_string(),
+            adapter_role: "reviewer".to_string(),
+            prompt: "代码审查".to_string(),
             input_summary: json!({}),
-            output_schema: "schema://aria/artifacts/testing_report/v1".to_string(),
+            output_schema: "schema://aria/artifacts/code_review_report/v1".to_string(),
             write_class: NodeWriteClass::ReadOnly,
             allowed_write_scope: Vec::new(),
             forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-            verification_commands: vec!["cargo test --locked -j 1".to_string()],
+            verification_commands: vec!["cargo test --locked".to_string()],
             checkpoint_id: Some("ckpt_0001".to_string()),
         }),
     ]);
@@ -61,7 +61,7 @@ fn scripted_step_runner_exposes_provider_steps_in_order() {
                     write_class: NodeWriteClass::WritesWorkspace,
                     allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
                     forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-                    verification_commands: vec!["cargo test --locked -j 1".to_string()],
+                    verification_commands: vec!["cargo test --locked".to_string()],
                     checkpoint_id: Some("ckpt_0001".to_string()),
                 },
                 "确认后的编码 prompt".to_string()
@@ -75,7 +75,7 @@ fn scripted_step_runner_exposes_provider_steps_in_order() {
             .expect("second")
             .expect("step")
             .node_id,
-        "N17"
+        "N18"
     );
 }
 
@@ -92,24 +92,24 @@ fn scripted_step_runner_rejects_mismatched_step_without_consuming_queue() {
         write_class: NodeWriteClass::WritesWorkspace,
         allowed_write_scope: vec!["src/".to_string(), "tests/".to_string()],
         forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-        verification_commands: vec!["cargo test --locked -j 1".to_string()],
+        verification_commands: vec!["cargo test --locked".to_string()],
         checkpoint_id: Some("ckpt_0001".to_string()),
     })]);
 
     let error = runner
         .run_provider_step(
             PendingProviderStep {
-                node_id: "N17".to_string(),
+                node_id: "N18".to_string(),
                 provider_type: "codex".to_string(),
-                runtime_role: "executor".to_string(),
-                adapter_role: "executor".to_string(),
-                prompt: "测试".to_string(),
+                runtime_role: "reviewer".to_string(),
+                adapter_role: "reviewer".to_string(),
+                prompt: "代码审查".to_string(),
                 input_summary: json!({}),
-                output_schema: "schema://aria/artifacts/testing_report/v1".to_string(),
+                output_schema: "schema://aria/artifacts/code_review_report/v1".to_string(),
                 write_class: NodeWriteClass::ReadOnly,
                 allowed_write_scope: Vec::new(),
                 forbidden_actions: vec!["修改 cadence/project-rules".to_string()],
-                verification_commands: vec!["cargo test --locked -j 1".to_string()],
+                verification_commands: vec!["cargo test --locked".to_string()],
                 checkpoint_id: Some("ckpt_0001".to_string()),
             },
             "wrong prompt".to_string(),
@@ -134,6 +134,7 @@ fn provider_step_from_adapter_input_maps_node_write_class_and_schema() {
         role: AdapterRole::Executor,
         prompt: "prompt body".to_string(),
         worktree_path: Some("/tmp/worktree".to_string()),
+        provider_stream_log_dir: None,
         context_files: vec!["src/lib.rs".to_string()],
         output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
         timeout: 30,
@@ -157,6 +158,7 @@ fn provider_step_from_adapter_input_exposes_web_confirmation_metadata() {
         role: AdapterRole::Executor,
         prompt: "prompt body".to_string(),
         worktree_path: Some("/tmp/worktree".to_string()),
+        provider_stream_log_dir: None,
         context_files: vec!["src/lib.rs".to_string()],
         output_schema: "schema://aria/artifacts/coding_report/v1".to_string(),
         timeout: 30,

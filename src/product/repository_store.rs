@@ -9,18 +9,25 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 use crate::product::models::RepositoryRecord;
 
 mod initializer;
+mod operation;
 mod registration;
 mod types;
 
 pub use initializer::ClaudeRepositoryInitializer;
+pub use operation::RepositoryInitializationOperationStore;
+#[allow(unused_imports)]
+pub(crate) use registration::RepositoryInitializationLaunch;
 pub use registration::{
     CadenceSkillsPreparation, ProjectLookup, RepositoryInitializer, RepositoryPersistence,
     RepositoryRegistrationCoordinator,
 };
 pub use types::{
     CadenceSkillsPreparationSummary, RepositoryInitializationCommandSummary,
-    RepositoryInitializationSummary, RepositoryRegistrationError, RepositoryRegistrationInput,
-    RepositoryRegistrationSuccess,
+    RepositoryInitializationOperation, RepositoryInitializationOperationInput,
+    RepositoryInitializationOperationStatus, RepositoryInitializationProgress,
+    RepositoryInitializationStepKind, RepositoryInitializationStepRecord,
+    RepositoryInitializationStepStatus, RepositoryInitializationSummary,
+    RepositoryRegistrationError, RepositoryRegistrationInput, RepositoryRegistrationSuccess,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +47,11 @@ pub struct RepositoryStore {
 impl RepositoryStore {
     pub fn new(paths: ProductAppPaths) -> Self {
         Self { paths }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn initialization_operation_store(&self) -> RepositoryInitializationOperationStore {
+        RepositoryInitializationOperationStore::new(self.paths.clone())
     }
 
     pub fn list(&self, project_id: &str) -> Result<Vec<RepositoryRecord>, ProductStoreError> {
@@ -128,4 +140,12 @@ impl RepositoryStore {
 fn canonicalize_repo_path(path: &Path) -> Result<PathBuf, ProductStoreError> {
     fs::canonicalize(path)
         .map_err(|error| ProductStoreError::Io(format!("canonicalize {}: {error}", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn repository_initialization_launch_is_nameable_through_repository_store() {
+        let _: Option<crate::product::repository_store::RepositoryInitializationLaunch> = None;
+    }
 }

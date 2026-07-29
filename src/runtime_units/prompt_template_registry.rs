@@ -13,9 +13,7 @@ pub fn all_planning_node_ids() -> Vec<&'static str> {
 
 pub fn all_phase1_provider_node_ids() -> Vec<&'static str> {
     let mut nodes = all_planning_node_ids();
-    nodes.extend([
-        "N16", "N17", "N18", "N19", "N20", "N24", "N25", "N26", "N27",
-    ]);
+    nodes.extend(["N16", "N18", "N19", "N20", "N24", "N25", "N26", "N27"]);
     nodes
 }
 
@@ -180,7 +178,6 @@ fn artifact_kind(node_id: &str) -> &'static str {
         "N11" => "plan",
         "N12" => "dispatch_package",
         "N16" => "coding_report",
-        "N17" => "testing_report",
         "N18" => "code_review_report",
         "N19" => "coding_report",
         "N20" => "ready_advisory",
@@ -217,10 +214,6 @@ fn generic_node_prompt_deltas(node_id: &str) -> (&'static str, &'static str) {
         "N16" => (
             "你是 Codex executor，只能在当前 worktask routing 授权的 worktree 写范围内完成 coding_report 候选输出；不得执行 git commit。",
             "当前阶段：已确认 Plan/WorkTask 范围内实施。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。仅在授权写入范围内实施，完成声明前必须取得新鲜验证证据。\n",
-        ),
-        "N17" => (
-            "你是 Codex executor，默认只运行验证并产出 testing_report；除非 route 明确授权，不得修改生产代码。",
-            "当前阶段：测试执行与新鲜验证证据收集。必调 Skill：using-superpowers → verification-before-completion。只执行现有测试职责，不修改生产代码或越过 daemon gate。\n",
         ),
         "N18" => (
             "你是 Codex reviewer，只读检查 worktask 改动并输出 code_review_report；不得修改文件。",

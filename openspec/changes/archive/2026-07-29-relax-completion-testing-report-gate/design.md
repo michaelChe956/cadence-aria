@@ -1,0 +1,70 @@
+## Context
+
+Coding Workspace 当前生产 runner 编排 Coder、Code Reviewer、review request 与 Internal Reviewer，但没有 Testing 阶段的生产调用。完成门禁仍同时支持 schema v2 group、legacy group 与 single-attempt 路径，并在三条路径中要求 required verification check 对应 Passed 或 PassedWithWarnings testing report。
+
+这形成了不可满足的门禁：internal PR review 已通过、unit 与 handoff 已完成，但 attempt 因不存在 testing report 停留在运行态。产品已确认至少未来半年不引入 Testing 阶段，并选择最小、可逆的改动范围：只解除完成门禁与 testing report 的绑定，保留 Testing 相关模型、存储、枚举、Provider 配置与其他基础设施。
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- 让 schema v2 group 与 single-attempt 在 internal PR review 通过且非 testing 门禁满足时完成；让 legacy group completion gate 在同等条件下不因 testing report 阻塞。
+- 即使 canonical contract 或 legacy verification plan 声明 required 检查，缺少 testing report 也不阻塞完成。
+- 保留文件范围、runtime binding、handoff、unit 状态、worktree 清洁性等既有非 testing 完成校验。
+- 以回归测试固定“Testing 不参与完成判定”的产品语义。
+
+**Non-Goals:**
+
+- 不编排或实现 Testing 阶段。
+- 不删除 Testing stage、tester prompt/configuration、TestingReport 模型与存储。
+- 不新增项目级、attempt 级或环境级 testing gate 开关。
+- 不改变 Internal Reviewer、review request、rework 或 final-confirm 的其他行为。
+- 不自动迁移、自动重放或直接修改历史停滞 attempt。
+- 不放宽 group terminal status 对 `CodingAttemptPlanBinding`、`WorkItemPlanLineage` 与 authoritative plan revision 的既有完整性要求；无 binding 的 legacy group terminalization 不在本 change 范围内。
+
+## Decisions
+
+### 1. 从所有 completion gate 移除 testing report 校验
+
+完成门禁的 schema v2 group、legacy group 与 single-attempt 路径均不再调用 required verification result 校验函数；不只修复当前 schema v2 生产路径，以免 gate 语义在不同 attempt 类型中分叉。schema v2 group 与 single-attempt 继续覆盖完整 final-confirm/Completed 流程；legacy group 仅在 gate 层验证，因为当前 group terminal status 无条件要求 authoritative plan binding，而补齐 lineage 后该 attempt 即进入 schema v2 路径。
+
+**替代方案：** 仅修改 schema v2 group。该方案改动最小，但 legacy/single gate 仍保留一个生产 pipeline 无法满足的门禁，行为不一致，因此不采用。另一替代方案是允许无 binding legacy group terminalize；这会放宽 Completed/Failed/Aborted 共用的核心完整性约束，属于独立行为变化，因此不纳入本 change。
+
+### 2. 删除专用于完成判定的 testing 校验函数
+
+删除原 `verify_schema_v2_required_gates_satisfied` 与 `verify_required_gates_satisfied` 实现，在完成门禁调用点留下产品决策注释。保留不再被调用的公共错误变体 `VerificationGateResultMissing`，避免为本次行为放宽引入无必要的公共类型破坏。
+
+**替代方案：** 保留函数并无条件返回成功。该方案便于日后恢复，但制造误导性死代码和未使用参数，恢复成本优势不足，因此不采用。
+
+### 3. 不引入配置开关
+
+Testing 至少半年不进入产品流程，当前完成语义对所有 attempt 一致生效。新增 `testing_gate_enabled` 等开关会扩大配置、持久化、API 与测试矩阵，违反 YAGNI。
+
+若未来恢复 Testing，必须通过新的 OpenSpec change 同时设计生产编排、report 绑定、失败恢复和完成门禁，而不是只重新打开旧校验。
+
+### 4. 保留所有非 testing 完成门禁
+
+此次仅解除 TestingReport 依赖。changed-file/runtime scope、可见 handoff、全部 unit 完成、completion commit、共享 worktree 清洁性及现有一致性检查仍按原顺序执行并可阻塞完成。
+
+### 5. 将旧 testing 门禁测试改写为新语义回归
+
+原 `group_final_confirm_requires_testing_report_for_each_unit_plan` 的早期 `VerificationGateResultMissing` 断言不再代表产品要求。实现中确认：无 lineage 的 legacy group 可以进入 legacy completion gate，但 group terminal status 无条件要求 `CodingAttemptPlanBinding` 和 `WorkItemPlanLineage`；补齐这些数据后流程会被识别为 schema v2。因此 legacy 测试改为 crate 内直接调用 `run_group_completion_gates`，验证一个 required plan 只有 Blocked report、另一个 required plan 无 report 时 gate 通过且原 report 不变，不声称无 binding legacy attempt 可 terminalize。schema v2 group 与 single-attempt 测试继续覆盖完整 final-confirm/Completed 结果。
+
+## Risks / Trade-offs
+
+- **[风险] 未执行自动化测试的代码也可被标记完成。** → 这是已确认的产品取舍；继续依赖 Code Reviewer、Internal Reviewer 与非 testing 结构门禁，UI/API 不伪造 testing 成功结果。
+- **[风险] 存量 TestingReport 即使失败也不再影响完成。** → Testing 已明确不属于当前验收标准；report 数据继续保留，但不参与 completion decision。
+- **[风险] 三条 completion gate 同时修改扩大回归面。** → schema v2 group 与 single-attempt 覆盖完整 final-confirm，legacy group 覆盖 gate-level 行为，并运行全量 lib、clippy、fmt 和相关集成测试。
+- **[风险] legacy gate 与 group terminal binding 不变量被误解为同一能力。** → Spec 明确区分 gate 判定与 terminal status；本 change 不允许无 authoritative binding 的 group attempt 完成。
+- **[风险] 历史停滞 attempt 不会自动完成。** → 部署后使用现有恢复/重试入口重新触发 final completion；若现有入口无法安全重放，则创建新 attempt，不在本 change 中改写持久化状态。
+
+## Migration Plan
+
+1. 部署移除 testing-report completion gate 的后端版本；无需数据迁移。
+2. 经用户确认后重启后端，使新门禁生效。
+3. 对当前停滞 attempt 尝试通过现有恢复/重试入口重新触发最终完成；失败时保留证据并新建 attempt 验证完整流程。
+4. 回滚时恢复原三处校验调用与校验函数即可；现有 TestingReport 数据格式未变化。
+
+## Open Questions
+
+无。产品范围、持续时间、是否引入开关及 Testing 基础设施保留策略均已确认。

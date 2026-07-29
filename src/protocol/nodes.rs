@@ -15,7 +15,6 @@ pub const N13: &str = "N13";
 pub const N14: &str = "N14";
 pub const N15: &str = "N15";
 pub const N16: &str = "N16";
-pub const N17: &str = "N17";
 pub const N18: &str = "N18";
 pub const N19: &str = "N19";
 pub const N20: &str = "N20";
@@ -40,7 +39,7 @@ pub const X09: &str = "X09";
 
 pub fn is_protocol_node_id(node_id: &str) -> bool {
     if let Some(number) = node_id.strip_prefix('N') {
-        return matches!(number.parse::<u8>(), Ok(value) if value <= 28);
+        return matches!(number.parse::<u8>(), Ok(value) if value <= 28 && value != 17);
     }
 
     if let Some(number) = node_id.strip_prefix('X') {

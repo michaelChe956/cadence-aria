@@ -70,10 +70,9 @@ async fn assert_runner_recovers_amendment_before_provider(state: RunnerRecoveryS
     let runner_attempt = attempt.clone();
     let runner_event_tx = event_tx.clone();
     let task = tokio::spawn(async move {
-        let engine = CodingWorkspaceEngine::with_provider(
+        let engine = CodingWorkspaceEngine::new(
             runner_store.clone(),
             GitWorkspaceService::new(),
-            runner_state.provider_adapter.clone(),
             runner_event_tx.clone(),
         );
         execute_start_coding_flow(
@@ -91,10 +90,14 @@ async fn assert_runner_recovers_amendment_before_provider(state: RunnerRecoveryS
     let mut amendment_updates = 0;
     let mut reached_stage_gate = false;
     while !reached_stage_gate {
-        let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
-            .await
-            .unwrap_or_else(|_| panic!("runner event timeout for {state:?}"))
-            .unwrap_or_else(|| panic!("runner ended before amendment recovery for {state:?}"));
+        let event = match tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => panic!(
+                "runner ended before amendment recovery for {state:?}: {:?}",
+                task.await
+            ),
+            Err(_) => panic!("runner event timeout for {state:?}"),
+        };
         match event {
             CodingWsOutMessage::PlanAmendmentUpdated { amendment, .. } => {
                 assert_eq!(amendment.id, manifest.id, "{state:?}");
@@ -174,10 +177,9 @@ async fn coding_ws_plan_repair_await_handoff_stays_blocked_after_stage_gate_cont
         })
         .await
         .unwrap();
-    let engine = CodingWorkspaceEngine::with_provider(
+    let engine = CodingWorkspaceEngine::new(
         fixture.store.clone(),
         GitWorkspaceService::new(),
-        web_state.provider_adapter.clone(),
         event_tx.clone(),
     );
 
@@ -227,10 +229,9 @@ async fn coding_ws_plan_repair_await_handoff_stays_blocked_after_stage_gate_cont
         }
     });
     let (_replay_command_tx, replay_command_rx) = mpsc::channel(8);
-    let replay_engine = CodingWorkspaceEngine::with_provider(
+    let replay_engine = CodingWorkspaceEngine::new(
         fixture.store.clone(),
         GitWorkspaceService::new(),
-        web_state.provider_adapter.clone(),
         replay_event_tx.clone(),
     );
     let replay_attempt = fixture
@@ -299,10 +300,24 @@ async fn prepare_runner_amendment(
         .revision_store
         .get_work_item_projection_bundle(&active_plan, &revised.work_item_projection_bundle_id)
         .unwrap();
+    let previous_verification = fixture
+        .revision_store
+        .get_verification_plan_revision(&active_plan, &revised.verification_plan_revision_id)
+        .unwrap();
+    let previous_bundle_id = previous_bundle.id.clone();
     revised.id = "work_item_revision_current_0002".to_string();
     revised.source_draft_revision_id = "draft_revision_current_0002".to_string();
     revised.work_item_projection_bundle_id = "projection_bundle_current_0002".to_string();
+    revised.verification_plan_revision_id = "verification_revision_current_0002".to_string();
     revised.created_at = "2026-07-19T00:00:03Z".to_string();
+    let mut revised_verification = previous_verification;
+    revised_verification.id = revised.verification_plan_revision_id.clone();
+    revised_verification.source_draft_revision_id = revised.source_draft_revision_id.clone();
+    revised_verification.created_at = revised.created_at.clone();
+    fixture
+        .revision_store
+        .put_verification_plan_revision(&active_plan, &revised_verification)
+        .unwrap();
     fixture
         .revision_store
         .put_work_item_revision(&active_plan, &revised)
@@ -310,6 +325,19 @@ async fn prepare_runner_amendment(
     let mut revised_bundle = previous_bundle;
     revised_bundle.id = revised.work_item_projection_bundle_id.clone();
     revised_bundle.work_item_revision_id = revised.id.clone();
+    revised_bundle.coder_projection.work_item_revision_id = revised.id.clone();
+    revised_bundle.reviewer_projection.work_item_revision_id = revised.id.clone();
+    let revised_hashes = crate::product::work_item_projection::projection_hashes(
+        &crate::product::work_item_projection::CompiledWorkItemProjections {
+            human: revised_bundle.human_projection.clone(),
+            coder: revised_bundle.coder_projection.clone(),
+            reviewer: revised_bundle.reviewer_projection.clone(),
+        },
+    )
+    .unwrap();
+    revised_bundle.human_projection_hash = revised_hashes.human;
+    revised_bundle.coder_projection_hash = revised_hashes.coder;
+    revised_bundle.reviewer_projection_hash = revised_hashes.reviewer;
     revised_bundle.created_at = "2026-07-19T00:00:03Z".to_string();
     fixture
         .revision_store
@@ -345,6 +373,28 @@ async fn prepare_runner_amendment(
     next_plan.validation_report_ref = "validation_report_0002".to_string();
     next_plan.plan_projection_bundle_id = "plan_projection_bundle_0002".to_string();
     next_plan.created_at = "2026-07-19T00:00:03Z".to_string();
+    let mut next_plan_projection = fixture
+        .revision_store
+        .get_plan_projection_bundle(&active_plan, &previous_plan.plan_projection_bundle_id)
+        .unwrap();
+    next_plan_projection.id = next_plan.plan_projection_bundle_id.clone();
+    next_plan_projection.plan_revision_id = next_plan.id.clone();
+    next_plan_projection.work_item_projection_bundle_refs = next_plan_projection
+        .work_item_projection_bundle_refs
+        .iter()
+        .map(|bundle_id| {
+            if bundle_id == &previous_bundle_id {
+                revised_bundle.id.clone()
+            } else {
+                bundle_id.clone()
+            }
+        })
+        .collect();
+    next_plan_projection.created_at = next_plan.created_at.clone();
+    fixture
+        .revision_store
+        .put_plan_projection_bundle(&active_plan, &next_plan_projection)
+        .unwrap();
     fixture
         .revision_store
         .put_plan_revision(&active_plan, &next_plan)

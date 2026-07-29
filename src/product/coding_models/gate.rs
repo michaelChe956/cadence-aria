@@ -91,15 +91,11 @@ pub enum CodingGateActionType {
     Abort,
     RetryPush,
     ManualFix,
-    RetryTestPlan,
-    RerunMissingSteps,
     ProvideContext,
     ManualContinue,
     RetryCoding,
     RetryReview,
     RetryInternalReview,
-    AcceptTestingResult,
-    RerunTesting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,8 +134,6 @@ pub struct QualityGateBypassAudit {
     pub stage: CodingExecutionStage,
     #[serde(default)]
     pub reason_code: Option<String>,
-    #[serde(default)]
-    pub skipped_required_steps: Vec<String>,
     pub operator_context: String,
     pub created_at: String,
 }

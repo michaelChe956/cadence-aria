@@ -1,4 +1,6 @@
 use super::*;
+use crate::product::models::WorkItemRuntimeBinding;
+use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
     WorkItemHistoryEntryDto, WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
 };
@@ -108,36 +110,23 @@ impl WorkspaceEngine {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        lifecycle
-            .commit_issue_work_item_plan(
-                &tx.project_id,
-                &tx.issue_id,
-                &tx.plan_id,
-                IssueWorkItemPlanUpdate {
-                    work_item_ids: work_item_ids.clone(),
-                    verification_plan_ids: verification_plan_ids.clone(),
-                    repository_profile_ref: tx
-                        .previous_plan_snapshot
-                        .repository_profile_ref
-                        .clone(),
-                    dependency_graph: outcome
-                        .dependency_graph_revision
-                        .edges
-                        .iter()
-                        .map(|edge| IssueWorkItemDependencyEdge {
-                            from_work_item_id: edge.from.clone(),
-                            to_work_item_id: edge.to.clone(),
-                        })
-                        .collect(),
-                    created_from_provider_run: tx
-                        .previous_plan_snapshot
-                        .created_from_provider_run
-                        .clone(),
-                    validator_findings: tx.validator_findings.clone(),
-                },
-            )
-            .map_err(|error| format!("commit issue work item plan failed: {error}"))?;
-        tx.step_cursor = "plan_summary_committed".to_string();
+        let plan_update = IssueWorkItemPlanUpdate {
+            work_item_ids: work_item_ids.clone(),
+            verification_plan_ids: verification_plan_ids.clone(),
+            repository_profile_ref: tx.previous_plan_snapshot.repository_profile_ref.clone(),
+            dependency_graph: outcome
+                .dependency_graph_revision
+                .edges
+                .iter()
+                .map(|edge| IssueWorkItemDependencyEdge {
+                    from_work_item_id: edge.from.clone(),
+                    to_work_item_id: edge.to.clone(),
+                })
+                .collect(),
+            created_from_provider_run: tx.previous_plan_snapshot.created_from_provider_run.clone(),
+            validator_findings: tx.validator_findings.clone(),
+        };
+        tx.step_cursor = "plan_summary_prepared".to_string();
         tx.updated_at = tx.created_at.clone();
         store
             .put_compile_transaction(tx)
@@ -145,7 +134,7 @@ impl WorkspaceEngine {
         #[cfg(test)]
         self.maybe_fail_work_item_plan_compile_finalizer(
             tx,
-            WorkItemPlanCompileFinalizerCheckpoint::PlanSummaryCommitted,
+            WorkItemPlanCompileFinalizerCheckpoint::PlanSummaryPrepared,
         )?;
 
         let mut sessions = lifecycle
@@ -153,6 +142,32 @@ impl WorkspaceEngine {
             .map_err(|error| format!("list child work item workspaces failed: {error}"))?;
         tx.child_session_ids.clear();
         for (index, logical_id) in work_item_ids.iter().enumerate() {
+            let compiled = compiled_by_logical_id
+                .get(logical_id.as_str())
+                .ok_or_else(|| {
+                    format!(
+                        "compiled outcome missing logical work item `{logical_id}` during child workspace preparation"
+                    )
+                })?;
+            let binding = WorkItemRuntimeBinding {
+                plan_id: tx.plan_id.clone(),
+                plan_revision_id: outcome.plan_revision.id.clone(),
+                logical_work_item_id: logical_id.clone(),
+                work_item_revision_id: compiled.work_item_revision.id.clone(),
+                projection_bundle_id: compiled.projection_bundle.id.clone(),
+                verification_plan_revision_id: compiled.verification_plan_revision.id.clone(),
+                canonical_contract_hash: compiled
+                    .work_item_revision
+                    .canonical_contract_hash
+                    .clone(),
+                projection_compiler_version: compiled.projection_bundle.compiler_version.clone(),
+                human_projection_hash: compiled.projection_bundle.human_projection_hash.clone(),
+                coder_projection_hash: compiled.projection_bundle.coder_projection_hash.clone(),
+                reviewer_projection_hash: compiled
+                    .projection_bundle
+                    .reviewer_projection_hash
+                    .clone(),
+            };
             let matched = sessions
                 .iter()
                 .filter(|session| {
@@ -193,7 +208,7 @@ impl WorkspaceEngine {
                     ));
                 }
             };
-            tx.child_session_ids.push(session_id);
+            tx.child_session_ids.push(session_id.clone());
             tx.step_cursor = format!("child_session_{:03}_ensured", index + 1);
             tx.updated_at = tx.created_at.clone();
             store
@@ -206,12 +221,50 @@ impl WorkspaceEngine {
                     WorkItemPlanCompileFinalizerCheckpoint::FirstChildSessionEnsured,
                 )?;
             }
+            let bound_session = lifecycle
+                .ensure_work_item_runtime_binding(&session_id, &binding)
+                .map_err(|error| format!("ensure child runtime binding failed: {error}"))?;
+            tx.step_cursor = format!("child_session_{:03}_binding_ensured", index + 1);
+            tx.updated_at = tx.created_at.clone();
+            store
+                .put_compile_transaction(tx)
+                .map_err(|error| format!("save child binding cursor failed: {error}"))?;
+            #[cfg(test)]
+            if index == 0 {
+                self.maybe_fail_work_item_plan_compile_finalizer(
+                    tx,
+                    WorkItemPlanCompileFinalizerCheckpoint::FirstChildBindingEnsured,
+                )?;
+            }
+            ensure_workspace_context_message(&lifecycle.app_paths(), lifecycle, bound_session)
+                .map_err(|error| format!("ensure child workspace context failed: {error}"))?;
+            tx.step_cursor = format!("child_session_{:03}_context_prepared", index + 1);
+            tx.updated_at = tx.created_at.clone();
+            store
+                .put_compile_transaction(tx)
+                .map_err(|error| format!("save child context cursor failed: {error}"))?;
+            #[cfg(test)]
+            if index == 0 {
+                self.maybe_fail_work_item_plan_compile_finalizer(
+                    tx,
+                    WorkItemPlanCompileFinalizerCheckpoint::FirstChildContextPrepared,
+                )?;
+            }
         }
-        tx.step_cursor = "child_sessions_ensured".to_string();
+        tx.step_cursor = "child_workspaces_prepared".to_string();
         tx.updated_at = tx.created_at.clone();
         store
             .put_compile_transaction(tx)
             .map_err(|error| format!("save child sessions cursor failed: {error}"))?;
+
+        lifecycle
+            .commit_issue_work_item_plan(&tx.project_id, &tx.issue_id, &tx.plan_id, plan_update)
+            .map_err(|error| format!("commit issue work item plan failed: {error}"))?;
+        tx.step_cursor = "plan_confirmed".to_string();
+        tx.updated_at = tx.created_at.clone();
+        store
+            .put_compile_transaction(tx)
+            .map_err(|error| format!("save plan confirmed cursor failed: {error}"))?;
 
         let compile_report = WorkItemPlanCompileReportPayload {
             compile_id: tx.compile_id.clone(),

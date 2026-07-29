@@ -1,7 +1,6 @@
 use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
 use crate::product::models::WorkspaceSessionSummaryRecord;
-use crate::web::error::sanitize_repository_api_warnings;
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
 ) -> IssueWorkItemPlanDetailDto {
@@ -99,31 +98,13 @@ pub(crate) fn repository_dto(record: RepositoryRecord) -> RepositoryDto {
     }
 }
 
-#[derive(serde::Serialize)]
-struct RepositoryRegistrationInitializationDto {
-    source: String,
-    commands: Vec<serde_json::Value>,
-    warnings: Vec<String>,
-    changed_paths: Vec<String>,
-    completed_at: String,
-}
-pub(crate) fn repository_registration_response(
-    success: crate::product::repository_store::RepositoryRegistrationSuccess,
-) -> serde_json::Value {
-    let commands = success
-        .initialization
-        .commands
-        .into_iter()
-        .map(|item| json!({"index": item.command_index, "command": item.command, "status": item.status}))
-        .collect();
-    let initialization = RepositoryRegistrationInitializationDto {
-        source: success.initialization.source_mode,
-        commands,
-        warnings: sanitize_repository_api_warnings(success.warnings),
-        changed_paths: success.changed_paths,
-        completed_at: success.completed_at,
-    };
-    json!({"repository": repository_dto(success.repository), "initialization": initialization})
+mod repository_initialization;
+pub(crate) use repository_initialization::repository_initialization_operation_dto;
+
+pub(crate) fn repository_initialization_result_dto(
+    success: &crate::product::repository_store::RepositoryRegistrationSuccess,
+) -> RepositoryInitializationResultDto {
+    repository_initialization::repository_initialization_result_dto_impl(success)
 }
 
 pub(crate) fn product_issue_dto_with_binding(
@@ -377,7 +358,6 @@ pub(crate) fn lifecycle_work_item_dto(
         source_outline_id: record.source_outline_id,
         source_draft_id: record.source_draft_id,
         planned_implementation_context: record.planned_implementation_context,
-        planned_handoff_summary: record.planned_handoff_summary,
         kind: work_item_kind_text(&record.kind).to_string(),
         sequence_hint: record.sequence_hint,
         depends_on: record.depends_on,
@@ -386,22 +366,23 @@ pub(crate) fn lifecycle_work_item_dto(
         context_budget: WorkItemContextBudgetDto {
             target_context_k: record.context_budget.target_context_k,
             max_summary_chars: record.context_budget.max_summary_chars,
-            max_handoff_chars: record.context_budget.max_handoff_chars,
             max_code_context_chars: record.context_budget.max_code_context_chars,
             max_context_file_refs: record.context_budget.max_context_file_refs,
             max_traceability_refs: record.context_budget.max_traceability_refs,
-            max_dependency_handoffs: record.context_budget.max_dependency_handoffs,
         },
-        required_handoff_from: record.required_handoff_from,
         verification_plan_ref: record.verification_plan_ref,
         require_execution_plan_confirm: record.require_execution_plan_confirm,
         execution_plan_status: work_item_execution_plan_status_text(&record.execution_plan_status)
             .to_string(),
-        handoff_summary_ref: record.handoff_summary_ref,
         completion_commit: record.completion_commit,
         completion_diff_summary_ref: record.completion_diff_summary_ref,
     })
 }
+
+mod work_item_runtime;
+pub(crate) use work_item_runtime::{
+    LifecycleWorkItemRuntimeDtoInput, lifecycle_work_item_runtime_dto,
+};
 
 pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {
     CodingAttemptDto {
@@ -725,7 +706,6 @@ pub(crate) fn coding_execution_stage_text(stage: &CodingExecutionStage) -> &'sta
         CodingExecutionStage::PrepareContext => "prepare_context",
         CodingExecutionStage::WorktreePrepare => "worktree_prepare",
         CodingExecutionStage::Coding => "coding",
-        CodingExecutionStage::Testing => "testing",
         CodingExecutionStage::CodeReview => "code_review",
         CodingExecutionStage::ReviewRequest => "review_request",
         CodingExecutionStage::InternalPrReview => "internal_pr_review",
@@ -788,13 +768,4 @@ pub(crate) fn issue_status_text(status: &IssueStatus) -> &'static str {
 }
 
 #[cfg(test)]
-#[test]
-fn repository_registration_success_preserves_all_source_modes() {
-    for source_mode in ["online_clone", "online_update", "offline"] {
-        let mut success = super::product_resources::create_repository_tests::registration_success();
-        success.initialization.source_mode = source_mode.to_string();
-        let value = repository_registration_response(success);
-        assert_eq!(value["initialization"]["source"], source_mode);
-        assert!(value.get("warnings").is_none() && value.get("completed_at").is_none());
-    }
-}
+include!("dto/repository_initialization_tests.rs");

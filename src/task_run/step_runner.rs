@@ -138,8 +138,8 @@ fn allowed_write_scope_for_node(node_id: &str) -> Vec<String> {
 
 fn verification_commands_for_node(node_id: &str) -> Vec<String> {
     match node_id {
-        "N16" | "N17" | "N18" | "N19" => vec!["cargo test --locked -j 1".to_string()],
-        "N25" | "N27" => vec!["cargo test --locked -j 1".to_string()],
+        "N16" | "N18" | "N19" => vec!["cargo test --locked".to_string()],
+        "N25" | "N27" => vec!["cargo test --locked".to_string()],
         _ => vec!["cargo check --locked".to_string()],
     }
 }

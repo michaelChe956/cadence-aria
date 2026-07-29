@@ -28,29 +28,13 @@
       "src/feature/lib.rs"
     ]
   },
-  "N17": {
-    "testing_report_ref": "testing_report_worktask_001_0001",
-    "test_results": [
-      {
-        "command": "cargo test --test execution_chain_fake_provider",
-        "status": "passed"
-      }
-    ],
-    "coverage_summary": {
-      "closed": [
-        "WP-001"
-      ],
-      "uncovered": [],
-      "exempted": []
-    }
-  },
   "N18": {
     "code_review_report_ref": "code_review_report_worktask_001_0001",
     "findings": []
   },
   "N19": {
     "rework_scope": {
-      "source": "testing_report_worktask_001_0001",
+      "source": "code_review_report_worktask_001_0001",
       "allowed_write_scope": [
         "src/feature/"
       ]

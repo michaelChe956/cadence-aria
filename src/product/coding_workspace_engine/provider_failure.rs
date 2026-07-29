@@ -44,10 +44,28 @@ impl CodingWorkspaceEngine {
             vec![retry_action]
         } else if matches!(
             reason_code,
-            "internal_review_operational_blocker" | "internal_review_human_triage"
+            "group_final_review_blocked"
+                | "internal_review_blocked"
+                | "internal_review_change_requested"
+                | "internal_review_verification_incomplete"
+                | "internal_review_operational_blocker"
+                | "internal_review_human_triage"
         ) {
             vec![
                 retry_action,
+                coding_gate_action_for_id("manual_continue").expect("manual continue action"),
+                coding_gate_action_for_id("abort").expect("abort action"),
+            ]
+        } else if matches!(
+            reason_code,
+            "code_review_output_human_triage"
+                | "code_review_verification_incomplete"
+                | "code_review_operational_blocker"
+        ) {
+            vec![
+                retry_action,
+                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
+                coding_gate_action_for_id("manual_continue").expect("manual continue action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ]
         } else {

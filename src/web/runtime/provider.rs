@@ -645,6 +645,7 @@ mod tests {
                 provider_type: ProviderType::ClaudeCode,
                 role: AdapterRole::Executor,
                 worktree_path: None,
+                provider_stream_log_dir: None,
                 prompt: "test".to_string(),
                 context_files: Vec::new(),
                 output_schema: String::new(),

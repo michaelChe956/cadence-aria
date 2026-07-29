@@ -21,22 +21,27 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
+use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
 use crate::product::models::{
     AmendmentResumeMode, AmendmentResumeTarget, DependencyGraphRevision, LogicalWorkItem,
     PlanAmendmentManifest, PlanDefectClass, PlanDefectEvidence, PlanDefectRoute,
-    PlanRepairRequestStatus, PlanRepairSessionStage, PlanRevisionReason, RepairTarget,
-    RepairTargetKind, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle,
-    WorkItemRevision,
+    PlanProjectionBundle, PlanRepairRequestStatus, PlanRepairSessionStage, PlanRevisionReason,
+    RepairTarget, RepairTargetKind, VerificationPlanRevision, WorkItemPlanLineage,
+    WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::plan_repair::PlanDefectConfidence;
-use crate::product::tester_agent_loop::TesterAgentOptions;
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, ContractCompatibilityPolicy,
     HandoffContract, PromisedOutputContract, RequiredInputContract, WorkItemContractIdentity,
     WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
 };
-use crate::product::work_item_projection::{WorkItemProjectionCompiler, projection_hashes};
+use crate::product::work_item_projection::{
+    CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
+    ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler,
+    plan_projection_hashes, projection_hashes,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 mod delivery_ack;
@@ -65,7 +70,6 @@ struct PlanRepairFixture {
 enum ProviderEntry {
     Coder,
     CoderRework,
-    Tester,
     CodeReviewer,
     InternalReviewer,
     GroupFinalReviewer,
@@ -84,10 +88,6 @@ impl CountingProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for CountingProvider {
-    fn supports_provider_driven_testing(&self) -> bool {
-        true
-    }
-
     async fn start(
         &self,
         _input: StreamingProviderInput,
@@ -588,7 +588,6 @@ async fn coding_plan_repair_provider_runs_fail_closed_during_amendment() {
         for entry in [
             ProviderEntry::Coder,
             ProviderEntry::CoderRework,
-            ProviderEntry::Tester,
             ProviderEntry::CodeReviewer,
             ProviderEntry::InternalReviewer,
             ProviderEntry::GroupFinalReviewer,
@@ -684,22 +683,6 @@ async fn assert_provider_entry_blocked(status: CodingAttemptStatus, entry: Provi
                 )
                 .await
                 .expect_err("coder rework must be blocked")
-                .to_string()
-        }
-        ProviderEntry::Tester => {
-            let (_command_tx, mut command_rx) = mpsc::channel(1);
-            fixture
-                .engine
-                .execute_testing_with_provider_commands(
-                    &attempt,
-                    &provider,
-                    &crate::product::coding_workspace_engine::CodingExecutionContext::default(),
-                    &[],
-                    TesterAgentOptions::default(),
-                    &mut command_rx,
-                )
-                .await
-                .expect_err("tester must be blocked")
                 .to_string()
         }
         ProviderEntry::CodeReviewer => fixture

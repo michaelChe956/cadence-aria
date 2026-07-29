@@ -304,6 +304,20 @@ pub fn validate_canonical_contract(
             ));
         }
     }
+    for criterion in &contract.acceptance_criteria {
+        if is_process_evidence_acceptance_criterion(&criterion.criterion_id, &criterion.statement) {
+            findings.push(warning_finding(
+                "process_evidence_acceptance_criterion",
+                logical_work_item_id,
+                Some(&criterion.criterion_id),
+                None,
+                format!(
+                    "acceptance criterion {} must describe an observable result, not process evidence",
+                    criterion.criterion_id
+                ),
+            ));
+        }
+    }
 
     for scope in &contract.write_policy.exclusive_scopes {
         if scope.trim().is_empty() {
@@ -340,19 +354,25 @@ pub fn validate_canonical_contract(
     }
 
     for check in &contract.verification_checks {
-        if check.required
-            && check
-                .command
-                .as_deref()
-                .is_none_or(|command| command.trim().is_empty())
-        {
+        // required check 必须有可执行依据，但依据有两种：自动化命令，或人工核对说明。
+        // 只认 command 会让没有可信命令目录的 work item（如纯静态页面）无法把任何
+        // 人工核对设为必需，与 outline 的 verification_intent 直接冲突。
+        let has_command = check
+            .command
+            .as_deref()
+            .is_some_and(|command| !command.trim().is_empty());
+        let has_manual_instruction = check
+            .manual_instruction
+            .as_deref()
+            .is_some_and(|instruction| !instruction.trim().is_empty());
+        if check.required && !has_command && !has_manual_instruction {
             findings.push(error_finding(
                 "missing_required_verification_command",
                 logical_work_item_id,
                 Some(&check.check_id),
                 None,
                 format!(
-                    "required verification check {} must define a command",
+                    "required verification check {} must define a command or a manual_instruction",
                     check.check_id
                 ),
             ));
@@ -432,6 +452,76 @@ pub(crate) fn error_finding(
         capability_ref: capability_ref.map(str::to_string),
         message,
     }
+}
+
+pub(crate) fn warning_finding(
+    code: &str,
+    logical_work_item_id: &str,
+    contract_ref: Option<&str>,
+    capability_ref: Option<&str>,
+    message: String,
+) -> ContractValidationFinding {
+    ContractValidationFinding {
+        code: code.to_string(),
+        severity: ContractFindingSeverity::Warning,
+        logical_work_item_id: Some(logical_work_item_id.to_string()),
+        contract_ref: contract_ref.map(str::to_string),
+        capability_ref: capability_ref.map(str::to_string),
+        message,
+    }
+}
+
+fn is_process_evidence_acceptance_criterion(criterion_id: &str, statement: &str) -> bool {
+    let criterion_text = format!("{criterion_id} {statement}");
+    let lowercase = criterion_text.to_ascii_lowercase();
+    let ascii_words = lowercase
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<BTreeSet<_>>();
+    let has_ascii_commit_word = ["commit", "commits", "committed"]
+        .into_iter()
+        .any(|word| ascii_words.contains(word));
+    // 中文「提交」有歧义：既指版本控制的 commit，也指表单/按钮的提交动作。
+    // 只有出现在版本控制语境的组合词里才算 commit，否则「无需点击提交控件」这类
+    // 完全合法的可观测结果状态会被误判为过程证据。
+    // 白名单只收版本控制语境下无歧义的组合词。「提交顺序」「提交信息」被有意排除：
+    // 前者可指表单提交次序，后者可指用户提交的信息。
+    let has_chinese_commit_word = [
+        "提交记录",
+        "提交历史",
+        "提交序列",
+        "提交树",
+        "提交链",
+        "次提交",
+        "个提交",
+        "条提交",
+    ]
+    .into_iter()
+    .any(|phrase| criterion_text.contains(phrase))
+        || (criterion_text.contains("提交")
+            && ["git", "commit", "commits", "committed", "tdd", "red"]
+                .into_iter()
+                .any(|word| ascii_words.contains(word)));
+    let has_development_context = [
+        "git", "tdd", "test", "tests", "testing", "red", "code", "branch", "branches", "rebase",
+    ]
+    .into_iter()
+    .any(|word| ascii_words.contains(word))
+        || ["测试", "代码", "分支"]
+            .into_iter()
+            .any(|word| criterion_text.contains(word));
+    let has_process_word = criterion_text.contains("先失败")
+        || ascii_words.contains("red")
+        || ["history", "order", "sequence", "timing"]
+            .into_iter()
+            .any(|word| ascii_words.contains(word))
+        || criterion_text.contains("历史")
+        || criterion_text.contains("顺序")
+        || criterion_text.contains("时序");
+
+    (has_ascii_commit_word || has_chinese_commit_word)
+        && has_development_context
+        && has_process_word
 }
 
 fn report_duplicate_ids<'a>(

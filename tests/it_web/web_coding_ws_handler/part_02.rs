@@ -245,7 +245,7 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
     send_json(
         &mut ws,
         &CodingWsInMessage::ProviderSelect {
-            role: "tester_execute".to_string(),
+            role: "code_reviewer".to_string(),
             provider: ProviderName::Codex,
         },
     )
@@ -254,7 +254,7 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
     assert_eq!(
         wait_for_provider_config_update(&mut ws).await,
         CodingWsOutMessage::CodingProviderConfigUpdated {
-            role: CodingProviderRole::Tester,
+            role: CodingProviderRole::CodeReviewer,
             provider: ProviderName::Codex,
         }
     );
@@ -267,14 +267,14 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
         refreshed_gate
             .provider_snapshot
             .as_ref()
-            .map(|snapshot| snapshot.tester_execute_provider()),
+            .map(|snapshot| snapshot.provider_for_role(&CodingProviderRole::CodeReviewer)),
         Some(&ProviderName::Codex)
     );
     assert_eq!(
         store
             .get_role_provider_config_snapshot("project_0001", "issue_0001", "coding_attempt_0001")
             .expect("role provider snapshot")
-            .tester_execute,
+            .code_reviewer,
         ProviderName::Codex
     );
 
@@ -301,7 +301,7 @@ async fn coding_ws_permission_mode_select_updates_role_config() {
     send_json(
         &mut ws,
         &CodingWsInMessage::PermissionModeSelect {
-            role: "tester".to_string(),
+            role: "code_reviewer".to_string(),
             permission_mode: CodingProviderPermissionMode::Supervised,
         },
     )
@@ -310,7 +310,7 @@ async fn coding_ws_permission_mode_select_updates_role_config() {
     assert_eq!(
         wait_for_provider_config_update(&mut ws).await,
         CodingWsOutMessage::CodingProviderConfigUpdated {
-            role: CodingProviderRole::Tester,
+            role: CodingProviderRole::CodeReviewer,
             provider: ProviderName::Fake,
         }
     );
@@ -320,7 +320,8 @@ async fn coding_ws_permission_mode_select_updates_role_config() {
             ..
         } => {
             assert_eq!(
-                role_provider_config_snapshot.permission_mode_for_role(&CodingProviderRole::Tester),
+                role_provider_config_snapshot
+                    .permission_mode_for_role(&CodingProviderRole::CodeReviewer),
                 CodingProviderPermissionMode::Supervised
             );
         }
@@ -331,7 +332,7 @@ async fn coding_ws_permission_mode_select_updates_role_config() {
         .get_role_provider_config_snapshot("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("role config");
     assert_eq!(
-        snapshot.permission_mode_for_role(&CodingProviderRole::Tester),
+        snapshot.permission_mode_for_role(&CodingProviderRole::CodeReviewer),
         CodingProviderPermissionMode::Supervised
     );
 
@@ -380,7 +381,7 @@ async fn coding_ws_stage_gate_timeout_auto_starts_stage() {
 async fn coding_ws_provider_select_rejects_current_running_stage_role_without_gate() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
-    let app = app_with_running_testing_attempt(root.path());
+    let app = app_with_running_code_review_attempt(root.path());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -394,7 +395,7 @@ async fn coding_ws_provider_select_rejects_current_running_stage_role_without_ga
     send_json(
         &mut ws,
         &CodingWsInMessage::ProviderSelect {
-            role: "tester_execute".to_string(),
+            role: "code_reviewer".to_string(),
             provider: ProviderName::Codex,
         },
     )
@@ -628,14 +629,6 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_review_request_complet
     let worktree = attempt.worktree_path.as_ref().expect("worktree path");
     assert_ne!(worktree, &root.path().join("repo"));
     assert!(worktree.join("src/lib.rs").is_file());
-
-    assert!(
-        store
-            .list_testing_reports("project_0001", "issue_0001", &attempt.id)
-            .expect("testing reports")
-            .is_empty(),
-        "new pipeline should not run tester reports"
-    );
 
     let review_request = store
         .list_review_requests("project_0001", "issue_0001", &attempt.id)

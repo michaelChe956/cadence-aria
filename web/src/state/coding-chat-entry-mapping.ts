@@ -40,8 +40,6 @@ function chatEntryRoleFromCodingEntry(entry: CodingChatEntry): ChatEntryRole {
       return "coder";
     case "reviewer":
       return "code_reviewer";
-    case "tester":
-      return "tester";
     case "git":
     case "system":
       return "system";

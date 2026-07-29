@@ -195,6 +195,39 @@ impl WorkItemPlanStore {
             .join(format!("{draft_id}.json"))
     }
 
+    /// 删除某个 plan 在 plan store 中的全部产物：draft、compile transaction、
+    /// outline context index。
+    ///
+    /// 删除 plan 时必须调用，否则这些记录会成为指向不存在 plan 的孤儿；若新 plan
+    /// 复用同一 ID，还会读到上一轮的 outline context。清理是幂等的：目录本就不存在
+    /// 时视为成功，因为清理路径不应要求被清理对象处于健康状态。
+    pub fn purge_plan_artifacts(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
+        for root in [
+            self.draft_plan_root(project_id, issue_id, plan_id),
+            self.issue_root(project_id, issue_id)
+                .join("work_item_plan_compiles")
+                .join(plan_id),
+            self.issue_root(project_id, issue_id)
+                .join("work_item_plan_outlines")
+                .join(plan_id),
+        ] {
+            match fs::remove_dir_all(&root) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(ProductStoreError::Io(error.to_string())),
+            }
+        }
+        Ok(())
+    }
+
     fn draft_plan_root(&self, project_id: &str, issue_id: &str, plan_id: &str) -> PathBuf {
         self.issue_root(project_id, issue_id)
             .join("work_item_plan_drafts")

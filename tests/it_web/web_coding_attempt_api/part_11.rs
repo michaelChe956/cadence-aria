@@ -74,83 +74,45 @@ async fn group_then_single_creation_is_serialized_by_work_item_guard() {
     assert_creation_winner_state(root.path(), &winner_id, true);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn single_then_group_creation_is_serialized_by_work_item_guard() {
+#[tokio::test]
+async fn schema_v2_single_creation_requires_group_without_persisting_attempt() {
     let root = tempdir().expect("root");
     let repo = git_repo();
-    let bootstrap_app = build_web_router(WebAppState::new(
+    let app = build_web_router(WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
     ));
-    bootstrap_confirmed_work_item_plan_group(bootstrap_app, repo.path()).await;
-    let single_state = WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    );
-    let single_app = build_web_router(single_state.clone());
-    let group_app = build_web_router(WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    ));
-    let single_pause = single_state
-        .test_controls
-        .pause_next_coding_attempt_after_worktree_acquire();
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
 
-    let mut single_request = tokio::spawn(async move {
-        request_json(
-            single_app,
-            Method::POST,
-            "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
-            json!({}),
-        )
-        .await
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        single_pause.wait_until_paused(),
-    )
-    .await
-    .expect("single request did not pause after worktree acquire");
-
-    let mut group_request = tokio::spawn(async move {
-        request_json(
-            group_app,
-            Method::POST,
-            "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
-            json!({}),
-        )
-        .await
-    });
-    let early_group = tokio::time::timeout(
-        std::time::Duration::from_millis(150),
-        &mut group_request,
+    let (single_status, single) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
     )
     .await;
-    if let Ok(result) = early_group {
-        single_pause.resume();
-        panic!("group request bypassed paused single creation: {result:?}");
-    }
+    assert_eq!(single_status, StatusCode::BAD_REQUEST, "{single}");
+    assert_eq!(single["code"], "schema_v2_group_coding_required");
 
-    single_pause.resume();
-    let (single_status, single) = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        &mut single_request,
-    )
-    .await
-    .expect("single request did not finish")
-    .expect("single request task");
-    let (group_status, group) = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        &mut group_request,
-    )
-    .await
-    .expect("group request did not finish")
-    .expect("group request task");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    assert!(
+        CodingAttemptStore::new(app_paths)
+            .list_attempts_for_work_item("project_0001", "issue_0001", "work_item_0001")
+            .expect("list attempts after rejected single request")
+            .is_empty(),
+        "a rejected Schema v2 single request must not create an attempt"
+    );
 
-    assert_eq!(single_status, StatusCode::OK, "{single}");
-    assert_eq!(group_status, StatusCode::CONFLICT, "{group}");
-    let winner_id = assert_global_attempt_id(&single);
-    assert_creation_winner_state(root.path(), &winner_id, false);
+    let (group_status, group) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(group_status, StatusCode::OK, "{group}");
+    let winner_id = assert_global_attempt_id(&group);
+    assert_creation_winner_state(root.path(), &winner_id, true);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -264,10 +226,17 @@ async fn group_retry_and_delete_are_serialized_by_initialization_arbitration() {
     );
     let shared = LifecycleStore::new(app_paths)
         .get_issue_shared_worktree("project_0001", "issue_0001")
-        .expect("shared worktree after delete")
-        .expect("shared worktree after delete");
-    assert_eq!(shared.current_active_work_item_id, None);
-    assert_eq!(shared.current_lock_owner_id, None);
+        .expect("shared worktree lookup after delete");
+    // DELETE 后该 issue 无其他 attempt 记录时，shared-worktree.json 一并被条件清理
+    // （spec `harden-coding-attempt-deletion`）。无论是「json 已删」还是「json 保留但
+    // lock 已释放」，都视为删除路径正确收敛。
+    match shared {
+        None => {}
+        Some(record) => {
+            assert_eq!(record.current_active_work_item_id, None);
+            assert_eq!(record.current_lock_owner_id, None);
+        }
+    }
 }
 
 fn assert_creation_winner_state(

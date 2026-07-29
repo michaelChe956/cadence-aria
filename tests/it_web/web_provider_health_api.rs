@@ -332,6 +332,7 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
             provider_type: ProviderType::Codex,
             role: AdapterRole::Executor,
             worktree_path: Some(root.path().to_string_lossy().into_owned()),
+            provider_stream_log_dir: None,
             prompt: "run".to_string(),
             context_files: Vec::new(),
             output_schema: String::new(),
@@ -351,10 +352,9 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
         json!({"name":"Gate","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;

@@ -6,21 +6,27 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::{
     CodingAttemptPlanBinding, CodingAttemptScope, CodingExecutionUnitStatus, CodingProviderRole,
-    RemoteKind,
+    CodingUnitRun, CodingUnitRunStatus, RemoteKind,
 };
 use crate::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, LifecycleStore,
 };
 use crate::product::models::{
-    DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
-    PlanRevisionReason, ProviderConversationRef, ProviderConversationRole, WorkItemPlanLineage,
-    WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
+    DependencyGraphRevision, HandoffRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
+    LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason, ProviderConversationRef,
+    ProviderConversationRole, VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision,
+    WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract, PromisedOutputContract,
-    WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
+    VerificationCheck, WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy,
+    canonical_contract_hash,
 };
-use crate::product::work_item_projection::{WorkItemProjectionCompiler, projection_hashes};
+use crate::product::work_item_projection::{
+    CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
+    ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler,
+    plan_projection_hashes, projection_hashes, renderer_for,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use std::fs;
@@ -28,36 +34,46 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
-fn blocked_report_with(missing: Vec<String>, skipped: Vec<String>) -> TestingReport {
-    TestingReport {
-        id: "testing_report_0001".to_string(),
-        attempt_id: "coding_attempt_0001".to_string(),
-        role_run_id: None,
-        run_no: None,
-        commands: Vec::new(),
-        overall_status: TestingOverallStatus::Blocked,
-        provider_claim: None,
-        backend_verified: true,
-        started_at: "2026-06-10T00:00:00Z".to_string(),
-        completed_at: Some("2026-06-10T00:00:01Z".to_string()),
-        plan_id: Some("test_plan_0001".to_string()),
-        plan_summary: Some("plan".to_string()),
-        steps: Vec::new(),
-        unplanned_commands: Vec::new(),
-        unplanned_evidence: Vec::new(),
-        missing_required_steps: missing,
-        skipped_required_steps: skipped,
-        context_warnings: Vec::new(),
-        raw_provider_output_ref: None,
-        plan_defect_findings: Vec::new(),
-    }
-}
-
 fn seed_group_attempt_fixture(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
     initialize_attempt: bool,
     with_dependency: bool,
+) {
+    seed_group_attempt_fixture_with_legacy_work_items(
+        store,
+        attempt,
+        initialize_attempt,
+        with_dependency,
+        true,
+        &[],
+    );
+}
+
+fn seed_schema_v2_group_attempt_fixture(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    initialize_attempt: bool,
+    with_dependency: bool,
+    verification_checks: &[VerificationCheck],
+) {
+    seed_group_attempt_fixture_with_legacy_work_items(
+        store,
+        attempt,
+        initialize_attempt,
+        with_dependency,
+        false,
+        verification_checks,
+    );
+}
+
+fn seed_group_attempt_fixture_with_legacy_work_items(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    initialize_attempt: bool,
+    with_dependency: bool,
+    include_legacy_work_items: bool,
+    verification_checks: &[VerificationCheck],
 ) {
     let lifecycle = LifecycleStore::new(store.paths());
     let work_items = [
@@ -65,46 +81,48 @@ fn seed_group_attempt_fixture(
         ("work_item_0002", "work_item_revision_0002"),
         ("work_item_0003", "work_item_revision_0003"),
     ];
-    for (index, (work_item_id, _)) in work_items.iter().enumerate() {
+    if include_legacy_work_items {
+        for (index, (work_item_id, _)) in work_items.iter().enumerate() {
+            lifecycle
+                .create_work_item(CreateWorkItemInput {
+                    id: Some((*work_item_id).to_string()),
+                    project_id: attempt.project_id.clone(),
+                    issue_id: attempt.issue_id.clone(),
+                    repository_id: "repository_0001".to_string(),
+                    title: format!("group work item {}", index + 1),
+                    work_item_set_id: Some("work_item_plan_0001".to_string()),
+                    sequence_hint: Some(((index + 1) * 10) as u32),
+                    plan_status: WorkItemPlanStatus::Confirmed,
+                    ..Default::default()
+                })
+                .expect("group work item");
+        }
         lifecycle
-            .create_work_item(CreateWorkItemInput {
-                id: Some((*work_item_id).to_string()),
+            .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+                id: Some("work_item_plan_0001".to_string()),
                 project_id: attempt.project_id.clone(),
                 issue_id: attempt.issue_id.clone(),
-                repository_id: "repository_0001".to_string(),
-                title: format!("group work item {}", index + 1),
-                work_item_set_id: Some("work_item_plan_0001".to_string()),
-                sequence_hint: Some(((index + 1) * 10) as u32),
-                plan_status: WorkItemPlanStatus::Confirmed,
-                ..Default::default()
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                options: IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: IssueWorkItemPlanStatus::Confirmed,
+                work_item_ids: work_items
+                    .iter()
+                    .map(|(work_item_id, _)| (*work_item_id).to_string())
+                    .collect(),
+                repository_profile_ref: None,
+                verification_plan_ids: Vec::new(),
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
             })
-            .expect("group work item");
+            .expect("group plan");
     }
-    lifecycle
-        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
-            id: Some("work_item_plan_0001".to_string()),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            source_story_spec_ids: Vec::new(),
-            source_design_spec_ids: Vec::new(),
-            options: IssueWorkItemPlanOptions {
-                include_integration_tests: false,
-                include_e2e_tests: false,
-                force_frontend_backend_split: false,
-                require_execution_plan_confirm: false,
-            },
-            status: IssueWorkItemPlanStatus::Confirmed,
-            work_item_ids: work_items
-                .iter()
-                .map(|(work_item_id, _)| (*work_item_id).to_string())
-                .collect(),
-            repository_profile_ref: None,
-            verification_plan_ids: Vec::new(),
-            dependency_graph: Vec::new(),
-            created_from_provider_run: None,
-            validator_findings: Vec::new(),
-        })
-        .expect("group plan");
 
     let revision_store = WorkItemRevisionStore::new(store.paths());
     let lineage = WorkItemPlanLineage {
@@ -122,6 +140,8 @@ fn seed_group_attempt_fixture(
         .put_plan_lineage(&lineage)
         .expect("plan lineage");
     let mut plan_bindings = std::collections::BTreeMap::new();
+    let mut work_item_projections = std::collections::BTreeMap::new();
+    let mut projection_bundle_refs = Vec::new();
     for (index, (work_item_id, revision_id)) in work_items.iter().enumerate() {
         let logical = LogicalWorkItem {
             id: (*work_item_id).to_string(),
@@ -156,7 +176,7 @@ fn seed_group_attempt_fixture(
                 forbidden_scopes: Vec::new(),
             },
             acceptance_criteria: Vec::new(),
-            verification_checks: Vec::new(),
+            verification_checks: verification_checks.to_vec(),
             handoff_contract: HandoffContract {
                 required_fields: Vec::new(),
                 provided_contract_refs: vec![format!("contract_{work_item_id}")],
@@ -183,6 +203,11 @@ fn seed_group_attempt_fixture(
                     route: BlockerRoute::VerificationRetry,
                     target_contract_refs: Vec::new(),
                 },
+                BlockerRule {
+                    reason_code: "operational_blocker".to_string(),
+                    route: BlockerRoute::OperationalGate,
+                    target_contract_refs: Vec::new(),
+                },
             ],
             design_traceability: Vec::new(),
         };
@@ -191,11 +216,26 @@ fn seed_group_attempt_fixture(
             logical_work_item_id: logical.id.clone(),
             source_draft_revision_id: format!("draft_revision_{:04}", index + 1),
             canonical_contract_hash: canonical_contract_hash(&contract).expect("contract hash"),
-            canonical_contract: contract,
+            canonical_contract: contract.clone(),
             work_item_projection_bundle_id: format!("projection_bundle_{:04}", index + 1),
             verification_plan_revision_id: format!("verification_revision_{:04}", index + 1),
             created_at: "2026-07-18T00:00:00Z".to_string(),
         };
+        revision_store
+            .put_verification_plan_revision(
+                &lineage,
+                &VerificationPlanRevision {
+                    id: work_item_revision.verification_plan_revision_id.clone(),
+                    logical_work_item_id: logical.id.clone(),
+                    source_draft_revision_id: work_item_revision.source_draft_revision_id.clone(),
+                    verification_checks: work_item_revision
+                        .canonical_contract
+                        .verification_checks
+                        .clone(),
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("verification plan revision");
         revision_store
             .put_work_item_revision(&lineage, &work_item_revision)
             .expect("work item revision");
@@ -215,9 +255,9 @@ fn seed_group_attempt_fixture(
                     canonical_contract_hash: work_item_revision.canonical_contract_hash.clone(),
                     projection_schema_version: 1,
                     compiler_version: "work-item-projection-compiler-v1".to_string(),
-                    human_projection: projections.human,
-                    coder_projection: projections.coder,
-                    reviewer_projection: projections.reviewer,
+                    human_projection: projections.human.clone(),
+                    coder_projection: projections.coder.clone(),
+                    reviewer_projection: projections.reviewer.clone(),
                     human_projection_hash: hashes.human,
                     coder_projection_hash: hashes.coder,
                     reviewer_projection_hash: hashes.reviewer,
@@ -225,6 +265,8 @@ fn seed_group_attempt_fixture(
                 },
             )
             .expect("work item projection bundle");
+        projection_bundle_refs.push(work_item_revision.work_item_projection_bundle_id.clone());
+        work_item_projections.insert(logical.id.clone(), projections);
         revision_store
             .set_active_work_item_revision(&lineage, &logical, None, &work_item_revision.id)
             .expect("active work item revision");
@@ -247,6 +289,77 @@ fn seed_group_attempt_fixture(
     revision_store
         .put_dependency_graph_revision(&lineage, &graph)
         .expect("dependency graph");
+    let ordered_logical_work_item_ids = work_items
+        .iter()
+        .map(|(logical_id, _)| (*logical_id).to_string())
+        .collect::<Vec<_>>();
+    let compiled_plan = CompiledPlanProjections {
+        human: HumanGroupProjection {
+            plan_id: lineage.id.clone(),
+            goal: "group attempt fixture".to_string(),
+            split_reason: "fixture uses deterministic plan projections".to_string(),
+            work_items: ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| {
+                    let projection = &work_item_projections[logical_id].human;
+                    HumanGroupWorkItemSummary {
+                        logical_work_item_id: logical_id.clone(),
+                        title: projection.title.clone(),
+                        goal: projection.goal.clone(),
+                        depends_on: graph
+                            .edges
+                            .iter()
+                            .filter(|edge| edge.to == *logical_id)
+                            .map(|edge| edge.from.clone())
+                            .collect(),
+                        provides: projection
+                            .outputs
+                            .iter()
+                            .map(|output| output.contract_id.clone())
+                            .collect(),
+                        scope_summary: projection.scope_summary.clone(),
+                    }
+                })
+                .collect(),
+            contract_flow: Vec::new(),
+            risks: Vec::new(),
+            source_refs: Vec::new(),
+            normative: false,
+            used_by_provider: false,
+        },
+        coder: CoderGroupContext {
+            plan_id: lineage.id.clone(),
+            ordered_logical_work_item_ids: ordered_logical_work_item_ids.clone(),
+            dependency_edges: graph.edges.clone(),
+            group_write_scopes: ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| {
+                    (
+                        logical_id.clone(),
+                        work_item_projections[logical_id].coder.write_policy.clone(),
+                    )
+                })
+                .collect(),
+        },
+        reviewer: ReviewerGroupMatrix {
+            plan_id: lineage.id.clone(),
+            work_items: ordered_logical_work_item_ids
+                .iter()
+                .map(|logical_id| ReviewerGroupMatrixEntry {
+                    logical_work_item_id: logical_id.clone(),
+                    criterion_refs: work_item_projections[logical_id]
+                        .reviewer
+                        .criterion_refs
+                        .clone(),
+                    input_contract_refs: Vec::new(),
+                    output_contract_refs: Vec::new(),
+                })
+                .collect(),
+            dependency_edges: graph.edges.clone(),
+            design_traceability_refs: Vec::new(),
+        },
+    };
+    let plan_projection_hashes = plan_projection_hashes(&compiled_plan).expect("plan hashes");
     let plan_revision = WorkItemPlanRevision {
         id: "plan_revision_0001".to_string(),
         plan_id: lineage.id.clone(),
@@ -259,6 +372,25 @@ fn seed_group_attempt_fixture(
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
         created_at: "2026-07-18T00:00:00Z".to_string(),
     };
+    revision_store
+        .put_plan_projection_bundle(
+            &lineage,
+            &PlanProjectionBundle {
+                id: plan_revision.plan_projection_bundle_id.clone(),
+                plan_revision_id: plan_revision.id.clone(),
+                dependency_graph_revision_id: plan_revision.dependency_graph_revision_id.clone(),
+                work_item_projection_bundle_refs: projection_bundle_refs,
+                human_group_projection: compiled_plan.human,
+                coder_group_context: compiled_plan.coder,
+                reviewer_group_matrix: compiled_plan.reviewer,
+                human_group_projection_hash: plan_projection_hashes.human,
+                coder_group_context_hash: plan_projection_hashes.coder,
+                reviewer_group_matrix_hash: plan_projection_hashes.reviewer,
+                compiler_version: "plan-projection-compiler-v1".to_string(),
+                created_at: "2026-07-18T00:00:00Z".to_string(),
+            },
+        )
+        .expect("plan projection bundle");
     revision_store
         .put_plan_revision(&lineage, &plan_revision)
         .expect("plan revision");
@@ -305,12 +437,14 @@ fn seed_group_attempt_fixture(
     }
 }
 
+mod code_review_triage;
 mod coder_resume_recovery;
 mod gate_coder_feedback;
 mod gate_rework;
 mod git_operation_reconcile;
 mod group_completion_authority;
 mod group_terminal;
+mod internal_review_triage;
 mod parser_prompt;
 mod plan_amendment;
 mod plan_defect_entrypoints;
@@ -322,8 +456,7 @@ mod provider_start_persistence;
 mod runtime_handoff_compatibility;
 mod runtime_handoff_delta;
 mod runtime_handoff_impact;
-mod tester_cancellation;
-mod tester_repair_plan_defect;
+mod schema_v2_runtime;
 
 #[tokio::test]
 async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node() {
@@ -514,6 +647,7 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
                 manual_instructions: Vec::new(),
                 created_at: "2026-07-07T00:00:00Z".to_string(),
                 updated_at: "2026-07-07T00:00:00Z".to_string(),
+                push_error: None,
             },
         )
         .expect("review request");
@@ -528,12 +662,6 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
     assert_eq!(completed.scope, CodingAttemptScope::WorkItem);
     assert_eq!(completed.status, CodingAttemptStatus::Completed);
     assert_eq!(completed.stage, CodingExecutionStage::ReviewRequest);
-    assert!(
-        store
-            .get_work_item_handoff(&completed.project_id, &completed.issue_id, &completed.id)
-            .expect("work item handoff")
-            .is_some()
-    );
     assert!(
         store
             .get_timeline_nodes(&completed.project_id, &completed.issue_id, &completed.id)

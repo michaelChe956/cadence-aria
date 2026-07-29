@@ -68,6 +68,7 @@ fn adapter_input(provider_type: ProviderType) -> AdapterInput {
         provider_type,
         role: AdapterRole::Orchestrator,
         worktree_path: None,
+        provider_stream_log_dir: None,
         prompt: "fixture prompt".to_string(),
         context_files: Vec::new(),
         output_schema: "schema://aria/artifacts/clarification_record/v1".to_string(),

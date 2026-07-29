@@ -5,8 +5,10 @@ mod finalizer;
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum WorkItemPlanCompileFinalizerCheckpoint {
-    PlanSummaryCommitted,
+    PlanSummaryPrepared,
     FirstChildSessionEnsured,
+    FirstChildBindingEnsured,
+    FirstChildContextPrepared,
     CompileReportPersisted,
 }
 

@@ -305,6 +305,63 @@ esac
 "#,
     );
     let worktree = tempfile::tempdir().expect("worktree");
+    let stream_log_dir = tempfile::tempdir().expect("stream log dir");
+    let compatibility = fixture_compatibility_entry(ProviderType::Fake, command);
+    let adapter = CliProviderAdapter::new(CliAdapterConfig {
+        compatibility,
+        expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
+    });
+
+    let output = adapter
+        .run(&adapter_input_with_stream_log_dir(
+            worktree.path(),
+            stream_log_dir.path(),
+        ))
+        .expect("cli run");
+
+    let combined_logs = read_stream_logs(stream_log_dir.path());
+    assert!(combined_logs.contains("stdout before structured output"));
+    assert!(combined_logs.contains("stderr before structured output"));
+    assert!(
+        !worktree.path().join(".aria").exists(),
+        "provider stream logs must not be written into the target repository"
+    );
+    assert_eq!(
+        output.files_modified,
+        Vec::<String>::new(),
+        "runtime stream logs must not be reported as target file changes"
+    );
+}
+
+/// 未提供流日志目录时不得写流日志，且不得回退到 provider 工作目录。
+#[test]
+fn cli_adapter_does_not_write_stream_logs_without_log_dir() {
+    let _guard = cli_adapter_test_guard();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let command = support::write_executable_script(
+        tempdir.path(),
+        "no-log-dir-provider",
+        r#"#!/bin/sh
+set -eu
+case "${1:-run}" in
+  probe|version|auth)
+    echo "ok"
+    exit 0
+    ;;
+  run)
+    cat >/dev/null
+    echo "stdout without log dir"
+    echo "stderr without log dir" >&2
+    echo "<ARIA_STRUCTURED_OUTPUT>"
+    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "</ARIA_STRUCTURED_OUTPUT>"
+    exit 0
+    ;;
+esac
+"#,
+    );
+    let worktree = tempfile::tempdir().expect("worktree");
     let compatibility = fixture_compatibility_entry(ProviderType::Fake, command);
     let adapter = CliProviderAdapter::new(CliAdapterConfig {
         compatibility,
@@ -314,25 +371,95 @@ esac
 
     let output = adapter
         .run(&adapter_input(worktree.path()))
-        .expect("cli run");
+        .expect("cli run must succeed without a stream log dir");
 
-    let stream_dir = worktree.path().join(".aria/runtime/provider-streams");
-    let mut combined_logs = String::new();
-    for entry in fs::read_dir(&stream_dir)
-        .unwrap_or_else(|error| panic!("read {}: {error}", stream_dir.display()))
-    {
-        let entry = entry.expect("stream entry");
-        if entry.path().is_file() {
-            combined_logs
-                .push_str(&fs::read_to_string(entry.path()).expect("read provider stream log"));
-        }
-    }
-    assert!(combined_logs.contains("stdout before structured output"));
-    assert!(combined_logs.contains("stderr before structured output"));
+    assert!(
+        !worktree.path().join(".aria").exists(),
+        "missing stream log dir must not fall back to the provider working directory"
+    );
+    assert!(output.structured_output.is_some());
+    assert_eq!(output.files_modified, Vec::<String>::new());
+}
+
+/// 命名规则不得改变，且先前执行的日志不得被覆盖。
+///
+/// 追加写入模式无法在此验证：跨进程执行的 child_id 不同，两次执行落到不同文件。
+/// 追加语义由 `cli_adapter::provider_stream_tests` 直接锁住。
+#[test]
+fn cli_adapter_stream_log_naming_and_previous_runs_are_preserved() {
+    let _guard = cli_adapter_test_guard();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let command = support::write_executable_script(
+        tempdir.path(),
+        "naming-provider",
+        r#"#!/bin/sh
+set -eu
+case "${1:-run}" in
+  probe|version|auth)
+    echo "ok"
+    exit 0
+    ;;
+  run)
+    cat >/dev/null
+    echo "stdout marker line"
+    echo "stderr marker line" >&2
+    echo "<ARIA_STRUCTURED_OUTPUT>"
+    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "</ARIA_STRUCTURED_OUTPUT>"
+    exit 0
+    ;;
+esac
+"#,
+    );
+    let worktree = tempfile::tempdir().expect("worktree");
+    let stream_log_dir = tempfile::tempdir().expect("stream log dir");
+    let compatibility = fixture_compatibility_entry(ProviderType::Fake, command);
+    let adapter = CliProviderAdapter::new(CliAdapterConfig {
+        compatibility,
+        expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
+    });
+    let input = adapter_input_with_stream_log_dir(worktree.path(), stream_log_dir.path());
+
+    adapter.run(&input).expect("first cli run");
+
+    let names = fs::read_dir(stream_log_dir.path())
+        .expect("read stream log dir")
+        .map(|entry| {
+            entry
+                .expect("stream entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        names.iter().any(|name| name.contains("naming-provider")),
+        "stream log file name must retain the provider name: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.ends_with("-stdout.log")),
+        "stdout stream log must be named by stream: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.ends_with("-stderr.log")),
+        "stderr stream log must be named by stream: {names:?}"
+    );
+
+    // 第二次执行落在新的 child_id 上，因此两次执行的日志共存于同一目录，
+    // 既有文件不被覆盖。
+    adapter.run(&input).expect("second cli run");
+
+    let combined_logs = read_stream_logs(stream_log_dir.path());
     assert_eq!(
-        output.files_modified,
-        Vec::<String>::new(),
-        "runtime stream logs must not be reported as target file changes"
+        combined_logs.matches("stdout marker line").count(),
+        2,
+        "logs from both runs must coexist; earlier files must not be overwritten"
+    );
+    assert_eq!(
+        combined_logs.matches("stderr marker line").count(),
+        2,
+        "logs from both runs must coexist; earlier files must not be overwritten"
     );
 }
 
@@ -412,17 +539,85 @@ fn missing_provider_command_is_diagnostic_not_a_panic() {
     assert!(error.details.contains("missing-provider-command"));
 }
 
+/// 无 coding attempt 上下文的执行路径不得提供流日志目录，从而按 adapter 的缺省
+/// 行为不写流日志。`build_provider_context` 服务全部 runtime unit，取其作为代表：
+/// 它是这些路径构造 `AdapterInput` 的唯一入口。
+#[test]
+fn runtime_unit_adapter_input_carries_no_provider_stream_log_dir() {
+    use cadence_aria::cross_cutting::provider_context_builder::{
+        ProviderContextBuilderInput, build_provider_context,
+    };
+    use cadence_aria::runtime_units::prompt_template_registry::all_planning_node_ids;
+
+    let node_id = all_planning_node_ids()
+        .first()
+        .expect("at least one planning node")
+        .to_string();
+    let worktree = tempfile::tempdir().expect("worktree");
+    let result = build_provider_context(ProviderContextBuilderInput {
+        session_id: "session_001".to_string(),
+        task_id: "task_001".to_string(),
+        node_id,
+        canonical_inputs: json!({
+            "artifact_refs": ["art_ref_spec_0001"],
+            "risk_registry_ref": "risk_registry_001"
+        }),
+        canonical_input_summary: "canonical summary for test".to_string(),
+        projection_refs: vec!["proj_spec_projection_art_spec_001_0001".to_string()],
+        projection_summary: "projection summary for test".to_string(),
+        constraint_bundle_ref: "constraint_bundle_openspec_sample-change_0001".to_string(),
+        constraint_summary: "constraint summary for test".to_string(),
+        context_files: vec!["tests/fixtures/artifacts/spec.md".to_string()],
+        worktree_path: Some(worktree.path().to_string_lossy().to_string()),
+    })
+    .expect("context package");
+
+    assert!(
+        result.adapter_input.worktree_path.is_some(),
+        "the runtime unit still executes inside the target worktree"
+    );
+    assert!(
+        result.adapter_input.provider_stream_log_dir.is_none(),
+        "runtime unit inputs must not carry a stream log dir"
+    );
+}
+
 fn adapter_input(worktree_path: &std::path::Path) -> AdapterInput {
     AdapterInput {
         provider_type: ProviderType::Fake,
         role: AdapterRole::Orchestrator,
         worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        provider_stream_log_dir: None,
         prompt: "fixture prompt".to_string(),
         context_files: Vec::new(),
         output_schema: "clarification_record.v1".to_string(),
         timeout: 3,
         max_retries: 1,
     }
+}
+
+fn adapter_input_with_stream_log_dir(
+    worktree_path: &std::path::Path,
+    stream_log_dir: &std::path::Path,
+) -> AdapterInput {
+    AdapterInput {
+        provider_stream_log_dir: Some(stream_log_dir.to_string_lossy().to_string()),
+        ..adapter_input(worktree_path)
+    }
+}
+
+fn read_stream_logs(stream_dir: &std::path::Path) -> String {
+    let mut combined_logs = String::new();
+    for entry in fs::read_dir(stream_dir)
+        .unwrap_or_else(|error| panic!("read {}: {error}", stream_dir.display()))
+    {
+        let entry = entry.expect("stream entry");
+        if entry.path().is_file() {
+            combined_logs
+                .push_str(&fs::read_to_string(entry.path()).expect("read provider stream log"));
+        }
+    }
+    combined_logs
 }
 
 fn temp_path(name: &str) -> std::path::PathBuf {

@@ -244,8 +244,6 @@ pub(crate) struct ProviderWorkItem {
     #[serde(default)]
     pub(crate) context_budget: Option<WorkItemContextBudget>,
     #[serde(default)]
-    pub(crate) required_handoff_from: Vec<String>,
-    #[serde(default)]
     pub(crate) require_execution_plan_confirm: bool,
 }
 

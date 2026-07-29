@@ -6,13 +6,12 @@ pub(crate) async fn bootstrap_story_and_design(app: axum::Router, repo_path: &st
         json!({"name":"Coding","description":null}),
     )
     .await;
-    request_json(
+    let repository = register_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
         json!({"name":"Repo","path":repo_path}),
     )
     .await;
+    assert_eq!(repository["repository_id"], "repository_0001");
     request_json(
         app.clone(),
         Method::POST,
@@ -55,6 +54,43 @@ pub(crate) async fn bootstrap_story_and_design(app: axum::Router, repo_path: &st
     .await;
 }
 
+async fn register_repository_and_wait(app: axum::Router, request: Value) -> Value {
+    let (status, accepted) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/repositories",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+
+    let operation_id = accepted["operation_id"].as_str().expect("operation id");
+    let operation_uri = format!(
+        "/api/projects/project_0001/repository-initializations/{operation_id}"
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let (status, snapshot) = request_json(
+            app.clone(),
+            Method::GET,
+            &operation_uri,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{snapshot}");
+        match snapshot["status"].as_str() {
+            Some("completed") => return snapshot["result"]["repository"].clone(),
+            Some("failed") => panic!("repository initialization failed: {snapshot}"),
+            _ => {
+                if tokio::time::Instant::now() >= deadline {
+                    panic!("repository initialization did not finish: {snapshot}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+}
+
 pub(crate) async fn request_json(
     app: axum::Router,
     method: Method,
@@ -92,41 +128,31 @@ pub(crate) fn scoped_attempt_uri(attempt_id: &str, suffix: &str) -> String {
 
 pub(crate) fn inject_invalid_group_second_work_item(
     app_paths: &ProductAppPaths,
-) -> (PathBuf, Vec<u8>, PathBuf, Vec<u8>) {
-    let issue_root = app_paths.issue_lifecycle_root("project_0001", "issue_0001");
-    let second_work_item_path = issue_root.join("work-items/work_item_0002.json");
-    let plan_path = issue_root.join("issue-work-item-plans/work_item_plan_0001.json");
-    let original_work_item = fs::read(&second_work_item_path).expect("second work item");
-    let original_plan = fs::read(&plan_path).expect("work item plan");
-    let mut invalid_work_item: Value =
-        serde_json::from_slice(&original_work_item).expect("parse second work item");
-    invalid_work_item["id"] = json!("../invalid_work_item");
+) -> (PathBuf, Vec<u8>) {
+    let projection_path = app_paths
+        .issue_root("project_0001", "issue_0001")
+        .join(
+            "work-item-revisions/work_item_plan_0001/plan-projection-bundles/plan_projection_bundle_0001.json",
+        );
+    let original_projection = fs::read(&projection_path).expect("plan projection bundle");
+    let mut invalid_projection: Value =
+        serde_json::from_slice(&original_projection).expect("parse plan projection bundle");
+    invalid_projection["coder_group_context"]["ordered_logical_work_item_ids"][1] =
+        json!("../invalid_work_item");
     fs::write(
-        &second_work_item_path,
-        serde_json::to_vec_pretty(&invalid_work_item).expect("serialize invalid work item"),
+        &projection_path,
+        serde_json::to_vec_pretty(&invalid_projection)
+            .expect("serialize invalid plan projection bundle"),
     )
-    .expect("write invalid work item");
-    let mut invalid_plan: Value = serde_json::from_slice(&original_plan).expect("parse plan");
-    invalid_plan["work_item_ids"][1] = json!("../invalid_work_item");
-    fs::write(
-        &plan_path,
-        serde_json::to_vec_pretty(&invalid_plan).expect("serialize invalid plan"),
-    )
-    .expect("write invalid plan");
-    (
-        second_work_item_path,
-        original_work_item,
-        plan_path,
-        original_plan,
-    )
+    .expect("write invalid plan projection bundle");
+    (projection_path, original_projection)
 }
 
 pub(crate) fn restore_group_second_work_item(
-    fixture: (PathBuf, Vec<u8>, PathBuf, Vec<u8>),
+    fixture: (PathBuf, Vec<u8>),
 ) {
-    let (second_work_item_path, original_work_item, plan_path, original_plan) = fixture;
-    fs::write(second_work_item_path, original_work_item).expect("restore second work item");
-    fs::write(plan_path, original_plan).expect("restore work item plan");
+    let (projection_path, original_projection) = fixture;
+    fs::write(projection_path, original_projection).expect("restore plan projection bundle");
 }
 
 pub(crate) fn assert_group_attempt_creation_rolled_back(app_paths: &ProductAppPaths) {

@@ -27,6 +27,10 @@ pub(crate) fn load_coding_work_item_context(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<CompiledCodingWorkItemContext, ProductStoreError> {
+    if is_schema_v2_group_attempt(app_paths, attempt)? {
+        return bound_coder_work_item_context(app_paths, attempt);
+    }
+
     let current_work_item_id = attempt
         .current_work_item_id
         .as_deref()
@@ -46,6 +50,72 @@ pub(crate) fn load_coding_work_item_context(
 
     Ok(CompiledCodingWorkItemContext {
         markdown,
+        verification_commands,
+    })
+}
+
+fn is_schema_v2_group_attempt(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<bool, ProductStoreError> {
+    if attempt.scope != crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
+        return Ok(false);
+    }
+    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+        return Ok(false);
+    };
+    match crate::product::work_item_revision_store::WorkItemRevisionStore::new(app_paths.clone())
+        .get_plan_lineage(&attempt.project_id, &attempt.issue_id, plan_id)
+    {
+        Ok(_) => Ok(true),
+        Err(ProductStoreError::NotFound {
+            kind: "work_item_plan_lineage",
+            ..
+        }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn bound_coder_work_item_context(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<CompiledCodingWorkItemContext, ProductStoreError> {
+    let coding_store =
+        crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
+    let Some(unit) =
+        coding_store.get_active_coding_unit(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+    else {
+        return Ok(CompiledCodingWorkItemContext::default());
+    };
+    let run = coding_store
+        .list_coding_unit_runs(attempt, &unit.id)?
+        .into_iter()
+        .max_by_key(|run| run.execution_no);
+    let reader =
+        crate::product::work_item_runtime_reader::WorkItemRuntimeReader::new(app_paths.clone());
+    let (projection, coder_projection_hash) =
+        reader.coder_projection_for_unit(attempt, &unit, run.as_ref())?;
+    let runtime = reader.normative_context_for_unit(attempt, &unit, run.as_ref())?;
+    let projection_json = serde_json::to_string_pretty(&projection)
+        .map_err(|error| ProductStoreError::Json(error.to_string()))?;
+    let verification_commands = runtime
+        .verification_plan_revision
+        .verification_checks
+        .iter()
+        .filter_map(|check| check.command.as_deref())
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    Ok(CompiledCodingWorkItemContext {
+        markdown: Some(format!(
+            "# Bound Coder Context\n\n- Plan revision: {}\n- Work item revision: {}\n- Coder projection hash: {}\n\n## Coder Projection\n\n{}\n",
+            runtime.binding.plan_revision_id,
+            runtime.binding.work_item_revision_id,
+            coder_projection_hash,
+            projection_json,
+        )),
         verification_commands,
     })
 }
@@ -98,12 +168,6 @@ fn needs_source_draft_supplement(work_item: &LifecycleWorkItemRecord) -> bool {
         .map(str::trim)
         .unwrap_or_default()
         .is_empty()
-        || work_item
-            .planned_handoff_summary
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
 }
 
 fn final_compile_draft_supplement(
@@ -220,19 +284,9 @@ fn compiled_work_item_markdown(
         "Planned Implementation Context",
         work_item.planned_implementation_context.as_deref(),
     );
-    push_markdown_section(
-        &mut markdown,
-        "Planned Handoff Summary",
-        work_item.planned_handoff_summary.as_deref(),
-    );
     push_string_list(&mut markdown, "Story Spec IDs", &work_item.story_spec_ids);
     push_string_list(&mut markdown, "Design Spec IDs", &work_item.design_spec_ids);
     push_string_list(&mut markdown, "Depends On", &work_item.depends_on);
-    push_string_list(
-        &mut markdown,
-        "Required Handoff From",
-        &work_item.required_handoff_from,
-    );
     push_string_list(
         &mut markdown,
         "Exclusive Write Scopes",

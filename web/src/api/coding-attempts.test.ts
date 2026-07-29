@@ -211,7 +211,6 @@ function codingAttemptSnapshotResponse() {
       },
     ],
     active_node_id: "coding_node_0001",
-    testing_report: null,
     code_review_reports: [],
     review_request: null,
     internal_pr_review: null,
@@ -232,7 +231,6 @@ function codingAttemptSnapshotResponse() {
     ],
     pending_choices: [],
     work_item_execution_plan: null,
-    work_item_handoff: null,
     require_execution_plan_confirm: false,
   };
 }

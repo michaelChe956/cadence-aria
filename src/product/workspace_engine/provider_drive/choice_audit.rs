@@ -161,7 +161,6 @@ fn role_label(role: &ProviderConversationRole) -> &'static str {
         ProviderConversationRole::Author => "author",
         ProviderConversationRole::Reviewer => "reviewer",
         ProviderConversationRole::Coder => "coder",
-        ProviderConversationRole::Tester => "tester",
         ProviderConversationRole::Analyst => "analyst",
         ProviderConversationRole::CodeReviewer => "code_reviewer",
         ProviderConversationRole::InternalReviewer => "internal_reviewer",

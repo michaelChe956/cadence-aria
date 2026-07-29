@@ -103,28 +103,24 @@ async fn manages_workspace_repositories_and_keeps_issue_on_lifecycle_flow() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(workspace["project_id"], "project_0001");
 
-    let (status, repository_a) = request_json(
+    let repository_a = crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo A","path":repo_a.path()}),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
         repository_a["repository"]["repository_id"],
         "repository_0001"
     );
     assert_eq!(repository_a["repository"]["project_id"], "project_0001");
 
-    let (status, repository_b) = request_json(
+    let repository_b = crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Repo B","path":repo_b.path()}),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
         repository_b["repository"]["repository_id"],
         "repository_0002"
@@ -214,17 +210,15 @@ async fn product_issue_start_endpoint_is_removed() {
         json!({"name":"Product Project","description":"Issue lifecycle"}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Workspace A","path":repo_a.path()}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Workspace B","path":repo_b.path()}),
     )
     .await;
@@ -321,10 +315,9 @@ async fn deletes_workspace_project_repository_and_issue_records() {
         json!({"name":"Product","description":null}),
     )
     .await;
-    request_json(
+    crate::create_repository_and_wait(
         app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/repositories",
+        "project_0001",
         json!({"name":"Code Repo","path":repo.path()}),
     )
     .await;

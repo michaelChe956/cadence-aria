@@ -1,6 +1,13 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
+use crate::product::models::WorkItemRuntimeBinding;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
+use std::collections::{BTreeMap, BTreeSet};
+
+mod deletion;
+pub use deletion::{delete_work_item, delete_work_item_plan};
 
 pub async fn issue_lifecycle(
     State(state): State<WebAppState>,
@@ -50,18 +57,199 @@ pub async fn issue_lifecycle(
             )
         })
         .collect::<ApiResult<Vec<_>>>()?;
-    let work_item_plans = lifecycle
+    let work_item_plan_records = lifecycle
         .list_issue_work_item_plans(&project_id, &issue_id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .map(|plan| issue_work_item_plan_detail_dto(&plan))
+        .map_err(product_store_api_error)?;
+    let work_item_plans = work_item_plan_records
+        .iter()
+        .map(issue_work_item_plan_detail_dto)
         .collect::<Vec<_>>();
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let mut coding_attempts = Vec::new();
-    let work_items = lifecycle
-        .list_work_items(&project_id, &issue_id)
-        .map_err(product_store_api_error)?
+    let repository_id = issue.repo_id.clone().ok_or_else(|| {
+        product_store_api_error(ProductStoreError::NotFound {
+            kind: "issue_repository",
+            id: issue.id.clone(),
+        })
+    })?;
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
+    let runtime_reader = WorkItemRuntimeReader::new(app_paths.clone());
+    let mut schema_v2_plan_ids = BTreeSet::new();
+    let mut schema_v2_work_item_ids = BTreeSet::new();
+    let mut work_items = Vec::new();
+
+    for plan in &work_item_plan_records {
+        let lineage = match revision_store.get_plan_lineage(&project_id, &issue_id, &plan.id) {
+            Ok(lineage) => lineage,
+            Err(ProductStoreError::NotFound {
+                kind: "work_item_plan_lineage",
+                ..
+            }) => {
+                continue;
+            }
+            Err(error) => return Err(product_store_api_error(error)),
+        };
+        schema_v2_plan_ids.insert(plan.id.clone());
+        if plan.status != IssueWorkItemPlanStatus::Confirmed {
+            continue;
+        }
+
+        let active_revision_id = lineage.active_revision_id.as_deref().ok_or_else(|| {
+            product_store_api_error(ProductStoreError::IdentityMismatch {
+                kind: "runtime_binding_missing",
+                id: plan.id.clone(),
+            })
+        })?;
+        let plan_revision = revision_store
+            .get_plan_revision(&project_id, &issue_id, &plan.id, active_revision_id)
+            .map_err(product_store_api_error)?;
+        let plan_projection = revision_store
+            .get_plan_projection_bundle(&lineage, &plan_revision.plan_projection_bundle_id)
+            .map_err(product_store_api_error)?;
+        if plan_projection.plan_revision_id != plan_revision.id
+            || plan_projection.dependency_graph_revision_id
+                != plan_revision.dependency_graph_revision_id
+            || plan_projection.human_group_projection.plan_id != plan.id
+        {
+            return Err(product_store_api_error(
+                ProductStoreError::IdentityMismatch {
+                    kind: "runtime_binding_integrity_mismatch",
+                    id: plan.id.clone(),
+                },
+            ));
+        }
+
+        let human_item_ids = plan_projection
+            .human_group_projection
+            .work_items
+            .iter()
+            .map(|item| item.logical_work_item_id.clone())
+            .collect::<BTreeSet<_>>();
+        let revision_item_ids = plan_revision
+            .work_item_bindings
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if human_item_ids.len() != plan_projection.human_group_projection.work_items.len()
+            || human_item_ids != revision_item_ids
+        {
+            return Err(product_store_api_error(
+                ProductStoreError::IdentityMismatch {
+                    kind: "runtime_binding_integrity_mismatch",
+                    id: plan.id.clone(),
+                },
+            ));
+        }
+
+        let group_attempt = coding_store
+            .get_attempt_for_work_item_group(&project_id, &issue_id, &plan.id)
+            .map_err(product_store_api_error)?;
+        let units_by_logical_id = if let Some(attempt) = group_attempt.as_ref() {
+            coding_attempts.push(coding_attempt_dto(attempt));
+            let units = coding_store
+                .list_coding_units(&project_id, &issue_id, &attempt.id)
+                .map_err(product_store_api_error)?;
+            let mut units_by_logical_id = BTreeMap::new();
+            for unit in units {
+                if unit.plan_id != plan.id
+                    || plan_revision
+                        .work_item_bindings
+                        .get(&unit.logical_work_item_id)
+                        != Some(&unit.work_item_revision_id)
+                    || units_by_logical_id
+                        .insert(unit.logical_work_item_id.clone(), unit)
+                        .is_some()
+                {
+                    return Err(product_store_api_error(
+                        ProductStoreError::IdentityMismatch {
+                            kind: "runtime_binding_integrity_mismatch",
+                            id: attempt.id.clone(),
+                        },
+                    ));
+                }
+            }
+            units_by_logical_id
+        } else {
+            BTreeMap::new()
+        };
+
+        for human_projection in &plan_projection.human_group_projection.work_items {
+            let work_item_revision_id = plan_revision
+                .work_item_bindings
+                .get(&human_projection.logical_work_item_id)
+                .ok_or_else(|| {
+                    product_store_api_error(ProductStoreError::IdentityMismatch {
+                        kind: "runtime_binding_integrity_mismatch",
+                        id: human_projection.logical_work_item_id.clone(),
+                    })
+                })?;
+            let work_item_revision = revision_store
+                .get_work_item_revision(
+                    &lineage,
+                    &human_projection.logical_work_item_id,
+                    work_item_revision_id,
+                )
+                .map_err(product_store_api_error)?;
+            let projection_bundle = revision_store
+                .get_work_item_projection_bundle(
+                    &lineage,
+                    &work_item_revision.work_item_projection_bundle_id,
+                )
+                .map_err(product_store_api_error)?;
+            let binding = WorkItemRuntimeBinding {
+                plan_id: plan.id.clone(),
+                plan_revision_id: plan_revision.id.clone(),
+                logical_work_item_id: human_projection.logical_work_item_id.clone(),
+                work_item_revision_id: work_item_revision.id.clone(),
+                projection_bundle_id: projection_bundle.id.clone(),
+                verification_plan_revision_id: work_item_revision
+                    .verification_plan_revision_id
+                    .clone(),
+                canonical_contract_hash: work_item_revision.canonical_contract_hash.clone(),
+                projection_compiler_version: projection_bundle.compiler_version.clone(),
+                human_projection_hash: projection_bundle.human_projection_hash.clone(),
+                coder_projection_hash: projection_bundle.coder_projection_hash.clone(),
+                reviewer_projection_hash: projection_bundle.reviewer_projection_hash.clone(),
+            };
+            let runtime = runtime_reader
+                .resolve_binding(&project_id, &issue_id, &binding)
+                .map_err(product_store_api_error)?;
+            let session = workspace_session_for_entity(
+                &workspace_sessions,
+                &human_projection.logical_work_item_id,
+                &WorkspaceType::WorkItem,
+            );
+            let unit = units_by_logical_id.get(&human_projection.logical_work_item_id);
+            work_items.push(lifecycle_work_item_runtime_dto(
+                &lifecycle,
+                LifecycleWorkItemRuntimeDtoInput {
+                    repository_id: &repository_id,
+                    plan_id: &plan.id,
+                    runtime: &runtime,
+                    human_projection,
+                    latest_attempt: group_attempt.as_ref().map(coding_attempt_dto),
+                    unit,
+                    session_id: session.map(|session| session.id.as_str()),
+                    require_execution_plan_confirm: plan.options.require_execution_plan_confirm,
+                },
+            )?);
+            schema_v2_work_item_ids.insert(human_projection.logical_work_item_id.clone());
+        }
+    }
+
+    let has_legacy_plan = work_item_plan_records
+        .iter()
+        .any(|plan| !schema_v2_plan_ids.contains(&plan.id));
+    let legacy_work_items = if schema_v2_plan_ids.is_empty() || has_legacy_plan {
+        lifecycle
+            .list_work_items(&project_id, &issue_id)
+            .map_err(product_store_api_error)?
+    } else {
+        Vec::new()
+    };
+    let legacy_work_items = legacy_work_items
         .into_iter()
+        .filter(|work_item| !schema_v2_work_item_ids.contains(&work_item.id))
         .map(|work_item| {
             let attempts = coding_store
                 .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
@@ -81,6 +269,7 @@ pub async fn issue_lifecycle(
             )
         })
         .collect::<ApiResult<Vec<_>>>()?;
+    work_items.extend(legacy_work_items);
     let workspace_sessions = workspace_sessions
         .iter()
         .map(workspace_session_summary_dto)
@@ -294,72 +483,6 @@ pub async fn delete_design_spec(
         .delete_design_spec(&project_id, &issue_id, &design_spec_id)
         .map_err(product_store_api_error)?;
     Ok(Json(json!({"status":"deleted"})))
-}
-
-pub async fn delete_work_item(
-    State(state): State<WebAppState>,
-    Path((project_id, issue_id, work_item_id)): Path<(String, String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let app_paths = product_app_paths(&state);
-    let store = LifecycleStore::new(app_paths.clone());
-    delete_work_item_with_cleanup(&app_paths, &store, &project_id, &issue_id, &work_item_id)
-        .await?;
-    Ok(Json(json!({"status":"deleted"})))
-}
-
-pub async fn delete_work_item_plan(
-    State(state): State<WebAppState>,
-    Path((project_id, issue_id, plan_id)): Path<(String, String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let app_paths = product_app_paths(&state);
-    let store = LifecycleStore::new(app_paths.clone());
-    let plan = store
-        .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
-        .map_err(product_store_api_error)?;
-    for work_item_id in &plan.work_item_ids {
-        delete_work_item_with_cleanup(&app_paths, &store, &project_id, &issue_id, work_item_id)
-            .await?;
-    }
-    store
-        .delete_issue_work_item_plan(&project_id, &issue_id, &plan_id)
-        .map_err(product_store_api_error)?;
-    Ok(Json(json!({"status":"deleted"})))
-}
-
-pub(crate) async fn delete_work_item_with_cleanup(
-    app_paths: &ProductAppPaths,
-    store: &LifecycleStore,
-    project_id: &str,
-    issue_id: &str,
-    work_item_id: &str,
-) -> ApiResult<()> {
-    let work_item = store
-        .list_work_items(project_id, issue_id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .find(|work_item| work_item.id == work_item_id)
-        .ok_or_else(|| {
-            product_store_api_error(ProductStoreError::NotFound {
-                kind: "work_item",
-                id: work_item_id.to_string(),
-            })
-        })?;
-    let repository = find_repository(app_paths, project_id, &work_item.repository_id)?;
-    let coding_store = CodingAttemptStore::new(app_paths.clone());
-    let attempts = coding_store
-        .list_attempts_for_work_item(project_id, issue_id, work_item_id)
-        .map_err(product_store_api_error)?;
-    for attempt in attempts {
-        let attempt = abort_attempt_if_active(&coding_store, attempt)?;
-        cleanup_coding_attempt_workspace(&repository, &attempt).await?;
-    }
-    coding_store
-        .delete_attempts_for_work_item(project_id, issue_id, work_item_id)
-        .map_err(product_store_api_error)?;
-    store
-        .delete_work_item(project_id, issue_id, work_item_id)
-        .map_err(product_store_api_error)?;
-    Ok(())
 }
 
 pub async fn confirm_gate(

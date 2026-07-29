@@ -6,6 +6,35 @@ use crate::product::work_item_contract::{CanonicalWorkItemContract, Verification
 
 use super::lifecycle::{IssueWorkItemPlan, WorkItemKind, WorkItemSplitFinding};
 
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_COMMANDS: usize = 3;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_COMMAND_LENGTH: usize = 48;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_CWD_LENGTH: usize = 16;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH: usize = 32;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH: usize = 32;
+pub const MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES: usize = 425;
+
+pub fn trusted_draft_verification_command_catalog_prompt_projection(
+    commands: &[TrustedDraftVerificationCommand],
+) -> String {
+    format!(
+        "fields: command|cwd|purpose|source_ref\n{}",
+        commands
+            .iter()
+            .map(|entry| format!(
+                "- {}|{}|{}|{}",
+                entry.command, entry.cwd, entry.purpose, entry.source_ref
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+pub fn trusted_draft_verification_command_catalog_prompt_bytes(
+    commands: &[TrustedDraftVerificationCommand],
+) -> usize {
+    trusted_draft_verification_command_catalog_prompt_projection(commands).len()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemPlanOutline {
@@ -63,7 +92,18 @@ pub struct WorkItemOutline {
     pub forbidden_write_scopes: Vec<String>,
     pub depends_on: Vec<String>,
     pub verification_intent: Vec<String>,
+    #[serde(default)]
+    pub trusted_verification_commands: Vec<TrustedDraftVerificationCommand>,
     pub handoff_notes: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TrustedDraftVerificationCommand {
+    pub command: String,
+    pub cwd: String,
+    pub purpose: String,
+    pub source_ref: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +149,8 @@ pub struct WorkItemDraftRecord {
     pub attempt_index: u32,
     pub outline_version_ref: String,
     pub generation_mode: WorkItemGenerationMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_diagnostics: Option<WorkItemDraftGenerationDiagnostics>,
     pub candidate: WorkItemDraftCandidate,
     pub status: WorkItemDraftStatus,
     pub active: bool,
@@ -129,6 +171,16 @@ pub struct WorkItemDraftRecord {
     pub superseded_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemDraftGenerationDiagnostics {
+    pub auto_repair_attempted: bool,
+    #[serde(default)]
+    pub initial_validation_findings: Vec<WorkItemSplitFinding>,
+    #[serde(default)]
+    pub final_validation_findings: Vec<WorkItemSplitFinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

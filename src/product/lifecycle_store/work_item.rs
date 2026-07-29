@@ -49,18 +49,15 @@ impl LifecycleStore {
             source_outline_id: input.source_outline_id,
             source_draft_id: input.source_draft_id,
             planned_implementation_context: input.planned_implementation_context,
-            planned_handoff_summary: input.planned_handoff_summary,
             kind: input.kind,
             sequence_hint: input.sequence_hint,
             depends_on: input.depends_on,
             exclusive_write_scopes: input.exclusive_write_scopes,
             forbidden_write_scopes: input.forbidden_write_scopes,
             context_budget: input.context_budget,
-            required_handoff_from: input.required_handoff_from,
             verification_plan_ref: input.verification_plan_ref,
             require_execution_plan_confirm: input.require_execution_plan_confirm,
             execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
-            handoff_summary_ref: None,
             completion_commit: None,
             completion_diff_summary_ref: None,
             created_at: now.clone(),
@@ -174,17 +171,19 @@ impl LifecycleStore {
         Ok(record)
     }
 
-    pub fn update_work_item_handoff_summary(
+    /// 写入 work item 的完成 commit。
+    ///
+    /// 该函数是 `completion_commit` 在全仓的唯一写入点，其消费者独立于已移除的
+    /// 交接摘要（依赖交接引用展示），因此不随交接摘要一并删除。
+    pub fn update_work_item_completion_commit(
         &self,
         project_id: &str,
         issue_id: &str,
         work_item_id: &str,
-        handoff_summary_ref: Option<String>,
         completion_commit: Option<String>,
     ) -> Result<LifecycleWorkItemRecord, ProductStoreError> {
         let path = self.work_item_path(project_id, issue_id, work_item_id)?;
         let mut record: LifecycleWorkItemRecord = read_json(&path)?;
-        record.handoff_summary_ref = handoff_summary_ref;
         record.completion_commit = completion_commit;
         record.updated_at = Utc::now().to_rfc3339();
         write_json(&path, &record)?;

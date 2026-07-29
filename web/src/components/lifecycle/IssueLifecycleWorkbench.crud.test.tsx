@@ -1,7 +1,10 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProviderHealthResponse } from "../../api/types";
+import type {
+  ProviderHealthResponse,
+  RepositoryInitializationOperationSnapshot,
+} from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 import {
@@ -63,43 +66,111 @@ function setRepositoryProviderHealth() {
   useProviderAvailabilityStore.setState({ snapshot, loadStatus: "loaded" });
 }
 
-function repositoryEnvelopeFetch(baseFetch: ReturnType<typeof lifecycleFetch>) {
+function repositoryOperationSnapshot(
+  status: RepositoryInitializationOperationSnapshot["status"],
+  overrides?: Partial<RepositoryInitializationOperationSnapshot>,
+): RepositoryInitializationOperationSnapshot {
+  return {
+    operation_id: "repository_initialization_0001",
+    status,
+    steps: [
+      { step_id: "cadence_skills", status: "completed" },
+      {
+        step_id: "pre_check",
+        status:
+          status === "failed"
+            ? "failed"
+            : status === "completed"
+              ? "completed"
+              : "running",
+      },
+      {
+        step_id: "rule_config",
+        status: status === "completed" ? "completed" : "pending",
+      },
+      {
+        step_id: "mcp_configuration",
+        status: status === "completed" ? "completed" : "pending",
+      },
+      {
+        step_id: "project_rules_examples",
+        status: status === "completed" ? "completed" : "pending",
+      },
+    ],
+    current_step: status === "completed" ? null : "pre_check",
+    failed_step: status === "failed" ? "pre_check" : null,
+    result: null,
+    error: null,
+    created_at: "2026-07-14T00:00:00Z",
+    updated_at: "2026-07-14T00:00:00Z",
+    completed_at: null,
+    ...overrides,
+  };
+}
+
+function repositoryOperationFetch({
+  operationSnapshots,
+}: {
+  operationSnapshots: RepositoryInitializationOperationSnapshot[];
+}) {
+  const baseFetch = lifecycleFetch({
+    repositoriesByProject: { project_0001: [] },
+  });
+  const repository = repositoryRecord({
+    name: "New Repo",
+    path: "/tmp/new-repo",
+  });
+  let operationFetchCount = 0;
+  let completed = false;
+
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const response = await baseFetch(input, init);
+    const url = String(input);
+    const requestUrl = url.replace(/\/$/u, "");
     if (
       init?.method === "POST" &&
-      /^\/api\/projects\/[^/]+\/repositories$/u.test(String(input))
+      requestUrl === "/api/projects/project_0001/repositories"
     ) {
-      const repository = (await response.json()) as ReturnType<typeof repositoryRecord>;
       return new Response(
-        JSON.stringify({
-          repository,
-          initialization: {
-            source: "offline",
-            commands: [
-              { index: 1, command: "/cadence-init:pre-check", status: "completed" },
-              { index: 2, command: "/cadence-init:rule-config", status: "completed" },
-            ],
-            warnings: ["cadence_skills_conflict:<path>"],
-            changed_paths: [".claude/rules/project.md"],
-            completed_at: "2026-07-14T00:01:00Z",
-          },
-        }),
-        { status: 201 },
+        JSON.stringify(repositoryOperationSnapshot("created")),
+        { status: 202 },
       );
     }
-    return response;
+    if (requestUrl.includes("repository-initializations")) {
+      const snapshot = operationSnapshots[operationFetchCount];
+      operationFetchCount += 1;
+      if (!snapshot) {
+        throw new Error("unexpected repository initialization fetch");
+      }
+      completed ||= snapshot.status === "completed";
+      return new Response(
+        JSON.stringify(snapshot),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (
+      requestUrl === "/api/projects/project_0001/repositories" &&
+      init?.method !== "POST"
+    ) {
+      if (completed) {
+        return new Response(
+          JSON.stringify({ repositories: [repository] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ repositories: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return baseFetch(input, init);
   });
 }
 
-function repositoryFailureFetch(baseFetch: ReturnType<typeof lifecycleFetch>) {
-  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (
-      init?.method === "POST" &&
-      /^\/api\/projects\/[^/]+\/repositories$/u.test(String(input))
-    ) {
-      return new Response(
-        JSON.stringify({
+function repositoryFailureFetch() {
+  return repositoryOperationFetch({
+    operationSnapshots: [
+      repositoryOperationSnapshot("failed", {
+        error: {
           code: "repository_init_command_failed",
           message: "repository registration failed",
           details: {
@@ -113,11 +184,15 @@ function repositoryFailureFetch(baseFetch: ReturnType<typeof lifecycleFetch>) {
             retryable: true,
             action: "修复权限后重试",
           },
-        }),
-        { status: 500 },
-      );
-    }
-    return baseFetch(input, init);
+        },
+      }),
+    ],
+  });
+}
+
+async function flushAsyncWork() {
+  await act(async () => {
+    await Promise.resolve();
   });
 }
 
@@ -127,81 +202,151 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     setRepositoryProviderHealth();
   });
   afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
     useProviderAvailabilityStore.getState().reset();
   });
 
-  it("refreshes repositories and keeps the initialization result open until confirmed", async () => {
-    const fetchMock = repositoryEnvelopeFetch(
-      lifecycleFetch({ repositoriesByProject: { project_0001: [] } }),
-    );
+  it("only refreshes repositories after the initialization operation completes", async () => {
+    const completed = repositoryOperationSnapshot("completed", {
+      result: {
+        repository: repositoryRecord({
+          name: "New Repo",
+          path: "/tmp/new-repo",
+        }),
+        initialization: {
+          source: "offline",
+          commands: [
+            {
+              index: 1,
+              command: "/cadence-init:pre-check",
+              status: "completed",
+            },
+          ],
+          warnings: ["cadence_skills_conflict:<path>"],
+          changed_paths: [".claude/rules/project.md"],
+          git_finalize_warning: null,
+          completed_at: "2026-07-14T00:01:00Z",
+        },
+      },
+      completed_at: "2026-07-14T00:01:00Z",
+    });
+    const fetchMock = repositoryOperationFetch({
+      operationSnapshots: [repositoryOperationSnapshot("running"), completed],
+    });
     vi.stubGlobal("fetch", fetchMock);
-    const user = userEvent.setup();
+    vi.useFakeTimers();
 
     render(<IssueLifecycleWorkbench />);
-
-    await screen.findByText("还没有代码库");
-    expect(screen.getByRole("button", { name: "新建 Issue" })).toBeDisabled();
-
-    await user.click(screen.getByRole("button", { name: "添加代码库" }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加代码库" }));
     const dialog = screen.getByRole("dialog", { name: "添加代码库" });
-    await user.type(within(dialog).getByLabelText("代码库名称"), "New Repo");
-    await user.type(within(dialog).getByLabelText("本地路径"), "/tmp/new-repo");
-    await user.selectOptions(
-      within(dialog).getByLabelText("Policy"),
-      "manual-all",
-    );
-    await user.selectOptions(
-      within(dialog).getByLabelText("Provider"),
-      "claude_code",
-    );
-    await user.click(
-      within(dialog).getByRole("button", { name: "添加代码库" }),
-    );
+    fireEvent.change(within(dialog).getByLabelText("代码库名称"), {
+      target: { value: "New Repo" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("本地路径"), {
+      target: { value: "/tmp/new-repo" },
+    });
+    fireEvent.submit(dialog);
+    await flushAsyncWork();
 
-    expect(await screen.findByText("New Repo")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新建 Issue" })).toBeEnabled();
+    expect(screen.getByText("还没有代码库")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建 Issue" })).toBeDisabled();
+    expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
+      "正在初始化，请保持此窗口打开",
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    await flushAsyncWork();
+    await vi.runAllTimersAsync();
+    await flushAsyncWork();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          input === "/api/projects/project_0001/repositories" &&
+          init?.method !== "POST",
+      ),
+    ).toHaveLength(2);
+
     expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
       "代码库初始化完成",
     );
     expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
       "offline",
     );
+    expect(screen.getByText("New Repo")).toBeInTheDocument();
+    const operationFetches = fetchMock.mock.calls.filter(
+      ([input]) =>
+        input ===
+        "/api/projects/project_0001/repository-initializations/repository_initialization_0001",
+    );
+    expect(operationFetches).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/repository-initializations/repository_initialization_0001",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "content-type": "application/json" }),
+      }),
+    );
+    expect(
+      fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          input === "/api/projects/project_0001/repositories" &&
+          init?.method !== "POST",
+      ),
+    ).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "新建 Issue" })).toBeEnabled();
     expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
       "cadence_skills_conflict:<path>",
     );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project_0001/repositories",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({
-          name: "New Repo",
-          path: "/tmp/new-repo",
-          default_policy_preset: "manual-all",
-          default_provider_mode: "claude_code",
-        }),
-      }),
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "添加代码库" })).getByRole(
+        "button",
+        { name: "完成" },
+      ),
     );
-
-    await user.click(within(dialog).getByRole("button", { name: "完成" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "添加代码库" })).not.toBeInTheDocument(),
-    );
+    expect(
+      screen.queryByRole("dialog", { name: "添加代码库" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("keeps structured repository registration failure details in the dialog", async () => {
-    const fetchMock = repositoryFailureFetch(lifecycleFetch());
+  it("keeps repositories empty and preserves recovery details when initialization fails", async () => {
+    const fetchMock = repositoryFailureFetch();
     vi.stubGlobal("fetch", fetchMock);
-    const user = userEvent.setup();
+    vi.useFakeTimers();
 
     render(<IssueLifecycleWorkbench />);
-    await screen.findByRole("button", { name: "添加代码库" });
-    await user.click(screen.getByRole("button", { name: "添加代码库" }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加代码库" }));
     const dialog = screen.getByRole("dialog", { name: "添加代码库" });
-    await user.type(within(dialog).getByLabelText("代码库名称"), "New Repo");
-    await user.type(within(dialog).getByLabelText("本地路径"), "/tmp/new-repo");
-    await user.click(within(dialog).getByRole("button", { name: "添加代码库" }));
-
-    const alert = await within(dialog).findByRole("alert");
+    fireEvent.change(within(dialog).getByLabelText("代码库名称"), {
+      target: { value: "New Repo" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("本地路径"), {
+      target: { value: "/tmp/new-repo" },
+    });
+    fireEvent.submit(dialog);
+    await flushAsyncWork();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          input === "/api/projects/project_0001/repositories" &&
+          init?.method !== "POST",
+      ),
+    ).toHaveLength(1);
+    expect(screen.getByText("还没有代码库")).toBeInTheDocument();
+    const alert = screen.getByRole("alert");
+    expect(
+      fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          input === "/api/projects/project_0001/repositories" &&
+          init?.method !== "POST",
+      ),
+    ).toHaveLength(1);
     expect(alert).toHaveTextContent("repository registration failed");
     expect(alert).toHaveTextContent("repository_init_command");
     expect(alert).toHaveTextContent(".claude/rules/project.md");

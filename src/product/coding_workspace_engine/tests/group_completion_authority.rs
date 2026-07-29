@@ -119,52 +119,6 @@ fn create_authoritative_active_run_with_handoffs(
     run
 }
 
-fn save_active_legacy_handoff(
-    fixture: &GroupCompletionFixture,
-    tests_run: Vec<String>,
-    files_changed: Vec<String>,
-) -> WorkItemHandoff {
-    let unit = fixture
-        .store
-        .get_active_coding_unit(
-            &fixture.attempt.project_id,
-            &fixture.attempt.issue_id,
-            &fixture.attempt.id,
-        )
-        .expect("active unit lookup")
-        .expect("active unit");
-    let handoff = WorkItemHandoff {
-        id: "work_item_handoff_0001".to_string(),
-        project_id: fixture.attempt.project_id.clone(),
-        issue_id: fixture.attempt.issue_id.clone(),
-        work_item_id: unit.logical_work_item_id.clone(),
-        attempt_id: fixture.attempt.id.clone(),
-        provider_run_ref: None,
-        summary: "completed work item".to_string(),
-        files_changed,
-        commit_sha: None,
-        diff_summary: "unit diff".to_string(),
-        tests_run,
-        test_result_summary: "passed".to_string(),
-        review_summary: Some("approved".to_string()),
-        api_or_contract_changes: Vec::new(),
-        open_risks: Vec::new(),
-        next_work_item_notes: Vec::new(),
-        created_at: "2026-07-19T00:00:00Z".to_string(),
-    };
-    fixture
-        .store
-        .save_coding_unit_handoff(
-            &fixture.attempt.project_id,
-            &fixture.attempt.issue_id,
-            &fixture.attempt.id,
-            &unit.id,
-            &handoff,
-        )
-        .expect("legacy handoff");
-    handoff
-}
-
 fn expected_handoff_revision(
     run: &CodingUnitRun,
     commit_sha: &str,
@@ -183,11 +137,6 @@ fn expected_handoff_revision(
         contract_hash: "5d1465e86ea2fbad8df040b5eac6ab52130ce6b06d2bd3b6403305c3b3e83b23"
             .to_string(),
         commit_sha: commit_sha.to_string(),
-        tests: vec![
-            "cargo check --locked".to_string(),
-            "cargo test --locked".to_string(),
-        ],
-        artifacts: vec!["src/a.rs".to_string(), "src/z.rs".to_string()],
         created_at: created_at.to_string(),
     }
 }
@@ -213,18 +162,6 @@ async fn assert_completion_preflight_is_zero_write(
                 .expect("unit runs before")
         })
         .collect::<Vec<_>>();
-    let handoffs_before = units_before
-        .iter()
-        .map(|unit| {
-            fixture.store.get_coding_unit_handoff(
-                &fixture.attempt.project_id,
-                &fixture.attempt.issue_id,
-                &fixture.attempt.id,
-                &unit.id,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .expect("handoffs before");
     let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
     let lineage = revision_store
         .get_plan_lineage(
@@ -282,21 +219,6 @@ async fn assert_completion_preflight_is_zero_write(
             })
             .collect::<Vec<_>>(),
         runs_before
-    );
-    assert_eq!(
-        units_before
-            .iter()
-            .map(|unit| {
-                fixture.store.get_coding_unit_handoff(
-                    &fixture.attempt.project_id,
-                    &fixture.attempt.issue_id,
-                    &fixture.attempt.id,
-                    &unit.id,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .expect("handoffs after"),
-        handoffs_before
     );
     assert_eq!(
         revision_store
@@ -412,19 +334,6 @@ async fn coding_plan_repair_group_completion_publishes_dependency_handoff_for_ne
         CodingUnitRunStatus::Running,
         None,
         None,
-    );
-    save_active_legacy_handoff(
-        &fixture,
-        vec![
-            "cargo test --locked".to_string(),
-            "cargo check --locked".to_string(),
-            "cargo test --locked".to_string(),
-        ],
-        vec![
-            "src/z.rs".to_string(),
-            "src/a.rs".to_string(),
-            "src/z.rs".to_string(),
-        ],
     );
 
     let updated = fixture
@@ -653,19 +562,6 @@ async fn coding_plan_repair_group_completion_recovers_completed_run_without_new_
         Some(completion_commit.clone()),
         None,
     );
-    save_active_legacy_handoff(
-        &fixture,
-        vec![
-            "cargo test --locked".to_string(),
-            "cargo check --locked".to_string(),
-            "cargo test --locked".to_string(),
-        ],
-        vec![
-            "src/z.rs".to_string(),
-            "src/a.rs".to_string(),
-            "src/z.rs".to_string(),
-        ],
-    );
     let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
     let lineage = revision_store
         .get_plan_lineage(
@@ -739,18 +635,6 @@ async fn coding_plan_repair_group_completion_recovers_completed_run_without_new_
     assert_eq!(handoff.coding_unit_run_id, source_run.id);
     assert_eq!(handoff.commit_sha, completion_commit);
     assert_eq!(handoff, existing_handoff);
-    assert!(
-        fixture
-            .store
-            .get_coding_unit_handoff(
-                &updated.project_id,
-                &updated.issue_id,
-                &updated.id,
-                &first.id,
-            )
-            .expect("legacy handoff lookup")
-            .is_some()
-    );
 }
 
 include!("group_completion_recovery.rs");

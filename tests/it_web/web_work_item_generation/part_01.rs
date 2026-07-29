@@ -73,7 +73,6 @@ pub(crate) fn valid_split_output() -> Value {
                 "depends_on": [],
                 "exclusive_write_scopes": ["src/product/session.rs"],
                 "forbidden_write_scopes": ["web/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             },
             {
@@ -83,7 +82,6 @@ pub(crate) fn valid_split_output() -> Value {
                 "depends_on": [0],
                 "exclusive_write_scopes": ["web/src/session/**"],
                 "forbidden_write_scopes": ["src/product/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             },
             {
@@ -93,7 +91,6 @@ pub(crate) fn valid_split_output() -> Value {
                 "depends_on": [1],
                 "exclusive_write_scopes": ["tests/session/**"],
                 "forbidden_write_scopes": [],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],
@@ -185,6 +182,12 @@ pub(crate) fn valid_outline_output() -> Value {
                     "forbidden_write_scopes": ["web/**"],
                     "depends_on": [],
                     "verification_intent": ["cargo test --locked --lib session"],
+                    "trusted_verification_commands": [{
+                        "command": "cargo test --locked --lib session",
+                        "cwd": ".",
+                        "purpose": "验证后端会话逻辑",
+                        "source_ref": "design_spec_0001#verification"
+                    }],
                     "handoff_notes": "输出会话状态 DTO 与错误语义。"
                 },
                 {
@@ -203,6 +206,12 @@ pub(crate) fn valid_outline_output() -> Value {
                     "forbidden_write_scopes": ["src/product/**"],
                     "depends_on": ["outline_backend_session"],
                     "verification_intent": ["pnpm -C web test"],
+                    "trusted_verification_commands": [{
+                        "command": "pnpm -C web test",
+                        "cwd": ".",
+                        "purpose": "验证前端会话过期提示",
+                        "source_ref": "design_spec_0001#verification"
+                    }],
                     "handoff_notes": "消费后端会话状态 DTO。"
                 },
                 {
@@ -221,6 +230,12 @@ pub(crate) fn valid_outline_output() -> Value {
                     "forbidden_write_scopes": [],
                     "depends_on": ["outline_frontend_expiry"],
                     "verification_intent": ["cargo test --locked --test it_web session"],
+                    "trusted_verification_commands": [{
+                        "command": "cargo test --locked --test it_web session",
+                        "cwd": ".",
+                        "purpose": "验证会话过期端到端流程",
+                        "source_ref": "design_spec_0001#verification"
+                    }],
                     "handoff_notes": "验证前后端协议一致性。"
                 }
             ],
@@ -284,7 +299,6 @@ pub(crate) fn valid_revision_redo_output() -> Value {
                 "depends_on": [],
                 "exclusive_write_scopes": ["src/product/session.rs"],
                 "forbidden_write_scopes": ["web/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],
@@ -334,7 +348,6 @@ pub(crate) fn invalid_split_output_missing_e2e() -> Value {
                 "depends_on": [],
                 "exclusive_write_scopes": ["src/product/session.rs"],
                 "forbidden_write_scopes": ["web/**"],
-                "required_handoff_from": [],
                 "require_execution_plan_confirm": false
             }
         ],
@@ -532,29 +545,63 @@ async fn bootstrap_project_repo_issue_and_specs(
     app: axum::Router,
     repo: &std::path::Path,
 ) -> axum::Router {
-    request_json(
+    let (status, response) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects",
         json!({"name":"Lifecycle","description":null}),
     )
     .await;
-    request_json(
+    assert!(status.is_success(), "bootstrap project failed: {response}");
+    let (status, response) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/repositories",
         json!({"name":"Repo","path":repo}),
     )
     .await;
-    request_json(
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "bootstrap repository initialization start failed: {response}"
+    );
+    let operation_id = response["operation_id"]
+        .as_str()
+        .expect("bootstrap repository initialization operation id");
+    let operation_uri = format!(
+        "/api/projects/project_0001/repository-initializations/{operation_id}"
+    );
+    let mut last_snapshot = response;
+    let mut completed = None;
+    for _ in 0..100 {
+        let (status, snapshot) = request_json(app.clone(), Method::GET, &operation_uri, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "bootstrap repository initialization poll failed: {snapshot}");
+        match snapshot["status"].as_str() {
+            Some("completed") => {
+                completed = Some(snapshot);
+                break;
+            }
+            Some("failed") => panic!("bootstrap repository initialization failed: {snapshot}"),
+            _ => last_snapshot = snapshot,
+        }
+        tokio::task::yield_now().await;
+    }
+    let completed = completed.unwrap_or_else(|| {
+        panic!("bootstrap repository initialization did not complete: {last_snapshot}")
+    });
+    let repository_id = completed["result"]["repository"]["repository_id"]
+        .as_str()
+        .expect("bootstrap initialized repository id");
+    let (status, response) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"登录会话过期","description":"描述","repository_id":repository_id}),
     )
     .await;
+    assert!(status.is_success(), "bootstrap issue failed: {response}");
 
-    request_json(
+    let (status, response) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
@@ -568,15 +615,17 @@ async fn bootstrap_project_repo_issue_and_specs(
         }),
     )
     .await;
-    request_json(
+    assert!(status.is_success(), "bootstrap story generation failed: {response}");
+    let (status, response) = request_json(
         app.clone(),
         Method::POST,
         "/api/workspace-sessions/workspace_session_0001/confirm",
         json!({"confirmed_by":"human"}),
     )
     .await;
+    assert!(status.is_success(), "bootstrap story confirmation failed: {response}");
 
-    request_json(
+    let (status, response) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
@@ -591,13 +640,15 @@ async fn bootstrap_project_repo_issue_and_specs(
         }),
     )
     .await;
-    request_json(
+    assert!(status.is_success(), "bootstrap design generation failed: {response}");
+    let (status, response) = request_json(
         app.clone(),
         Method::POST,
         "/api/workspace-sessions/workspace_session_0002/confirm",
         json!({"confirmed_by":"human"}),
     )
     .await;
+    assert!(status.is_success(), "bootstrap design confirmation failed: {response}");
 
     app
 }

@@ -1,7 +1,5 @@
 use super::*;
 
-pub const TESTING_RESULT_REVIEW_REASON_CODE: &str = "testing_result_review_required";
-
 pub(crate) const REWORK_CONTEXT_NOTE_CHAR_LIMIT: usize = 10_000;
 
 #[derive(Debug, Error)]
@@ -10,10 +8,6 @@ pub enum CodingWorkspaceEngineError {
     Store(#[from] ProductStoreError),
     #[error(transparent)]
     Git(#[from] GitWorkspaceError),
-    #[error(transparent)]
-    TestExecutor(#[from] TestExecutorError),
-    #[error(transparent)]
-    TesterAgent(#[from] crate::product::tester_agent_loop::TesterAgentError),
     #[error(transparent)]
     ProviderAdapter(#[from] ProviderAdapterError),
     #[error("coding_provider_stream_failed: {0}")]
@@ -38,8 +32,6 @@ pub enum CodingWorkspaceEngineError {
     CompletionCommitMissing(String),
     #[error("work_item_handoff_missing: {0}")]
     WorkItemHandoffMissing(String),
-    #[error("verification_gate_result_missing: {0}")]
-    VerificationGateResultMissing(String),
     #[error("verification_gate_failed: {0}")]
     VerificationGateFailed(String),
     #[error("work_item_diff_scope_violation: {0}")]
@@ -53,12 +45,6 @@ pub struct CompletionGateReport;
 pub struct CodingExecutionContext {
     pub work_item_markdown: Option<String>,
     pub verification_commands: Vec<String>,
-}
-
-#[derive(Clone, Copy)]
-pub struct ProviderTestingAdapters<'a> {
-    pub plan: &'a dyn StreamingProviderAdapter,
-    pub execute: &'a dyn StreamingProviderAdapter,
 }
 
 pub(crate) struct CodingProviderFreshRetry {
@@ -82,13 +68,6 @@ pub(crate) struct CodingProviderStreamRun<'a> {
     pub(crate) timeout_reason_code: Option<&'static str>,
 }
 
-pub(crate) struct BlockedTestingGateContext<'a> {
-    pub(crate) reason_code: String,
-    pub(crate) description: String,
-    pub(crate) raw_provider_output_ref: Option<String>,
-    pub(crate) role_run: Option<&'a CodingRoleRun>,
-}
-
 pub(crate) fn run_timeout_sleep(
     timeout: Option<Duration>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
@@ -103,7 +82,6 @@ pub(crate) fn provider_conversation_role_for_coding_role(
 ) -> ProviderConversationRole {
     match role {
         CodingProviderRole::Coder => ProviderConversationRole::Coder,
-        CodingProviderRole::Tester => ProviderConversationRole::Tester,
         CodingProviderRole::CodeReviewer => ProviderConversationRole::CodeReviewer,
         CodingProviderRole::InternalReviewer => ProviderConversationRole::InternalReviewer,
     }
@@ -207,7 +185,6 @@ impl CodingPromptMode {
 pub struct CodingWorkspaceEngine {
     pub(crate) store: CodingAttemptStore,
     pub(crate) _git_service: GitWorkspaceService,
-    pub(crate) provider: Option<Arc<dyn ProviderAdapter + Send + Sync>>,
     pub(crate) event_tx: CancellableCodingEventSender,
     pub(crate) cancellation: CancellationToken,
 }

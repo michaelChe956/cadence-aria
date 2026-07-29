@@ -196,6 +196,12 @@ pub struct AdapterInput {
     pub provider_type: ProviderType,
     pub role: AdapterRole,
     pub worktree_path: Option<String>,
+    /// 流日志落盘目录。由调用方提供 Aria 侧目录；为 None 时不写流日志。
+    ///
+    /// MUST NOT 由 adapter 从 `worktree_path` 推导：那会把流日志写进被开发的
+    /// 目标代码库（change `fix-provider-stream-log-location`）。
+    #[serde(default)]
+    pub provider_stream_log_dir: Option<String>,
     pub prompt: String,
     pub context_files: Vec<String>,
     pub output_schema: String,
@@ -333,13 +339,6 @@ pub fn execution_contract_for_node(node_id: &str) -> Option<NodeExecutionContrac
                 "tpl_n16_coding_v1",
                 vec![ArtifactKind::CodingReport],
             ),
-            "N17" => (
-                ProviderType::Codex,
-                RuntimeRole::Executor,
-                "schema://aria/artifacts/testing_report/v1",
-                "tpl_n17_testing_v1",
-                vec![ArtifactKind::TestingReport],
-            ),
             "N18" => (
                 ProviderType::Codex,
                 RuntimeRole::Reviewer,
@@ -423,7 +422,6 @@ pub fn phase1_node_contract_table() -> Vec<Phase1NodeContractRow> {
         internal_row("N14", None),
         internal_row("N15", None),
         provider_row("N16"),
-        provider_row("N17"),
         provider_row("N18"),
         provider_row("N19"),
         provider_row("N20"),
@@ -451,16 +449,12 @@ pub fn workflow_discipline_for_node(node_id: &str) -> Option<WorkflowDisciplineS
         superpowers_required.push("test-driven-development".to_string());
         superpowers_required.push("verification-before-completion".to_string());
     }
-    if node_id == "N17" {
-        superpowers_required.push("verification-before-completion".to_string());
-    }
     if node_id == "N19" {
         superpowers_required.push("receiving-code-review".to_string());
         superpowers_required.push("verification-before-completion".to_string());
     }
 
     let superpowers_optional = match node_id {
-        "N17" => vec!["systematic-debugging".to_string()],
         "N19" => vec![
             "systematic-debugging".to_string(),
             "test-driven-development".to_string(),
@@ -504,18 +498,9 @@ fn required_canonical_inputs(node_id: &str) -> Vec<ArtifactKind> {
         ],
         "N12" => vec![ArtifactKind::Plan],
         "N16" => vec![ArtifactKind::DispatchPackage, ArtifactKind::Plan],
-        "N17" => vec![ArtifactKind::CodingReport, ArtifactKind::DispatchPackage],
-        "N18" => vec![
-            ArtifactKind::CodingReport,
-            ArtifactKind::TestingReport,
-            ArtifactKind::DispatchPackage,
-        ],
-        "N19" => vec![ArtifactKind::TestingReport, ArtifactKind::CodeReviewReport],
-        "N20" => vec![
-            ArtifactKind::CodingReport,
-            ArtifactKind::TestingReport,
-            ArtifactKind::CodeReviewReport,
-        ],
+        "N18" => vec![ArtifactKind::CodingReport, ArtifactKind::DispatchPackage],
+        "N19" => vec![ArtifactKind::CodeReviewReport],
+        "N20" => vec![ArtifactKind::CodingReport, ArtifactKind::CodeReviewReport],
         "N24" => vec![ArtifactKind::IntegrationReport],
         "N25" => vec![
             ArtifactKind::IntegrationReport,
@@ -537,7 +522,7 @@ fn required_projection_kinds(node_id: &str) -> Vec<ProjectionKind> {
             ]
         }
         "N12" => vec![ProjectionKind::PlanProjection],
-        "N16" | "N17" | "N18" | "N19" | "N20" | "N24" => vec![
+        "N16" | "N18" | "N19" | "N20" | "N24" => vec![
             ProjectionKind::SpecProjection,
             ProjectionKind::DesignProjection,
             ProjectionKind::PlanProjection,
@@ -560,7 +545,7 @@ fn required_constraint_kinds(node_id: &str) -> Vec<String> {
             "design_constraints".to_string(),
         ],
         "N12" => vec!["task_constraints".to_string()],
-        "N16" | "N17" | "N18" | "N19" | "N20" | "N24" | "N25" | "N26" | "N27" => {
+        "N16" | "N18" | "N19" | "N20" | "N24" | "N25" | "N26" | "N27" => {
             vec!["task_constraints".to_string()]
         }
         _ => Vec::new(),
@@ -571,7 +556,7 @@ fn allowed_external_inputs(node_id: &str) -> Vec<String> {
     let mut inputs = vec!["openspec".to_string(), "superpowers".to_string()];
     if matches!(
         node_id,
-        "N16" | "N17" | "N18" | "N19" | "N20" | "N24" | "N25" | "N26" | "N27"
+        "N16" | "N18" | "N19" | "N20" | "N24" | "N25" | "N26" | "N27"
     ) {
         inputs.push("worktree".to_string());
     }
@@ -597,11 +582,6 @@ fn allowed_command_classes(node_id: &str) -> Vec<CommandClass> {
             CommandClass::Test,
             CommandClass::ProcessSpawn,
         ],
-        "N17" => vec![
-            CommandClass::ReadOnly,
-            CommandClass::Test,
-            CommandClass::ProcessSpawn,
-        ],
         "N25" | "N26" | "N27" => vec![CommandClass::ReadOnly, CommandClass::FileWrite],
         _ => vec![CommandClass::ReadOnly],
     }
@@ -613,7 +593,7 @@ fn forbidden_actions(node_id: &str) -> Vec<String> {
         "do_not_modify_openspec_directly".to_string(),
         "do_not_advance_daemon_state".to_string(),
     ];
-    if matches!(node_id, "N16" | "N17" | "N18" | "N19") {
+    if matches!(node_id, "N16" | "N18" | "N19") {
         actions.push("do_not_write_outside_allowed_scope".to_string());
     }
     if matches!(node_id, "N20" | "N24") {
@@ -630,7 +610,7 @@ fn completion_criteria(node_id: &str) -> Vec<String> {
         "emit_aria_structured_output".to_string(),
         "preserve_daemon_as_runtime_truth".to_string(),
     ];
-    if matches!(node_id, "N16" | "N17" | "N18" | "N19") {
+    if matches!(node_id, "N16" | "N18" | "N19") {
         criteria.push("bind_output_to_worktask_traceability".to_string());
     }
     if matches!(node_id, "N25" | "N27") {
@@ -641,7 +621,7 @@ fn completion_criteria(node_id: &str) -> Vec<String> {
 
 fn verification_commands(node_id: &str) -> Vec<String> {
     match node_id {
-        "N16" | "N17" | "N18" | "N19" | "N20" => {
+        "N16" | "N18" | "N19" | "N20" => {
             vec!["cargo test --test execution_chain_fake_provider".to_string()]
         }
         "N24" => vec!["cargo test --test integration_retry_limit".to_string()],
@@ -655,9 +635,8 @@ fn verification_commands(node_id: &str) -> Vec<String> {
 
 fn failure_routes(node_id: &str) -> Vec<String> {
     match node_id {
-        "N17" => vec!["N19".to_string(), "X08".to_string()],
         "N18" => vec!["N19".to_string(), "M20".to_string(), "X08".to_string()],
-        "N19" => vec!["N17".to_string(), "N18".to_string(), "M20".to_string()],
+        "N19" => vec!["N18".to_string(), "M20".to_string()],
         "N20" => vec!["N21".to_string(), "N19".to_string(), "X08".to_string()],
         "N24" => vec!["N19".to_string(), "X08".to_string()],
         "N25" => vec!["N27".to_string(), "X01".to_string(), "X08".to_string()],

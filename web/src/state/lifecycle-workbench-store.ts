@@ -249,17 +249,6 @@ export function workItemWaitingReason(
     return `等待依赖完成：${titles}`;
   }
 
-  const missingHandoffs = item.required_handoff_from
-    .map((id) => allItems.find((candidate) => candidate.work_item_id === id))
-    .filter(
-      (dependency): dependency is LifecycleWorkItem =>
-        dependency !== undefined && dependency.handoff_summary_ref === null,
-    );
-  if (missingHandoffs.length > 0) {
-    const titles = missingHandoffs.map((dependency) => dependency.title).join("、");
-    return `等待交接摘要：${titles}`;
-  }
-
   if (
     item.latest_attempt &&
     ["created", "running"].includes(item.latest_attempt.status)

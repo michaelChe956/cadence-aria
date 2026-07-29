@@ -1,7 +1,7 @@
 mod cases;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,14 +22,16 @@ use crate::cross_cutting::provider_availability_gate::{
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::FakeStreamingProvider;
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::cadence_skills::{
     CadenceSkillsError, CadenceSkillsPreparationResult, CadenceSkillsSourceMode, LinkSyncStatus,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::{ProjectRecord, ProviderName, RepositoryRecord};
 use crate::product::repository_store::{
-    CreateRepositoryInput, RepositoryInitializationCommandSummary, RepositoryRegistrationError,
-    RepositoryRegistrationInput,
+    CreateRepositoryInput, RepositoryInitializationCommandSummary,
+    RepositoryInitializationOperationStore, RepositoryInitializationProgress,
+    RepositoryInitializationStepKind, RepositoryRegistrationError, RepositoryRegistrationInput,
 };
 
 struct AvailableHealth;
@@ -164,23 +166,26 @@ impl RepositoryInitializer for RecordingInitializer {
         _git_root: &std::path::Path,
         _command_timeout: Duration,
         _cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
         self.calls.lock().unwrap().push("initializer");
-        Ok([
-            "/pre-check",
-            "/rule-config",
-            "/mcp-configuration",
-            "/project-rules-examples",
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, command)| RepositoryInitializationCommandSummary {
-            command_index: index + 1,
-            command: command.to_string(),
-            status: "completed".to_string(),
-            output_summary: None,
-        })
-        .collect())
+        let mut summaries = Vec::with_capacity(4);
+        for (index, step) in RepositoryInitializationStepKind::ALL
+            .into_iter()
+            .filter(|step| step.command().is_some())
+            .enumerate()
+        {
+            let command = step.command().expect("Claude initialization command");
+            progress.step_started(step).map_err(|error| *error)?;
+            progress.step_completed(step).map_err(|error| *error)?;
+            summaries.push(RepositoryInitializationCommandSummary {
+                command_index: index + 1,
+                command: command.to_string(),
+                status: "completed".to_string(),
+                output_summary: None,
+            });
+        }
+        Ok(summaries)
     }
 }
 
@@ -216,7 +221,7 @@ impl ProjectLookup for ConfigProjectLookup {
 struct ConfigRepositoryPersistence {
     find_results: Mutex<VecDeque<Option<RepositoryRecord>>>,
     create_count: AtomicUsize,
-    fail_create: bool,
+    fail_create: AtomicBool,
 }
 
 impl ConfigRepositoryPersistence {
@@ -224,7 +229,7 @@ impl ConfigRepositoryPersistence {
         Self {
             find_results: Mutex::new(find_results.into()),
             create_count: AtomicUsize::new(0),
-            fail_create,
+            fail_create: AtomicBool::new(fail_create),
         }
     }
 }
@@ -243,7 +248,7 @@ impl RepositoryPersistence for ConfigRepositoryPersistence {
         input: CreateRepositoryInput,
     ) -> Result<RepositoryRecord, ProductStoreError> {
         self.create_count.fetch_add(1, Ordering::SeqCst);
-        if self.fail_create {
+        if self.fail_create.load(Ordering::SeqCst) {
             return Err(ProductStoreError::Io("persist failed".to_string()));
         }
         Ok(repository_record(&input.project_id, input.path))
@@ -323,20 +328,42 @@ impl RepositoryInitializer for StaticInitializer {
         _git_root: &std::path::Path,
         _command_timeout: Duration,
         _cancellation: CancellationToken,
+        progress: Arc<dyn RepositoryInitializationProgress>,
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
         self.count.fetch_add(1, Ordering::SeqCst);
         if self.fail {
+            let step = RepositoryInitializationStepKind::PreCheck;
+            progress.step_started(step).map_err(|error| *error)?;
+            progress.step_completed(step).map_err(|error| *error)?;
+            let step = RepositoryInitializationStepKind::RuleConfig;
+            progress.step_started(step).map_err(|error| *error)?;
             return Err(RepositoryRegistrationError::for_command(
                 "repository_initialization",
                 "repository_init_command_failed",
                 2,
-                "/rule-config",
+                step.command().expect("Claude initialization command"),
                 Some("failed".to_string()),
                 true,
                 "inspect",
             ));
         }
-        Ok(command_summaries())
+        let mut summaries = Vec::with_capacity(4);
+        for (index, step) in RepositoryInitializationStepKind::ALL
+            .into_iter()
+            .filter(|step| step.command().is_some())
+            .enumerate()
+        {
+            let command = step.command().expect("Claude initialization command");
+            progress.step_started(step).map_err(|error| *error)?;
+            progress.step_completed(step).map_err(|error| *error)?;
+            summaries.push(RepositoryInitializationCommandSummary {
+                command_index: index + 1,
+                command: command.to_string(),
+                status: "completed".to_string(),
+                output_summary: None,
+            });
+        }
+        Ok(summaries)
     }
 }
 
@@ -442,24 +469,6 @@ fn cadence_result(source_root: &std::path::Path) -> CadenceSkillsPreparationResu
     }
 }
 
-fn command_summaries() -> Vec<RepositoryInitializationCommandSummary> {
-    [
-        "/pre-check",
-        "/rule-config",
-        "/mcp-configuration",
-        "/project-rules-examples",
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, command)| RepositoryInitializationCommandSummary {
-        command_index: index + 1,
-        command: command.to_string(),
-        status: "completed".to_string(),
-        output_summary: None,
-    })
-    .collect()
-}
-
 fn registry() -> Arc<ProviderRegistry> {
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, Arc::new(FakeStreamingProvider));
@@ -476,9 +485,15 @@ fn coordinator(
     runner: Arc<dyn BoundedCommandRunner>,
     initializer: Arc<dyn RepositoryInitializer>,
 ) -> RepositoryRegistrationCoordinator {
-    RepositoryRegistrationCoordinator::new(
+    RepositoryRegistrationCoordinator::new_with_operations(
         projects,
         repositories,
+        RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+            std::env::temp_dir().join(format!(
+                "repository-registration-test-{}",
+                uuid::Uuid::new_v4()
+            )),
+        )),
         gate,
         registry(),
         cadence,
@@ -501,32 +516,252 @@ fn input(path: std::path::PathBuf) -> RepositoryRegistrationInput {
     }
 }
 
+struct OperationCoordinatorFixture {
+    _temp: TempDir,
+    coordinator: RepositoryRegistrationCoordinator,
+    operations: RepositoryInitializationOperationStore,
+    repositories: Arc<ConfigRepositoryPersistence>,
+    input: RepositoryRegistrationInput,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coordinator_with_operations(
+    projects: Arc<dyn ProjectLookup>,
+    repositories: Arc<dyn RepositoryPersistence>,
+    operations: RepositoryInitializationOperationStore,
+    gate: Arc<ProviderAvailabilityGate>,
+    cadence: Arc<dyn CadenceSkillsPreparation>,
+    host: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    runner: Arc<dyn BoundedCommandRunner>,
+    initializer: Arc<dyn RepositoryInitializer>,
+) -> RepositoryRegistrationCoordinator {
+    RepositoryRegistrationCoordinator::new_with_operations(
+        projects,
+        repositories,
+        operations,
+        gate,
+        registry(),
+        cadence,
+        host,
+        runner,
+        Arc::new(|| "completed-at".to_string()),
+        initializer,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+}
+
+fn operation_coordinator_fixture(
+    cadence_fails: bool,
+    initializer_fails: bool,
+) -> OperationCoordinatorFixture {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("repository");
+    std::fs::create_dir_all(&root).unwrap();
+    let operations = RepositoryInitializationOperationStore::new(ProductAppPaths::new(
+        temp.path().join(".aria"),
+    ));
+    let repositories = Arc::new(ConfigRepositoryPersistence::new(vec![], false));
+    let coordinator = RepositoryRegistrationCoordinator::new_with_operations(
+        Arc::new(ConfigProjectLookup { exists: true }),
+        repositories.clone(),
+        operations.clone(),
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AvailableHealth))),
+        registry(),
+        Arc::new(StaticCadence {
+            failure: cadence_fails.then_some("cadence_skills_unavailable"),
+            count: AtomicUsize::new(0),
+            source_root: temp.path().join("cadence"),
+        }),
+        Arc::new(|| Ok(())),
+        Arc::new(ConfigRunner {
+            root: root.clone(),
+            rev_parse: Mutex::new(None),
+            statuses: Mutex::new(
+                vec![
+                    command_result(Some(0), "", ""),
+                    command_result(Some(0), "?? generated.txt\0", ""),
+                ]
+                .into(),
+            ),
+            call_count: AtomicUsize::new(0),
+        }),
+        Arc::new(|| "completed-at".to_string()),
+        Arc::new(StaticInitializer {
+            fail: initializer_fails,
+            count: AtomicUsize::new(0),
+        }),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+
+    OperationCoordinatorFixture {
+        _temp: temp,
+        coordinator,
+        operations,
+        repositories,
+        input: input(root),
+    }
+}
+
 #[async_trait::async_trait]
 impl BoundedCommandRunner for RecordingRunner {
     async fn run(
         &self,
         request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
-        let stdout = if request.argv == ["rev-parse", "--show-toplevel"] {
-            self.calls.lock().unwrap().push("git_root");
-            format!("{}\n", self.root.display())
-        } else {
-            self.calls.lock().unwrap().push("git_status");
-            if self.status_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                " M existing.txt\0".to_string()
-            } else {
-                " M existing.txt\0?? generated.txt\0".to_string()
+        let (label, result) = match request.argv.as_slice() {
+            [first, second] if first == "rev-parse" && second == "--show-toplevel" => (
+                "git_root",
+                command_result(Some(0), &format!("{}\n", self.root.display()), ""),
+            ),
+            [first, second, third, fourth]
+                if first == "status"
+                    && second == "--porcelain=v1"
+                    && third == "-z"
+                    && fourth == "--untracked-files=all" =>
+            {
+                let stdout = if self.status_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    " M existing.txt\0"
+                } else {
+                    " M existing.txt\0?? generated.txt\0"
+                };
+                ("git_status", command_result(Some(0), stdout, ""))
             }
+            [first, second] if first == "add" && second == "-A" => {
+                ("git_finalize_add", command_result(Some(0), "", ""))
+            }
+            [first, second, third]
+                if first == "diff" && second == "--cached" && third == "--quiet" =>
+            {
+                ("git_finalize_diff", command_result(Some(1), "", ""))
+            }
+            [first, second, message]
+                if first == "commit"
+                    && second == "-m"
+                    && message == "初始化cadence-aria 代码库" =>
+            {
+                ("git_finalize_commit", command_result(Some(0), "", ""))
+            }
+            [first] if first == "remote" => (
+                "git_finalize_remote",
+                command_result(Some(0), "origin\n", ""),
+            ),
+            [first, second, third, fourth]
+                if first == "rev-parse"
+                    && second == "--abbrev-ref"
+                    && third == "--symbolic-full-name"
+                    && fourth == "@{u}" =>
+            {
+                (
+                    "git_finalize_upstream",
+                    command_result(Some(0), "origin/main\n", ""),
+                )
+            }
+            [first] if first == "push" => ("git_finalize_push", command_result(Some(0), "", "")),
+            argv => panic!("unexpected Git argv: {argv:?}"),
         };
-        Ok(BoundedCommandResult {
-            exit_code: Some(0),
-            stdout,
-            stderr: String::new(),
-            timed_out: false,
-            cancelled: false,
-            stdout_truncated: false,
-            stderr_truncated: false,
-            duration_ms: 1,
-        })
+        self.calls.lock().unwrap().push(label);
+        Ok(result)
+    }
+}
+
+struct GitFinalizeRunner {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    root: std::path::PathBuf,
+    status_calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl BoundedCommandRunner for GitFinalizeRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        let (label, result) = match request.argv.as_slice() {
+            [first, second] if first == "rev-parse" && second == "--show-toplevel" => (
+                "git_root",
+                command_result(Some(0), &format!("{}\n", self.root.display()), ""),
+            ),
+            [first, second, third, fourth]
+                if first == "status"
+                    && second == "--porcelain=v1"
+                    && third == "-z"
+                    && fourth == "--untracked-files=all" =>
+            {
+                let stdout = if self.status_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    " M existing.txt\0"
+                } else {
+                    " M existing.txt\0?? generated.txt\0"
+                };
+                ("git_status", command_result(Some(0), stdout, ""))
+            }
+            [first, second] if first == "add" && second == "-A" => {
+                ("git_finalize_add", command_result(Some(0), "", ""))
+            }
+            [first, second, third]
+                if first == "diff" && second == "--cached" && third == "--quiet" =>
+            {
+                ("git_finalize_diff", command_result(Some(1), "", ""))
+            }
+            [first, second, message]
+                if first == "commit"
+                    && second == "-m"
+                    && message == "初始化cadence-aria 代码库" =>
+            {
+                ("git_finalize_commit", command_result(Some(0), "", ""))
+            }
+            [first] if first == "remote" => (
+                "git_finalize_remote",
+                command_result(Some(0), "origin\n", ""),
+            ),
+            [first, second, third, fourth]
+                if first == "rev-parse"
+                    && second == "--abbrev-ref"
+                    && third == "--symbolic-full-name"
+                    && fourth == "@{u}" =>
+            {
+                (
+                    "git_finalize_upstream",
+                    command_result(Some(0), "origin/main\n", ""),
+                )
+            }
+            [first] if first == "push" => ("git_finalize_push", command_result(Some(0), "", "")),
+            argv => panic!("unexpected Git argv: {argv:?}"),
+        };
+        self.calls.lock().unwrap().push(label);
+        Ok(result)
+    }
+}
+
+struct ScriptedGitRunner {
+    calls: Mutex<Vec<Vec<String>>>,
+    responses: Mutex<VecDeque<(Vec<String>, BoundedCommandResult)>>,
+}
+
+impl ScriptedGitRunner {
+    fn new(responses: Vec<(Vec<String>, BoundedCommandResult)>) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses.into()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl BoundedCommandRunner for ScriptedGitRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        let (expected_argv, result) = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected extra Git invocation");
+        assert_eq!(request.argv, expected_argv, "unexpected Git argv");
+        self.calls.lock().unwrap().push(request.argv);
+        Ok(result)
     }
 }

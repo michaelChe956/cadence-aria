@@ -111,10 +111,9 @@ async fn run_coding_runner_task_body(
             }
         }
     }
-    let engine = CodingWorkspaceEngine::with_provider(
+    let engine = CodingWorkspaceEngine::new(
         coding_store.clone(),
         GitWorkspaceService::new(),
-        state.provider_adapter.clone(),
         event_tx.clone(),
     )
     .with_cancellation(cancellation.clone());

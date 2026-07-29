@@ -127,13 +127,12 @@ fn fake_provider_runs_n16_to_n18_happy_path_with_normalized_traceability() {
             .iter()
             .map(|step| step.node_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["N16", "N17", "N18"]
+        vec!["N16", "N18"]
     );
     assert_eq!(
         provider.seen_output_schemas(),
         vec![
             "schema://aria/artifacts/coding_report/v1".to_string(),
-            "schema://aria/artifacts/testing_report/v1".to_string(),
             "schema://aria/artifacts/code_review_report/v1".to_string(),
         ]
     );
@@ -157,7 +156,7 @@ fn fake_provider_runs_n16_to_n18_happy_path_with_normalized_traceability() {
             trace.node_id
         );
     }
-    for artifact_kind in ["coding_report", "testing_report", "code_review_report"] {
+    for artifact_kind in ["coding_report", "code_review_report"] {
         let artifact = result
             .artifacts
             .iter()
@@ -209,9 +208,9 @@ fn provider_candidate_traceability_refs_are_candidates_not_trusted_coverage() {
 }
 
 #[test]
-fn testing_failure_routes_to_rework_then_back_to_testing_and_review() {
+fn blocking_code_review_routes_to_rework_then_back_to_review() {
     let workspace = tempfile::tempdir().expect("workspace");
-    let provider = ScriptedExecutionProvider::testing_fails_then_passes();
+    let provider = ScriptedExecutionProvider::review_revises_then_passes();
 
     let result =
         run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
@@ -223,12 +222,12 @@ fn testing_failure_routes_to_rework_then_back_to_testing_and_review() {
             .iter()
             .map(|step| step.node_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["N16", "N17", "N19", "N17", "N18"]
+        vec!["N16", "N18", "N19", "N18"]
     );
     assert_eq!(result.rework_counter, 1);
     assert_eq!(
         result.protocol_steps[2].node_specific_fields["rework_scope"]["source"],
-        "testing_report_worktask_001_0001"
+        "code_review_report_worktask_001_0001"
     );
     assert_eq!(
         result.protocol_steps[2].node_specific_fields["superseded_report_refs"],
@@ -237,40 +236,13 @@ fn testing_failure_routes_to_rework_then_back_to_testing_and_review() {
     assert!(
         result
             .workflow_skills_activated
-            .contains(&"systematic-debugging".to_string())
+            .contains(&"receiving-code-review".to_string())
     );
     assert_eq!(result.next_node, "M20");
 }
 
 #[test]
-fn testing_report_with_only_out_of_scope_failures_allows_current_worktask_to_continue() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let provider = ScriptedExecutionProvider::testing_has_only_out_of_scope_failure();
-
-    let result =
-        run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
-            .expect("execution chain should continue after scoped verification passed");
-
-    assert_eq!(
-        result
-            .protocol_steps
-            .iter()
-            .map(|step| step.node_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["N16", "N17", "N18"]
-    );
-    assert_eq!(result.rework_counter, 0);
-    assert_eq!(result.next_node, "M20");
-    assert!(
-        !result
-            .workflow_skills_activated
-            .contains(&"systematic-debugging".to_string()),
-        "out-of-scope acceptance failures must not trigger current worktask rework"
-    );
-}
-
-#[test]
-fn testing_node_inherits_latest_coding_report_commands_when_route_has_no_verification_commands() {
+fn code_review_node_inherits_latest_coding_report_commands_when_route_has_none() {
     let workspace = tempfile::tempdir().expect("workspace");
     let provider = ScriptedExecutionProvider::happy();
     let mut input = execution_worktask_input(workspace.path());
@@ -278,14 +250,14 @@ fn testing_node_inherits_latest_coding_report_commands_when_route_has_no_verific
 
     run_worktask_execution_chain(input, &provider).expect("execution chain");
 
-    let testing_prompt = provider
-        .seen_prompts_for_schema("schema://aria/artifacts/testing_report/v1")
+    let review_prompt = provider
+        .seen_prompts_for_schema("schema://aria/artifacts/code_review_report/v1")
         .into_iter()
         .next()
-        .expect("testing prompt should be captured");
+        .expect("review prompt should be captured");
     assert!(
-        testing_prompt.contains("cargo test --test execution_chain_fake_provider"),
-        "N17 prompt should inherit commands_run from the latest coding_report when routing commands are empty"
+        review_prompt.contains("cargo test --test execution_chain_fake_provider"),
+        "N18 prompt should inherit commands_run from the latest coding_report when routing commands are empty"
     );
 }
 
@@ -321,7 +293,7 @@ fn coding_prompt_includes_worktask_plan_and_routing_context_for_real_providers()
 }
 
 #[test]
-fn review_prompt_includes_prior_coding_and_testing_reports_for_real_providers() {
+fn review_prompt_includes_prior_coding_report_for_real_providers() {
     let workspace = tempfile::tempdir().expect("workspace");
     let provider = ScriptedExecutionProvider::happy();
 
@@ -341,14 +313,7 @@ fn review_prompt_includes_prior_coding_and_testing_reports_for_real_providers() 
         review_prompt.contains("\"files_modified\":[\"src/feature/lib.rs\"]"),
         "N18 prompt should include changed files from the coding report"
     );
-    assert!(
-        review_prompt.contains("testing_report_worktask_001_0001"),
-        "N18 prompt should include the prior testing report"
-    );
-    assert!(
-        review_prompt.contains("\"tests_passed\":true"),
-        "N18 prompt should include testing status"
-    );
+    assert!(!review_prompt.contains("testing_report"));
 }
 
 #[test]
@@ -366,21 +331,21 @@ fn review_revise_routes_to_rework_and_rechecks_before_ready() {
             .iter()
             .map(|step| step.node_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["N16", "N17", "N18", "N19", "N17", "N18"]
+        vec!["N16", "N18", "N19", "N18"]
     );
     assert_eq!(result.rework_counter, 1);
     assert_eq!(
-        result.protocol_steps[3].node_specific_fields["rework_scope"]["source"],
+        result.protocol_steps[2].node_specific_fields["rework_scope"]["source"],
         "code_review_report_worktask_001_0001"
     );
     assert_eq!(result.next_node, "M20");
 }
 
 #[test]
-fn testing_rework_source_uses_actual_failed_testing_report_ref() {
+fn review_rework_source_uses_actual_blocking_review_report_ref() {
     let workspace = tempfile::tempdir().expect("workspace");
-    let provider = ScriptedExecutionProvider::testing_fails_then_passes()
-        .with_testing_artifact_ref("testing_report_custom_0001");
+    let provider = ScriptedExecutionProvider::review_revises_then_passes()
+        .with_review_artifact_ref("code_review_report_custom_0001");
 
     let result =
         run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
@@ -388,14 +353,14 @@ fn testing_rework_source_uses_actual_failed_testing_report_ref() {
 
     assert_eq!(
         result.protocol_steps[2].node_specific_fields["rework_scope"]["source"],
-        "testing_report_custom_0001"
+        "code_review_report_custom_0001"
     );
 }
 
 #[test]
 fn rework_counter_limit_routes_to_manual_intervention_hold() {
     let workspace = tempfile::tempdir().expect("workspace");
-    let provider = ScriptedExecutionProvider::testing_always_fails();
+    let provider = ScriptedExecutionProvider::review_always_revises();
     assert_eq!(
         LoopCounterRegistry::phase1().threshold(LoopCounterName::Rework),
         3
@@ -424,7 +389,7 @@ fn rework_counter_limit_routes_to_manual_intervention_hold() {
 #[test]
 fn provider_error_routes_execution_chain_to_manual_hold_and_keeps_failed_run_record() {
     let workspace = tempfile::tempdir().expect("workspace");
-    let provider = ScriptedExecutionProvider::testing_provider_errors();
+    let provider = ScriptedExecutionProvider::review_provider_errors();
 
     let result =
         run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
@@ -446,8 +411,8 @@ fn provider_error_routes_execution_chain_to_manual_hold_and_keeps_failed_run_rec
     let failed_run = result
         .provider_run_records
         .iter()
-        .find(|record| record.provider_run_id == "run_n17_0001")
-        .expect("failed N17 provider run must be retained");
+        .find(|record| record.provider_run_id == "run_n18_0001")
+        .expect("failed N18 provider run must be retained");
     assert_eq!(failed_run.status, ProviderRunStatus::Failed);
     assert_eq!(
         failed_run.error_code.as_deref(),
@@ -460,7 +425,7 @@ fn provider_error_routes_execution_chain_to_manual_hold_and_keeps_failed_run_rec
             .join("worktree/.aria/runtime/tasks/task_001/logs/node-events.jsonl"),
     )
     .expect("node events");
-    assert!(events.contains(r#""node_id":"N17""#));
+    assert!(events.contains(r#""node_id":"N18""#));
     assert!(events.contains(r#""status":"failed""#));
 }
 
@@ -670,4 +635,3 @@ fn git_output(cwd: &Path, args: &[&str]) -> String {
     );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
-

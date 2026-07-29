@@ -1,7 +1,9 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
+use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_models::CodingAttemptScope;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::state::CodingAttemptRunKey;
 
 mod group;
@@ -10,12 +12,75 @@ mod scope;
 pub use group::create_group_coding_attempt;
 use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};
 
+pub(crate) struct RuntimeBindingProviderConfigInput<'a> {
+    pub project_id: &'a str,
+    pub issue_id: &'a str,
+    pub plan_id: &'a str,
+    pub plan_revision_id: &'a str,
+    pub unit: &'a AuthoritativeCodingUnitBinding,
+    pub repository_default_provider: &'a str,
+}
+
 pub async fn create_coding_attempt(
     State(state): State<WebAppState>,
     Path((project_id, issue_id, work_item_id)): Path<(String, String, String)>,
 ) -> ApiResult<Json<CodingAttemptDto>> {
     let app_paths = product_app_paths(&state);
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let creation_guard = coding_store
+        .acquire_work_item_attempt_creation_async(&project_id, &issue_id, &work_item_id)
+        .await
+        .map_err(product_store_api_error)?;
+    let active_attempts = coding_store
+        .list_attempts_for_work_item(&project_id, &issue_id, &work_item_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|attempt| attempt.status.is_active())
+        .collect::<Vec<_>>();
+    if active_attempts.len() > 1 {
+        return Err(ApiError::runtime(
+            "coding_attempt_ambiguous",
+            "multiple active coding attempts exist for this work item",
+            json!({
+                "attempt_ids": active_attempts
+                    .iter()
+                    .map(|attempt| attempt.id.as_str())
+                    .collect::<Vec<_>>()
+            }),
+        ));
+    }
+    if let Some(active_attempt) = active_attempts.into_iter().next() {
+        if active_attempt.scope == CodingAttemptScope::WorkItem {
+            lifecycle
+                .bind_issue_worktree_lock_to_attempt(
+                    &project_id,
+                    &issue_id,
+                    &work_item_id,
+                    &active_attempt.id,
+                )
+                .map_err(product_store_api_error)?;
+        }
+        return Err(ApiError::runtime(
+            "coding_attempt_active",
+            "work item already has an active coding attempt",
+            json!({ "attempt_id": active_attempt.id }),
+        ));
+    }
+    if is_schema_v2_group_work_item(
+        &app_paths,
+        &lifecycle,
+        &project_id,
+        &issue_id,
+        &work_item_id,
+    )
+    .map_err(product_store_api_error)?
+    {
+        return Err(ApiError::validation(
+            "schema_v2_group_coding_required",
+            "schema v2 work items must start coding through their work item group",
+        ));
+    }
     let work_items = lifecycle
         .list_work_items(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
@@ -49,26 +114,6 @@ pub async fn create_coding_attempt(
         ));
     }
 
-    let missing_handoffs: Vec<String> = work_item
-        .required_handoff_from
-        .iter()
-        .filter(|handoff_id| {
-            work_items
-                .iter()
-                .find(|item| &item.id == *handoff_id)
-                .map(|item| item.handoff_summary_ref.is_none())
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect();
-    if !missing_handoffs.is_empty() {
-        return Err(ApiError::validation_with_details(
-            "work_item_handoff_missing",
-            "required dependency handoff summary is missing",
-            json!({ "missing_handoffs": missing_handoffs }),
-        ));
-    }
-
     if work_item.require_execution_plan_confirm
         && work_item.execution_plan_status != WorkItemExecutionPlanStatus::Confirmed
     {
@@ -83,47 +128,6 @@ pub async fn create_coding_attempt(
         return Err(ApiError::validation(
             "repository_path_not_git_repo",
             "repository path must point to a git work tree",
-        ));
-    }
-
-    let coding_store = CodingAttemptStore::new(app_paths.clone());
-    let creation_guard = coding_store
-        .acquire_work_item_attempt_creation_async(&project_id, &issue_id, &work_item.id)
-        .await
-        .map_err(product_store_api_error)?;
-    let active_attempts = coding_store
-        .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .filter(|attempt| attempt.status.is_active())
-        .collect::<Vec<_>>();
-    if active_attempts.len() > 1 {
-        return Err(ApiError::runtime(
-            "coding_attempt_ambiguous",
-            "multiple active coding attempts exist for this work item",
-            json!({
-                "attempt_ids": active_attempts
-                    .iter()
-                    .map(|attempt| attempt.id.as_str())
-                    .collect::<Vec<_>>()
-            }),
-        ));
-    }
-    if let Some(active_attempt) = active_attempts.into_iter().next() {
-        if active_attempt.scope == CodingAttemptScope::WorkItem {
-            lifecycle
-                .bind_issue_worktree_lock_to_attempt(
-                    &project_id,
-                    &issue_id,
-                    &work_item.id,
-                    &active_attempt.id,
-                )
-                .map_err(product_store_api_error)?;
-        }
-        return Err(ApiError::runtime(
-            "coding_attempt_active",
-            "work item already has an active coding attempt",
-            json!({ "attempt_id": active_attempt.id }),
         ));
     }
 
@@ -278,7 +282,7 @@ pub(crate) fn save_work_item_execution_plan_for_attempt(
         });
 
     let dependency_handoffs: Vec<WorkItemDependencyHandoffRef> = work_item
-        .required_handoff_from
+        .depends_on
         .iter()
         .filter_map(|dep_id| {
             all_work_items
@@ -286,11 +290,6 @@ pub(crate) fn save_work_item_execution_plan_for_attempt(
                 .find(|item| &item.id == dep_id)
                 .map(|dep| WorkItemDependencyHandoffRef {
                     work_item_id: dep.id.clone(),
-                    summary_ref: dep.handoff_summary_ref.clone(),
-                    summary: dep
-                        .handoff_summary_ref
-                        .clone()
-                        .map(|r| format!("handoff summary available at {}", r)),
                     commit_sha: dep.completion_commit.clone(),
                 })
         })
@@ -329,39 +328,6 @@ pub(crate) fn save_work_item_execution_plan_for_attempt(
         .map_err(product_store_api_error)
 }
 
-pub(crate) fn group_work_item_execution_order(
-    plan: &IssueWorkItemPlanRecord,
-    work_items: &[LifecycleWorkItemRecord],
-) -> Result<Vec<LifecycleWorkItemRecord>, ApiError> {
-    let mut selected = plan
-        .work_item_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| {
-            work_items
-                .iter()
-                .find(|item| &item.id == id)
-                .cloned()
-                .map(|item| (index, item))
-                .ok_or_else(|| {
-                    ApiError::runtime(
-                        "work_item_not_found",
-                        "plan work item not found",
-                        json!({ "work_item_id": id }),
-                    )
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    selected.sort_by(|(left_index, left_item), (right_index, right_item)| {
-        left_item
-            .sequence_hint
-            .unwrap_or(u32::MAX)
-            .cmp(&right_item.sequence_hint.unwrap_or(u32::MAX))
-            .then_with(|| left_index.cmp(right_index))
-    });
-    Ok(selected.into_iter().map(|(_, item)| item).collect())
-}
-
 pub(crate) fn next_execution_plan_id(
     _coding_store: &CodingAttemptStore,
     project_id: &str,
@@ -379,6 +345,74 @@ pub(crate) fn work_item_by_id<'a>(
     work_item_id: &str,
 ) -> Option<&'a LifecycleWorkItemRecord> {
     work_items.iter().find(|item| item.id == work_item_id)
+}
+
+fn is_schema_v2_group_work_item(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    work_item_id: &str,
+) -> Result<bool, ProductStoreError> {
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
+    for plan in lifecycle.list_issue_work_item_plans(project_id, issue_id)? {
+        if plan.status != IssueWorkItemPlanStatus::Confirmed
+            || !plan.work_item_ids.iter().any(|id| id == work_item_id)
+        {
+            continue;
+        }
+        let lineage = match revision_store.get_plan_lineage(project_id, issue_id, &plan.id) {
+            Ok(lineage) => lineage,
+            Err(ProductStoreError::NotFound {
+                kind: "work_item_plan_lineage",
+                ..
+            }) => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(active_revision_id) = lineage.active_revision_id else {
+            return Ok(true);
+        };
+        let revision = revision_store.get_plan_revision(
+            project_id,
+            issue_id,
+            &plan.id,
+            &active_revision_id,
+        )?;
+        if revision.work_item_bindings.contains_key(work_item_id) {
+            return Ok(true);
+        }
+        return Err(ProductStoreError::IdentityMismatch {
+            kind: "schema_v2_group_plan_binding",
+            id: plan.id,
+        });
+    }
+    Ok(false)
+}
+
+fn is_schema_v2_group_attempt(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<bool, ProductStoreError> {
+    if attempt.scope != CodingAttemptScope::WorkItemGroup {
+        return Ok(false);
+    }
+    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+        return Ok(false);
+    };
+    match WorkItemRevisionStore::new(app_paths.clone()).get_plan_lineage(
+        &attempt.project_id,
+        &attempt.issue_id,
+        plan_id,
+    ) {
+        Ok(_) => Ok(true),
+        Err(ProductStoreError::NotFound {
+            kind: "work_item_plan_lineage",
+            ..
+        }) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn coding_provider_config_snapshot(
@@ -422,6 +456,58 @@ pub(crate) fn coding_provider_config_snapshot(
     })
 }
 
+pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
+    lifecycle: &LifecycleStore,
+    input: RuntimeBindingProviderConfigInput<'_>,
+    provider_availability: &dyn Fn(&ProviderName) -> bool,
+) -> ApiResult<ProviderConfigSnapshot> {
+    let sessions = lifecycle
+        .list_workspace_sessions(input.project_id, input.issue_id)
+        .map_err(product_store_api_error)?;
+    if let Some(session) = sessions.iter().rev().find(|session| {
+        session.entity_id == input.unit.logical_work_item_id
+            && session.workspace_type == WorkspaceType::WorkItem
+            && session.status == WorkspaceSessionStatus::Confirmed
+            && session
+                .work_item_runtime_binding
+                .as_ref()
+                .is_some_and(|binding| {
+                    binding.plan_id == input.plan_id
+                        && binding.plan_revision_id == input.plan_revision_id
+                        && binding.logical_work_item_id == input.unit.logical_work_item_id
+                        && binding.work_item_revision_id == input.unit.work_item_revision_id
+                        && binding.projection_bundle_id == input.unit.projection_bundle_id
+                        && binding.verification_plan_revision_id
+                            == input.unit.verification_plan_revision_id
+                })
+    }) {
+        let author = resolve_explicit_provider_name(
+            provider_name_key(&session.author_provider),
+            provider_availability,
+        )?
+        .provider;
+        let reviewer = resolve_explicit_provider_name(
+            provider_name_key(&session.reviewer_provider),
+            provider_availability,
+        )?
+        .provider;
+        return Ok(ProviderConfigSnapshot {
+            author,
+            reviewer: Some(reviewer),
+            review_rounds: session.review_rounds,
+        });
+    }
+
+    let author =
+        resolve_default_coding_provider(input.repository_default_provider, provider_availability)?
+            .provider;
+    Ok(ProviderConfigSnapshot {
+        author: author.clone(),
+        reviewer: Some(author),
+        review_rounds: 1,
+    })
+}
+
 pub(crate) async fn get_coding_attempt(
     State(state): State<WebAppState>,
     Path(path): Path<CodingAttemptRoutePath>,
@@ -437,11 +523,6 @@ pub(crate) async fn get_coding_attempt(
     let timeline_nodes = coding_store
         .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
-    let testing_report = coding_store
-        .list_testing_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .last();
     let code_review_reports = coding_store
         .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -461,9 +542,6 @@ pub(crate) async fn get_coding_attempt(
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
     let work_item_execution_plan = coding_store
         .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .map_err(product_store_api_error)?;
-    let work_item_handoff = coding_store
-        .get_visible_work_item_handoff(&attempt)
         .map_err(product_store_api_error)?;
     let units = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
         coding_store
@@ -486,14 +564,12 @@ pub(crate) async fn get_coding_attempt(
         provider_config_snapshot: attempt.provider_config_snapshot,
         timeline_nodes,
         active_node_id,
-        testing_report,
         code_review_reports,
         review_request,
         internal_pr_review,
         pending_gates: Vec::new(),
         pending_choices,
         work_item_execution_plan,
-        work_item_handoff,
     }))
 }
 
@@ -596,18 +672,33 @@ pub(crate) async fn delete_coding_attempt(
         .current_work_item_id
         .as_deref()
         .unwrap_or(&attempt.work_item_id);
-    let work_item = lifecycle
-        .list_work_items(&attempt.project_id, &attempt.issue_id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .find(|work_item| work_item.id == active_work_item_id)
-        .ok_or_else(|| {
-            product_store_api_error(ProductStoreError::NotFound {
-                kind: "work_item",
-                id: active_work_item_id.to_string(),
-            })
-        })?;
-    let repository = find_repository(&app_paths, &attempt.project_id, &work_item.repository_id)?;
+    let repository_id =
+        if is_schema_v2_group_attempt(&app_paths, &attempt).map_err(product_store_api_error)? {
+            IssueStore::new(app_paths.clone())
+                .get(&attempt.project_id, &attempt.issue_id)
+                .map_err(product_store_api_error)?
+                .repo_id
+                .ok_or_else(|| {
+                    product_store_api_error(ProductStoreError::NotFound {
+                        kind: "issue_repository",
+                        id: attempt.issue_id.clone(),
+                    })
+                })?
+        } else {
+            lifecycle
+                .list_work_items(&attempt.project_id, &attempt.issue_id)
+                .map_err(product_store_api_error)?
+                .into_iter()
+                .find(|work_item| work_item.id == active_work_item_id)
+                .ok_or_else(|| {
+                    product_store_api_error(ProductStoreError::NotFound {
+                        kind: "work_item",
+                        id: active_work_item_id.to_string(),
+                    })
+                })?
+                .repository_id
+        };
+    let repository = find_repository(&app_paths, &attempt.project_id, &repository_id)?;
 
     if let Ok(Some(shared)) =
         lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
@@ -621,10 +712,55 @@ pub(crate) async fn delete_coding_attempt(
     }
 
     cleanup_coding_attempt_workspace(&repository, &attempt).await?;
-    coding_store
-        .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+    cleanup_attempt_handoff_revisions(&app_paths, &coding_store, &attempt)
         .map_err(product_store_api_error)?;
+    finalize_coding_attempt_deletion(&coding_store, &app_paths, &attempt)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// 删除 attempt 时清理该 attempt 各 unit 已认领的 handoff revision。
+/// 清理在 attempt 记录删除之前执行（依赖 unit 指针可读）。归属校验由
+/// `delete_handoff_revision` 负责；删除阶段文件缺失视为已清理（幂等），
+/// 其他错误上抛中断删除流程（失败关闭，不静默留不一致状态）。
+///
+/// attempt 未进入 plan 阶段（无 plan binding）时必然无 unit、无 handoff
+/// 产出，清理视为空操作返回；这与 `delete_handoff_revision` 对 handoff
+/// 档案 NotFound 的容忍语义一致，不构成静默吞错。
+fn cleanup_attempt_handoff_revisions(
+    app_paths: &ProductAppPaths,
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<(), ProductStoreError> {
+    // 无 unit 认领 handoff 时清理为空操作；先取 units，避免在无 plan
+    // binding 的 attempt 上强制要求 binding 存在。
+    let units =
+        coding_store.list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+    let target_units = units
+        .iter()
+        .filter(|unit| unit.latest_handoff_revision_id.is_some())
+        .collect::<Vec<_>>();
+    if target_units.is_empty() {
+        return Ok(());
+    }
+    let binding = coding_store.get_plan_binding(attempt)?;
+    let lineage = WorkItemRevisionStore::new(app_paths.clone()).get_plan_lineage(
+        &attempt.project_id,
+        &attempt.issue_id,
+        &binding.plan_id,
+    )?;
+    let revision_store = WorkItemRevisionStore::new(app_paths.clone());
+    for unit in target_units {
+        let handoff_id = unit
+            .latest_handoff_revision_id
+            .as_deref()
+            .expect("filtered units have handoff revision id");
+        // 归属校验 + 删除交由 delete_handoff_revision；`?` 传播错误
+        // （Ok(()) 返回值无意义故不绑定）。NotFound 仅在 remove_file 阶段
+        // 容忍，get 阶段 NotFound 会传播（指针指向不存在档案说明状态
+        // 不一致，按失败关闭处理）。
+        revision_store.delete_handoff_revision(&lineage, &unit.logical_work_item_id, handoff_id)?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn confirm_work_item_execution_plan(

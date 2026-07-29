@@ -234,15 +234,6 @@ impl ProviderAdapter for ScriptedTaskRunProvider {
                 "candidate_traceability_refs": [],
                 "status": "completed"
             }),
-            "schema://aria/artifacts/testing_report/v1" => json!({
-                "artifact_kind": "testing_report",
-                "artifact_ref": "testing_report_work_wt_001_0001",
-                "worktask_id": "work_wt_001",
-                "commands_run": ["node --test tests/climbStairs.test.js"],
-                "tests_passed": true,
-                "failures": [],
-                "candidate_traceability_refs": []
-            }),
             "schema://aria/artifacts/code_review_report/v1" => json!({
                 "artifact_kind": "code_review_report",
                 "artifact_ref": "code_review_report_work_wt_001_0001",

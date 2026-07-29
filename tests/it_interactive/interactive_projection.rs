@@ -48,17 +48,6 @@ fn projection_reads_state_reports_events_and_artifacts() {
     )
     .expect("write blocked");
     fs::write(
-        task_root.join("reports/testing-report.json"),
-        serde_json::to_vec_pretty(&json!({
-            "artifact_kind": "testing_report",
-            "artifact_ref": "testing_report_work_wt_006_0001",
-            "tests_passed": false,
-            "failures": ["node_contract.allowed_write_scope=[]"]
-        }))
-        .expect("testing json"),
-    )
-    .expect("write testing");
-    fs::write(
         task_root.join("logs/node-events.jsonl"),
         concat!(
             "{\"event_kind\":\"node_enter\",\"task_id\":\"task_0001\",\"node_id\":\"N16\",\"status\":\"started\",\"details\":{\"provider_run_id\":\"run_n16_0001\",\"output_schema\":\"schema://aria/artifacts/coding_report/v1\"}}\n",
@@ -195,8 +184,8 @@ fn projection_reads_json_metadata_even_when_json_file_is_classified_as_test() {
     fs::write(
         task_root.join("artifacts/tests/result.test.json"),
         serde_json::to_vec_pretty(&json!({
-            "artifact_kind": "testing_report",
-            "artifact_ref": "testing_report_task_0005_0001",
+            "artifact_kind": "test_result",
+            "artifact_ref": "test_result_task_0005_0001",
             "_aria": {
                 "traceability_refs": ["REQ-1"]
             }
@@ -211,9 +200,9 @@ fn projection_reads_json_metadata_even_when_json_file_is_classified_as_test() {
     let entry = projection
         .artifact_index
         .iter()
-        .find(|entry| entry.artifact_ref == "testing_report_task_0005_0001")
+        .find(|entry| entry.artifact_ref == "test_result_task_0005_0001")
         .expect("test json artifact");
-    assert_eq!(entry.artifact_kind, "testing_report");
+    assert_eq!(entry.artifact_kind, "test_result");
     assert_eq!(entry.content_type, ContentType::Test);
     assert_eq!(entry.traceability_refs, vec!["REQ-1"]);
 }
@@ -245,18 +234,15 @@ fn projection_classifies_write_scope_gate_blocked_fibonacci_shape() {
     )
     .expect("write blocked");
     fs::write(
-        task_root.join("reports/testing-report.json"),
+        task_root.join("reports/final-report.json"),
         serde_json::to_vec_pretty(&json!({
-            "artifact_kind": "testing_report",
-            "tests_passed": false,
-            "failures": [
-                "未发现归档到 cadence/designs/ 与 cadence/reports/ 的文件。",
-                "node_contract.allowed_write_scope=[]，本节点不得写入任何文件。"
-            ]
+            "status": "blocked_by_gate",
+            "root_cause": "contract write scope blocked",
+            "archive_worktask": "work_wt_006"
         }))
-        .expect("testing json"),
+        .expect("final report json"),
     )
-    .expect("write testing");
+    .expect("write final report");
 
     let projection =
         build_workspace_projection(workspace.path(), Some("task_0001")).expect("build projection");
@@ -267,8 +253,8 @@ fn projection_classifies_write_scope_gate_blocked_fibonacci_shape() {
         .find(|entry| entry["category"] == "contract_write_scope_blocked")
         .expect("write scope diagnostic");
     assert_eq!(diagnostic["severity"], "blocking");
-    assert_eq!(diagnostic["reason"], "rework_limit_exceeded");
-    assert_eq!(diagnostic["next_node"], "X08");
+    assert_eq!(diagnostic["root_cause"], "contract write scope blocked");
+    assert_eq!(diagnostic["archive_worktask"], "work_wt_006");
 }
 
 #[test]

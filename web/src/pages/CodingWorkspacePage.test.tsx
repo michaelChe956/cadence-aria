@@ -108,8 +108,6 @@ describe("CodingWorkspacePage shell and actions", () => {
       },
       role_provider_config_snapshot: {
         coder: "fake",
-        tester_plan: "fake",
-      tester_execute: "fake",
         code_reviewer: "fake",
         internal_reviewer: "fake",
         review_rounds: 1,
@@ -117,7 +115,6 @@ describe("CodingWorkspacePage shell and actions", () => {
       },
       timeline_nodes: [],
       active_node_id: null,
-      testing_report: null,
       code_review_reports: [],
       review_request: null,
       internal_pr_review: null,
@@ -128,7 +125,6 @@ describe("CodingWorkspacePage shell and actions", () => {
       work_item_markdown: null,
       verification_commands: [],
       work_item_execution_plan: null,
-      work_item_handoff: null,
       linked_plan_repair: null,
       require_execution_plan_confirm: false,
       ...overrides,
@@ -146,8 +142,8 @@ describe("CodingWorkspacePage shell and actions", () => {
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "running",
-      stage: "testing",
-      activeTab: "tests",
+      stage: "code_review",
+      activeTab: "logs",
       branchName: "aria/work-items/work_item_0001/attempt-1",
       baseBranch: "main",
       worktreePath: "/tmp/worktree",
@@ -155,10 +151,10 @@ describe("CodingWorkspacePage shell and actions", () => {
         {
           id: "coding_node_0001",
           attempt_id: "coding_attempt_0001",
-          stage: "testing",
-          title: "执行测试",
+          stage: "code_review",
+          title: "Code Review",
           status: "running",
-          agent_role: "tester",
+          agent_role: "reviewer",
           summary: null,
           started_at: "2026-05-23T00:00:00Z",
           completed_at: null,
@@ -172,31 +168,18 @@ describe("CodingWorkspacePage shell and actions", () => {
           id: "entry-1",
           type: "execution_event",
           role: "system",
-          content: "cargo test",
+          content: "reviewing changes",
           timestamp: "2026-05-23T00:00:01Z",
           node_id: "coding_node_0001",
         },
       ],
-      testingReport: {
-        id: "testing_report_0001",
-        attempt_id: "coding_attempt_0001",
-        overall_status: "passed",
-        provider_claim: null,
-        backend_verified: true,
-        started_at: "2026-05-23T00:00:00Z",
-        completed_at: "2026-05-23T00:00:02Z",
-        commands: [
-          {
-            command: ["cargo", "test"],
-            cwd: "/tmp/worktree",
-            exit_code: 0,
-            duration_ms: 100,
-            stdout_ref: "stdout.log",
-            stderr_ref: "stderr.log",
-            status: "passed",
-          },
-        ],
-      },
+      logs: [
+        {
+          id: "log_0001",
+          message: "review command completed",
+          timestamp: "2026-05-23T00:00:02Z",
+        },
+      ],
     });
 
     render(
@@ -208,63 +191,17 @@ describe("CodingWorkspacePage shell and actions", () => {
 
     expect(useCodingWorkspaceWs).toHaveBeenCalledWith(CODING_ATTEMPT_ADDRESS);
     expect(screen.getByText("Coding Attempt #coding_attempt_0001")).toBeInTheDocument();
-    expect(screen.getByTestId("coding-timeline")).toHaveTextContent("执行测试");
-    expect(screen.getByTestId("chat-entry-list")).toHaveTextContent("cargo test");
+    expect(screen.getByTestId("coding-timeline")).toHaveTextContent("Code Review");
+    expect(screen.getByTestId("chat-entry-list")).toHaveTextContent("reviewing changes");
     expect(screen.queryByTestId("coding-artifact-tabs")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
 
-    expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent("passed");
-    expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("Tester");
-    expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("Coder 修复次数 0/2");
-  });
-
-  it("renders tester assistant chat entries as bubbles", () => {
-    mockCodingWs();
-    useCodingWorkspaceStore.setState({
-      attemptId: "coding_attempt_0001",
-      status: "running",
-      stage: "testing",
-      timelineNodes: [
-        {
-          id: "coding_node_0003",
-          attempt_id: "coding_attempt_0001",
-          stage: "testing",
-          title: "执行测试",
-          status: "running",
-          agent_role: "tester",
-          summary: null,
-          started_at: "2026-06-10T00:00:00Z",
-          completed_at: null,
-          artifact_refs: [],
-        },
-      ],
-      chatEntries: [
-        {
-          id: "tester_entry_0001",
-          type: "provider_stream",
-          role: "tester",
-          content: "TestPlan: unit checks",
-          timestamp: "2026-06-10T00:00:01Z",
-          node_id: "coding_node_0003",
-          metadata: {
-            phase: "plan_tests",
-            test_plan_id: "test_plan_0001",
-          },
-        },
-      ],
-    });
-
-    render(
-      <CodingWorkspacePage
-        address={CODING_ATTEMPT_ADDRESS}
-        onBack={vi.fn()}
-      />
+    expect(screen.getByTestId("coding-artifact-tabs")).toHaveTextContent(
+      "review command completed",
     );
-
-    const chatList = screen.getByTestId("chat-entry-list");
-    expect(chatList).toHaveTextContent("Tester");
-    expect(chatList).toHaveTextContent("TestPlan: unit checks");
+    expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("Code Reviewer");
+    expect(screen.getByTestId("coding-status-bar")).toHaveTextContent("Coder 修复次数 0/2");
   });
 
   it("shows group progress and current work item for group attempts", async () => {
@@ -442,7 +379,7 @@ describe("CodingWorkspacePage shell and actions", () => {
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "running",
-      stage: "testing",
+      stage: "code_review",
       timelineNodes: [
         {
           id: "coding_node_0001",
@@ -459,10 +396,10 @@ describe("CodingWorkspacePage shell and actions", () => {
         {
           id: "coding_node_0002",
           attempt_id: "coding_attempt_0001",
-          stage: "testing",
-          title: "测试执行",
+          stage: "code_review",
+          title: "Code Review",
           status: "running",
-          agent_role: "tester",
+          agent_role: "reviewer",
           summary: null,
           started_at: "2026-05-23T00:01:00Z",
           completed_at: null,
@@ -479,10 +416,10 @@ describe("CodingWorkspacePage shell and actions", () => {
           node_id: "coding_node_0001",
         },
         {
-          id: "entry-testing",
+          id: "entry-review",
           type: "provider_stream",
-          role: "tester",
-          content: "测试中",
+          role: "code_reviewer",
+          content: "审查中",
           timestamp: "2026-05-23T00:01:30Z",
           node_id: "coding_node_0002",
         },
@@ -496,7 +433,7 @@ describe("CodingWorkspacePage shell and actions", () => {
       />
     );
     scrollIntoView.mockClear();
-    await userEvent.click(screen.getByRole("button", { name: /测试执行/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Code Review/ }));
 
     expect(useCodingWorkspaceStore.getState().selectedNodeId).toBe("coding_node_0002");
     expect(scrollIntoView).toHaveBeenCalled();
@@ -542,7 +479,7 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(api.startCoding).toHaveBeenCalled();
   });
 
-  it("shows dependency handoff summary in execution plan", () => {
+  it("shows dependency completion commit in execution plan", () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
       ...readyCodingState(),
@@ -551,8 +488,6 @@ describe("CodingWorkspacePage shell and actions", () => {
         dependency_handoffs: [
           {
             work_item_id: "work_item_0001",
-            summary_ref: "handoffs/work_item_0001.json",
-            summary: "后端 API 已完成",
             commit_sha: "abc123",
           },
         ],
@@ -569,7 +504,6 @@ describe("CodingWorkspacePage shell and actions", () => {
       />,
     );
 
-    expect(screen.getByText("后端 API 已完成")).toBeInTheDocument();
     expect(screen.getByText("abc123")).toBeInTheDocument();
   });
 

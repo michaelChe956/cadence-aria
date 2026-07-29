@@ -113,6 +113,29 @@ impl LifecycleStore {
         Ok(plan)
     }
 
+    pub fn delete_schema_v2_issue_work_item_plan_metadata(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<IssueWorkItemPlan, ProductStoreError> {
+        let plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+        delete_required_file(
+            &self
+                .issue_work_item_plans_root(project_id, issue_id)
+                .join(format!("{plan_id}.json")),
+            "issue_work_item_plan",
+            plan_id,
+        )?;
+        self.delete_workspace_sessions_for_entity(
+            project_id,
+            issue_id,
+            plan_id,
+            WorkspaceType::WorkItemPlan,
+        )?;
+        Ok(plan)
+    }
+
     pub fn confirm_issue_work_item_plan(
         &self,
         project_id: &str,
@@ -439,14 +462,12 @@ impl LifecycleStore {
                 source_outline_id: wi.source_outline_id.clone(),
                 source_draft_id: wi.source_draft_id.clone(),
                 planned_implementation_context: wi.planned_implementation_context.clone(),
-                planned_handoff_summary: wi.planned_handoff_summary.clone(),
                 kind: wi.kind.clone(),
                 sequence_hint: wi.sequence_hint,
                 depends_on: wi.depends_on.clone(),
                 exclusive_write_scopes: wi.exclusive_write_scopes.clone(),
                 forbidden_write_scopes: wi.forbidden_write_scopes.clone(),
                 context_budget: wi.context_budget.clone(),
-                required_handoff_from: wi.required_handoff_from.clone(),
                 verification_plan_ref: wi.verification_plan_ref.clone(),
                 require_execution_plan_confirm: wi.require_execution_plan_confirm,
                 plan_status: WorkItemPlanStatus::Draft,

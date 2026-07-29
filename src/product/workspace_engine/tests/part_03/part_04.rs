@@ -175,8 +175,6 @@ fn final_compile_projects_source_draft_context_into_work_items() {
     assert_eq!(work_item.source_outline_id.as_deref(), Some("outline_a"));
     assert_eq!(work_item.source_draft_id.as_deref(), Some("draft_a"));
     assert_eq!(work_item.planned_implementation_context, None);
-    assert_eq!(work_item.planned_handoff_summary, None);
-    assert_eq!(work_item.handoff_summary_ref, None);
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  EvidenceKind,
   WorkItemPlanArtifactPayload,
   WorkItemPlanArtifactVersion,
 } from "../../api/types";
@@ -328,83 +329,240 @@ describe("WorkItemPlanArtifactPanel", () => {
   it("renders draft artifacts with the current work item content needed for review", () => {
     render(
       <WorkItemPlanArtifactPanel
-        artifact={{
-          type: "draft_candidate",
-          payload: {
-            draft_record: {
-              draft_id: "draft_001",
-              plan_id: "plan_001",
-              generation_round_id: "round_001",
-              outline_id: "outline_backend_data",
-              batch_id: null,
-              candidate: {
+        artifact={
+          {
+            type: "draft_candidate",
+            payload: {
+              draft_record: {
+                draft_id: "draft_001",
+                plan_id: "plan_001",
+                generation_round_id: "round_001",
                 outline_id: "outline_backend_data",
-                title: "后端数据层",
-                kind: "backend",
-                goal: "实现 ProviderCatalog 与全局状态持久化。",
-                implementation_context: "{&quot;required_gates&quot;:[&quot;cmd_check&quot;]}",
-                exclusive_write_scopes: ["src/web/provider_catalog.rs"],
-                forbidden_write_scopes: ["web/src/"],
-                depends_on_outline_ids: [],
-                required_handoff_from_outline_ids: [],
-                verification_plan: {
-                  commands: [
-                    {
-                      command: "cargo test --locked --lib provider_catalog",
-                      description: "ProviderCatalog 单测",
-                      expected_exit_code: 0,
-                      id: "cmd_catalog",
+                batch_id: null,
+                candidate: {
+                  outline_id: "outline_backend_data",
+                  logical_work_item_id: "wi_backend_data",
+                  canonical_contract_candidate: {
+                    schema_version: 1,
+                    identity: {
+                      logical_work_item_id: "wi_backend_data",
+                      title: "后端数据层",
+                      kind: "backend",
                     },
-                  ],
-                  manual_checks: [],
-                  required_gates: [
-                    {
-                      gate_id: "gate_backend_data",
-                      name: "后端数据层验证",
-                      description: "单测和格式检查通过",
-                      depends_on: ["cmd_catalog"],
+                    goal: { summary: "实现 ProviderCatalog 与全局状态持久化。" },
+                    non_goals: [],
+                    input_contracts: [],
+                    output_contracts: [
+                      {
+                        contract_id: "contract_backend_data",
+                        capabilities: ["ProviderCatalog 查询接口"],
+                      },
+                    ],
+                    tasks: [
+                      {
+                        task_id: "task_catalog",
+                        statement: "实现 ProviderCatalog。",
+                        requirement_refs: ["REQ-001"],
+                        done_when_refs: ["criterion_catalog"],
+                      },
+                    ],
+                    write_policy: {
+                      exclusive_scopes: ["src/web/provider_catalog.rs"],
+                      forbidden_scopes: ["web/src/"],
                     },
-                  ],
+                    acceptance_criteria: [
+                      {
+                        criterion_id: "criterion_catalog",
+                        statement: "catalog 查询接口可用。",
+                        required_evidence: ["source_diff", "manual_check"] as EvidenceKind[],
+                      },
+                    ],
+                    verification_checks: [
+                      {
+                        check_id: "cmd_catalog",
+                        command: "cargo test --locked --lib provider_catalog",
+                        manual_instruction: null,
+                        required: true,
+                        non_zero_test_execution_required: true,
+                      },
+                    ],
+                    handoff_contract: {
+                      required_fields: ["catalog_api"],
+                      provided_contract_refs: ["contract_backend_data"],
+                      reviewer_check_refs: ["criterion_catalog"],
+                    },
+                    blocker_rules: [],
+                    design_traceability: [],
+                  },
+                  verification_plan: {
+                    checks: [
+                      {
+                        check_id: "cmd_catalog",
+                        command: "cargo test --locked --lib provider_catalog",
+                        manual_instruction: null,
+                        required: true,
+                        non_zero_test_execution_required: true,
+                      },
+                    ],
+                  },
                 },
-                handoff_summary: "后续安装器可调用 &quot;ProviderCatalog::required&quot;。",
+                status: "draft",
+                active: true,
+                superseded: false,
+                superseded_by_draft_id: null,
+                supersede_reason: null,
+                copied_from_draft_id: null,
+                generated_from_node_id: "node_draft",
+                accepted_by_node_id: null,
+                created_at: "2026-06-23T00:00:00Z",
+                updated_at: "2026-06-23T00:00:00Z",
               },
-              status: "draft",
-              active: true,
-              superseded: false,
-              superseded_by_draft_id: null,
-              supersede_reason: null,
-              copied_from_draft_id: null,
-              generated_from_node_id: "node_draft",
-              accepted_by_node_id: null,
-              created_at: "2026-06-23T00:00:00Z",
-              updated_at: "2026-06-23T00:00:00Z",
+              validator_findings: [
+                {
+                  severity: "error",
+                  code: "missing_scope",
+                  message: "缺少写入范围",
+                  work_item_ids: ["outline_backend_data"],
+                },
+              ],
+              can_accept: false,
             },
-            validator_findings: [
-              {
-                severity: "error",
-                code: "missing_scope",
-                message: "缺少写入范围",
-                work_item_ids: ["outline_backend_data"],
-              },
-            ],
-            can_accept: false,
-          },
-        } as unknown as WorkItemPlanArtifactPayload}
+          } as unknown as WorkItemPlanArtifactPayload
+        }
       />,
     );
 
     const panel = screen.getByTestId("work-item-plan-artifact-panel");
     expect(panel).toHaveTextContent("后端数据层");
     expect(panel).toHaveTextContent("实现 ProviderCatalog 与全局状态持久化。");
-    expect(panel).toHaveTextContent('"required_gates": [');
-    expect(panel).toHaveTextContent('"cmd_check"');
     expect(panel).toHaveTextContent("src/web/provider_catalog.rs");
     expect(panel).toHaveTextContent("web/src/");
     expect(panel).toHaveTextContent("cargo test --locked --lib provider_catalog");
-    expect(panel).toHaveTextContent("后端数据层验证");
-    expect(panel).toHaveTextContent('后续安装器可调用 "ProviderCatalog::required"。');
+    expect(panel).toHaveTextContent("catalog_api");
     expect(panel).toHaveTextContent("missing_scope");
-    expect(panel).not.toHaveTextContent("&quot;");
+  });
+  it("renders canonical contract draft artifacts without crashing", () => {
+    render(
+      <WorkItemPlanArtifactPanel
+        artifact={
+          {
+            type: "draft_candidate",
+            payload: {
+              draft_record: {
+                draft_id: "draft_001",
+                plan_id: "plan_001",
+                generation_round_id: "round_005",
+                outline_id: "outline_implement_compact_duration",
+                batch_id: null,
+                candidate: {
+                  outline_id: "outline_implement_compact_duration",
+                  logical_work_item_id: "wi_implement_compact_duration",
+                  canonical_contract_candidate: {
+                    schema_version: 1,
+                    identity: {
+                      logical_work_item_id: "wi_implement_compact_duration",
+                      title: "实现并导出紧凑时长格式化函数",
+                      kind: "other",
+                    },
+                    goal: {
+                      summary: "在独立 ESM 模块中提供 formatCompactDuration 命名导出。",
+                    },
+                    non_goals: ["不创建自动化单元测试文件。"],
+                    input_contracts: [],
+                    output_contracts: [
+                      {
+                        contract_id: "contract_compact_duration_module",
+                        capabilities: ["提供 ESM 命名导出 formatCompactDuration。"],
+                      },
+                    ],
+                    tasks: [
+                      {
+                        task_id: "task_module_surface",
+                        statement: "建立仅含命名导出的 ESM 模块边界。",
+                        requirement_refs: ["REQ-001"],
+                        done_when_refs: ["criterion_module_export"],
+                      },
+                    ],
+                    write_policy: {
+                      exclusive_scopes: ["src/formatCompactDuration.mjs"],
+                      forbidden_scopes: ["test/**"],
+                    },
+                    acceptance_criteria: [
+                      {
+                        criterion_id: "criterion_module_export",
+                        statement: "源模块提供且仅提供可命名导入的 formatCompactDuration。",
+                        required_evidence: ["source_diff", "manual_check"] as EvidenceKind[],
+                      },
+                    ],
+                    verification_checks: [
+                      {
+                        check_id: "check_vectors",
+                        command: "node --test test/formatCompactDuration.test.mjs",
+                        manual_instruction: null,
+                        required: true,
+                        non_zero_test_execution_required: true,
+                      },
+                    ],
+                    handoff_contract: {
+                      required_fields: ["module_path", "named_export"],
+                      provided_contract_refs: ["contract_compact_duration_module"],
+                      reviewer_check_refs: ["criterion_module_export"],
+                    },
+                    blocker_rules: [
+                      {
+                        reason_code: "output_contract_capability_missing",
+                        route: "coder_rework",
+                        target_contract_refs: ["contract_compact_duration_module"],
+                      },
+                    ],
+                    design_traceability: [
+                      {
+                        source_type: "story_spec",
+                        source_id: "story_spec_0001",
+                        requirement_id: "REQ-001",
+                      },
+                    ],
+                  },
+                  verification_plan: {
+                    checks: [
+                      {
+                        check_id: "check_vectors",
+                        command: "node --test test/formatCompactDuration.test.mjs",
+                        manual_instruction: null,
+                        required: true,
+                        non_zero_test_execution_required: true,
+                      },
+                    ],
+                  },
+                },
+                status: "draft",
+                active: true,
+                superseded: false,
+                superseded_by_draft_id: null,
+                supersede_reason: null,
+                copied_from_draft_id: null,
+                generated_from_node_id: "node_draft",
+                accepted_by_node_id: null,
+                created_at: "2026-07-25T00:00:00Z",
+                updated_at: "2026-07-25T00:00:00Z",
+              },
+              validator_findings: [],
+              can_accept: false,
+            },
+          } as unknown as WorkItemPlanArtifactPayload
+        }
+      />,
+    );
+
+    const panel = screen.getByTestId("work-item-plan-artifact-panel");
+    expect(panel).toHaveTextContent("实现并导出紧凑时长格式化函数");
+    expect(panel).toHaveTextContent("在独立 ESM 模块中提供 formatCompactDuration 命名导出。");
+    expect(panel).toHaveTextContent("src/formatCompactDuration.mjs");
+    expect(panel).toHaveTextContent("test/**");
+    expect(panel).toHaveTextContent("node --test test/formatCompactDuration.test.mjs");
+    expect(panel).toHaveTextContent("建立仅含命名导出的 ESM 模块边界。");
+    expect(panel).toHaveTextContent("module_path");
+    expect(panel).toHaveTextContent("contract_compact_duration_module");
   });
 
   it("switches to a JSON source view rendered with Monaco", async () => {
@@ -564,11 +722,13 @@ function workItemDraftArtifactWithCommand(
   command: string,
 ): WorkItemPlanArtifactPayload {
   const record = workItemDraftRecord("outline_backend", draftId);
-  record.candidate.verification_plan.commands = [
+  record.candidate.verification_plan.checks = [
     {
-      id: `cmd_${draftId}`,
+      check_id: `cmd_${draftId}`,
       command,
-      description: "ProviderCatalog 单测",
+      manual_instruction: null,
+      required: true,
+      non_zero_test_execution_required: true,
     },
   ];
   return {
@@ -624,27 +784,70 @@ function workItemDraftRecord(outlineId: string, draftId: string) {
     generation_mode: "serial",
     candidate: {
       outline_id: outlineId,
-      title: `${outlineId} draft`,
-      kind: "backend",
-      goal: `实现 ${outlineId}`,
-      implementation_context: "实现上下文",
-      exclusive_write_scopes: [`src/product/${outlineId}.rs`],
-      forbidden_write_scopes: ["web/src/"],
-      depends_on_outline_ids: [],
-      required_handoff_from_outline_ids: [],
-      verification_plan: {
-        commands: [
+      logical_work_item_id: `wi_${outlineId}`,
+      canonical_contract_candidate: {
+        schema_version: 1,
+        identity: {
+          logical_work_item_id: `wi_${outlineId}`,
+          title: `${outlineId} draft`,
+          kind: "backend",
+        },
+        goal: { summary: `实现 ${outlineId}` },
+        non_goals: [],
+        input_contracts: [],
+        output_contracts: [
           {
-            id: `cmd_${outlineId}`,
-            command: `cargo test --locked --lib ${outlineId}`,
-            description: `${outlineId} 单测`,
+            contract_id: `contract_${outlineId}`,
+            capabilities: [`提供 ${outlineId} 能力`],
           },
         ],
-        manual_checks: [],
-        required_gates: [],
-        risk_notes: [],
+        tasks: [
+          {
+            task_id: `task_${outlineId}`,
+            statement: `实现 ${outlineId} 模块边界`,
+            requirement_refs: ["REQ-001"],
+            done_when_refs: [`criterion_${outlineId}`],
+          },
+        ],
+        write_policy: {
+          exclusive_scopes: [`src/product/${outlineId}.rs`],
+          forbidden_scopes: ["web/src/"],
+        },
+        acceptance_criteria: [
+          {
+            criterion_id: `criterion_${outlineId}`,
+            statement: `${outlineId} 交付可用`,
+            required_evidence: ["source_diff", "manual_check"] as EvidenceKind[],
+          },
+        ],
+        verification_checks: [
+          {
+            check_id: `cmd_${outlineId}`,
+            command: `cargo test --locked --lib ${outlineId}`,
+            manual_instruction: null,
+            required: true,
+            non_zero_test_execution_required: true,
+          },
+        ],
+        handoff_contract: {
+          required_fields: [`${outlineId}_handoff_field`],
+          provided_contract_refs: [`contract_${outlineId}`],
+          reviewer_check_refs: [`criterion_${outlineId}`],
+        },
+        blocker_rules: [],
+        design_traceability: [],
       },
-      handoff_summary: `${outlineId} handoff`,
+      verification_plan: {
+        checks: [
+          {
+            check_id: `cmd_${outlineId}`,
+            command: `cargo test --locked --lib ${outlineId}`,
+            manual_instruction: null,
+            required: true,
+            non_zero_test_execution_required: true,
+          },
+        ],
+      },
     },
     status: "draft",
     active: true,

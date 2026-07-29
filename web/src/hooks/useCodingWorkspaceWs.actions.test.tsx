@@ -26,7 +26,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       harness.api.sendProviderSelect("internal_reviewer", "fake");
       harness.api.sendPermissionModeSelect("code_reviewer", "supervised");
       harness.api.sendMaxAutoReworkSelect(4);
-      harness.api.confirmStageGate("testing");
+      harness.api.confirmStageGate("code_review");
       harness.api.finalConfirm();
       harness.api.abortAttempt();
       harness.api.sendPing();
@@ -44,7 +44,7 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
         permission_mode: "supervised",
       }),
       JSON.stringify({ type: "max_auto_rework_select", max_auto_rework: 4 }),
-      JSON.stringify({ type: "stage_gate_confirm", stage: "testing" }),
+      JSON.stringify({ type: "stage_gate_confirm", stage: "code_review" }),
       JSON.stringify({ type: "final_confirm" }),
       JSON.stringify({ type: "abort_attempt" }),
       JSON.stringify({ type: "coding_ping" }),
@@ -361,7 +361,6 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       harness.ws.receive({
         ...codingSessionState(),
         work_item_execution_plan: executionPlan(),
-        work_item_handoff: null,
         require_execution_plan_confirm: false,
       });
     });
@@ -371,7 +370,6 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       goal: "实现后端 API",
       allowed_write_scopes: ["src/product/**"],
     });
-    expect(useCodingWorkspaceStore.getState().workItemHandoff).toBeNull();
     expect(useCodingWorkspaceStore.getState().requireExecutionPlanConfirm).toBe(false);
   });
 });

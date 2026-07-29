@@ -54,8 +54,6 @@ pub(super) async fn run_coding_provider_roles(
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: provider.clone(),
-                tester_plan: provider.clone(),
-                tester_execute: provider.clone(),
                 code_reviewer: provider.clone(),
                 internal_reviewer: provider,
                 review_rounds: 1,

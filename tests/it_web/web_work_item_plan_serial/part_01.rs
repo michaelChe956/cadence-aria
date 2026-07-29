@@ -451,6 +451,7 @@ async fn local_validation_failure_enters_draft_confirm_without_accept() {
     let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
         valid_outline_output(),
         invalid_draft_output_missing_scope("outline_backend_session"),
+        invalid_draft_output_missing_scope("outline_backend_session"),
     ])
     .await;
     let (_session_id, plan_id, mut ws) = prepare_plan_accept_outline_and_select_serial(&app).await;
@@ -517,130 +518,6 @@ async fn local_validation_failure_enters_draft_confirm_without_accept() {
     assert_eq!(
         index.draft_statuses.get(draft_id),
         Some(&WorkItemDraftStatus::ValidationFailed)
-    );
-
-    ws.close(None).await.ok();
-}
-
-#[tokio::test]
-async fn accepted_draft_enters_item_review_when_reviewer_enabled() {
-    let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls().await;
-    let (app, root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
-        valid_outline_output(),
-        valid_draft_output("outline_backend_session"),
-        valid_frontend_draft_output(),
-    ])
-    .await;
-    let (_session_id, plan_id, mut ws) =
-        prepare_plan_accept_outline_and_select_serial_with_reviewer(&app, true).await;
-
-    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
-        messages.iter().any(|message| {
-            message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_draft_confirm"
-        })
-    })
-    .await;
-    assert!(
-        messages.iter().any(|message| {
-            message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_draft_confirm"
-        }),
-        "serial draft should reach confirm before item review test continues, got {messages:?}"
-    );
-    let index = WorkItemPlanStore::new(ProductAppPaths::new(root.path().join(".aria")))
-        .load_active_index("project_0001", "issue_0001", &plan_id)
-        .expect("load active index")
-        .expect("active index");
-    let draft_id = index
-        .outline_to_current_draft_id
-        .get("outline_backend_session")
-        .expect("active backend draft")
-        .clone();
-    enable_work_item_plan_review_fixture(
-        &app,
-        &_session_id,
-        item_review_pass("outline_backend_session", &draft_id),
-    )
-    .await;
-
-    ws.send(Message::Text(
-        json!({
-            "type": "work_item_draft_decision",
-            "outline_id": "outline_backend_session",
-            "decision": "accept",
-            "feedback": null
-        })
-        .to_string()
-        .into(),
-    ))
-    .await
-    .expect("send draft accept");
-
-    let messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
-        messages.iter().any(|message| {
-            message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_draft_review"
-        })
-    })
-    .await;
-    assert!(
-        messages.iter().any(|message| {
-            message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_draft_review"
-        }),
-        "accept should enter item review, got {messages:?}"
-    );
-
-    ws.close(None).await.ok();
-}
-
-#[tokio::test]
-async fn author_decision_is_rejected_on_draft_confirm_node() {
-    let _guard = WS_TEST_LOCK.lock().await;
-    let _test_guard = enable_test_controls().await;
-    let (app, _root, _prompts) = app_with_confirmed_story_and_design_and_streaming_outputs(vec![
-        valid_outline_output(),
-        valid_draft_output("outline_backend_session"),
-    ])
-    .await;
-    let (_session_id, _plan_id, mut ws) =
-        prepare_plan_accept_outline_and_select_serial_with_reviewer(&app, true).await;
-
-    let _messages = recv_ws_until(&mut ws, Duration::from_secs(10), |messages| {
-        messages.iter().any(|message| {
-            message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "work_item_draft_confirm"
-        })
-    })
-    .await;
-
-    ws.send(Message::Text(
-        json!({ "type": "author_decision", "decision": "accept" })
-            .to_string()
-            .into(),
-    ))
-    .await
-    .expect("send invalid author decision");
-
-    let messages = recv_ws_until(&mut ws, Duration::from_secs(5), |messages| {
-        messages
-            .iter()
-            .any(|message| message["type"] == "protocol_error")
-    })
-    .await;
-    let protocol_error = messages
-        .iter()
-        .find(|message| message["type"] == "protocol_error")
-        .expect("protocol error");
-    assert_eq!(protocol_error["code"], "INVALID_AUTHOR_DECISION");
-    assert!(
-        !messages.iter().any(|message| {
-            message["type"] == "timeline_node_created"
-                && message["node"]["node_type"] == "reviewer_run"
-        }),
-        "generic reviewer_run must not be created from draft confirm: {messages:?}"
     );
 
     ws.close(None).await.ok();

@@ -8,6 +8,7 @@ import type {
 } from "../../api/types";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
 import type { ChatEntry, ChatEntryType } from "../../state/chat-entries";
+import { DraftValidationFailureNotice } from "../workspace/DraftValidationFailureNotice";
 
 interface ChatInputBarProps {
   stage: string;
@@ -184,6 +185,9 @@ export function ChatInputBar({
             </>
           ) : isWorkItemDraftConfirm ? (
             <>
+              {!draftPayload?.can_accept ? (
+                <DraftValidationFailureNotice findings={draftPayload?.validator_findings} />
+              ) : null}
               {draftPayload?.can_accept ? (
                 <button
                   type="button"
@@ -208,7 +212,7 @@ export function ChatInputBar({
                     className="inline-flex h-9 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-sm font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
                   >
                     <RefreshCcw className="h-4 w-4" />
-                    重写
+                    {draftPayload.can_accept ? "重写" : "根据校验错误重写"}
                   </button>
                   <button
                     type="button"

@@ -144,8 +144,6 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Codex,
-                tester_plan: ProviderName::Fake,
-                tester_execute: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,
@@ -208,8 +206,6 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Codex,
-                tester_plan: ProviderName::Fake,
-                tester_execute: ProviderName::Fake,
                 code_reviewer: ProviderName::Fake,
                 internal_reviewer: ProviderName::Fake,
                 review_rounds: 1,

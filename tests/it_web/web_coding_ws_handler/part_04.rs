@@ -246,7 +246,7 @@ async fn coding_ws_abort_attempt_closes_active_node_and_sends_snapshot() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let app = app_with_running_testing_attempt(root.path());
+    let app = app_with_running_code_review_attempt(root.path());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -264,7 +264,7 @@ async fn coding_ws_abort_attempt_closes_active_node_and_sends_snapshot() {
             ..
         } => {
             assert_eq!(status, CodingAttemptStatus::Running);
-            assert_eq!(stage, CodingExecutionStage::Testing);
+            assert_eq!(stage, CodingExecutionStage::CodeReview);
             assert_eq!(active_node_id.as_deref(), Some("coding_node_0001"));
         }
         other => panic!("expected coding session state, got {other:?}"),
@@ -294,7 +294,7 @@ async fn coding_ws_abort_attempt_closes_active_node_and_sends_snapshot() {
             ..
         } => {
             assert_eq!(status, CodingAttemptStatus::Aborted);
-            assert_eq!(stage, CodingExecutionStage::Testing);
+            assert_eq!(stage, CodingExecutionStage::CodeReview);
             assert!(active_node_id.is_none());
         }
         other => panic!("expected aborted coding session state, got {other:?}"),
@@ -313,7 +313,7 @@ async fn coding_ws_abort_attempt_closes_active_node_and_sends_snapshot() {
 async fn coding_ws_abort_attempt_aborts_all_registered_runners() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
-    let (app, state) = app_with_running_testing_attempt_and_state(root.path());
+    let (app, state) = app_with_running_code_review_attempt_and_state(root.path());
     let attempt_key = CodingAttemptRunKey::new(
         "project_0001",
         "issue_0001",

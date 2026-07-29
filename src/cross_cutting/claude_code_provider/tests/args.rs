@@ -1,15 +1,9 @@
 use std::path::PathBuf;
 
-use crate::cross_cutting::streaming_provider::{ProviderPermissionMode, StreamingProviderAdapter};
+use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
 
 use super::super::ClaudeCodeProvider;
 
-#[test]
-fn claude_code_provider_supports_provider_driven_testing() {
-    let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
-
-    assert!(provider.supports_provider_driven_testing());
-}
 #[test]
 fn claude_args_include_resume_when_provider_session_is_available() {
     let provider = ClaudeCodeProvider::new(PathBuf::from("claude"));
