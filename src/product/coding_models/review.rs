@@ -43,6 +43,8 @@ pub struct ReviewRequest {
     pub push_status: PushStatus,
     pub external_url: Option<String>,
     pub manual_instructions: Vec<String>,
+    #[serde(default)]
+    pub push_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

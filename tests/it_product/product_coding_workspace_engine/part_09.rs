@@ -169,6 +169,7 @@ fn sample_review_request(attempt_id: &str) -> ReviewRequest {
         manual_instructions: vec!["create review request".to_string()],
         created_at: "2026-05-23T00:00:00Z".to_string(),
         updated_at: "2026-05-23T00:00:00Z".to_string(),
+        push_error: None,
     }
 }
 

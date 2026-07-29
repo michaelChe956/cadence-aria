@@ -1,5 +1,32 @@
 use super::*;
 
+pub(crate) fn summarize_push_error(
+    remote: &str,
+    branch: &str,
+    stderr: Option<&str>,
+) -> Option<String> {
+    let stderr = stderr?.trim();
+    if stderr.is_empty() {
+        return None;
+    }
+    let lower = stderr.to_ascii_lowercase();
+    const MAX_LEN: usize = 500;
+    let detail = if lower.contains("non-fast-forward") || lower.contains("[rejected]") {
+        format!(
+            "远端 {}/{} 已存在冲突提交（non-fast-forward / rejected），请确认远端分支状态后再推送",
+            remote, branch
+        )
+    } else {
+        let trimmed = if stderr.len() > MAX_LEN {
+            format!("{}…", &stderr[..MAX_LEN])
+        } else {
+            stderr.to_string()
+        };
+        format!("推送到 {}/{} 失败：{}", remote, branch, trimmed)
+    };
+    Some(detail)
+}
+
 pub(crate) fn internal_review_blocked_gate_reason(
     decision: CodeReviewFlowDecision,
     is_group_final_review: bool,
@@ -49,6 +76,7 @@ impl CodingWorkspaceEngine {
                 manual_instructions: Vec::new(),
                 created_at: Utc::now().to_rfc3339(),
                 updated_at: Utc::now().to_rfc3339(),
+                push_error: None,
             });
         self.build_group_internal_pr_review_prompt(attempt, &review_request, None, None)
             .await
@@ -621,7 +649,7 @@ impl CodingWorkspaceEngine {
             };
             if matches!(remote_head.as_ref(), Ok(Some(head)) if head == commit_sha) {
                 journal = self
-                    .finish_review_git_operation(&attempt, &journal, PushStatus::Pushed)
+                    .finish_review_git_operation(&attempt, &journal, PushStatus::Pushed, None)
                     .await?;
             } else if matches!(remote_head, Err(GitWorkspaceError::Cancelled { .. })) {
                 let Some(completed) = self
@@ -640,13 +668,24 @@ impl CodingWorkspaceEngine {
                 {
                     Ok(push) => {
                         journal = if push.status == PushStatus::Pushed {
-                            self.finish_review_git_operation(&attempt, &journal, PushStatus::Pushed)
-                                .await?
+                            self.finish_review_git_operation(
+                                &attempt,
+                                &journal,
+                                PushStatus::Pushed,
+                                None,
+                            )
+                            .await?
                         } else {
+                            let push_error = summarize_push_error(
+                                remote,
+                                &attempt.branch_name,
+                                push.stderr.as_deref(),
+                            );
                             self.finish_nonzero_review_push(
                                 &attempt,
                                 &journal,
                                 push.remote_rejected,
+                                push_error,
                             )
                             .await?
                         };
@@ -685,23 +724,14 @@ impl CodingWorkspaceEngine {
                 Some("review request 已创建".to_string()),
             )
         } else {
-            self.store.update_attempt_status(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                CodingAttemptStatus::Blocked,
-            )?;
-            self.release_active_lock_if_shared_worktree_clean(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                self.active_work_item_id_for_attempt(&attempt),
-            )
-            .await?;
-            (
-                CodingTimelineNodeStatus::Failed,
-                Some("review request 推送失败".to_string()),
-            )
+            // push 失败不阻断主流程：attempt 保持当前状态，让后续 stage gate / GroupFinalReview 继续
+            // 推进。失败原因已记录在 review_request.push_error，这里仅在 timeline node 标 Failed。
+            let base = "review request 推送失败".to_string();
+            let summary = match request.push_error.as_ref() {
+                Some(error) => format!("{base}：{error}"),
+                None => base,
+            };
+            (CodingTimelineNodeStatus::Failed, Some(summary))
         };
         let completed_at = Utc::now().to_rfc3339();
         self.store.update_timeline_node_status(

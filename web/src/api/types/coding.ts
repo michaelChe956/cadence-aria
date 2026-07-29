@@ -266,6 +266,7 @@ export type ReviewRequest = {
   push_status: PushStatus;
   external_url: string | null;
   manual_instructions: string[];
+  push_error: string | null;
   created_at: string;
   updated_at: string;
 };

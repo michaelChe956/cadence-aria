@@ -294,6 +294,7 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         manual_instructions: vec!["手动打开 review branch".to_string()],
         created_at: "2026-05-23T00:05:00Z".to_string(),
         updated_at: "2026-05-23T00:05:00Z".to_string(),
+        push_error: None,
     };
     let node = CodingTimelineNode {
         id: "coding_node_0001".to_string(),

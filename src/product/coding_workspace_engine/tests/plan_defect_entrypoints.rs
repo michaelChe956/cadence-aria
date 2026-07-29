@@ -31,6 +31,7 @@ fn coding_plan_repair_entrypoints_internal_and_group_review_use_group_reviewer_r
         manual_instructions: Vec::new(),
         created_at: "2026-07-18T00:00:00Z".to_string(),
         updated_at: "2026-07-18T00:00:00Z".to_string(),
+        push_error: None,
     };
     let projection = reviewer_projection_fixture();
 
@@ -88,6 +89,7 @@ async fn coding_plan_repair_entrypoints_internal_review_execution_persists_safe_
         manual_instructions: Vec::new(),
         created_at: "2026-07-18T00:00:00Z".to_string(),
         updated_at: "2026-07-18T00:00:00Z".to_string(),
+        push_error: None,
     };
     store.save_review_request(&attempt, &request).unwrap();
     let (tx, _rx) = mpsc::channel(64);
@@ -528,6 +530,7 @@ pub(super) fn prepared_group_review_fixture() -> (
                 manual_instructions: Vec::new(),
                 created_at: "2026-07-19T00:00:00Z".to_string(),
                 updated_at: "2026-07-19T00:00:00Z".to_string(),
+                push_error: None,
             },
         )
         .expect("review request");

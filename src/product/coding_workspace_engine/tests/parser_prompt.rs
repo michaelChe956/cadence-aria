@@ -443,6 +443,7 @@ async fn non_group_internal_review_prompt_includes_both_reviewer_boundaries() {
         manual_instructions: Vec::new(),
         created_at: "2026-07-28T00:00:00Z".to_string(),
         updated_at: "2026-07-28T00:00:00Z".to_string(),
+        push_error: None,
     };
 
     let prompt = engine

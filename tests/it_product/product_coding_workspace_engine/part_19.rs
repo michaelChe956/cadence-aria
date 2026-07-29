@@ -42,6 +42,15 @@ async fn rejected_push_with_verified_missing_remote_ref_records_failed_review_re
 
     assert_eq!(request.push_status, PushStatus::Failed);
     assert!(
+        request
+            .push_error
+            .as_ref()
+            .is_some_and(|error| error.contains(&prepared.branch_name) && !error.is_empty()),
+        "push_error should mention branch {} and keep detail; got {:?}",
+        prepared.branch_name,
+        request.push_error
+    );
+    assert!(
         store
             .get_coding_git_operation(&prepared)
             .expect("journal")
@@ -51,12 +60,13 @@ async fn rejected_push_with_verified_missing_remote_ref_records_failed_review_re
                     && journal.push_status == Some(PushStatus::Failed)
             })
     );
-    assert_eq!(
+    assert_ne!(
         store
             .get_attempt(&prepared.project_id, &prepared.issue_id, &prepared.id)
-            .expect("blocked attempt")
+            .expect("attempt after failed review request")
             .status,
-        CodingAttemptStatus::Blocked
+        CodingAttemptStatus::Blocked,
+        "push 失败不应再把 attempt 标记为 Blocked（应保持运行态以继续流转）"
     );
     let remote_ref = format!("refs/heads/{}", prepared.branch_name);
     let remote_head = Command::new("git")

@@ -647,6 +647,7 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
                 manual_instructions: Vec::new(),
                 created_at: "2026-07-07T00:00:00Z".to_string(),
                 updated_at: "2026-07-07T00:00:00Z".to_string(),
+                push_error: None,
             },
         )
         .expect("review request");

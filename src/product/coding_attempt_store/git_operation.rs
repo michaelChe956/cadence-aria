@@ -48,6 +48,7 @@ pub struct CompleteReviewGitOperationInput {
     pub push_status: PushStatus,
     pub remote_kind: RemoteKind,
     pub review_request_id: String,
+    pub push_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +67,8 @@ pub struct CodingGitOperationJournal {
     pub phase: CodingGitOperationPhase,
     pub commit_sha: Option<String>,
     pub push_status: Option<PushStatus>,
+    #[serde(default)]
+    pub push_error: Option<String>,
     pub remote_kind: Option<RemoteKind>,
     pub review_request_id: Option<String>,
     pub created_at: String,
@@ -221,6 +224,7 @@ impl super::CodingAttemptStore {
             }
             current.phase = CodingGitOperationPhase::Completed;
             current.push_status = Some(input.push_status);
+            current.push_error = input.push_error;
             current.remote_kind = Some(input.remote_kind);
             current.review_request_id = Some(input.review_request_id);
             current.updated_at = Utc::now().to_rfc3339();
@@ -279,6 +283,7 @@ fn build_journal(
         phase: CodingGitOperationPhase::Before,
         commit_sha: None,
         push_status: None,
+        push_error: None,
         remote_kind: None,
         review_request_id: None,
         created_at: now.clone(),

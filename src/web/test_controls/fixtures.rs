@@ -390,6 +390,7 @@ fn create_coding_role_run_fixture(
             manual_instructions: vec!["E2E fixture review request".to_string()],
             created_at: now.clone(),
             updated_at: now.clone(),
+            push_error: None,
         };
         store.save_review_request(&attempt, &review_request)?;
 

@@ -321,6 +321,7 @@ describe("CodingWorkspacePage reports and history", () => {
         push_status: "pushed",
         external_url: "https://git.example/review/1",
         manual_instructions: ["打开平台创建 PR", "选择 attempt 分支"],
+        push_error: null,
         created_at: "2026-05-23T00:00:00Z",
         updated_at: "2026-05-23T00:00:01Z",
       },
@@ -342,6 +343,53 @@ describe("CodingWorkspacePage reports and history", () => {
     );
     expect(tabs).toHaveTextContent("打开平台创建 PR");
     expect(tabs).toHaveTextContent("选择 attempt 分支");
+  });
+
+  it("renders push failure reason when push_status is failed", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "internal_pr_review",
+      activeTab: "git",
+      baseBranch: "main",
+      branchName: "aria/work-items/work_item_0001/attempt-1",
+      headCommit: "abc1234",
+      pushedRemote: "origin",
+      reviewRequest: {
+        id: "review_request_0001",
+        attempt_id: "coding_attempt_0001",
+        kind: "git_branch_only",
+        remote_kind: "generic_git",
+        remote: "origin",
+        base_branch: "main",
+        branch_name: "aria/work-items/work_item_0001/attempt-1",
+        commit_sha: "abc1234",
+        push_status: "failed",
+        external_url: null,
+        manual_instructions: [
+          "基于远端 origin/aria/work-items/work_item_0001/attempt-1 发起代码审查",
+        ],
+        push_error:
+          "推送到 origin/aria/work-items/work_item_0001/attempt-1 失败：remote rejected",
+        created_at: "2026-05-23T00:00:00Z",
+        updated_at: "2026-05-23T00:00:01Z",
+      },
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    const tabs = screen.getByTestId("coding-artifact-tabs");
+    expect(tabs).toHaveTextContent("failed");
+    expect(tabs).toHaveTextContent(
+      "推送到 origin/aria/work-items/work_item_0001/attempt-1 失败：remote rejected",
+    );
   });
 
   it("renders role run history and selects linked timeline nodes", async () => {

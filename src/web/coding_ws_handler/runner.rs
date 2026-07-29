@@ -665,7 +665,7 @@ pub(crate) async fn execute_start_coding_flow(
         }
 
         {
-            let review_request = engine
+            let _review_request = engine
                 .execute_review_request(&current, "origin", "feat: implement work item")
                 .await?;
             current =
@@ -681,15 +681,8 @@ pub(crate) async fn execute_start_coding_flow(
             {
                 return Ok(());
             }
-            if review_request.push_status != crate::product::coding_models::PushStatus::Pushed {
-                return emit_current_session_state(
-                    event_tx,
-                    coding_store,
-                    &current,
-                    engine.cancellation_token(),
-                )
-                .await;
-            }
+            // push 失败不再阻断主流程：review_request.push_status=Failed + push_error 已记录，
+            // 后续流转（WorkItem 直接完成 / Group 经 stage gate 进 GroupFinalReview）照常推进。
             if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItem {
                 current = engine
                     .complete_attempt_after_review_request(&current)

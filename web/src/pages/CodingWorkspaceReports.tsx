@@ -152,6 +152,14 @@ export function GitPanel() {
         <InfoRow label="push" value={request?.push_status ?? "-"} />
         <InfoRow label="request" value={request?.id ?? "-"} />
       </dl>
+      {request?.push_status === "failed" && request.push_error ? (
+        <p
+          data-testid="review-request-push-error"
+          className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 text-[var(--aria-ink-muted)]"
+        >
+          {request.push_error}
+        </p>
+      ) : null}
       {request?.external_url ? (
         <a
           href={request.external_url}
