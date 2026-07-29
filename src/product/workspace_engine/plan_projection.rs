@@ -66,19 +66,70 @@ impl std::fmt::Display for WorkspaceEngineError {
             Self::Projection(error) => write!(formatter, "projection compile failed: {error}"),
             Self::WorkItemPlanValidation(report) => write!(
                 formatter,
-                "canonical work item plan validation failed with {} finding(s)",
-                report.findings.len()
+                "canonical work item plan validation failed with {} finding(s): {}",
+                report.findings.len(),
+                format_contract_validation_findings(&report.findings)
             ),
             Self::ProjectionValidation(report) => write!(
                 formatter,
-                "work item projection validation failed with {} finding(s)",
-                report.findings.len()
+                "work item projection validation failed with {} finding(s): {}",
+                report.findings.len(),
+                format_projection_validation_findings(&report.findings)
             ),
             Self::InvalidInitialPlan(message) => formatter.write_str(message),
             Self::InvalidHumanPresentationTarget => formatter
                 .write_str("human presentation target must resolve exactly one projection bundle"),
         }
     }
+}
+
+/// 把契约校验 finding 渲染成可诊断的单行摘要。
+///
+/// 只报告数量会让失败原因不可诊断：调用方（compile transaction 的
+/// `failure_reason`、UI 错误提示）拿到的就只有一个数字。
+fn format_contract_validation_findings(
+    findings: &[crate::product::work_item_contract::ContractValidationFinding],
+) -> String {
+    if findings.is_empty() {
+        return "(no findings)".to_string();
+    }
+    findings
+        .iter()
+        .map(|finding| {
+            let reference = finding
+                .contract_ref
+                .as_deref()
+                .or(finding.capability_ref.as_deref())
+                .unwrap_or("-");
+            format!(
+                "[{:?}] {} ({}): {}",
+                finding.severity, finding.code, reference, finding.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// 把 projection 校验 finding 渲染成可诊断的单行摘要。
+fn format_projection_validation_findings(
+    findings: &[crate::product::work_item_projection::ProjectionValidationFinding],
+) -> String {
+    if findings.is_empty() {
+        return "(no findings)".to_string();
+    }
+    findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "[{}] {} ({}): {}",
+                finding.projection,
+                finding.code,
+                finding.contract_ref.as_deref().unwrap_or("-"),
+                finding.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 impl std::error::Error for WorkspaceEngineError {}

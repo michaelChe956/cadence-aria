@@ -249,6 +249,12 @@ async fn work_item_plan_compile_canonical_validation_failure_writes_no_revision_
     let error = engine.run_work_item_plan_compile().await.unwrap_err();
 
     assert!(error.contains("canonical work item plan validation failed"));
+    // 失败原因必须携带 finding 明细。只报数量会让 compile transaction 的
+    // failure_reason 与 UI 提示都无法诊断——用户只能看到「N 条 finding」。
+    assert!(
+        error.contains("required_capability_missing") || error.contains("missing_capability"),
+        "validation failure must carry finding details, not just a count: {error}"
+    );
     assert!(matches!(
         engine.revision_store().get_plan_lineage(
             "project_0001",
