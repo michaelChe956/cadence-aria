@@ -18,7 +18,15 @@ pub(crate) fn summarize_push_error(
         )
     } else {
         let trimmed = if stderr.len() > MAX_LEN {
-            format!("{}…", &stderr[..MAX_LEN])
+            // 按 char boundary 截断：直接 &stderr[..MAX_LEN] 在多字节 UTF-8（本地化 git
+            // 报错、含 unicode 的文件名/分支名）上会切到字符中间而 panic，而本函数正落在
+            // push 失败的容错路径里，panic 会以崩溃方式重新引入失败。回退到 ≤MAX_LEN 的
+            // 最大字符边界。
+            let mut boundary = MAX_LEN;
+            while !stderr.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            format!("{}…", &stderr[..boundary])
         } else {
             stderr.to_string()
         };
@@ -753,5 +761,24 @@ impl CodingWorkspaceEngine {
             })
             .await;
         Ok(request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarize_push_error_handles_multibyte_stderr_without_panic() {
+        // 多字节 UTF-8 stderr：字节长度 >500 且第 500 字节落在字符中间。
+        // 旧实现 &stderr[..MAX_LEN] 会 panic（byte index not a char boundary），
+        // 而本函数正落在 push 失败的容错路径里，panic 会重新引入崩溃。
+        let stderr = "推送失败原因".repeat(100);
+        let summary =
+            summarize_push_error("origin", "aria/issues/issue_0001", Some(&stderr)).unwrap();
+        assert!(summary.contains("origin/aria/issues/issue_0001"));
+        assert!(summary.contains('…'));
+        // 已截断，不应含完整原串
+        assert!(!summary.contains(&stderr));
     }
 }
