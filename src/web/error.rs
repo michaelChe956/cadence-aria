@@ -103,7 +103,8 @@ impl IntoResponse for ApiError {
             "issue_worktree_active"
             | "repository_already_registered"
             | "repository_initialization_in_progress"
-            | "shared_worktree_dirty_manual_gate" => StatusCode::CONFLICT,
+            | "shared_worktree_dirty_manual_gate"
+            | "coding_workspace_exists" => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()

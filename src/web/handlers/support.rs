@@ -344,7 +344,6 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
 }
 
 /// 当 work item group 存在 coding workspace 时拒绝删除，提示先删除 coding workspace。
-#[allow(dead_code)] // 由 Task 3 起的 deletion.rs 删除门禁消费
 pub(crate) fn coding_workspace_exists_error(plan_id: &str, attempt_id: &str) -> ApiError {
     ApiError::runtime(
         "coding_workspace_exists",
