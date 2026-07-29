@@ -27,6 +27,7 @@ mod paths;
 mod plan;
 mod presentation;
 mod projection;
+mod purge;
 mod repair;
 mod work_item;
 

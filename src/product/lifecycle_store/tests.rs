@@ -354,3 +354,40 @@ fn work_item_completion_commit_is_persisted_and_readable() {
         "完成 commit 必须持久化并可读"
     );
 }
+
+#[test]
+fn delete_issue_shared_worktree_removes_json_and_lock() {
+    let (tmp, store) = setup();
+    let root = tmp
+        .path()
+        .join(".aria")
+        .join("projects")
+        .join(PROJECT_ID)
+        .join("issues")
+        .join(ISSUE_ID);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("issue-shared-worktree.json"), "{}").unwrap();
+    std::fs::write(root.join(".issue-shared-worktree.json.lock"), "{}").unwrap();
+
+    store
+        .delete_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+        .unwrap();
+
+    assert!(
+        !root.join("issue-shared-worktree.json").exists(),
+        "shared-worktree json 应被删除"
+    );
+    assert!(
+        !root.join(".issue-shared-worktree.json.lock").exists(),
+        "shared-worktree lock 应被删除"
+    );
+}
+
+#[test]
+fn delete_issue_shared_worktree_succeeds_when_absent() {
+    let (_tmp, store) = setup();
+    // 不播种任何产物；NotFound 视为成功
+    store
+        .delete_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+        .unwrap();
+}

@@ -4,7 +4,9 @@ use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{IssueSharedWorktree, IssueSharedWorktreeStatus};
 
-use super::{LifecycleStore, UpsertIssueSharedWorktreeInput, path_is_regular_file};
+use super::{
+    LifecycleStore, UpsertIssueSharedWorktreeInput, path_is_regular_file, remove_file_if_exists,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueWorktreeLockLease {
@@ -56,6 +58,22 @@ impl LifecycleStore {
             write_json(&path, &record)?;
             Ok(record)
         })
+    }
+
+    /// 删除 issue 级共享 worktree 的 json 与 lock 文件。
+    ///
+    /// lock 文件名与 `coding_attempt_store::locking::lock_path_for` 的命名约定一致
+    /// （`.` + json 文件名 + `.lock`）。NotFound 视为成功：清理路径不应要求被清理对象预先存在。
+    pub fn delete_issue_shared_worktree(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let json_path = self.issue_shared_worktree_path(project_id, issue_id);
+        let lock_path = json_path.with_file_name(".issue-shared-worktree.json.lock");
+        remove_file_if_exists(&json_path)?;
+        remove_file_if_exists(&lock_path)?;
+        Ok(())
     }
 
     pub fn get_issue_shared_worktree(
