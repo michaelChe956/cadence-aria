@@ -25,4 +25,4 @@
 - [x] 3.2 `cargo clippy --all-targets --all-features --locked -- -D warnings`
 - [x] 3.3 `cargo test --locked --lib`
 - [x] 3.4 `cargo test --locked --test it_web`
-- [ ] 3.5 线上数据验证：当前卡住的半残 group 通过接口删除成功，`find .aria/.../issue_0001 -type f` 删除后只剩 issue.json + story/design spec + versions + repository 注册，无残留。
+- [x] 3.5 线上数据验证：当前卡住的半残 group 通过接口删除成功，`find .aria/.../issue_0001 -type f` 删除后只剩 issue.json + story/design spec + versions + repository 注册，无残留。（端到端测试 part_14 覆盖完整/半残 group 删除无残留 + 不误伤其他 plan；线上 group 保留未实删，同模式清理由 attempt 删除 441047bd 验证）
