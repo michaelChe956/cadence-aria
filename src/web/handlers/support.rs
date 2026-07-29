@@ -322,12 +322,35 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ProductStoreError::PathEscape(_) => {
             ApiError::validation("invalid_project_id", "invalid project id")
         }
-        _ => ApiError::runtime(
-            "product_store_error",
-            "product store operation failed",
-            json!({}),
-        ),
+        other => {
+            let details = match &other {
+                ProductStoreError::NotFound { kind, id }
+                | ProductStoreError::Ambiguous { kind, id }
+                | ProductStoreError::Conflict { kind, id }
+                | ProductStoreError::IdentityMismatch { kind, id } => {
+                    json!({ "kind": kind, "id": id })
+                }
+                ProductStoreError::Io(message)
+                | ProductStoreError::Json(message)
+                | ProductStoreError::PathEscape(message) => json!({ "message": message }),
+            };
+            ApiError::runtime(
+                "product_store_error",
+                "product store operation failed",
+                details,
+            )
+        }
     }
+}
+
+/// 当 work item group 存在 coding workspace 时拒绝删除，提示先删除 coding workspace。
+#[allow(dead_code)] // 由 Task 3 起的 deletion.rs 删除门禁消费
+pub(crate) fn coding_workspace_exists_error(plan_id: &str, attempt_id: &str) -> ApiError {
+    ApiError::runtime(
+        "coding_workspace_exists",
+        "存在 coding workspace，请先删除 coding workspace 再删除 work item group",
+        json!({ "plan_id": plan_id, "attempt_id": attempt_id }),
+    )
 }
 
 pub(crate) fn node_detail_store_api_error(error: ProductStoreError) -> ApiError {
@@ -478,5 +501,43 @@ mod tests {
         assert_eq!(error.code, "coding_attempt_active");
         assert_eq!(error.details["attempt_id"], "coding_attempt_winner");
         assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn product_store_api_error_fallback_includes_kind_and_id_for_identity_mismatch() {
+        // IdentityMismatch 只有 kind=="coding_attempt" 被精确映射；其他 kind 命中兜底，
+        // 兜底必须把 kind/id 带进 details 以便定位失败对象。
+        let error = product_store_api_error(ProductStoreError::IdentityMismatch {
+            kind: "runtime_binding_missing",
+            id: "plan_1".to_string(),
+        });
+
+        assert_eq!(error.code, "product_store_error");
+        assert_eq!(error.message, "product store operation failed");
+        assert_eq!(error.details["kind"], "runtime_binding_missing");
+        assert_eq!(error.details["id"], "plan_1");
+    }
+
+    #[test]
+    fn product_store_api_error_fallback_includes_message_for_io() {
+        // 未被精确映射的 Io/Json/PathEscape 兜底应带 message 进 details。
+        let error =
+            product_store_api_error(ProductStoreError::Io("remove tmp: broken pipe".to_string()));
+
+        assert_eq!(error.code, "product_store_error");
+        assert_eq!(error.details["message"], "remove tmp: broken pipe");
+    }
+
+    #[test]
+    fn coding_workspace_exists_error_returns_stable_contract() {
+        let error = coding_workspace_exists_error("plan_1", "attempt_1");
+
+        assert_eq!(error.code, "coding_workspace_exists");
+        assert_eq!(
+            error.message,
+            "存在 coding workspace，请先删除 coding workspace 再删除 work item group"
+        );
+        assert_eq!(error.details["plan_id"], "plan_1");
+        assert_eq!(error.details["attempt_id"], "attempt_1");
     }
 }
