@@ -1,9 +1,7 @@
-# non-interrupt-repository-bootstrap Specification
+# Delta: non-interrupt-repository-bootstrap
 
-## Purpose
+## MODIFIED Requirements
 
-以无中断模式（`--no-interrupt`）执行 Cadence-skills 的四个 Claude Code 初始化命令，禁止初始化流程等待人工输入。
-## Requirements
 ### Requirement: 无中断 Claude Code 初始化命令
 系统 SHALL 使用 Claude Code 按固定顺序执行四个独立初始化命令，并为每条命令传递完整的 `--no-interrupt` token：`/pre-check --no-interrupt 用大陆镜像`、`/rule-config --no-interrupt`、`/mcp-configuration --no-interrupt`、`/project-rules-examples --no-interrupt`。`pre_check` 命令 SHALL 附带 `用大陆镜像` 参数，引导命令执行期间优先使用大陆镜像资源。第六步 `git_finalize` 不是 Claude Code 命令，SHALL NOT 通过 Provider 执行。
 
@@ -26,4 +24,3 @@
 #### Scenario: 最终摘要保留无中断命令
 - **WHEN** 四个 Claude Code 初始化命令全部完成
 - **THEN** 最终初始化摘要 SHALL 按实际执行顺序列出四条命令，其中 `pre_check` 条目为 `/pre-check --no-interrupt 用大陆镜像`
-
