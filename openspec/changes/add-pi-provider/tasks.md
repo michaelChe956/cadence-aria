@@ -6,26 +6,25 @@
 
 ## 2. Pi 流式会话适配
 
-- [ ] 2.1 实现 Pi RPC 会话适配，覆盖流式输出、会话标识、恢复、取消和错误映射。
-- [ ] 2.2 实现 Aria 授权扩展，将工具调用转换为 `Auto` 放行或 `Supervised` 授权请求（权限模式经环境变量注入）。
+- [ ] 2.1 实现 Pi RPC 会话适配，覆盖流式输出、会话标识、恢复、取消和错误映射（Auto-only，无授权扩展）。
 
 ## 3. Workspace 角色配置与执行
 
 - [ ] 3.1 为普通 Workspace 的 Author 与 Reviewer 持久化独立权限模式，并将默认值设为 `Auto`。
-- [ ] 3.2 让普通 Workspace 的 Author、Reviewer 与返修运行支持 Pi 与授权桥接（失败直接报错，不做运行期降级）。
+- [ ] 3.2 让普通 Workspace 的 Author、Reviewer 与返修运行支持 Pi（Auto 模式；失败直接报错，不做运行期降级）。
 
 ## 4. Coding Workspace 角色配置与执行
 
 - [ ] 4.1 将 Coding Workspace 各角色的新建默认权限模式改为 `Auto`，保留独立的 `Supervised` 配置。
-- [ ] 4.2 让 Coder、Code Reviewer、Internal Reviewer 支持 Pi 与授权桥接（失败直接报错，不做运行期降级）。
+- [ ] 4.2 让 Coder、Code Reviewer、Internal Reviewer 支持 Pi（Auto 模式；失败直接报错，不做运行期降级）。
 
 ## 5. 用户界面与运行可见性
 
-- [ ] 5.1 在普通 Workspace 与 Coding Workspace 的 Provider 配置中展示 Pi 和一致的 `Auto` / `Supervised` 控制。
+- [ ] 5.1 在普通 Workspace 与 Coding Workspace 的 Provider 配置中展示 Pi；Claude Code 与 Codex 提供一致的 `Auto` / `Supervised` 控制，Pi 仅显示 `Auto`。
 - [ ] 5.2 在运行事件与界面状态中呈现不可用原因与失败状态。
 
 ## 6. 回归验证
 
-- [ ] 6.1 为 Pi 健康检查、目录展示、会话协议、取消、恢复和两种授权模式补充后端测试。
+- [ ] 6.1 为 Pi 健康检查、目录展示、会话协议、取消、恢复和 Auto 运行补充后端测试。
 - [ ] 6.2 为 Story、Design、Work Item 三种 Workspace 入口（共享 `workspace_engine`）及 Coding 角色补充 Provider、权限，以及所选 Provider 启动或运行失败时直接报告且不切换 Provider 的回归测试。
 - [ ] 6.3 验证仓库初始化与 Task Runner 未被 Pi 扩张（含 Task Runner HTTP 入口、router、兼容性矩阵、节点契约拒绝 Pi 的回归断言），并执行相关前后端质量检查。

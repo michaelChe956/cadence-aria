@@ -36,27 +36,27 @@
 - **THEN** 系统终止该 Pi 会话
 - **AND THEN** Workspace 或 Coding Workspace 显示既有的已取消状态而不继续处理后续输出
 
-### Requirement: Provider 权限模式默认为 Auto 且可按角色监督
+### Requirement: Provider 权限模式默认为 Auto，Pi 仅支持 Auto
 
-普通 Workspace 的 Author 与 Reviewer、以及 Coding Workspace 的每个 Provider 角色 SHALL 默认使用 `Auto` 权限模式。`Auto` 模式 MUST 允许 Provider 直接执行其工具调用且保留运行事件。用户 SHALL 能为每个适用角色独立切换至 `Supervised`；在该模式下，Pi 的每次工具调用 MUST 等待用户允许或拒绝。
+普通 Workspace 的 Author 与 Reviewer、以及 Coding Workspace 的每个 Provider 角色 SHALL 默认使用 `Auto` 权限模式。`Auto` 模式 MUST 允许 Provider 直接执行其工具调用且保留运行事件。Claude Code 与 Codex 保留既有的 `Supervised` 逐工具确认能力，用户可为每个适用角色独立切换。Pi 因不提供逐工具批准机制，SHALL 仅以 `Auto` 模式运行，不向用户提供 Pi 的 `Supervised` 选项。
 
 #### Scenario: 默认 Auto 运行 Pi 工具调用
 
-- **WHEN** 用户未更改某角色的权限模式并启动 Pi 运行
+- **WHEN** 用户启动一个已选择 Pi 的角色运行
 - **THEN** 该角色以 `Auto` 模式执行
 - **AND THEN** Pi 工具调用不要求用户逐项确认
 
-#### Scenario: Supervised 模式等待用户决定
+#### Scenario: Pi 不提供 Supervised 选项
 
-- **WHEN** 用户将某个 Pi 角色切换为 `Supervised` 且 Pi 发起工具调用
-- **THEN** 系统向页面发送工具调用的授权请求
-- **AND THEN** Pi 在收到用户允许或拒绝前不执行该调用
+- **WHEN** 用户查看已选择 Pi 的角色的权限模式设置
+- **THEN** 系统不向该角色提供 `Supervised` 选项
+- **AND THEN** 该角色保持 `Auto` 模式
 
-#### Scenario: 用户拒绝受监督工具调用
+#### Scenario: Claude Code 与 Codex 保留 Supervised
 
-- **WHEN** 页面拒绝一个待处理的 Pi 工具调用
-- **THEN** 系统将拒绝结果返回给 Pi
-- **AND THEN** 系统记录该授权决定而不把该调用作为已执行处理
+- **WHEN** 用户为已选择 Claude Code 或 Codex 的角色切换权限模式
+- **THEN** 系统提供 `Auto` 与 `Supervised` 两种选项
+- **AND THEN** `Supervised` 模式下沿用该 Provider 既有的逐工具确认能力
 
 ### Requirement: 所选 Provider 的失败直接报告且不切换
 
