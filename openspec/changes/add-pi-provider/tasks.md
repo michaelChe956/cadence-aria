@@ -26,5 +26,5 @@
 ## 6. 回归验证
 
 - [ ] 6.1 为 Pi 健康检查、目录展示、会话协议、取消、恢复和两种授权模式补充后端测试。
-- [ ] 6.2 为 Story、Design、Work Item 三种 Workspace 入口（共享 `workspace_engine`）及 Coding 角色补充 Provider 与权限回归测试。
+- [ ] 6.2 为 Story、Design、Work Item 三种 Workspace 入口（共享 `workspace_engine`）及 Coding 角色补充 Provider、权限，以及所选 Provider 启动或运行失败时直接报告且不切换 Provider 的回归测试。
 - [ ] 6.3 验证仓库初始化与 Task Runner 未被 Pi 扩张，并执行相关前后端质量检查。

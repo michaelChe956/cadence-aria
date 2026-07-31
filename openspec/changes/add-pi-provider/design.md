@@ -18,7 +18,7 @@
 - 不改动 Task Runner 的 `ProviderType`、节点契约、CLI/API、Provider router 或同步适配器。
 - 不改动添加代码库、仓库初始化或其 Claude Code 专用 Provider 选择。
 - 不把 Pi 配置、扩展或用户认证信息写入全局 Pi 配置或版本库。
-- 不在已经执行工具或输出部分结果后自动重放到其他 Provider。
+- 不在 Provider 启动或运行失败后自动重放或切换到其他 Provider。
 
 ## Decisions
 

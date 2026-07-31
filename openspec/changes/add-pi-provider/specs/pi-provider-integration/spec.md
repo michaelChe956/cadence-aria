@@ -1,6 +1,6 @@
 ## Purpose
 
-让日常 Workspace 与 Coding Workspace 将 Pi 作为与 Claude Code、Codex 并列的真实 Provider 使用，同时保留一致的可用性、授权、失败恢复与审计体验。
+让日常 Workspace 与 Coding Workspace 将 Pi 作为与 Claude Code、Codex 并列的真实 Provider 使用，同时保留一致的可用性、授权、失败报告与审计体验。
 
 ## ADDED Requirements
 
@@ -57,6 +57,22 @@
 - **WHEN** 页面拒绝一个待处理的 Pi 工具调用
 - **THEN** 系统将拒绝结果返回给 Pi
 - **AND THEN** 系统记录该授权决定而不把该调用作为已执行处理
+
+### Requirement: 所选 Provider 的失败直接报告且不切换
+
+当用户所选的真实 Provider（包括 Pi）在启动或运行期间失败时，系统 SHALL 将该失败及其原因报告为当前运行的失败状态。系统 MUST NOT 在运行期自动切换、重放或重试到其他 Provider。
+
+#### Scenario: 所选 Provider 启动失败
+
+- **WHEN** 用户所选 Provider 在启动前健康检查、命令启动、认证或连接期间失败
+- **THEN** 系统报告当前运行失败及失败原因
+- **AND THEN** 系统不自动选择或启动其他 Provider
+
+#### Scenario: 所选 Provider 运行期间失败
+
+- **WHEN** 用户所选 Provider 已开始运行后报告错误或异常终止
+- **THEN** 系统报告当前运行失败及失败原因
+- **AND THEN** 系统不自动重放该运行或切换到其他 Provider
 
 ### Requirement: Pi 不扩大仓库初始化和 Task Runner 的 Provider 范围
 

@@ -1,6 +1,6 @@
 ## Why
 
-产品当前只支持 Claude Code 与 Codex 两个真实 Provider，无法让用户在日常 Workspace 与 Coding Workspace 中使用本机已安装的 Pi。接入 Pi 能提供第三个可用执行端，并在其中一个 Provider 不可用时保持关键工作流可继续执行。
+产品当前只支持 Claude Code 与 Codex 两个真实 Provider，无法让用户在日常 Workspace 与 Coding Workspace 中使用本机已安装的 Pi。接入 Pi 能提供第三个可供用户选择的执行端，使用户可在日常 Workspace 与 Coding Workspace 中使用本机已安装的 Pi。
 
 ## What Changes
 
