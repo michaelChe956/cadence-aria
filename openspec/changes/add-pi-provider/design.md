@@ -43,11 +43,15 @@ Pi 的 `--approve` 只用于项目资源/配置的信任，不能替代工具授
 
 替代方案是仅调用 Pi 的非 RPC JSON 输出模式。它可较快产生文本，却不能在工具执行点等待网页授权或可靠地处理会话控制，不满足已确认的监督交互。
 
+实施前提与 spike：本方案以 Pi RPC 的会话粒度、会话级临时扩展加载、扩展 UI request/response 往返为技术地基。实施首个任务前 SHALL 以一次小 spike 验证这三项能力确实可用；若任一项不可用，则需在本变更内重新决策（例如重新评估已排除的 JSON 输出方案或调整授权交互），不得在未验证前提的情况下推进实现。
+
 ### 3. 按角色持久化权限模式并统一默认 Auto
 
 普通 Workspace 在 session、创建输入、更新消息和前端快照中新增 Author 与 Reviewer 的权限模式；缺失字段以 `Auto` 反序列化，保证已有会话可继续读取。Coding Workspace 保留既有逐角色配置模型，只将各角色新建默认值改为 `Auto`。
 
 两个页面都使用 `Auto` / `Supervised` 的一致文案和既有授权弹窗。权限模式变更只影响后续启动的 Provider 运行；活动会话保持启动时的模式，避免运行中改变安全语义。
+
+类型边界：保留普通 Workspace 使用的 `streaming_provider::ProviderPermissionMode` 与 Coding Workspace 使用的 `CodingProviderPermissionMode` 两套独立类型，各自将默认值改为 `Auto`，不合并为单一 enum，以维持最小影响面并避免跨域序列化回归。
 
 ### 4. 由运行编排层执行安全降级
 
@@ -70,6 +74,7 @@ Pi 健康检查通过其版本命令和既有 Provider 健康状态接口暴露�
 - [默认 Auto 提升误操作风险] → 继续提供每角色 `Supervised`，并保留工具事件与授权决定的审计记录。
 - [降级误判导致重复副作用] → 以首个输出或工具活动为硬边界；越过边界即失败而非自动重试。
 - [已有持久化会话缺少权限模式字段] → 读取时默认 `Auto`，写入时持久化显式值，并用回归测试覆盖旧记录。
+- [两套权限模式类型并存] → 不合并 `ProviderPermissionMode` 与 `CodingProviderPermissionMode`，避免跨域序列化回归风险。
 
 ## Migration Plan
 
