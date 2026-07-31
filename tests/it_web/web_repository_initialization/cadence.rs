@@ -14,6 +14,12 @@ impl BoundedCommandRunner for LocalOriginRunner {
         self.calls.lock().expect("calls").push(request.argv.clone());
         if request.argv.first().map(String::as_str) == Some("clone") {
             request.argv[1] = self.origin.to_string_lossy().into_owned();
+        } else if request.argv.len() == 4
+            && request.argv[0] == "remote"
+            && request.argv[1] == "set-url"
+            && request.argv[2] == "origin"
+        {
+            request.argv[3] = self.origin.to_string_lossy().into_owned();
         }
         TokioBoundedCommandRunner.run(request).await
     }
