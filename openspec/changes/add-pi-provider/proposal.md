@@ -9,7 +9,7 @@
 - 所有上述角色默认使用 `Auto` 权限模式；用户可分别切换为 `Supervised`，在页面上确认或拒绝单次工具调用。
 - Provider 启动或运行失败时保持现有行为：直接报告失败，不在运行期自动切换到其他 Provider。
 - 保持添加代码库与仓库初始化仅使用 Claude Code，不展示或调用 Pi。
-- 保持 Task Runner、其 CLI/API、专用协议与旧的 Fake Provider Workspace Runner 不变；Pi 不在本次变更中接入这些路径。
+- 保持 Task Runner、其 CLI/API、专用协议与旧的 Fake Provider Workspace Runner 的可调度 Provider 范围和运行行为不变；为满足流式链路的共享类型约束，`ProviderType` 会增加 `Pi` 变体，但 Pi 在这些路径中被显式拒绝且不被调度。
 
 ## Capabilities
 

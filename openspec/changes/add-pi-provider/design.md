@@ -1,6 +1,6 @@
 ## Context
 
-现有真实 Provider 分为两条架构：普通 Workspace 与 Coding Workspace 使用 `ProviderName`、Provider Registry 和 WebSocket 流式会话；Task Runner 使用独立的同步 `ProviderType`、静态节点契约和 CLI/API 路由。本变更只扩展前者。Pi 已提供 CLI、RPC 模式、会话恢复能力和扩展 UI 请求/响应机制，但没有内建的逐工具批准命令。
+现有真实 Provider 分为两条架构：普通 Workspace 与 Coding Workspace 使用 `ProviderName`、Provider Registry 和 WebSocket 流式会话；Task Runner 使用独立的同步 `ProviderType`、静态节点契约和 CLI/API 路由。本变更只扩展前者的 Pi 执行能力；由于 `ProviderType` 同时被流式域的 `StreamingProviderInput` 使用，会增加 `ProviderType::Pi` 类型变体，但后者的调度、路由、兼容性和节点契约仍显式拒绝 Pi。Pi 已提供 CLI、RPC 模式、会话恢复能力和扩展 UI 请求/响应机制，但没有内建的逐工具批准命令。
 
 普通 Workspace 已有授权请求事件和页面弹窗，但没有持久化的角色权限模式，且多数运行点固定为 `Supervised`。Coding Workspace 已有每角色权限模式，默认值为 `Supervised`。Provider 健康检查、前端 Provider 目录和流式 Registry 目前只枚举 Claude Code 与 Codex。
 
