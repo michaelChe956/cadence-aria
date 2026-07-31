@@ -15,7 +15,7 @@
 
 **Non-Goals:**
 
-- 不改动 Task Runner 的节点契约、CLI/API、Provider router 或同步适配器的运行路径；Pi 不被 Task Runner 调度。
+- 不扩展 Task Runner 的节点契约、CLI/API、Provider router 或同步适配器的可调度 Provider 范围和运行行为；为支持共享 `ProviderType::Pi` 所需的显式拒绝分支除外。Pi 不被 Task Runner 调度、路由或执行。
 - 不改动添加代码库、仓库初始化或其 Claude Code 专用 Provider 选择。
 - 不把 Pi 配置、扩展或用户认证信息写入全局 Pi 配置或版本库。
 - 不在 Provider 启动或运行失败后自动重放或切换到其他 Provider。
