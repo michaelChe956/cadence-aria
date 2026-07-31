@@ -26,4 +26,4 @@
 - Provider 名称与前后端 API contract、Provider 健康检查及可选 Provider 目录。
 - Workspace 与 Coding Workspace 的 WebSocket 流式 Provider Registry、会话控制与现有授权桥接（Pi 走 Auto，不新增授权交互）。
 - 普通 Workspace 与 Coding Workspace 的 Provider 配置持久化、默认权限模式和界面。
-- 新增 Pi CLI/RPC 适配及按会话加载的 Aria 扩展；不引入全局 Pi 配置修改。
+- 新增 Pi CLI/RPC 适配；不引入 Aria 授权扩展，也不修改全局 Pi 配置或版本库。

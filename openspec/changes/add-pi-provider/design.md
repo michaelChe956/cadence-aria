@@ -17,7 +17,7 @@
 
 - 不扩展 Task Runner 的节点契约、CLI/API、Provider router 或同步适配器的可调度 Provider 范围和运行行为；为支持共享 `ProviderType::Pi` 所需的显式拒绝分支除外。Pi 不被 Task Runner 调度、路由或执行。
 - 不改动添加代码库、仓库初始化或其 Claude Code 专用 Provider 选择。
-- 不把 Pi 配置、扩展或用户认证信息写入全局 Pi 配置或版本库。
+- 不把 Pi 配置或用户认证信息写入全局 Pi 配置或版本库。
 - 不在 Provider 启动或运行失败后自动重放或切换到其他 Provider。
 
 ## Decisions
@@ -60,7 +60,7 @@ Pi 健康检查通过其版本命令和既有 Provider 健康状态接口暴露�
 
 ## Risks / Trade-offs
 
-- [Pi RPC 事件字段或扩展协议随 CLI 版本变化] → 将协议解析、扩展载荷和版本检测封装在 Pi 适配器中，并以录制 RPC fixture 覆盖关键事件。
+- [Pi RPC 事件字段或 CLI 协议随版本变化] → 将协议解析和版本检测封装在 Pi 适配器中，并以录制 RPC fixture 覆盖关键事件。
 - [默认 Auto 提升误操作风险] → Claude Code 与 Codex 继续提供每角色 `Supervised`；Pi 仅 Auto，但保留工具事件与运行的审计记录。
 - [已有持久化会话缺少权限模式字段] → 读取时默认 `Auto`，写入时持久化显式值，并用回归测试覆盖旧记录。
 - [两套权限模式类型并存] → 不合并 `ProviderPermissionMode` 与 `CodingProviderPermissionMode`，避免跨域序列化回归风险。
