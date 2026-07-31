@@ -84,8 +84,10 @@
 - **THEN** Provider 选项与初始化执行不包含 Pi
 - **AND THEN** 初始化继续使用 Claude Code
 
-#### Scenario: Task Runner 保持冻结
+#### Scenario: Task Runner 拒绝调度 Pi
 
-- **WHEN** 用户调用现有 Task Runner CLI 或 HTTP API
-- **THEN** Task Runner 不将 Pi 作为可选 Provider
+- **WHEN** 用户调用现有 Task Runner CLI 或 HTTP API 并尝试使用 Pi
+- **THEN** Task Runner 拒绝将 Pi 作为可选或可调度的 Provider
 - **AND THEN** 其既有 Claude Code、Codex 或 Fake 行为保持不变
+
+> 注：`ProviderType` 会增加 `Pi` 变体以维持流式域 `StreamingProviderInput` 的类型一致性，但 Task Runner 的调度入口、Provider router、兼容性矩阵与节点契约不匹配、不路由 Pi。

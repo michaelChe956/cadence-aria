@@ -1,7 +1,8 @@
 ## 1. Provider 目录与可用性
 
-- [ ] 1.1 将 Pi 纳入活跃流式 Provider 的名称、健康检查、状态接口和前端选择目录。
-- [ ] 1.2 保持仓库初始化的 Claude Code 专用选项与执行路径不受 Pi 影响。
+- [ ] 1.1 将 Pi 纳入活跃流式 Provider 的名称（`ProviderName`）、健康检查、状态接口和前端选择目录。
+- [ ] 1.2 给 `ProviderType` 加 `Pi` 变体并保证 `provider_type_for_name` 可映射；Task Runner 调度入口、router、兼容性矩阵与节点契约显式拒绝 Pi，不改变 Task Runner 实际行为。
+- [ ] 1.3 保持仓库初始化的 Claude Code 专用选项与执行路径不受 Pi 影响。
 
 ## 2. Pi 流式会话适配
 
@@ -27,4 +28,4 @@
 
 - [ ] 6.1 为 Pi 健康检查、目录展示、会话协议、取消、恢复和两种授权模式补充后端测试。
 - [ ] 6.2 为 Story、Design、Work Item 三种 Workspace 入口（共享 `workspace_engine`）及 Coding 角色补充 Provider、权限，以及所选 Provider 启动或运行失败时直接报告且不切换 Provider 的回归测试。
-- [ ] 6.3 验证仓库初始化与 Task Runner 未被 Pi 扩张，并执行相关前后端质量检查。
+- [ ] 6.3 验证仓库初始化与 Task Runner 未被 Pi 扩张（含 Task Runner 拒绝调度 Pi 的回归），并执行相关前后端质量检查。

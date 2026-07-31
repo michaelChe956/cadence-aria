@@ -15,20 +15,22 @@
 
 **Non-Goals:**
 
-- 不改动 Task Runner 的 `ProviderType`、节点契约、CLI/API、Provider router 或同步适配器。
+- 不改动 Task Runner 的节点契约、CLI/API、Provider router 或同步适配器的运行路径；Pi 不被 Task Runner 调度。
 - 不改动添加代码库、仓库初始化或其 Claude Code 专用 Provider 选择。
 - 不把 Pi 配置、扩展或用户认证信息写入全局 Pi 配置或版本库。
 - 不在 Provider 启动或运行失败后自动重放或切换到其他 Provider。
 
 ## Decisions
 
-### 1. Pi 只加入流式 Provider 域
+### 1. Pi 加入流式 Provider 域，`ProviderType` 加变体但 Task Runner 拒绝调度
 
-在产品层将 `Pi` 增加到 `ProviderName` 及其健康、前端 wire value 和 Provider Registry。Task Runner 专用 `ProviderType` 保持不变，因此新增 Pi 不会扩张或修改 Task Runner 的任何运行路径。
+在产品层将 `Pi` 增加到 `ProviderName` 及其健康、前端 wire value 和 Provider Registry。同时**给共享的 `ProviderType` 加 `Pi` 变体**，原因见下。
 
-这是把当前真实用户工作流与待清理批处理工作流隔离的最小边界。把 Pi 同时加入两种 Provider 类型会迫使 Task Runner router、兼容性矩阵和静态节点契约定义 Pi 的执行行为，违反本次已确认的范围。
+背景：`ProviderType` 名义上属 Task Runner 域，但代码中它同时是流式域 `StreamingProviderInput.provider_type` 的类型，且普通 Workspace 与 Coding Workspace 运行链路通过 `provider_type_for_name(ProviderName) -> ProviderType` 的全匹配 match 构造它。`ProviderName` 加 `Pi` 后该 match 必须覆盖 `Pi` 分支才能编译，因此 `ProviderType` 也必须有 `Pi` 变体。不加变体的方案在本仓库结构下不可行。
 
-替代方案是在共享 Provider 类型中加入 Pi 并让 Task Runner 明确拒绝它；该方案仍会改变冻结模块的公共契约和匹配分支，故不采用。
+为守住「Task Runner 运行路径不变」的边界，`ProviderType::Pi` 只作为类型变体存在：Task Runner 的调度入口、Provider router、兼容性矩阵与静态节点契约**显式拒绝** `Pi`（不匹配、不路由、返回既有“不支持/不可用”错误），使 Task Runner 的实际行为与加变体前完全一致。`adapter_compatibility` 兼容性矩阵不为 Pi 增加条目。
+
+这是保持流式域可扩展而冻结 Task Runner 行为的最小代价。被否决的替代方案是把 `StreamingProviderInput.provider_type` 改为 `ProviderName` 以解耦流式域——该改动会波及流式域 20+ 处对 `provider_type` 的读取，影响面过大，不采用。
 
 ### 2. 使用 Pi RPC 会话和 Aria 临时扩展实现流式授权
 
