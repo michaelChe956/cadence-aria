@@ -32,9 +32,11 @@
 
 这是保持流式域可扩展而冻结 Task Runner 行为的最小代价。被否决的替代方案是把 `StreamingProviderInput.provider_type` 改为 `ProviderName` 以解耦流式域——该改动会波及流式域 20+ 处对 `provider_type` 的读取，影响面过大，不采用。
 
-### 2. 使用 Pi RPC 会话和 Aria 临时扩展实现流式授权
+### 2. 使用 Pi RPC 会话和 Aria 授权扩展实现流式授权
 
-新增独立的 Pi 流式适配器。每个运行启动 Pi RPC 会话，并临时加载仅属于该会话的 Aria 扩展；适配器把 Pi 文本、工具、完成、错误和会话事件映射为既有流式 Provider 事件，把取消、授权响应和恢复请求映射回 Pi RPC。
+新增独立的 Pi 流式适配器。每个运行启动一个独立的 `pi --mode rpc` 子进程（JSONL over stdin/stdout），加载 Aria 自带的授权扩展；适配器把 Pi 文本、工具、完成、错误和会话事件映射为既有流式 Provider 事件，把取消、授权响应和恢复请求映射回 Pi RPC。
+
+授权扩展为 Aria 随附的固定文件（`aria-gate.ts`），不每次运行临时生成：扩展逻辑与具体运行无关，权限模式通过进程环境变量（`ARIA_PERMISSION_MODE=auto|supervised`）按运行注入，不写全局 Pi 配置或项目版本库。会话隔离由独立子进程、`--session-id` 与各自工作目录保证，不依赖临时目录。
 
 扩展是权限策略的执行点：
 
@@ -45,7 +47,7 @@ Pi 的 `--approve` 只用于项目资源/配置的信任，不能替代工具授
 
 替代方案是仅调用 Pi 的非 RPC JSON 输出模式。它可较快产生文本，却不能在工具执行点等待网页授权或可靠地处理会话控制，不满足已确认的监督交互。
 
-实施前提与 spike：本方案以 Pi RPC 的会话粒度、会话级临时扩展加载、扩展 UI request/response 往返为技术地基。实施首个任务前 SHALL 以一次小 spike 验证这三项能力确实可用；若任一项不可用，则需在本变更内重新决策（例如重新评估已排除的 JSON 输出方案或调整授权交互），不得在未验证前提的情况下推进实现。
+实施前提与 spike：本方案以 Pi RPC 的会话粒度、加载 Aria 授权扩展、扩展 UI request/response 往返为技术地基。实施首个任务前 SHALL 以一次小 spike 验证这三项能力确实可用；若任一项不可用，则需在本变更内重新决策（例如重新评估已排除的 JSON 输出方案或调整授权交互），不得在未验证前提的情况下推进实现。
 
 ### 3. 按角色持久化权限模式并统一默认 Auto
 
@@ -64,10 +66,11 @@ Pi 健康检查通过其版本命令和既有 Provider 健康状态接口暴露�
 ## Risks / Trade-offs
 
 - [Pi RPC 事件字段或扩展协议随 CLI 版本变化] → 将协议解析、扩展载荷和版本检测封装在 Pi 适配器中，并以录制 RPC fixture 覆盖关键事件。
-- [会话临时扩展残留或并发运行串扰] → 每次运行使用唯一临时目录与会话标识，运行结束、取消或失败时清理。
 - [默认 Auto 提升误操作风险] → 继续提供每角色 `Supervised`，并保留工具事件与授权决定的审计记录。
 - [已有持久化会话缺少权限模式字段] → 读取时默认 `Auto`，写入时持久化显式值，并用回归测试覆盖旧记录。
 - [两套权限模式类型并存] → 不合并 `ProviderPermissionMode` 与 `CodingProviderPermissionMode`，避免跨域序列化回归风险。
+
+**fail-fast 边界澄清：** “不切换、重放或重试”指禁止跨到其他 Provider，不禁止同一 Provider 的内部重试（如 Claude/Codex 现有的 artifact 补漏重试、resume-stall 新会话重试）。Pi 不实现同 Provider 内部重试：启动或运行失败即进入终态失败。
 
 ## Migration Plan
 
