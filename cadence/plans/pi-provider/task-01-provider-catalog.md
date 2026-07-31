@@ -20,6 +20,7 @@
 - Modify: `src/cross_cutting/provider_registry.rs:47`（`available_names()` 加 `ProviderName::Pi`）
 - Modify: `src/web/handlers/providers.rs`（状态 API 数组 + `provider_dto()` 加 Pi）
 - Modify: `src/web/handlers/dto.rs:742`（provider wire 文本化加 Pi）
+- Modify: `src/web/provider_availability.rs:173-182`（`parse_provider_name` 接受 `"pi"`）与 `:157-165`（`provider_name_key` 返回 `"pi"`）
 - Modify: `web/src/api/types/provider.ts:1`（`RealProviderName` 加 `"pi"`）、`web/src/state/provider-options.ts`（catalog 加 Pi）
 - Test: 上述各文件内联 `#[cfg(test)]` + `web/src/state/provider-options.test.ts`
 
@@ -64,7 +65,7 @@ pub enum ProviderType { ClaudeCode, Codex, Pi, Fake }
 - [ ] Run: `cargo test -p cadence-aria provider_name_pi_serializes_to_snake_case`
 - Expected: PASS
 
-## Step 3: 写失败测试 —— `ProviderType::Pi` 序列化
+## Step 3: 补充回归测试 -- `ProviderType::Pi` 序列化（`Pi` 已在 Step 2 加入，此为锁定回归）
 
 `src/protocol/contracts.rs` 的 `#[cfg(test)]` 加：
 
@@ -96,7 +97,7 @@ rg -n "ProviderType::(ClaudeCode|Codex|Fake)" src/ -g '*.rs' | grep -v test
 | `work_item_projection/render.rs:183` `renderer_for(provider)` | 映射到 Claude 同款 renderer | `ProviderName::Pi => renderer_for_claude(),` |
 | `provider_registry.rs:47` `available_names()` | 纳入 | 数组加 `ProviderName::Pi` |
 | `web/handlers/dto.rs:742` provider wire 文本化 | 映射 | `"pi"` |
-| `provider_availability.rs` 各 helper | 映射/保留拒绝 | `provider_name_key` 映射 `"pi"`；`parse_provider_type` 保持拒 `"pi"` |
+| `provider_availability.rs` 各 helper | 映射/保留拒绝 | `provider_name_key(&ProviderName::Pi)` 返回 `"pi"`；`parse_provider_name("pi")` 返回 `Ok(ProviderName::Pi)`；`parse_provider_type("pi")` 保持拒（返回 `web_runtime_provider_type`，错误文本含 `pi`） |
 | `task_run/step_runner.rs:111` 节点契约文本化 | 不产生 | 保持只文本化 Claude/Codex/Fake |
 | 仓库初始化 provider 选择 | Claude-only | 不加 Pi 分支 |
 
@@ -204,7 +205,70 @@ fn pi_version_command() -> CommandSpec {
 - [ ] Run: `cargo test -p cadence-aria provider_health`
 - Expected: PASS
 
-## Step 11: 写失败测试 —— 状态 API 返回 Pi
+## Step 10b: 写失败测试 -- 后端 provider 名解析含 Pi（高1 后端）
+
+`src/web/provider_availability.rs` 的 `#[cfg(test)]` 加：
+
+```rust
+#[test]
+fn parse_provider_name_accepts_pi() {
+    assert_eq!(parse_provider_name("pi").unwrap(), ProviderName::Pi);
+}
+
+#[test]
+fn provider_name_key_pi() {
+    assert_eq!(provider_name_key(&ProviderName::Pi), "pi");
+}
+
+#[test]
+fn parse_provider_type_still_rejects_pi() {
+    // Task Runner HTTP 入口仍拒绝 pi（Decision 1）
+    let err = parse_provider_type("pi").unwrap_err();
+    assert!(err.message().contains("pi") || format!("{err:?}").contains("pi"));
+}
+```
+
+- [ ] Run: `cargo test -p cadence-aria provider_availability`
+- Expected: FAIL -- `parse_provider_name` 拒 `"pi"`；`provider_name_key` 无 Pi 分支
+
+## Step 10c: `parse_provider_name` 与 `provider_name_key` 加 Pi
+
+`src/web/provider_availability.rs:173-182`：
+
+```rust
+fn parse_provider_name(value: &str) -> ApiResult<ProviderName> {
+    match value {
+        "claude_code" => Ok(ProviderName::ClaudeCode),
+        "codex" => Ok(ProviderName::Codex),
+        "pi" => Ok(ProviderName::Pi),
+        "fake" => Ok(ProviderName::Fake),
+        _ => Err(ApiError::validation(
+            "invalid_provider",
+            "provider must be claude_code, codex, pi, or fake",
+        )),
+    }
+}
+```
+
+`:157-165`：
+
+```rust
+pub fn provider_name_key(provider: &ProviderName) -> &'static str {
+    match provider {
+        ProviderName::ClaudeCode => "claude_code",
+        ProviderName::Codex => "codex",
+        ProviderName::Pi => "pi",
+        ProviderName::Fake => "fake",
+    }
+}
+```
+
+注：`parse_provider_type` **不**改（Task Runner HTTP 入口仍拒 `"pi"`，满足 Decision 1）。
+
+- [ ] Run: `cargo test -p cadence-aria provider_availability`
+- Expected: PASS
+
+## Step 11: 写失败测试 -- 状态 API 返回 Pi
 
 `src/web/handlers/providers.rs` 的 `#[cfg(test)]` 加：
 
@@ -308,7 +372,7 @@ cargo test -p cadence-aria provider_factory
 cargo test -p cadence-aria providers
 cargo test -p cadence-aria provider_registry
 cd web && npm test provider-options && cd ..
-git add src/product/models/provider.rs src/protocol/contracts.rs src/product/workspace_engine/mappings.rs src/product/coding_workspace_engine/tool_format.rs src/product/provider_workspace_runner.rs src/product/work_item_split_engine/types.rs src/product/work_item_projection/render.rs src/task_run/provider_factory.rs src/task_run/step_runner.rs src/cross_cutting/provider_health.rs src/cross_cutting/provider_registry.rs src/web/handlers/providers.rs src/web/handlers/dto.rs web/src/api/types/provider.ts web/src/state/provider-options.ts web/src/state/provider-options.test.ts
+git add src/product/models/provider.rs src/protocol/contracts.rs src/product/workspace_engine/mappings.rs src/product/coding_workspace_engine/tool_format.rs src/product/provider_workspace_runner.rs src/product/work_item_split_engine/types.rs src/product/work_item_projection/render.rs src/task_run/provider_factory.rs src/task_run/step_runner.rs src/cross_cutting/provider_health.rs src/cross_cutting/provider_registry.rs src/web/handlers/providers.rs src/web/handlers/dto.rs src/web/provider_availability.rs web/src/api/types/provider.ts web/src/state/provider-options.ts web/src/state/provider-options.test.ts
 git commit -m "feat(provider): register Pi across provider name/type, health, status API, registry, frontend catalog; Task Runner rejects Pi"
 ```
 

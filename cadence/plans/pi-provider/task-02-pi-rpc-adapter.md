@@ -37,10 +37,11 @@
 {"direction": "pi_to_client", "payload": {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "..."}}}
 ```
 
-录制两条：
+录制三条：
 
 1. `auto_text.jsonl`：一次文本输出 + 一次工具执行 + `agent_settled`。
 2. `auto_cancel.jsonl`：prompt 后发 `abort`，会话终止。
+3. `resume.jsonl`：输入携带旧 `resume_provider_session_id`，`get_state` 返回对应 session，完成事件含 `provider_session_id`（供 Step 8 的恢复测试）。
 
 录制命令（Auto-only，无 `-e`）：
 
@@ -48,23 +49,27 @@
 pi --mode rpc --no-session --session-dir <tmp> --no-skills --no-prompt-templates --no-context-files
 ```
 
-（注：fixture 录制时用 `--no-session` 避免落盘污染；正式实现**不加** `--no-session`，靠 `--session-id` 续接。）
+（注：fixture 录制时用 `--no-session --session-dir <tmp>` **仅作录制隔离**，不是产品运行参数，也不验证恢复；正式实现**不加** `--no-session`、**不传** `--session-dir`，靠 `--session-id` 续接。恢复由 `resume.jsonl` fixture 与 Step 8 的 session-level 测试验证。）
 
 - [ ] 提交 fixture 到 `tests/fixtures/`。
 
-## Step 2: 从 fixture 确认协议包络
+## Step 2: 从 fixture 确认协议包络（技术路线定案：pi_provider 独立分流）
 
 写 fixture loader（`tests.rs` 内）解析 envelope，提取 inbound（pi_to_client）/outbound（client_to_pi）序列。
 
 确认关键协议点（写成 `parse.rs` 的依据）：
-- Pi 命令响应包络：`{"type":"response","id":...,"command":...,"success":...}`（**不是** JSON-RPC 的 `result`）。
-- `JsonRpcPeer::request()` 的 response 判别（`json_rpc_peer.rs:52-110`）能否识别该包络——先写一个测试验证；若不能，Pi 的命令响应用 `send()` + 事件循环按 `id` 匹配，不用 `request()`。
+- Pi 命令响应包络：`{"type":"response","id":...,"command":...,"success":...,"data":...}`（**不是** JSON-RPC 的 `result`）。
+- **技术路线（高4，选项 2）：** `JsonRpcPeer::is_response()`（`json_rpc_peer.rs:196-202`）只识别含 `result`/`response`/`error` 的对象，**不识别** Pi 的 `type:"response"`/`data` 包络。因此**不扩展 `JsonRpcPeer`**（它是 Claude/Codex 共用，改它风险大），改由 `pi_provider/session.rs` **独立维护 response 分流**：
+  - `pi_provider` 不用 `JsonRpcPeer::request()`；而是 `JsonRpcPeer::send()` 写命令、用 `next_incoming()` 读 stdout。
+  - session.rs 维护 `pending_by_id: HashMap<String, oneshot::Sender<Value>>`。
+  - reader loop 逐行读：若 `type=="response"` 且有匹配 `id`，走 `pending_by_id` 的 oneshot；否则作为事件走事件处理。
+  - 命令超时、`success:false`、乱序 event/response 都需处理。
 - `sessionId` 从 `get_state` 响应的 `data.sessionId` 获取。
 
-- [ ] 测试：解析 fixture 每行的 `type`，断言能识别 `response`/`message_update`/`tool_execution_*`/`agent_settled`。
+测试：解析 fixture 每行的 `type`，断言能识别 `response`/`message_update`/`tool_execution_*`/`agent_settled`。另写一个单元测试验证 response 与 event 分流逻辑（mock pending map）。
 
-Run: `cargo test -p cadence-aria pi_provider`
-Expected: FAIL —— `pi_provider` 模块不存在
+- [ ] Run: `cargo test -p cadence-aria pi_provider`
+- Expected: FAIL -- `pi_provider` 模块不存在
 
 ## Step 3: 建 `pi_provider` 模块骨架
 
@@ -225,8 +230,15 @@ async fn session_captures_session_id_into_completion() {
 }
 
 #[tokio::test]
-async fn session_aborts_on_cancel() {
-    // 触发 cancel → 断言 fake Pi 读到 abort 命令，run_pi_session 终止且后续输出不再消费
+async fn session_aborts_on_provider_command_abort() {
+    // 发 ProviderCommand::Abort 到 command channel
+    // 断言 fake Pi 读到 abort 命令，run_pi_session 发 aborted 状态并终止，后续输出不消费
+}
+
+#[tokio::test]
+async fn session_demultiplexes_response_by_id() {
+    // fake Pi：先发一个 event 再发该命令的 response（乱序）
+    // 断言 session 的 pending_by_id 正确分流：response 走 oneshot，event 走事件处理
 }
 
 #[tokio::test]
@@ -242,22 +254,20 @@ async fn session_failure_is_terminal_no_retry() {
 
 ## Step 9: 实现 `StreamingProviderAdapter for PiProvider` + `run_pi_session`
 
-`mod.rs` 仿 `codex_provider/mod.rs` 的 `start()`：`ProcessManager::spawn(&command, &args, &input.working_dir, &input.env_vars, cancel)` + `JsonRpcPeer::new(stdout, stdin)` + `tokio::spawn(run_pi_session(...))`。Auto-only 不需要 `ApprovalBridge`（Pi 无 Supervised）。
+`mod.rs` 仿 `codex_provider/mod.rs` 的 `start()`：`ProcessManager::spawn` + `JsonRpcPeer::new(stdout, stdin)` + 创建 `(event_tx, event_rx)` 与 `(command_tx, command_rx)` + `tokio::spawn(run_pi_session(...))`，返回 `ProviderSession { events: event_rx, commands: command_tx }`。Auto-only **不需要** `ApprovalBridge`（Pi 无 Supervised）。
 
-`session.rs` 的 `run_pi_session`：
-- 启动后 `get_state` 拿 `sessionId`（首次无 `--session-id`，从响应获取供续接）。
-- 发 `prompt` 命令（含 `input.prompt`）。
-- 事件循环：
-  - `message_update` 文本增量 → `ProviderEvent::TextDelta`
-  - `tool_execution_*` → 工具执行事件
-  - 错误事件 → `ProviderEvent::Failed`（fail-fast，不重试）
-  - `agent_settled` → `ProviderCompletion::from_output(full_output, contract, Some(session_id))` → `ProviderEvent::Completed`
-- 取消：发 `abort` 命令。
-- EOF/进程退出 → `ProviderEvent::Failed`。
-
-- [ ] Run: `cargo test -p cadence-aria pi_provider`
-- Expected: PASS
-
+`session.rs` 的 `run_pi_session(peer, command_rx, event_tx, input, cancel)`：
+- 维护 `pending_by_id: HashMap<String, oneshot::Sender<Value>>`（高4 选项 2 独立分流）。
+- 启动后 `send` get_state 命令，按 id 等 response，拿 `sessionId`（首次无 `--session-id`，供续接）。
+- `send` prompt 命令，按 id 等 response ack。
+- reader loop（`select!` 含 `command_rx`、`cancel`、`next_incoming`）：
+  - `ProviderCommand::Abort` -> `send` abort 命令 -> 发 aborted 状态 -> 终止
+  - `next_incoming` 行：`type=="response"` 且匹配 pending id -> oneshot；否则作为事件处理
+  - `message_update` 文本增量 -> `ProviderEvent::TextDelta`
+  - `tool_execution_*` -> 工具执行事件
+  - 错误事件 -> `ProviderEvent::Failed`（fail-fast，不重试）
+  - `agent_settled` -> `ProviderCompletion::from_output(full_output, contract, Some(session_id))` -> `ProviderEvent::Completed`
+- EOF/进程退出 -> `ProviderEvent::Failed`
 ## Step 10: 写失败测试 —— 生产 registry 含 Pi
 
 `src/web/state.rs` 相关测试：构造生产模式 `default_provider_registry`，断言 `registry.get(&ProviderName::Pi).is_some()`。

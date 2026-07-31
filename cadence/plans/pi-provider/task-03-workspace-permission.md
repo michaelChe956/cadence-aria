@@ -17,6 +17,8 @@
 - Modify: `src/product/workspace_engine/types.rs:72`（`WorkspaceSession` 加 `permission_modes`）+ `types.rs:91`（`from_record` 映射）
 - Modify: `src/web/workspace_ws_types/common.rs:112`（`ProviderConfigSnapshot` 加 `permission_modes`，`#[serde(default)]`）
 - Modify: `src/product/workspace_engine/lifecycle.rs:617-649`（`start_generation()` 锁定权限模式到 session + store）
+- Modify: `src/product/lifecycle_store/inputs.rs:174-185`（`CreateWorkspaceSessionInput` 处理初始权限模式）
+- Modify: `src/product/lifecycle_store/workspace.rs:231-251`（创建记录时初始化 `permission_modes`）与 `:407-425`（更新接口或新增 `update_workspace_session_permission_modes`）
 - Modify: `src/product/workspace_engine/session_state.rs:205-222`、`session_state/timeline.rs:412-419`（timeline snapshot 复制权限模式）
 - Modify: `src/product/workspace_engine/lifecycle_recovery.rs:117-122`、`plan_repair_recovery.rs:37-41`、`plan_repair_transaction.rs:755-759`、`web/handlers/coding.rs:442-456`（其余 `ProviderConfigSnapshot` 构造点，见 Step 6 盘点）
 - Modify: `src/product/workspace_engine/prompts.rs:154,177`、`review.rs`、`review_repair.rs:49`、`revision.rs:55`（硬编码 `Supervised` 改读配置）
@@ -156,7 +158,7 @@ rg -n "ProviderConfigSnapshot\s*\{" src/ -g '*.rs' | grep -v test
 | `session_state/timeline.rs:412-419` | 从 session 读 |
 | `plan_repair_recovery.rs:37-41` | 从 session 读 |
 | `plan_repair_transaction.rs:755-759` | 从 session 读 |
-| `web/handlers/coding.rs:442-456,494-508` | 按来源（Coding 域用 `CodingRolePermissionModes`，注意这是普通 Workspace 的 DTO，确认此处是普通还是 Coding） |
+| `web/handlers/coding.rs:442-456,494-508` | 若此处构造普通 Workspace 的 `ProviderConfigSnapshot`，用 `WorkspaceRolePermissionModes::default()`；**不**用 `CodingRolePermissionModes`（两类型独立，不混用）。Coding 自己的每角色模式存在 `CodingRoleProviderConfigSnapshot.permission_modes`，不从本字段复制 |
 
 `src/web/workspace_ws_types/common.rs:112` `ProviderConfigSnapshot` 加：
 
@@ -170,11 +172,32 @@ rg -n "ProviderConfigSnapshot\s*\{" src/ -g '*.rs' | grep -v test
 - [ ] Run: `cargo test -p cadence-aria workspace_engine`
 - Expected: 编译通过，timeline snapshot 测试断言 `permission_modes` 与 session 一致
 
-## Step 7: `start_generation()` 把 wire 权限模式锁定到 session + store
+## Step 7: `start_generation()` 把 wire 权限模式锁定到 session + store（高2）
 
-`src/product/workspace_engine/lifecycle.rs:617-649`：`start_generation()` 从 wire `ProviderConfigSnapshot` 读 `permission_modes`，写入 `WorkspaceSession` 与 store（author/reviewer/rounds/modes 一起持久化）。若 reviewer 关闭（`reviewer: None`），明确 reviewer mode 语义（保留或归零），并测试。
+`src/product/workspace_engine/lifecycle.rs:617-649`：`start_generation()` 从 wire `ProviderConfigSnapshot` 读 `permission_modes`，写入 `WorkspaceSession`。
 
-- [ ] Run: `cargo test -p cadence-aria workspace_engine`
+**store 层（高2）：**
+- `src/product/lifecycle_store/inputs.rs:174-185` `CreateWorkspaceSessionInput`：明确创建时的初始权限模式策略--若创建输入不携带权限模式，用 `WorkspaceRolePermissionModes::default()`（全 Auto）。
+- `src/product/lifecycle_store/workspace.rs:231-251` 创建记录处：初始化 `permission_modes` 字段（从输入或默认值）。
+- `src/product/lifecycle_store/workspace.rs:407-425` 现有 `update_workspace_session_providers()` 只写 author/reviewer；新增 `update_workspace_session_permission_modes(...)`（或扩展更新接口为 author/reviewer/rounds/modes 原子更新），供 `start_generation()` 调用。
+
+测试（`src/product/lifecycle_store/` 或 `workspace_engine/tests/`）：
+
+```rust
+#[test]
+fn new_session_defaults_permission_modes_to_auto() {
+    // 创建 session 不携权限模式；断言记录 permission_modes 为全 Auto
+}
+
+#[test]
+fn start_generation_locks_selected_modes_into_store() {
+    // start_generation 后重读 store，断言 permission_modes 为所选值（非默认）
+}
+```
+
+若 reviewer 关闭（`reviewer: None`），明确 reviewer mode 语义（保留或归零），并测试。
+
+- [ ] Run: `cargo test -p cadence-aria workspace_engine`、`cargo test -p cadence-aria lifecycle_store`
 - Expected: PASS
 
 ## Step 8: 写失败测试 —— Author 运行读 session 权限模式

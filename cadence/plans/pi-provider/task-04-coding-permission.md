@@ -83,37 +83,32 @@ impl Default for CodingRolePermissionModes {
 - [ ] Run: `cargo test -p cadence-aria coding_models`
 - Expected: PASS
 
-## Step 3: 写失败测试 —— 三角色可选 Pi + fail-fast
+## Step 3: 写失败测试 -- Pi+Supervised 规范化为 Auto + fail-fast（真实未实现行为）
 
-`tests/it_product/product_coding_workspace_engine/` 参照现有 `execute_coding_*`（如 `part_04.rs`/`part_06.rs` 的 test harness 与 registry 注入方式），为三个角色各加一个测试：
+注：Task 1/2 完成后，选 Pi 走 `PiProvider` 可能已通过 registry 路径执行，故"三角色可选 Pi"不作为 red test。本步聚焦 Task 4 真正未实现的行为：(a) Pi 角色的 Supervised mode 被规范化为 Auto；(b) Pi 运行失败不触发 Codex-only fresh retry。
+
+`tests/it_product/product_coding_workspace_engine/` 参照现有 `execute_coding_*`（如 `part_04.rs`/`part_06.rs` 的 test harness 与 registry 注入方式），加测试：
 
 ```rust
 #[tokio::test]
-async fn coder_run_with_pi_uses_pi_provider() {
-    // recording Pi provider；coder 选 Pi；断言走 PiProvider.start
+async fn pi_role_with_supervised_mode_normalized_to_auto() {
+    // 构造 CodingRoleProviderConfigSnapshot：coder 选 Pi 且 permission_modes.coder = Supervised
+    // 跑运行；断言实际 StreamingProviderInput.permission_mode == Auto（Pi 强制 Auto）
 }
 
 #[tokio::test]
-async fn code_reviewer_run_with_pi_uses_pi_provider() {
-    // 同上，code_reviewer 角色
-}
-
-#[tokio::test]
-async fn internal_reviewer_run_with_pi_uses_pi_provider() {
-    // 同上，internal_reviewer 角色
-}
-
-#[tokio::test]
-async fn pi_failure_reports_without_retrying_or_switching() {
+async fn pi_failure_does_not_trigger_fresh_retry() {
     // recording Pi provider 运行失败
     // 断言：pi start_count == 1、其他 provider start_count == 0、终态失败
+    // （Codex 的 resume-stall fresh retry 不对 Pi 触发）
 }
 ```
 
-注：需明确每个角色的 `CodingRoleProviderConfigSnapshot` 构造、registry 注入路径、recording adapter 的 start_count 计数方式（参照现有 `execute_coding_*` 测试的 harness）。
+注：需明确 `CodingRoleProviderConfigSnapshot` 构造、registry 注入路径、recording adapter 的 start_count 计数方式（参照现有 `execute_coding_*` 测试的 harness）。
 
 - [ ] Run: `cargo test -p cadence-aria product_coding_workspace_engine`
-- Expected: FAIL —— Coding 运行链路未接 Pi
+- Expected: FAIL -- Pi+Supervised 未规范化；Pi 失败可能触发 fresh retry
+
 
 ## Step 4: Coding 运行链路接 Pi + fail-fast
 

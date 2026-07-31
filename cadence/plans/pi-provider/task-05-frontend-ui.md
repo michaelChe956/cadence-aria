@@ -90,24 +90,54 @@ export type ProviderConfigSnapshot = {
 - [ ] Run: `cd web && npm run build`
 - Expected: 类型编译通过
 
-## Step 4: `providerConfigFor()` 序列化 permission_modes + workspace store state
+## Step 4: `providerConfigFor()` 序列化 permission_modes + `providerNameFor` 接受 pi + workspace store state
 
 `web/src/pages/ChatWorkspacePageParts.tsx:335` `providerConfigFor()` 接受权限模式并写入返回的 `ProviderConfigSnapshot.permission_modes`。
 
+**高1 前端（关键）：** `providerConfigFor()` 内部的 `providerNameFor()`（`ChatWorkspacePageParts.tsx:359`）当前只认 `claude_code`/`codex`/`fake`，未知 provider 会回退成 `claude_code`。必须让它接受 `"pi"`：
+
+```ts
+function providerNameFor(value: string | undefined | null, fallback: WorkspaceProviderName): WorkspaceProviderName {
+  if (value === "claude_code" || value === "codex" || value === "pi" || value === "fake") {
+    return value;
+  }
+  return fallback;
+}
+```
+
 workspace store 加权限 mode state 与更新 action；`ChatWorkspacePage.tsx` 绑定 state + setter，传给 `ProviderConfigPanel` 的 `permissionModes`/`onPermissionModeSelect`。
 
-`web/src/pages/ChatWorkspacePageParts.test.tsx` 加测试：`providerConfigFor` 传入权限模式时，返回的 snapshot 含 `permission_modes`。
+`web/src/pages/ChatWorkspacePageParts.test.tsx` 加测试：
+
+```ts
+it("providerConfigFor 保留 pi 选择不回退", () => {
+  const snapshot = providerConfigFor({ author: "pi", reviewer: "codex" }, true, 1, { author: "auto", reviewer: "auto" });
+  expect(snapshot.author).toBe("pi");
+  expect(snapshot.permission_modes?.author).toBe("auto");
+});
+```
 
 - [ ] Run: `cd web && npm test ChatWorkspacePageParts`
 - Expected: PASS
 
-## Step 5: Coding 面板确认 Pi 仅 Auto
+## Step 5: Coding 面板 Pi 仅 Auto + 服务端规范化
 
-`web/src/components/coding-workspace/CodingProviderConfigPanel.tsx` 已有权限控件。确认 Task 1 的 catalog 改动让 Pi 出现在三角色选择器；当角色选 Pi 时权限控件只显示 Auto。
+`web/src/components/coding-workspace/CodingProviderConfigPanel.tsx` 已有权限控件（`:160-192` 无条件渲染 `["auto","supervised"]`）。确认 Task 1 的 catalog 改动让 Pi 出现在三角色选择器；当角色选 Pi 时，权限控件 filter 为仅 `auto`：
+
+```ts
+// 角色当前 provider === "pi" 时，模式列表过滤为 ["auto"]
+const modes = roleProvider === "pi" ? ["auto"] : ["auto", "supervised"];
+```
+
+文案说明「Pi 仅支持 Auto」。
+
+**服务端规范化（防陈旧数据/API 输入）：** 在 Coding 的 provider-selection / permission-mode 更新入口（后端，定位 `rg -n "CodingRolePermissionModes" src/product/coding_workspace_engine/ src/web/coding_ws_handler/ -g '*.rs'`）加 validation：若某角色 provider 为 `Pi`，强制其 mode 为 `Auto`。
 
 `CodingProviderConfigPanel.test.tsx` 补测试：三角色均可选 Pi，选 Pi 时权限控件仅 Auto。
 
-- [ ] Run: `cd web && npm test CodingProviderConfigPanel`
+后端测试（`tests/it_product/product_coding_models.rs` 或对应）补：直接构造 `Pi + Supervised` 的 snapshot，断言保存/运行输入被规范化为 `Auto`。
+
+- [ ] Run: `cd web && npm test CodingProviderConfigPanel`；`cargo test -p cadence-aria coding_models`
 - Expected: PASS
 
 ## Step 6: 不可用 Pi 禁用 + 原因；失败状态可见

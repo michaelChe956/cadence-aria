@@ -35,7 +35,8 @@
 
 参照 reviewer 验证的注入点：`provider_registry.rs:21-44` 注册测试 provider；`tests/it_product/product_coding_workspace_engine/part_10.rs:371-383` 已有启动失败替身先例。
 
-- [ ] Run: `cargo test -p cadence-aria workspace_engine product_coding_workspace_engine`
+- [ ] Run: `cargo test -p cadence-aria workspace_engine
+cargo test -p cadence-aria product_coding_workspace_engine`
 - Expected: PASS
 
 ## Step 3: 边界验证 —— 仓库初始化与 Task Runner 未被扩张（tasks 6.3）
@@ -47,7 +48,9 @@
   - 兼容性矩阵：`default_compatibility_matrix().entry_for(ProviderType::Pi)` 为 `None`
   - 节点契约：遍历 `default_node_contracts()`（或等价静态契约集合），断言每个 `provider_type != ProviderType::Pi`（**不是**源码文字扫描）
 
-- [ ] Run: `cargo test -p cadence-aria provider_factory task_run provider_availability`
+- [ ] Run: `cargo test -p cadence-aria provider_factory
+cargo test -p cadence-aria task_run
+cargo test -p cadence-aria provider_availability`
 - Expected: PASS
 
 ## Step 4: 前后端质量检查 + 契约同步
