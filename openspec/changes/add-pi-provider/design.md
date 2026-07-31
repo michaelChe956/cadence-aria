@@ -11,7 +11,7 @@
 - 使 Pi 成为活跃 Workspace 与 Coding Workspace 中可选择、可检查和可执行的流式 Provider。
 - 让 Pi 与既有运行协议统一支持输出流、取消、会话恢复和授权事件。
 - 将可配置角色的默认权限模式统一为 `Auto`，同时保留真实的 `Supervised` 逐工具确认。
-- 在无副作用的启动前失败边界提供可审计的 Provider 降级。
+- Provider 启动或运行失败时直接报错，不在运行期自动切换 Provider（与现有 Claude Code、Codex 行为一致）。
 
 **Non-Goals:**
 
@@ -53,15 +53,7 @@ Pi 的 `--approve` 只用于项目资源/配置的信任，不能替代工具授
 
 类型边界：保留普通 Workspace 使用的 `streaming_provider::ProviderPermissionMode` 与 Coding Workspace 使用的 `CodingProviderPermissionMode` 两套独立类型，各自将默认值改为 `Auto`，不合并为单一 enum，以维持最小影响面并避免跨域序列化回归。
 
-### 4. 由运行编排层执行安全降级
-
-自动降级放在 Workspace 与 Coding Workspace 的 Provider 启动编排层，而不是嵌入某个 CLI 适配器。候选顺序为：当前用户选择的 Provider 优先，其余候选按 Claude Code、Codex、Pi 的稳定顺序尝试并跳过已失败项。
-
-仅当失败发生在工具调用、文件副作用或部分输出之前，编排层才启动下一个候选。运行事件记录请求 Provider、失败原因和实际 Provider。适配器一旦发出输出或工具活动，编排层将其视为已开始，不会静默接力，以避免重复写入或重复生成产物。
-
-替代方案是任意错误后直接换 Provider 并重跑。它在编码与带工具的运行中可能重复修改代码，故不采用。
-
-### 5. Pi 复用可用性与选择目录，不扩大初始化范围
+### 4. Pi 复用可用性与选择目录，不扩大初始化范围
 
 Pi 健康检查通过其版本命令和既有 Provider 健康状态接口暴露。集中 Provider 目录负责展示名、安装提示、不可用原因和角色选择器选项；已配置但暂时不可用的 Pi 仍以禁用状态保留。
 
@@ -72,7 +64,6 @@ Pi 健康检查通过其版本命令和既有 Provider 健康状态接口暴露�
 - [Pi RPC 事件字段或扩展协议随 CLI 版本变化] → 将协议解析、扩展载荷和版本检测封装在 Pi 适配器中，并以录制 RPC fixture 覆盖关键事件。
 - [会话临时扩展残留或并发运行串扰] → 每次运行使用唯一临时目录与会话标识，运行结束、取消或失败时清理。
 - [默认 Auto 提升误操作风险] → 继续提供每角色 `Supervised`，并保留工具事件与授权决定的审计记录。
-- [降级误判导致重复副作用] → 以首个输出或工具活动为硬边界；越过边界即失败而非自动重试。
 - [已有持久化会话缺少权限模式字段] → 读取时默认 `Auto`，写入时持久化显式值，并用回归测试覆盖旧记录。
 - [两套权限模式类型并存] → 不合并 `ProviderPermissionMode` 与 `CodingProviderPermissionMode`，避免跨域序列化回归风险。
 

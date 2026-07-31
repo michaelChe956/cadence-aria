@@ -58,22 +58,6 @@
 - **THEN** 系统将拒绝结果返回给 Pi
 - **AND THEN** 系统记录该授权决定而不把该调用作为已执行处理
 
-### Requirement: Pi 参与安全的启动前 Provider 降级
-
-当被选中的真实 Provider 在运行开始前因健康检查、命令启动、认证或连接失败而不可用时，系统 SHALL 保留该选择作为首选，并按 `Claude Code`、`Codex`、`Pi` 的顺序尝试其余健康 Provider，跳过已经失败的 Provider。系统 MUST 记录 Provider 降级原因和实际执行 Provider。
-
-#### Scenario: Pi 启动前失败后自动使用其他健康 Provider
-
-- **WHEN** 某角色选择 Pi 且 Pi 在执行任何工具调用或产生部分结果前启动失败
-- **THEN** 系统自动选择下一个健康的候选 Provider
-- **AND THEN** 运行记录包含 Pi 的失败原因和实际使用的 Provider
-
-#### Scenario: 已产生副作用的运行不会静默换 Provider
-
-- **WHEN** Provider 已执行工具调用或已产生部分结果后发生失败
-- **THEN** 系统不自动切换到其他 Provider 重跑该运行
-- **AND THEN** 系统报告可恢复的失败状态供用户显式处理
-
 ### Requirement: Pi 不扩大仓库初始化和 Task Runner 的 Provider 范围
 
 添加代码库与仓库初始化 SHALL 继续只使用 Claude Code，且不向其用户界面或执行输入暴露 Pi。Task Runner、其 CLI/API 和旧的 Fake Provider Workspace Runner MUST 保持现有 Provider 行为，且不得因本变更调度 Pi。
@@ -87,5 +71,5 @@
 #### Scenario: Task Runner 保持冻结
 
 - **WHEN** 用户调用现有 Task Runner CLI 或 HTTP API
-- **THEN** Task Runner 不将 Pi 作为可选或降级 Provider
+- **THEN** Task Runner 不将 Pi 作为可选 Provider
 - **AND THEN** 其既有 Claude Code、Codex 或 Fake 行为保持不变
