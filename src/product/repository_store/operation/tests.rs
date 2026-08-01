@@ -95,7 +95,7 @@ fn success_result(project_id: &str) -> RepositoryRegistrationSuccess {
             link_sync_status: "synchronized".to_string(),
             commands: vec![RepositoryInitializationCommandSummary {
                 command_index: 1,
-                command: "/pre-check --no-interrupt 用大陆镜像".to_string(),
+                command: "/pre-check --no-interrupt --upgrade 用大陆镜像".to_string(),
                 status: "completed".to_string(),
                 output_summary: Some("ok".to_string()),
             }],

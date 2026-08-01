@@ -47,7 +47,7 @@ function repositoryInitializationResult(): CreateRepositoryResponse {
     initialization: {
       source: "offline",
       commands: [
-        { index: 1, command: "/pre-check --no-interrupt 用大陆镜像", status: "completed" },
+        { index: 1, command: "/pre-check --no-interrupt --upgrade 用大陆镜像", status: "completed" },
         {
           index: 2,
           command: "/rule-config --no-interrupt",
@@ -244,7 +244,7 @@ describe("api client", () => {
         message: "repository initialization failed",
         details: {
           stage: "repository_init_command",
-          command: "/pre-check --no-interrupt 用大陆镜像",
+          command: "/pre-check --no-interrupt --upgrade 用大陆镜像",
           reason_code: "repository_init_command_failed",
           retryable: true,
         },

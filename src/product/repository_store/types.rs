@@ -101,7 +101,7 @@ impl RepositoryInitializationStepKind {
     pub fn command(self) -> Option<&'static str> {
         match self {
             Self::CadenceSkills | Self::GitFinalize => None,
-            Self::PreCheck => Some("/pre-check --no-interrupt 用大陆镜像"),
+            Self::PreCheck => Some("/pre-check --no-interrupt --upgrade 用大陆镜像"),
             Self::RuleConfig => Some("/rule-config --no-interrupt"),
             Self::McpConfiguration => Some("/mcp-configuration --no-interrupt"),
             Self::ProjectRulesExamples => Some("/project-rules-examples --no-interrupt"),
