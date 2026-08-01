@@ -183,12 +183,21 @@ rg -n "ProviderConfigSnapshot\s*\{" src/ -g '*.rs' | grep -v test
 - `src/product/lifecycle_store/workspace.rs:231-251` 创建记录处：初始化 `permission_modes` 字段。
 - `src/product/lifecycle_store/workspace.rs:407-421` 现有 `update_workspace_session_providers()` 只写 author/reviewer；新增 `update_workspace_session_permission_modes(...)`（或扩展为 author/reviewer/rounds/modes 原子更新），供 `start_generation()` 调用。
 
-测试（`src/product/workspace_engine/tests/`，参照该目录现有 `setup()`/`make_session()` harness，如 `part_06.rs:495`）：
+测试（参照 `tests/it_web/web_workspace_recovery_consistency/part_01.rs:140-154` 的真实 harness：`LifecycleStore::new(ProductAppPaths::new(...))` + `create_workspace_session` + `WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, tx, session)`）：
 
 ```rust
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::workspace_engine::WorkspaceEngine;
+
+fn lifecycle_store(root: &Path) -> LifecycleStore {
+    LifecycleStore::new(ProductAppPaths::new(root.join(".aria")))
+}
+
 #[test]
 fn new_session_defaults_permission_modes_to_auto() {
-    let (_tmp, store) = setup();
+    let tmp = tempdir().expect("root");
+    let store = lifecycle_store(tmp.path());
     let record = store
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: "p1".to_string(),
@@ -208,11 +217,28 @@ fn new_session_defaults_permission_modes_to_auto() {
 
 #[tokio::test]
 async fn start_generation_locks_selected_modes_into_store() {
-    let (_tmp, store) = setup();
+    let tmp = tempdir().expect("root");
+    let lifecycle = lifecycle_store(tmp.path());
+    let checkpoint_store = Arc::new(CheckpointStore::new(
+        ProductAppPaths::new(tmp.path().join(".aria")).issue_lifecycle_root("p1", "i1"),
+    ));
+    let record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "p1".to_string(),
+            issue_id: "i1".to_string(),
+            entity_id: "e1".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("create session");
+    let session_id = record.id.clone();
+    let session = WorkspaceSession::from_record(record);
     let (tx, _rx) = mpsc::channel(64);
-    let session = make_session("sess_lock");
-    let session_id = session.session_id.clone();
-    let mut engine = WorkspaceEngine::new(store.clone(), tx, session);
+    let mut engine = WorkspaceEngine::new_persistent(checkpoint_store, lifecycle.clone(), tx, session);
     let wire = ProviderConfigSnapshot {
         author: ProviderName::ClaudeCode,
         reviewer: Some(ProviderName::Codex),
@@ -223,17 +249,34 @@ async fn start_generation_locks_selected_modes_into_store() {
         },
     };
     engine.start_generation(wire, true).await.expect("start generation");
-    let reread = store.get_workspace_session(&session_id).expect("reload");
+    let reread = lifecycle.get_workspace_session(&session_id).expect("reload");
     assert_eq!(reread.permission_modes.author, ProviderPermissionMode::Supervised);
 }
 
 #[tokio::test]
 async fn start_generation_normalizes_pi_role_to_auto() {
-    let (_tmp, store) = setup();
+    let tmp = tempdir().expect("root");
+    let lifecycle = lifecycle_store(tmp.path());
+    let checkpoint_store = Arc::new(CheckpointStore::new(
+        ProductAppPaths::new(tmp.path().join(".aria")).issue_lifecycle_root("p1", "i1"),
+    ));
+    let record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "p1".to_string(),
+            issue_id: "i1".to_string(),
+            entity_id: "e1".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Pi,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("create session");
+    let session_id = record.id.clone();
+    let session = WorkspaceSession::from_record(record);
     let (tx, _rx) = mpsc::channel(64);
-    let session = make_session("sess_norm");
-    let session_id = session.session_id.clone();
-    let mut engine = WorkspaceEngine::new(store.clone(), tx, session);
+    let mut engine = WorkspaceEngine::new_persistent(checkpoint_store, lifecycle.clone(), tx, session);
     let wire = ProviderConfigSnapshot {
         author: ProviderName::Pi,
         reviewer: None,
@@ -244,13 +287,13 @@ async fn start_generation_normalizes_pi_role_to_auto() {
         },
     };
     engine.start_generation(wire, false).await.expect("start generation");
-    let reread = store.get_workspace_session(&session_id).expect("reload");
+    let reread = lifecycle.get_workspace_session(&session_id).expect("reload");
     // Pi 仅 Auto：服务端归一化
     assert_eq!(reread.permission_modes.author, ProviderPermissionMode::Auto);
 }
 ```
 
-注：`setup()`/`make_session(id)`/`WorkspaceEngine::new(store, tx, session)` 是 `src/product/workspace_engine/tests/` 现有 harness（见 `part_06.rs:495` 等测试）；`store.create_workspace_session(input)` 和 `store.get_workspace_session(&id)` 均为同步方法；`start_generation(&mut self, wire, reviewer_enabled)` 需 `&mut self` 且传 `reviewer_enabled: bool`。
+注：`LifecycleStore::new(ProductAppPaths::new(...))`、`CheckpointStore::new(...)`、`WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, tx, session)` 是 `tests/it_web/web_workspace_recovery_consistency/part_01.rs:140-154` 的真实 harness。`store.create_workspace_session(input)` 和 `store.get_workspace_session(&id)` 均为同步方法；`start_generation(&mut self, wire, reviewer_enabled)` 需 `&mut self` 且传 `reviewer_enabled: bool`。
 
 若 reviewer 关闭（`reviewer: None`），明确 reviewer mode 语义（保留或归零），并测试。
 

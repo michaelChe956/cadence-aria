@@ -171,6 +171,9 @@ async fn pi_role_with_supervised_mode_normalized_to_auto() {
             internal_reviewer: CodingProviderPermissionMode::Auto,
         },
     };
+    store
+        .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, config)
+        .expect("write pi config");
     engine
         .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
         .await
@@ -202,6 +205,17 @@ async fn pi_failure_does_not_trigger_fresh_retry() {
         seen_modes: Arc::new(Mutex::new(Vec::new())),
         fail_on_start: true,
     };
+    // coder 选 Pi
+    let config = CodingRoleProviderConfigSnapshot {
+        coder: ProviderName::Pi,
+        code_reviewer: ProviderName::ClaudeCode,
+        internal_reviewer: ProviderName::ClaudeCode,
+        review_rounds: 1,
+        permission_modes: CodingRolePermissionModes::default(),
+    };
+    store
+        .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, config)
+        .expect("write pi config");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -214,10 +228,7 @@ async fn pi_failure_does_not_trigger_fresh_retry() {
 }
 ```
 
-注：`CodingAttemptStore::new`/`ProductAppPaths::new`/`CreateCodingAttemptInput`/`create_input()`/`CodingAttemptStatus::Running`/`GitWorkspaceService::new()`/`CodingWorkspaceEngine::new(store, git, tx)`/`execute_coding(&attempt, &provider, &CodingExecutionContext::default())` 均为 `tests/it_product/product_coding_workspace_engine/part_04.rs` 现有 harness 与 API。`CodingRoleProviderConfigSnapshot` 需在 Coding 运行链路中传入（确认 `execute_coding` 如何读 config，可能在 `CodingExecutionContext` 或 attempt 上）。
-
-- [ ] Run: `cargo test -p cadence-aria product_coding_workspace_engine`
-- Expected: FAIL -- Pi+Supervised 未规范化；Pi 失败可能触发 fresh retry
+注：`CodingAttemptStore::new`/`ProductAppPaths::new`/`CreateCodingAttemptInput`/`create_input()`/`CodingAttemptStatus::Running`/`GitWorkspaceService::new()`/`CodingWorkspaceEngine::new(store, git, tx)`/`execute_coding(&attempt, &provider, &CodingExecutionContext::default())`/`update_role_provider_config_snapshot(project_id, issue_id, &attempt.id, config)` 均为 `tests/it_product/product_coding_workspace_engine/part_04.rs` 现有 harness 与真实 store API。`execute_coding` 从 store 读 `get_role_provider_config_snapshot`，所以必须先 `update_role_provider_config_snapshot` 写入 Pi 配置。
 
 - [ ] Run: `cargo test -p cadence-aria product_coding_workspace_engine`
 - Expected: FAIL -- Pi+Supervised 未规范化；Pi 失败可能触发 fresh retry

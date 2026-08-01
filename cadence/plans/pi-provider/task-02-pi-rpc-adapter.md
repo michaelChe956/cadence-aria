@@ -24,7 +24,7 @@
 - **无授权扩展**：不创建 `aria-gate.ts`，不传 `-e`，不做授权 UI 往返。Pi 工具调用直接执行。
 - **无 `-e` 扩展**：`build_args()` 不含 `-e` 参数（Auto-only 不需要扩展）。
 - **权限模式**：Pi 始终以 Auto 运行，`permission_mode` 不影响 Pi 行为（Pi 无 Supervised）。
-- **ApprovalBridge 复用**：Pi 的 `start()` 仍创建 `ApprovalBridge::new(Auto, event_tx)`（与 Codex 同构），因为 bridge **不只提供授权**，还提供 `command_sender()`（`ProviderCommand::Abort` 通道）和 pending cleanup。Auto 模式下 `request_tool` 直接返回 approved，不阻塞。
+- **ApprovalBridge 仅用于授权（Auto 模式不调用）**：Pi 的 `start()` 创建 `ApprovalBridge::new(Auto, event_tx)`（与 Codex 同构，保持接口一致），但 Auto 模式下 `request_tool` 不被调用。**注意**：`ApprovalBridge::new()` 内部已把 `command_rx` 移交给 `listen_for_permission_commands()` 后台任务（只做 pending cleanup，不转发 Abort），且 bridge **不暴露 `command_receiver()`**。因此 Pi 的 `ProviderCommand::Abort` 通道**必须独立创建**（`mpsc::channel(8)`），不能依赖 bridge。`start()` 返回 `ProviderSession { events: event_rx, commands: command_tx }`，`run_pi_session` 接收 `command_rx`。
 - **会话标识**：从 `get_state` 的响应或协议事件拿 `sessionId`，通过 `ProviderCompletion::from_output(..., Some(session_id))` 返回，由上层 engine 持久化 `ProviderConversationRef`（adapter 不直接持久化）。
 
 ---
@@ -254,8 +254,7 @@ async fn session_sends_prompt_and_emits_text_until_settled() {
     let (reader, writer) = tokio::io::split(client_io);
     let peer = JsonRpcPeer::new(reader, writer);
     let (event_tx, mut event_rx) = mpsc::channel(16);
-    let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx.clone());
-    let _commands = bridge.command_sender();
+    let (command_tx, command_rx) = mpsc::channel(8);
 
     // fake Pi：读 get_state -> 回 sessionId；读 prompt -> 回 ack -> 写 text_delta -> 写 agent_settled
     tokio::spawn(async move {
@@ -281,7 +280,7 @@ async fn session_sends_prompt_and_emits_text_until_settled() {
         write_inbound(&mut server_writer, serde_json::json!({"type": "agent_settled"})).await;
     });
 
-    run_pi_session(peer, bridge, event_tx, streaming_input_for_test(None), CancellationToken::new())
+    run_pi_session(peer, command_rx, event_tx, streaming_input_for_test(None), CancellationToken::new())
         .await
         .expect("session ok");
 
@@ -300,8 +299,7 @@ async fn session_aborts_on_provider_command_abort() {
     let (reader, writer) = tokio::io::split(client_io);
     let peer = JsonRpcPeer::new(reader, writer);
     let (event_tx, mut event_rx) = mpsc::channel(16);
-    let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx.clone());
-    let command_tx = bridge.command_sender();
+    let (command_tx, command_rx) = mpsc::channel(8);
 
     tokio::spawn(async move {
         let (server_reader, mut server_writer) = tokio::io::split(server_io);
@@ -320,11 +318,10 @@ async fn session_aborts_on_provider_command_abort() {
         assert_eq!(abort["type"], "abort");
     });
 
-    // 触发上层取消：经 bridge 的 command_sender 发 Abort
-    let command_tx = bridge.command_sender();
+    // 触发上层取消：经独立 command channel 发 Abort
     command_tx.send(ProviderCommand::Abort).await.expect("send abort");
 
-    run_pi_session(peer, bridge, event_tx, streaming_input_for_test(None), CancellationToken::new())
+    run_pi_session(peer, command_rx, event_tx, streaming_input_for_test(None), CancellationToken::new())
         .await
         .expect("session ends after abort");
 
@@ -339,8 +336,7 @@ async fn session_resumes_with_existing_session_id() {
     let (reader, writer) = tokio::io::split(client_io);
     let peer = JsonRpcPeer::new(reader, writer);
     let (event_tx, mut event_rx) = mpsc::channel(16);
-    let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx.clone());
-    let _commands = bridge.command_sender();
+    let (command_tx, command_rx) = mpsc::channel(8);
 
     tokio::spawn(async move {
         let (server_reader, mut server_writer) = tokio::io::split(server_io);
@@ -366,7 +362,7 @@ async fn session_resumes_with_existing_session_id() {
     assert!(args.contains(&"--session-id".to_string()));
     assert!(args.contains(&"sess-old".to_string()));
 
-    run_pi_session(peer, bridge, event_tx, input, CancellationToken::new())
+    run_pi_session(peer, command_rx, event_tx, input, CancellationToken::new())
         .await
         .expect("resume session ok");
 
@@ -384,8 +380,7 @@ async fn session_failure_is_terminal_no_retry() {
     let (reader, writer) = tokio::io::split(client_io);
     let peer = JsonRpcPeer::new(reader, writer);
     let (event_tx, mut event_rx) = mpsc::channel(16);
-    let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx.clone());
-    let _commands = bridge.command_sender();
+    let (command_tx, command_rx) = mpsc::channel(8);
 
     // fake Pi：get_state 后直接 EOF（drop writer）
     tokio::spawn(async move {
@@ -395,7 +390,7 @@ async fn session_failure_is_terminal_no_retry() {
         drop(server_writer); // EOF
     });
 
-    let _ = run_pi_session(peer, bridge, event_tx, streaming_input_for_test(None), CancellationToken::new()).await;
+    let _ = run_pi_session(peer, command_rx, event_tx, streaming_input_for_test(None), CancellationToken::new()).await;
 
     let events = drain_events(&mut event_rx).await;
     assert!(events.iter().any(|e| matches!(e, ProviderEvent::Failed { .. })), "EOF 应产生 Failed（fail-fast，不重试）");
@@ -408,8 +403,7 @@ async fn session_demultiplexes_response_by_id() {
     let (reader, writer) = tokio::io::split(client_io);
     let peer = JsonRpcPeer::new(reader, writer);
     let (event_tx, mut event_rx) = mpsc::channel(16);
-    let bridge = ApprovalBridge::new(ProviderPermissionMode::Auto, event_tx.clone());
-    let _commands = bridge.command_sender();
+    let (command_tx, command_rx) = mpsc::channel(8);
 
     tokio::spawn(async move {
         let (server_reader, mut server_writer) = tokio::io::split(server_io);
@@ -431,7 +425,7 @@ async fn session_demultiplexes_response_by_id() {
         write_inbound(&mut server_writer, serde_json::json!({"type": "agent_settled"})).await;
     });
 
-    run_pi_session(peer, bridge, event_tx, streaming_input_for_test(None), CancellationToken::new())
+    run_pi_session(peer, command_rx, event_tx, streaming_input_for_test(None), CancellationToken::new())
         .await
         .expect("session ok");
 
@@ -449,13 +443,13 @@ async fn session_demultiplexes_response_by_id() {
 
 ## Step 9: 实现 `StreamingProviderAdapter for PiProvider` + `run_pi_session`
 
-`mod.rs` 仿 `codex_provider/mod.rs` 的 `start()`：`ProcessManager::spawn` + `JsonRpcPeer::new(stdout, stdin)` + `ApprovalBridge::new(input.permission_mode.clone(), event_tx)` + `commands = bridge.command_sender()` + `tokio::spawn(run_pi_session(...))`，返回 `ProviderSession { events: event_rx, commands }`。Auto 模式下 bridge 不阻塞（`request_tool` 直接返回 approved），但提供 `ProviderCommand::Abort` 通道。
+`mod.rs` 仿 `codex_provider/mod.rs` 的 `start()`：`ProcessManager::spawn` + `JsonRpcPeer::new(stdout, stdin)` + `ApprovalBridge::new(input.permission_mode.clone(), event_tx)`（保持接口一致，Auto 下不调用 `request_tool`）+ **独立创建** `(command_tx, command_rx) = mpsc::channel(8)`（`ProviderCommand::Abort` 通道，不依赖 bridge）+ `tokio::spawn(run_pi_session(...))`，返回 `ProviderSession { events: event_rx, commands: command_tx }`。
 
-`session.rs` 的 `run_pi_session(peer, bridge, event_tx, input, cancel)`（与 `run_codex_session` 同构）：
+`session.rs` 的 `run_pi_session(peer, command_rx, event_tx, input, cancel)`：
 - 维护 `pending_by_id: HashMap<String, oneshot::Sender<Value>>`（高4 选项 2 独立分流）。
 - 启动后 `send` get_state 命令，按 id 等 response，拿 `sessionId`（首次无 `--session-id`，供续接）。
 - `send` prompt 命令，按 id 等 response ack。
-- reader loop（`select!` 含 `bridge.command_receiver()`、`cancel`、`next_incoming`）：
+- reader loop（`select!` 含 `command_rx`、`cancel`、`next_incoming`）：
   - `ProviderCommand::Abort` -> `send` abort 命令 -> 发 aborted 状态 -> 终止
   - `next_incoming` 行：`type=="response"` 且匹配 pending id -> oneshot；否则作为事件处理
   - `message_update` 文本增量 -> `ProviderEvent::TextDelta`
