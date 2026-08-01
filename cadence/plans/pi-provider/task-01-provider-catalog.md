@@ -270,18 +270,41 @@ pub fn provider_name_key(provider: &ProviderName) -> &'static str {
 
 ## Step 11: 写失败测试 -- 状态 API 返回 Pi
 
-`src/web/handlers/providers.rs` 的 `#[cfg(test)]` 加：
+`src/web/handlers/providers.rs` 的 `#[cfg(test)]` 加（参照该文件现有测试的 snapshot 构造方式）：
 
 ```rust
 #[test]
 fn provider_status_includes_pi_when_available() {
-    // 构造含 Pi 可用条目的健康快照，调 response_from_snapshot
-    // 断言返回 providers 含 provider == "pi" 且 display_name == "Pi"
+    let checked_at = Utc::now();
+    let snapshot = ProviderHealthSnapshot {
+        schema_version: PROVIDER_HEALTH_SCHEMA_VERSION,
+        generation: 1,
+        checked_at,
+        providers: vec![
+            available_entry(ProviderName::ClaudeCode, checked_at),
+            available_entry(ProviderName::Codex, checked_at),
+            available_entry(ProviderName::Pi, checked_at),
+        ],
+    };
+    let state = test_web_app_state();
+    let response = response_from_snapshot(&state, Arc::new(snapshot));
+
+    let pi = response
+        .providers
+        .iter()
+        .find(|dto| dto.provider == "pi")
+        .expect("status API 应返回 pi 条目");
+    assert_eq!(pi.display_name, "Pi");
+    assert!(pi.available);
+    assert!(pi.install_hint.contains("pi"));
 }
 ```
 
+注：`available_entry(provider, checked_at)` 构造 `ProviderHealthEntry { provider, available: true, version: Some("0.83.0".into()), reason_code: None, reason: None, checked_at, .. }`；`test_web_app_state()` 参照该文件现有测试的 state 构造（如 `providers_status_reports_degraded_storage_without_http_error` 用的方式）。
+
 - [ ] Run: `cargo test -p cadence-aria providers`
-- Expected: FAIL —— `response_from_snapshot` 只枚举 Claude/Codex；`provider_dto` 无 Pi 分支
+- Expected: FAIL -- `response_from_snapshot` 只枚举 Claude/Codex；`provider_dto` 无 Pi 分支
+
 
 ## Step 12: 状态 API 加 Pi
 

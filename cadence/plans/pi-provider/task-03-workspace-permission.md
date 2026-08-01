@@ -158,7 +158,7 @@ rg -n "ProviderConfigSnapshot\s*\{" src/ -g '*.rs' | grep -v test
 | `session_state/timeline.rs:412-419` | 从 session 读 |
 | `plan_repair_recovery.rs:37-41` | 从 session 读 |
 | `plan_repair_transaction.rs:755-759` | 从 session 读 |
-| `web/handlers/coding.rs:442-456,494-508` | 若此处构造普通 Workspace 的 `ProviderConfigSnapshot`，用 `WorkspaceRolePermissionModes::default()`；**不**用 `CodingRolePermissionModes`（两类型独立，不混用）。Coding 自己的每角色模式存在 `CodingRoleProviderConfigSnapshot.permission_modes`，不从本字段复制 |
+| `web/handlers/coding.rs:427-446,467-498` | **有已确认 session 的分支**（现已从 session 复制 provider/rounds）用 `session.permission_modes.clone()`，与 provider/rounds 同源；**仅无 session 的 fallback 分支**用 `WorkspaceRolePermissionModes::default()`。**不**用 `CodingRolePermissionModes`（两类型独立）。Coding 自己的每角色模式存在 `CodingRoleProviderConfigSnapshot.permission_modes`，不从本字段复制。补回归测试：已确认 Work Item session 的非默认 mode 出现在输出 snapshot 中 |
 
 `src/web/workspace_ws_types/common.rs:112` `ProviderConfigSnapshot` 加：
 
@@ -172,33 +172,75 @@ rg -n "ProviderConfigSnapshot\s*\{" src/ -g '*.rs' | grep -v test
 - [ ] Run: `cargo test -p cadence-aria workspace_engine`
 - Expected: 编译通过，timeline snapshot 测试断言 `permission_modes` 与 session 一致
 
-## Step 7: `start_generation()` 把 wire 权限模式锁定到 session + store（高2）
+## Step 7: `start_generation()` 锁定权限模式到 session + store，并对 Pi 归一化为 Auto（高2 + 服务端归一化）
 
 `src/product/workspace_engine/lifecycle.rs:617-649`：`start_generation()` 从 wire `ProviderConfigSnapshot` 读 `permission_modes`，写入 `WorkspaceSession`。
 
-**store 层（高2）：**
-- `src/product/lifecycle_store/inputs.rs:174-185` `CreateWorkspaceSessionInput`：明确创建时的初始权限模式策略--若创建输入不携带权限模式，用 `WorkspaceRolePermissionModes::default()`（全 Auto）。
-- `src/product/lifecycle_store/workspace.rs:231-251` 创建记录处：初始化 `permission_modes` 字段（从输入或默认值）。
-- `src/product/lifecycle_store/workspace.rs:407-425` 现有 `update_workspace_session_providers()` 只写 author/reviewer；新增 `update_workspace_session_permission_modes(...)`（或扩展更新接口为 author/reviewer/rounds/modes 原子更新），供 `start_generation()` 调用。
+**服务端归一化（Pi 仅 Auto）：** 锁定前，若 `author_provider == ProviderName::Pi` 则强制 `permission_modes.author = Auto`；`reviewer_provider == Pi` 同理。前端过滤不能防陈旧数据或直接 API/WS 输入，必须服务端兜底。
 
-测试（`src/product/lifecycle_store/` 或 `workspace_engine/tests/`）：
+**store 层（高2）：**
+- `src/product/lifecycle_store/inputs.rs:174-184` `CreateWorkspaceSessionInput`：创建时若不携带权限模式，用 `WorkspaceRolePermissionModes::default()`（全 Auto）。
+- `src/product/lifecycle_store/workspace.rs:231-251` 创建记录处：初始化 `permission_modes` 字段。
+- `src/product/lifecycle_store/workspace.rs:407-421` 现有 `update_workspace_session_providers()` 只写 author/reviewer；新增 `update_workspace_session_permission_modes(...)`（或扩展为 author/reviewer/rounds/modes 原子更新），供 `start_generation()` 调用。
+
+测试（`src/product/workspace_engine/tests/` 或 `lifecycle_store` 测试模块）：
 
 ```rust
-#[test]
-fn new_session_defaults_permission_modes_to_auto() {
-    // 创建 session 不携权限模式；断言记录 permission_modes 为全 Auto
+#[tokio::test]
+async fn new_session_defaults_permission_modes_to_auto() {
+    let store = test_lifecycle_store();
+    let record = store
+        .create_workspace_session(create_input_without_permission_modes())
+        .await
+        .expect("create session");
+    assert_eq!(record.permission_modes.author, ProviderPermissionMode::Auto);
+    assert_eq!(record.permission_modes.reviewer, ProviderPermissionMode::Auto);
 }
 
-#[test]
-fn start_generation_locks_selected_modes_into_store() {
-    // start_generation 后重读 store，断言 permission_modes 为所选值（非默认）
+#[tokio::test]
+async fn start_generation_locks_selected_modes_into_store() {
+    let (engine, store) = engine_with_store();
+    let wire = ProviderConfigSnapshot {
+        author: ProviderName::ClaudeCode,
+        reviewer: Some(ProviderName::Codex),
+        review_rounds: 1,
+        permission_modes: WorkspaceRolePermissionModes {
+            author: ProviderPermissionMode::Supervised,
+            reviewer: ProviderPermissionMode::Auto,
+        },
+    };
+    engine.start_generation(wire).await.expect("start generation");
+    let reread = store.load_workspace_session(session_id).await.expect("reload");
+    assert_eq!(reread.permission_modes.author, ProviderPermissionMode::Supervised);
+}
+
+#[tokio::test]
+async fn start_generation_normalizes_pi_role_to_auto() {
+    let (engine, store) = engine_with_store();
+    let wire = ProviderConfigSnapshot {
+        author: ProviderName::Pi,
+        reviewer: None,
+        review_rounds: 1,
+        permission_modes: WorkspaceRolePermissionModes {
+            author: ProviderPermissionMode::Supervised, // 陈旧/非法输入
+            reviewer: ProviderPermissionMode::Auto,
+        },
+    };
+    engine.start_generation(wire).await.expect("start generation");
+    let reread = store.load_workspace_session(session_id).await.expect("reload");
+    // Pi 仅 Auto：服务端归一化
+    assert_eq!(reread.permission_modes.author, ProviderPermissionMode::Auto);
 }
 ```
 
+注：`test_lifecycle_store()`/`engine_with_store()`/`create_input_without_permission_modes()` 参照 `src/product/workspace_engine/tests/` 现有 harness 构造（如 `part_01.rs` 的 session/store 搭建方式）。
+
 若 reviewer 关闭（`reviewer: None`），明确 reviewer mode 语义（保留或归零），并测试。
 
-- [ ] Run: `cargo test -p cadence-aria workspace_engine`、`cargo test -p cadence-aria lifecycle_store`
+- [ ] Run: `cargo test -p cadence-aria workspace_engine`
+- [ ] Run: `cargo test -p cadence-aria lifecycle_store`
 - Expected: PASS
+
 
 ## Step 8: 写失败测试 —— Author 运行读 session 权限模式
 
@@ -214,26 +256,116 @@ fn start_generation_locks_selected_modes_into_store() {
 - [ ] Run: `cargo test -p cadence-aria workspace_engine`
 - Expected: PASS
 
-## Step 10: 写失败测试 —— Author 选 Pi 走 PiProvider + fail-fast
+## Step 10: 写失败测试 -- Author 选 Pi 走 PiProvider + fail-fast
 
-`src/product/workspace_engine/tests/` 加（用 recording `StreamingProviderAdapter`，参照注入点 `provider_registry.rs:21-44`）：
+**测试模板依据：** recording adapter 照 `src/product/workspace_engine/tests/part_06.rs:449` 的 `RecordingStreamingProvider`（记录 `input.provider_type`、返回 `ProviderSession { events, commands }`）；registry 注入照 `provider_registry.rs:21-44` 的 `register`。
+
+`src/product/workspace_engine/tests/` 加：
 
 ```rust
-#[tokio::test]
-async fn author_run_with_pi_uses_pi_provider() {
-    // 注册 recording Pi provider；构造 author 选 Pi 的 session
-    // 跑 Author 运行，断言 PiProvider.start 被调一次
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// 记录 start 次数与收到的 provider_type / permission_mode
+struct CountingProvider {
+    starts: Arc<AtomicUsize>,
+    seen: Arc<Mutex<Vec<(ProviderType, ProviderPermissionMode)>>>,
+    fail_on_start: bool,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CountingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        self.seen
+            .lock()
+            .unwrap()
+            .push((input.provider_type.clone(), input.permission_mode.clone()));
+        if self.fail_on_start {
+            return Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "pi start failed",
+                0,
+            ));
+        }
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let output = complete_story_artifact("生成候选草稿。", "候选草稿可进入审核。");
+            let _ = event_tx.send(ProviderEvent::TextDelta { content: output.clone() }).await;
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::plain(output, Some("sess-1".to_string()))))
+                .await;
+        });
+        Ok(ProviderSession { events: event_rx, commands: command_tx })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(None, String::new(), "unused", 0))
+    }
 }
 
 #[tokio::test]
-async fn pi_start_failure_reports_failure_without_switching_or_retrying() {
-    // recording Pi provider 的 start() 返回 Err（启动失败）
-    // 断言：运行呈失败状态、pi start_count == 1、其他 provider start_count == 0
+async fn author_run_with_pi_uses_pi_provider_in_auto_mode() {
+    let pi_starts = Arc::new(AtomicUsize::new(0));
+    let pi_seen = Arc::new(Mutex::new(Vec::new()));
+    let claude_starts = Arc::new(AtomicUsize::new(0));
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Pi, Arc::new(CountingProvider {
+        starts: pi_starts.clone(), seen: pi_seen.clone(), fail_on_start: false,
+    }));
+    registry.register(ProviderName::ClaudeCode, Arc::new(CountingProvider {
+        starts: claude_starts.clone(), seen: Arc::new(Mutex::new(Vec::new())), fail_on_start: false,
+    }));
+
+    // author 选 Pi、permission_modes.author = Auto 的 session
+    let engine = engine_with_registry(Arc::new(registry), session_with_author_pi());
+    engine.run_author().await.expect("author run");
+
+    assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 应被调用一次");
+    assert_eq!(claude_starts.load(Ordering::SeqCst), 0, "不应调用其他 provider");
+    let seen = pi_seen.lock().unwrap();
+    assert_eq!(seen[0].0, ProviderType::Pi);
+    assert_eq!(seen[0].1, ProviderPermissionMode::Auto, "Pi 仅 Auto");
+}
+
+#[tokio::test]
+async fn pi_start_failure_reports_without_switching_or_retrying() {
+    let pi_starts = Arc::new(AtomicUsize::new(0));
+    let claude_starts = Arc::new(AtomicUsize::new(0));
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Pi, Arc::new(CountingProvider {
+        starts: pi_starts.clone(), seen: Arc::new(Mutex::new(Vec::new())), fail_on_start: true,
+    }));
+    registry.register(ProviderName::ClaudeCode, Arc::new(CountingProvider {
+        starts: claude_starts.clone(), seen: Arc::new(Mutex::new(Vec::new())), fail_on_start: false,
+    }));
+
+    let engine = engine_with_registry(Arc::new(registry), session_with_author_pi());
+    let result = engine.run_author().await;
+
+    assert!(result.is_err(), "启动失败应报错");
+    assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 只启动一次，不重试");
+    assert_eq!(claude_starts.load(Ordering::SeqCst), 0, "不切换到其他 provider");
 }
 ```
 
+注：`engine_with_registry(registry, session)`、`session_with_author_pi()`、`complete_story_artifact(...)` 参照 `src/product/workspace_engine/tests/part_06.rs` 现有 harness；`engine.run_author()` 用该文件里驱动 Author 运行的实际入口名替换。
+
 - [ ] Run: `cargo test -p cadence-aria workspace_engine`
-- Expected: FAIL —— 运行链路未接 Pi / fail-fast 未保证
+- Expected: FAIL -- 运行链路未接 Pi / fail-fast 未保证
+
 
 ## Step 11: 运行链路接 Pi + fail-fast 边界
 
@@ -255,7 +387,7 @@ async fn pi_start_failure_reports_failure_without_switching_or_retrying() {
 ```bash
 cargo test -p cadence-aria workspace
 cargo test -p cadence-aria workspace_engine
-git add src/product/models/workspace.rs src/product/workspace_engine/ src/web/workspace_ws_types/common.rs src/cross_cutting/streaming_provider/mod.rs
+git add src/product/models/workspace.rs src/product/workspace_engine/ src/product/lifecycle_store/inputs.rs src/product/lifecycle_store/workspace.rs src/web/workspace_ws_types/common.rs src/web/handlers/coding.rs src/cross_cutting/streaming_provider/mod.rs
 git commit -m "feat(workspace): persist per-role permission mode in session record (default Auto) and support Pi with fail-fast"
 ```
 

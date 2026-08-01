@@ -207,50 +207,238 @@ impl PiProvider {
 - [ ] Run: `cargo test -p cadence-aria pi_provider`
 - Expected: PASS
 
-## Step 8: 写失败测试 —— session 驱动（duplex 模拟 Pi peer）
+## Step 8: 写失败测试 -- session 驱动（duplex 模拟 Pi peer，含 Abort 与 resume）
 
-用 `tokio::io::duplex` 模拟 Pi 的 stdin/stdout。`JsonRpcPeer::new(reader, writer)` 需要读写两半。fake Pi 协程：先写入预置的 inbound JSONL（来自 fixture），同时读取并断言 outbound。
+**架构要点（高4）：** `run_pi_session` 除 peer/event/input/cancel，**必须**接收 `mpsc::Receiver<ProviderCommand>`。上层取消把 `ProviderCommand::Abort` 发到 `ProviderSession.commands`（见 `provider_drive.rs:183-187`、`coding_workspace_engine/provider_stream.rs:175-183`），session 的 `select!` 把 `Abort` 映射为 Pi `abort` 命令，随后发 aborted 状态并停止消费后续输出。`start()` 创建 command channel 并返回 `ProviderSession { events, commands }`（与 Claude/Codex 一致）。
 
-`tests.rs` 加（完整可运行框架）：
+**测试模板依据：** duplex + `JsonRpcPeer` 的可运行写法直接照 `src/cross_cutting/json_rpc_peer.rs` 的 `#[cfg(test)]`（该模块已有 4 个 duplex 测试）：`tokio::io::duplex(4096)` → `tokio::io::split(client_io)` 给 `JsonRpcPeer::new(reader, writer)`；fake Pi 用 `tokio::spawn` + `split(server_io)` + `BufReader::read_line` 读 outbound、`write_all` + `\n` 写 inbound。
+
+`tests.rs` 加：
 
 ```rust
-use tokio::io::duplex;
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
-#[tokio::test]
-async fn session_sends_prompt_and_emits_text_until_settled() {
-    let (client_io, mut pi_io) = duplex(8192);
-    // client_io 交给 run_pi_session；pi_io 由本测试扮演 fake Pi
-    // fake Pi：读 prompt 命令 → 回 response(success) → 写 message_update(text_delta) → 写 agent_settled
-    // 断言：run_pi_session 把 text_delta 转成 ProviderEvent::TextDelta，遇 agent_settled 发 Completed
+/// 读一行 outbound JSON（fake Pi 侧）
+async fn read_outbound(reader: &mut tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>) -> serde_json::Value {
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("read outbound");
+    serde_json::from_str(&line).expect("outbound is json")
+}
+
+/// 写一行 inbound JSON（fake Pi 侧）
+async fn write_inbound(writer: &mut (impl tokio::io::AsyncWrite + Unpin), value: serde_json::Value) {
+    writer.write_all(value.to_string().as_bytes()).await.expect("write inbound");
+    writer.write_all(b"\n").await.expect("write newline");
+}
+
+/// drain 事件直到收到 Completed 或 Failed，返回全部事件
+async fn drain_events(rx: &mut mpsc::Receiver<ProviderEvent>) -> Vec<ProviderEvent> {
+    let mut out = Vec::new();
+    while let Some(ev) = rx.recv().await {
+        let terminal = matches!(ev, ProviderEvent::Completed(_) | ProviderEvent::Failed { .. });
+        out.push(ev);
+        if terminal {
+            break;
+        }
+    }
+    out
 }
 
 #[tokio::test]
-async fn session_captures_session_id_into_completion() {
-    // fake Pi：get_state 响应含 sessionId → 断言 ProviderCompletion.provider_session_id == Some(sessionId)
+async fn session_sends_prompt_and_emits_text_until_settled() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (reader, writer) = tokio::io::split(client_io);
+    let peer = JsonRpcPeer::new(reader, writer);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (_command_tx, command_rx) = mpsc::channel(8);
+
+    // fake Pi：读 get_state -> 回 sessionId；读 prompt -> 回 ack -> 写 text_delta -> 写 agent_settled
+    tokio::spawn(async move {
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let mut reader = tokio::io::BufReader::new(server_reader);
+
+        let get_state = read_outbound(&mut reader).await;
+        assert_eq!(get_state["type"], "get_state");
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "response", "id": get_state["id"], "command": "get_state",
+            "success": true, "data": {"sessionId": "sess-1"}
+        })).await;
+
+        let prompt = read_outbound(&mut reader).await;
+        assert_eq!(prompt["type"], "prompt");
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "response", "id": prompt["id"], "command": "prompt", "success": true
+        })).await;
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "Hello"}
+        })).await;
+        write_inbound(&mut server_writer, serde_json::json!({"type": "agent_settled"})).await;
+    });
+
+    run_pi_session(peer, command_rx, event_tx, streaming_input_for_test(None), CancellationToken::new())
+        .await
+        .expect("session ok");
+
+    let events = drain_events(&mut event_rx).await;
+    assert!(events.iter().any(|e| matches!(e, ProviderEvent::TextDelta { content } if content == "Hello")));
+    let completion = events.iter().find_map(|e| match e {
+        ProviderEvent::Completed(c) => Some(c.clone()),
+        _ => None,
+    }).expect("completed");
+    assert_eq!(completion.provider_session_id.as_deref(), Some("sess-1"));
 }
 
 #[tokio::test]
 async fn session_aborts_on_provider_command_abort() {
-    // 发 ProviderCommand::Abort 到 command channel
-    // 断言 fake Pi 读到 abort 命令，run_pi_session 发 aborted 状态并终止，后续输出不消费
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (reader, writer) = tokio::io::split(client_io);
+    let peer = JsonRpcPeer::new(reader, writer);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (command_tx, command_rx) = mpsc::channel(8);
+
+    tokio::spawn(async move {
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let mut reader = tokio::io::BufReader::new(server_reader);
+        let get_state = read_outbound(&mut reader).await;
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "response", "id": get_state["id"], "command": "get_state",
+            "success": true, "data": {"sessionId": "sess-1"}
+        })).await;
+        let prompt = read_outbound(&mut reader).await;
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "response", "id": prompt["id"], "command": "prompt", "success": true
+        })).await;
+        // 等 abort 命令
+        let abort = read_outbound(&mut reader).await;
+        assert_eq!(abort["type"], "abort");
+    });
+
+    // 触发上层取消
+    command_tx.send(ProviderCommand::Abort).await.expect("send abort");
+
+    run_pi_session(peer, command_rx, event_tx, streaming_input_for_test(None), CancellationToken::new())
+        .await
+        .expect("session ends after abort");
+
+    let events = drain_events(&mut event_rx).await;
+    assert!(events.iter().any(|e| matches!(e, ProviderEvent::Failed { .. }) || matches!(e, ProviderEvent::StatusChanged(_))));
 }
 
 #[tokio::test]
-async fn session_demultiplexes_response_by_id() {
-    // fake Pi：先发一个 event 再发该命令的 response（乱序）
-    // 断言 session 的 pending_by_id 正确分流：response 走 oneshot，event 走事件处理
+async fn session_resumes_with_existing_session_id() {
+    // 中4：真实恢复流程（不只测 build_args）
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (reader, writer) = tokio::io::split(client_io);
+    let peer = JsonRpcPeer::new(reader, writer);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (_command_tx, command_rx) = mpsc::channel(8);
+
+    tokio::spawn(async move {
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let mut reader = tokio::io::BufReader::new(server_reader);
+        let get_state = read_outbound(&mut reader).await;
+        // 恢复场景：Pi 返回既有 session id
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "response", "id": get_state["id"], "command": "get_state",
+            "success": true, "data": {"sessionId": "sess-old"}
+        })).await;
+        let prompt = read_outbound(&mut reader).await;
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "response", "id": prompt["id"], "command": "prompt", "success": true
+        })).await;
+        write_inbound(&mut server_writer, serde_json::json!({"type": "agent_settled"})).await;
+    });
+
+    // 输入携带旧 session id
+    let input = streaming_input_for_test(Some("sess-old".to_string()));
+    // build_args 侧断言（启动参数含 --session-id）
+    let provider = PiProvider::new("pi".into());
+    let args = provider.build_args(input.resume_provider_session_id.as_deref());
+    assert!(args.contains(&"--session-id".to_string()));
+    assert!(args.contains(&"sess-old".to_string()));
+
+    run_pi_session(peer, command_rx, event_tx, input, CancellationToken::new())
+        .await
+        .expect("resume session ok");
+
+    let events = drain_events(&mut event_rx).await;
+    let completion = events.iter().find_map(|e| match e {
+        ProviderEvent::Completed(c) => Some(c.clone()),
+        _ => None,
+    }).expect("completed");
+    assert_eq!(completion.provider_session_id.as_deref(), Some("sess-old"));
 }
 
 #[tokio::test]
 async fn session_failure_is_terminal_no_retry() {
-    // fake Pi：中途写错误事件 / EOF → 断言 run_pi_session 发 Failed，不重试（start 不调第二次）
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (reader, writer) = tokio::io::split(client_io);
+    let peer = JsonRpcPeer::new(reader, writer);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (_command_tx, command_rx) = mpsc::channel(8);
+
+    // fake Pi：get_state 后直接 EOF（drop writer）
+    tokio::spawn(async move {
+        let (server_reader, server_writer) = tokio::io::split(server_io);
+        let mut reader = tokio::io::BufReader::new(server_reader);
+        let _ = read_outbound(&mut reader).await;
+        drop(server_writer); // EOF
+    });
+
+    let _ = run_pi_session(peer, command_rx, event_tx, streaming_input_for_test(None), CancellationToken::new()).await;
+
+    let events = drain_events(&mut event_rx).await;
+    assert!(events.iter().any(|e| matches!(e, ProviderEvent::Failed { .. })), "EOF 应产生 Failed（fail-fast，不重试）");
+}
+
+#[tokio::test]
+async fn session_demultiplexes_response_by_id() {
+    // 高4：response 与 event 乱序时按 id 正确分流
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (reader, writer) = tokio::io::split(client_io);
+    let peer = JsonRpcPeer::new(reader, writer);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (_command_tx, command_rx) = mpsc::channel(8);
+
+    tokio::spawn(async move {
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let mut reader = tokio::io::BufReader::new(server_reader);
+        let get_state = read_outbound(&mut reader).await;
+        // 先发一个无关 event，再发 response（乱序）
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "early"}
+        })).await;
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "response", "id": get_state["id"], "command": "get_state",
+            "success": true, "data": {"sessionId": "sess-1"}
+        })).await;
+        let prompt = read_outbound(&mut reader).await;
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "response", "id": prompt["id"], "command": "prompt", "success": true
+        })).await;
+        write_inbound(&mut server_writer, serde_json::json!({"type": "agent_settled"})).await;
+    });
+
+    run_pi_session(peer, command_rx, event_tx, streaming_input_for_test(None), CancellationToken::new())
+        .await
+        .expect("session ok");
+
+    let events = drain_events(&mut event_rx).await;
+    // 乱序的 early text_delta 也应作为事件转发
+    assert!(events.iter().any(|e| matches!(e, ProviderEvent::TextDelta { content } if content == "early")));
 }
 ```
 
-注：每个测试需明确 `run_pi_session` 的参数签名、`JsonRpcPeer` 的构造、`ProviderEvent` 的 drain 方式。fake Pi 协程的读写时序要与真实 Pi 一致（参照 fixture）。
+注：`streaming_input_for_test(resume_id)` 构造 `StreamingProviderInput`（`provider_type: ProviderType::Pi`、`permission_mode: ProviderPermissionMode::Auto`、`working_dir` 临时目录、`resume_provider_session_id: resume_id`），参照 `src/cross_cutting/codex_provider/tests.rs` 的 input 构造 helper。
 
 - [ ] Run: `cargo test -p cadence-aria pi_provider`
-- Expected: FAIL —— `run_pi_session` 未实现
+- Expected: FAIL -- `run_pi_session` 未实现
+
 
 ## Step 9: 实现 `StreamingProviderAdapter for PiProvider` + `run_pi_session`
 

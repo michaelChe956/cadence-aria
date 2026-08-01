@@ -31,13 +31,41 @@
 
 ---
 
-## Step 1: 写失败测试 —— 普通 Workspace 面板展示 Pi + 权限模式选择
+## Step 1: 写失败测试 -- 普通 Workspace 面板展示 Pi + 权限模式选择
 
-`web/src/components/workspace/ProviderConfigPanel.test.tsx` 仿现有测试（用 `useProviderAvailabilityStore.setState()` 设健康快照；参照现有 `setProviderHealth`/`providerEntry` helper）：
+**测试模板依据：** 照 `web/src/components/workspace/ProviderConfigPanel.test.tsx` 现有写法——用 `useProviderAvailabilityStore.setState()` 设健康快照，`providerEntry()`/`setProviderHealth()` 是该文件已有 helper。`providers` prop 用真实 `WsProviderConfig`（`{author, reviewer?}`，**无** `review_rounds`）。
 
 ```ts
-it("author 可选 Pi 并选择权限模式", () => {
-  useProviderAvailabilityStore.setState({ snapshot: piAvailableSnapshot() });
+function piEntry(available: boolean): ProviderHealthEntry {
+  return {
+    provider: "pi",
+    display_name: "Pi",
+    available,
+    version: available ? "0.83.0" : null,
+    reason_code: available ? null : "command_missing",
+    reason: available ? null : "pi 未安装",
+    checked_at: "2026-07-31T00:00:00Z",
+    install_hint: "安装 pi",
+  };
+}
+
+function setHealthWithPi(piAvailable: boolean) {
+  useProviderAvailabilityStore.setState({
+    snapshot: {
+      schema_version: 1,
+      generation: 1,
+      checked_at: "2026-07-31T00:00:00Z",
+      state_status: "ready",
+      state_error: null,
+      real_workflow_blocked: false,
+      test_provider_enabled: false,
+      providers: [providerEntry("claude_code", true), providerEntry("codex", true), piEntry(piAvailable)],
+    },
+  });
+}
+
+it("author 可选 Pi，且 Pi 角色只提供 Auto", () => {
+  setHealthWithPi(true);
   const onPermissionModeSelect = vi.fn();
   render(
     <ProviderConfigPanel
@@ -50,15 +78,43 @@ it("author 可选 Pi 并选择权限模式", () => {
       onPermissionModeSelect={onPermissionModeSelect}
     />,
   );
-  // 断言 author provider 选择器含 "pi" 选项
-  // 断言 author 权限模式控件存在且 Pi 只显示 "Auto"（无 Supervised 选项）
+
+  // author provider 选择器含 Pi
+  const authorSelect = screen.getByLabelText("Author Provider");
+  expect(within(authorSelect).getByRole("option", { name: /Pi/ })).toBeTruthy();
+
+  // author 是 Pi 时，权限控件只有 Auto，没有 Supervised
+  const authorModes = screen.getByTestId("author-permission-mode");
+  expect(within(authorModes).getByRole("button", { name: "Auto" })).toBeTruthy();
+  expect(within(authorModes).queryByRole("button", { name: "Supervised" })).toBeNull();
+
+  // reviewer 是 Codex，两种模式都在
+  const reviewerModes = screen.getByTestId("reviewer-permission-mode");
+  expect(within(reviewerModes).getByRole("button", { name: "Supervised" })).toBeTruthy();
+});
+
+it("Pi 不可用时选项禁用且显示原因", () => {
+  setHealthWithPi(false);
+  render(
+    <ProviderConfigPanel
+      providers={{ author: "pi", reviewer: "codex" }}
+      editable
+      onSelectProvider={() => {}}
+      reviewerEnabled
+      onToggleReviewer={() => {}}
+      permissionModes={{ author: "auto", reviewer: "auto" }}
+      onPermissionModeSelect={() => {}}
+    />,
+  );
+  expect(screen.getByText(/pi 未安装/)).toBeTruthy();
 });
 ```
 
-注：`providers` 用真实 `WsProviderConfig` 结构（`{author, reviewer?}`，**不含** `review_rounds`）。`piAvailableSnapshot()` 参照现有测试 helper 构造含 Pi 可用的健康快照。`permissionModes`/`onPermissionModeSelect` 是新增 props（Step 2 实现）。
+注：`providerEntry` 是该测试文件已有 helper（当前只处理 claude_code/codex，需扩展或用上面的 `piEntry`）。`getByLabelText("Author Provider")` / `getByTestId("author-permission-mode")` 的实际查询串以 Step 2 实现的 DOM 结构为准，实现时同步这两处。
 
 - [ ] Run: `cd web && npm test ProviderConfigPanel`
-- Expected: FAIL —— 面板无权限模式控件 / 无 `onPermissionModeSelect` prop
+- Expected: FAIL -- 面板无权限模式控件 / 无 `permissionModes`、`onPermissionModeSelect` prop
+
 
 ## Step 2: 面板加权限控件 + Pi 仅 Auto
 

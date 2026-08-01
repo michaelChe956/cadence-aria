@@ -87,24 +87,102 @@ impl Default for CodingRolePermissionModes {
 
 注：Task 1/2 完成后，选 Pi 走 `PiProvider` 可能已通过 registry 路径执行，故"三角色可选 Pi"不作为 red test。本步聚焦 Task 4 真正未实现的行为：(a) Pi 角色的 Supervised mode 被规范化为 Auto；(b) Pi 运行失败不触发 Codex-only fresh retry。
 
-`tests/it_product/product_coding_workspace_engine/` 参照现有 `execute_coding_*`（如 `part_04.rs`/`part_06.rs` 的 test harness 与 registry 注入方式），加测试：
+**测试模板依据：** recording adapter 照 `src/product/workspace_engine/tests/part_06.rs:449` 的 `RecordingStreamingProvider`；Coding harness 与 registry 注入照 `tests/it_product/product_coding_workspace_engine/part_04.rs` 的 `execute_coding_*` 测试。
 
 ```rust
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// 记录 start 次数与收到的 permission_mode（复用 Task 3 的同名 helper 思路）
+struct CountingProvider {
+    starts: Arc<AtomicUsize>,
+    seen_modes: Arc<Mutex<Vec<ProviderPermissionMode>>>,
+    fail_on_start: bool,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CountingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        self.seen_modes.lock().unwrap().push(input.permission_mode.clone());
+        if self.fail_on_start {
+            return Err(ProviderAdapterError::execution_failed(None, String::new(), "pi failed", 0));
+        }
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::plain("done", Some("sess-1".into()))))
+                .await;
+        });
+        Ok(ProviderSession { events: event_rx, commands: command_tx })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(None, String::new(), "unused", 0))
+    }
+}
+
 #[tokio::test]
 async fn pi_role_with_supervised_mode_normalized_to_auto() {
-    // 构造 CodingRoleProviderConfigSnapshot：coder 选 Pi 且 permission_modes.coder = Supervised
-    // 跑运行；断言实际 StreamingProviderInput.permission_mode == Auto（Pi 强制 Auto）
+    let seen_modes = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Pi, Arc::new(CountingProvider {
+        starts: Arc::new(AtomicUsize::new(0)),
+        seen_modes: seen_modes.clone(),
+        fail_on_start: false,
+    }));
+
+    // coder 选 Pi 且 permission_modes.coder = Supervised（陈旧/非法输入）
+    let config = CodingRoleProviderConfigSnapshot {
+        coder: ProviderName::Pi,
+        code_reviewer: ProviderName::ClaudeCode,
+        internal_reviewer: ProviderName::ClaudeCode,
+        review_rounds: 1,
+        permission_modes: CodingRolePermissionModes {
+            coder: CodingProviderPermissionMode::Supervised,
+            code_reviewer: CodingProviderPermissionMode::Auto,
+            internal_reviewer: CodingProviderPermissionMode::Auto,
+        },
+    };
+    let engine = coding_engine_with_registry(Arc::new(registry), config);
+    engine.execute_coding().await.expect("coding run");
+
+    let modes = seen_modes.lock().unwrap();
+    assert_eq!(modes[0], ProviderPermissionMode::Auto, "Pi 角色须归一化为 Auto");
 }
 
 #[tokio::test]
 async fn pi_failure_does_not_trigger_fresh_retry() {
-    // recording Pi provider 运行失败
-    // 断言：pi start_count == 1、其他 provider start_count == 0、终态失败
-    // （Codex 的 resume-stall fresh retry 不对 Pi 触发）
+    let pi_starts = Arc::new(AtomicUsize::new(0));
+    let claude_starts = Arc::new(AtomicUsize::new(0));
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Pi, Arc::new(CountingProvider {
+        starts: pi_starts.clone(), seen_modes: Arc::new(Mutex::new(Vec::new())), fail_on_start: true,
+    }));
+    registry.register(ProviderName::ClaudeCode, Arc::new(CountingProvider {
+        starts: claude_starts.clone(), seen_modes: Arc::new(Mutex::new(Vec::new())), fail_on_start: false,
+    }));
+
+    let config = coding_config_with_coder(ProviderName::Pi);
+    let engine = coding_engine_with_registry(Arc::new(registry), config);
+    let result = engine.execute_coding().await;
+
+    assert!(result.is_err(), "Pi 启动失败应报错");
+    assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 只启动一次（无 fresh retry）");
+    assert_eq!(claude_starts.load(Ordering::SeqCst), 0, "不切换到其他 provider");
 }
 ```
 
-注：需明确 `CodingRoleProviderConfigSnapshot` 构造、registry 注入路径、recording adapter 的 start_count 计数方式（参照现有 `execute_coding_*` 测试的 harness）。
+注：`coding_engine_with_registry(registry, config)`、`coding_config_with_coder(provider)`、`engine.execute_coding()` 用 `tests/it_product/product_coding_workspace_engine/part_04.rs` 中驱动 Coding 运行的实际 harness 名替换。
 
 - [ ] Run: `cargo test -p cadence-aria product_coding_workspace_engine`
 - Expected: FAIL -- Pi+Supervised 未规范化；Pi 失败可能触发 fresh retry
