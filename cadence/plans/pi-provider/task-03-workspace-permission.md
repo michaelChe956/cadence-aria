@@ -183,15 +183,24 @@ rg -n "ProviderConfigSnapshot\s*\{" src/ -g '*.rs' | grep -v test
 - `src/product/lifecycle_store/workspace.rs:231-251` 创建记录处：初始化 `permission_modes` 字段。
 - `src/product/lifecycle_store/workspace.rs:407-421` 现有 `update_workspace_session_providers()` 只写 author/reviewer；新增 `update_workspace_session_permission_modes(...)`（或扩展为 author/reviewer/rounds/modes 原子更新），供 `start_generation()` 调用。
 
-测试（`src/product/workspace_engine/tests/` 或 `lifecycle_store` 测试模块）：
+测试（`src/product/workspace_engine/tests/`，参照该目录现有 `setup()`/`make_session()` harness，如 `part_06.rs:495`）：
 
 ```rust
-#[tokio::test]
-async fn new_session_defaults_permission_modes_to_auto() {
-    let store = test_lifecycle_store();
+#[test]
+fn new_session_defaults_permission_modes_to_auto() {
+    let (_tmp, store) = setup();
     let record = store
-        .create_workspace_session(create_input_without_permission_modes())
-        .await
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "p1".to_string(),
+            issue_id: "i1".to_string(),
+            entity_id: "e1".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
         .expect("create session");
     assert_eq!(record.permission_modes.author, ProviderPermissionMode::Auto);
     assert_eq!(record.permission_modes.reviewer, ProviderPermissionMode::Auto);
@@ -199,7 +208,11 @@ async fn new_session_defaults_permission_modes_to_auto() {
 
 #[tokio::test]
 async fn start_generation_locks_selected_modes_into_store() {
-    let (engine, store) = engine_with_store();
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let session = make_session("sess_lock");
+    let session_id = session.session_id.clone();
+    let mut engine = WorkspaceEngine::new(store.clone(), tx, session);
     let wire = ProviderConfigSnapshot {
         author: ProviderName::ClaudeCode,
         reviewer: Some(ProviderName::Codex),
@@ -209,31 +222,35 @@ async fn start_generation_locks_selected_modes_into_store() {
             reviewer: ProviderPermissionMode::Auto,
         },
     };
-    engine.start_generation(wire).await.expect("start generation");
-    let reread = store.load_workspace_session(session_id).await.expect("reload");
+    engine.start_generation(wire, true).await.expect("start generation");
+    let reread = store.get_workspace_session(&session_id).expect("reload");
     assert_eq!(reread.permission_modes.author, ProviderPermissionMode::Supervised);
 }
 
 #[tokio::test]
 async fn start_generation_normalizes_pi_role_to_auto() {
-    let (engine, store) = engine_with_store();
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let session = make_session("sess_norm");
+    let session_id = session.session_id.clone();
+    let mut engine = WorkspaceEngine::new(store.clone(), tx, session);
     let wire = ProviderConfigSnapshot {
         author: ProviderName::Pi,
         reviewer: None,
-        review_rounds: 1,
+        review_rounds: 0,
         permission_modes: WorkspaceRolePermissionModes {
             author: ProviderPermissionMode::Supervised, // 陈旧/非法输入
             reviewer: ProviderPermissionMode::Auto,
         },
     };
-    engine.start_generation(wire).await.expect("start generation");
-    let reread = store.load_workspace_session(session_id).await.expect("reload");
+    engine.start_generation(wire, false).await.expect("start generation");
+    let reread = store.get_workspace_session(&session_id).expect("reload");
     // Pi 仅 Auto：服务端归一化
     assert_eq!(reread.permission_modes.author, ProviderPermissionMode::Auto);
 }
 ```
 
-注：`test_lifecycle_store()`/`engine_with_store()`/`create_input_without_permission_modes()` 参照 `src/product/workspace_engine/tests/` 现有 harness 构造（如 `part_01.rs` 的 session/store 搭建方式）。
+注：`setup()`/`make_session(id)`/`WorkspaceEngine::new(store, tx, session)` 是 `src/product/workspace_engine/tests/` 现有 harness（见 `part_06.rs:495` 等测试）；`store.create_workspace_session(input)` 和 `store.get_workspace_session(&id)` 均为同步方法；`start_generation(&mut self, wire, reviewer_enabled)` 需 `&mut self` 且传 `reviewer_enabled: bool`。
 
 若 reviewer 关闭（`reviewer: None`），明确 reviewer mode 语义（保留或归零），并测试。
 
@@ -258,7 +275,7 @@ async fn start_generation_normalizes_pi_role_to_auto() {
 
 ## Step 10: 写失败测试 -- Author 选 Pi 走 PiProvider + fail-fast
 
-**测试模板依据：** recording adapter 照 `src/product/workspace_engine/tests/part_06.rs:449` 的 `RecordingStreamingProvider`（记录 `input.provider_type`、返回 `ProviderSession { events, commands }`）；registry 注入照 `provider_registry.rs:21-44` 的 `register`。
+**测试模板依据：** recording adapter 照 `src/product/workspace_engine/tests/part_06.rs:449` 的 `RecordingStreamingProvider`；engine 驱动照 `part_06.rs:495` 的 `handle_user_message(prompt, Arc<provider>, commands)`（provider 直接传入，不经 registry）。
 
 `src/product/workspace_engine/tests/` 加：
 
@@ -316,24 +333,24 @@ impl StreamingProviderAdapter for CountingProvider {
 
 #[tokio::test]
 async fn author_run_with_pi_uses_pi_provider_in_auto_mode() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_pi");
+    session.author_provider = ProviderName::Pi;
+    session.permission_modes.author = ProviderPermissionMode::Auto;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+
     let pi_starts = Arc::new(AtomicUsize::new(0));
     let pi_seen = Arc::new(Mutex::new(Vec::new()));
-    let claude_starts = Arc::new(AtomicUsize::new(0));
-
-    let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Pi, Arc::new(CountingProvider {
+    let provider = CountingProvider {
         starts: pi_starts.clone(), seen: pi_seen.clone(), fail_on_start: false,
-    }));
-    registry.register(ProviderName::ClaudeCode, Arc::new(CountingProvider {
-        starts: claude_starts.clone(), seen: Arc::new(Mutex::new(Vec::new())), fail_on_start: false,
-    }));
+    };
 
-    // author 选 Pi、permission_modes.author = Auto 的 session
-    let engine = engine_with_registry(Arc::new(registry), session_with_author_pi());
-    engine.run_author().await.expect("author run");
+    engine
+        .handle_user_message("start".to_string(), Arc::new(provider), empty_provider_commands())
+        .await;
 
     assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 应被调用一次");
-    assert_eq!(claude_starts.load(Ordering::SeqCst), 0, "不应调用其他 provider");
     let seen = pi_seen.lock().unwrap();
     assert_eq!(seen[0].0, ProviderType::Pi);
     assert_eq!(seen[0].1, ProviderPermissionMode::Auto, "Pi 仅 Auto");
@@ -341,27 +358,28 @@ async fn author_run_with_pi_uses_pi_provider_in_auto_mode() {
 
 #[tokio::test]
 async fn pi_start_failure_reports_without_switching_or_retrying() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_pi_fail");
+    session.author_provider = ProviderName::Pi;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+
     let pi_starts = Arc::new(AtomicUsize::new(0));
-    let claude_starts = Arc::new(AtomicUsize::new(0));
-
-    let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Pi, Arc::new(CountingProvider {
+    let provider = CountingProvider {
         starts: pi_starts.clone(), seen: Arc::new(Mutex::new(Vec::new())), fail_on_start: true,
-    }));
-    registry.register(ProviderName::ClaudeCode, Arc::new(CountingProvider {
-        starts: claude_starts.clone(), seen: Arc::new(Mutex::new(Vec::new())), fail_on_start: false,
-    }));
+    };
 
-    let engine = engine_with_registry(Arc::new(registry), session_with_author_pi());
-    let result = engine.run_author().await;
+    engine
+        .handle_user_message("start".to_string(), Arc::new(provider), empty_provider_commands())
+        .await;
 
-    assert!(result.is_err(), "启动失败应报错");
+    // fail-fast：Pi 启动失败后 engine 回到 prepare 阶段（不切换、不重试）
     assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 只启动一次，不重试");
-    assert_eq!(claude_starts.load(Ordering::SeqCst), 0, "不切换到其他 provider");
+    assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
 }
 ```
 
-注：`engine_with_registry(registry, session)`、`session_with_author_pi()`、`complete_story_artifact(...)` 参照 `src/product/workspace_engine/tests/part_06.rs` 现有 harness；`engine.run_author()` 用该文件里驱动 Author 运行的实际入口名替换。
+注：`setup()`/`make_session(id)`/`WorkspaceEngine::new(store, tx, session)`/`complete_story_artifact(...)`/`empty_provider_commands()` 是 `src/product/workspace_engine/tests/` 现有 harness（见 `part_06.rs:495`）。`handle_user_message(prompt, Arc<provider>, commands)` 是 Author 运行真实入口。Pi 启动失败后 engine 回到 `PrepareContext` 阶段（见 `part_08.rs:41` 的 `handle_user_message_provider_error_returns_to_prepare_context`）。
 
 - [ ] Run: `cargo test -p cadence-aria workspace_engine`
 - Expected: FAIL -- 运行链路未接 Pi / fail-fast 未保证

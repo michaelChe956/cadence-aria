@@ -87,13 +87,16 @@ impl Default for CodingRolePermissionModes {
 
 注：Task 1/2 完成后，选 Pi 走 `PiProvider` 可能已通过 registry 路径执行，故"三角色可选 Pi"不作为 red test。本步聚焦 Task 4 真正未实现的行为：(a) Pi 角色的 Supervised mode 被规范化为 Auto；(b) Pi 运行失败不触发 Codex-only fresh retry。
 
-**测试模板依据：** recording adapter 照 `src/product/workspace_engine/tests/part_06.rs:449` 的 `RecordingStreamingProvider`；Coding harness 与 registry 注入照 `tests/it_product/product_coding_workspace_engine/part_04.rs` 的 `execute_coding_*` 测试。
+**测试模板依据：** recording adapter 照 `src/product/workspace_engine/tests/part_06.rs:449` 的 `RecordingStreamingProvider`；Coding harness 照 `tests/it_product/product_coding_workspace_engine/part_04.rs:39-45` 的真实写法：`CodingAttemptStore::new(ProductAppPaths::new(...))` + `create_attempt(CreateCodingAttemptInput{..create_input()})` + `CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx)` + `execute_coding(&attempt, &provider, &CodingExecutionContext::default())`（provider 直接传入，不经 registry）。
 
 ```rust
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::fs;
+use tempfile::tempdir;
+use tokio::sync::mpsc;
 
-/// 记录 start 次数与收到的 permission_mode（复用 Task 3 的同名 helper 思路）
+/// 记录 start 次数与收到的 permission_mode
 struct CountingProvider {
     starts: Arc<AtomicUsize>,
     seen_modes: Arc<Mutex<Vec<ProviderPermissionMode>>>,
@@ -133,13 +136,28 @@ impl StreamingProviderAdapter for CountingProvider {
 
 #[tokio::test]
 async fn pi_role_with_supervised_mode_normalized_to_auto() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Running)
+        .expect("running");
+
     let seen_modes = Arc::new(Mutex::new(Vec::new()));
-    let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Pi, Arc::new(CountingProvider {
+    let provider = CountingProvider {
         starts: Arc::new(AtomicUsize::new(0)),
         seen_modes: seen_modes.clone(),
         fail_on_start: false,
-    }));
+    };
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
     // coder 选 Pi 且 permission_modes.coder = Supervised（陈旧/非法输入）
     let config = CodingRoleProviderConfigSnapshot {
@@ -153,8 +171,10 @@ async fn pi_role_with_supervised_mode_normalized_to_auto() {
             internal_reviewer: CodingProviderPermissionMode::Auto,
         },
     };
-    let engine = coding_engine_with_registry(Arc::new(registry), config);
-    engine.execute_coding().await.expect("coding run");
+    engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("execute coding");
 
     let modes = seen_modes.lock().unwrap();
     assert_eq!(modes[0], ProviderPermissionMode::Auto, "Pi 角色须归一化为 Auto");
@@ -162,27 +182,42 @@ async fn pi_role_with_supervised_mode_normalized_to_auto() {
 
 #[tokio::test]
 async fn pi_failure_does_not_trigger_fresh_retry() {
-    let pi_starts = Arc::new(AtomicUsize::new(0));
-    let claude_starts = Arc::new(AtomicUsize::new(0));
-    let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Pi, Arc::new(CountingProvider {
-        starts: pi_starts.clone(), seen_modes: Arc::new(Mutex::new(Vec::new())), fail_on_start: true,
-    }));
-    registry.register(ProviderName::ClaudeCode, Arc::new(CountingProvider {
-        starts: claude_starts.clone(), seen_modes: Arc::new(Mutex::new(Vec::new())), fail_on_start: false,
-    }));
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status("project_0001", "issue_0001", &attempt.id, CodingAttemptStatus::Running)
+        .expect("running");
 
-    let config = coding_config_with_coder(ProviderName::Pi);
-    let engine = coding_engine_with_registry(Arc::new(registry), config);
-    let result = engine.execute_coding().await;
+    let pi_starts = Arc::new(AtomicUsize::new(0));
+    let provider = CountingProvider {
+        starts: pi_starts.clone(),
+        seen_modes: Arc::new(Mutex::new(Vec::new())),
+        fail_on_start: true,
+    };
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let result = engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await;
 
     assert!(result.is_err(), "Pi 启动失败应报错");
     assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 只启动一次（无 fresh retry）");
-    assert_eq!(claude_starts.load(Ordering::SeqCst), 0, "不切换到其他 provider");
 }
 ```
 
-注：`coding_engine_with_registry(registry, config)`、`coding_config_with_coder(provider)`、`engine.execute_coding()` 用 `tests/it_product/product_coding_workspace_engine/part_04.rs` 中驱动 Coding 运行的实际 harness 名替换。
+注：`CodingAttemptStore::new`/`ProductAppPaths::new`/`CreateCodingAttemptInput`/`create_input()`/`CodingAttemptStatus::Running`/`GitWorkspaceService::new()`/`CodingWorkspaceEngine::new(store, git, tx)`/`execute_coding(&attempt, &provider, &CodingExecutionContext::default())` 均为 `tests/it_product/product_coding_workspace_engine/part_04.rs` 现有 harness 与 API。`CodingRoleProviderConfigSnapshot` 需在 Coding 运行链路中传入（确认 `execute_coding` 如何读 config，可能在 `CodingExecutionContext` 或 attempt 上）。
+
+- [ ] Run: `cargo test -p cadence-aria product_coding_workspace_engine`
+- Expected: FAIL -- Pi+Supervised 未规范化；Pi 失败可能触发 fresh retry
 
 - [ ] Run: `cargo test -p cadence-aria product_coding_workspace_engine`
 - Expected: FAIL -- Pi+Supervised 未规范化；Pi 失败可能触发 fresh retry

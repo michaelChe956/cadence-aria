@@ -107,6 +107,10 @@ it("Pi 不可用时选项禁用且显示原因", () => {
     />,
   );
   expect(screen.getByText(/pi 未安装/)).toBeTruthy();
+  // Pi option 应禁用
+  const authorSelect = screen.getByLabelText("Author Provider");
+  const piOption = within(authorSelect).getByRole("option", { name: /Pi/ });
+  expect(piOption).toBeDisabled();
 });
 ```
 

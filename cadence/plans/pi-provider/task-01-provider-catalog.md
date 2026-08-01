@@ -270,25 +270,22 @@ pub fn provider_name_key(provider: &ProviderName) -> &'static str {
 
 ## Step 11: 写失败测试 -- 状态 API 返回 Pi
 
-`src/web/handlers/providers.rs` 的 `#[cfg(test)]` 加（参照该文件现有测试的 snapshot 构造方式）：
+`src/web/handlers/providers.rs` 的 `#[cfg(test)]` 加（直接复用该文件已有 helper：`ScriptedRunner` + `success(version)` + `service(root, runner)` + `state(root, health, runner)` + `response_from_state(&state)`；现有测试如 `providers_status_maps_all_availability_states_and_complete_fields` 即用此模式）：
 
 ```rust
-#[test]
-fn provider_status_includes_pi_when_available() {
-    let checked_at = Utc::now();
-    let snapshot = ProviderHealthSnapshot {
-        schema_version: PROVIDER_HEALTH_SCHEMA_VERSION,
-        generation: 1,
-        checked_at,
-        providers: vec![
-            available_entry(ProviderName::ClaudeCode, checked_at),
-            available_entry(ProviderName::Codex, checked_at),
-            available_entry(ProviderName::Pi, checked_at),
-        ],
-    };
-    let state = test_web_app_state();
-    let response = response_from_snapshot(&state, Arc::new(snapshot));
+#[tokio::test]
+async fn providers_status_includes_pi_when_available() {
+    let root = tempdir().expect("root");
+    // ScriptedRunner 依次返回 claude/codex/pi 三个 success（stdout 格式 "provider {version}"）
+    let runner = Arc::new(ScriptedRunner::new(
+        vec![success("1.0"), success("2.0"), success("0.83.0")],
+        Duration::ZERO,
+    ));
+    let health = service(root.path(), runner.clone());
+    health.refresh(CancellationToken::new()).await.expect("refresh");
+    let response = response_from_state(&state(root.path(), health, runner));
 
+    assert_eq!(response.providers.len(), 3);
     let pi = response
         .providers
         .iter()
@@ -300,10 +297,10 @@ fn provider_status_includes_pi_when_available() {
 }
 ```
 
-注：`available_entry(provider, checked_at)` 构造 `ProviderHealthEntry { provider, available: true, version: Some("0.83.0".into()), reason_code: None, reason: None, checked_at, .. }`；`test_web_app_state()` 参照该文件现有测试的 state 构造（如 `providers_status_reports_degraded_storage_without_http_error` 用的方式）。
+注：`success(version)` / `service(root, runner)` / `state(root, health, runner)` / `ScriptedRunner` / `response_from_state` 均为该文件 `#[cfg(test)]` 已有 helper，直接复用。加 Pi 后 `response.providers.len()` 从 2 变 3。
 
-- [ ] Run: `cargo test -p cadence-aria providers`
-- Expected: FAIL -- `response_from_snapshot` 只枚举 Claude/Codex；`provider_dto` 无 Pi 分支
+- [ ] Run: `cargo test -p cadence-aria providers_status_includes_pi_when_available`
+- Expected: FAIL -- `response_from_state`/`refresh` 只枚举 Claude/Codex；`provider_dto` 无 Pi 分支
 
 
 ## Step 12: 状态 API 加 Pi
