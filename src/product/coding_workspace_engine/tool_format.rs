@@ -107,6 +107,19 @@ pub(crate) fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
     match provider {
         ProviderName::ClaudeCode => ProviderType::ClaudeCode,
         ProviderName::Codex => ProviderType::Codex,
+        ProviderName::Pi => ProviderType::Pi,
         ProviderName::Fake => ProviderType::Fake,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_type_for_name;
+    use crate::product::models::ProviderName;
+    use crate::protocol::contracts::ProviderType;
+
+    #[test]
+    fn provider_type_for_name_maps_pi() {
+        assert_eq!(provider_type_for_name(&ProviderName::Pi), ProviderType::Pi);
     }
 }

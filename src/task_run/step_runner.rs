@@ -112,6 +112,7 @@ fn provider_type_text(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::ClaudeCode => "claude_code",
         ProviderType::Codex => "codex",
+        ProviderType::Pi => unreachable!("task run node contracts do not produce pi"),
         ProviderType::Fake => "fake",
     }
 }

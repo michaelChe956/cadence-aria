@@ -130,6 +130,7 @@ pub(crate) fn provider_name_to_type(name: &ProviderName) -> ProviderType {
     match name {
         ProviderName::ClaudeCode => ProviderType::ClaudeCode,
         ProviderName::Codex => ProviderType::Codex,
+        ProviderName::Pi => ProviderType::Pi,
         ProviderName::Fake => ProviderType::Fake,
     }
 }
@@ -320,6 +321,18 @@ pub(crate) fn prompt_nonce(prompt: &str) -> String {
         .and_then(|(_, tail)| tail.split_once('"'))
         .map(|(nonce, _)| nonce.to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_name_to_type;
+    use crate::product::models::ProviderName;
+    use crate::protocol::contracts::ProviderType;
+
+    #[test]
+    fn provider_name_to_type_maps_pi() {
+        assert_eq!(provider_name_to_type(&ProviderName::Pi), ProviderType::Pi);
+    }
 }
 
 pub(crate) fn format_string_list(values: &[String]) -> String {

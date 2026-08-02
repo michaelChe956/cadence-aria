@@ -1,6 +1,7 @@
 mod claude_code;
 mod codex;
 mod fake;
+mod pi;
 
 use std::collections::BTreeSet;
 
@@ -19,6 +20,7 @@ use super::{
 use claude_code::ClaudeCodeProjectionRenderer;
 use codex::CodexProjectionRenderer;
 use fake::FakeProjectionRenderer;
+use pi::PiProjectionRenderer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectionRenderRole {
@@ -184,6 +186,7 @@ pub fn renderer_for(provider: &ProviderName) -> Box<dyn ProviderProjectionRender
     match provider {
         ProviderName::Codex => Box::new(CodexProjectionRenderer),
         ProviderName::ClaudeCode => Box::new(ClaudeCodeProjectionRenderer),
+        ProviderName::Pi => Box::new(PiProjectionRenderer),
         ProviderName::Fake => Box::new(FakeProjectionRenderer),
     }
 }

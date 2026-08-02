@@ -48,6 +48,7 @@ impl ProviderRegistry {
         [
             ProviderName::ClaudeCode,
             ProviderName::Codex,
+            ProviderName::Pi,
             ProviderName::Fake,
         ]
         .into_iter()
@@ -142,12 +143,14 @@ mod tests {
         registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
         registry.register(ProviderName::ClaudeCode, Arc::new(FakeStreamingProvider));
         registry.register(ProviderName::Codex, Arc::new(FakeStreamingProvider));
+        registry.register(ProviderName::Pi, Arc::new(FakeStreamingProvider));
 
         assert_eq!(
             registry.available_names(),
             vec![
                 ProviderName::ClaudeCode,
                 ProviderName::Codex,
+                ProviderName::Pi,
                 ProviderName::Fake
             ]
         );
@@ -168,6 +171,11 @@ mod tests {
             gate.clone(),
         );
         registry.register_gated(
+            ProviderName::Pi,
+            Arc::new(FakeStreamingProvider),
+            gate.clone(),
+        );
+        registry.register_gated(
             ProviderName::Fake,
             Arc::new(FakeStreamingProvider),
             gate.clone(),
@@ -178,6 +186,7 @@ mod tests {
             vec![
                 ProviderName::ClaudeCode,
                 ProviderName::Codex,
+                ProviderName::Pi,
                 ProviderName::Fake
             ]
         );

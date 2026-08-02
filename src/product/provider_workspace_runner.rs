@@ -131,6 +131,7 @@ fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
     match provider {
         ProviderName::ClaudeCode => ProviderType::ClaudeCode,
         ProviderName::Codex => ProviderType::Codex,
+        ProviderName::Pi => unreachable!("legacy fake runner does not support pi"),
         ProviderName::Fake => ProviderType::Fake,
     }
 }

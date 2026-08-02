@@ -24,11 +24,13 @@ type RealProviderCatalogEntry = {
 const REAL_PROVIDER_CATALOG: readonly RealProviderCatalogEntry[] = [
   { value: "claude_code", fallbackLabel: "Claude Code" },
   { value: "codex", fallbackLabel: "Codex" },
+  { value: "pi", fallbackLabel: "Pi" },
 ];
 
 export const PROVIDER_ORDER: readonly WorkspaceProviderName[] = [
   "claude_code",
   "codex",
+  "pi",
   "fake",
 ];
 

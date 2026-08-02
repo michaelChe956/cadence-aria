@@ -68,6 +68,7 @@ describe("provider options", () => {
     expect(options.map((option) => option.value)).toEqual([
       "claude_code",
       "codex",
+      "pi",
       "fake",
     ]);
     expect(options[0]).toMatchObject({
@@ -85,6 +86,15 @@ describe("provider options", () => {
       available: available.codex,
       disabled: !available.codex,
       installHint: "Install codex",
+    });
+    expect(options[2]).toMatchObject({
+      value: "pi",
+      label: "Pi",
+      visible: true,
+      available: false,
+      disabled: true,
+      reason: "Provider 状态尚未确认",
+      installHint: null,
     });
     if (!available.claude_code) {
       expect(options[0].reason).toBe("claude_code unavailable");
@@ -206,5 +216,30 @@ describe("provider options", () => {
     expect(getProviderOption(health, "codex")).toEqual(
       getProviderOptions(health).find((option) => option.value === "codex"),
     );
+  });
+  it("pi available 时出现在 provider 选项中", () => {
+    const snapshot = {
+      real_workflow_blocked: false,
+      state_error: null,
+      state_status: "ready" as const,
+      test_provider_enabled: false,
+      providers: [
+        {
+          provider: "pi",
+          display_name: "Pi",
+          available: true,
+          version: "0.83.0",
+          reason_code: null,
+          reason: null,
+          checked_at: "",
+          install_hint: "",
+        },
+      ],
+    };
+    const options = getProviderOptions(snapshot as any);
+    const pi = options.find((option) => option.value === "pi");
+    expect(pi).toBeDefined();
+    expect(pi?.available).toBe(true);
+    expect(pi?.real).toBe(true);
   });
 });

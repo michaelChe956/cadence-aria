@@ -30,6 +30,7 @@ pub(crate) fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
     match provider {
         ProviderName::ClaudeCode => ProviderType::ClaudeCode,
         ProviderName::Codex => ProviderType::Codex,
+        ProviderName::Pi => ProviderType::Pi,
         ProviderName::Fake => ProviderType::Fake,
     }
 }
@@ -38,6 +39,7 @@ pub(crate) fn provider_name_text(provider: &ProviderName) -> &'static str {
     match provider {
         ProviderName::ClaudeCode => "claude_code",
         ProviderName::Codex => "codex",
+        ProviderName::Pi => "pi",
         ProviderName::Fake => "fake",
     }
 }
@@ -220,4 +222,16 @@ pub(crate) fn latest_artifact_from_messages(
             markdown: extract_artifact_content(&message.content),
             diff: None,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_type_for_name;
+    use crate::product::models::ProviderName;
+    use crate::protocol::contracts::ProviderType;
+
+    #[test]
+    fn provider_type_for_name_maps_pi() {
+        assert_eq!(provider_type_for_name(&ProviderName::Pi), ProviderType::Pi);
+    }
 }

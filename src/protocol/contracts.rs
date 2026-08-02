@@ -45,7 +45,18 @@ pub enum AdapterRole {
 pub enum ProviderType {
     ClaudeCode,
     Codex,
+    Pi,
     Fake,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderType;
+
+    #[test]
+    fn provider_type_pi_serializes_to_snake_case() {
+        assert_eq!(serde_json::to_string(&ProviderType::Pi).unwrap(), "\"pi\"");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

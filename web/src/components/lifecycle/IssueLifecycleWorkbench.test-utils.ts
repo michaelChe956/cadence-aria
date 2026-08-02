@@ -457,8 +457,8 @@ export function lifecycleFetch(options?: {
       const issueId = storyGenerateMatch[2];
       const payload = JSON.parse(String(init?.body ?? "{}")) as {
         title: string;
-        author_provider: "claude_code" | "codex" | "fake";
-        reviewer_provider: "claude_code" | "codex" | "fake";
+        author_provider: "claude_code" | "codex" | "pi" | "fake";
+        reviewer_provider: "claude_code" | "codex" | "pi" | "fake";
         review_rounds: number;
         superpowers_enabled: boolean;
         openspec_enabled: boolean;
@@ -499,8 +499,8 @@ export function lifecycleFetch(options?: {
       const payload = JSON.parse(String(init?.body ?? "{}")) as {
         title: string;
         story_spec_ids: string[];
-        author_provider: "claude_code" | "codex" | "fake";
-        reviewer_provider: "claude_code" | "codex" | "fake";
+        author_provider: "claude_code" | "codex" | "pi" | "fake";
+        reviewer_provider: "claude_code" | "codex" | "pi" | "fake";
         review_rounds: number;
         superpowers_enabled: boolean;
         openspec_enabled: boolean;
@@ -553,8 +553,8 @@ export function lifecycleFetch(options?: {
         title: string;
         story_spec_ids: string[];
         design_spec_ids: string[];
-        author_provider: "claude_code" | "codex" | "fake";
-        reviewer_provider: "claude_code" | "codex" | "fake";
+        author_provider: "claude_code" | "codex" | "pi" | "fake";
+        reviewer_provider: "claude_code" | "codex" | "pi" | "fake";
         review_rounds: number;
         superpowers_enabled: boolean;
         openspec_enabled: boolean;

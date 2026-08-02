@@ -517,7 +517,11 @@ mod tests {
             let _guard = ENV_LOCK.lock().expect("env lock");
             let _provider_mode = ProviderModeGuard::disabled();
             let root = tempdir().expect("root");
-            let runner = Arc::new(ScriptedRunner::new(vec![success("1.0"), success("2.0")]));
+            let runner = Arc::new(ScriptedRunner::new(vec![
+                success("1.0"),
+                success("2.0"),
+                success("0.83.0"),
+            ]));
             let health = provider_health(root.path(), runner.clone());
             let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
             let state = WebAppState::new(

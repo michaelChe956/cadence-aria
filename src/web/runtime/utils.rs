@@ -59,6 +59,7 @@ fn provider_type_slug(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::ClaudeCode => "claude",
         ProviderType::Codex => "codex",
+        ProviderType::Pi => unreachable!("task run output chunks do not originate from pi"),
         ProviderType::Fake => "fake",
     }
 }
