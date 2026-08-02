@@ -3,6 +3,7 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderSession, StreamChunk, StreamingProviderInput,
 };
+use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::{
     AuthorDecision, HumanConfirmDecision, ProviderConfigSnapshot, RevisionPath, StructuredFeedback,
 };
@@ -1002,10 +1003,9 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
         CreateWorkspaceSessionInput,
     };
     use crate::product::models::{
-        IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName, WorkItemSplitFinding,
+        IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkItemSplitFinding,
         WorkItemSplitFindingSeverity, WorkspaceType,
     };
-    use std::sync::Arc;
 
     let tmp = tempfile::tempdir().unwrap();
     let lifecycle = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));

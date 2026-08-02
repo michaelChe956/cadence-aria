@@ -193,11 +193,12 @@ impl CodingWorkspaceEngine {
             timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
         };
-        let mut provider_input = streaming_input_from_adapter(&input, worktree_path);
+        let permission_mode =
+            role_permission_mode_for_attempt(&self.store, &updated, CodingProviderRole::Coder)?;
+        let mut provider_input =
+            streaming_input_from_adapter(&input, worktree_path, permission_mode);
         provider_input.workspace_session_id = Some(updated.id.clone());
         provider_input.resume_provider_session_id = resume_provider_session_id.clone();
-        provider_input.permission_mode =
-            role_permission_mode_for_attempt(&self.store, &updated, CodingProviderRole::Coder)?;
         let fresh_retry = (coder_provider_name == ProviderName::Codex
             && resume_provider_session_id.is_some())
         .then(|| {

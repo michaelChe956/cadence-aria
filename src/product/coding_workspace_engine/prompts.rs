@@ -450,11 +450,8 @@ pub(crate) fn provider_prompt_event(
 pub(crate) fn streaming_input_from_adapter(
     input: &AdapterInput,
     working_dir: PathBuf,
+    permission_mode: ProviderPermissionMode,
 ) -> StreamingProviderInput {
-    let permission_mode = coding_permission_mode_for_provider_type(
-        &input.provider_type,
-        CodingProviderPermissionMode::Supervised,
-    );
     StreamingProviderInput {
         provider_type: input.provider_type.clone(),
         role: input.role.clone(),

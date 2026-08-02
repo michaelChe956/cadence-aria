@@ -446,6 +446,7 @@ mod group_completion_authority;
 mod group_terminal;
 mod internal_review_triage;
 mod parser_prompt;
+mod pi_rework_permission;
 mod plan_amendment;
 mod plan_defect_entrypoints;
 mod provider_driven;

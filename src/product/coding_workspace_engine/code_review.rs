@@ -99,14 +99,15 @@ impl CodingWorkspaceEngine {
             &CodingProviderRole::CodeReviewer,
             &reviewer,
         );
-        let mut provider_input = streaming_input_from_adapter(&input, worktree_path.clone());
-        provider_input.workspace_session_id = Some(attempt.id.clone());
-        provider_input.resume_provider_session_id = resume_provider_session_id;
-        provider_input.permission_mode = role_permission_mode_for_attempt(
+        let permission_mode = role_permission_mode_for_attempt(
             &self.store,
             &attempt,
             CodingProviderRole::CodeReviewer,
         )?;
+        let mut provider_input =
+            streaming_input_from_adapter(&input, worktree_path.clone(), permission_mode);
+        provider_input.workspace_session_id = Some(attempt.id.clone());
+        provider_input.resume_provider_session_id = resume_provider_session_id;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
