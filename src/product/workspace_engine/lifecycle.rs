@@ -621,11 +621,15 @@ impl WorkspaceEngine {
         reviewer_enabled: bool,
     ) -> Result<(TimelineNode, WsOutMessage), String> {
         let mut locked_snapshot = provider_config;
-        if locked_snapshot.author == ProviderName::Pi {
-            locked_snapshot.permission_modes.author = ProviderPermissionMode::Auto;
-        }
-        if locked_snapshot.reviewer == Some(ProviderName::Pi) {
-            locked_snapshot.permission_modes.reviewer = ProviderPermissionMode::Auto;
+        locked_snapshot.permission_modes.author = permission_mode_for_provider(
+            &locked_snapshot.author,
+            locked_snapshot.permission_modes.author.clone(),
+        );
+        if let Some(reviewer) = &locked_snapshot.reviewer {
+            locked_snapshot.permission_modes.reviewer = permission_mode_for_provider(
+                reviewer,
+                locked_snapshot.permission_modes.reviewer.clone(),
+            );
         }
         if !reviewer_enabled {
             locked_snapshot.reviewer = None;

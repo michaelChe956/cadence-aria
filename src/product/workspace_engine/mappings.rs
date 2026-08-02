@@ -35,6 +35,25 @@ pub(crate) fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
     }
 }
 
+/// Pi does not support per-tool approval, so it can only execute in Auto mode.
+pub(crate) fn permission_mode_for_provider_type(
+    provider_type: &ProviderType,
+    configured_mode: ProviderPermissionMode,
+) -> ProviderPermissionMode {
+    if *provider_type == ProviderType::Pi {
+        ProviderPermissionMode::Auto
+    } else {
+        configured_mode
+    }
+}
+
+pub(crate) fn permission_mode_for_provider(
+    provider: &ProviderName,
+    configured_mode: ProviderPermissionMode,
+) -> ProviderPermissionMode {
+    permission_mode_for_provider_type(&provider_type_for_name(provider), configured_mode)
+}
+
 pub(crate) fn provider_name_text(provider: &ProviderName) -> &'static str {
     match provider {
         ProviderName::ClaudeCode => "claude_code",

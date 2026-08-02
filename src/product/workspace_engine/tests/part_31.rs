@@ -618,7 +618,7 @@ async fn author_run_with_pi_uses_pi_provider_in_auto_mode() {
 }
 
 #[tokio::test]
-async fn pi_start_failure_reports_without_switching_or_retrying() {
+async fn pi_start_failure_does_not_retry_selected_provider() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let (_tmp, store) = setup();

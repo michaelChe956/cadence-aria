@@ -46,7 +46,10 @@ impl WorkspaceEngine {
             working_dir: base_input.working_dir.clone(),
             workspace_session_id: base_input.workspace_session_id.clone(),
             resume_provider_session_id: provider_session_id,
-            permission_mode: self.session.permission_modes.reviewer.clone(),
+            permission_mode: permission_mode_for_provider_type(
+                &base_input.provider_type,
+                self.session.permission_modes.reviewer.clone(),
+            ),
             structured_output_contract: Some(StructuredOutputContract { nonce, schema_name }),
             env_vars: base_input.env_vars.clone(),
             timeout_secs: base_input.timeout_secs,
