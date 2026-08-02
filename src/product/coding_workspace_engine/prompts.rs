@@ -451,6 +451,10 @@ pub(crate) fn streaming_input_from_adapter(
     input: &AdapterInput,
     working_dir: PathBuf,
 ) -> StreamingProviderInput {
+    let permission_mode = coding_permission_mode_for_provider_type(
+        &input.provider_type,
+        CodingProviderPermissionMode::Supervised,
+    );
     StreamingProviderInput {
         provider_type: input.provider_type.clone(),
         role: input.role.clone(),
@@ -458,7 +462,7 @@ pub(crate) fn streaming_input_from_adapter(
         working_dir,
         workspace_session_id: None,
         resume_provider_session_id: None,
-        permission_mode: ProviderPermissionMode::Supervised,
+        permission_mode,
         structured_output_contract: None,
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,

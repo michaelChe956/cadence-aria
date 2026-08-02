@@ -100,6 +100,23 @@ pub(crate) fn coding_provider_permission_mode(
     }
 }
 
+pub(crate) fn coding_permission_mode_for_provider_type(
+    provider_type: &ProviderType,
+    configured_mode: CodingProviderPermissionMode,
+) -> ProviderPermissionMode {
+    permission_mode_for_provider_type(
+        provider_type,
+        coding_provider_permission_mode(configured_mode),
+    )
+}
+
+pub(crate) fn coding_permission_mode_for_provider(
+    provider: &ProviderName,
+    configured_mode: CodingProviderPermissionMode,
+) -> ProviderPermissionMode {
+    coding_permission_mode_for_provider_type(&provider_type_for_name(provider), configured_mode)
+}
+
 pub(crate) fn role_permission_mode_for_attempt(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
@@ -110,9 +127,37 @@ pub(crate) fn role_permission_mode_for_attempt(
         &attempt.issue_id,
         &attempt.id,
     )?;
-    Ok(coding_provider_permission_mode(
+    Ok(coding_permission_mode_for_provider(
+        snapshot.provider_for_role(&role),
         snapshot.permission_mode_for_role(&role),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coding_permission_mode_for_provider_type_forces_pi_to_auto() {
+        assert_eq!(
+            coding_permission_mode_for_provider_type(
+                &ProviderType::Pi,
+                CodingProviderPermissionMode::Supervised,
+            ),
+            ProviderPermissionMode::Auto
+        );
+    }
+
+    #[test]
+    fn coding_permission_mode_for_provider_type_preserves_non_pi_mode() {
+        assert_eq!(
+            coding_permission_mode_for_provider_type(
+                &ProviderType::ClaudeCode,
+                CodingProviderPermissionMode::Supervised,
+            ),
+            ProviderPermissionMode::Supervised
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

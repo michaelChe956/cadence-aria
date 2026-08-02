@@ -24,9 +24,9 @@ pub struct CodingRolePermissionModes {
 impl Default for CodingRolePermissionModes {
     fn default() -> Self {
         Self {
-            coder: CodingProviderPermissionMode::Supervised,
-            code_reviewer: CodingProviderPermissionMode::Supervised,
-            internal_reviewer: CodingProviderPermissionMode::Supervised,
+            coder: CodingProviderPermissionMode::Auto,
+            code_reviewer: CodingProviderPermissionMode::Auto,
+            internal_reviewer: CodingProviderPermissionMode::Auto,
         }
     }
 }
@@ -113,5 +113,45 @@ impl CodingRoleProviderConfigSnapshot {
             CodingProviderRole::CodeReviewer => self.permission_modes.code_reviewer = mode,
             CodingProviderRole::InternalReviewer => self.permission_modes.internal_reviewer = mode,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coding_role_permission_modes_default_is_auto() {
+        let modes = CodingRolePermissionModes::default();
+        assert_eq!(modes.coder, CodingProviderPermissionMode::Auto);
+        assert_eq!(modes.code_reviewer, CodingProviderPermissionMode::Auto);
+        assert_eq!(modes.internal_reviewer, CodingProviderPermissionMode::Auto);
+    }
+
+    #[test]
+    fn explicit_supervised_value_preserved() {
+        let json = serde_json::json!({
+            "coder": "supervised", "code_reviewer": "supervised", "internal_reviewer": "supervised"
+        });
+        let modes: CodingRolePermissionModes = serde_json::from_value(json).unwrap();
+        assert_eq!(modes.coder, CodingProviderPermissionMode::Supervised);
+        assert_eq!(
+            modes.code_reviewer,
+            CodingProviderPermissionMode::Supervised
+        );
+    }
+
+    #[test]
+    fn old_coding_snapshot_without_permission_modes_deserializes_to_auto() {
+        // CodingRoleProviderConfigSnapshot.permission_modes uses #[serde(default)]; absent fields use Auto.
+        let json = serde_json::json!({
+            "coder": "claude_code", "code_reviewer": "codex",
+            "internal_reviewer": "claude_code", "review_rounds": 1
+        });
+        let snapshot: CodingRoleProviderConfigSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            snapshot.permission_modes.coder,
+            CodingProviderPermissionMode::Auto
+        );
     }
 }

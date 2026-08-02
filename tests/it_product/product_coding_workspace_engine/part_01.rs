@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
@@ -503,11 +504,11 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
     assert_eq!(inputs.len(), 2);
     assert_eq!(
         inputs[0].permission_mode,
-        ProviderPermissionMode::Supervised
+        ProviderPermissionMode::Auto
     );
     assert_eq!(
         inputs[1].permission_mode,
-        ProviderPermissionMode::Supervised
+        ProviderPermissionMode::Auto
     );
     assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[1].timeout_secs, 10_800);

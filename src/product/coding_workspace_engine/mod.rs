@@ -45,6 +45,7 @@ use crate::product::models::{
     LifecycleWorkItemRecord, ProviderConversationRef, ProviderConversationRole, ProviderName,
     WorkItemStatus,
 };
+use crate::product::workspace_engine::permission_mode_for_provider_type;
 use crate::protocol::contracts::ProviderType;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use crate::web::coding_ws_handler::CodingWsOutMessage;

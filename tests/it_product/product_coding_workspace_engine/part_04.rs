@@ -1,3 +1,170 @@
+struct CountingProvider {
+    starts: Arc<AtomicUsize>,
+    seen_modes: Arc<Mutex<Vec<ProviderPermissionMode>>>,
+    fail_on_start: bool,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CountingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        self.seen_modes
+            .lock()
+            .expect("seen modes lock")
+            .push(input.permission_mode);
+        if self.fail_on_start {
+            return Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "pi failed",
+                0,
+            ));
+        }
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        "done",
+                        Some("sess-1".into()),
+                    ),
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "unused",
+            0,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn pi_role_with_supervised_mode_normalized_to_auto() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+
+    let seen_modes = Arc::new(Mutex::new(Vec::new()));
+    let provider = CountingProvider {
+        starts: Arc::new(AtomicUsize::new(0)),
+        seen_modes: Arc::clone(&seen_modes),
+        fail_on_start: false,
+    };
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let config = CodingRoleProviderConfigSnapshot {
+        coder: ProviderName::Pi,
+        code_reviewer: ProviderName::ClaudeCode,
+        internal_reviewer: ProviderName::ClaudeCode,
+        review_rounds: 1,
+        permission_modes: CodingRolePermissionModes {
+            coder: CodingProviderPermissionMode::Supervised,
+            code_reviewer: CodingProviderPermissionMode::Auto,
+            internal_reviewer: CodingProviderPermissionMode::Auto,
+        },
+    };
+    store
+        .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, config)
+        .expect("write pi config");
+    engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await
+        .expect("execute coding");
+
+    let modes = seen_modes.lock().expect("seen modes lock");
+    assert_eq!(
+        modes[0],
+        ProviderPermissionMode::Auto,
+        "Pi role must normalize to Auto"
+    );
+}
+
+#[tokio::test]
+async fn pi_failure_does_not_trigger_fresh_retry() {
+    let root = tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            worktree_path: Some(worktree),
+            ..create_input()
+        })
+        .expect("create attempt");
+    store
+        .update_attempt_status(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running");
+
+    let pi_starts = Arc::new(AtomicUsize::new(0));
+    let provider = CountingProvider {
+        starts: Arc::clone(&pi_starts),
+        seen_modes: Arc::new(Mutex::new(Vec::new())),
+        fail_on_start: true,
+    };
+    let config = CodingRoleProviderConfigSnapshot {
+        coder: ProviderName::Pi,
+        code_reviewer: ProviderName::ClaudeCode,
+        internal_reviewer: ProviderName::ClaudeCode,
+        review_rounds: 1,
+        permission_modes: CodingRolePermissionModes::default(),
+    };
+    store
+        .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, config)
+        .expect("write pi config");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let result = engine
+        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .await;
+
+    assert!(result.is_err(), "Pi startup failure must return an error");
+    assert_eq!(
+        pi_starts.load(Ordering::SeqCst),
+        1,
+        "Pi starts only once without a fresh retry"
+    );
+}
+
 #[tokio::test]
 async fn coding_prompt_includes_rework_fix_hints() {
     let root = tempdir().expect("root");

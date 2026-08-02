@@ -125,35 +125,49 @@ async fn coding_code_reviewer_run_uses_fresh_provider_session() {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::ClaudeCode,
-                reviewer: Some(ProviderName::ClaudeCode),
+                author: ProviderName::Pi,
+                reviewer: Some(ProviderName::Pi),
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             ..create_input()
         })
         .expect("create attempt");
+    let config = CodingRoleProviderConfigSnapshot {
+        coder: ProviderName::Pi,
+        code_reviewer: ProviderName::Pi,
+        internal_reviewer: ProviderName::Pi,
+        review_rounds: 1,
+        permission_modes: CodingRolePermissionModes {
+            coder: CodingProviderPermissionMode::Supervised,
+            code_reviewer: CodingProviderPermissionMode::Supervised,
+            internal_reviewer: CodingProviderPermissionMode::Supervised,
+        },
+    };
+    store
+        .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, config)
+        .expect("set Pi role config");
     let attempt = store
         .replace_attempt_provider_conversations(
             &attempt,
             vec![
                 ProviderConversationRef {
                     role: ProviderConversationRole::Coder,
-                    provider: ProviderName::ClaudeCode,
+                    provider: ProviderName::Pi,
                     provider_session_id: "coder-session-1".to_string(),
                     updated_at: "2026-06-01T00:00:00Z".to_string(),
                     last_node_id: Some("coding-node-1".to_string()),
                 },
                 ProviderConversationRef {
                     role: ProviderConversationRole::CodeReviewer,
-                    provider: ProviderName::ClaudeCode,
+                    provider: ProviderName::Pi,
                     provider_session_id: "reviewer-session-1".to_string(),
                     updated_at: "2026-06-01T00:01:00Z".to_string(),
                     last_node_id: Some("testing-node-1".to_string()),
                 },
                 ProviderConversationRef {
                     role: ProviderConversationRole::CodeReviewer,
-                    provider: ProviderName::ClaudeCode,
+                    provider: ProviderName::Pi,
                     provider_session_id: "code-reviewer-session-0".to_string(),
                     updated_at: "2026-06-01T00:02:00Z".to_string(),
                     last_node_id: Some("code-review-node-0".to_string()),
@@ -184,10 +198,8 @@ async fn coding_code_reviewer_run_uses_fresh_provider_session() {
     assert_eq!(report.verdict, ReviewVerdict::Approve);
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
-    assert_eq!(
-        inputs[0].permission_mode,
-        ProviderPermissionMode::Supervised
-    );
+    assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
+    assert_eq!(inputs[0].provider_type, ProviderType::Pi);
     assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
     let updated = store
@@ -195,7 +207,7 @@ async fn coding_code_reviewer_run_uses_fresh_provider_session() {
         .expect("updated attempt");
     assert!(updated.provider_conversations.iter().any(|conversation| {
         conversation.role == ProviderConversationRole::CodeReviewer
-            && conversation.provider == ProviderName::ClaudeCode
+            && conversation.provider == ProviderName::Pi
             && conversation.provider_session_id == "code-reviewer-session-1"
     }));
 }
@@ -212,20 +224,34 @@ async fn coding_internal_reviewer_uses_fresh_provider_session() {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::ClaudeCode,
-                reviewer: Some(ProviderName::ClaudeCode),
+                author: ProviderName::Pi,
+                reviewer: Some(ProviderName::Pi),
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             ..create_input()
         })
         .expect("create attempt");
+    let config = CodingRoleProviderConfigSnapshot {
+        coder: ProviderName::Pi,
+        code_reviewer: ProviderName::Pi,
+        internal_reviewer: ProviderName::Pi,
+        review_rounds: 1,
+        permission_modes: CodingRolePermissionModes {
+            coder: CodingProviderPermissionMode::Supervised,
+            code_reviewer: CodingProviderPermissionMode::Supervised,
+            internal_reviewer: CodingProviderPermissionMode::Supervised,
+        },
+    };
+    store
+        .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, config)
+        .expect("set Pi role config");
     let attempt = store
         .replace_attempt_provider_conversations(
             &attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::InternalReviewer,
-                provider: ProviderName::ClaudeCode,
+                provider: ProviderName::Pi,
                 provider_session_id: "internal-reviewer-session-1".to_string(),
                 updated_at: "2026-06-01T00:00:00Z".to_string(),
                 last_node_id: Some("internal-review-node-1".to_string()),
@@ -268,10 +294,8 @@ async fn coding_internal_reviewer_uses_fresh_provider_session() {
     assert_eq!(review.verdict, ReviewVerdict::Approve);
     let inputs = provider.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
-    assert_eq!(
-        inputs[0].permission_mode,
-        ProviderPermissionMode::Supervised
-    );
+    assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
+    assert_eq!(inputs[0].provider_type, ProviderType::Pi);
     assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[0].resume_provider_session_id, None);
 }

@@ -61,9 +61,9 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
             "internal_reviewer": "fake",
             "review_rounds": 2,
             "permission_modes": {
-                "coder": "supervised",
-                "code_reviewer": "supervised",
-                "internal_reviewer": "supervised"
+                "coder": "auto",
+                "code_reviewer": "auto",
+                "internal_reviewer": "auto"
             }
         })
     );
