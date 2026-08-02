@@ -9,6 +9,7 @@ use crate::cross_cutting::bounded_command_runner::{
 };
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
+use crate::cross_cutting::pi_provider::PiProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_health::{
@@ -316,6 +317,12 @@ fn default_provider_registry(
         );
         registry.register(
             ProviderName::Codex,
+            Arc::new(TestControlledFakeStreamingProvider::new(
+                test_controls.clone(),
+            )),
+        );
+        registry.register(
+            ProviderName::Pi,
             Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
         );
         return Arc::new(registry);
@@ -333,6 +340,11 @@ fn default_provider_registry(
     registry.register_gated(
         ProviderName::Codex,
         Arc::new(CodexProvider::new(PathBuf::from("codex"))),
+        provider_gate.clone(),
+    );
+    registry.register_gated(
+        ProviderName::Pi,
+        Arc::new(PiProvider::new(PathBuf::from("pi"))),
         provider_gate,
     );
     Arc::new(registry)
@@ -464,6 +476,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn production_default_provider_registry_registers_pi() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner);
+        let gate = Arc::new(ProviderAvailabilityGate::new(health));
+        let registry = default_provider_registry(TestControls::default(), gate, false);
+
+        assert!(registry.get(&ProviderName::Pi).is_some());
     }
 
     #[tokio::test]

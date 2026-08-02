@@ -16,6 +16,7 @@ pub mod integration_queue;
 pub mod json_rpc_peer;
 pub mod manual_intervention;
 pub mod openspec_constraints;
+pub mod pi_provider;
 pub mod policy_mode;
 pub mod process_manager;
 pub mod provider_adapter;
