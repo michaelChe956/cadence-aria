@@ -117,6 +117,16 @@ pub(crate) fn coding_permission_mode_for_provider(
     coding_permission_mode_for_provider_type(&provider_type_for_name(provider), configured_mode)
 }
 
+pub(crate) fn normalize_coding_permission_mode_for_provider(
+    provider: &ProviderName,
+    configured_mode: CodingProviderPermissionMode,
+) -> CodingProviderPermissionMode {
+    match coding_permission_mode_for_provider(provider, configured_mode) {
+        ProviderPermissionMode::Auto => CodingProviderPermissionMode::Auto,
+        ProviderPermissionMode::Supervised => CodingProviderPermissionMode::Supervised,
+    }
+}
+
 pub(crate) fn role_permission_mode_for_attempt(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,

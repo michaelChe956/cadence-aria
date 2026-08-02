@@ -223,10 +223,16 @@ export type ProviderWorkspaceConfig = {
 
 export type ProviderWorkspaceConfigInput = Partial<ProviderWorkspaceConfig>;
 
+export type ProviderPermissionMode = "auto" | "supervised";
+
 export type ProviderConfigSnapshot = {
   author: WorkspaceProviderName;
   reviewer?: WorkspaceProviderName | null;
   review_rounds: number;
+  permission_modes?: {
+    author: ProviderPermissionMode;
+    reviewer: ProviderPermissionMode;
+  };
 };
 
 export type StructuredFeedback = {
