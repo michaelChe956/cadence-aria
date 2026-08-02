@@ -66,15 +66,25 @@ where
         json!({ "type": "get_state" }),
     )
     .await?;
-    let (get_state_response, _) = await_pi_response(
+    let (get_state_response, _) = match await_pi_response(
         get_state,
-        &peer,
-        &mut pending_by_id,
-        &event_tx,
-        &mut full_output,
-        &cancel,
+        PiResponseWaitContext {
+            peer: &peer,
+            pending_by_id: &mut pending_by_id,
+            event_tx: &event_tx,
+            full_output: &mut full_output,
+            command_rx: &mut command_rx,
+            next_id: &mut next_id,
+            cancel: &cancel,
+        },
     )
-    .await?;
+    .await?
+    {
+        PiResponseWait::Response(response, settled_while_waiting) => {
+            (response, settled_while_waiting)
+        }
+        PiResponseWait::Aborted => return Ok(()),
+    };
     ensure_pi_success(&get_state_response)?;
     let session_id = parse_pi_session_id(&get_state_response).or_else(|| {
         input
@@ -90,15 +100,25 @@ where
         json!({ "type": "prompt", "message": input.prompt }),
     )
     .await?;
-    let (prompt_response, settled_while_waiting) = await_pi_response(
+    let (prompt_response, settled_while_waiting) = match await_pi_response(
         prompt,
-        &peer,
-        &mut pending_by_id,
-        &event_tx,
-        &mut full_output,
-        &cancel,
+        PiResponseWaitContext {
+            peer: &peer,
+            pending_by_id: &mut pending_by_id,
+            event_tx: &event_tx,
+            full_output: &mut full_output,
+            command_rx: &mut command_rx,
+            next_id: &mut next_id,
+            cancel: &cancel,
+        },
     )
-    .await?;
+    .await?
+    {
+        PiResponseWait::Response(response, settled_while_waiting) => {
+            (response, settled_while_waiting)
+        }
+        PiResponseWait::Aborted => return Ok(()),
+    };
     ensure_pi_success(&prompt_response)?;
     send_event(
         &event_tx,
@@ -122,7 +142,7 @@ where
     loop {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => {
+            _ = await_pi_abort(&mut command_rx, &cancel) => {
                 abort_pi_session(&peer, &mut next_id, &event_tx).await?;
                 return Ok(());
             }
@@ -133,18 +153,6 @@ where
                     String::new(),
                     timeout_secs.saturating_mul(1000),
                 ));
-            }
-            command = command_rx.recv(), if !command_rx.is_closed() => {
-                match command {
-                    Some(ProviderCommand::Abort) => {
-                        abort_pi_session(&peer, &mut next_id, &event_tx).await?;
-                        return Ok(());
-                    }
-                    Some(_) => {
-                        // Pi is Auto-only and exposes no Aria approval or tool-result round trips.
-                    }
-                    None => {}
-                }
             }
             incoming = peer.next_incoming() => {
                 let incoming = incoming.ok_or_else(|| provider_error("Pi RPC stream ended before completion"))?;
@@ -165,6 +173,24 @@ where
                     return Ok(());
                 }
                 handle_pi_event(&incoming, &event_tx, &mut full_output).await?;
+            }
+        }
+    }
+}
+
+async fn await_pi_abort(
+    command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    cancel: &CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            command = command_rx.recv(), if !command_rx.is_closed() => {
+                if matches!(command, Some(ProviderCommand::Abort)) {
+                    return;
+                }
+                // Pi is Auto-only and exposes no Aria approval or tool-result round trips.
             }
         }
     }
@@ -200,14 +226,28 @@ where
     Ok(response_rx)
 }
 
+enum PiResponseWait {
+    Response(Value, bool),
+    Aborted,
+}
+
+struct PiResponseWaitContext<'a, W>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    peer: &'a JsonRpcPeer<W>,
+    pending_by_id: &'a mut PendingResponses,
+    event_tx: &'a mpsc::Sender<ProviderEvent>,
+    full_output: &'a mut String,
+    command_rx: &'a mut mpsc::Receiver<ProviderCommand>,
+    next_id: &'a mut u64,
+    cancel: &'a CancellationToken,
+}
+
 async fn await_pi_response<W>(
     mut response_rx: oneshot::Receiver<Value>,
-    peer: &JsonRpcPeer<W>,
-    pending_by_id: &mut PendingResponses,
-    event_tx: &mpsc::Sender<ProviderEvent>,
-    full_output: &mut String,
-    cancel: &CancellationToken,
-) -> Result<(Value, bool), ProviderAdapterError>
+    context: PiResponseWaitContext<'_, W>,
+) -> Result<PiResponseWait, ProviderAdapterError>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -217,24 +257,29 @@ where
     loop {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Err(provider_error("Pi provider cancelled")),
+            _ = await_pi_abort(context.command_rx, context.cancel) => {
+                abort_pi_session(context.peer, context.next_id, context.event_tx).await?;
+                return Ok(PiResponseWait::Aborted);
+            }
             _ = &mut timeout => return Err(ProviderAdapterError::timeout_with_details(
                 "Pi RPC command timed out",
-                full_output.clone(),
+                context.full_output.clone(),
                 String::new(),
                 u64::try_from(PI_RPC_REQUEST_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
             )),
             response = &mut response_rx => {
-                return response.map(|response| (response, settled_while_waiting)).map_err(|_| provider_error("Pi RPC response channel closed"));
+                return response
+                    .map(|response| PiResponseWait::Response(response, settled_while_waiting))
+                    .map_err(|_| provider_error("Pi RPC response channel closed"));
             }
-            incoming = peer.next_incoming() => {
+            incoming = context.peer.next_incoming() => {
                 let Some(incoming) = incoming else {
                     if settled_while_waiting {
                         return Err(provider_error("Pi RPC response channel closed before command response"));
                     }
                     return Err(provider_error("Pi RPC stream ended while waiting for command response"));
                 };
-                if dispatch_pi_response(&incoming, pending_by_id) {
+                if dispatch_pi_response(&incoming, context.pending_by_id) {
                     continue;
                 }
                 if let Some(error) = parse_pi_failure(&incoming) {
@@ -244,7 +289,7 @@ where
                     settled_while_waiting = true;
                     continue;
                 }
-                handle_pi_event(&incoming, event_tx, full_output).await?;
+                handle_pi_event(&incoming, context.event_tx, context.full_output).await?;
             }
         }
     }
