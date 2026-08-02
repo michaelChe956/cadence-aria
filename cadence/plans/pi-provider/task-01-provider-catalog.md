@@ -94,7 +94,7 @@ rg -n "ProviderType::(ClaudeCode|Codex|Fake)" src/ -g '*.rs' | grep -v test
 |---|---|---|
 | `workspace_engine/mappings.rs:29`、`coding_workspace_engine/tool_format.rs:106`、`work_item_split_engine/types.rs:129` `provider_type_for_name` | 流式映射 | `ProviderName::Pi => ProviderType::Pi,` |
 | `provider_workspace_runner.rs:130` `provider_type_for_name`（legacy Fake runner） | 拒绝 | `ProviderName::Pi => unreachable!("legacy fake runner does not support pi"),` |
-| `work_item_projection/render.rs:183` `renderer_for(provider)` | 映射到 Claude 同款 renderer | `ProviderName::Pi => renderer_for_claude(),` |
+| `work_item_projection/render.rs:183` `renderer_for(provider)` | **新建 `PiProjectionRenderer`**（勿复用 Claude 的） | renderer 是 `ProviderRenderProfile` 的薄包装；复用会让 Pi 的 prompt 带上 `provider_label: "Claude Code"` 与 claude 的 `renderer_version`。新建 `render/pi.rs`，照 `render/codex.rs` 结构，profile 用 `provider_label: "Pi"`、`renderer_version: "pi-provider-projection-renderer-v1"`、hint 按 Auto-only 措词 |
 | `provider_registry.rs:47` `available_names()` | 纳入 | 数组加 `ProviderName::Pi` |
 | `web/handlers/dto.rs:742` provider wire 文本化 | 映射 | `"pi"` |
 | `provider_availability.rs` 各 helper | 映射/保留拒绝 | `provider_name_key(&ProviderName::Pi)` 返回 `"pi"`；`parse_provider_name("pi")` 返回 `Ok(ProviderName::Pi)`；`parse_provider_type("pi")` 保持拒（返回 `web_runtime_provider_type`，错误文本含 `pi`） |
@@ -377,10 +377,21 @@ const REAL_PROVIDER_CATALOG: readonly RealProviderCatalogEntry[] = [
 - [ ] Run: `cd web && npm test provider-options`
 - Expected: PASS
 
-## Step 16: 验证仓库初始化不受影响
+## Step 16: 验证仓库初始化不受影响（已知：必须显式过滤）
 
-- [ ] Run: `codegraph explore "仓库初始化 / 添加代码库 页面 provider 选项来源，是否引用 REAL_PROVIDER_CATALOG"`
-- Expected: 初始化路径有独立 Claude Code 专用选项，不读 `REAL_PROVIDER_CATALOG`。
+⚠️ **仓库初始化复用共享 catalog，不是独立选项**。`CreateRepositoryDialog.tsx:74` 调 `getProviderOptions(...)`、`:386` 把结果全部渲染为可选项，所以 catalog 加 Pi 后 Pi 会出现在「添加代码库」，直接违反 spec 场景「添加代码库不显示 Pi」。
+
+**必须在 `CreateRepositoryDialog.tsx` 显式过滤掉 Pi**（而不是从共享 catalog 移除 Pi——Task 5 需要 catalog 里有 Pi）：
+
+```ts
+const visibleProviderOptions = providerOptions.filter(
+  (option) =>
+    option.value !== "pi" && // 仓库初始化仅支持 Claude Code（Decision 1：不扩大初始化范围）
+    (option.visible || option.value === providerMode),
+);
+```
+
+并在 `web/src/components/lifecycle/CreateRepositoryDialog.test.tsx` 补守卫测试：构造 Pi **可用**的健康快照，断言对话框 provider 选项无 Pi、Claude Code 仍可选。该测试必须在移除 filter 时真的失败。
 
 ## Step 17: 全量测试 + Commit
 
