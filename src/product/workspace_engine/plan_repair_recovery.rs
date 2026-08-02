@@ -38,6 +38,7 @@ pub(crate) fn initial_plan_repair_timeline(session: &WorkspaceSessionRecord) -> 
             author: session.author_provider.clone(),
             reviewer: Some(session.reviewer_provider.clone()),
             review_rounds: session.review_rounds,
+            permission_modes: session.permission_modes.clone(),
         },
         retry: None,
     }]
@@ -424,6 +425,7 @@ fn append_recovery_failure_timeline(
             author: session.author_provider.clone(),
             reviewer: session.reviewer_provider.clone(),
             review_rounds: session.review_rounds,
+            permission_modes: session.permission_modes.clone(),
         },
         retry: None,
     });

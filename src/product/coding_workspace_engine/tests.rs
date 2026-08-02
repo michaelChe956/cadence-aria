@@ -477,6 +477,7 @@ async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node(
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -526,6 +527,7 @@ async fn coding_plan_repair_partial_group_attempt_cannot_start_coding() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -568,6 +570,7 @@ async fn coding_plan_repair_group_attempt_missing_active_pointer_cannot_start() 
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -692,6 +695,7 @@ fn running_attempt_with_worktree() -> (
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -724,6 +728,7 @@ fn test_attempt(id: &str) -> CodingExecutionAttempt {
             author: ProviderName::ClaudeCode,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         provider_conversations: Vec::new(),
         rework_count: 0,

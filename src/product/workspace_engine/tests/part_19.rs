@@ -444,6 +444,7 @@ fn interrupted_recovery_timeline_node(
             author: ProviderName::Codex,
             reviewer: Some(ProviderName::ClaudeCode),
             review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     }

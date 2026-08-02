@@ -106,6 +106,7 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -470,6 +471,7 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
                 author: ProviderName::ClaudeCode,
                 reviewer: Some(ProviderName::Codex),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             ..create_input()
         })
@@ -529,6 +531,7 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             ..create_input()
         })

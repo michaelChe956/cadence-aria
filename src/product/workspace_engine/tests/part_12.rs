@@ -168,6 +168,7 @@ async fn build_session_state_inlines_sanitized_work_item_plan_run_details() {
             author: ProviderName::ClaudeCode,
             reviewer: None,
             review_rounds: 0,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     });

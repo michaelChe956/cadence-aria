@@ -48,6 +48,7 @@ fn human_presentation_save_is_stage_independent_and_non_plan_workspaces_stay_uns
                 author_provider: ProviderName::ClaudeCode,
                 reviewer_provider: Some(ProviderName::Codex),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
                 superpowers_enabled: false,
                 openspec_enabled: false,
                 provider_conversations: vec![],

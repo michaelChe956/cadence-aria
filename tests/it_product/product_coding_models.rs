@@ -44,6 +44,7 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
         author: ProviderName::Codex,
         reviewer: Some(ProviderName::Fake),
         review_rounds: 2,
+        permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
     });
 
     assert_eq!(snapshot.coder, ProviderName::Codex);
@@ -74,6 +75,7 @@ fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_mi
         author: ProviderName::ClaudeCode,
         reviewer: None,
         review_rounds: 1,
+        permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
     });
 
     assert_eq!(snapshot.coder, ProviderName::ClaudeCode);
@@ -178,6 +180,8 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
             author: ProviderName::Fake,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 1,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(
+            ),
         },
         rework_count: 0,
         max_auto_rework: 2,

@@ -250,6 +250,7 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })

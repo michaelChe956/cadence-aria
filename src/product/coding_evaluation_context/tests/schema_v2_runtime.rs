@@ -40,6 +40,7 @@ fn schema_v2_attempt_without_active_unit_binding_fails_closed() {
             author: ProviderName::Codex,
             reviewer: Some(ProviderName::ClaudeCode),
             review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         rework_count: 0,
         max_auto_rework: 2,

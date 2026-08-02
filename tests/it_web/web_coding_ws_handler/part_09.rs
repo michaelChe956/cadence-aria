@@ -116,6 +116,7 @@ fn app_with_group_attempt(root_path: &std::path::Path) -> axum::Router {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         },
@@ -173,6 +174,7 @@ async fn coding_ws_stage_gate_confirm_resolves_persisted_gate() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             }),
         )
         .expect("create stage gate");

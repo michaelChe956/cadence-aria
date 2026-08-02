@@ -184,6 +184,7 @@ fn active_timeline_node_id_prefers_terminal_completed_node_over_stale_active_nod
         author: session.author_provider.clone(),
         reviewer: session.reviewer_provider.clone(),
         review_rounds: session.review_rounds,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     };
     let stale_human_confirm = TimelineNode {
         node_id: "timeline_node_001".to_string(),
@@ -247,6 +248,7 @@ async fn persistent_engine_keeps_open_stage_after_failed_running_node() {
         author: session_record.author_provider.clone(),
         reviewer: Some(session_record.reviewer_provider.clone()),
         review_rounds: session_record.review_rounds,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     };
     lifecycle_store
         .save_timeline_nodes(
@@ -362,6 +364,7 @@ async fn build_session_state_omits_unneeded_work_item_plan_details_and_keeps_act
             author: ProviderName::ClaudeCode,
             reviewer: None,
             review_rounds: 0,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     });
@@ -500,6 +503,7 @@ async fn build_session_state_keeps_story_details_out_of_inline_payload() {
             author: ProviderName::ClaudeCode,
             reviewer: None,
             review_rounds: 0,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     });
@@ -586,6 +590,7 @@ async fn persistent_session_state_ignores_malformed_unrelated_session_files() {
             author: ProviderName::ClaudeCode,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 2,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     };

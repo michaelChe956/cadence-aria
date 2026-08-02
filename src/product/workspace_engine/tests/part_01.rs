@@ -314,6 +314,7 @@ fn make_session(session_id: &str) -> WorkspaceSession {
         author_provider: ProviderName::ClaudeCode,
         reviewer_provider: Some(ProviderName::Codex),
         review_rounds: 2,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         superpowers_enabled: true,
         openspec_enabled: true,
         provider_conversations: Vec::new(),
@@ -740,6 +741,7 @@ async fn persistent_engine_recovers_pending_text_fallback_choice_after_restart()
         author: ProviderName::Codex,
         reviewer: Some(ProviderName::ClaudeCode),
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     };
     lifecycle_store
         .save_timeline_nodes(

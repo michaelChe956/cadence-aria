@@ -756,6 +756,7 @@ fn append_timeline_node(
             author: engine.session.author_provider.clone(),
             reviewer: engine.session.reviewer_provider.clone(),
             review_rounds: engine.session.review_rounds,
+            permission_modes: engine.session.permission_modes.clone(),
         },
         retry: None,
     });

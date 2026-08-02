@@ -75,6 +75,7 @@ async fn recovery_abort_and_rollback_is_rejected_after_plan_commit_marker() {
             author: ProviderName::Fake,
             reviewer: None,
             review_rounds: 1,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     });
@@ -213,6 +214,7 @@ async fn recovery_human_triage_keeps_transaction_for_manual_resolution() {
             author: ProviderName::Fake,
             reviewer: None,
             review_rounds: 1,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     });
@@ -419,6 +421,7 @@ async fn compile_recovery_resumes_after_committed_marker() {
             author: ProviderName::Fake,
             reviewer: None,
             review_rounds: 1,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     });
@@ -583,6 +586,7 @@ async fn recovery_abort_is_rejected_when_active_plan_revision_exists_with_stale_
             author: ProviderName::Fake,
             reviewer: None,
             review_rounds: 1,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     });

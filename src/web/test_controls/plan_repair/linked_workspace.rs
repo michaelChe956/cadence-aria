@@ -184,6 +184,8 @@ fn persist_human_confirmation(
                     author: ProviderName::ClaudeCode,
                     reviewer: Some(ProviderName::Codex),
                     review_rounds: 2,
+                    permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
+                    ),
                 },
                 retry: None,
             }],

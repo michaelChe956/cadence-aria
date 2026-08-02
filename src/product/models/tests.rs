@@ -201,6 +201,7 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         author_provider: ProviderName::Codex,
         reviewer_provider: ProviderName::ClaudeCode,
         review_rounds: 2,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         superpowers_enabled: true,
         openspec_enabled: true,
         provider_conversations: Vec::new(),

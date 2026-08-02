@@ -131,6 +131,7 @@ fn persistent_engine_accepts_complete_revision_artifact_misclassified_as_text_fa
                         author: ProviderName::ClaudeCode,
                         reviewer: Some(ProviderName::Codex),
                         review_rounds: 1,
+                        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
                     },
                     retry: None,
                 }],

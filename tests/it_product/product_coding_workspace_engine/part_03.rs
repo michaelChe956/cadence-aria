@@ -128,6 +128,7 @@ async fn coding_code_reviewer_run_uses_fresh_provider_session() {
                 author: ProviderName::ClaudeCode,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             ..create_input()
         })
@@ -214,6 +215,7 @@ async fn coding_internal_reviewer_uses_fresh_provider_session() {
                 author: ProviderName::ClaudeCode,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             ..create_input()
         })

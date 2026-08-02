@@ -44,7 +44,7 @@ use crate::product::models::{
     IssueStatus as ProductIssueStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
     NodeDetail, ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord,
     WorkItemExecutionPlanStatus, WorkItemKind, WorkItemStatus, WorkspaceMessageRecord,
-    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    WorkspaceRolePermissionModes, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::models::{
     IssueWorkItemPlan as IssueWorkItemPlanRecord, IssueWorkItemPlanStatus, WorkItemPlanStatus,

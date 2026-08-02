@@ -283,6 +283,7 @@ fn persists_workspace_timeline_nodes_and_artifact_versions() {
             author: ProviderName::ClaudeCode,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 2,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     };

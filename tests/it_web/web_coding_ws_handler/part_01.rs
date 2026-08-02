@@ -583,6 +583,7 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             }),
         )
         .expect("create stage gate");

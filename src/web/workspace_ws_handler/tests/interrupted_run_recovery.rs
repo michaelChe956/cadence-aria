@@ -51,6 +51,7 @@ async fn interrupted_recovery_provider_start_failure_returns_to_prepare_context(
         author_provider: ProviderName::ClaudeCode,
         reviewer_provider: Some(ProviderName::Codex),
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         superpowers_enabled: false,
         openspec_enabled: false,
         provider_conversations: vec![],
@@ -218,6 +219,7 @@ fn handler_interrupted_timeline_node(
             author: ProviderName::ClaudeCode,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     }

@@ -75,6 +75,7 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -228,6 +229,7 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -521,6 +523,7 @@ async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })

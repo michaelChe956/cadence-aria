@@ -24,6 +24,7 @@ fn provider_config() -> ProviderConfigSnapshot {
         author: ProviderName::ClaudeCode,
         reviewer: None,
         review_rounds: 0,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     }
 }
 
@@ -478,6 +479,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
                 author: ProviderName::ClaudeCode,
                 reviewer: Some(ProviderName::Codex),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: true,
         },

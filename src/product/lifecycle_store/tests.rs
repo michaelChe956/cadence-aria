@@ -38,6 +38,17 @@ fn create_session(
         .unwrap()
 }
 
+#[test]
+fn new_session_defaults_permission_modes_to_auto() {
+    let (_tmp, store) = setup();
+    let record = create_session(&store, "story_spec_permissions", WorkspaceType::Story);
+
+    assert_eq!(
+        record.permission_modes,
+        crate::product::models::WorkspaceRolePermissionModes::default()
+    );
+}
+
 fn runtime_binding() -> WorkItemRuntimeBinding {
     WorkItemRuntimeBinding {
         plan_id: "work_item_plan_0001".to_string(),

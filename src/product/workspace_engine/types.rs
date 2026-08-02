@@ -1,3 +1,5 @@
+use crate::product::models::WorkspaceRolePermissionModes;
+
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +83,7 @@ pub struct WorkspaceSession {
     pub author_provider: ProviderName,
     pub reviewer_provider: Option<ProviderName>,
     pub review_rounds: u32,
+    pub permission_modes: WorkspaceRolePermissionModes,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
     pub provider_conversations: Vec<ProviderConversationRef>,
@@ -113,6 +116,7 @@ impl WorkspaceSession {
             author_provider: record.author_provider,
             reviewer_provider: Some(record.reviewer_provider),
             review_rounds: record.review_rounds,
+            permission_modes: record.permission_modes.clone(),
             superpowers_enabled: record.superpowers_enabled,
             openspec_enabled: record.openspec_enabled,
             provider_conversations: record.provider_conversations,

@@ -20,6 +20,7 @@ async fn coding_runtime_handoff_without_amendment_keeps_normal_group_path_unchan
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })

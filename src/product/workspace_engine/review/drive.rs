@@ -51,7 +51,7 @@ impl WorkspaceEngine {
 
         match self.parse_review_completion_for_active_node(&first_completion) {
             Ok(verdict) => self.complete_review(first_completion, verdict).await,
-            Err(first_error) if first_error.is_repairable() => {
+            Err(first_error) if first_error.is_repairable() && reviewer != ProviderName::Pi => {
                 let repair_input = match self.build_review_repair_input(
                     &input,
                     &first_completion,
@@ -216,11 +216,12 @@ impl WorkspaceEngine {
             )
             .await;
         }
-        let retry_context = ArtifactRetryContext {
-            provider: provider.clone(),
-            input: input.clone(),
-            attempted: false,
-        };
+        let retry_context =
+            (self.session.author_provider != ProviderName::Pi).then(|| ArtifactRetryContext {
+                provider: provider.clone(),
+                input: input.clone(),
+                attempted: false,
+            });
         let revision_resume_fallback = if input.resume_provider_session_id.is_some()
             && self.session.author_provider == ProviderName::Codex
         {
@@ -238,7 +239,7 @@ impl WorkspaceEngine {
             node_id,
             agent: Some(author),
             role: ProviderConversationRole::Author,
-            artifact_retry: Some(retry_context),
+            artifact_retry: retry_context,
             revision_resume_fallback,
         })
         .await;

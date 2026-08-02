@@ -711,6 +711,7 @@ fn store_persists_and_resolves_stage_gates_in_attempt_scope() {
         author: ProviderName::Codex,
         reviewer: Some(ProviderName::Fake),
         review_rounds: 1,
+        permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
     });
     let gate = store
         .create_stage_gate(

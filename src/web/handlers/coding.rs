@@ -443,6 +443,7 @@ pub(crate) fn coding_provider_config_snapshot(
             author,
             reviewer: Some(reviewer),
             review_rounds: session.review_rounds,
+            permission_modes: session.permission_modes.clone(),
         });
     }
 
@@ -453,6 +454,7 @@ pub(crate) fn coding_provider_config_snapshot(
         author: author.clone(),
         reviewer: Some(author),
         review_rounds: 1,
+        permission_modes: WorkspaceRolePermissionModes::default(),
     })
 }
 
@@ -495,6 +497,7 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
             author,
             reviewer: Some(reviewer),
             review_rounds: session.review_rounds,
+            permission_modes: session.permission_modes.clone(),
         });
     }
 
@@ -505,6 +508,7 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
         author: author.clone(),
         reviewer: Some(author),
         review_rounds: 1,
+        permission_modes: WorkspaceRolePermissionModes::default(),
     })
 }
 

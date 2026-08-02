@@ -394,6 +394,7 @@ fn workspace_session_record(
         author_provider,
         reviewer_provider: ProviderName::Codex,
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         superpowers_enabled: true,
         openspec_enabled: true,
         work_item_runtime_binding: None,

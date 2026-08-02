@@ -42,6 +42,7 @@ fn setup() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -54,6 +55,7 @@ fn provider_snapshot() -> ProviderConfigSnapshot {
         author: ProviderName::Codex,
         reviewer: Some(ProviderName::ClaudeCode),
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     }
 }
 

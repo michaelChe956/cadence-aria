@@ -49,6 +49,7 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -320,6 +321,7 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -422,6 +424,7 @@ async fn abort_during_provider_failure_prewrite_pause_is_stable() {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -564,6 +567,8 @@ async fn internal_review_blocked_gates_use_triage_actions_without_coder_rework()
                     author: ProviderName::Codex,
                     reviewer: Some(ProviderName::ClaudeCode),
                     review_rounds: 1,
+                    permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
+                    ),
                 },
                 max_auto_rework: 2,
             })

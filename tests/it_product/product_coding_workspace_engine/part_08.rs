@@ -152,6 +152,7 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -314,6 +315,7 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -403,6 +405,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -611,6 +614,7 @@ fn create_input() -> CreateCodingAttemptInput {
             author: ProviderName::Fake,
             reviewer: Some(ProviderName::Fake),
             review_rounds: 1,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
         max_auto_rework: 2,
     }

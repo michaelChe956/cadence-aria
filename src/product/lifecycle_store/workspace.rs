@@ -7,8 +7,8 @@ use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     PlanRepairSessionSnapshotDto, ProviderConversationRef, WorkItemRuntimeBinding,
-    WorkspaceMessageRecord, WorkspaceSessionLink, WorkspaceSessionRecord, WorkspaceSessionStatus,
-    WorkspaceSessionSummaryRecord, WorkspaceType,
+    WorkspaceMessageRecord, WorkspaceRolePermissionModes, WorkspaceSessionLink,
+    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceSessionSummaryRecord, WorkspaceType,
 };
 use crate::web::workspace_ws_types::{ArtifactVersion, TimelineNode};
 
@@ -238,6 +238,7 @@ impl LifecycleStore {
             author_provider: input.author_provider,
             reviewer_provider: input.reviewer_provider,
             review_rounds: input.review_rounds,
+            permission_modes: WorkspaceRolePermissionModes::default(),
             superpowers_enabled: input.superpowers_enabled,
             openspec_enabled: input.openspec_enabled,
             work_item_runtime_binding: None,
@@ -415,6 +416,20 @@ impl LifecycleStore {
         let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
         session.author_provider = author_provider;
         session.reviewer_provider = reviewer_provider;
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json(&session_path, &session)?;
+        Ok(session)
+    }
+
+    pub fn update_workspace_session_permission_modes(
+        &self,
+        session_id: &str,
+        permission_modes: WorkspaceRolePermissionModes,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+        session.permission_modes = permission_modes;
         session.updated_at = Utc::now().to_rfc3339();
         write_json(&session_path, &session)?;
         Ok(session)

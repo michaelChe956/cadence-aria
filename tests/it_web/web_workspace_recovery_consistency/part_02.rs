@@ -115,6 +115,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
                 author: cadence_aria::product::models::ProviderName::Fake,
                 reviewer: Some(cadence_aria::product::models::ProviderName::Codex),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             retry: None,
         }],

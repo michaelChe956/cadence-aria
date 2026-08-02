@@ -30,7 +30,8 @@ pub struct StreamingRunHandle {
     pub cancel: CancellationToken,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderPermissionMode {
     Auto,
     Supervised,

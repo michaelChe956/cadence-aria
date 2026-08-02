@@ -28,6 +28,7 @@ fn linked_workspace_timeline(node_id: &str) -> Vec<TimelineNode> {
             author: ProviderName::ClaudeCode,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 2,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     }]

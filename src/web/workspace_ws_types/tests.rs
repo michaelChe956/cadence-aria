@@ -123,6 +123,7 @@ fn timeline_messages_include_node_identity() {
             author: ProviderName::ClaudeCode,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 2,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     };
@@ -343,6 +344,7 @@ fn start_generation_roundtrip() {
         author: ProviderName::ClaudeCode,
         reviewer: Some(ProviderName::Codex),
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     };
     let msg = WsInMessage::StartGeneration {
         provider_config: snapshot,
@@ -421,6 +423,7 @@ fn provider_locked_roundtrip() {
             author: ProviderName::ClaudeCode,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         locked_at: "2026-05-20T14:35:00Z".to_string(),
     };
