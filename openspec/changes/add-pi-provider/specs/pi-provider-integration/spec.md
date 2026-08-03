@@ -43,9 +43,11 @@
 #### Scenario: Pi 遇到需求歧义时弹出选择卡片
 
 - **WHEN** Pi 在生成角色产物时发现必须由用户决定的需求/范围/验收歧义
-- **THEN** Pi 调用 `ask_user` 工具，系统向页面发送 `ChoiceRequest` 事件
-- **AND THEN** 前端弹出与其他 Provider 一致的选择卡片
-- **AND THEN** 用户回答后，答案在同一 Pi 进程内接续，Pi 带着该答案继续生成
+- **THEN** Pi 通过已注册的 `ask_user` 工具调用 `ctx.ui.select()`
+- **AND THEN** 适配器发出的 `ChoiceRequest` 的 `source` 为 `ProviderChoice`
+- **AND THEN** 选择卡片保留扩展请求的题目/标题及所有选项（含顺序与显示值）
+- **AND THEN** 用户 `ChoiceResponse` 的所选 `value` 被原样封装为 `extension_ui_response(value)` 发回**同一** Pi RPC 进程
+- **AND THEN** Pi 在收到该响应后继续同一会话的生成
 
 #### Scenario: 提问扩展不拦截工具调用
 

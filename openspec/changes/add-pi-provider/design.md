@@ -66,7 +66,7 @@ Pi 健康检查通过其版本命令和既有 Provider 健康状态接口暴露�
 
 ## Risks / Trade-offs
 
-- [Pi RPC 事件字段或 CLI 协议随版本变化] → 将协议解析和版本检测封装在 Pi 适配器中，并以录制 RPC fixture 覆盖关键事件。
+- [Pi RPC 事件字段、CLI 协议或 Extension API（自定义工具注册、`ctx.ui.select`、`extension_ui_request/response`）随版本变化] → 将协议解析与扩展交互封装在 Pi 适配器中；健康检查检测并报告不受支持的 Pi 版本，并以录制 RPC fixture 覆盖普通流式事件和结构化提问完整往返。
 - [默认 Auto 提升误操作风险] → Claude Code 与 Codex 继续提供每角色 `Supervised`；Pi 仅 Auto，但保留工具事件与运行的审计记录。
 - [已有持久化会话缺少权限模式字段] → 读取时默认 `Auto`，写入时持久化显式值，并用回归测试覆盖旧记录。
 - [两套权限模式类型并存] → 不合并 `ProviderPermissionMode` 与 `CodingProviderPermissionMode`，避免跨域序列化回归风险。
