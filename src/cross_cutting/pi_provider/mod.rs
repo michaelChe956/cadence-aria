@@ -1,5 +1,11 @@
+use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 use sha2::{Digest, Sha256};
 
@@ -8,6 +14,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
+use crate::cross_cutting::bounded_command_runner::{
+    BoundedCommandRequest, TokioBoundedCommandRunner,
+};
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
@@ -43,27 +52,103 @@ enum PiVersion {
     Unknown(ProbeFailure),
 }
 
-fn ensure_ask_extension() -> Result<PathBuf, ProviderAdapterError> {
-    let cache = std::env::temp_dir().join("cadence-aria-pi-ask");
-    std::fs::create_dir_all(&cache).map_err(|error| {
-        ProviderAdapterError::parse_error(
-            format!("failed to create Pi ask extension cache: {error}"),
-            String::new(),
-            String::new(),
-        )
-    })?;
+fn ask_extension_error(message: impl std::fmt::Display) -> ProviderAdapterError {
+    ProviderAdapterError::parse_error(
+        format!("failed to prepare Pi ask extension: {message}"),
+        String::new(),
+        String::new(),
+    )
+}
+
+fn ensure_private_cache_directory(cache: &Path) -> Result<(), ProviderAdapterError> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(false);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    match builder.create(cache) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            std::fs::create_dir_all(
+                cache
+                    .parent()
+                    .ok_or_else(|| ask_extension_error("cache path has no parent"))?,
+            )
+            .map_err(|error| ask_extension_error(format!("create cache parent: {error}")))?;
+            builder
+                .create(cache)
+                .map_err(|error| ask_extension_error(format!("create cache directory: {error}")))?;
+        }
+        Err(error) => {
+            return Err(ask_extension_error(format!(
+                "create cache directory: {error}"
+            )));
+        }
+    }
+    let metadata = std::fs::symlink_metadata(cache)
+        .map_err(|error| ask_extension_error(format!("inspect cache directory: {error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ask_extension_error("cache path is not a directory"));
+    }
+    #[cfg(unix)]
+    std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| ask_extension_error(format!("restrict cache directory: {error}")))?;
+    Ok(())
+}
+
+fn validate_ask_extension(path: &Path) -> Result<bool, ProviderAdapterError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(ask_extension_error(format!("inspect extension: {error}"))),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(ask_extension_error("extension path must not be a symlink"));
+    }
+    if !metadata.is_file() {
+        return Err(ask_extension_error("extension path is not a regular file"));
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| ask_extension_error(format!("read extension: {error}")))?;
+    if content != ARIA_ASK_EXTENSION {
+        return Err(ask_extension_error(
+            "existing extension content does not match Aria's extension",
+        ));
+    }
+    Ok(true)
+}
+
+fn ensure_ask_extension_in(cache: &Path) -> Result<PathBuf, ProviderAdapterError> {
+    ensure_private_cache_directory(cache)?;
     let hash = hex::encode(Sha256::digest(ARIA_ASK_EXTENSION.as_bytes()));
     let path = cache.join(format!("aria-ask-{}.ts", &hash[..8]));
-    if !path.exists() {
-        std::fs::write(&path, ARIA_ASK_EXTENSION).map_err(|error| {
-            ProviderAdapterError::parse_error(
-                format!("failed to write Pi ask extension: {error}"),
-                String::new(),
-                String::new(),
-            )
-        })?;
+    if validate_ask_extension(&path)? {
+        return Ok(path);
     }
-    Ok(path)
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    match options.open(&path) {
+        Ok(mut file) => {
+            file.write_all(ARIA_ASK_EXTENSION.as_bytes())
+                .map_err(|error| ask_extension_error(format!("write extension: {error}")))?;
+            file.sync_all()
+                .map_err(|error| ask_extension_error(format!("sync extension: {error}")))?;
+            Ok(path)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            validate_ask_extension(&path)?;
+            Ok(path)
+        }
+        Err(error) => Err(ask_extension_error(format!("create extension: {error}"))),
+    }
+}
+
+fn ensure_ask_extension() -> Result<PathBuf, ProviderAdapterError> {
+    let home = std::env::var_os("HOME").ok_or_else(|| ask_extension_error("HOME is not set"))?;
+    ensure_ask_extension_in(&PathBuf::from(home).join(".cache").join("cadence-aria"))
 }
 
 fn parse_pi_version(output: &str) -> PiVersion {
@@ -83,19 +168,24 @@ fn parse_pi_version(output: &str) -> PiVersion {
 }
 
 async fn probe_pi_version(command: &Path) -> PiVersion {
-    match tokio::time::timeout(
-        PI_VERSION_PROBE_TIMEOUT,
-        tokio::process::Command::new(command)
-            .arg("--version")
-            .output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) if output.status.success() => {
-            parse_pi_version(&String::from_utf8_lossy(&output.stdout))
-        }
-        Ok(Ok(_)) | Ok(Err(_)) => PiVersion::Unknown(ProbeFailure::CommandFailed),
-        Err(_) => PiVersion::Unknown(ProbeFailure::TimedOut),
+    probe_pi_version_with_timeout(command, PI_VERSION_PROBE_TIMEOUT).await
+}
+
+async fn probe_pi_version_with_timeout(command: &Path, timeout: Duration) -> PiVersion {
+    let request = BoundedCommandRequest {
+        executable: command.to_string_lossy().into_owned(),
+        argv: vec!["--version".to_string()],
+        working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        timeout,
+        cancellation: CancellationToken::new(),
+        environment: BTreeMap::new(),
+        stdout_limit: 64 * 1024,
+        stderr_limit: 64 * 1024,
+    };
+    match TokioBoundedCommandRunner.run_inherited(request).await {
+        Ok(result) if result.timed_out => PiVersion::Unknown(ProbeFailure::TimedOut),
+        Ok(result) if result.exit_code == Some(0) => parse_pi_version(&result.stdout),
+        Ok(_) | Err(_) => PiVersion::Unknown(ProbeFailure::CommandFailed),
     }
 }
 

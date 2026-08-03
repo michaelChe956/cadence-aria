@@ -208,7 +208,7 @@ async fn await_pi_command(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return PiCommand::Abort,
-            command = command_rx.recv(), if !command_rx.is_closed() => match command {
+            command = command_rx.recv() => match command {
                 Some(ProviderCommand::Abort) | None => return PiCommand::Abort,
                 Some(ProviderCommand::ChoiceResponse { id, selected_option_ids, free_text, .. }) => {
                     return PiCommand::ChoiceResponse { id, selected_option_ids, free_text };

@@ -2,6 +2,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -54,6 +59,17 @@ fn outbound(envelopes: &[FixtureEnvelope]) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(unix)]
+fn write_executable(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(name);
+    let mut file = fs::File::create(&path).expect("create executable fixture");
+    writeln!(file, "#!/bin/sh\n{body}").expect("write executable fixture");
+    let mut permissions = file.metadata().expect("fixture metadata").permissions();
+    permissions.set_mode(0o755);
+    file.set_permissions(permissions)
+        .expect("make fixture executable");
+    path
+}
 #[test]
 fn pi_provider_aria_ask_extension_is_structured_and_does_not_intercept_tools() {
     assert!(ARIA_ASK_EXTENSION.contains("ask_user"));
@@ -62,26 +78,50 @@ fn pi_provider_aria_ask_extension_is_structured_and_does_not_intercept_tools() {
     assert!(!ARIA_ASK_EXTENSION.contains("tool_call"));
 }
 
+#[test]
+fn ensure_ask_extension_reuses_only_matching_content() {
+    let cache = tempfile::tempdir().expect("temporary cache");
+    let extension = ensure_ask_extension_in(cache.path()).expect("create extension");
+    assert_eq!(
+        fs::read_to_string(&extension).expect("read extension"),
+        ARIA_ASK_EXTENSION
+    );
+    assert_eq!(
+        ensure_ask_extension_in(cache.path()).expect("reuse matching extension"),
+        extension
+    );
+    fs::write(&extension, "untrusted extension").expect("replace extension");
+    assert!(ensure_ask_extension_in(cache.path()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_ask_extension_rejects_symlink() {
+    let cache = tempfile::tempdir().expect("temporary cache");
+    let target = cache.path().join("target.ts");
+    fs::write(&target, ARIA_ASK_EXTENSION).expect("write target");
+    let hash = hex::encode(sha2::Sha256::digest(ARIA_ASK_EXTENSION.as_bytes()));
+    std::os::unix::fs::symlink(
+        &target,
+        cache.path().join(format!("aria-ask-{}.ts", &hash[..8])),
+    )
+    .expect("create symlink");
+    assert!(ensure_ask_extension_in(cache.path()).is_err());
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn pi_start_below_minimum_returns_before_spawning() {
-    use std::os::unix::fs::PermissionsExt;
-
     let temp = tempfile::tempdir().expect("temporary directory");
-    let command = temp.path().join("fake-pi");
     let marker = temp.path().join("spawned");
-    fs::write(
-        &command,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 0.82.0; exit 0; fi\ntouch {}\n",
+    let command = write_executable(
+        temp.path(),
+        "fake-pi",
+        &format!(
+            "if [ \"$1\" = \"--version\" ]; then echo 0.82.0; exit 0; fi\ntouch {}",
             marker.display()
         ),
-    )
-    .expect("fake Pi command");
-    let mut permissions = fs::metadata(&command)
-        .expect("command metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&command, permissions).expect("make fake Pi executable");
+    );
 
     let provider = PiProvider::new(command);
     let result = provider
@@ -122,14 +162,27 @@ fn pi_version_unparseable_does_not_block() {
     assert!(ensure_pi_version_compatible(&parse_pi_version("pi version xyz")).is_ok());
 }
 
-#[test]
-fn pi_version_command_missing_does_not_block() {
-    assert!(ensure_pi_version_compatible(&PiVersion::Unknown(ProbeFailure::CommandFailed)).is_ok());
+#[tokio::test]
+async fn pi_version_command_missing_does_not_block() {
+    let missing = tempfile::tempdir()
+        .expect("temporary directory")
+        .path()
+        .join("missing-pi");
+    assert_eq!(
+        probe_pi_version_with_timeout(&missing, std::time::Duration::from_secs(1)).await,
+        PiVersion::Unknown(ProbeFailure::CommandFailed)
+    );
 }
 
-#[test]
-fn pi_version_timeout_does_not_block() {
-    assert!(ensure_pi_version_compatible(&PiVersion::Unknown(ProbeFailure::TimedOut)).is_ok());
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_version_timeout_does_not_block() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let command = write_executable(temp.path(), "hanging-pi", "sleep 30");
+    assert_eq!(
+        probe_pi_version_with_timeout(&command, std::time::Duration::from_millis(50)).await,
+        PiVersion::Unknown(ProbeFailure::TimedOut)
+    );
 }
 
 #[test]
@@ -218,8 +271,9 @@ fn parse_session_id_from_get_state_response() {
 
 #[test]
 fn build_args_rpc_mode_auto_only() {
+    let cache = tempfile::tempdir().expect("temporary cache");
     let provider = PiProvider::new("pi".into());
-    let extension = ensure_ask_extension().expect("ask extension");
+    let extension = ensure_ask_extension_in(cache.path()).expect("ask extension");
     let args = provider.build_args(None, &extension);
     assert!(args.contains(&"--mode".to_string()));
     assert!(args.contains(&"rpc".to_string()));
@@ -232,8 +286,9 @@ fn build_args_rpc_mode_auto_only() {
 
 #[test]
 fn build_args_resume_includes_session_id() {
+    let cache = tempfile::tempdir().expect("temporary cache");
     let provider = PiProvider::new("pi".into());
-    let extension = ensure_ask_extension().expect("ask extension");
+    let extension = ensure_ask_extension_in(cache.path()).expect("ask extension");
     let args = provider.build_args(Some("sess-123"), &extension);
     assert!(args.contains(&"--session-id".to_string()));
     assert!(args.contains(&"sess-123".to_string()));
@@ -515,6 +570,21 @@ async fn session_select_abort_during_wait_sends_pi_abort() {
         .send(ProviderCommand::Abort)
         .await
         .expect("abort");
+    assert_eq!(server.await.expect("server")["type"], "abort");
+    run.await.expect("session task").expect("session abort");
+    assert!(
+        drain_events(&mut event_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::StatusChanged(ProviderStatus::Aborted)))
+    );
+}
+
+#[tokio::test]
+async fn session_select_closed_command_channel_sends_pi_abort() {
+    let (run, command_tx, mut event_rx, server) = start_select_session(false).await;
+    recv_choice_request(&mut event_rx).await;
+    drop(command_tx);
     assert_eq!(server.await.expect("server")["type"], "abort");
     run.await.expect("session task").expect("session abort");
     assert!(
