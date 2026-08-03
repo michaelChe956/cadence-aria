@@ -86,7 +86,7 @@ export function ReferenceImageUpload() {
               onClick={removeReference}
               disabled={isBusy}
               title={isBusy ? "处理中不可修改参考图" : undefined}
-              className="shrink-0 rounded-md border border-[var(--aria-line)] bg-white px-2 py-1 text-xs font-semibold text-[var(--aria-danger)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="shrink-0 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-1 text-xs font-semibold text-[var(--aria-danger)] transition-colors hover:border-[var(--aria-danger)] hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] disabled:cursor-not-allowed disabled:opacity-50"
             >
               移除参考图
             </button>
@@ -97,10 +97,10 @@ export function ReferenceImageUpload() {
           htmlFor={isBusy ? undefined : inputId}
           aria-disabled={isBusy}
           title={isBusy ? "处理中不可修改参考图" : undefined}
-          className={`mt-3 flex flex-col items-center rounded-lg border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-6 text-center ${
+          className={`mt-3 flex flex-col items-center rounded-lg border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-4 py-6 text-center transition-colors ${
             isBusy
               ? "cursor-not-allowed opacity-60"
-              : "cursor-pointer hover:bg-white"
+              : "cursor-pointer hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel)] focus-within:ring-2 focus-within:ring-[var(--aria-primary)]"
           }`}
         >
           <span className="text-sm font-semibold">选择一张参考图</span>

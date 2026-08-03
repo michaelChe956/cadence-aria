@@ -31,12 +31,12 @@ export function PromptBlock() {
         disabled={isBusy}
         rows={7}
         placeholder="Agent 给出的 suggested_prompt 会显示在这里，也可手动填写。"
-        className="mt-3 block min-h-36 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm leading-6 text-[var(--aria-ink)] placeholder:text-[var(--aria-ink-muted)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70"
+        className="mt-3 block min-h-36 w-full resize-y rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm leading-6 text-[var(--aria-ink)] transition-colors placeholder:text-[var(--aria-ink-muted)] hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70"
       />
       {retainedPromptNotice ? (
         <p
           role="status"
-          className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800"
+          className="mt-2 rounded-md border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-xs font-semibold text-[var(--aria-warning)]"
         >
           {retainedPromptNotice.content}
         </p>

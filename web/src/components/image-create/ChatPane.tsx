@@ -44,7 +44,7 @@ export function ChatPane() {
           </p>
         </div>
         {isBusy ? (
-          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
+          <span className="rounded-full bg-[var(--aria-primary-soft)] px-2.5 py-1 text-xs font-semibold text-[var(--aria-primary)]">
             正在处理
           </span>
         ) : null}
@@ -62,7 +62,7 @@ export function ChatPane() {
         {isBusy ? (
           <div
             role="status"
-            className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700"
+            className="rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-primary)]"
           >
             正在处理，请稍候…
           </div>
@@ -80,7 +80,7 @@ export function ChatPane() {
           disabled={isBusy || !currentSession}
           rows={3}
           placeholder={isBusy ? "Agent 正在处理上一条消息…" : "描述图片目标或提出修改意见"}
-          className="block min-h-20 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm text-[var(--aria-ink)] placeholder:text-[var(--aria-ink-muted)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70"
+          className="block min-h-20 w-full resize-y rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm text-[var(--aria-ink)] transition-colors placeholder:text-[var(--aria-ink-muted)] hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70"
         />
         <div className="mt-2 flex items-center justify-between gap-3">
           <span className="text-xs text-[var(--aria-ink-muted)]">
@@ -89,7 +89,7 @@ export function ChatPane() {
           <button
             type="submit"
             disabled={isBusy || !currentSession || !message.trim()}
-            className="rounded-md bg-[var(--aria-primary)] px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-md bg-[var(--aria-primary)] px-4 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             发送
           </button>
@@ -109,24 +109,24 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
       );
     case "provider_text":
       return (
-        <article className="max-w-[90%] whitespace-pre-wrap rounded-xl border border-[var(--aria-line)] bg-white px-3 py-2 text-sm leading-6">
+        <article className="max-w-[90%] whitespace-pre-wrap rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm leading-6">
           {entry.content}
         </article>
       );
     case "prompt_block":
       return (
-        <article className="rounded-xl border border-violet-200 bg-violet-50 px-3 py-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-violet-700">
+        <article className="rounded-xl border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-[var(--aria-primary)]">
             Suggested prompt{entry.version ? ` · v${entry.version}` : ""}
           </div>
-          <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-violet-950">
+          <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-[var(--aria-ink)]">
             {entry.content}
           </p>
         </article>
       );
     case "generation_image":
       return (
-        <article className="overflow-hidden rounded-xl border border-[var(--aria-line)] bg-white">
+        <article className="overflow-hidden rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)]">
           <img
             src={`data:${entry.mediaType};base64,${entry.base64}`}
             alt={entry.prompt || "生成图片"}
@@ -141,20 +141,20 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
       return (
         <div
           role="alert"
-          className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700"
+          className="rounded-lg border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-danger)]"
         >
           生成失败：{entry.content}
         </div>
       );
     case "system_notice":
       return (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+        <div className="rounded-lg border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-sm text-[var(--aria-warning)]">
           {entry.content}
         </div>
       );
     case "busy_notice":
       return (
-        <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700">
+        <div className="rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-primary)]">
           {entry.content}
         </div>
       );

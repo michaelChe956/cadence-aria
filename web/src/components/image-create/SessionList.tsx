@@ -79,13 +79,13 @@ export function SessionList() {
             setShowCreate(true);
             setError(null);
           }}
-          className="rounded-md bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white"
+          className="rounded-md bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
         >
           新建会话
         </button>
       </div>
       {error ? (
-        <p role="alert" className="mx-3 mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+        <p role="alert" className="mx-3 mt-3 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm text-[var(--aria-danger)]">
           {error}
         </p>
       ) : null}
@@ -122,7 +122,7 @@ export function SessionList() {
               <button
                 type="button"
                 onClick={() => setShowCreate(false)}
-                className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold"
+                className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
               >
                 关闭
               </button>
@@ -137,7 +137,7 @@ export function SessionList() {
                     setTemplate(event.target.value as TemplateSelection);
                     setError(null);
                   }}
-                  className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal"
+                  className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-normal text-[var(--aria-ink)] transition-colors hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
                 >
                   <option value="ppt_business_illustration">PPT 商务配图</option>
                   <option value="business_flow_diagram">业务流程图</option>
@@ -155,7 +155,7 @@ export function SessionList() {
                       setError(null);
                     }}
                     rows={3}
-                    className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal"
+                    className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-normal text-[var(--aria-ink)] transition-colors hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
                   />
                 </label>
               ) : null}
@@ -167,7 +167,7 @@ export function SessionList() {
                   onChange={(event) =>
                     setProvider(event.target.value as ImageCreateProvider)
                   }
-                  className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal"
+                  className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-normal text-[var(--aria-ink)] transition-colors hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
                 >
                   {IMAGE_CREATE_PROVIDER_OPTIONS.map((option) => (
                     <option key={option} value={option}>
@@ -186,14 +186,14 @@ export function SessionList() {
               <button
                 type="button"
                 onClick={() => setShowCreate(false)}
-                className="rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold"
+                className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
               >
                 取消
               </button>
               <button
                 type="submit"
                 disabled={submitting}
-                className="rounded-md bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                className="rounded-md bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:opacity-60"
               >
                 {submitting ? "创建中…" : "创建"}
               </button>
@@ -218,13 +218,17 @@ function SessionItem({
 }) {
   return (
     <div
-      className={`rounded-lg border p-2 ${
+      className={`rounded-lg border p-2 transition-colors ${
         active
-          ? "border-[var(--aria-primary)] bg-blue-50"
-          : "border-[var(--aria-line)] bg-white"
+          ? "border-[var(--aria-primary)] bg-[var(--aria-primary-soft)]"
+          : "border-[var(--aria-line)] bg-[var(--aria-panel)] hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)]"
       }`}
     >
-      <button type="button" onClick={onOpen} className="w-full px-1 py-1 text-left">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="w-full rounded-md px-1 py-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+      >
         <span className="block truncate text-sm font-semibold">
           {templateLabel(session.template)}
         </span>
@@ -241,7 +245,7 @@ function SessionItem({
           aria-label={`删除会话 ${session.id}`}
           onClick={onDelete}
           disabled={session.status === "deleting"}
-          className="rounded px-2 py-1 text-xs font-semibold text-[var(--aria-danger)] hover:bg-red-50 disabled:opacity-50"
+          className="rounded px-2 py-1 text-xs font-semibold text-[var(--aria-danger)] transition-colors hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] disabled:opacity-50"
         >
           删除
         </button>

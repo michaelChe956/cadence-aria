@@ -15,7 +15,7 @@ import {
 } from "../../state/image-create-store";
 
 const inputClassName =
-  "mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
+  "mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-normal text-[var(--aria-ink)] transition-colors hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
 
 function settingsErrorMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;
@@ -167,7 +167,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         aria-label="图片创作设置"
         aria-modal="true"
         onSubmit={handleSubmit}
-        className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
+        className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
       >
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
@@ -181,7 +181,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]"
+            className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
           >
             关闭
           </button>
@@ -249,7 +249,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     setError(null);
                     setSuccess(null);
                   }}
-                  className="rounded-md border border-[var(--aria-danger)] px-3 py-1.5 text-xs font-semibold text-[var(--aria-danger)] disabled:opacity-60"
+                  className="rounded-md border border-[var(--aria-danger)] px-3 py-1.5 text-xs font-semibold text-[var(--aria-danger)] transition-colors hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] disabled:opacity-60"
                 >
                   清除 key
                 </button>
@@ -296,7 +296,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               </p>
             ) : null}
             {success ? (
-              <p role="status" className="text-sm font-semibold text-green-700">
+              <p role="status" className="text-sm font-semibold text-[var(--aria-success)]">
                 {success}
               </p>
             ) : null}
@@ -307,14 +307,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink-muted)]"
+            className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={controlsDisabled}
-            className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:opacity-60"
           >
             {submitting ? "保存中…" : "保存设置"}
           </button>
