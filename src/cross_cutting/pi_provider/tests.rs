@@ -9,7 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderEvent, ProviderPermissionMode, StreamingProviderInput,
+    ChoiceRequestSource, ProviderCommand, ProviderEvent, ProviderPermissionMode, ProviderStatus,
+    StreamingProviderInput,
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 
@@ -51,6 +52,84 @@ fn outbound(envelopes: &[FixtureEnvelope]) -> Vec<Value> {
         .filter(|envelope| envelope.direction == "client_to_pi")
         .map(|envelope| envelope.payload.clone())
         .collect()
+}
+
+#[test]
+fn pi_provider_aria_ask_extension_is_structured_and_does_not_intercept_tools() {
+    assert!(ARIA_ASK_EXTENSION.contains("ask_user"));
+    assert!(ARIA_ASK_EXTENSION.contains("ctx.ui.select"));
+    assert!(ARIA_ASK_EXTENSION.contains("promptGuidelines"));
+    assert!(!ARIA_ASK_EXTENSION.contains("tool_call"));
+}
+
+#[tokio::test]
+async fn pi_start_below_minimum_returns_before_spawning() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let command = temp.path().join("fake-pi");
+    let marker = temp.path().join("spawned");
+    fs::write(
+        &command,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 0.82.0; exit 0; fi\ntouch {}\n",
+            marker.display()
+        ),
+    )
+    .expect("fake Pi command");
+    let mut permissions = fs::metadata(&command)
+        .expect("command metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&command, permissions).expect("make fake Pi executable");
+
+    let provider = PiProvider::new(command);
+    let result = provider
+        .start(streaming_input_for_test(None), CancellationToken::new())
+        .await;
+    assert!(result.is_err(), "incompatible Pi must be rejected");
+    assert!(
+        !marker.exists(),
+        "Pi process must not spawn when the version is below minimum"
+    );
+}
+
+#[test]
+fn parse_pi_select_request_preserves_title_and_options() {
+    let fixture = fs::read_to_string(fixture("select_request.jsonl")).expect("select fixture");
+    let request = parse_pi_select_request(
+        &serde_json::from_str::<Value>(fixture.trim()).expect("select fixture json"),
+    )
+    .expect("select request");
+    assert_eq!(request.id, "select-1");
+    assert_eq!(request.title, "格式?");
+    assert_eq!(request.options, vec!["A", "B", "C"]);
+}
+
+#[test]
+fn pi_version_below_minimum_blocks() {
+    assert!(ensure_pi_version_compatible(&PiVersion::Known((0, 82, 0))).is_err());
+}
+
+#[test]
+fn pi_version_at_or_above_minimum_passes() {
+    assert!(ensure_pi_version_compatible(&PiVersion::Known((0, 83, 0))).is_ok());
+    assert!(ensure_pi_version_compatible(&PiVersion::Known((0, 84, 0))).is_ok());
+}
+
+#[test]
+fn pi_version_unparseable_does_not_block() {
+    assert!(ensure_pi_version_compatible(&parse_pi_version("pi version xyz")).is_ok());
+}
+
+#[test]
+fn pi_version_command_missing_does_not_block() {
+    assert!(ensure_pi_version_compatible(&PiVersion::Unknown(ProbeFailure::CommandFailed)).is_ok());
+}
+
+#[test]
+fn pi_version_timeout_does_not_block() {
+    assert!(ensure_pi_version_compatible(&PiVersion::Unknown(ProbeFailure::TimedOut)).is_ok());
 }
 
 #[test]
@@ -140,10 +219,12 @@ fn parse_session_id_from_get_state_response() {
 #[test]
 fn build_args_rpc_mode_auto_only() {
     let provider = PiProvider::new("pi".into());
-    let args = provider.build_args(None);
+    let extension = ensure_ask_extension().expect("ask extension");
+    let args = provider.build_args(None, &extension);
     assert!(args.contains(&"--mode".to_string()));
     assert!(args.contains(&"rpc".to_string()));
-    assert!(!args.contains(&"-e".to_string()));
+    assert!(args.contains(&"-e".to_string()));
+    assert!(args.iter().any(|arg| std::path::Path::new(arg).is_file()));
     assert!(!args.contains(&"--session-dir".to_string()));
     assert!(!args.contains(&"--no-extensions".to_string()));
     assert!(!args.contains(&"--session-id".to_string()));
@@ -152,7 +233,8 @@ fn build_args_rpc_mode_auto_only() {
 #[test]
 fn build_args_resume_includes_session_id() {
     let provider = PiProvider::new("pi".into());
-    let args = provider.build_args(Some("sess-123"));
+    let extension = ensure_ask_extension().expect("ask extension");
+    let args = provider.build_args(Some("sess-123"), &extension);
     assert!(args.contains(&"--session-id".to_string()));
     assert!(args.contains(&"sess-123".to_string()));
 }
@@ -206,8 +288,275 @@ async fn drain_events(rx: &mut mpsc::Receiver<ProviderEvent>) -> Vec<ProviderEve
     out
 }
 
+async fn start_select_session(
+    select_before_get_state_response: bool,
+) -> (
+    tokio::task::JoinHandle<
+        Result<(), crate::cross_cutting::provider_adapter::ProviderAdapterError>,
+    >,
+    mpsc::Sender<ProviderCommand>,
+    mpsc::Receiver<ProviderEvent>,
+    tokio::task::JoinHandle<Value>,
+) {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (reader, writer) = tokio::io::split(client_io);
+    let peer = JsonRpcPeer::new(reader, writer);
+    let (event_tx, event_rx) = mpsc::channel(16);
+    let (command_tx, command_rx) = mpsc::channel(8);
+    let server = tokio::spawn(async move {
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let mut reader = tokio::io::BufReader::new(server_reader);
+        let get_state = read_outbound(&mut reader).await;
+        if select_before_get_state_response {
+            write_inbound(
+                &mut server_writer,
+                serde_json::json!({
+                    "type": "extension_ui_request", "id": "select-1", "method": "select",
+                    "title": "格式?", "options": ["A", "B"]
+                }),
+            )
+            .await;
+        }
+        if !select_before_get_state_response {
+            write_inbound(
+                &mut server_writer,
+                serde_json::json!({
+                    "type": "response", "id": get_state["id"], "command": "get_state",
+                    "success": true, "data": {"sessionId": "sess-1"}
+                }),
+            )
+            .await;
+            let prompt = read_outbound(&mut reader).await;
+            write_inbound(
+                &mut server_writer,
+                serde_json::json!({
+                    "type": "response", "id": prompt["id"], "command": "prompt", "success": true
+                }),
+            )
+            .await;
+            write_inbound(
+                &mut server_writer,
+                serde_json::json!({
+                    "type": "extension_ui_request", "id": "select-1", "method": "select",
+                    "title": "格式?", "options": ["A", "B"]
+                }),
+            )
+            .await;
+        }
+        let response = read_outbound(&mut reader).await;
+        if select_before_get_state_response {
+            write_inbound(
+                &mut server_writer,
+                serde_json::json!({
+                    "type": "response", "id": get_state["id"], "command": "get_state",
+                    "success": true, "data": {"sessionId": "sess-1"}
+                }),
+            )
+            .await;
+            let prompt = read_outbound(&mut reader).await;
+            write_inbound(
+                &mut server_writer,
+                serde_json::json!({
+                    "type": "response", "id": prompt["id"], "command": "prompt", "success": true
+                }),
+            )
+            .await;
+        }
+        write_inbound(&mut server_writer, serde_json::json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "continued"}
+        })).await;
+        write_inbound(
+            &mut server_writer,
+            serde_json::json!({"type": "agent_settled"}),
+        )
+        .await;
+        response
+    });
+    let run = tokio::spawn(run_pi_session(
+        peer,
+        command_rx,
+        event_tx,
+        streaming_input_for_test(None),
+        CancellationToken::new(),
+    ));
+    (run, command_tx, event_rx, server)
+}
+
+async fn recv_choice_request(event_rx: &mut mpsc::Receiver<ProviderEvent>) {
+    loop {
+        match event_rx.recv().await.expect("choice event") {
+            ProviderEvent::ChoiceRequest(request) => {
+                assert_eq!(request.id, "select-1");
+                assert_eq!(request.source, ChoiceRequestSource::ProviderChoice);
+                assert_eq!(request.prompt, "格式?");
+                assert_eq!(request.options.len(), 2);
+                assert_eq!(request.options[0].id, "A");
+                assert!(request.allow_free_text);
+                assert!(!request.allow_multiple);
+                return;
+            }
+            _ => continue,
+        }
+    }
+}
+
 #[tokio::test]
-async fn session_in_auto_mode_emits_tool_audit_events_from_recorded_stream() {
+async fn session_select_request_maps_to_choice_request_and_forwards_response() {
+    let (run, command_tx, mut event_rx, server) = start_select_session(false).await;
+    recv_choice_request(&mut event_rx).await;
+    command_tx
+        .send(ProviderCommand::ChoiceResponse {
+            id: "select-1".to_string(),
+            selected_option_ids: vec!["A".to_string()],
+            free_text: None,
+            answers: vec![],
+        })
+        .await
+        .expect("choice response");
+    let response = server.await.expect("server");
+    assert_eq!(
+        response,
+        serde_json::json!({"type":"extension_ui_response", "id":"select-1", "value":"A"})
+    );
+    run.await.expect("session task").expect("session complete");
+    let events = drain_events(&mut event_rx).await;
+    assert!(events.iter().any(
+        |event| matches!(event, ProviderEvent::TextDelta { content } if content == "continued")
+    ));
+}
+
+#[tokio::test]
+async fn session_select_with_free_text_maps_to_value() {
+    let (run, command_tx, mut event_rx, server) = start_select_session(false).await;
+    recv_choice_request(&mut event_rx).await;
+    command_tx
+        .send(ProviderCommand::ChoiceResponse {
+            id: "select-1".to_string(),
+            selected_option_ids: vec![],
+            free_text: Some("自定义".to_string()),
+            answers: vec![],
+        })
+        .await
+        .expect("choice response");
+    let response = server.await.expect("server");
+    assert_eq!(response["value"], "自定义");
+    run.await.expect("session task").expect("session complete");
+}
+
+#[tokio::test]
+async fn session_select_empty_response_sends_full_cancelled_envelope() {
+    let (run, command_tx, mut event_rx, server) = start_select_session(false).await;
+    recv_choice_request(&mut event_rx).await;
+    command_tx
+        .send(ProviderCommand::ChoiceResponse {
+            id: "select-1".to_string(),
+            selected_option_ids: vec![],
+            free_text: None,
+            answers: vec![],
+        })
+        .await
+        .expect("choice response");
+    let response = server.await.expect("server");
+    assert_eq!(
+        response,
+        serde_json::json!({"type":"extension_ui_response", "id":"select-1", "cancelled":true})
+    );
+    run.await.expect("session task").expect("session complete");
+}
+
+#[tokio::test]
+async fn session_select_during_handshake_is_handled() {
+    let (run, command_tx, mut event_rx, server) = start_select_session(true).await;
+    recv_choice_request(&mut event_rx).await;
+    command_tx
+        .send(ProviderCommand::ChoiceResponse {
+            id: "select-1".to_string(),
+            selected_option_ids: vec!["B".to_string()],
+            free_text: None,
+            answers: vec![],
+        })
+        .await
+        .expect("choice response");
+    assert_eq!(server.await.expect("server")["value"], "B");
+    run.await.expect("session task").expect("session complete");
+}
+
+#[tokio::test]
+async fn session_select_abort_during_wait_sends_pi_abort() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (reader, writer) = tokio::io::split(client_io);
+    let peer = JsonRpcPeer::new(reader, writer);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (command_tx, command_rx) = mpsc::channel(8);
+    let server = tokio::spawn(async move {
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let mut reader = tokio::io::BufReader::new(server_reader);
+        let get_state = read_outbound(&mut reader).await;
+        write_inbound(&mut server_writer, serde_json::json!({"type":"response","id":get_state["id"],"success":true,"data":{"sessionId":"sess-1"}})).await;
+        let prompt = read_outbound(&mut reader).await;
+        write_inbound(
+            &mut server_writer,
+            serde_json::json!({"type":"response","id":prompt["id"],"success":true}),
+        )
+        .await;
+        write_inbound(&mut server_writer, serde_json::json!({"type":"extension_ui_request","id":"select-1","method":"select","title":"格式?","options":["A", "B"]})).await;
+        read_outbound(&mut reader).await
+    });
+    let run = tokio::spawn(run_pi_session(
+        peer,
+        command_rx,
+        event_tx,
+        streaming_input_for_test(None),
+        CancellationToken::new(),
+    ));
+    recv_choice_request(&mut event_rx).await;
+    command_tx
+        .send(ProviderCommand::Abort)
+        .await
+        .expect("abort");
+    assert_eq!(server.await.expect("server")["type"], "abort");
+    run.await.expect("session task").expect("session abort");
+    assert!(
+        drain_events(&mut event_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::StatusChanged(ProviderStatus::Aborted)))
+    );
+}
+
+#[tokio::test]
+async fn session_select_wrong_id_then_correct_id() {
+    let (run, command_tx, mut event_rx, server) = start_select_session(false).await;
+    recv_choice_request(&mut event_rx).await;
+    command_tx
+        .send(ProviderCommand::ChoiceResponse {
+            id: "wrong".to_string(),
+            selected_option_ids: vec!["A".to_string()],
+            free_text: None,
+            answers: vec![],
+        })
+        .await
+        .expect("wrong response");
+    let protocol_error = event_rx.recv().await.expect("protocol error");
+    assert!(
+        matches!(protocol_error, ProviderEvent::ProtocolError { ref code, .. } if code == "CHOICE_ID_UNMATCHED")
+    );
+    command_tx
+        .send(ProviderCommand::ChoiceResponse {
+            id: "select-1".to_string(),
+            selected_option_ids: vec!["A".to_string()],
+            free_text: None,
+            answers: vec![],
+        })
+        .await
+        .expect("correct response");
+    assert_eq!(server.await.expect("server")["value"], "A");
+    run.await.expect("session task").expect("session complete");
+}
+
+#[tokio::test]
+async fn session_tool_call_does_not_produce_permission_or_choice_request() {
     let (client_io, server_io) = tokio::io::duplex(8192);
     let (reader, writer) = tokio::io::split(client_io);
     let peer = JsonRpcPeer::new(reader, writer);
@@ -293,6 +642,13 @@ async fn session_in_auto_mode_emits_tool_audit_events_from_recorded_stream() {
                 && result.output == "fixture-tool-ok"
                 && !result.is_error
     )));
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ChoiceRequest(_) | ProviderEvent::PermissionRequest(_)
+        )),
+        "ordinary Pi tools must not trigger choice or permission requests"
+    );
     let completion = events
         .iter()
         .find_map(|event| match event {
@@ -643,7 +999,8 @@ async fn session_resumes_with_existing_session_id() {
 
     let input = streaming_input_for_test(Some("sess-old".to_string()));
     let provider = PiProvider::new("pi".into());
-    let args = provider.build_args(input.resume_provider_session_id.as_deref());
+    let extension = ensure_ask_extension().expect("ask extension");
+    let args = provider.build_args(input.resume_provider_session_id.as_deref(), &extension);
     assert!(args.contains(&"--session-id".to_string()));
     assert!(args.contains(&"sess-old".to_string()));
     run_pi_session(peer, command_rx, event_tx, input, CancellationToken::new())

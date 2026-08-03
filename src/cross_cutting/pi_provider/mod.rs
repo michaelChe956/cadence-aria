@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use sha2::{Digest, Sha256};
 
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
@@ -23,6 +26,99 @@ pub mod tests;
 pub(crate) use parse::*;
 
 pub const PI_COMMAND: &str = "pi";
+const ARIA_ASK_EXTENSION: &str = include_str!("aria-ask.ts");
+const MIN_PI_VERSION: &str = "0.83.0";
+const PI_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProbeFailure {
+    CommandFailed,
+    TimedOut,
+    Unparseable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PiVersion {
+    Known((u32, u32, u32)),
+    Unknown(ProbeFailure),
+}
+
+fn ensure_ask_extension() -> Result<PathBuf, ProviderAdapterError> {
+    let cache = std::env::temp_dir().join("cadence-aria-pi-ask");
+    std::fs::create_dir_all(&cache).map_err(|error| {
+        ProviderAdapterError::parse_error(
+            format!("failed to create Pi ask extension cache: {error}"),
+            String::new(),
+            String::new(),
+        )
+    })?;
+    let hash = hex::encode(Sha256::digest(ARIA_ASK_EXTENSION.as_bytes()));
+    let path = cache.join(format!("aria-ask-{}.ts", &hash[..8]));
+    if !path.exists() {
+        std::fs::write(&path, ARIA_ASK_EXTENSION).map_err(|error| {
+            ProviderAdapterError::parse_error(
+                format!("failed to write Pi ask extension: {error}"),
+                String::new(),
+                String::new(),
+            )
+        })?;
+    }
+    Ok(path)
+}
+
+fn parse_pi_version(output: &str) -> PiVersion {
+    output
+        .split_whitespace()
+        .find_map(|token| {
+            let token = token.trim_start_matches('v');
+            let mut parts = token.split('.');
+            Some((
+                parts.next()?.parse().ok()?,
+                parts.next()?.parse().ok()?,
+                parts.next()?.parse().ok()?,
+            ))
+        })
+        .map(PiVersion::Known)
+        .unwrap_or(PiVersion::Unknown(ProbeFailure::Unparseable))
+}
+
+async fn probe_pi_version(command: &Path) -> PiVersion {
+    match tokio::time::timeout(
+        PI_VERSION_PROBE_TIMEOUT,
+        tokio::process::Command::new(command)
+            .arg("--version")
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) if output.status.success() => {
+            parse_pi_version(&String::from_utf8_lossy(&output.stdout))
+        }
+        Ok(Ok(_)) | Ok(Err(_)) => PiVersion::Unknown(ProbeFailure::CommandFailed),
+        Err(_) => PiVersion::Unknown(ProbeFailure::TimedOut),
+    }
+}
+
+fn ensure_pi_version_compatible(version: &PiVersion) -> Result<(), ProviderAdapterError> {
+    let PiVersion::Known(version) = version else {
+        return Ok(());
+    };
+    let minimum = match parse_pi_version(MIN_PI_VERSION) {
+        PiVersion::Known(minimum) => minimum,
+        PiVersion::Unknown(_) => unreachable!("minimum Pi version must be valid"),
+    };
+    if version < &minimum {
+        return Err(ProviderAdapterError::parse_error(
+            format!(
+                "Pi version {}.{}.{} is incompatible; Pi {MIN_PI_VERSION} or newer is required",
+                version.0, version.1, version.2
+            ),
+            String::new(),
+            String::new(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct PiProvider {
@@ -35,12 +131,21 @@ impl PiProvider {
     }
 
     /// Constructs Pi's Auto-only RPC command line.
-    /// - No `-e`: Pi receives no Aria authorization extension.
+    /// - `-e <path>` loads Aria's structured ask extension.
     /// - No `--session-dir`: Pi uses its default `~/.pi` directory.
     /// - No `--no-extensions`: Pi preserves user-global extensions.
     /// - The project repository is passed as the process cwd at spawn time.
-    pub(crate) fn build_args(&self, resume_session_id: Option<&str>) -> Vec<String> {
-        let mut args = vec!["--mode".to_string(), "rpc".to_string()];
+    pub(crate) fn build_args(
+        &self,
+        resume_session_id: Option<&str>,
+        extension_path: &Path,
+    ) -> Vec<String> {
+        let mut args = vec![
+            "--mode".to_string(),
+            "rpc".to_string(),
+            "-e".to_string(),
+            extension_path.display().to_string(),
+        ];
         if let Some(session_id) = resume_session_id.map(str::trim).filter(|id| !id.is_empty()) {
             args.push("--session-id".to_string());
             args.push(session_id.to_string());
@@ -56,7 +161,10 @@ impl StreamingProviderAdapter for PiProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        let args = self.build_args(input.resume_provider_session_id.as_deref());
+        let version = probe_pi_version(&self.command).await;
+        ensure_pi_version_compatible(&version)?;
+        let extension_path = ensure_ask_extension()?;
+        let args = self.build_args(input.resume_provider_session_id.as_deref(), &extension_path);
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
         let process = ProcessManager::spawn(

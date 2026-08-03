@@ -123,7 +123,7 @@ fn structured_interaction_guidance_for(provider: &ProviderName) -> &'static str 
             "当前 author provider 是 Codex；需要向用户确认时，必须使用结构化 requestUserInput，让同一个 Codex turn 等待用户回答后继续。禁止输出文本 1/2/3 或 A/B/C 选择题作为交互替代；若仍输出可解析的文本选择题，daemon 仅作为 text_fallback 异常兜底处理，并在用户回答后只追加 compact QA。"
         }
         ProviderName::Pi => {
-            "当前 author provider 是 Pi；Pi 未声明原生结构化交互能力。需要向用户确认时，必须输出 daemon 可识别的暂停信号并交给 text_fallback。禁止伪造 AskUserQuestion 或 requestUserInput 工具调用，也不要把文本选择题作为正常交互路径。"
+            "当前 author provider 是 Pi；需要向用户确认时，使用 `ask_user` 工具提问并等待回答。禁止输出文本 A/B/C 选择题作为交互替代；`ask_user` 会经 Aria 弹出选择卡片，用户回答后同一 Pi 进程继续。"
         }
         ProviderName::Fake => {
             "当前 author provider 未声明原生结构化交互能力；需要向用户确认时，必须输出 daemon 可识别的暂停信号并交给 text_fallback。禁止伪造 AskUserQuestion 或 requestUserInput 工具调用，也不要把文本选择题作为正常交互路径。"

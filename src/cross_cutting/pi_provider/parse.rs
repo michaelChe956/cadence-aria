@@ -15,6 +15,27 @@ pub(crate) struct PiToolEnd {
     pub(crate) is_error: bool,
 }
 
+pub(crate) struct PiSelectRequest {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) options: Vec<String>,
+}
+
+pub(crate) fn parse_pi_select_request(value: &Value) -> Option<PiSelectRequest> {
+    (value.get("type").and_then(Value::as_str) == Some("extension_ui_request")).then_some(())?;
+    (value.get("method").and_then(Value::as_str) == Some("select")).then_some(())?;
+    Some(PiSelectRequest {
+        id: value.get("id")?.as_str()?.to_string(),
+        title: value.get("title")?.as_str()?.to_string(),
+        options: value
+            .get("options")?
+            .as_array()?
+            .iter()
+            .map(|option| option.as_str().map(ToString::to_string))
+            .collect::<Option<Vec<_>>>()?,
+    })
+}
+
 pub(crate) fn parse_pi_text_delta(value: &Value) -> Option<String> {
     (value.get("type").and_then(Value::as_str) == Some("message_update")).then_some(())?;
     let event = value.get("assistantMessageEvent")?;

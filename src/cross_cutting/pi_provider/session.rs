@@ -8,13 +8,13 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderCompletion, ProviderEvent, ProviderStatus, ProviderToolCall,
-    ProviderToolResult, StreamingProviderInput,
+    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCommand, ProviderCompletion,
+    ProviderEvent, ProviderStatus, ProviderToolCall, ProviderToolResult, StreamingProviderInput,
 };
 
 use super::{
-    is_pi_terminal, parse_pi_failure, parse_pi_session_id, parse_pi_text_delta, parse_pi_tool_end,
-    parse_pi_tool_start,
+    PiSelectRequest, is_pi_terminal, parse_pi_failure, parse_pi_select_request,
+    parse_pi_session_id, parse_pi_text_delta, parse_pi_tool_end, parse_pi_tool_start,
 };
 
 const PI_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -142,9 +142,14 @@ where
     loop {
         tokio::select! {
             biased;
-            _ = await_pi_abort(&mut command_rx, &cancel) => {
-                abort_pi_session(&peer, &mut next_id, &event_tx).await?;
-                return Ok(());
+            command = await_pi_command(&mut command_rx, &cancel) => {
+                match command {
+                    PiCommand::Abort => {
+                        abort_pi_session(&peer, &mut next_id, &event_tx).await?;
+                        return Ok(());
+                    }
+                    PiCommand::ChoiceResponse { id, .. } => send_choice_id_unmatched(&event_tx, id).await?,
+                }
             }
             _ = &mut timeout => {
                 return Err(ProviderAdapterError::timeout_with_details(
@@ -157,6 +162,14 @@ where
             incoming = peer.next_incoming() => {
                 let incoming = incoming.ok_or_else(|| provider_error("Pi RPC stream ended before completion"))?;
                 if dispatch_pi_response(&incoming, &mut pending_by_id) {
+                    continue;
+                }
+                if let Some(select) = parse_pi_select_request(&incoming) {
+                    if await_pi_choice_response(
+                        &peer, &mut command_rx, &event_tx, &cancel, &mut next_id, select,
+                    ).await? {
+                        return Ok(());
+                    }
                     continue;
                 }
                 if let Some(error) = parse_pi_failure(&incoming) {
@@ -178,22 +191,119 @@ where
     }
 }
 
-async fn await_pi_abort(
+enum PiCommand {
+    Abort,
+    ChoiceResponse {
+        id: String,
+        selected_option_ids: Vec<String>,
+        free_text: Option<String>,
+    },
+}
+
+async fn await_pi_command(
     command_rx: &mut mpsc::Receiver<ProviderCommand>,
     cancel: &CancellationToken,
-) {
+) -> PiCommand {
     loop {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => return,
-            command = command_rx.recv(), if !command_rx.is_closed() => {
-                if matches!(command, Some(ProviderCommand::Abort)) {
-                    return;
+            _ = cancel.cancelled() => return PiCommand::Abort,
+            command = command_rx.recv(), if !command_rx.is_closed() => match command {
+                Some(ProviderCommand::Abort) | None => return PiCommand::Abort,
+                Some(ProviderCommand::ChoiceResponse { id, selected_option_ids, free_text, .. }) => {
+                    return PiCommand::ChoiceResponse { id, selected_option_ids, free_text };
                 }
-                // Pi is Auto-only and exposes no Aria approval or tool-result round trips.
+                Some(ProviderCommand::PermissionResponse { .. } | ProviderCommand::ToolResult(_)) => {}
             }
         }
     }
+}
+
+async fn await_pi_choice_response<W>(
+    peer: &JsonRpcPeer<W>,
+    command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    cancel: &CancellationToken,
+    next_id: &mut u64,
+    select: PiSelectRequest,
+) -> Result<bool, ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let request_id = select.id.clone();
+    send_event(
+        event_tx,
+        ProviderEvent::ChoiceRequest(ChoiceRequestData {
+            id: request_id.clone(),
+            prompt: select.title,
+            options: select
+                .options
+                .into_iter()
+                .map(|option| ChoiceOptionData {
+                    id: option.clone(),
+                    label: option,
+                    description: None,
+                })
+                .collect(),
+            allow_multiple: false,
+            allow_free_text: true,
+            questions: Vec::new(),
+            source: ChoiceRequestSource::ProviderChoice,
+        }),
+    )
+    .await?;
+    loop {
+        match await_pi_command(command_rx, cancel).await {
+            PiCommand::Abort => {
+                abort_pi_session(peer, next_id, event_tx).await?;
+                return Ok(true);
+            }
+            PiCommand::ChoiceResponse {
+                id,
+                selected_option_ids,
+                free_text,
+            } if id == request_id => {
+                send_pi_choice_response(peer, &request_id, selected_option_ids, free_text).await?;
+                return Ok(false);
+            }
+            PiCommand::ChoiceResponse { id, .. } => send_choice_id_unmatched(event_tx, id).await?,
+        }
+    }
+}
+
+async fn send_pi_choice_response<W>(
+    peer: &JsonRpcPeer<W>,
+    id: &str,
+    selected_option_ids: Vec<String>,
+    free_text: Option<String>,
+) -> Result<(), ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let value = selected_option_ids
+        .into_iter()
+        .next()
+        .or_else(|| free_text.filter(|text| !text.is_empty()));
+    peer.send(match value {
+        Some(value) => json!({ "type": "extension_ui_response", "id": id, "value": value }),
+        None => json!({ "type": "extension_ui_response", "id": id, "cancelled": true }),
+    })
+    .await
+}
+
+async fn send_choice_id_unmatched(
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    id: String,
+) -> Result<(), ProviderAdapterError> {
+    send_event(
+        event_tx,
+        ProviderEvent::ProtocolError {
+            code: "CHOICE_ID_UNMATCHED".to_string(),
+            message: format!("ChoiceResponse id={id} not found in pending"),
+            context: Some(json!({ "choice_id": id })),
+        },
+    )
+    .await
 }
 
 async fn send_pi_command<W>(
@@ -257,9 +367,14 @@ where
     loop {
         tokio::select! {
             biased;
-            _ = await_pi_abort(context.command_rx, context.cancel) => {
-                abort_pi_session(context.peer, context.next_id, context.event_tx).await?;
-                return Ok(PiResponseWait::Aborted);
+            command = await_pi_command(context.command_rx, context.cancel) => {
+                match command {
+                    PiCommand::Abort => {
+                        abort_pi_session(context.peer, context.next_id, context.event_tx).await?;
+                        return Ok(PiResponseWait::Aborted);
+                    }
+                    PiCommand::ChoiceResponse { id, .. } => send_choice_id_unmatched(context.event_tx, id).await?,
+                }
             }
             _ = &mut timeout => return Err(ProviderAdapterError::timeout_with_details(
                 "Pi RPC command timed out",
@@ -280,6 +395,15 @@ where
                     return Err(provider_error("Pi RPC stream ended while waiting for command response"));
                 };
                 if dispatch_pi_response(&incoming, context.pending_by_id) {
+                    continue;
+                }
+                if let Some(select) = parse_pi_select_request(&incoming) {
+                    if await_pi_choice_response(
+                        context.peer, context.command_rx, context.event_tx, context.cancel,
+                        context.next_id, select,
+                    ).await? {
+                        return Ok(PiResponseWait::Aborted);
+                    }
                     continue;
                 }
                 if let Some(error) = parse_pi_failure(&incoming) {
