@@ -30,7 +30,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tempfile::{TempDir, tempdir};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::time::{Duration, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -50,6 +50,8 @@ const VALID_STORY_SPEC: &str = "# Story Spec\n\n\
 无\n\n\
 ## 非功能需求\n\
 无\n";
+
+const PI_POST_ABORT_OUTPUT: &str = "Pi post-abort output";
 
 const INITIAL_STORY_SPEC: &str = "# Initial Story Spec\n\n\
 ## 范围\n\

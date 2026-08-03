@@ -52,6 +52,7 @@ impl StreamingProviderAdapter for HangingStreamingProvider {
 
 struct PiHangingStreamingProvider {
     started: Arc<std::sync::atomic::AtomicBool>,
+    abort_observed: Arc<Notify>,
     seen_inputs: Arc<Mutex<Vec<(cadence_aria::protocol::contracts::ProviderType, cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode)>>>,
 }
 
@@ -70,19 +71,29 @@ impl StreamingProviderAdapter for PiHangingStreamingProvider {
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let (event_tx, event_rx) = mpsc::channel(8);
-        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        let abort_observed = self.abort_observed.clone();
         tokio::spawn(async move {
             let _ = event_tx
                 .send(ProviderEvent::TextDelta {
                     content: "Pi partial output".to_string(),
                 })
                 .await;
-            tokio::select! {
-                _ = cancel.cancelled() => {}
-                command = command_rx.recv() => {
-                    assert!(matches!(command, Some(ProviderCommand::Abort)), "Pi author run must receive Abort");
-                }
-            }
+            cancel.cancelled().await;
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: PI_POST_ABORT_OUTPUT.to_string(),
+                })
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Completed(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        PI_POST_ABORT_OUTPUT.to_string(),
+                        Some("pi-post-abort-session".to_string()),
+                    ),
+                ))
+                .await;
+            abort_observed.notify_one();
         });
         Ok(ProviderSession {
             events: event_rx,

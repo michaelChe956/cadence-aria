@@ -169,3 +169,30 @@
 ## 产品缺陷
 
 未发现。所有新增测试在既有生产实现上直接转绿；本轮没有修改生产代码或生产行为。
+
+---
+
+# Task 6 第 2 轮修复报告
+
+- 修复目标：关闭 `workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output` 的“停止输出”断言空泛问题；仅加强测试和本报告，未修改生产行为。
+- 结论：通过。`PiHangingStreamingProvider` 在已收到取消令牌后，确定性地发送带有唯一标记 `Pi post-abort output` 的 `ProviderEvent::TextDelta`，随后发送 `ProviderEvent::Completed`；测试确认该标记及任何后续前端帧均不会到达 WebSocket 客户端。
+
+## 后中止发送的确定性触发
+
+`WsInMessage::Abort` 的现有处理同时向 Workspace run 发送 `ProviderCommand::Abort` 并取消 run token。引擎在收到取消后终止 provider 驱动；测试 provider 随后在其收到同一个 `CancellationToken` 的取消通知后才发送 post-abort delta 与 completion。因此发送严格发生在 Abort 已被 provider 观察到（通过 cancellation token）之后，而不是基于 sleep 的竞态。`Notify` 仅在两条 post-abort provider event 的发送尝试均已执行后发出；测试在已收到 `Aborted` 和 `prepare_context` 后等待该通知，才开始 150 ms 的客户端静默窗口。
+
+## RED / GREEN 证据
+
+- **RED（验证断言可失败）**：临时仅变异 `WorkspaceEngine::drive_provider_session` 的 cancellation 分支，使其在执行既有 `finish_aborted_run()` 后额外读取一个 provider event，并将该 `TextDelta` 作为 `EngineEvent::StreamChunk` 转发。运行 `cargo test -p cadence-aria --test it_core workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output -- --nocapture` 得到 **0 passed / 1 failed**；失败位于 `part_04.rs` 的断言：`cancelled Pi run must suppress provider output emitted after Abort`。随后已立即还原该临时生产变异；工作树没有生产文件改动。
+- **GREEN**：还原后，同一条定向命令得到 **1 passed / 0 failed**。在真实取消抑制逻辑下，provider 的 post-abort `TextDelta` 和 `Completed` 不会传至客户端。
+- **重复运行**：同一取消测试连续 **20/20 passed**，未观察到 flaky 结果。
+
+## 更正后的取消覆盖矩阵行
+
+| Brief 要求 | 实际覆盖测试 | 状态 | 说明 |
+|---|---|---|---|
+| Pi 取消到 Workspace 前端既有已取消状态，且停止处理后续输出 | `workspace_ws_integration::workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output` | 本轮加强 | Pi 注册到真实 WS registry；断言 `Aborted`、回到 `prepare_context`、持久化 Open 状态和重连中的 failed/“运行已中止”。provider 在已观察到取消后确定性发送带标记 `Pi post-abort output` 的 delta 及 completion；客户端在通知后的窗口内不接收该标记或任何输出。 |
+
+## 产品缺陷
+
+未发现。定向 RED 仅由临时破坏取消分支的变异造成；还原后测试转绿，未改变生产行为。

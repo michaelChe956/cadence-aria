@@ -5,12 +5,14 @@ async fn workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output() {
     let root = tempdir().expect("root");
     create_workspace_session_fixture_with_author(&root, "pi").await;
     let started = Arc::new(AtomicBool::new(false));
+    let abort_observed = Arc::new(Notify::new());
     let seen_inputs = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::new();
     registry.register(
         ProviderName::Pi,
         Arc::new(PiHangingStreamingProvider {
             started: started.clone(),
+            abort_observed: abort_observed.clone(),
             seen_inputs: seen_inputs.clone(),
         }),
     );
@@ -56,15 +58,33 @@ async fn workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output() {
             } => saw_aborted_status = true,
             WsOutMessage::StageChange { stage } if stage == "prepare_context" => {
                 assert!(saw_aborted_status, "frontend must receive the existing aborted status");
+                timeout(Duration::from_secs(1), abort_observed.notified())
+                    .await
+                    .expect("Pi provider must observe Abort before emitting post-abort events");
                 let session = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
                     .get_workspace_session("workspace_session_0001")
                     .expect("persisted workspace session");
                 assert_eq!(session.status, cadence_aria::product::models::WorkspaceSessionStatus::Open);
                 let no_trailing_output = timeout(Duration::from_millis(150), ws.next()).await;
-                assert!(
-                    no_trailing_output.is_err(),
-                    "cancelled Pi run must stop sending frontend output"
-                );
+                match no_trailing_output {
+                    Err(_) => {}
+                    Ok(Some(Ok(Message::Text(text)))) => {
+                        let message: WsOutMessage =
+                            serde_json::from_str(&text).expect("ws json after Abort");
+                        assert!(
+                            !matches!(message, WsOutMessage::StreamChunk { ref content, .. } if content.contains(PI_POST_ABORT_OUTPUT)),
+                            "cancelled Pi run must suppress provider output emitted after Abort"
+                        );
+                        panic!("cancelled Pi run must not emit frontend output after Abort: {message:?}");
+                    }
+                    Ok(Some(Ok(other))) => {
+                        panic!("cancelled Pi run must not emit websocket frame after Abort: {other:?}")
+                    }
+                    Ok(Some(Err(error))) => {
+                        panic!("websocket read failed while checking post-abort output: {error}")
+                    }
+                    Ok(None) => panic!("websocket closed while checking post-abort output"),
+                }
                 drop(ws);
 
                 let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
