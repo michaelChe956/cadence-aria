@@ -1,0 +1,101 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { SessionRecord } from "../../api/types/image-create";
+import { useImageCreateStore } from "../../state/image-create-store";
+import { ChatPane } from "./ChatPane";
+
+const originalState = useImageCreateStore.getState();
+
+beforeEach(() => {
+  useImageCreateStore.setState({
+    ...originalState,
+    entries: [],
+    isBusy: false,
+    currentSession: null,
+  });
+});
+
+describe("ChatPane", () => {
+  it.each([
+    ["image/png", "data:image/png;base64,cG5n"],
+    ["image/webp", "data:image/webp;base64,d2VicA=="],
+  ])("renders generation images using their media type", (mediaType, expectedSrc) => {
+    useImageCreateStore.setState({
+      entries: [
+        {
+          id: "image-1",
+          type: "generation_image",
+          role: "provider",
+          content: "生成的图片",
+          prompt: "商务插画",
+          mediaType,
+          base64: mediaType === "image/png" ? "cG5n" : "d2VicA==",
+          timestamp: "2026-08-03T10:00:00Z",
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+
+    expect(screen.getByRole("img", { name: "商务插画" })).toHaveAttribute(
+      "src",
+      expectedSrc,
+    );
+  });
+
+  it("shows readable generation errors", () => {
+    useImageCreateStore.setState({
+      entries: [
+        {
+          id: "error-1",
+          type: "generation_error",
+          role: "system",
+          content: "图片服务暂时不可用",
+          timestamp: "2026-08-03T10:00:00Z",
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+    expect(screen.getByRole("alert")).toHaveTextContent("图片服务暂时不可用");
+  });
+
+  it("submits chat messages and disables the input while busy", () => {
+    const sendMessage = vi.fn();
+    useImageCreateStore.setState({
+      sendMessage,
+      currentSession: sessionRecord(),
+    });
+    const { rerender } = render(<ChatPane />);
+
+    fireEvent.change(screen.getByLabelText("创作消息"), {
+      target: { value: "请加强对比度" },
+    });
+    fireEvent.submit(screen.getByTestId("image-create-chat-form"));
+    expect(sendMessage).toHaveBeenCalledWith("请加强对比度");
+
+    useImageCreateStore.setState({ isBusy: true });
+    rerender(<ChatPane />);
+    expect(screen.getByLabelText("创作消息")).toBeDisabled();
+    expect(screen.getByText("正在处理，请稍候…")).toBeInTheDocument();
+  });
+});
+
+function sessionRecord(): SessionRecord {
+  return {
+    session: {
+      id: "session-1",
+      provider_name: "claude_code",
+      template: { preset: "ppt_business_illustration" },
+      last_provider_session_id: null,
+      current_prompt: "prompt",
+      status: "active",
+      created_at: "2026-08-03T10:00:00Z",
+    },
+    messages: [],
+    prompt_blocks: [],
+    generation_results: [],
+    events: [],
+    generation: 0,
+  };
+}

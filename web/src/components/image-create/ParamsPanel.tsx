@@ -1,0 +1,130 @@
+import {
+  IMAGE_BACKGROUND_OPTIONS,
+  IMAGE_INPUT_FIDELITY_OPTIONS,
+  IMAGE_OUTPUT_FORMAT_OPTIONS,
+  IMAGE_QUALITY_OPTIONS,
+  IMAGE_SIZE_OPTIONS,
+  type ImageBackground,
+  type ImageInputFidelity,
+  type ImageOutputFormat,
+  type ImageQuality,
+  type ImageSize,
+} from "../../api/types/image-create";
+import { useImageCreateStore } from "../../state/image-create-store";
+
+const selectClassName =
+  "mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm text-[var(--aria-ink)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
+
+export function ParamsPanel() {
+  const params = useImageCreateStore((state) => state.params);
+  const referenceImage = useImageCreateStore((state) => state.referenceImage);
+  const currentSession = useImageCreateStore((state) => state.currentSession);
+  const isBusy = useImageCreateStore((state) => state.isBusy);
+  const setParams = useImageCreateStore((state) => state.setParams);
+  const generate = useImageCreateStore((state) => state.generate);
+
+  return (
+    <section
+      aria-labelledby="image-create-params-heading"
+      className="rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-sm"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <h2 id="image-create-params-heading" className="text-base font-semibold">
+          生成参数
+        </h2>
+        {isBusy ? (
+          <span className="text-xs font-semibold text-[var(--aria-primary)]">处理中</span>
+        ) : null}
+      </div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <ParameterSelect
+          label="尺寸"
+          value={params.size}
+          options={IMAGE_SIZE_OPTIONS}
+          disabled={isBusy}
+          onChange={(value) => setParams({ size: value as ImageSize })}
+        />
+        <ParameterSelect
+          label="质量"
+          value={params.quality}
+          options={IMAGE_QUALITY_OPTIONS}
+          disabled={isBusy}
+          onChange={(value) => setParams({ quality: value as ImageQuality })}
+        />
+        <ParameterSelect
+          label="背景"
+          value={params.background}
+          options={IMAGE_BACKGROUND_OPTIONS}
+          disabled={isBusy}
+          onChange={(value) => setParams({ background: value as ImageBackground })}
+        />
+        <ParameterSelect
+          label="输出格式"
+          value={params.output_format}
+          options={IMAGE_OUTPUT_FORMAT_OPTIONS}
+          disabled={isBusy}
+          onChange={(value) =>
+            setParams({ output_format: value as ImageOutputFormat })
+          }
+        />
+        {referenceImage ? (
+          <ParameterSelect
+            label="参考图保真度"
+            value={params.input_fidelity ?? "low"}
+            options={IMAGE_INPUT_FIDELITY_OPTIONS}
+            disabled={isBusy}
+            onChange={(value) =>
+              setParams({ input_fidelity: value as ImageInputFidelity })
+            }
+          />
+        ) : null}
+      </div>
+      <button
+        type="button"
+        onClick={() => void generate()}
+        disabled={isBusy || !currentSession || !params.prompt.trim()}
+        className="mt-4 w-full rounded-md bg-[var(--aria-primary)] px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {isBusy ? "生成中…" : "生成图片"}
+      </button>
+      {!currentSession ? (
+        <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">请先选择或创建会话。</p>
+      ) : !params.prompt.trim() ? (
+        <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">请先填写建议提示词。</p>
+      ) : null}
+    </section>
+  );
+}
+
+function ParameterSelect({
+  label,
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: readonly string[];
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block text-sm font-semibold text-[var(--aria-ink)]">
+      {label}
+      <select
+        aria-label={label}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        className={selectClassName}
+      >
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
