@@ -61,7 +61,7 @@ Pi 的 `extension_ui_request(method=select)` 真实线格式（来自 spike fixt
 - `selected_option_ids` 非空：`value = selected_option_ids[0]`（单选取第一个）
 - `selected_option_ids` 空但 `free_text` 非空：`value = free_text`
 - 两者都空：回 `{"type":"extension_ui_response","id":<暂存的 select id>,"cancelled":true}`（完整包络，Pi 据此关联到对应 select 请求）
-- 回传包络：`{type:"extension_ui_response", id: <暂存的 select id>, value: <value>}` 或 `{cancelled: true}`
+- 回传包络：`{"type":"extension_ui_response", "id": <暂存的 select id>, "value": <value>}` 或 `{"type":"extension_ui_response", "id": <暂存的 select id>, "cancelled": true}`
 
 **2. select 在 reader loop 的处理：**
 
@@ -114,9 +114,9 @@ async fn start(&self, input, cancel) -> Result<ProviderSession, ProviderAdapterE
 }
 ```
 
-`probe_pi_version` 返回 `enum PiVersion { Known((u32,u32,u32)), Unknown(ProbeFailure) }`，**不返回 `Result`**。命令缺失/超时/无法解析归为 `Unknown`，仅 `Known(低于最低版本)` 阻止启动。
+`probe_pi_version` 返回 `enum PiVersion { Known((u32,u32,u32)), Unknown(ProbeFailure) }`，**不返回 `Result`**。命令缺失/超时/无法解析归为 `Unknown`（返回 `PiVersion::Unknown(...)`），仅 `Known(低于最低版本)` 阻止启动。
 
-`probe_pi_version` 用 `BoundedCommandRunner`（既有）或有界 timeout 跑 `pi --version`，解析 stdout 中的版本 token。失败（命令缺失/超时/无法解析）**不阻止启动**——返回 `Ok(unknown_version)`，只在能确定低于最低版本时才返回 `Err`。这样 `pi` 不在 PATH 时由 gate 层（`ProviderAvailabilityGate`）拦截，而不是版本检测重复报错。
+`probe_pi_version` 用 `BoundedCommandRunner`（既有）或有界 timeout 跑 `pi --version`，解析 stdout 中的版本 token。失败（命令缺失/超时/无法解析）**不阻止启动**——返回 `PiVersion::Unknown(...)`，只在 `PiVersion::Known(低于最低版本)` 时才阻止启动。这样 `pi` 不在 PATH 时由 gate 层（`ProviderAvailabilityGate`）拦截，而不是版本检测重复报错。
 
 **不引入新依赖**：版本比较用简单 `split('.')` + 数值比较（Pi 版本是 `major.minor.patch`），不引入 semver crate。
 
