@@ -60,7 +60,7 @@ Pi 的 `extension_ui_request(method=select)` 真实线格式（来自 spike fixt
 回传规则：用户 `ChoiceResponse` 到来时——
 - `selected_option_ids` 非空：`value = selected_option_ids[0]`（单选取第一个）
 - `selected_option_ids` 空但 `free_text` 非空：`value = free_text`
-- 两者都空：回 `{cancelled: true}`（用户未作选择）
+- 两者都空：回 `{"type":"extension_ui_response","id":<暂存的 select id>,"cancelled":true}`（完整包络，Pi 据此关联到对应 select 请求）
 - 回传包络：`{type:"extension_ui_response", id: <暂存的 select id>, value: <value>}` 或 `{cancelled: true}`
 
 **2. select 在 reader loop 的处理：**
@@ -73,7 +73,7 @@ Pi 的 `extension_ui_request(method=select)` 真实线格式（来自 spike fixt
 - **重构 `await_pi_abort`**（`:181-196`）为 `await_pi_command`，支持 Abort 和 ChoiceResponse 两种 command，不再静默吞掉 ChoiceResponse
 - 等待期间 **不调** `next_incoming`（Pi 在 `ctx.ui.select` 里阻塞，不会发后续事件）
 - `Abort`/cancel 到来时：发 Pi `abort` 命令、发 `ProviderStatus::Aborted`、终止（与 Task 2 fix round 1 的 abort 逻辑一致）
-- 错 id 的 ChoiceResponse：发 protocol error `PERMISSION_ID_UNMATCHED`，继续等待
+- 错 id 的 ChoiceResponse：发 protocol error `CHOICE_ID_UNMATCHED`（**不是** `PERMISSION_ID_UNMATCHED`——选择响应用 choice 前缀，见 `approval_bridge/commands.rs:60-68`），继续等待正确 id 的响应
 
 **3. include_str! + 缓存落盘：**
 
@@ -104,13 +104,17 @@ fn ensure_ask_extension() -> Result<PathBuf, ProviderAdapterError> {
 
 ```rust
 async fn start(&self, input, cancel) -> Result<ProviderSession, ProviderAdapterError> {
-    let version = probe_pi_version(&self.command).await?; // 跑 pi --version，解析
-    if version < MIN_PI_VERSION { return Err(incompatible error); }
+    let version = probe_pi_version(&self.command).await; // 不用 ?，失败归为 Unknown
+    if let PiVersion::Known(v) = &version {
+        if *v < MIN_PI_VERSION { return Err(incompatible error); }
+    }
     let ext = ensure_ask_extension()?;
     let args = self.build_args(input.resume_provider_session_id.as_deref(), &ext);
     // ... spawn ...
 }
 ```
+
+`probe_pi_version` 返回 `enum PiVersion { Known((u32,u32,u32)), Unknown(ProbeFailure) }`，**不返回 `Result`**。命令缺失/超时/无法解析归为 `Unknown`，仅 `Known(低于最低版本)` 阻止启动。
 
 `probe_pi_version` 用 `BoundedCommandRunner`（既有）或有界 timeout 跑 `pi --version`，解析 stdout 中的版本 token。失败（命令缺失/超时/无法解析）**不阻止启动**——返回 `Ok(unknown_version)`，只在能确定低于最低版本时才返回 `Err`。这样 `pi` 不在 PATH 时由 gate 层（`ProviderAvailabilityGate`）拦截，而不是版本检测重复报错。
 
@@ -184,6 +188,19 @@ async fn session_select_during_handshake_is_handled() {
     // handshake 阶段（get_state response 尚未到达）先到达 select
     // 断言 select 不被吞，ChoiceRequest 正常发出
 }
+
+#[tokio::test]
+async fn session_select_wrong_id_then_correct_id() {
+    // 先发 ChoiceResponse 错误 id → 断言 CHOICE_ID_UNMATCHED protocol error
+    // 再发匹配 id 的 ChoiceResponse → 断言 Pi 收到 extension_ui_response(value) 并继续完成
+}
+
+#[tokio::test]
+async fn session_select_empty_response_sends_full_cancelled_envelope() {
+    // ChoiceResponse: selected_option_ids=[], free_text=None
+    // 断言 fake Pi 收到 {type:"extension_ui_response", id:<select-id>, cancelled:true}
+    // （完整包络，含 type 和 id，Pi 可关联）
+}
 ```
 
 Run: `cargo test -p cadence-aria pi_provider`
@@ -214,12 +231,18 @@ Expected: PASS（Task 2 已实现此行为，测试是回归锁定）
 
 ```rust
 #[test]
-fn pi_version_below_minimum_returns_error() { /* 0.82.0 < 0.83.0 → Err */ }
+fn pi_version_below_minimum_blocks() { /* 0.82.0 < 0.83.0 → Known(低) → Err */ }
 #[test]
-fn pi_version_at_or_above_minimum_passes() { /* 0.83.0, 0.84.0 → Ok */ }
+fn pi_version_at_or_above_minimum_passes() { /* 0.83.0, 0.84.0 → Known(达标) → Ok */ }
 #[test]
-fn pi_version_unparseable_does_not_block() { /* "pi version xyz" → Ok(unknown) */ }
+fn pi_version_unparseable_does_not_block() { /* "pi version xyz" → Unknown → Ok */ }
+#[test]
+fn pi_version_command_missing_does_not_block() { /* 命令不存在 → Unknown → Ok */ }
+#[test]
+fn pi_version_timeout_does_not_block() { /* 探测超时 → Unknown → Ok */ }
 ```
+
+另外加一个集成级测试：低版本时 `start()` 返回错误且**未 spawn**（用 recording spawn 检测器验证 start_count == 0）。
 
 Run: `cargo test -p cadence-aria pi_version`
 Expected: FAIL（版本比较函数未定义）
