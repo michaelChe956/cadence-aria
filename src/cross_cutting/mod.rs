@@ -12,6 +12,7 @@ pub mod cli_adapter;
 pub mod codex_provider;
 pub mod document_ops;
 pub mod git_command;
+pub mod image_client;
 pub mod integration_queue;
 pub mod json_rpc_peer;
 pub mod manual_intervention;
