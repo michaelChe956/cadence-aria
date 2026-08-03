@@ -299,7 +299,7 @@ async fn repository_initializer_runs_four_independent_claude_turns_in_strict_ord
             .map(|input| input.prompt.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "/pre-check --no-interrupt",
+            "/pre-check --no-interrupt --upgrade 用大陆镜像",
             "/rule-config --no-interrupt",
             "/mcp-configuration --no-interrupt",
             "/project-rules-examples --no-interrupt",
@@ -330,7 +330,11 @@ async fn repository_initializer_runs_four_independent_claude_turns_in_strict_ord
             ))
             .collect::<Vec<_>>(),
         vec![
-            (1, "/pre-check --no-interrupt", "completed"),
+            (
+                1,
+                "/pre-check --no-interrupt --upgrade 用大陆镜像",
+                "completed"
+            ),
             (2, "/rule-config --no-interrupt", "completed"),
             (3, "/mcp-configuration --no-interrupt", "completed"),
             (4, "/project-rules-examples --no-interrupt", "completed"),

@@ -548,7 +548,7 @@ describe("repository initialization operation types", () => {
           commands: [
             {
               index: 1,
-              command: "/pre-check --no-interrupt",
+              command: "/pre-check --no-interrupt --upgrade 用大陆镜像",
               status: "completed",
             },
             {
@@ -597,7 +597,7 @@ describe("repository initialization operation types", () => {
         message: "repository initialization failed",
         details: {
           stage: "repository_init_command",
-          command: "/pre-check --no-interrupt",
+          command: "/pre-check --no-interrupt --upgrade 用大陆镜像",
           reason_code: "repository_init_command_failed",
           retryable: true,
         },
