@@ -184,6 +184,9 @@ async fn parse_generate_multipart(
         };
         match name.as_str() {
             "reference" => {
+                if reference.is_some() {
+                    return Err(invalid_param("仅支持单张参考图"));
+                }
                 let declared_mime = field
                     .content_type()
                     .map(str::to_owned)
@@ -267,34 +270,61 @@ pub async fn image_create_chat_ws(
 
 async fn handle_chat_socket(socket: WebSocket, session_id: String, engine: Arc<ImageCreateEngine>) {
     let (mut sender, mut receiver) = socket.split();
-    while let Some(message) = receiver.next().await {
-        let message = match message {
-            Ok(Message::Text(text)) => text.to_string(),
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => continue,
-        };
+    let mut active_iteration: Option<tokio::sync::mpsc::Receiver<IterationEvent>> = None;
 
-        match engine.start_iteration(&session_id, message).await {
-            Ok(mut events) => {
-                while let Some(event) = events.recv().await {
-                    if !send_ws_event(&mut sender, &event).await {
-                        return;
+    loop {
+        if let Some(events) = active_iteration.as_mut() {
+            tokio::select! {
+                message = receiver.next() => {
+                    match message {
+                        Some(Ok(Message::Text(_))) => {
+                            let event = iteration_error_event("会话忙，请等待当前任务完成");
+                            if !send_ws_event(&mut sender, &event).await {
+                                return;
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                        Some(Ok(_)) => {}
+                    }
+                }
+                event = events.recv() => {
+                    match event {
+                        Some(event) => {
+                            if !send_ws_event(&mut sender, &event).await {
+                                return;
+                            }
+                        }
+                        None => active_iteration = None,
                     }
                 }
             }
+            continue;
+        }
+
+        let message = match receiver.next().await {
+            Some(Ok(Message::Text(text))) => text.to_string(),
+            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+            Some(Ok(_)) => continue,
+        };
+        match engine.start_iteration(&session_id, message).await {
+            Ok(events) => active_iteration = Some(events),
             Err(error) => {
-                let event = IterationEvent {
-                    kind: "error".to_string(),
-                    text: None,
-                    suggested_prompt: None,
-                    provider_session_id: None,
-                    error: Some(error.to_string()),
-                };
+                let event = iteration_error_event(error.to_string());
                 if !send_ws_event(&mut sender, &event).await {
                     return;
                 }
             }
         }
+    }
+}
+
+fn iteration_error_event(error: impl Into<String>) -> IterationEvent {
+    IterationEvent {
+        kind: "error".to_string(),
+        text: None,
+        suggested_prompt: None,
+        provider_session_id: None,
+        error: Some(error.into()),
     }
 }
 
@@ -311,31 +341,49 @@ where
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
+    use futures_util::{SinkExt, StreamExt};
+    use image::ImageEncoder;
+    use image::codecs::png::PngEncoder;
     use serde::de::DeserializeOwned;
     use serde_json::{Value, json};
     use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::sync::{Notify, mpsc};
+    use tokio::time::{Duration, timeout};
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+    use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::image_client::{
         ImageClientApi, ImageClientError, ImageGenOutcome, ImageGenRequest, ImageRefImage,
     };
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
     use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::cross_cutting::streaming_provider::{
+        ProviderCommand, ProviderCompletion, ProviderEvent, ProviderSession,
+        StreamingProviderAdapter, StreamingProviderInput,
+    };
     use crate::product::image_create::models::{
         ImageCreateSettings, SessionStoreApi, SettingsStoreApi,
     };
     use crate::product::image_create::{
         ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
     };
+    use crate::product::models::ProviderName;
     use crate::web::app::build_web_router;
     use crate::web::runtime::WebRuntime;
     use crate::web::state::WebAppState;
 
-    struct FakeImageClient;
+    struct FakeImageClient {
+        expected_reference: Option<Vec<u8>>,
+    }
 
     #[async_trait]
     impl ImageClientApi for FakeImageClient {
@@ -346,10 +394,55 @@ mod tests {
             reference: Option<ImageRefImage>,
         ) -> Result<ImageGenOutcome, ImageClientError> {
             assert_eq!(request.prompt, "draw a cat");
-            assert!(reference.is_none());
+            match (&self.expected_reference, reference) {
+                (Some(expected), Some(reference)) => {
+                    assert_eq!(&reference.bytes, expected);
+                    assert_eq!(reference.declared_mime, "image/png");
+                }
+                (None, None) => {}
+                (expected, actual) => panic!(
+                    "unexpected reference: expected={}, actual={}",
+                    expected.is_some(),
+                    actual.is_some()
+                ),
+            }
             Ok(ImageGenOutcome {
                 media_type: "image/png".to_string(),
                 b64: "ZmFrZS1pbWFnZQ==".to_string(),
+            })
+        }
+    }
+
+    struct BlockingIterationProvider {
+        starts: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl StreamingProviderAdapter for BlockingIterationProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            let (event_tx, event_rx) = mpsc::channel(4);
+            let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(1);
+            let release = self.release.clone();
+            tokio::spawn(async move {
+                release.notified().await;
+                let _ = event_tx
+                    .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                        "iteration complete",
+                        None,
+                    )))
+                    .await;
+            });
+            Ok(ProviderSession {
+                events: event_rx,
+                commands: command_tx,
             })
         }
     }
@@ -372,6 +465,69 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .expect("request")
+    }
+
+    fn valid_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&[0x7f], 1, 1, image::ExtendedColorType::L8)
+            .expect("encode png");
+        bytes
+    }
+
+    fn generate_multipart(boundary: &str, references: &[&[u8]]) -> Vec<u8> {
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ndraw a cat\r\n"
+        )
+        .into_bytes();
+        for reference in references {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"reference\"; filename=\"reference.png\"\r\nContent-Type: image/png\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(reference);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        body
+    }
+
+    async fn configured_generate_state(
+        root: &std::path::Path,
+        expected_reference: Option<Vec<u8>>,
+    ) -> (WebAppState, String) {
+        let paths = AriaStatePaths::from_workspace_root(root);
+        let store = SessionStore::new(paths.clone());
+        let session = store
+            .create(
+                serde_json::from_value(json!({
+                    "template": {"preset": "ppt_business_illustration", "custom": null},
+                    "provider_name": "fake"
+                }))
+                .expect("create request"),
+            )
+            .await
+            .expect("session");
+        SettingsStore::new(paths.clone())
+            .save(&ImageCreateSettings {
+                base_url: "https://images.example.com/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                defaults: Default::default(),
+            })
+            .await
+            .expect("settings");
+        let mut state = state(root);
+        state.image_create_engine = Some(Arc::new(ImageCreateEngine::new(
+            paths.clone(),
+            Arc::new(SessionStore::new(paths.clone())),
+            Arc::new(SettingsStore::new(paths)),
+            Arc::new(FakeImageClient { expected_reference }),
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(ImageCreateRunRegistry::default()),
+        )));
+        (state, session.id)
     }
 
     #[tokio::test]
@@ -590,7 +746,9 @@ mod tests {
             paths.clone(),
             Arc::new(SessionStore::new(paths.clone())),
             Arc::new(SettingsStore::new(paths)),
-            Arc::new(FakeImageClient),
+            Arc::new(FakeImageClient {
+                expected_reference: None,
+            }),
             Arc::new(ProviderRegistry::new()),
             Arc::new(ImageCreateRunRegistry::default()),
         )));
@@ -617,5 +775,181 @@ mod tests {
             response_json::<Value>(response).await,
             json!({"media_type": "image/png", "b64": "ZmFrZS1pbWFnZQ=="})
         );
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_multiple_reference_fields() {
+        let root = tempdir().expect("root");
+        let reference = valid_png();
+        let (state, session_id) =
+            configured_generate_state(root.path(), Some(reference.clone())).await;
+        let boundary = "image-create-multiple-reference";
+        let body = generate_multipart(boundary, &[&reference, &reference]);
+
+        let response = build_web_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/image-create/sessions/{session_id}/generate"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("generate response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json::<Value>(response).await["error"],
+            "invalid parameter: 仅支持单张参考图"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_passes_single_valid_reference_to_engine() {
+        let root = tempdir().expect("root");
+        let reference = valid_png();
+        let (state, session_id) =
+            configured_generate_state(root.path(), Some(reference.clone())).await;
+        let boundary = "image-create-single-reference";
+        let body = generate_multipart(boundary, &[&reference]);
+
+        let response = build_web_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/image-create/sessions/{session_id}/generate"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("generate response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json::<Value>(response).await,
+            json!({"media_type": "image/png", "b64": "ZmFrZS1pbWFnZQ=="})
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_message_immediately_while_iteration_is_active() {
+        let root = tempdir().expect("root");
+        let paths = AriaStatePaths::from_workspace_root(root.path());
+        let store = SessionStore::new(paths.clone());
+        let session = store
+            .create(
+                serde_json::from_value(json!({
+                    "template": {"preset": "ppt_business_illustration", "custom": null},
+                    "provider_name": "fake"
+                }))
+                .expect("create request"),
+            )
+            .await
+            .expect("session");
+        let starts = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            ProviderName::Fake,
+            Arc::new(BlockingIterationProvider {
+                starts: starts.clone(),
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        );
+        let mut state = state(root.path());
+        state.image_create_engine = Some(Arc::new(ImageCreateEngine::new(
+            paths.clone(),
+            Arc::new(SessionStore::new(paths.clone())),
+            Arc::new(SettingsStore::new(paths)),
+            Arc::new(FakeImageClient {
+                expected_reference: None,
+            }),
+            Arc::new(registry),
+            Arc::new(ImageCreateRunRegistry::default()),
+        )));
+        let app = build_web_router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("local address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let (mut socket, _) = connect_async(format!(
+            "ws://{address}/api/image-create/sessions/{}/chat",
+            session.id
+        ))
+        .await
+        .expect("connect websocket");
+
+        socket
+            .send(TungsteniteMessage::Text("first request".into()))
+            .await
+            .expect("send first request");
+        timeout(Duration::from_secs(3), started.notified())
+            .await
+            .expect("first iteration started");
+        socket
+            .send(TungsteniteMessage::Text("second request".into()))
+            .await
+            .expect("send second request");
+
+        let busy = timeout(Duration::from_secs(1), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(TungsteniteMessage::Text(text))) => {
+                        let event: Value = serde_json::from_str(&text).expect("event json");
+                        if event["kind"] == "error" {
+                            break event;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => panic!("websocket receive failed: {error}"),
+                    None => panic!("websocket closed before busy event"),
+                }
+            }
+        })
+        .await
+        .expect("busy event must arrive while first iteration is blocked");
+        assert_eq!(busy["error"], "会话忙，请等待当前任务完成");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        release.notify_one();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(TungsteniteMessage::Text(text))) => {
+                        let event: Value = serde_json::from_str(&text).expect("event json");
+                        if event["kind"] == "done" {
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => panic!("websocket receive failed: {error}"),
+                    None => panic!("websocket closed before done event"),
+                }
+            }
+        })
+        .await
+        .expect("first iteration completes");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        let record = store
+            .get(&session.id)
+            .await
+            .expect("session lookup")
+            .expect("session record");
+        assert_eq!(record.messages.len(), 1);
+        assert_eq!(record.messages[0].content, "first request");
+
+        socket.close(None).await.expect("close websocket");
+        server.abort();
     }
 }
