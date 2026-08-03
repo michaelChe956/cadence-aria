@@ -1,12 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ChatPane } from "../components/image-create/ChatPane";
 import { ParamsPanel } from "../components/image-create/ParamsPanel";
 import { PromptBlock } from "../components/image-create/PromptBlock";
 import { ReferenceImageUpload } from "../components/image-create/ReferenceImageUpload";
 import { SessionList } from "../components/image-create/SessionList";
+import { SettingsDialog } from "../components/image-create/SettingsDialog";
 import { useImageCreateStore } from "../state/image-create-store";
 
 export function ImageCreatePage({ sessionId }: { sessionId?: string }) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const error = useImageCreateStore((state) => state.error);
   const loadSessions = useImageCreateStore((state) => state.loadSessions);
   const loadSettings = useImageCreateStore((state) => state.loadSettings);
@@ -41,7 +43,7 @@ export function ImageCreatePage({ sessionId }: { sessionId?: string }) {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              title="设置弹窗将在 Task 12 实现"
+              onClick={() => setSettingsOpen(true)}
               className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-semibold hover:bg-[var(--aria-panel-muted)]"
             >
               设置
@@ -74,6 +76,9 @@ export function ImageCreatePage({ sessionId }: { sessionId?: string }) {
           </div>
         </div>
       </div>
+      {settingsOpen ? (
+        <SettingsDialog onClose={() => setSettingsOpen(false)} />
+      ) : null}
     </main>
   );
 }
