@@ -11,8 +11,8 @@ Cadence Aria 目前是「AI 辅助软件开发平台」，所有 AI 能力仅服
 - 新增「图片生成」阶段：由用户点按钮触发，Aria 后端使用新增的 `reqwest` 链路调用 image2 API；按用户是否提供参考图自动选择 `/v1/images/generations`（文生图）或 `/v1/images/edits`（参考图改图），返回 `b64_json` 按其媒体类型在前端直接展示；每次生成恰好一张。
 - 新增图片生成的失败与计费边界：网关错误（连接/超时/4xx/5xx/空 data）归一为可读错误，**不自动重试**（防重复计费），失败不写入成功结果。
 - 新增单会话操作并发约束：每会话任一时刻最多一个进行中后端操作，忙碌时拒绝新请求。
-- 新增会话生命周期管理：删除会话时先取消进行中操作，再清理 scratch 目录与持久化记录。
-- 新增「图片创作设置」能力：用户录入 image2 网关 `base_url` 与 `api_key` 及默认参数；配置存于 Aria 后端 `.aria` 目录，前端展示脱敏，**不传递给 CLI 子进程**；`base_url` 仅允许 HTTPS（或本地回环），跨域重定向不携带 Authorization。
+- 新增会话生命周期管理：删除会话为线性化操作（先 tombstone 拒新请求 → 取消并等待在途任务终止/条件写入 → 确认无在途写入后清理 scratch 与记录，删除后异步完成不回写）。
+- 新增「图片创作设置」能力：用户录入 image2 网关 `base_url` 与 `api_key` 及默认参数；配置存于 Aria 后端 `.aria` 目录，前端展示脱敏，**不传递给 CLI 子进程**；`base_url` 仅允许 HTTPS（或本地回环），默认禁用自动重定向、仅同 origin（同 scheme+host+port）且不降级才跟随、跨 origin/降级不携带 Authorization。
 - 新增「图片 prompt 模板」机制：预置两套模板（PPT 商务配图、业务流程图），支持用户选模板或填写一次性自定义引导词；引导词注入 prompt 迭代对话（不提供模板持久化 CRUD）。
 - 新增图片生成参数的枚举化配置（size / quality / background / output_format / input_fidelity），在页面以下拉框呈现；参考图随生成请求直接 multipart 传输，不持久化。
 - 新增后端依赖 `reqwest`（带 `json`、`multipart` feature）——本平台首个对外 HTTP 客户端。
@@ -30,7 +30,7 @@ Cadence Aria 目前是「AI 辅助软件开发平台」，所有 AI 能力仅服
 ## Impact
 
 - **后端（Rust）**：
-  - 新增对外 HTTP 客户端依赖 `reqwest`（首个对外 HTTP 调用链路，限定 `json`/`multipart` feature，含出站安全约束：HTTPS-only、不跨域携带 Authorization）。
+  - 新增对外 HTTP 客户端依赖 `reqwest`（首个对外 HTTP 调用链路，限定 `json`/`multipart` feature，含出站安全约束：HTTPS-only、默认禁重定向/同 origin 才跟随/不降级/不携带 Authorization）。
   - 新增图片创作相关 handler（会话 CRUD、prompt 迭代 WS 流、图片生成、settings 读写），挂载在 `/api/image-create/*`。
   - 复用 `StreamingProvider`（Claude Code / Codex）承载 prompt 迭代，**仅传入不含 key 的 env_vars**；扩展 `AriaStatePaths` 提供 image-create 配置/会话/scratch 专用路径；图片创作会话使用独立的 session 仓库与运行注册表。
   - prompt 迭代执行器运行在临时 scratch 目录（无 git）；会话删除时清理 scratch 与记录。
