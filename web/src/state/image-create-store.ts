@@ -38,6 +38,7 @@ export type ImageCreateState = {
   settings: MaskedSettings | null;
   connectionStatus: ImageCreateConnectionStatus;
   isBusy: boolean;
+  lastIterationHadPrompt: boolean;
   error: string | null;
 };
 
@@ -73,11 +74,13 @@ const initialState: ImageCreateState = {
   settings: null,
   connectionStatus: "disconnected",
   isBusy: false,
+  lastIterationHadPrompt: false,
   error: null,
 };
 
 let activeSocket: WebSocket | null = null;
 let entrySequence = 0;
+let generationRequestSequence = 0;
 
 function entryId(prefix: string): string {
   entrySequence += 1;
@@ -187,6 +190,7 @@ function handleIterationEvent(event: IterationEvent) {
   if (event.kind === "prompt" && event.suggested_prompt?.trim()) {
     const prompt = event.suggested_prompt.trim();
     useImageCreateStore.setState((state) => ({
+      lastIterationHadPrompt: true,
       params: { ...state.params, prompt },
       currentSession: state.currentSession
         ? {
@@ -208,26 +212,44 @@ function handleIterationEvent(event: IterationEvent) {
     return;
   }
   if (event.kind === "done") {
-    useImageCreateStore.setState((state) => ({
-      isBusy: false,
-      currentSession: state.currentSession
-        ? {
-            ...state.currentSession,
-            session: {
-              ...state.currentSession.session,
-              last_provider_session_id:
-                event.provider_session_id ??
-                state.currentSession.session.last_provider_session_id,
-            },
-          }
-        : null,
-    }));
+    useImageCreateStore.setState((state) => {
+      const retainedPrompt = state.params.prompt.trim();
+      const noPromptNotice: ImageChatEntry[] =
+        !state.lastIterationHadPrompt && retainedPrompt
+          ? [
+              {
+                id: entryId("notice"),
+                type: "system_notice",
+                role: "system",
+                content: "本轮未产出新的建议 prompt，已保留上一版",
+                timestamp,
+              },
+            ]
+          : [];
+      return {
+        isBusy: false,
+        lastIterationHadPrompt: false,
+        entries: [...state.entries, ...noPromptNotice],
+        currentSession: state.currentSession
+          ? {
+              ...state.currentSession,
+              session: {
+                ...state.currentSession.session,
+                last_provider_session_id:
+                  event.provider_session_id ??
+                  state.currentSession.session.last_provider_session_id,
+              },
+            }
+          : null,
+      };
+    });
     return;
   }
   if (event.kind === "error") {
     const message = event.error || "图片创作迭代失败";
     useImageCreateStore.setState((state) => ({
       isBusy: false,
+      lastIterationHadPrompt: false,
       error: message,
       entries: [
         ...state.entries,
@@ -293,14 +315,19 @@ export function validateImageCreateBaseUrl(baseUrl: string): void {
     return;
   }
   const host = parsed.hostname.toLowerCase();
+  const ipv4Parts = host.split(".");
+  const isIpv4Loopback =
+    ipv4Parts.length === 4 &&
+    ipv4Parts.every((part) => /^\d+$/.test(part) && Number(part) <= 255) &&
+    Number(ipv4Parts[0]) === 127;
   const loopback =
     parsed.protocol === "http:" &&
     (host === "localhost" ||
-      host.startsWith("127.") ||
+      isIpv4Loopback ||
       host === "[::1]" ||
       host === "::1");
   if (!loopback) {
-    throw new Error("base_url 必须使用 HTTPS，或使用 localhost/127.x/[::1]");
+    throw new Error("base_url 必须使用 HTTPS，或使用 localhost/loopback IP");
   }
 }
 
@@ -320,7 +347,8 @@ export const useImageCreateStore = create<
   },
 
   openSession: async (sessionId) => {
-    set({ error: null, isBusy: false });
+    generationRequestSequence += 1;
+    set({ error: null, isBusy: false, lastIterationHadPrompt: false });
     try {
       const record = await getImageCreateSession(sessionId);
       set({
@@ -397,6 +425,7 @@ export const useImageCreateStore = create<
     activeSocket.send(message);
     set((state) => ({
       isBusy: true,
+      lastIterationHadPrompt: false,
       error: null,
       entries: [
         ...state.entries,
@@ -434,16 +463,21 @@ export const useImageCreateStore = create<
     if (!currentSession || get().isBusy) {
       return;
     }
+    const sessionId = currentSession.session.id;
+    const requestToken = ++generationRequestSequence;
     set({ isBusy: true, error: null });
     try {
       const request: GenerateImageRequest = {
         ...params,
         reference: referenceImage,
       };
-      const result = await requestImageGeneration(
-        currentSession.session.id,
-        request,
-      );
+      const result = await requestImageGeneration(sessionId, request);
+      if (
+        get().currentSession?.session.id !== sessionId ||
+        generationRequestSequence !== requestToken
+      ) {
+        return;
+      }
       appendEntry({
         id: entryId("image"),
         type: "generation_image",
@@ -456,6 +490,12 @@ export const useImageCreateStore = create<
       });
       set({ isBusy: false });
     } catch (error) {
+      if (
+        get().currentSession?.session.id !== sessionId ||
+        generationRequestSequence !== requestToken
+      ) {
+        return;
+      }
       const message = errorMessage(error);
       appendEntry({
         id: entryId("error"),
@@ -508,6 +548,7 @@ export const useImageCreateStore = create<
   reset: () => {
     closeActiveSocket();
     entrySequence = 0;
+    generationRequestSequence += 1;
     set({ ...initialState, params: { ...initialState.params } });
   },
 }));

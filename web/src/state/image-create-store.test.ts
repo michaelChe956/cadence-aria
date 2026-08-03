@@ -134,9 +134,111 @@ describe("image create store", () => {
           content: "I improved the lighting.",
         }),
         expect.objectContaining({ type: "prompt_block", content: "previous prompt" }),
+        expect.objectContaining({
+          type: "system_notice",
+          content: "本轮未产出新的建议 prompt，已保留上一版",
+        }),
       ]),
     );
     expect(useImageCreateStore.getState().isBusy).toBe(false);
+  });
+
+  it("does not append an async generation result after switching sessions", async () => {
+    const first = imageSession({ id: "session-a", current_prompt: "prompt a" });
+    const second = imageSession({ id: "session-b", current_prompt: "prompt b" });
+    api.getImageCreateSession.mockImplementation(async (sessionId: string) =>
+      record(sessionId === first.id ? first : second),
+    );
+    let resolveGeneration!: (result: {
+      media_type: string;
+      b64: string;
+    }) => void;
+    api.generateImage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        }),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().openSession(first.id);
+    const generation = useImageCreateStore.getState().generate();
+    await useImageCreateStore.getState().openSession(second.id);
+    resolveGeneration({ media_type: "image/png", b64: "old-session-image" });
+    await generation;
+
+    expect(useImageCreateStore.getState().currentSession?.session.id).toBe(second.id);
+    expect(useImageCreateStore.getState().entries).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "generation_image",
+          base64: "old-session-image",
+        }),
+      ]),
+    );
+    expect(useImageCreateStore.getState().isBusy).toBe(false);
+  });
+
+  it.each([
+    "http://127.example.com",
+    "http://127.0.0.1.example.com",
+  ])("rejects non-loopback base URL %s", async (baseUrl) => {
+    const { validateImageCreateBaseUrl } = await import("./image-create-store");
+
+    expect(() => validateImageCreateBaseUrl(baseUrl)).toThrow(
+      "base_url 必须使用 HTTPS，或使用 localhost/loopback IP",
+    );
+  });
+
+  it("treats malformed numeric hosts as invalid URLs", async () => {
+    const { validateImageCreateBaseUrl } = await import("./image-create-store");
+
+    expect(() => validateImageCreateBaseUrl("http://127.0.0.999")).toThrow(
+      "base_url 必须是有效 URL",
+    );
+  });
+
+  it.each([
+    "http://localhost:8080",
+    "http://127.0.0.2:8080",
+    "http://[::1]:8080",
+  ])("accepts loopback base URL %s", async (baseUrl) => {
+    const { validateImageCreateBaseUrl } = await import("./image-create-store");
+
+    expect(() => validateImageCreateBaseUrl(baseUrl)).not.toThrow();
+  });
+
+  it("does not show a no-prompt notice after receiving a valid prompt", async () => {
+    const session = imageSession({ current_prompt: "previous prompt" });
+    api.getImageCreateSession.mockResolvedValue(record(session));
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().openSession(session.id);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    useImageCreateStore.getState().sendMessage("revise");
+    socket.receive({
+      kind: "prompt",
+      text: null,
+      suggested_prompt: "new prompt",
+      provider_session_id: null,
+      error: null,
+    });
+    socket.receive({
+      kind: "done",
+      text: null,
+      suggested_prompt: null,
+      provider_session_id: "provider-session-1",
+      error: null,
+    });
+
+    expect(useImageCreateStore.getState().params.prompt).toBe("new prompt");
+    expect(useImageCreateStore.getState().lastIterationHadPrompt).toBe(false);
+    expect(useImageCreateStore.getState().entries).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "system_notice" }),
+      ]),
+    );
   });
 
   it("updates the prompt when a prompt event arrives and clears busy on errors", async () => {

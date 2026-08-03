@@ -1,4 +1,4 @@
-import { ApiRequestError, normalizeApiError } from "./client";
+import { ApiRequestError } from "./client";
 import type {
   CreateSessionRequest,
   GenerateImageRequest,
@@ -12,6 +12,37 @@ import type {
 
 const API_ROOT = "/api/image-create";
 
+type ImageCreateErrorBody = {
+  code?: unknown;
+  message?: unknown;
+  details?: unknown;
+  error?: unknown;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function imageCreateApiError(response: Response): Promise<ApiRequestError> {
+  const body: unknown = await response.json().catch(() => ({}));
+  const errorBody: ImageCreateErrorBody = isRecord(body) ? body : {};
+  const nestedError = isRecord(errorBody.error) ? errorBody.error : null;
+  const message =
+    (typeof errorBody.error === "string" && errorBody.error) ||
+    (nestedError &&
+      typeof nestedError.message === "string" &&
+      nestedError.message) ||
+    (typeof errorBody.message === "string" && errorBody.message) ||
+    response.statusText ||
+    `图片创作请求失败（HTTP ${response.status}）`;
+
+  return new ApiRequestError({
+    code: typeof errorBody.code === "string" ? errorBody.code : "image_create_error",
+    message,
+    details: isRecord(errorBody.details) ? errorBody.details : {},
+  });
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -21,7 +52,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    throw new ApiRequestError(await normalizeApiError(response));
+    throw await imageCreateApiError(response);
   }
   const text = await response.text();
   if (!text.trim()) {
@@ -78,10 +109,10 @@ export async function generateImage(
   form.append("quality", request.quality);
   form.append("background", request.background);
   form.append("output_format", request.output_format);
-  if (request.input_fidelity) {
-    form.append("input_fidelity", request.input_fidelity);
-  }
   if (request.reference) {
+    if (request.input_fidelity) {
+      form.append("input_fidelity", request.input_fidelity);
+    }
     form.append("reference", request.reference);
   }
 
@@ -90,7 +121,7 @@ export async function generateImage(
     body: form,
   });
   if (!response.ok) {
-    throw new ApiRequestError(await normalizeApiError(response));
+    throw await imageCreateApiError(response);
   }
   return (await response.json()) as ImageGenerationResponse;
 }

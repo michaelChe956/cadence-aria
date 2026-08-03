@@ -124,6 +124,36 @@ describe("image create api", () => {
     expect(form.get("input_fidelity")).toBe("high");
     expect(form.get("reference")).toBe(reference);
   });
+
+  it("omits input_fidelity when generate has no reference image", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ media_type: "image/png", b64: "aW1hZ2U=" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generateImage("session-1", {
+      prompt: "draw from text",
+      size: "auto",
+      quality: "auto",
+      background: "auto",
+      output_format: "png",
+      input_fidelity: "high",
+      reference: null,
+    });
+
+    const form = fetchMock.mock.calls[0][1]?.body as FormData;
+    expect(form.has("reference")).toBe(false);
+    expect(form.has("input_fidelity")).toBe(false);
+  });
+
+  it.each([
+    [{ error: "图片生成服务未配置" }, "图片生成服务未配置"],
+    [{ error: { message: "参考图格式不受支持" } }, "参考图格式不受支持"],
+  ])("extracts image-create backend errors from %j", async (body, message) => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(body, 400)));
+
+    await expect(listImageCreateSessions()).rejects.toThrow(message);
+  });
 });
 
 function jsonResponse(body: unknown, status = 200) {
