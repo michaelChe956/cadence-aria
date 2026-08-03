@@ -25,6 +25,6 @@
 
 ## 6. 回归验证
 
-- [ ] 6.1 为 Pi 健康检查、目录展示、会话协议、取消、恢复和 Auto 运行补充后端测试。
-- [ ] 6.2 为 Story、Design、Work Item 三种 Workspace 入口（共享 `workspace_engine`）及 Coding 角色补充 Provider、权限，以及所选 Provider 启动或运行失败时直接报告且不切换 Provider 的回归测试。
-- [ ] 6.3 验证仓库初始化与 Task Runner 未被 Pi 扩张（含 Task Runner HTTP 入口、router、兼容性矩阵、节点契约拒绝 Pi 的回归断言），并执行相关前后端质量检查。
+- [x] 6.1 为 Pi 健康检查、目录展示、会话协议、取消、恢复和 Auto 运行补充后端测试。
+- [x] 6.2 为 Story、Design、Work Item 三种 Workspace 入口（共享 `workspace_engine`）及 Coding 角色补充 Provider、权限，以及所选 Provider 启动或运行失败时直接报告且不切换 Provider 的回归测试。
+- [x] 6.3 验证仓库初始化与 Task Runner 未被 Pi 扩张（含 Task Runner HTTP 入口、router、兼容性矩阵、节点契约拒绝 Pi 的回归断言），并执行相关前后端质量检查。

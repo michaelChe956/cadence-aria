@@ -287,6 +287,12 @@ async fn repository_initializer_runs_four_independent_claude_turns_in_strict_ord
 
     let inputs = provider.inputs.lock().unwrap();
     assert_eq!(inputs.len(), 4);
+    assert!(
+        inputs.iter().all(|input| {
+            input.provider_type == crate::protocol::contracts::ProviderType::ClaudeCode
+        }),
+        "repository initialization execution must construct only Claude Code inputs"
+    );
     assert_eq!(
         inputs
             .iter()

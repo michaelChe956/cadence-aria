@@ -51,6 +51,10 @@ fn default_matrix_contains_claude_code_and_codex_cli_entries() {
 
     assert_eq!(claude.provider_type, ProviderType::ClaudeCode);
     assert_eq!(codex.provider_type, ProviderType::Codex);
+    assert!(
+        matrix.entry_for(ProviderType::Pi).is_none(),
+        "Pi is a streaming-only provider and must not enter Task Runner's CLI compatibility matrix"
+    );
     assert!(!claude.matrix_version.is_empty());
     assert!(!codex.matrix_version.is_empty());
     assert_eq!(claude.prompt_input_mode, PromptInputMode::Stdin);

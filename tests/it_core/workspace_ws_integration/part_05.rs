@@ -371,6 +371,22 @@ async fn create_workspace_session_fixture_with_author(
     create_workspace_session_fixture_with_providers(root, author_provider, "fake", 1).await
 }
 
+fn set_workspace_author_permission_mode_to_supervised(root: &TempDir) {
+    let session = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+        .update_workspace_session_permission_modes(
+            "workspace_session_0001",
+            cadence_aria::product::models::WorkspaceRolePermissionModes {
+                author: cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised,
+                reviewer: cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            },
+        )
+        .expect("persist supervised author permission mode");
+    assert_eq!(
+        session.permission_modes.author,
+        cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised
+    );
+}
+
 async fn create_workspace_session_fixture_with_providers(
     root: &TempDir,
     author_provider: &str,
