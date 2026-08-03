@@ -81,7 +81,9 @@ export function ParamsPanel() {
       </div>
       <button
         type="button"
-        onClick={() => void generate()}
+        onClick={() => {
+          generate().catch(() => {});
+        }}
         disabled={isBusy || !currentSession || !params.prompt.trim()}
         className="mt-4 w-full rounded-md bg-[var(--aria-primary)] px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
       >

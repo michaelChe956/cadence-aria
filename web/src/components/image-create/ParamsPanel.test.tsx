@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../api/types/image-create";
@@ -49,6 +49,21 @@ describe("ParamsPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "生成图片" }));
     expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles a rejected generation promise at the click boundary", async () => {
+    const rejected = Promise.reject(new Error("生成失败"));
+    void rejected.catch(() => {});
+    const catchSpy = vi.spyOn(rejected, "catch");
+    useImageCreateStore.setState({
+      generate: vi.fn(() => rejected),
+      currentSession: sessionRecord(),
+    });
+
+    render(<ParamsPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "生成图片" }));
+
+    await waitFor(() => expect(catchSpy).toHaveBeenCalledTimes(1));
   });
 
   it("hides fidelity without a reference and shows it when a reference exists", () => {

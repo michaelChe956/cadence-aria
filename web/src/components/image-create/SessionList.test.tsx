@@ -56,6 +56,18 @@ describe("SessionList", () => {
     expect(createSession).toHaveBeenCalledWith({ custom: "科技感海报" }, "claude_code");
   });
 
+  it("handles a rejected open-session promise at the click boundary", async () => {
+    const rejected = Promise.reject(new Error("打开失败"));
+    void rejected.catch(() => {});
+    const catchSpy = vi.spyOn(rejected, "catch");
+    useImageCreateStore.setState({ openSession: vi.fn(() => rejected) });
+
+    render(<SessionList />);
+    fireEvent.click(screen.getByRole("button", { name: /PPT 商务配图/ }));
+
+    await waitFor(() => expect(catchSpy).toHaveBeenCalledTimes(1));
+  });
+
   it("switches and deletes sessions", async () => {
     const openSession = vi.fn().mockResolvedValue(undefined);
     const deleteSession = vi.fn().mockResolvedValue(undefined);

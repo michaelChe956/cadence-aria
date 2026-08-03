@@ -100,7 +100,9 @@ export function SessionList() {
               key={session.id}
               session={session}
               active={currentSessionId === session.id}
-              onOpen={() => void openSession(session.id)}
+              onOpen={() => {
+                openSession(session.id).catch(() => {});
+              }}
               onDelete={() => void handleDelete(session.id)}
             />
           ))

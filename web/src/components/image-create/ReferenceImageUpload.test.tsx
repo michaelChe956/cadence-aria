@@ -9,7 +9,12 @@ const originalState = useImageCreateStore.getState();
 beforeEach(() => {
   useImageCreateStore.setState({
     ...originalState,
+    params: {
+      ...originalState.params,
+      input_fidelity: null,
+    },
     referenceImage: null,
+    isBusy: false,
   });
   vi.stubGlobal("URL", {
     ...URL,
@@ -54,6 +59,7 @@ describe("ReferenceImageUpload", () => {
     await user.upload(screen.getByLabelText("上传参考图"), file);
 
     expect(useImageCreateStore.getState().referenceImage).toBe(file);
+    expect(useImageCreateStore.getState().params.input_fidelity).toBe("low");
     expect(screen.getByRole("img", { name: "参考图预览" })).toHaveAttribute(
       "src",
       "blob:reference-preview",
@@ -63,5 +69,24 @@ describe("ReferenceImageUpload", () => {
     await user.click(screen.getByRole("button", { name: "移除参考图" }));
     expect(useImageCreateStore.getState().referenceImage).toBeNull();
     expect(screen.queryByRole("img", { name: "参考图预览" })).not.toBeInTheDocument();
+  });
+
+  it("disables upload and removal controls while busy", () => {
+    const file = new File(["png"], "reference.png", { type: "image/png" });
+    useImageCreateStore.setState({ referenceImage: file, isBusy: true });
+
+    const { rerender } = render(<ReferenceImageUpload />);
+
+    expect(screen.getByLabelText("上传参考图")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "移除参考图" })).toBeDisabled();
+    expect(screen.getByText("处理中不可修改参考图")).toBeInTheDocument();
+
+    useImageCreateStore.setState({ referenceImage: null });
+    rerender(<ReferenceImageUpload />);
+
+    expect(screen.getByText("选择一张参考图").closest("label")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
   });
 });
