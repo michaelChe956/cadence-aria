@@ -117,6 +117,10 @@ fn iteration_input(
     working_dir: std::path::PathBuf,
     resume_provider_session_id: Option<String>,
 ) -> StreamingProviderInput {
+    let nonce = make_nonce();
+    let prompt = format!(
+        "{prompt}\n\n请严格按以下格式输出（不要输出其他内容）：\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n{{\"suggested_prompt\":\"你建议的最终图片 prompt\"}}\n</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n"
+    );
     StreamingProviderInput {
         provider_type,
         role: AdapterRole::Executor,
@@ -126,7 +130,7 @@ fn iteration_input(
         resume_provider_session_id,
         permission_mode: ProviderPermissionMode::Auto,
         structured_output_contract: Some(StructuredOutputContract {
-            nonce: make_nonce(),
+            nonce,
             schema_name: SUGGESTED_PROMPT_SCHEMA.to_string(),
         }),
         env_vars: BTreeMap::new(),
@@ -152,18 +156,20 @@ async fn consume_iteration_events(
     session: &mut ProviderSession,
     cancel: CancellationToken,
 ) -> Result<IterationOutcome, IterationRunError> {
-    let mut readable_text = String::new();
+    let mut text_deltas = String::new();
     loop {
         let event = tokio::select! {
             _ = cancel.cancelled() => return Err(IterationRunError::Runtime("image iteration cancelled".to_string())),
             event = session.events.recv() => event,
         };
         match event {
-            Some(ProviderEvent::TextDelta { content }) => readable_text.push_str(&content),
+            Some(ProviderEvent::TextDelta { content }) => text_deltas.push_str(&content),
             Some(ProviderEvent::Completed(completion)) => {
-                if readable_text.is_empty() {
-                    readable_text = completion.readable_output.clone();
-                }
+                let readable_text = if !completion.readable_output.trim().is_empty() {
+                    completion.readable_output.clone()
+                } else {
+                    text_deltas
+                };
                 let suggested_prompt = match completion.structured_output {
                     StructuredOutputState::Parsed(value) => value
                         .get("suggested_prompt")
@@ -330,30 +336,37 @@ mod tests {
                     structured,
                     session,
                 }) => {
+                    let contract = self
+                        .captured
+                        .lock()
+                        .await
+                        .last()
+                        .and_then(|input| input.structured_output_contract.clone());
+                    let full_output = match (contract.as_ref(), structured) {
+                        (Some(contract), Some(value)) => format!(
+                            "{text}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{}\n</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+                            contract.nonce, value, contract.nonce
+                        ),
+                        _ => text.clone(),
+                    };
+                    let completion = ProviderCompletion::from_output(
+                        full_output.clone(),
+                        contract.as_ref(),
+                        session,
+                    );
                     let (event_tx, event_rx) = mpsc::channel(4);
                     let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(1);
                     tokio::spawn(async move {
                         if event_tx
                             .send(ProviderEvent::TextDelta {
-                                content: text.clone(),
+                                content: full_output,
                             })
                             .await
                             .is_err()
                         {
                             return;
                         }
-                        let structured_output = structured.map_or(
-                            StructuredOutputState::NotRequested,
-                            StructuredOutputState::Parsed,
-                        );
-                        let _ = event_tx
-                            .send(ProviderEvent::Completed(ProviderCompletion {
-                                full_output: text.clone(),
-                                readable_output: text,
-                                structured_output,
-                                provider_session_id: session,
-                            }))
-                            .await;
+                        let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
                     });
                     Ok(ProviderSession {
                         events: event_rx,
@@ -431,6 +444,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.readable_text, "我已优化画面构图。");
+        assert!(!outcome.readable_text.contains("<ARIA_STRUCTURED_OUTPUT"));
         assert_eq!(
             outcome.suggested_prompt.as_deref(),
             Some("专业蓝色等距云端部署插画")
@@ -449,6 +463,11 @@ mod tests {
                 .all(|byte| byte.is_ascii_alphanumeric())
         );
         assert_eq!(contract.schema_name, SUGGESTED_PROMPT_SCHEMA);
+        let start_tag = format!("<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">", contract.nonce);
+        let end_tag = format!("</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">", contract.nonce);
+        assert!(inputs[0].prompt.contains(&start_tag));
+        assert!(inputs[0].prompt.contains("{\"suggested_prompt\""));
+        assert!(inputs[0].prompt.contains(&end_tag));
         assert!(inputs[0].working_dir.is_dir());
     }
 
@@ -456,7 +475,7 @@ mod tests {
     async fn parse_fallback_keeps_readable_text_without_structured_prompt() {
         let provider = Arc::new(ScriptedProvider::new([Script::Complete {
             text: "仍然可以展示这段可读回复。".to_string(),
-            structured: Some(json!({"suggested_prompt": "  "})),
+            structured: None,
             session: None,
         }]));
         let engine = engine(provider);
@@ -507,5 +526,18 @@ mod tests {
         assert!(inputs[1].prompt.contains("过去需求：画云端部署场景"));
         assert!(inputs[1].prompt.contains("上一轮建议：蓝色等距产品插画"));
         assert!(inputs[1].prompt.contains("当前需求：增加安全盾牌"));
+        for input in &inputs {
+            let contract = input.structured_output_contract.as_ref().unwrap();
+            assert_eq!(contract.nonce.len(), 8);
+            assert_ne!(contract.nonce, "00000000");
+            assert!(input.prompt.contains(&format!(
+                "<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+                contract.nonce
+            )));
+            assert!(input.prompt.contains(&format!(
+                "</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+                contract.nonce
+            )));
+        }
     }
 }
