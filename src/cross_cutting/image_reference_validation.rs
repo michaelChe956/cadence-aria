@@ -39,13 +39,17 @@ pub fn validate_reference_image(
         return Err(RefImageError::TooLarge);
     }
 
-    let declared_format = format_for_mime(declared_mime)?;
+    let declared_format = mime_to_format(declared_mime).ok_or(RefImageError::UnsupportedMime)?;
 
     #[allow(deprecated)]
     let mut reader = image::io::Reader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|_| RefImageError::Decoding)?;
     let actual_format = reader.format().ok_or(RefImageError::Decoding)?;
+    if actual_format != declared_format {
+        return Err(RefImageError::InvalidFormat);
+    }
+
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_SIDE);
     limits.max_image_height = Some(MAX_SIDE);
@@ -61,10 +65,6 @@ pub fn validate_reference_image(
     };
 
     reject_animation(bytes, actual_format)?;
-
-    if actual_format != declared_format {
-        return Err(RefImageError::InvalidFormat);
-    }
 
     let width = decoded.width();
     let height = decoded.height();
@@ -82,12 +82,12 @@ pub fn validate_reference_image(
     })
 }
 
-fn format_for_mime(mime: &str) -> Result<ImageFormat, RefImageError> {
-    match mime {
-        "image/png" => Ok(ImageFormat::Png),
-        "image/jpeg" => Ok(ImageFormat::Jpeg),
-        "image/webp" => Ok(ImageFormat::WebP),
-        _ => Err(RefImageError::UnsupportedMime),
+fn mime_to_format(declared_mime: &str) -> Option<ImageFormat> {
+    match declared_mime {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" => Some(ImageFormat::Jpeg),
+        "image/webp" => Some(ImageFormat::WebP),
+        _ => None,
     }
 }
 
@@ -282,6 +282,20 @@ mod tests {
 
         assert_eq!(
             validate_reference_image(&bytes, "image/png"),
+            Err(RefImageError::InvalidFormat)
+        );
+    }
+
+    #[test]
+    fn disguised_gif_is_rejected_as_invalid_format_before_decode() {
+        const ONE_PIXEL_GIF: &[u8] = &[
+            0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xff, 0xff, 0xff, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+            0x00, 0x02, 0x01, 0x4c, 0x00, 0x3b,
+        ];
+
+        assert_eq!(
+            validate_reference_image(ONE_PIXEL_GIF, "image/png"),
             Err(RefImageError::InvalidFormat)
         );
     }
