@@ -235,9 +235,13 @@ fn make_nonce() -> String {
 
 fn is_invalid_resume_error(error: &IterationRunError) -> bool {
     let message = error.searchable_message().to_ascii_lowercase();
-    ["session", "resume", "not found", "invalid"]
-        .iter()
-        .any(|marker| message.contains(marker))
+    let has_session_context = message.contains("session");
+    let explicit_resume_failure = message.contains("resume") && has_session_context;
+    let missing_or_expired_session = has_session_context
+        && ["not found", "missing", "expired", "invalid", "unknown"]
+            .iter()
+            .any(|marker| message.contains(marker));
+    explicit_resume_failure || missing_or_expired_session
 }
 
 enum IterationRunError {
@@ -489,6 +493,38 @@ mod tests {
 
         assert_eq!(outcome.readable_text, "仍然可以展示这段可读回复。");
         assert_eq!(outcome.suggested_prompt, None);
+    }
+
+    #[tokio::test]
+    async fn ordinary_invalid_request_does_not_trigger_fresh_session_fallback() {
+        let provider = Arc::new(ScriptedProvider::new([
+            Script::StartFails("invalid request: prompt is too long".to_string()),
+            Script::Complete {
+                text: "must not be reached".to_string(),
+                structured: None,
+                session: None,
+            },
+        ]));
+        let engine = engine(provider.clone());
+        let root = tempdir().unwrap();
+        let paths = AriaStatePaths::from_workspace_root(root.path());
+
+        let error = engine
+            .iterate(
+                &record(),
+                "当前需求：增加安全盾牌",
+                &paths,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("ordinary provider errors must be returned directly");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid request: prompt is too long")
+        );
+        assert_eq!(provider.captured().await.len(), 1);
     }
 
     #[tokio::test]

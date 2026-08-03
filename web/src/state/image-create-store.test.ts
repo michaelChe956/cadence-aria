@@ -143,6 +143,67 @@ describe("image create store", () => {
     expect(useImageCreateStore.getState().isBusy).toBe(false);
   });
 
+  it("keeps the latest A to B session open when A resolves last", async () => {
+    const first = imageSession({ id: "session-a", current_prompt: "prompt a" });
+    const second = imageSession({ id: "session-b", current_prompt: "prompt b" });
+    const requests = new Map<
+      string,
+      (value: SessionRecord) => void
+    >();
+    api.getImageCreateSession.mockImplementation(
+      (sessionId: string) =>
+        new Promise<SessionRecord>((resolve) => requests.set(sessionId, resolve)),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    const openingFirst = useImageCreateStore.getState().openSession(first.id);
+    const openingSecond = useImageCreateStore.getState().openSession(second.id);
+    requests.get(second.id)!(record(second));
+    await openingSecond;
+    requests.get(first.id)!(record(first));
+    await openingFirst;
+
+    expect(useImageCreateStore.getState().currentSession?.session.id).toBe(second.id);
+    expect(useImageCreateStore.getState().params.prompt).toBe("prompt b");
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(MockWebSocket.instances[0].url).toContain("/session-b/chat");
+  });
+
+  it("keeps the latest A target in an A to B to A out-of-order sequence", async () => {
+    const firstOld = imageSession({ id: "session-a", current_prompt: "old a" });
+    const second = imageSession({ id: "session-b", current_prompt: "prompt b" });
+    const firstLatest = imageSession({ id: "session-a", current_prompt: "latest a" });
+    const pending: Array<{
+      sessionId: string;
+      resolve: (value: SessionRecord) => void;
+    }> = [];
+    api.getImageCreateSession.mockImplementation(
+      (sessionId: string) =>
+        new Promise<SessionRecord>((resolve) => pending.push({ sessionId, resolve })),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    const openingFirstOld = useImageCreateStore.getState().openSession(firstOld.id);
+    const openingSecond = useImageCreateStore.getState().openSession(second.id);
+    const openingFirstLatest = useImageCreateStore.getState().openSession(firstLatest.id);
+    pending[1].resolve(record(second));
+    await openingSecond;
+    pending[0].resolve(record(firstOld));
+    await openingFirstOld;
+    pending[2].resolve(record(firstLatest));
+    await openingFirstLatest;
+
+    expect(useImageCreateStore.getState().currentSession?.session.id).toBe(firstLatest.id);
+    expect(useImageCreateStore.getState().params.prompt).toBe("latest a");
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(MockWebSocket.instances[0].url).toContain("/session-a/chat");
+    expect(pending.map(({ sessionId }) => sessionId)).toEqual([
+      "session-a",
+      "session-b",
+      "session-a",
+    ]);
+  });
+
   it("does not append an async generation result after switching sessions", async () => {
     const first = imageSession({ id: "session-a", current_prompt: "prompt a" });
     const second = imageSession({ id: "session-b", current_prompt: "prompt b" });

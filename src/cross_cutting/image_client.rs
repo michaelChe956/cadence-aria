@@ -9,6 +9,9 @@ use crate::product::image_create::models::{
     ImageBackground, ImageCreateSettings, ImageOutputFormat, ImageQuality, ImageSize, InputFidelity,
 };
 
+const IMAGE_MODEL: &str = "gpt-image-2";
+const MAX_ERROR_BODY_CHARS: usize = 500;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageGenRequest {
     pub prompt: String,
@@ -112,6 +115,7 @@ impl ImageClientApi for ImageClient {
                     )
                 })?;
             let form = Form::new()
+                .text("model", IMAGE_MODEL)
                 .text("prompt", req.prompt.clone())
                 .text("size", wire_value(&req.size)?)
                 .text("quality", wire_value(&req.quality)?)
@@ -125,6 +129,7 @@ impl ImageClientApi for ImageClient {
             self.http.post(url).multipart(form)
         } else {
             self.http.post(url).json(&GenerationBody {
+                model: IMAGE_MODEL,
                 prompt: &req.prompt,
                 size: req.size,
                 quality: req.quality,
@@ -145,7 +150,10 @@ impl ImageClientApi for ImageClient {
         if !response.status().is_success() {
             let code = response.status().as_u16();
             let body = response.text().await.map_err(normalize_reqwest_error)?;
-            return Err(ImageClientError::HttpStatus { code, body });
+            return Err(ImageClientError::HttpStatus {
+                code,
+                body: sanitize_error_body(&body, &settings.api_key),
+            });
         }
 
         let payload = response
@@ -168,6 +176,7 @@ impl ImageClientApi for ImageClient {
 
 #[derive(Serialize)]
 struct GenerationBody<'a> {
+    model: &'static str,
     prompt: &'a str,
     size: ImageSize,
     quality: ImageQuality,
@@ -244,6 +253,15 @@ fn media_type(format: ImageOutputFormat) -> &'static str {
     }
 }
 
+fn sanitize_error_body(body: &str, api_key: &str) -> String {
+    let redacted = if api_key.is_empty() {
+        body.to_string()
+    } else {
+        body.replace(api_key, "[REDACTED]")
+    };
+    redacted.chars().take(MAX_ERROR_BODY_CHARS).collect()
+}
+
 fn normalize_reqwest_error(error: reqwest::Error) -> ImageClientError {
     if error.is_timeout() {
         ImageClientError::Timeout
@@ -284,6 +302,7 @@ mod tests {
             .mock("POST", "/v1/images/generations")
             .match_header("authorization", "Bearer sk-test")
             .match_body(Matcher::Json(json!({
+                "model": "gpt-image-2",
                 "prompt": "draw a fox",
                 "size": "1536x1024",
                 "quality": "high",
@@ -336,6 +355,7 @@ mod tests {
                 Matcher::Regex("multipart/form-data; boundary=".into()),
             )
             .match_body(Matcher::AllOf(vec![
+                Matcher::Regex(r#"name="model"\r\n\r\ngpt-image-2"#.into()),
                 Matcher::Regex(r#"name="image\[\]""#.into()),
                 Matcher::Regex("Content-Type: image/png".into()),
                 Matcher::Regex(r#"name="prompt"\r\n\r\ndraw a fox"#.into()),
@@ -428,6 +448,30 @@ mod tests {
             })
         );
         rate_limited.assert_async().await;
+
+        let echoed_secret = server
+            .mock("POST", "/v1/images/generations")
+            .with_status(500)
+            .with_body(format!(
+                "upstream echoed Authorization: Bearer {} -- {}",
+                settings.api_key,
+                "x".repeat(600)
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+        let error = client
+            .generate(&settings, &req(ImageOutputFormat::Png), None)
+            .await
+            .expect_err("echoed secret response must fail");
+        let ImageClientError::HttpStatus { code, body } = error else {
+            panic!("expected HTTP status error");
+        };
+        assert_eq!(code, 500);
+        assert!(!body.contains(&settings.api_key));
+        assert!(body.contains("Bearer [REDACTED]"));
+        assert!(body.chars().count() <= 500);
+        echoed_secret.assert_async().await;
 
         let empty = server
             .mock("POST", "/v1/images/generations")

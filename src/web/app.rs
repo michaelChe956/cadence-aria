@@ -1,4 +1,5 @@
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -32,7 +33,8 @@ pub fn build_web_router(state: WebAppState) -> Router {
         )
         .route(
             "/api/image-create/sessions/{id}/generate",
-            post(handlers::generate_image),
+            post(handlers::generate_image)
+                .layer(DefaultBodyLimit::max(11 * 1024 * 1024)),
         )
         .route(
             "/api/image-create/settings",

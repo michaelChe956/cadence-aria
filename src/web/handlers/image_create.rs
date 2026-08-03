@@ -362,8 +362,10 @@ mod tests {
 
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::image_client::{
-        ImageClientApi, ImageClientError, ImageGenOutcome, ImageGenRequest, ImageRefImage,
+        ImageClient, ImageClientApi, ImageClientError, ImageGenOutcome, ImageGenRequest,
+        ImageRefImage,
     };
+    use crate::cross_cutting::image_reference_validation::MAX_BYTES;
     use crate::cross_cutting::provider_adapter::ProviderAdapterError;
     use crate::cross_cutting::provider_registry::ProviderRegistry;
     use crate::cross_cutting::streaming_provider::{
@@ -472,6 +474,25 @@ mod tests {
         PngEncoder::new(&mut bytes)
             .write_image(&[0x7f], 1, 1, image::ExtendedColorType::L8)
             .expect("encode png");
+        bytes
+    }
+
+    fn valid_png_larger_than_two_mib() -> Vec<u8> {
+        const WIDTH: u32 = 2048;
+        const HEIGHT: u32 = 1100;
+        let mut state = 0x1234_5678_u32;
+        let pixels: Vec<u8> = (0..WIDTH * HEIGHT)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect();
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&pixels, WIDTH, HEIGHT, image::ExtendedColorType::L8)
+            .expect("encode large png");
+        assert!(bytes.len() > 2 * 1024 * 1024);
+        assert!(bytes.len() < MAX_BYTES);
         bytes
     }
 
@@ -775,6 +796,144 @@ mod tests {
             response_json::<Value>(response).await,
             json!({"media_type": "image/png", "b64": "ZmFrZS1pbWFnZQ=="})
         );
+    }
+
+    #[tokio::test]
+    async fn generate_accepts_reference_above_two_mib_and_rejects_above_ten_mib() {
+        let root = tempdir().expect("root");
+        let large_reference = valid_png_larger_than_two_mib();
+        let (state, session_id) =
+            configured_generate_state(root.path(), Some(large_reference.clone())).await;
+        let boundary = "image-create-large-valid-reference";
+        let body = generate_multipart(boundary, &[&large_reference]);
+
+        let response = build_web_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/image-create/sessions/{session_id}/generate"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("generate response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let root = tempdir().expect("root");
+        let (state, session_id) = configured_generate_state(root.path(), None).await;
+        let mut oversized = valid_png();
+        oversized.resize(MAX_BYTES + 1, 0);
+        let boundary = "image-create-over-ten-mib-reference";
+        let body = generate_multipart(boundary, &[&oversized]);
+        let response = build_web_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/image-create/sessions/{session_id}/generate"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("oversized response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response_json::<Value>(response).await["error"]
+                .as_str()
+                .expect("error")
+                .contains("10 MiB")
+        );
+    }
+
+    #[tokio::test]
+    async fn echoed_api_key_is_redacted_from_rest_event_and_persisted_session() {
+        let root = tempdir().expect("root");
+        let paths = AriaStatePaths::from_workspace_root(root.path());
+        let store = SessionStore::new(paths.clone());
+        let session = store
+            .create(
+                serde_json::from_value(json!({
+                    "template": {"preset": "ppt_business_illustration", "custom": null},
+                    "provider_name": "fake"
+                }))
+                .expect("create request"),
+            )
+            .await
+            .expect("session");
+        let secret = "sk-secret123";
+        let mut gateway = mockito::Server::new_async().await;
+        let gateway_error = gateway
+            .mock("POST", "/v1/images/generations")
+            .with_status(500)
+            .with_body(format!(
+                "gateway echoed Authorization: Bearer {secret}; token={secret}"
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+        SettingsStore::new(paths.clone())
+            .save(&ImageCreateSettings {
+                base_url: gateway.url(),
+                api_key: secret.to_string(),
+                defaults: Default::default(),
+            })
+            .await
+            .expect("settings");
+        let mut state = state(root.path());
+        state.image_create_engine = Some(Arc::new(ImageCreateEngine::new(
+            paths.clone(),
+            Arc::new(SessionStore::new(paths.clone())),
+            Arc::new(SettingsStore::new(paths.clone())),
+            Arc::new(ImageClient::new()),
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(ImageCreateRunRegistry::default()),
+        )));
+        let boundary = "image-create-secret-echo";
+        let body = generate_multipart(boundary, &[]);
+
+        let response = build_web_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/image-create/sessions/{}/generate",
+                        session.id
+                    ))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("generate response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let rest_body = response_json::<Value>(response).await.to_string();
+        assert!(!rest_body.contains(secret));
+        assert!(rest_body.contains("REDACTED"));
+
+        let record = store
+            .get(&session.id)
+            .await
+            .expect("session lookup")
+            .expect("session record");
+        assert_eq!(record.events.len(), 1);
+        assert!(!record.events[0].message.contains(secret));
+        assert!(record.events[0].message.contains("REDACTED"));
+        let persisted = tokio::fs::read_to_string(paths.image_create_session_file(&session.id))
+            .await
+            .expect("persisted session");
+        assert!(!persisted.contains(secret));
+        assert!(persisted.contains("REDACTED"));
+        gateway_error.assert_async().await;
     }
 
     #[tokio::test]

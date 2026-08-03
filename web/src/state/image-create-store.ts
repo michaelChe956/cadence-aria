@@ -81,6 +81,7 @@ const initialState: ImageCreateState = {
 let activeSocket: WebSocket | null = null;
 let entrySequence = 0;
 let generationRequestSequence = 0;
+let openSessionRequestSequence = 0;
 
 function entryId(prefix: string): string {
   entrySequence += 1;
@@ -348,9 +349,13 @@ export const useImageCreateStore = create<
 
   openSession: async (sessionId) => {
     generationRequestSequence += 1;
+    const requestToken = ++openSessionRequestSequence;
     set({ error: null, isBusy: false, lastIterationHadPrompt: false });
     try {
       const record = await getImageCreateSession(sessionId);
+      if (openSessionRequestSequence !== requestToken) {
+        return;
+      }
       set({
         currentSession: record,
         entries: buildEntries(record),
@@ -362,6 +367,9 @@ export const useImageCreateStore = create<
       });
       connectSession(sessionId);
     } catch (error) {
+      if (openSessionRequestSequence !== requestToken) {
+        return;
+      }
       set({ error: errorMessage(error) });
       throw error;
     }
