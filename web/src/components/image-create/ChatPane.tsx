@@ -44,7 +44,7 @@ export function ChatPane() {
           </p>
         </div>
         {isBusy ? (
-          <span className="rounded-full bg-[var(--aria-primary-soft)] px-2.5 py-1 text-xs font-semibold text-[var(--aria-primary)]">
+          <span className="rounded-full bg-[var(--aria-primary-soft)] px-2.5 py-1 text-xs font-semibold text-[var(--aria-ink)]">
             正在处理
           </span>
         ) : null}
@@ -62,7 +62,7 @@ export function ChatPane() {
         {isBusy ? (
           <div
             role="status"
-            className="rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-primary)]"
+            className="rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]"
           >
             正在处理，请稍候…
           </div>
@@ -116,7 +116,7 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
     case "prompt_block":
       return (
         <article className="rounded-xl border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-[var(--aria-primary)]">
+          <div className="text-xs font-semibold uppercase tracking-wide text-[var(--aria-ink)]">
             Suggested prompt{entry.version ? ` · v${entry.version}` : ""}
           </div>
           <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-[var(--aria-ink)]">
@@ -141,20 +141,20 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
       return (
         <div
           role="alert"
-          className="rounded-lg border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-danger)]"
+          className="rounded-lg border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]"
         >
           生成失败：{entry.content}
         </div>
       );
     case "system_notice":
       return (
-        <div className="rounded-lg border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-sm text-[var(--aria-warning)]">
+        <div className="rounded-lg border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-sm text-[var(--aria-ink)]">
           {entry.content}
         </div>
       );
     case "busy_notice":
       return (
-        <div className="rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-primary)]">
+        <div className="rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">
           {entry.content}
         </div>
       );

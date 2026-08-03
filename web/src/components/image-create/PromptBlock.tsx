@@ -36,7 +36,7 @@ export function PromptBlock() {
       {retainedPromptNotice ? (
         <p
           role="status"
-          className="mt-2 rounded-md border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-xs font-semibold text-[var(--aria-warning)]"
+          className="mt-2 rounded-md border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-xs font-semibold text-[var(--aria-ink)]"
         >
           {retainedPromptNotice.content}
         </p>

@@ -85,7 +85,7 @@ export function SessionList() {
         </button>
       </div>
       {error ? (
-        <p role="alert" className="mx-3 mt-3 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm text-[var(--aria-danger)]">
+        <p role="alert" className="mx-3 mt-3 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">
           {error}
         </p>
       ) : null}
