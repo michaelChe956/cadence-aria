@@ -20,17 +20,22 @@
 
 ### Requirement: 会话生命周期与资源清理
 
-系统 SHALL 为每个会话维护独立的执行器 scratch 目录。系统 SHALL 在删除会话时取消该会话任何进行中的执行器 run 与图片生成请求，阻止该会话的新请求，删除其 scratch 目录与持久化记录。会话删除 SHALL 失败时不静默吞错，SHALL 向用户报告失败。
+系统 SHALL 为每个会话维护独立的执行器 scratch 目录。系统 SHALL 将会话删除实现为线性化操作：先将会话原子标记为删除中（tombstone）并拒绝该会话任何新请求，再取消进行中的执行器 run 与图片生成请求，并在确认这些在途任务已终止（或以其会话 generation token 对完成写入做条件校验）后才删除 scratch 目录与持久化记录。会话删除后，任何在途异步完成（生成成功/失败、迭代输出）SHALL NOT 重建会话历史、scratch 或会话记录。会话删除 SHALL 失败时不静默吞错，SHALL 向用户报告失败。
 
 #### Scenario: 删除空闲会话清理资源
 
 - **WHEN** 用户删除一个无进行中操作的会话
 - **THEN** 系统删除其 scratch 目录与持久化记录，且其不再出现在会话列表
 
-#### Scenario: 删除运行中的会话先终止操作
+#### Scenario: 删除运行中的会话先终止操作并等待
 
 - **WHEN** 用户删除一个存在进行中 prompt 迭代或图片生成的会话
-- **THEN** 系统先取消这些进行中操作，再执行删除与资源清理
+- **THEN** 系统先将该会话标记为删除中并拒绝新请求，取消进行中操作，待其在途任务终止确认后再执行删除与资源清理
+
+#### Scenario: 删除后异步完成不回写
+
+- **WHEN** 一个已被删除会话的在途生成或迭代在删除后才完成
+- **THEN** 系统不将其成功/失败结果或输出写回，不重建该会话的历史、scratch 或记录
 
 #### Scenario: 会话不存在的请求
 
@@ -137,12 +142,17 @@
 
 ### Requirement: 参考图输入约束
 
-系统 SHALL 对参考图施加约束：单张；限定允许的图像 MIME 类型（png/jpeg/webp）；限定最大字节数与图像尺寸上限。系统 SHALL 拒绝不符合约束的参考图并给出明确原因。参考图 SHALL 仅在本次生成请求生命周期内使用，SHALL NOT 在生成完成后持久化保留。
+系统 SHALL 对参考图施加约束：单张；仅允许静态图像 MIME 类型（png/jpeg/webp），拒绝动图与多帧图像；最大字节数 SHALL 不超过 10 MB；解码后单边像素 SHALL 不超过 4096、总像素 SHALL 不超过 4096×4096。系统 SHALL 在向 image2 网关发送前由后端按**实际文件内容**校验格式、字节数与解码后尺寸（不只信任前端或声明 MIME），SHALL 拒绝不符合约束的参考图并给出明确原因。参考图 SHALL 仅在本次生成请求生命周期内使用，SHALL NOT 在生成完成后持久化保留。
 
 #### Scenario: 拒绝超大或格式不符的参考图
 
-- **WHEN** 用户上传超过最大字节数或不在允许 MIME 内的参考图
+- **WHEN** 用户上传超过 10 MB、不在允许 MIME 内、或解码后像素超过 4096×4096 的参考图
 - **THEN** 系统拒绝该参考图并提示具体原因，不发起生成
+
+#### Scenario: 后端按实际内容校验，拒绝伪造声明的参考图
+
+- **WHEN** 参考图的声明 MIME 与实际文件内容不符（如声明 png 实为其他格式），或为动图/多帧图像
+- **THEN** 后端在发网关前检出并拒绝，不发起生成
 
 #### Scenario: 参考图不被持久化
 
@@ -207,7 +217,7 @@
 
 ### Requirement: API Key 安全边界与出站目标约束
 
-系统 SHALL 仅在 Aria 后端读取与使用 image2 `api_key`（用于发起 image2 请求的鉴权头）。系统 SHALL NOT 将 `api_key` 传递给 prompt 迭代所用的 CLI 执行器子进程。系统 SHALL 对用户录入的 `base_url` 施加出站安全约束：仅允许 HTTPS（或本地回环）；禁止在跨域 HTTP 重定向时携带 Authorization 头。系统 SHALL NOT 在错误日志、诊断输出或测试夹具中明文记录 `api_key`。
+系统 SHALL 仅在 Aria 后端读取与使用 image2 `api_key`（用于发起 image2 请求的鉴权头）。系统 SHALL NOT 将 `api_key` 传递给 prompt 迭代所用的 CLI 执行器子进程。系统 SHALL 对用户录入的 `base_url` 施加出站安全约束：仅允许 HTTPS（或本地回环）。系统 SHALL 默认禁用 image2 请求的自动重定向；如需允许重定向，SHALL 仅允许目标与原请求为同一 origin（scheme、host、port 三者全同），SHALL 拒绝任何 HTTPS→HTTP 的降级重定向，且 SHALL NOT 在任何跨 origin 或降级重定向中携带 Authorization 头。系统 SHALL NOT 在错误日志、诊断输出或测试夹具中明文记录 `api_key`。
 
 #### Scenario: 执行器子进程不接触 key
 
@@ -224,7 +234,7 @@
 - **WHEN** 用户录入的 `base_url` 不是 HTTPS（且非本地回环）
 - **THEN** 系统拒绝该 `base_url` 并提示必须使用 HTTPS
 
-#### Scenario: 跨域重定向不携带鉴权
+#### Scenario: 重定向默认禁用，仅同 origin 且不降级时才跟随
 
-- **WHEN** image2 请求被网关重定向到与原 host 不同的目标
-- **THEN** 系统不在该重定向请求中携带 Authorization 头
+- **WHEN** image2 请求被网关重定向
+- **THEN** 系统默认不自动跟随；若跟随，仅当目标与原请求 scheme、host、port 全同且非 HTTPS→HTTP 降级时才携带 Authorization，否则不携带或拒绝

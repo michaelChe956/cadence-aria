@@ -43,9 +43,9 @@
 
 ## 8. UI 视觉与打磨
 
-- [ ] 8.1 基于 `[educational-platform]` 风格（Claymorphism + 块状 + 清晰层级 + 微交互）出视觉方案对比（融合 vs 照搬），与 Aria 现有调性协调后定稿（设计交付前置；详见 `cadence/prds/2026-08-03_概要需求_图片创作agent_v1.0.md` 第 9 节）
+- [ ] 8.1 基于 `[educational-platform]` 风格（Claymorphism + 块状 + 清晰层级 + 微交互）出视觉方案对比（融合 vs 照搬），与 Aria 现有调性协调后定稿（设计交付前置；详见 `cadence/prds/2026-08-03_概要需求_图片创作agent_v1.2.md` 第 9 节）
 
 ## 9. 验证
 
-- [ ] 9.1 后端单测：端点选择（有无参考图）、出站安全约束（HTTPS、重定向不携带 Authorization、日志脱敏）、配置读写与保留语义、参数枚举校验、单会话并发互斥、会话删除取消操作并清理 scratch、生图错误不重试、用 FakeStreamingProvider 覆盖结构化解析失败与续接失败降级（对应 spec 各 Scenario）
+- [ ] 9.1 后端单测：端点选择（有无参考图）；参考图后端按实际内容校验（10MB/4096×4096/静态图、拒绝伪造声明 MIME 与多帧图）；出站安全约束（HTTPS、默认禁用重定向、同 origin 才跟随、不降级、不携带 Authorization、日志脱敏）；配置读写与保留语义；参数枚举校验；单会话并发互斥；会话删除线性化（tombstone、等待在途终止、删除后异步完成不回写）；生图错误不重试；用 FakeStreamingProvider 覆盖结构化解析失败与续接失败降级（对应 spec 各 Scenario）
 - [ ] 9.2 前端单测：参数下拉绑定与 input_fidelity 显隐、参考图上传/移除/约束、prompt 区块编辑与解析失败保留、设置脱敏与保留语义、忙碌态展示
