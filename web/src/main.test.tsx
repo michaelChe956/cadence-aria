@@ -19,6 +19,10 @@ describe("AppShell", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Issue 卡片列表" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Issue 生命周期详情" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "图片创作" })).toHaveAttribute(
+      "href",
+      "/image-create",
+    );
     expect(screen.queryByRole("main", { name: "Aria workbench" })).not.toBeInTheDocument();
   });
 
