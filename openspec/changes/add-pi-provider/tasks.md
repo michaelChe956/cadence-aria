@@ -6,7 +6,8 @@
 
 ## 2. Pi 流式会话适配
 
-- [x] 2.1 实现 Pi RPC 会话适配，覆盖流式输出、会话标识、恢复、取消和错误映射（Auto-only，无授权扩展）。
+- [x] 2.1 实现 Pi RPC 会话适配，覆盖流式输出、会话标识、恢复、取消和错误映射（Auto-only）。
+- [ ] 2.2 实现结构化提问扩展（`aria-ask.ts`，`include_str!` 交付）：Pi 需要用户决策时经 `ask_user` 工具→`extension_ui_request(select)`→既有 `ChoiceRequest` 往返，答案在同进程内接续；更新 Pi prompt 指引从「输出文本暂停信号」改为「使用 `ask_user` 工具提问」。
 
 ## 3. Workspace 角色配置与执行
 

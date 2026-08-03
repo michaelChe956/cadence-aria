@@ -36,6 +36,23 @@
 - **THEN** 系统终止该 Pi 会话
 - **AND THEN** Workspace 或 Coding Workspace 显示既有的已取消状态而不继续处理后续输出
 
+### Requirement: Pi 支持结构化提问
+
+系统 SHALL 通过 Aria 自带的 `aria-ask.ts` 扩展让 Pi 在遇到必须由用户决策的需求歧义时，以与 Claude Code 的 `AskUserQuestion` 和 Codex 的 `requestUserInput` 一致的方式向用户提问。扩展注册一个 `ask_user` 自定义工具（不拦截任何工具调用），LLM 需要澄清时主动调用它；工具内 `ctx.ui.select()` 在 RPC 模式下经 `extension_ui_request/response` 往返，Aria 适配器将其映射为既有 `ProviderEvent::ChoiceRequest`（source 为 `ProviderChoice`），用户回答后映射回 `extension_ui_response(value)`，使答案在同一 Pi 进程内接续，上下文完整。
+
+#### Scenario: Pi 遇到需求歧义时弹出选择卡片
+
+- **WHEN** Pi 在生成角色产物时发现必须由用户决定的需求/范围/验收歧义
+- **THEN** Pi 调用 `ask_user` 工具，系统向页面发送 `ChoiceRequest` 事件
+- **AND THEN** 前端弹出与其他 Provider 一致的选择卡片
+- **AND THEN** 用户回答后，答案在同一 Pi 进程内接续，Pi 带着该答案继续生成
+
+#### Scenario: 提问扩展不拦截工具调用
+
+- **WHEN** Pi 执行工具调用（如 `read`、`bash`、`write`）
+- **THEN** 工具调用直接执行（Auto 模式），不弹出授权请求
+- **AND THEN** 运行事件与工具活动照常记录
+
 ### Requirement: Provider 权限模式默认为 Auto，Pi 仅支持 Auto
 
 普通 Workspace 的 Author 与 Reviewer、以及 Coding Workspace 的每个 Provider 角色 SHALL 默认使用 `Auto` 权限模式。`Auto` 模式 MUST 允许 Provider 直接执行其工具调用且保留运行事件。Claude Code 与 Codex 保留既有的 `Supervised` 逐工具确认能力，用户可为每个适用角色独立切换。Pi 因不提供逐工具批准机制，SHALL 仅以 `Auto` 模式运行，不向用户提供 Pi 的 `Supervised` 选项。

@@ -10,14 +10,16 @@
 
 - 使 Pi 成为活跃 Workspace 与 Coding Workspace 中可选择、可检查和可执行的流式 Provider。
 - 让 Pi 与既有运行协议统一支持输出流、取消、会话恢复（Auto 模式）。
+- 让 Pi 支持结构化提问（`aria-ask.ts` 扩展），使 Pi 需要用户决策时弹出与 Claude/Codex 一致的选择卡片，答案在同一进程内接续。
 - 将可配置角色的默认权限模式统一为 `Auto`；Claude Code 与 Codex 保留既有 `Supervised`，Pi 仅支持 `Auto`。
 - Provider 启动或运行失败时直接报错，不在运行期自动切换 Provider（与现有 Claude Code、Codex 行为一致）。
 
 **Non-Goals:**
 
 - 不扩展 Task Runner 的节点契约、CLI/API、Provider router 或同步适配器的可调度 Provider 范围和运行行为；为支持共享 `ProviderType::Pi` 所需的显式拒绝分支除外。Pi 不被 Task Runner 调度、路由或执行。
+- 不为 Pi 实现逐工具授权拦截（不做 `tool_call` 钩子式 Supervised）；提问扩展仅注册 `ask_user` 自定义工具，不拦截任何工具调用。
 - 不改动添加代码库、仓库初始化或其 Claude Code 专用 Provider 选择。
-- 不把 Pi 配置或用户认证信息写入全局 Pi 配置或版本库。
+- 不把 Pi 配置或用户认证信息写入全局 Pi 配置或版本库（提问扩展内容经 `include_str!` 嵌入 Aria 二进制，运行时落缓存目录，不写全局 Pi 配置）。
 - 不在 Provider 启动或运行失败后自动重放或切换到其他 Provider。
 
 ## Decisions
@@ -32,17 +34,21 @@
 
 这是保持流式域可扩展而冻结 Task Runner 行为的最小代价。被否决的替代方案是把 `StreamingProviderInput.provider_type` 改为 `ProviderName` 以解耦流式域——该改动会波及流式域 20+ 处对 `provider_type` 的读取，影响面过大，不采用。
 
-### 2. 使用 Pi RPC 会话实现流式执行（Auto-only，无授权扩展）
+### 2. 使用 Pi RPC 会话实现流式执行（Auto-only，结构化提问扩展）
 
-新增独立的 Pi 流式适配器。每个运行启动一个独立的 `pi --mode rpc` 子进程（JSONL over stdin/stdout）；适配器把 Pi 文本、工具、完成、错误和会话事件映射为既有流式 Provider 事件，把取消和恢复请求映射回 Pi RPC。
+新增独立的 Pi 流式适配器。每个运行启动一个独立的 `pi --mode rpc` 子进程（JSONL over stdin/stdout）并加载 Aria 自带的 `aria-ask.ts` 提问扩展；适配器把 Pi 文本、工具、完成、错误和会话事件映射为既有流式 Provider 事件，把取消、提问响应和恢复请求映射回 Pi RPC。
 
-Pi 仅以 `Auto` 模式运行，**不引入 Aria 授权扩展**。原因：Pi 刻意不包含内建逐工具批准（其文档明确「intentionally does not include built-in permission popups」，需以扩展自建），`--approve` 只是项目资源信任而非工具授权；为实现 Supervised 而自建扩展会引入扩展资源交付、授权 UI 往返与机器可读 payload 的复杂度，超出本变更价值。产品决策：Pi 不提供 Supervised。
+**Pi 仅以 `Auto` 模式运行，不做逐工具授权扩展**——Pi 刻意不包含内建逐工具批准（其文档明确「intentionally does not include built-in permission popups」，需以扩展自建），`--approve` 只是项目资源信任而非工具授权；为实现 Supervised 而自建逐工具拦截扩展会引入每次工具调用的授权 UI 往返与机器可读 payload 的复杂度，超出本变更价值。产品决策：Pi 不提供 Supervised。
+
+**但 Pi 引入结构化提问扩展（`aria-ask.ts`），与 Claude Code 的 `AskUserQuestion` / Codex 的 `requestUserInput` 对齐**：Pi 自身的 LLM 能力覆盖了「发现需求歧义→需要用户决策→提问→等待→带着答案继续」这个完整语义，唯一缺的是结构化提问的通道——Pi 扩展的 `ctx.ui.select()` 在 RPC 模式下经 `extension_ui_request/response` 子协议往返（已由 Phase 0 spike 验证可用）。Aria 在适配器内把 `extension_ui_request(method=select)` 映射为既有 `ProviderEvent::ChoiceRequest`（source 为 `ProviderChoice`），把用户的 `ChoiceResponse` 映射回 `extension_ui_response(value)`，使前端弹出与 Claude/Codex 完全一致的选择卡片，且答案在同一 Pi 进程内接续，上下文完整。
+
+提问扩展与被否决的授权扩展的关键区别：提问扩展不拦截工具调用（不挂 `tool_call` 钩子），只注册一个 `ask_user` 自定义工具让 LLM 在需要澄清时主动调用；提问在整个会话中最多发生少数几次，不是每次工具调用都触发。
+
+**扩展交付方式**：`aria-ask.ts` 的内容经 Rust `include_str!` 在编译期嵌入二进制，运行时按内容哈希写入 Aria 缓存目录（内容不变则复用），`pi -e` 指向该路径。扩展不依赖 npm 安装布局、不写入用户全局 Pi 配置或项目版本库。用户零安装步骤。
 
 Pi 的 `Auto` 运行与其他 Provider 的 `Auto` 一致：工具调用直接执行，运行事件与工具活动照常记录（审计），无需逐项确认。Claude Code 与 Codex 的 `Supervised` 是其内建能力，不在本变更范围，不受影响。
 
-替代方案是为 Pi 自建授权扩展实现 Supervised。该方案需解决固定 `.ts` 扩展的发行期资源路径、`extension_ui_request/response` 往返与机器可读工具信息 payload，复杂度与风险高，且产品已确认 Pi 无需 Supervised，故不采用。
-
-实施前提与 spike：本方案以 Pi RPC 的会话粒度、流式事件映射、取消与恢复为技术地基。实施首个任务前 SHALL 以一次小 spike 验证这些能力确实可用（会话标识、事件流、取消、恢复）；若不可用，则需在本变更内重新决策，不得在未验证前提的情况下推进实现。（监督相关的扩展 spike 因 Supervised 被取消而不再需要。）
+实施前提与 spike：Pi RPC 的会话粒度、流式事件映射、取消与恢复已由首个 spike 验证可用；`ctx.ui.select()` 经 `extension_ui_request/response` 往返并由同进程续跑已由第二个 spike（A 方案）验证可用（含 LLM 主动调用 `ask_user` 工具、回传 `value` 后同进程继续）。两项均通过。
 
 ### 3. 按角色持久化权限模式并统一默认 Auto
 
