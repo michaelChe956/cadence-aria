@@ -650,7 +650,7 @@ pub(crate) fn build_work_item_draft_prompt(
          - canonical_contract.schema_version: integer literal 1；identity: obj{{logical_work_item_id: str+, title: string, kind: backend|frontend|integration|e2e|docs|infra|other}}；goal: obj{{summary: string}}；non_goals: [string]。\n\
          - input_contracts: [obj{{contract_id: str+, provider_logical_work_item_id: str+, required_capabilities: [string], compatibility_policy: require_all|require_any}}]；output_contracts: [obj{{contract_id: str+, capabilities: [string]}}]。\n\
          - tasks: [obj{{task_id: str+, statement: string, requirement_refs: [string], done_when_refs: [string]}}]；write_policy: obj{{exclusive_scopes: [string], forbidden_scopes: [string]}}。\n\
-         - acceptance_criteria: [obj{{criterion_id: str+, statement: string, required_evidence: [source_diff|non_zero_test_execution|manual_check|handoff_field]}}]。\n\
+         - acceptance_criteria: [obj{{criterion_id: str+, statement: string, required_evidence: [source_diff|non_zero_test_execution|manual_check|handoff_field]（必为数组，单元素也需成数组）}}]。\n\
          - acceptance criterion 的 statement 必须描述从最终代码状态、验证命令输出、人工检查结果或 handoff 字段可观测的结果状态；不得描述开发过程本身。\n\
          - verification_checks: [obj{{check_id: str+, command: string|null, manual_instruction: string|null, required: boolean, non_zero_test_execution_required: boolean}}]；verification_plan: obj{{checks: 与 verification_checks 完全相同的数组}}。\n\
          - handoff_contract: obj{{required_fields: 唯一 str+ 数组, provided_contract_refs: 唯一 str+ 数组（无下游消费者时为空数组）, reviewer_check_refs: 唯一 str+ 数组}}。\n\
