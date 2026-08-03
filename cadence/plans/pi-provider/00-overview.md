@@ -69,4 +69,3 @@
 - **Task 3 产出**：`WorkspaceRolePermissionModes { author: ProviderPermissionMode, reviewer: ProviderPermissionMode }`（`Default` 全 `Auto`）；`WorkspaceSessionRecord.permission_modes`（`#[serde(default)]`）；`WorkspaceSession.permission_modes`。
 - **Task 4 产出**：`CodingRolePermissionModes::default()` 全 `Auto`（既有类型，只改默认值）。
 - **Task 5 产出**：前端 `WsProviderConfig.permission_modes`；普通/Coding 面板权限控件（Pi 仅 Auto）。
-
