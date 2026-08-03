@@ -50,6 +50,60 @@ impl StreamingProviderAdapter for HangingStreamingProvider {
     }
 }
 
+struct PiHangingStreamingProvider {
+    started: Arc<std::sync::atomic::AtomicBool>,
+    seen_inputs: Arc<Mutex<Vec<(cadence_aria::protocol::contracts::ProviderType, cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode)>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for PiHangingStreamingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.seen_inputs
+            .lock()
+            .expect("Pi input recorder")
+            .push((input.provider_type, input.permission_mode));
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: "Pi partial output".to_string(),
+                })
+                .await;
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                command = command_rx.recv() => {
+                    assert!(matches!(command, Some(ProviderCommand::Abort)), "Pi author run must receive Abort");
+                }
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
 struct ChoiceThenHangingStreamingProvider;
 
 #[async_trait::async_trait]

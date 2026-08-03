@@ -1,4 +1,103 @@
 #[tokio::test]
+async fn workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let root = tempdir().expect("root");
+    create_workspace_session_fixture_with_author(&root, "pi").await;
+    let started = Arc::new(AtomicBool::new(false));
+    let seen_inputs = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Pi,
+        Arc::new(PiHangingStreamingProvider {
+            started: started.clone(),
+            seen_inputs: seen_inputs.clone(),
+        }),
+    );
+    let app = build_web_router(WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/workspace_session_0001/ws");
+    let (mut ws, _) = connect_async(url.clone()).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(
+        &mut ws,
+        &WsInMessage::UserMessage {
+            content: "run Pi then cancel".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(recv_until_stream_chunk(&mut ws).await, "Pi partial output");
+    assert!(started.load(Ordering::SeqCst), "Pi author adapter must start");
+    assert_eq!(
+        seen_inputs.lock().expect("Pi input recorder").as_slice(),
+        &[(
+            cadence_aria::protocol::contracts::ProviderType::Pi,
+            cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        )],
+        "workspace must invoke Pi in Auto mode"
+    );
+
+    send_json(&mut ws, &WsInMessage::Abort).await;
+
+    let mut saw_aborted_status = false;
+    for _ in 0..80 {
+        match recv_json(&mut ws).await {
+            WsOutMessage::ProviderStatus {
+                status: WsProviderStatus::Aborted,
+            } => saw_aborted_status = true,
+            WsOutMessage::StageChange { stage } if stage == "prepare_context" => {
+                assert!(saw_aborted_status, "frontend must receive the existing aborted status");
+                let session = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+                    .get_workspace_session("workspace_session_0001")
+                    .expect("persisted workspace session");
+                assert_eq!(session.status, cadence_aria::product::models::WorkspaceSessionStatus::Open);
+                let no_trailing_output = timeout(Duration::from_millis(150), ws.next()).await;
+                assert!(
+                    no_trailing_output.is_err(),
+                    "cancelled Pi run must stop sending frontend output"
+                );
+                drop(ws);
+
+                let (mut reconnected, _) = connect_async(url).await.expect("reconnect ws");
+                match recv_json(&mut reconnected).await {
+                    WsOutMessage::SessionState {
+                        stage,
+                        active_run_id,
+                        timeline_nodes,
+                        ..
+                    } => {
+                        assert_eq!(stage, "prepare_context");
+                        assert!(active_run_id.is_none());
+                        let last = timeline_nodes.last().expect("cancelled Pi timeline node");
+                        assert_eq!(last.status, TimelineNodeStatus::Failed);
+                        assert_eq!(last.summary.as_deref(), Some("运行已中止"));
+                    }
+                    other => panic!("expected cancellation session state, got {other:?}"),
+                }
+                drop(reconnected);
+                server.abort();
+                return;
+            }
+            WsOutMessage::StreamChunk { .. } | WsOutMessage::MessageComplete { .. } => {
+                panic!("cancelled Pi run must not emit output after Abort")
+            }
+            WsOutMessage::Error { message } => panic!("ws error: {message}"),
+            _ => {}
+        }
+    }
+    panic!("Pi abort did not return workspace to prepare_context");
+}
+
+#[tokio::test]
 async fn workspace_ws_abort_after_choice_response_returns_prepare_context() {
     let root = tempdir().expect("root");
     create_workspace_session_fixture(&root).await;

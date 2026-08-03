@@ -207,12 +207,21 @@ async fn drain_events(rx: &mut mpsc::Receiver<ProviderEvent>) -> Vec<ProviderEve
 }
 
 #[tokio::test]
-async fn session_sends_prompt_and_emits_text_until_settled() {
+async fn session_in_auto_mode_emits_tool_audit_events_from_recorded_stream() {
     let (client_io, server_io) = tokio::io::duplex(8192);
     let (reader, writer) = tokio::io::split(client_io);
     let peer = JsonRpcPeer::new(reader, writer);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let (_command_tx, command_rx) = mpsc::channel(8);
+    let tool_events = inbound(&load_fixture("auto_text.jsonl"))
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event["type"].as_str(),
+                Some("tool_execution_start" | "tool_execution_end")
+            )
+        })
+        .collect::<Vec<_>>();
 
     tokio::spawn(async move {
         let (server_reader, mut server_writer) = tokio::io::split(server_io);
@@ -236,6 +245,9 @@ async fn session_sends_prompt_and_emits_text_until_settled() {
             }),
         )
         .await;
+        for event in tool_events {
+            write_inbound(&mut server_writer, event).await;
+        }
         write_inbound(
             &mut server_writer,
             serde_json::json!({
@@ -259,7 +271,7 @@ async fn session_sends_prompt_and_emits_text_until_settled() {
         CancellationToken::new(),
     )
     .await
-    .expect("session ok");
+    .expect("Auto session completes without an Aria approval round trip");
 
     let events = drain_events(&mut event_rx).await;
     assert!(
@@ -267,6 +279,20 @@ async fn session_sends_prompt_and_emits_text_until_settled() {
             |event| matches!(event, ProviderEvent::TextDelta { content } if content == "Hello")
         )
     );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ProviderEvent::ToolCall(call)
+            if call.id == "toolu_bdrk_012r11A6JgdXmJY7LeXvA4d3"
+                && call.tool_name == "bash"
+                && call.input == serde_json::json!({"command": "printf fixture-tool-ok"})
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ProviderEvent::ToolResult(result)
+            if result.tool_use_id == "toolu_bdrk_012r11A6JgdXmJY7LeXvA4d3"
+                && result.output == "fixture-tool-ok"
+                && !result.is_error
+    )));
     let completion = events
         .iter()
         .find_map(|event| match event {

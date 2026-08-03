@@ -618,6 +618,49 @@ async fn author_run_with_pi_uses_pi_provider_in_auto_mode() {
 }
 
 #[tokio::test]
+async fn pi_author_runs_from_story_design_and_work_item_entries_in_auto_mode() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+    ] {
+        let (_tmp, store) = setup();
+        let (tx, _rx) = mpsc::channel(64);
+        let mut session = make_session(&format!("sess_pi_{workspace_type:?}"));
+        session.workspace_type = workspace_type.clone();
+        session.author_provider = ProviderName::Pi;
+        session.permission_modes.author = ProviderPermissionMode::Supervised;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        let pi_starts = Arc::new(AtomicUsize::new(0));
+        let pi_seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = CountingProvider {
+            starts: pi_starts.clone(),
+            seen: pi_seen.clone(),
+            fail_on_start: false,
+        };
+
+        engine
+            .handle_user_message("start".to_string(), Arc::new(provider), empty_provider_commands())
+            .await;
+
+        assert_eq!(
+            pi_starts.load(Ordering::SeqCst),
+            1,
+            "Pi must start once from the {workspace_type:?} author entry"
+        );
+        let seen = pi_seen.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            &[(ProviderType::Pi, ProviderPermissionMode::Auto)],
+            "the {workspace_type:?} author entry must select Pi and normalize it to Auto"
+        );
+    }
+}
+
+#[tokio::test]
 async fn pi_start_failure_does_not_retry_selected_provider() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
