@@ -5,7 +5,7 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
     FakeGroupReviewExecutor, GroupReviewExecutionResult, GroupReviewOrchestrationError,
-    GroupReviewOrchestrator, finding_fingerprint, merge_findings, reduce_verdict,
+    GroupReviewOrchestrator, PersistOutcome, finding_fingerprint, merge_findings, reduce_verdict,
 };
 use crate::product::coding_workspace_engine::group_review_types::{
     GroupDiffIndex, GroupPartitionResult, GroupReviewGraph, GroupReviewMaterialSnapshot,
@@ -309,9 +309,12 @@ fn recovery_skips_internal_review_when_snapshot_is_no_longer_active() {
     store
         .activate_group_review_snapshot(&attempt_id, "new_snapshot")
         .expect("supersede snapshot");
-    orchestrator
-        .persist_internal_pr_review_from_reduction(&attempt, &snapshot, &reduction)
-        .expect("stale recovery is ignored");
+    assert_eq!(
+        orchestrator
+            .persist_internal_pr_review_from_reduction(&attempt, &snapshot, &reduction)
+            .expect("stale recovery is ignored"),
+        PersistOutcome::SkippedStale
+    );
     assert!(
         store
             .list_internal_pr_reviews("project_0001", "issue_0001", &attempt_id)

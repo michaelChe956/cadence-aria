@@ -240,9 +240,12 @@ impl<'a> GroupReviewOrchestrator<'a> {
             let release_result =
                 self.store
                     .release_group_review_lease(&snapshot.attempt_id, &recovery_lease_id, "");
-            persist_result?;
+            let outcome = persist_result?;
             release_result?;
-            return Ok(reduction);
+            return match outcome {
+                PersistOutcome::Persisted => Ok(reduction),
+                PersistOutcome::SkippedStale => Err(GroupReviewOrchestrationError::ReductionStale),
+            };
         }
         let segments =
             super::group_review_prompts::build_reduction_prompt(snapshot, shard_reports, None);
@@ -361,9 +364,12 @@ impl<'a> GroupReviewOrchestrator<'a> {
         let release_result =
             self.store
                 .release_group_review_lease(&snapshot.attempt_id, &reduction_lease_id, "");
-        persist_result?;
+        let outcome = persist_result?;
         release_result?;
-        Ok(reduction)
+        match outcome {
+            PersistOutcome::Persisted => Ok(reduction),
+            PersistOutcome::SkippedStale => Err(GroupReviewOrchestrationError::ReductionStale),
+        }
     }
 
     pub(crate) fn persist_internal_pr_review_from_reduction(
@@ -371,15 +377,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
         attempt: &crate::product::coding_models::CodingExecutionAttempt,
         snapshot: &GroupReviewMaterialSnapshot,
         reduction: &GroupReviewReductionReport,
-    ) -> Result<(), ProductStoreError> {
-        if self
-            .store
-            .get_active_group_review_snapshot_hash(&snapshot.attempt_id)?
-            .as_deref()
-            != Some(reduction.snapshot_hash.as_str())
-        {
-            return Ok(());
-        }
+    ) -> Result<PersistOutcome, ProductStoreError> {
         let existing = self.store.list_internal_pr_reviews(
             &attempt.project_id,
             &attempt.issue_id,
@@ -395,7 +393,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
             .iter()
             .any(|review| review.raw_provider_output_ref.as_deref() == Some(raw_ref.as_str()))
         {
-            return Ok(());
+            return Ok(PersistOutcome::Persisted);
         }
         let raw_output = self.store.read_attempt_artifact_text(attempt, raw_ref)?;
         let payload = parse_review_payload(&raw_output, CodingExecutionStage::InternalPrReview);
@@ -416,7 +414,14 @@ impl<'a> GroupReviewOrchestrator<'a> {
             role_run_id: None,
             run_no: None,
         };
-        self.store.save_internal_pr_review(attempt, &review)
+        match self.store.save_internal_pr_review_if_active(
+            &snapshot.attempt_id,
+            &reduction.snapshot_hash,
+            &review,
+        )? {
+            true => Ok(PersistOutcome::Persisted),
+            false => Ok(PersistOutcome::SkippedStale),
+        }
     }
 
     fn matching_shard_reports(
@@ -507,6 +512,12 @@ impl<'a> GroupReviewOrchestrator<'a> {
             CasOutcome::StoredStale => Ok(None),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistOutcome {
+    Persisted,
+    SkippedStale,
 }
 
 struct ShardLeaseCleanup<'a> {

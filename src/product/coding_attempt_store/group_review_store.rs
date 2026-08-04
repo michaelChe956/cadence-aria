@@ -11,6 +11,44 @@ use crate::product::coding_models::{
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
+    pub fn save_internal_pr_review_if_active(
+        &self,
+        attempt_id: &str,
+        expected_snapshot_hash: &str,
+        review: &crate::product::coding_models::InternalPrReview,
+    ) -> Result<bool, ProductStoreError> {
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(expected_snapshot_hash)?;
+        validate_relative_id(&review.id)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        self.validate_scoped_attempt_record(
+            &attempt,
+            &review.attempt_id,
+            "internal_pr_review",
+            &review.id,
+        )?;
+        let root = group_review_root(self, &attempt);
+        let active_path = root.join("active-snapshot.json");
+        with_exclusive_lock(&active_path, || {
+            let active_hash = if super::path_is_regular_file(&active_path)? {
+                Some(read_json::<ActiveGroupReviewSnapshot>(&active_path)?.content_hash)
+            } else {
+                None
+            };
+            if active_hash.as_deref() != Some(expected_snapshot_hash) {
+                return Ok(false);
+            }
+            write_json(
+                &self
+                    .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                    .join("internal-reviews")
+                    .join(format!("{}.json", review.id)),
+                review,
+            )?;
+            Ok(true)
+        })
+    }
+
     pub fn claim_group_review_lease(
         &self,
         attempt_id: &str,
