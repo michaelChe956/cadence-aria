@@ -1,3 +1,7 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use crate::product::coding_models::{
@@ -5,9 +9,15 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
     FakeGroupReviewExecutor, GroupReviewExecutionError, GroupReviewExecutionResult,
-    GroupReviewExecutor, GroupReviewOrchestrationError,
+    GroupReviewExecutor, GroupReviewOrchestrationError, GroupReviewOrchestrator,
 };
-use crate::product::coding_workspace_engine::group_review_types::PromptBudgetBreakdown;
+use crate::product::coding_workspace_engine::group_review_types::{
+    CompactContractInterface, CompactRoutingTarget, ContractEdge, DeterministicGroupFinding,
+    DiffFileEntry, DiffHunk, GroupDiffIndex, GroupPartitionResult, GroupReviewGraph,
+    GroupReviewMaterialSnapshot, GroupShardSpec, PromptBudgetBreakdown, ReductionDiffSelection,
+    RequirementCoverage, ScopeOverlap, ShardDiffSelection, UnitCrossReviewRecord,
+    UnitEvidenceSummary, UnitScopeSummary,
+};
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use tempfile::TempDir;
@@ -215,4 +225,261 @@ async fn fake_executor_and_orchestration_errors_are_constructible() {
         },
     };
     assert_eq!(error.to_string(), "material_overflow");
+}
+
+fn material_snapshot(
+    unit_count: usize,
+    shard_count: usize,
+    diff_body: &str,
+) -> GroupReviewMaterialSnapshot {
+    let unit_records = (0..unit_count)
+        .map(|index| UnitCrossReviewRecord {
+            unit_id: format!("unit_{index:04}"),
+            unit_run_id: format!("run_{index:04}"),
+            logical_work_item_id: format!("work_item_{index:04}"),
+            work_item_revision_id: format!("revision_{index:04}"),
+            completion_commit: format!("commit_{index:04}"),
+            dependency_ids: Vec::new(),
+            scope_summary: UnitScopeSummary {
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+            },
+            contract_interfaces: Vec::<CompactContractInterface>::new(),
+            evidence_summary: UnitEvidenceSummary {
+                required_command_count: 0,
+                executed_command_count: 0,
+                manual_check_count: 0,
+                missing_refs: Vec::new(),
+            },
+            routing_targets: Vec::<CompactRoutingTarget>::new(),
+        })
+        .collect::<Vec<_>>();
+    let shards = (0..shard_count)
+        .map(|index| GroupShardSpec {
+            shard_id: format!("shard_{index:04}"),
+            ordered_unit_run_ids: vec![format!("run_{index:04}")],
+            partition_rationale: vec!["stable_order".to_string()],
+        })
+        .collect::<Vec<_>>();
+    let shard_selections = shards
+        .iter()
+        .map(|shard| ShardDiffSelection {
+            shard_id: shard.shard_id.clone(),
+            fragments: vec![
+                crate::product::coding_workspace_engine::group_review_types::SelectedDiffFragment {
+                    path: "src/lib.rs".to_string(),
+                    level: 'E',
+                    body: diff_body.to_string(),
+                    hunk_content_hash: "hunk_hash".to_string(),
+                    redacted: false,
+                    truncated: false,
+                    not_shown_count: 0,
+                },
+            ],
+            total_hunks_in_shard: 1,
+        })
+        .collect();
+    GroupReviewMaterialSnapshot {
+        schema_version: 1,
+        compiler_version: "test".to_string(),
+        attempt_id: "placeholder".to_string(),
+        review_request_id: "review_request_0001".to_string(),
+        base_branch: "main".to_string(),
+        final_commit: "final_commit".to_string(),
+        authoritative_binding_digest: "binding_digest".to_string(),
+        unit_records,
+        global_graph: GroupReviewGraph {
+            contract_edges: Vec::<ContractEdge>::new(),
+            scope_overlaps: Vec::<ScopeOverlap>::new(),
+            commit_reachability:
+                crate::product::coding_workspace_engine::group_review_types::CommitReachability {
+                    reachable_completion_commits: Vec::new(),
+                    unreachable_completion_commits: Vec::new(),
+                },
+            requirement_coverage: RequirementCoverage {
+                covered: Vec::new(),
+                missing: Vec::new(),
+                conflicting: Vec::new(),
+            },
+        },
+        diff_index: GroupDiffIndex {
+            files: vec![DiffFileEntry {
+                path: "src/lib.rs".to_string(),
+                insertions: 1,
+                deletions: 0,
+                owner_unit_run_ids: Vec::new(),
+                shared: false,
+                ambiguous: false,
+                forbidden_scope_hit: false,
+            }],
+            hunks: vec![DiffHunk {
+                hunk_index: 0,
+                path: "src/lib.rs".to_string(),
+                owner_unit_run_ids: Vec::new(),
+                header: "@@".to_string(),
+                body: diff_body.to_string(),
+                redacted: false,
+                content_hash: "hunk_hash".to_string(),
+            }],
+            shard_selections,
+            reduction_selection: ReductionDiffSelection {
+                fragments: Vec::new(),
+                total_cross_shard_hunks: 0,
+            },
+        },
+        deterministic_findings: Vec::<DeterministicGroupFinding>::new(),
+        partition_result: GroupPartitionResult {
+            shards,
+            cross_shard_edges: Vec::new(),
+        },
+        content_hash: "snapshot_hash".to_string(),
+    }
+}
+
+fn valid_review_output(finding_count: usize) -> String {
+    let findings = (0..finding_count)
+        .map(|index| serde_json::json!({"message": format!("finding {index}")}))
+        .collect::<Vec<_>>();
+    format!(
+        "GROUP_REVIEW_VERDICT\n{}",
+        serde_json::json!({
+            "verdict": "approve",
+            "summary": "approved",
+            "findings": findings,
+        })
+    )
+}
+
+#[tokio::test]
+async fn execute_shards_rejects_capacity_before_executor_call() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(21, 1, "diff");
+    snapshot.attempt_id = attempt_id;
+    let executor = FakeGroupReviewExecutor::new(Vec::new());
+
+    let error = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect_err("capacity must fail closed");
+
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::CapacityExceeded
+    ));
+    assert!(executor.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn execute_shards_rejects_overflow_before_executor_call() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(1, 1, &"x".repeat(31 * 1024));
+    snapshot.attempt_id = attempt_id;
+    let executor = FakeGroupReviewExecutor::new(Vec::new());
+
+    let error = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect_err("overflow must fail closed");
+
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::MaterialOverflow { .. }
+    ));
+    assert!(executor.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn execute_shards_parses_persists_and_returns_reports() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(1, 1, "diff");
+    snapshot.attempt_id = attempt_id.clone();
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+    let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
+        full_output: valid_review_output(0),
+        provider_session_id: Some("session_0001".to_string()),
+    })]);
+
+    let reports = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect("execute shard");
+
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].verdict, ReviewVerdict::Approve);
+    assert_eq!(reports[0].run_failure_code, None);
+    assert_eq!(reports[0].raw_provider_output_refs.len(), 1);
+    assert_eq!(
+        store
+            .list_group_review_shard_reports(&attempt_id)
+            .expect("stored reports")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn execute_shards_rejects_more_than_eight_findings() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(1, 1, "diff");
+    snapshot.attempt_id = attempt_id;
+    let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
+        full_output: valid_review_output(9),
+        provider_session_id: None,
+    })]);
+
+    let error = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect_err("finding overflow must be invalid output");
+
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ShardOutputInvalid { .. }
+    ));
+}
+
+struct ConcurrentExecutor {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl GroupReviewExecutor for ConcurrentExecutor {
+    async fn execute(
+        &self,
+        _prompt: &str,
+    ) -> Result<GroupReviewExecutionResult, GroupReviewExecutionError> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(GroupReviewExecutionResult {
+            full_output: valid_review_output(0),
+            provider_session_id: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn execute_shards_limits_concurrency_to_two() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(3, 3, "diff");
+    snapshot.attempt_id = attempt_id.clone();
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+    let executor = Arc::new(ConcurrentExecutor {
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+    });
+
+    let reports = GroupReviewOrchestrator::new(executor.as_ref(), &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect("execute shards");
+
+    assert_eq!(reports.len(), 3);
+    assert_eq!(executor.peak.load(Ordering::SeqCst), 2);
 }
