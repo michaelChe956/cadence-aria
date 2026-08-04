@@ -20,10 +20,14 @@ impl super::CodingAttemptStore {
             {
                 return Ok(());
             }
-            return Err(ProductStoreError::IdentityMismatch {
-                kind: "unit_review_conclusion_snapshot",
-                id: snapshot.unit_run_id.clone(),
-            });
+            if existing.attempt_id != snapshot.attempt_id
+                || existing.unit_run_id != snapshot.unit_run_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "unit_review_conclusion_snapshot",
+                    id: snapshot.unit_run_id.clone(),
+                });
+            }
         }
         if attempt.id != snapshot.attempt_id {
             return Err(ProductStoreError::IdentityMismatch {
