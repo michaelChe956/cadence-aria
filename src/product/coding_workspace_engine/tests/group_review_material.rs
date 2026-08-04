@@ -604,13 +604,19 @@ fn material_charges_a_file_header_once_across_multiple_hunks() {
 }
 
 #[test]
-fn material_keeps_units_with_shared_file_in_same_shard() {
-    let left = binding(1, "left", Vec::new(), Vec::new());
-    let right = binding(2, "right", Vec::new(), Vec::new());
-    let bindings = vec![left, right];
+fn material_keeps_shared_file_pair_together_across_four_unit_boundary() {
+    let fillers = (0..3)
+        .map(|index| binding(index, &format!("filler-{index}"), Vec::new(), Vec::new()))
+        .collect::<Vec<_>>();
+    let left = binding(3, "shared-left", Vec::new(), Vec::new());
+    let right = binding(4, "shared-right", Vec::new(), Vec::new());
+    let mut bindings = fillers;
+    bindings.extend([left, right]);
     let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
     let mut git_facts = facts(&bindings);
-    for diff in &mut git_facts.completion_diffs {
+    for diff in git_facts.completion_diffs.iter_mut().filter(|diff| {
+        diff.unit_run_id == "run_shared-left" || diff.unit_run_id == "run_shared-right"
+    }) {
         diff.patch = "diff --git a/shared.rs b/shared.rs\n@@ -0,0 +1 @@\n+shared\n".to_string();
         diff.file_stats = vec![DiffFileStat {
             path: "shared.rs".to_string(),
@@ -627,20 +633,49 @@ fn material_keeps_units_with_shared_file_in_same_shard() {
         1_000,
     )
     .expect("compile");
+    assert!(result.partition_result.shards.iter().any(|shard| {
+        shard
+            .ordered_unit_run_ids
+            .contains(&"run_shared-left".to_string())
+            && shard
+                .ordered_unit_run_ids
+                .contains(&"run_shared-right".to_string())
+    }));
+
+    let no_affinity = (0..5)
+        .map(|index| binding(index, &format!("plain-{index}"), Vec::new(), Vec::new()))
+        .collect::<Vec<_>>();
+    let no_affinity_snapshots = no_affinity.iter().map(snapshot).collect::<Vec<_>>();
+    let control = compile_group_review_material(
+        &no_affinity,
+        &no_affinity_snapshots,
+        &request(),
+        &facts(&no_affinity),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("control compile");
+    assert!(control.partition_result.shards.iter().any(|shard| {
+        shard.ordered_unit_run_ids
+            == vec!["run_plain-0", "run_plain-1", "run_plain-2", "run_plain-3"]
+    }));
     assert!(
-        result
+        control
             .partition_result
             .shards
             .iter()
-            .any(|shard| shard.ordered_unit_run_ids.len() == 2)
+            .any(|shard| { shard.ordered_unit_run_ids == vec!["run_plain-4"] })
     );
 }
 
 #[test]
-fn material_keeps_units_with_contract_boundary_in_same_shard() {
+fn material_keeps_contract_boundary_pair_together_across_four_unit_boundary() {
+    let fillers = (0..3)
+        .map(|index| binding(index, &format!("filler-{index}"), Vec::new(), Vec::new()))
+        .collect::<Vec<_>>();
     let left = binding(
-        1,
-        "left",
+        3,
+        "contract-left",
         Vec::new(),
         vec![PromisedOutputContract {
             contract_id: "same".to_string(),
@@ -648,15 +683,16 @@ fn material_keeps_units_with_contract_boundary_in_same_shard() {
         }],
     );
     let right = binding(
-        2,
-        "right",
+        4,
+        "contract-right",
         Vec::new(),
         vec![PromisedOutputContract {
             contract_id: "same".to_string(),
             capabilities: vec![],
         }],
     );
-    let bindings = vec![left, right];
+    let mut bindings = fillers;
+    bindings.extend([left, right]);
     let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
     let result = compile_group_review_material(
         &bindings,
@@ -667,12 +703,38 @@ fn material_keeps_units_with_contract_boundary_in_same_shard() {
         1_000,
     )
     .expect("compile");
+    assert!(result.partition_result.shards.iter().any(|shard| {
+        shard
+            .ordered_unit_run_ids
+            .contains(&"run_contract-left".to_string())
+            && shard
+                .ordered_unit_run_ids
+                .contains(&"run_contract-right".to_string())
+    }));
+
+    let control = (0..5)
+        .map(|index| binding(index, &format!("plain-{index}"), Vec::new(), Vec::new()))
+        .collect::<Vec<_>>();
+    let control_snapshots = control.iter().map(snapshot).collect::<Vec<_>>();
+    let control_result = compile_group_review_material(
+        &control,
+        &control_snapshots,
+        &request(),
+        &facts(&control),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("control compile");
+    assert!(control_result.partition_result.shards.iter().any(|shard| {
+        shard.ordered_unit_run_ids
+            == vec!["run_plain-0", "run_plain-1", "run_plain-2", "run_plain-3"]
+    }));
     assert!(
-        result
+        control_result
             .partition_result
             .shards
             .iter()
-            .any(|shard| shard.ordered_unit_run_ids.len() == 2)
+            .any(|shard| { shard.ordered_unit_run_ids == vec!["run_plain-4"] })
     );
 }
 
@@ -744,7 +806,7 @@ fn material_assigns_highest_diff_level_when_forbidden_and_shared() {
 }
 
 #[test]
-fn material_includes_cross_shard_c_file_in_reduction_selection() {
+fn material_includes_cross_shard_shared_file_as_b_in_reduction_selection() {
     let bindings = (0..5)
         .map(|index| binding(index, &format!("cross-{index}"), Vec::new(), Vec::new()))
         .collect::<Vec<_>>();
@@ -774,6 +836,6 @@ fn material_includes_cross_shard_c_file_in_reduction_selection() {
             .reduction_selection
             .fragments
             .iter()
-            .any(|fragment| fragment.path == "shared.rs" && fragment.level == 'C')
+            .any(|fragment| fragment.path == "shared.rs" && fragment.level == 'B')
     );
 }

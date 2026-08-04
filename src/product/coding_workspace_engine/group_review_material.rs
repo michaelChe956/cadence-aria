@@ -732,7 +732,7 @@ fn build_diff_index(
         .into_iter()
         .map(|(path, (insertions, deletions))| {
             let owners = path_owners.get(&path).cloned().unwrap_or_default();
-            let ambiguous = owners.is_empty();
+            let ambiguous = owners.len() != 1;
             let forbidden = bindings.iter().any(|binding| {
                 binding
                     .projection_binding
