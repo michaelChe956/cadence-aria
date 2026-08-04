@@ -239,6 +239,35 @@ pub(crate) fn build_outline_prompt(
     .0
 }
 
+/// Renders the semantics of enabled split/test option flags so outline authors
+/// classify `kind` correctly before the strict Final Compile validator enforces
+/// the composition. Returns an empty string when no relevant flag is enabled.
+fn split_option_semantics(request: &GenerateWorkItemsRequest) -> String {
+    let mut rules: Vec<&'static str> = Vec::new();
+    if request.force_frontend_backend_split.unwrap_or(false) {
+        rules.push(
+            "- force_frontend_backend_split=true：本次拆分必须产出至少一个 kind=backend 和至少一个 kind=frontend 的 outline。被拆离页面/演示的纯库函数、共享实现、核心逻辑归 backend；页面、UI、演示内容归 frontend。为满足该前后端拆分要求而产出的 backend/frontend 两方均不得标为 other；额外独立的 docs、infra 等工作仍按实际 kind 标注。",
+        );
+    }
+    if request.include_integration_tests.unwrap_or(false) {
+        rules.push(
+            "- include_integration_tests=true：必须产出至少一个 kind=integration 的 outline。",
+        );
+    }
+    if request.include_e2e_tests.unwrap_or(false) {
+        rules.push("- include_e2e_tests=true：必须产出至少一个 kind=e2e 的 outline。");
+    }
+    if rules.is_empty() {
+        return String::new();
+    }
+    format!(
+        "[user_option_semantics]\n\
+         以下用户选项已开启，outline 的 kind 组成必须满足对应约束（Final Compile 会严格校验，不满足将整体失败）：\n\
+         {}\n\n",
+        rules.join("\n")
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_outline_prompt_with_nonce(
     request: &GenerateWorkItemsRequest,
@@ -282,6 +311,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          include_e2e_tests: {include_e2e_tests}\n\
          force_frontend_backend_split: {force_frontend_backend_split}\n\
          require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
+         {split_option_semantics}\
          {outline_write_scope_rules}\
          [strict_output_contract]\n\
          只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
@@ -322,6 +352,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
         include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
         force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
         require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        split_option_semantics = split_option_semantics(request),
         outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
         nonce = nonce,
         schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
@@ -330,7 +361,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
 }
 
 pub(crate) fn build_outline_revision_prompt(
-    _request: &GenerateWorkItemsRequest,
+    request: &GenerateWorkItemsRequest,
     issue: &IssueRecord,
     feedback: &str,
 ) -> (String, String) {
@@ -346,6 +377,12 @@ pub(crate) fn build_outline_revision_prompt(
          issue_id: {issue_id}\n\
          title: {title}\n\n\
          [revision_feedback]\n{feedback}\n\n\
+         [user_options]\n\
+         include_integration_tests: {include_integration_tests}\n\
+         include_e2e_tests: {include_e2e_tests}\n\
+         force_frontend_backend_split: {force_frontend_backend_split}\n\
+         require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
+         {split_option_semantics}\
          {outline_write_scope_rules}\
          [strict_output_contract]\n\
          只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
@@ -372,6 +409,11 @@ pub(crate) fn build_outline_revision_prompt(
         issue_id = issue.id,
         title = issue.title,
         feedback = feedback,
+        include_integration_tests = request.include_integration_tests.unwrap_or(false),
+        include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
+        force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
+        require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        split_option_semantics = split_option_semantics(request),
         outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
         nonce = nonce,
         schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
