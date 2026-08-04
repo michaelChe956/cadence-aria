@@ -9,7 +9,18 @@ export function ChatPane() {
   const isBusy = useImageCreateStore((state) => state.isBusy);
   const sendMessage = useImageCreateStore((state) => state.sendMessage);
   const [message, setMessage] = useState("");
+  const [elapsed, setElapsed] = useState(0);
   const listRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isBusy) {
+      setElapsed(0);
+      return;
+    }
+    setElapsed(0);
+    const id = window.setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [isBusy]);
 
   useEffect(() => {
     if (listRef.current) {
@@ -62,9 +73,16 @@ export function ChatPane() {
         {isBusy ? (
           <div
             role="status"
-            className="rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]"
+            aria-live="polite"
+            className="rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm text-[var(--aria-ink)]"
           >
-            正在处理，请稍候…
+            <div className="flex items-center gap-2 font-semibold">
+              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-[var(--aria-primary)]"></span>
+              正在处理，请稍候…已等待 {elapsed} 秒
+            </div>
+            <p className="mt-1 text-xs">
+              Agent 正在迭代提示词或生成图片，请耐心等待，<strong>不要重复点击或刷新页面</strong>。
+            </p>
           </div>
         ) : null}
       </div>

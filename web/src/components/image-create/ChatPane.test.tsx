@@ -77,7 +77,9 @@ describe("ChatPane", () => {
     useImageCreateStore.setState({ isBusy: true });
     rerender(<ChatPane />);
     expect(screen.getByLabelText("创作消息")).toBeDisabled();
-    expect(screen.getByText("正在处理，请稍候…")).toBeInTheDocument();
+    expect(
+      screen.getByText((content) => content.includes("正在处理，请稍候")),
+    ).toBeInTheDocument();
   });
 });
 
