@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   IMAGE_BACKGROUND_OPTIONS,
   IMAGE_INPUT_FIDELITY_OPTIONS,
@@ -15,6 +16,20 @@ import { useImageCreateStore } from "../../state/image-create-store";
 const selectClassName =
   "mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm text-[var(--aria-ink)] transition-colors hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
 
+function useElapsedSeconds(active: boolean): number {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (!active) {
+      setSeconds(0);
+      return;
+    }
+    setSeconds(0);
+    const id = window.setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return seconds;
+}
+
 export function ParamsPanel() {
   const params = useImageCreateStore((state) => state.params);
   const referenceImage = useImageCreateStore((state) => state.referenceImage);
@@ -22,6 +37,7 @@ export function ParamsPanel() {
   const isBusy = useImageCreateStore((state) => state.isBusy);
   const setParams = useImageCreateStore((state) => state.setParams);
   const generate = useImageCreateStore((state) => state.generate);
+  const elapsed = useElapsedSeconds(isBusy);
 
   return (
     <section
@@ -36,6 +52,21 @@ export function ParamsPanel() {
           <span className="text-xs font-semibold text-[var(--aria-primary)]">处理中</span>
         ) : null}
       </div>
+      {isBusy ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-3 rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm text-[var(--aria-ink)]"
+        >
+          <div className="flex items-center gap-2 font-semibold">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-[var(--aria-primary)]"></span>
+            正在生成图片…已等待 {elapsed} 秒
+          </div>
+          <p className="mt-1 text-xs">
+            gpt-image-2 生成通常需要 1-3 分钟，请耐心等待，<strong>不要重复点击生成或刷新页面</strong>。
+          </p>
+        </div>
+      ) : null}
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         <ParameterSelect
           label="尺寸"
@@ -87,7 +118,7 @@ export function ParamsPanel() {
         disabled={isBusy || !currentSession || !params.prompt.trim()}
         className="mt-4 w-full rounded-md bg-[var(--aria-primary)] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {isBusy ? "生成中…" : "生成图片"}
+        {isBusy ? `生成中…（${elapsed}s）` : "生成图片"}
       </button>
       {!currentSession ? (
         <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">请先选择或创建会话。</p>
