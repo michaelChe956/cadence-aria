@@ -168,7 +168,7 @@ async fn consume_iteration_events(
                 let readable_text = if !completion.readable_output.trim().is_empty() {
                     completion.readable_output.clone()
                 } else {
-                    text_deltas
+                    strip_structured_output_block(&text_deltas)
                 };
                 let suggested_prompt = match completion.structured_output {
                     StructuredOutputState::Parsed(value) => value
@@ -227,6 +227,30 @@ fn fallback_user_message(history: &IterationHistory, user_message: &str) -> Stri
     }
     sections.push(format!("当前用户输入：\n{user_message}"));
     sections.join("\n\n")
+}
+
+/// 剥离流式文本里的结构化输出块（`<ARIA_STRUCTURED_OUTPUT ...>...</ARIA_STRUCTURED_OUTPUT ...>`）。
+/// 当 provider 把整个输出都包在结构化块里时，`readable_output` 为空，需对 fallback 的 text_deltas 剥离。
+fn strip_structured_output_block(text: &str) -> String {
+    const START: &str = "<ARIA_STRUCTURED_OUTPUT";
+    const END: &str = "</ARIA_STRUCTURED_OUTPUT";
+    let Some(start) = text.find(START) else {
+        return text.to_string();
+    };
+    // 从 END 开始找其后的 '>'（结束标签形如 </ARIA_STRUCTURED_OUTPUT nonce="...">）
+    let Some(end_tag_start) = text[start..].find(END) else {
+        return text.to_string();
+    };
+    let end_tag_start = start + end_tag_start;
+    let after_end_tag = &text[end_tag_start + END.len()..];
+    let end_close = after_end_tag.find('>').map(|i| end_tag_start + END.len() + i + 1);
+    let Some(end_close) = end_close else {
+        return text.to_string();
+    };
+    let mut result = String::new();
+    result.push_str(&text[..start]);
+    result.push_str(&text[end_close..]);
+    result.trim().to_string()
 }
 
 fn make_nonce() -> String {
