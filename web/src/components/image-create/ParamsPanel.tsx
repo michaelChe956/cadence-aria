@@ -1,3 +1,4 @@
+import { LoaderCircle, SlidersHorizontal, Wand2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   IMAGE_BACKGROUND_OPTIONS,
@@ -14,7 +15,7 @@ import {
 import { useImageCreateStore } from "../../state/image-create-store";
 
 const selectClassName =
-  "mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm text-[var(--aria-ink)] transition-colors hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
+  "mt-1.5 block w-full rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2.5 text-sm text-[var(--aria-ink)] shadow-inner transition-all duration-200 hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
 
 function useElapsedSeconds(active: boolean): number {
   const [seconds, setSeconds] = useState(0);
@@ -42,32 +43,43 @@ export function ParamsPanel() {
   return (
     <section
       aria-labelledby="image-create-params-heading"
-      className="rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-sm"
+      className="rounded-2xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-[0_2px_8px_rgba(15,23,42,0.04),0_10px_28px_rgba(15,23,42,0.06)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
     >
       <div className="flex items-center justify-between gap-3">
-        <h2 id="image-create-params-heading" className="text-base font-semibold">
-          生成参数
-        </h2>
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--aria-primary-soft)] text-[var(--aria-primary)] shadow-sm">
+            <SlidersHorizontal aria-hidden="true" className="h-4 w-4" />
+          </span>
+          <h2 id="image-create-params-heading" className="text-base font-semibold">
+            生成参数
+          </h2>
+        </div>
         {isBusy ? (
-          <span className="text-xs font-semibold text-[var(--aria-primary)]">处理中</span>
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--aria-primary-soft)] px-2.5 py-1 text-xs font-semibold text-[var(--aria-ink)]">
+            <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 motion-safe:animate-spin" />
+            处理中
+          </span>
         ) : null}
       </div>
       {isBusy ? (
         <div
           role="status"
           aria-live="polite"
-          className="mt-3 rounded-lg border border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] px-3 py-2 text-sm text-[var(--aria-ink)]"
+          className="mt-4 rounded-xl border border-[var(--aria-primary)]/40 bg-[var(--aria-primary-soft)] px-3.5 py-3 text-sm text-[var(--aria-ink)] shadow-sm"
         >
           <div className="flex items-center gap-2 font-semibold">
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-[var(--aria-primary)]"></span>
+            <span className="relative flex h-3 w-3">
+              <span className="absolute inline-flex h-full w-full rounded-full bg-[var(--aria-primary)] opacity-50 motion-safe:animate-ping" />
+              <span className="relative inline-flex h-3 w-3 rounded-full bg-[var(--aria-primary)]" />
+            </span>
             正在生成图片…已等待 {elapsed} 秒
           </div>
-          <p className="mt-1 text-xs">
+          <p className="mt-1.5 text-xs leading-5">
             gpt-image-2 生成通常需要 1-3 分钟，请耐心等待，<strong>不要重复点击生成或刷新页面</strong>。
           </p>
         </div>
       ) : null}
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <div className="mt-4 grid gap-3 rounded-xl bg-[var(--aria-panel-muted)] p-3 sm:grid-cols-2">
         <ParameterSelect
           label="尺寸"
           value={params.size}
@@ -116,14 +128,19 @@ export function ParamsPanel() {
           generate().catch(() => {});
         }}
         disabled={isBusy || !currentSession || !params.prompt.trim()}
-        className="mt-4 w-full rounded-md bg-[var(--aria-primary)] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+        className="mt-4 inline-flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-3 text-sm font-semibold text-white shadow-[0_5px_16px_rgba(8,145,178,0.26)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50"
       >
+        {isBusy ? (
+          <LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" />
+        ) : (
+          <Wand2 aria-hidden="true" className="h-4 w-4" />
+        )}
         {isBusy ? `生成中…（${elapsed}s）` : "生成图片"}
       </button>
       {!currentSession ? (
-        <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">请先选择或创建会话。</p>
+        <p className="mt-2.5 text-center text-xs text-[var(--aria-ink-muted)]">请先选择或创建会话。</p>
       ) : !params.prompt.trim() ? (
-        <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">请先填写建议提示词。</p>
+        <p className="mt-2.5 text-center text-xs text-[var(--aria-ink-muted)]">请先填写建议提示词。</p>
       ) : null}
     </section>
   );

@@ -1,3 +1,4 @@
+import { KeyRound, LoaderCircle, Save, Settings, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   IMAGE_BACKGROUND_OPTIONS,
@@ -15,7 +16,7 @@ import {
 } from "../../state/image-create-store";
 
 const inputClassName =
-  "mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-normal text-[var(--aria-ink)] transition-colors hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
+  "mt-1.5 block w-full rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2.5 text-sm font-normal text-[var(--aria-ink)] shadow-inner transition-all duration-200 hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
 
 function settingsErrorMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;
@@ -161,38 +162,45 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const controlsDisabled = loading || submitting || !original || !defaults;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-sm">
       <form
         role="dialog"
         aria-label="图片创作设置"
         aria-modal="true"
         onSubmit={handleSubmit}
-        className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
+        className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-2xl border border-white/80 bg-[var(--aria-panel)] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.22)]"
       >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-[var(--aria-ink)]">
-              图片创作设置
-            </h2>
-            <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">
-              API Key 仅展示脱敏值；不修改时会安全保留原值。
-            </p>
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[var(--aria-primary-soft)] text-[var(--aria-primary)] shadow-sm">
+              <Settings aria-hidden="true" className="h-5 w-5" />
+            </span>
+            <div>
+              <h2 className="text-base font-semibold text-[var(--aria-ink)]">
+                图片创作设置
+              </h2>
+              <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">
+                API Key 仅展示脱敏值；不修改时会安全保留原值。
+              </p>
+            </div>
           </div>
           <button
             type="button"
+            aria-label="关闭"
             onClick={onClose}
-            className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
           >
-            关闭
+            <X aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
 
         {loading ? (
-          <p className="py-8 text-center text-sm text-[var(--aria-ink-muted)]">
+          <div className="flex items-center justify-center gap-2 rounded-xl bg-[var(--aria-panel-muted)] py-10 text-sm text-[var(--aria-ink-muted)]">
+            <LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" />
             正在加载设置…
-          </p>
+          </div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-5 rounded-xl bg-[var(--aria-panel-muted)] p-4">
             <label className="block text-sm font-semibold text-[var(--aria-ink)]">
               base_url
               <input
@@ -232,7 +240,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   className={inputClassName}
                 />
               </label>
-              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+              <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs text-[var(--aria-ink-muted)]">
                   {apiKeyAction === "retain"
                     ? "当前 key 将保持不变"
@@ -249,8 +257,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     setError(null);
                     setSuccess(null);
                   }}
-                  className="rounded-md border border-[var(--aria-danger)] px-3 py-1.5 text-xs font-semibold text-[var(--aria-danger)] transition-colors hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] disabled:opacity-60"
+                  className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--aria-danger)] bg-[var(--aria-panel)] px-3 py-2 text-xs font-semibold text-[var(--aria-danger)] transition-all duration-200 hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                 >
+                  <KeyRound aria-hidden="true" className="h-3.5 w-3.5" />
                   清除 key
                 </button>
               </div>
@@ -261,7 +270,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 <legend className="text-sm font-semibold text-[var(--aria-ink)]">
                   默认生成参数
                 </legend>
-                <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                <div className="mt-2.5 grid gap-3 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 sm:grid-cols-2">
                   <SettingsSelect
                     label="默认尺寸"
                     value={defaults.size}
@@ -291,12 +300,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             ) : null}
 
             {error ? (
-              <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">
+              <p role="alert" className="rounded-lg border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">
                 {error}
               </p>
             ) : null}
             {success ? (
-              <p role="status" className="text-sm font-semibold text-[var(--aria-success)]">
+              <p role="status" className="rounded-lg border border-[var(--aria-success)] bg-[var(--aria-success-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">
                 {success}
               </p>
             ) : null}
@@ -307,15 +316,20 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink-muted)] transition-colors hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            className="cursor-pointer rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--aria-ink-muted)] shadow-sm transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={controlsDisabled}
-            className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:opacity-60"
+            className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_4px_12px_rgba(8,145,178,0.24)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
           >
+            {submitting ? (
+              <LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" />
+            ) : (
+              <Save aria-hidden="true" className="h-4 w-4" />
+            )}
             {submitting ? "保存中…" : "保存设置"}
           </button>
         </div>
