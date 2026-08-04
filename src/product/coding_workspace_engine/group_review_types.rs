@@ -14,6 +14,7 @@ pub(crate) struct PromptSegments {
     pub retry_diagnostic_reserve: String,
 }
 
+#[derive(Debug)]
 pub(crate) struct PromptBudgetBreakdown {
     pub fixed_protocol: usize,
     pub identity: usize,

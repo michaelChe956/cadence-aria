@@ -1,11 +1,112 @@
 use std::fs;
 
+use serde::{Deserialize, Serialize};
+
+use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::coding_models::{
-    CodeReviewReport, CompactFindingDigest, SnapshotRebuildError, UnitReviewConclusionSnapshot,
+    CasOutcome, CodeReviewReport, CompactFindingDigest, GroupReviewReductionReport,
+    GroupReviewShardReport, SnapshotRebuildError, UnitReviewConclusionSnapshot,
 };
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
+    pub fn activate_group_review_snapshot(
+        &self,
+        attempt_id: &str,
+        snapshot_hash: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(snapshot_hash)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let active_path = group_review_root(self, &attempt).join("active-snapshot.json");
+        with_exclusive_lock(&active_path, || {
+            write_json(
+                &active_path,
+                &ActiveGroupReviewSnapshot {
+                    content_hash: snapshot_hash.to_string(),
+                },
+            )
+        })
+    }
+
+    pub fn get_active_group_review_snapshot_hash(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<String>, ProductStoreError> {
+        validate_relative_id(attempt_id)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let active_path = group_review_root(self, &attempt).join("active-snapshot.json");
+        if !super::path_is_regular_file(&active_path)? {
+            return Ok(None);
+        }
+        Ok(Some(
+            read_json::<ActiveGroupReviewSnapshot>(&active_path)?.content_hash,
+        ))
+    }
+
+    pub fn write_group_review_shard_report_cas(
+        &self,
+        attempt_id: &str,
+        report: GroupReviewShardReport,
+    ) -> Result<CasOutcome, ProductStoreError> {
+        validate_group_review_report(&report.id, &report.attempt_id, attempt_id)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        write_group_review_report_cas(
+            self,
+            &attempt,
+            &report.snapshot_hash,
+            "shard-reports",
+            &report.id,
+            &report,
+        )
+    }
+
+    pub fn write_group_review_reduction_report_cas(
+        &self,
+        attempt_id: &str,
+        report: GroupReviewReductionReport,
+    ) -> Result<CasOutcome, ProductStoreError> {
+        validate_group_review_report(&report.id, &report.attempt_id, attempt_id)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        write_group_review_report_cas(
+            self,
+            &attempt,
+            &report.snapshot_hash,
+            "reduction-reports",
+            &report.id,
+            &report,
+        )
+    }
+
+    pub fn list_group_review_shard_reports(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<GroupReviewShardReport>, ProductStoreError> {
+        self.list_group_review_reports(attempt_id, "shard-reports")
+    }
+
+    pub fn list_group_review_reduction_reports(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<GroupReviewReductionReport>, ProductStoreError> {
+        self.list_group_review_reports(attempt_id, "reduction-reports")
+    }
+
+    fn list_group_review_reports<T: serde::de::DeserializeOwned>(
+        &self,
+        attempt_id: &str,
+        kind: &str,
+    ) -> Result<Vec<T>, ProductStoreError> {
+        validate_relative_id(attempt_id)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let root = group_review_root(self, &attempt).join(kind);
+        let mut reports = Vec::new();
+        for path in super::json_file_paths(&root)? {
+            reports.push(read_json(&path)?);
+        }
+        Ok(reports)
+    }
+
     pub fn write_unit_review_conclusion_snapshot(
         &self,
         snapshot: &UnitReviewConclusionSnapshot,
@@ -154,6 +255,71 @@ impl super::CodingAttemptStore {
             ))),
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ActiveGroupReviewSnapshot {
+    content_hash: String,
+}
+
+fn group_review_root(
+    store: &super::CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+) -> std::path::PathBuf {
+    store
+        .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .join("group-review")
+}
+
+fn write_group_review_report_cas<T: Serialize>(
+    store: &super::CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    report_snapshot_hash: &str,
+    kind: &str,
+    report_id: &str,
+    report: &T,
+) -> Result<CasOutcome, ProductStoreError> {
+    validate_relative_id(report_snapshot_hash)?;
+    let root = group_review_root(store, attempt);
+    let active_path = root.join("active-snapshot.json");
+    with_exclusive_lock(&active_path, || {
+        let active_hash = if super::path_is_regular_file(&active_path)? {
+            Some(read_json::<ActiveGroupReviewSnapshot>(&active_path)?.content_hash)
+        } else {
+            None
+        };
+        let (path, outcome) = if active_hash.as_deref() == Some(report_snapshot_hash) {
+            (
+                root.join(kind).join(format!("{report_id}.json")),
+                CasOutcome::Written,
+            )
+        } else {
+            (
+                root.join("stale")
+                    .join(kind)
+                    .join(format!("{report_id}.json")),
+                CasOutcome::StoredStale,
+            )
+        };
+        write_json(&path, report)?;
+        Ok(outcome)
+    })
+}
+
+fn validate_group_review_report(
+    report_id: &str,
+    report_attempt_id: &str,
+    attempt_id: &str,
+) -> Result<(), ProductStoreError> {
+    validate_relative_id(report_id)?;
+    validate_relative_id(attempt_id)?;
+    if report_attempt_id != attempt_id {
+        return Err(ProductStoreError::IdentityMismatch {
+            kind: "group_review_report",
+            id: report_id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_snapshot(snapshot: &UnitReviewConclusionSnapshot) -> Result<(), ProductStoreError> {
