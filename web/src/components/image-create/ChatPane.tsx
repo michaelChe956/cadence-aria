@@ -50,7 +50,7 @@ export function ChatPane() {
   return (
     <section
       aria-labelledby="image-create-chat-heading"
-      className="flex min-h-[36rem] flex-col overflow-hidden rounded-2xl border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-[0_2px_8px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.07)] transition-all duration-200 hover:shadow-md"
+      className="flex min-h-[60vh] flex-col overflow-hidden rounded-2xl border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-[0_2px_8px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.07)] transition-all duration-200 hover:shadow-md lg:min-h-[36rem]"
     >
       <div className="flex items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-gradient-to-b from-white to-[var(--aria-panel-muted)] px-5 py-4">
         <div className="flex min-w-0 items-center gap-3">
@@ -75,7 +75,7 @@ export function ChatPane() {
           </span>
         ) : null}
       </div>
-      <div ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-[var(--aria-panel-muted)]/60 p-5">
+      <div ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-[var(--aria-panel-muted)]/60 p-4 sm:p-5">
         {entries.length === 0 ? (
           <div className="flex min-h-72 items-center justify-center">
             <div className="max-w-sm text-center">
@@ -130,7 +130,7 @@ export function ChatPane() {
           disabled={isBusy || !currentSession}
           rows={3}
           placeholder={isBusy ? "Agent 正在处理上一条消息…" : "描述图片目标或提出修改意见"}
-          className="block min-h-24 w-full resize-y rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-3 text-sm leading-6 text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 placeholder:text-[var(--aria-ink-muted)] hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70"
+          className="block min-h-24 w-full resize-y rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-3 text-base leading-6 text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 placeholder:text-[var(--aria-ink-muted)] hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70 sm:text-sm"
         />
         <div className="mt-3 flex items-center justify-between gap-3">
           <span className="text-xs text-[var(--aria-ink-muted)]">
@@ -139,7 +139,7 @@ export function ChatPane() {
           <button
             type="submit"
             disabled={isBusy || !currentSession || !message.trim()}
-            className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_4px_12px_rgba(8,145,178,0.24)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_4px_12px_rgba(8,145,178,0.24)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Send aria-hidden="true" className="h-4 w-4" />
             发送
@@ -154,13 +154,13 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
   switch (entry.type) {
     case "user_message":
       return (
-        <article className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-gradient-to-br from-[var(--aria-primary)] to-[#0e7490] px-4 py-3 text-sm leading-6 text-white shadow-[0_5px_14px_rgba(8,145,178,0.2)]">
+        <article className="ml-auto w-full max-w-none rounded-2xl rounded-br-md bg-gradient-to-br from-[var(--aria-primary)] to-[#0e7490] px-4 py-3 text-sm leading-6 text-white shadow-[0_5px_14px_rgba(8,145,178,0.2)] sm:w-auto sm:max-w-[85%]">
           {entry.content}
         </article>
       );
     case "provider_text":
       return (
-        <article className="max-w-[90%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-3 text-sm leading-6 shadow-sm">
+        <article className="w-full max-w-none whitespace-pre-wrap rounded-2xl rounded-bl-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-3 text-sm leading-6 shadow-sm sm:w-auto sm:max-w-[90%]">
           {entry.content}
         </article>
       );
@@ -193,7 +193,7 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
             <a
               href={dataUri}
               download={`image-create-${Date.now()}.${extension}`}
-              className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-3 py-2 text-xs font-semibold text-white shadow-[0_3px_10px_rgba(8,145,178,0.22)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+              className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-3 py-2 text-xs font-semibold text-white shadow-[0_3px_10px_rgba(8,145,178,0.22)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
             >
               <Download aria-hidden="true" className="h-3.5 w-3.5" />
               下载原图

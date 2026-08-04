@@ -33,6 +33,28 @@ async function selectCustomOption(
 }
 
 describe("ParamsPanel", () => {
+  it("keeps generation visible while collapsing mobile parameters by default", async () => {
+    const user = userEvent.setup();
+    useImageCreateStore.setState({ currentSession: sessionRecord() });
+
+    render(<ParamsPanel />);
+
+    const toggle = screen.getByRole("button", { name: "展开生成参数" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("combobox", { name: "尺寸" }).parentElement?.parentElement)
+      .toHaveClass("hidden", "lg:grid");
+    expect(screen.getByRole("button", { name: "生成图片" })).toHaveClass(
+      "min-h-11",
+    );
+
+    await user.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "收起生成参数" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "尺寸" }).parentElement?.parentElement)
+      .toHaveClass("grid");
+  });
+
   it("binds all parameter selects to setParams and only generates on button click", async () => {
     const user = userEvent.setup();
     const setParams = vi.fn();

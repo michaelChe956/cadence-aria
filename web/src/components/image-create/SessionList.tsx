@@ -40,7 +40,13 @@ function templateSelectionFromLabel(label: string): TemplateSelection {
 const fieldClassName =
   "mt-1.5 block w-full rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-2.5 text-sm font-medium text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2";
 
-export function SessionList() {
+export function SessionList({
+  onClose,
+  onSessionSelect,
+}: {
+  onClose?: () => void;
+  onSessionSelect?: () => void;
+} = {}) {
   const sessions = useImageCreateStore((state) => state.sessions);
   const currentSessionId = useImageCreateStore(
     (state) => state.currentSession?.session.id ?? null,
@@ -78,6 +84,7 @@ export function SessionList() {
       setTemplate("ppt_business_illustration");
       setProvider("claude_code");
       setCustomTemplate("");
+      onSessionSelect?.();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "创建会话失败");
     } finally {
@@ -95,7 +102,7 @@ export function SessionList() {
   }
 
   return (
-    <aside className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-[0_2px_8px_rgba(15,23,42,0.04),0_10px_28px_rgba(15,23,42,0.06)] transition-all duration-200 hover:shadow-md">
+    <aside className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-[0_2px_8px_rgba(15,23,42,0.04),0_10px_28px_rgba(15,23,42,0.06)] transition-all duration-200 hover:shadow-md">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--aria-line)] bg-gradient-to-b from-white to-[var(--aria-panel-muted)] p-4">
         <div className="flex items-center gap-2.5">
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--aria-primary-soft)] text-[var(--aria-primary)] shadow-sm">
@@ -106,18 +113,30 @@ export function SessionList() {
             <p className="text-xs text-[var(--aria-ink-muted)]">保存每次创作思路</p>
           </div>
         </div>
-        <button
-          type="button"
-          aria-label="新建会话"
-          title="新建会话"
-          onClick={() => {
-            setShowCreate(true);
-            setError(null);
-          }}
-          className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] text-white shadow-[0_4px_12px_rgba(8,145,178,0.25)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5"
-        >
-          <Plus aria-hidden="true" className="h-4 w-4" />
-        </button>
+        <div className="flex items-center gap-2">
+          {onClose ? (
+            <button
+              type="button"
+              aria-label="关闭会话列表"
+              onClick={onClose}
+              className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 lg:hidden"
+            >
+              <X aria-hidden="true" className="h-5 w-5" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label="新建会话"
+            title="新建会话"
+            onClick={() => {
+              setShowCreate(true);
+              setError(null);
+            }}
+            className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] text-white shadow-[0_4px_12px_rgba(8,145,178,0.25)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5"
+          >
+            <Plus aria-hidden="true" className="h-4 w-4" />
+          </button>
+        </div>
       </div>
       {error ? (
         <p role="alert" className="mx-3 mt-3 rounded-lg border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">
@@ -141,6 +160,7 @@ export function SessionList() {
               active={currentSessionId === session.id}
               onOpen={() => {
                 openSession(session.id).catch(() => {});
+                onSessionSelect?.();
               }}
               onDelete={() => void handleDelete(session.id)}
             />
@@ -170,7 +190,7 @@ export function SessionList() {
                 type="button"
                 aria-label="关闭"
                 onClick={() => setShowCreate(false)}
-                className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
               >
                 <X aria-hidden="true" className="h-4 w-4" />
               </button>
@@ -197,7 +217,7 @@ export function SessionList() {
                     }}
                     rows={3}
                     placeholder="描述这个会话的创作方向"
-                    className={`${fieldClassName} resize-y placeholder:text-[var(--aria-ink-muted)]`}
+                    className={`${fieldClassName} min-h-11 resize-y text-base placeholder:text-[var(--aria-ink-muted)] sm:text-sm`}
                   />
                 </label>
               ) : null}
@@ -219,14 +239,14 @@ export function SessionList() {
               <button
                 type="button"
                 onClick={() => setShowCreate(false)}
-                className="cursor-pointer rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--aria-ink-muted)] shadow-sm transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+                className="min-h-11 cursor-pointer rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--aria-ink-muted)] shadow-sm transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
               >
                 取消
               </button>
               <button
                 type="submit"
                 disabled={submitting}
-                className="cursor-pointer rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_4px_12px_rgba(8,145,178,0.24)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                className="min-h-11 cursor-pointer rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_4px_12px_rgba(8,145,178,0.24)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {submitting ? "创建中…" : "创建"}
               </button>
@@ -260,7 +280,7 @@ function SessionItem({
       <button
         type="button"
         onClick={onOpen}
-        className="w-full cursor-pointer rounded-lg px-1.5 py-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+        className="min-h-11 w-full cursor-pointer rounded-lg px-1.5 py-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
       >
         <span className="block truncate text-sm font-semibold">
           {templateLabel(session.template)}
@@ -278,7 +298,7 @@ function SessionItem({
           aria-label={`删除会话 ${session.id}`}
           onClick={onDelete}
           disabled={session.status === "deleting"}
-          className="inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold text-[var(--aria-danger)] transition-all duration-200 hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1 rounded-lg px-3 py-2 text-xs font-semibold text-[var(--aria-danger)] transition-all duration-200 hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Trash2 aria-hidden="true" className="h-3 w-3" />
           删除

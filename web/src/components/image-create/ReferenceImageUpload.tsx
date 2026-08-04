@@ -96,7 +96,7 @@ export function ReferenceImageUpload() {
               onClick={removeReference}
               disabled={isBusy}
               title={isBusy ? "处理中不可修改参考图" : undefined}
-              className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2.5 py-1.5 text-xs font-semibold text-[var(--aria-danger)] transition-all duration-200 hover:border-[var(--aria-danger)] hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2 text-xs font-semibold text-[var(--aria-danger)] transition-all duration-200 hover:border-[var(--aria-danger)] hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
               移除参考图

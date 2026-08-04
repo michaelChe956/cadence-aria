@@ -1,4 +1,4 @@
-import { LoaderCircle, SlidersHorizontal, Wand2 } from "lucide-react";
+import { ChevronDown, LoaderCircle, SlidersHorizontal, Wand2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   IMAGE_BACKGROUND_OPTIONS,
@@ -36,6 +36,7 @@ export function ParamsPanel() {
   const isBusy = useImageCreateStore((state) => state.isBusy);
   const setParams = useImageCreateStore((state) => state.setParams);
   const generate = useImageCreateStore((state) => state.generate);
+  const [paramsExpanded, setParamsExpanded] = useState(false);
   const elapsed = useElapsedSeconds(isBusy);
 
   return (
@@ -52,12 +53,29 @@ export function ParamsPanel() {
             生成参数
           </h2>
         </div>
-        {isBusy ? (
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--aria-primary-soft)] px-2.5 py-1 text-xs font-semibold text-[var(--aria-ink)]">
-            <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 motion-safe:animate-spin" />
-            处理中
-          </span>
-        ) : null}
+        <div className="flex items-center gap-2">
+          {isBusy ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--aria-primary-soft)] px-2.5 py-1 text-xs font-semibold text-[var(--aria-ink)]">
+              <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 motion-safe:animate-spin" />
+              处理中
+            </span>
+          ) : null}
+          <button
+            type="button"
+            aria-label={paramsExpanded ? "收起生成参数" : "展开生成参数"}
+            aria-expanded={paramsExpanded}
+            aria-controls="image-create-parameter-fields"
+            onClick={() => setParamsExpanded((expanded) => !expanded)}
+            className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 lg:hidden"
+          >
+            <ChevronDown
+              aria-hidden="true"
+              className={`h-5 w-5 transition-transform duration-200 motion-reduce:transition-none ${
+                paramsExpanded ? "rotate-180" : ""
+              }`}
+            />
+          </button>
+        </div>
       </div>
       {isBusy ? (
         <div
@@ -77,7 +95,12 @@ export function ParamsPanel() {
           </p>
         </div>
       ) : null}
-      <div className="mt-4 grid gap-3 rounded-xl bg-[var(--aria-panel-muted)] p-3 sm:grid-cols-2">
+      <div
+        id="image-create-parameter-fields"
+        className={`mt-4 gap-3 rounded-xl bg-[var(--aria-panel-muted)] p-3 sm:grid-cols-2 lg:grid ${
+          paramsExpanded ? "grid" : "hidden"
+        }`}
+      >
         <ParameterSelect
           label="尺寸"
           value={params.size}
@@ -126,7 +149,7 @@ export function ParamsPanel() {
           generate().catch(() => {});
         }}
         disabled={isBusy || !currentSession || !params.prompt.trim()}
-        className="mt-4 inline-flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-3 text-sm font-semibold text-white shadow-[0_5px_16px_rgba(8,145,178,0.26)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50"
+        className="mt-4 inline-flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-3 text-sm font-semibold text-white shadow-[0_5px_16px_rgba(8,145,178,0.26)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {isBusy ? (
           <LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" />

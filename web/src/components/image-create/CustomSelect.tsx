@@ -17,7 +17,7 @@ export interface CustomSelectProps {
 }
 
 const triggerClassName =
-  "flex w-full items-center justify-between gap-3 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-2.5 text-left text-sm font-medium text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)] disabled:opacity-60";
+  "flex min-h-11 w-full items-center justify-between gap-3 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-2.5 text-left text-base font-medium text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)] disabled:opacity-60 sm:text-sm";
 
 export function CustomSelect({
   label,
@@ -189,7 +189,7 @@ export function CustomSelect({
                 role="option"
                 aria-selected={selected}
                 onClick={(event) => handleOptionClick(event, option)}
-                className={`flex w-full cursor-pointer items-center gap-2 rounded-lg border-l-2 px-3.5 py-2.5 text-left text-sm font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--aria-primary)] ${
+                className={`flex min-h-11 w-full cursor-pointer items-center gap-2 rounded-lg border-l-2 px-3.5 py-2.5 text-left text-base font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--aria-primary)] sm:text-sm ${
                   selected
                     ? "border-l-[var(--aria-primary)] bg-[var(--aria-primary-soft)] text-[var(--aria-primary)]"
                     : "border-l-transparent text-[var(--aria-ink)] hover:bg-[var(--aria-primary-soft)] hover:text-[var(--aria-primary)]"

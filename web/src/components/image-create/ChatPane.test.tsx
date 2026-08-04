@@ -60,6 +60,36 @@ describe("ChatPane", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("图片服务暂时不可用");
   });
 
+  it("uses mobile-first touch sizing and full-width message content", () => {
+    useImageCreateStore.setState({
+      currentSession: sessionRecord(),
+      entries: [
+        {
+          id: "user-1",
+          type: "user_message",
+          role: "user",
+          content: "请加强对比度",
+          timestamp: "2026-08-03T10:00:00Z",
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+
+    expect(screen.getByRole("region", { name: "创作对话" })).toHaveClass(
+      "min-h-[60vh]",
+      "lg:min-h-[36rem]",
+    );
+    expect(screen.getByLabelText("创作消息")).toHaveClass(
+      "text-base",
+      "sm:text-sm",
+    );
+    expect(screen.getByText("请加强对比度")).toHaveClass(
+      "max-w-none",
+      "sm:max-w-[85%]",
+    );
+  });
+
   it("submits chat messages and disables the input while busy", () => {
     const sendMessage = vi.fn();
     useImageCreateStore.setState({

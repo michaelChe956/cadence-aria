@@ -49,6 +49,54 @@ describe("ImageCreatePage", () => {
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
+  it("opens the mobile session drawer and closes it after selecting a session", async () => {
+    const user = userEvent.setup();
+    const openSession = vi.fn().mockResolvedValue(undefined);
+    useImageCreateStore.setState({
+      sessions: [
+        {
+          id: "session-1",
+          provider_name: "claude_code",
+          template: { preset: "ppt_business_illustration" },
+          status: "active",
+          created_at: "2026-08-03T09:00:00Z",
+          updated_at: "2026-08-03T09:00:00Z",
+        },
+      ],
+      openSession,
+    });
+
+    render(<ImageCreatePage />);
+
+    const drawer = screen.getByTestId("image-create-session-drawer");
+    expect(drawer).toHaveClass("-translate-x-full", "lg:translate-x-0");
+
+    await user.click(screen.getByRole("button", { name: "打开会话列表" }));
+    expect(drawer).toHaveClass("translate-x-0");
+    expect(screen.getByRole("button", { name: "关闭会话列表" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /PPT 商务配图/ }));
+
+    expect(openSession).toHaveBeenCalledWith("session-1");
+    expect(drawer).toHaveClass("-translate-x-full");
+  });
+
+  it("keeps the desktop workspace columns while using a single mobile-first flow", () => {
+    render(<ImageCreatePage />);
+
+    expect(screen.getByTestId("image-create-workspace")).toHaveClass(
+      "lg:grid",
+      "lg:grid-cols-[18rem_minmax(0,1fr)]",
+    );
+    expect(screen.getByTestId("image-create-main-area")).toHaveClass(
+      "xl:grid-cols-[minmax(0,1fr)_22rem]",
+    );
+    expect(screen.getByRole("button", { name: "打开会话列表" })).toHaveClass(
+      "lg:hidden",
+      "min-h-11",
+    );
+  });
+
   it("opens and closes the settings dialog without saving", async () => {
     const user = userEvent.setup();
     const loadSettings = vi.fn().mockResolvedValue(undefined);
