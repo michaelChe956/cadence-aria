@@ -23,6 +23,15 @@ beforeEach(() => {
   });
 });
 
+async function selectCustomOption(
+  user: ReturnType<typeof userEvent.setup>,
+  label: string,
+  option: string,
+) {
+  await user.click(screen.getByRole("combobox", { name: label }));
+  await user.click(screen.getByRole("option", { name: option }));
+}
+
 describe("ParamsPanel", () => {
   it("binds all parameter selects to setParams and only generates on button click", async () => {
     const user = userEvent.setup();
@@ -36,10 +45,10 @@ describe("ParamsPanel", () => {
 
     render(<ParamsPanel />);
 
-    await user.selectOptions(screen.getByLabelText("尺寸"), "1536x1024");
-    await user.selectOptions(screen.getByLabelText("质量"), "high");
-    await user.selectOptions(screen.getByLabelText("背景"), "transparent");
-    await user.selectOptions(screen.getByLabelText("输出格式"), "webp");
+    await selectCustomOption(user, "尺寸", "1536x1024");
+    await selectCustomOption(user, "质量", "high");
+    await selectCustomOption(user, "背景", "transparent");
+    await selectCustomOption(user, "输出格式", "webp");
 
     expect(setParams).toHaveBeenCalledWith({ size: "1536x1024" });
     expect(setParams).toHaveBeenCalledWith({ quality: "high" });
@@ -75,10 +84,9 @@ describe("ParamsPanel", () => {
     );
     rerender(<ParamsPanel />);
 
-    expect(screen.getByLabelText("参考图保真度")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("参考图保真度"), {
-      target: { value: "high" },
-    });
+    expect(screen.getByRole("combobox", { name: "参考图保真度" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("combobox", { name: "参考图保真度" }));
+    fireEvent.click(screen.getByRole("option", { name: "high" }));
     expect(useImageCreateStore.getState().params.input_fidelity).toBe("high");
   });
 });

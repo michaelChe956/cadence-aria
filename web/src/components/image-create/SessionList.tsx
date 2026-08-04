@@ -8,6 +8,7 @@ import {
   type SessionSummary,
 } from "../../api/types/image-create";
 import { useImageCreateStore } from "../../state/image-create-store";
+import { CustomSelect } from "./CustomSelect";
 
 type TemplateSelection = ImageCreatePreset | "custom";
 
@@ -16,6 +17,25 @@ const TEMPLATE_LABELS: Record<ImageCreatePreset, string> = {
   business_flow_diagram: "业务流程图",
   web_page_ui: "Web 页面 UI 图",
 };
+
+const TEMPLATE_SELECTION_OPTIONS = [
+  ...Object.values(TEMPLATE_LABELS),
+  "自定义引导词",
+] as const;
+
+function templateSelectionLabel(selection: TemplateSelection): string {
+  return selection === "custom" ? "自定义引导词" : TEMPLATE_LABELS[selection];
+}
+
+function templateSelectionFromLabel(label: string): TemplateSelection {
+  if (label === "自定义引导词") {
+    return "custom";
+  }
+  const selection = Object.entries(TEMPLATE_LABELS).find(
+    ([, templateName]) => templateName === label,
+  )?.[0];
+  return (selection ?? "ppt_business_illustration") as ImageCreatePreset;
+}
 
 const fieldClassName =
   "mt-1.5 block w-full rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-2.5 text-sm font-medium text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2";
@@ -156,23 +176,15 @@ export function SessionList() {
               </button>
             </div>
             <div className="mt-5 space-y-4 rounded-xl bg-[var(--aria-panel-muted)] p-4">
-              <label className="block text-sm font-semibold">
-                模板
-                <select
-                  aria-label="模板"
-                  value={template}
-                  onChange={(event) => {
-                    setTemplate(event.target.value as TemplateSelection);
-                    setError(null);
-                  }}
-                  className={fieldClassName}
-                >
-                  <option value="ppt_business_illustration">PPT 商务配图</option>
-                  <option value="business_flow_diagram">业务流程图</option>
-                  <option value="web_page_ui">Web 页面 UI 图</option>
-                  <option value="custom">自定义引导词</option>
-                </select>
-              </label>
+              <CustomSelect
+                label="模板"
+                value={templateSelectionLabel(template)}
+                options={TEMPLATE_SELECTION_OPTIONS}
+                onChange={(value) => {
+                  setTemplate(templateSelectionFromLabel(value));
+                  setError(null);
+                }}
+              />
               {template === "custom" ? (
                 <label className="block text-sm font-semibold">
                   自定义引导词
@@ -189,23 +201,14 @@ export function SessionList() {
                   />
                 </label>
               ) : null}
-              <label className="block text-sm font-semibold">
-                Provider
-                <select
-                  aria-label="Provider"
-                  value={provider}
-                  onChange={(event) =>
-                    setProvider(event.target.value as ImageCreateProvider)
-                  }
-                  className={fieldClassName}
-                >
-                  {IMAGE_CREATE_PROVIDER_OPTIONS.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <CustomSelect
+                label="Provider"
+                value={provider}
+                options={IMAGE_CREATE_PROVIDER_OPTIONS}
+                onChange={(value) =>
+                  setProvider(value as ImageCreateProvider)
+                }
+              />
               {error ? (
                 <p role="alert" className="rounded-lg border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)]">
                   {error}

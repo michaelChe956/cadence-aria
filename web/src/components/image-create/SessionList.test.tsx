@@ -33,6 +33,15 @@ beforeEach(() => {
   });
 });
 
+async function selectCustomOption(
+  user: ReturnType<typeof userEvent.setup>,
+  label: string,
+  option: string,
+) {
+  await user.click(screen.getByRole("combobox", { name: label }));
+  await user.click(screen.getByRole("option", { name: option }));
+}
+
 describe("SessionList", () => {
   it("creates preset and custom sessions with the selected provider", async () => {
     const user = userEvent.setup();
@@ -41,8 +50,8 @@ describe("SessionList", () => {
     render(<SessionList />);
 
     await user.click(screen.getByRole("button", { name: "新建会话" }));
-    await user.selectOptions(screen.getByLabelText("模板"), "business_flow_diagram");
-    await user.selectOptions(screen.getByLabelText("Provider"), "codex");
+    await selectCustomOption(user, "模板", "业务流程图");
+    await selectCustomOption(user, "Provider", "codex");
     await user.click(screen.getByRole("button", { name: "创建" }));
     expect(createSession).toHaveBeenCalledWith(
       { preset: "business_flow_diagram" },
@@ -50,7 +59,7 @@ describe("SessionList", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "新建会话" }));
-    await user.selectOptions(screen.getByLabelText("模板"), "custom");
+    await selectCustomOption(user, "模板", "自定义引导词");
     await user.type(screen.getByLabelText("自定义引导词"), "科技感海报");
     await user.click(screen.getByRole("button", { name: "创建" }));
     expect(createSession).toHaveBeenCalledWith({ custom: "科技感海报" }, "claude_code");

@@ -37,6 +37,15 @@ beforeEach(() => {
   });
 });
 
+async function selectCustomOption(
+  user: ReturnType<typeof userEvent.setup>,
+  label: string,
+  option: string,
+) {
+  await user.click(screen.getByRole("combobox", { name: label }));
+  await user.click(screen.getByRole("option", { name: option }));
+}
+
 describe("SettingsDialog", () => {
   it("loads settings and displays the masked API key", async () => {
     const { loadSettings } = renderDialog();
@@ -118,7 +127,7 @@ describe("SettingsDialog", () => {
 
     await user.clear(screen.getByLabelText("base_url"));
     await user.type(screen.getByLabelText("base_url"), "http://127.0.0.1:8080/v1");
-    await user.selectOptions(screen.getByLabelText("默认质量"), "high");
+    await selectCustomOption(user, "默认质量", "high");
     await user.click(screen.getByRole("button", { name: "保存设置" }));
 
     await waitFor(() => {
