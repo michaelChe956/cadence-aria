@@ -1,0 +1,217 @@
+{
+  "runId": "1de510eb",
+  "agent": "reviewer",
+  "task": "Scoped re-review：验证 final whole-branch review 的 fix wave（只读不改）。这是最终审查的收尾验证。\n\n## 上一轮 final review 的 findings（逐条核验）\n1. **Critical：API key 可经网关错误正文回显泄露**——修法：ImageClientError::HttpStatus body 脱敏（key→[REDACTED]）+ 截断 ≤500 字符；REST/事件/持久化不含 key；加测试。\n2. **Important：generate 路由无 DefaultBodyLimit（Axum 默认 2MiB 与参考图 ≤10MiB 契约冲突）**——修法：仅 generate 路由加 11MiB DefaultBodyLimit；validator 仍严格 10MiB；加 2-10MiB 成功/>10MiB 失败测试。\n3. **Important：openSession 无 request token（A→B→A 乱序覆盖）**——修法：openSessionRequestSequence + stale check；加 A→B、A→B→A 测试。\n4. **Important：resume 失效识别过宽**——修法：收紧为明确 session/resume 失效；加普通错误不 fallback 负例测试。\n5. **Minor：openspec tasks.md 未勾选**——修法：25 个已完成项勾 [x]。\n6. **Recommendation：ImageGenRequest 无 model 字段**——修法：后端 body 加固定 model=\"gpt-image-2\"（generations/edits 都带）。\n\n## Fix diff（本次审查对象）\n`.superpowers/sdd/2026-08-03_计划文档_功能开发_图片创作agent_v1.9/review-ccd7e111..98a4e32b.diff`\n\n## 审查要求\n1. **6 findings 是否 ADDRESSED**：逐条核验（Critical 重点——key 是否真在 REST/事件/持久化三层都不出现；脱敏是否覆盖完整 key；截断是否正确）。可参考源码 `src/cross_cutting/image_client.rs`、`src/web/app.rs`、`src/web/handlers/image_create.rs`、`src/product/image_create/prompt_iteration.rs`、`web/src/state/image-create-store.ts`、`openspec/changes/add-image-create-agent/tasks.md`。\n2. **fix diff 有无新 breakage**：只审 fix diff（ccd7e111..98a4e32b），新 Critical/Important breakage 才提。\n3. 实现者声称：后端 fmt/clippy/311+doc 全过、前端 tsc + 770 测试全过（含新增回归测试）。\n\n## 输出\n- 中文。\n- 6 findings 逐条：ADDRESSED / NOT ADDRESSED + 证据。\n- fix diff 新 breakage（无则明说「无」）。\n- 末尾：**最终结论——分支是否 Ready to merge（是/否）**；若还有残留，列阻塞项（应已没有或极少）。\n- 只读，不改任何文件。",
+  "exitCode": 0,
+  "usage": {
+    "input": 56636,
+    "output": 9304,
+    "cacheRead": 239616,
+    "cacheWrite": 0,
+    "cost": 0,
+    "turns": 10
+  },
+  "model": "my-openai/gpt-5.6-terra:high",
+  "attemptedModels": [
+    "my-openai/gpt-5.6-terra:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "my-openai/gpt-5.6-terra:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 56636,
+        "output": 9304,
+        "cacheRead": 239616,
+        "cacheWrite": 0,
+        "cost": 0,
+        "turns": 10
+      }
+    }
+  ],
+  "durationMs": 196538,
+  "toolCount": 24,
+  "launchContractDigest": "47a2a2d7aca5b5248dab1d6849f33aa7c0dc28125f71ef02c559e233bd7d6a34",
+  "launchResolvedExtensions": {
+    "version": 1,
+    "source": "launch-resolved",
+    "disableAmbientExtensions": false,
+    "runtime": [
+      "sha256:c56dc3962d3f099c"
+    ],
+    "configured": [],
+    "effective": [
+      "sha256:c56dc3962d3f099c"
+    ],
+    "omitted": {
+      "runtime": 0,
+      "configured": 0,
+      "effective": 0
+    }
+  },
+  "acceptance": {
+    "status": "checked",
+    "evidenceStatus": "checked",
+    "explicit": true,
+    "effectiveAcceptance": {
+      "level": "checked",
+      "explicit": true,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "changed-files",
+            "tests-added",
+            "commands-run",
+            "residual-risks",
+            "no-staged-files"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "changed-files",
+        "tests-added",
+        "commands-run",
+        "residual-risks",
+        "no-staged-files"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "changed-files",
+          "tests-added",
+          "commands-run",
+          "residual-risks",
+          "no-staged-files"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "criterion:criterion-1",
+        "status": "passed",
+        "message": "Required criterion 'criterion-1' satisfied."
+      },
+      {
+        "id": "evidence:changed-files",
+        "status": "passed",
+        "message": "changed-files evidence present."
+      },
+      {
+        "id": "evidence:tests-added",
+        "status": "passed",
+        "message": "tests-added evidence present."
+      },
+      {
+        "id": "evidence:commands-run",
+        "status": "passed",
+        "message": "commands-run evidence present."
+      },
+      {
+        "id": "evidence:residual-risks",
+        "status": "passed",
+        "message": "residual-risks evidence present."
+      },
+      {
+        "id": "evidence:no-staged-files",
+        "status": "passed",
+        "message": "no-staged-files evidence present."
+      },
+      {
+        "id": "no-staged-files",
+        "status": "passed",
+        "message": "No staged files detected."
+      }
+    ],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "已逐项给出 6 个 finding 的 ADDRESSED 结论、具体源码/测试文件路径及行号；新 Critical/Important breakage 审查结果为无。"
+        }
+      ],
+      "changedFiles": [
+        "openspec/changes/add-image-create-agent/tasks.md",
+        "src/cross_cutting/image_client.rs",
+        "src/product/image_create/prompt_iteration.rs",
+        "src/web/app.rs",
+        "src/web/handlers/image_create.rs",
+        "web/src/state/image-create-store.test.ts",
+        "web/src/state/image-create-store.ts"
+      ],
+      "testsAddedOrUpdated": [
+        "src/cross_cutting/image_client.rs: generations/edits model 字段、回显 key 脱敏和 ≤500 字符测试",
+        "src/product/image_create/prompt_iteration.rs: 普通 invalid request 不触发 resume fallback 测试",
+        "src/web/handlers/image_create.rs: >2MiB 至 <10MiB 成功、>10MiB 拒绝、REST/event/persisted key 脱敏测试",
+        "web/src/state/image-create-store.test.ts: A→B 与 A→B→A 乱序 openSession 测试"
+      ],
+      "commandsRun": [
+        {
+          "command": "git diff --check ccd7e111..98a4e32b",
+          "result": "passed",
+          "summary": "无 whitespace error 输出。"
+        },
+        {
+          "command": "git diff --name-only ccd7e111..98a4e32b",
+          "result": "passed",
+          "summary": "确认 fix wave 仅变更 7 个审查对象文件。"
+        },
+        {
+          "command": "git diff --cached --name-only",
+          "result": "passed",
+          "summary": "无输出；暂存区为空。"
+        },
+        {
+          "command": "cargo fmt --check / cargo clippy / cargo test --locked / cd web && pnpm tsc -b / pnpm test",
+          "result": "not-run",
+          "summary": "本任务为只读 diff 审查，且运行环境的审查工具规则仅允许使用 git/grep/ls/cat 类只读命令；未独立复跑实现者声称的验证命令。"
+        }
+      ],
+      "validationOutput": [
+        "6/6 上一轮 findings 均已静态核验为 ADDRESSED。",
+        "关键泄露路径已追踪：ImageClientError HttpStatus 脱敏 → ImageCreateError → REST 响应与 session event → session JSON 持久化。",
+        "fix diff 未发现新 Critical 或 Important breakage。",
+        "git diff --check 通过；无 staged files。"
+      ],
+      "residualRisks": [
+        "实现者声称的全量后端/前端验证未由本次只读审查独立执行。",
+        "脱敏覆盖完整 API key 的原始字面量回显；非原样编码后的上游回显未由当前 replace 策略专门处理。"
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "修复网关错误正文脱敏及截断、generate 单路由 11MiB body limit、前端 openSession 时序 token、resume fallback 识别规则；补齐对应测试、OpenSpec 任务勾选及固定 gpt-image-2 model 字段。",
+      "reviewFindings": [
+        "no blockers: src/cross_cutting/image_client.rs:150-156,256-262 - HTTP error body 在传播前脱敏并限长。",
+        "no blockers: src/web/app.rs:33-38 - 仅 generate 路由放宽至 11MiB。",
+        "no blockers: web/src/state/image-create-store.ts:350-372 - stale openSession completion 被 token 拦截。",
+        "no blockers: src/product/image_create/prompt_iteration.rs:236-244 - resume fallback 已收紧且有普通错误负例测试。"
+      ],
+      "manualNotes": "建议合并；无残留阻塞项。"
+    }
+  },
+  "effects": {
+    "fileMutation": {
+      "status": "not-applicable",
+      "expected": false,
+      "attempted": false
+    }
+  },
+  "transcriptPath": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0803-add-image-create/.pi-subagents/artifacts/1de510eb_reviewer_0_transcript.jsonl",
+  "timestamp": 1785788988499
+}
