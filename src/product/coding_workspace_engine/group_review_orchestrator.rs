@@ -11,9 +11,10 @@ use tokio::sync::Semaphore;
 
 use super::group_review_budget::{
     BudgetDecision, CapacityDecision, FindingsDecision, GROUP_REVIEW_QUALITY_TARGET_BYTES,
-    check_capacity, check_shard_findings, decide_budget, group_review_shard_concurrency,
+    REPAIR_PROMPT_BYTE_CAP, check_capacity, check_shard_findings, decide_budget,
+    group_review_shard_concurrency,
 };
-use super::group_review_prompts::build_shard_prompt;
+use super::group_review_prompts::{build_repair_prompt, build_shard_prompt};
 use super::group_review_types::{GroupReviewMaterialSnapshot, PromptBudgetBreakdown};
 use super::plan_defect_routing::{GroupReviewerProjectionBinding, validate_group_reviewer_finding};
 use super::review_parser::parse_review_payload;
@@ -94,6 +95,61 @@ impl<'a> GroupReviewOrchestrator<'a> {
         }
         reports.sort_by(|left, right| left.shard_id.cmp(&right.shard_id));
         Ok(reports)
+    }
+
+    pub(crate) async fn execute_with_retry(
+        &self,
+        prompt: &str,
+        max_attempts: usize,
+    ) -> Result<String, GroupReviewExecutionError> {
+        let attempts = max_attempts.max(1);
+        let mut last_transport_error = None;
+        for _ in 0..attempts {
+            match self.executor.execute(prompt).await {
+                Ok(result) => return Ok(result.full_output),
+                Err(error @ GroupReviewExecutionError::Transport(_)) => {
+                    last_transport_error = Some(error);
+                }
+                Err(error @ GroupReviewExecutionError::UserCancelled)
+                | Err(error @ GroupReviewExecutionError::Internal(_)) => return Err(error),
+            }
+        }
+        Err(last_transport_error.expect("at least one transport error after exhausted retries"))
+    }
+
+    pub(crate) async fn execute_repair(
+        &self,
+        raw_output: &str,
+        max_findings: usize,
+    ) -> Result<RepairOutput, RepairError> {
+        let prompt = build_repair_prompt(raw_output);
+        if prompt.measure().total > REPAIR_PROMPT_BYTE_CAP {
+            return Err(RepairError::InputTooLarge);
+        }
+        let repaired_output = self.executor.execute(&prompt.join()).await?.full_output;
+        validate_repair_fidelity(raw_output, &repaired_output, max_findings)?;
+        Ok(RepairOutput { repaired_output })
+    }
+
+    pub(crate) fn persist_repair_outputs(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        raw_output: &str,
+        repair: &RepairOutput,
+    ) -> Result<Vec<String>, ProductStoreError> {
+        let raw_ref = self.store.save_provider_raw_output(
+            attempt,
+            CodingExecutionStage::InternalPrReview,
+            "group_review_repair_raw",
+            raw_output,
+        )?;
+        let repaired_ref = self.store.save_provider_raw_output(
+            attempt,
+            CodingExecutionStage::InternalPrReview,
+            "group_review_repair_output",
+            &repair.repaired_output,
+        )?;
+        Ok(vec![raw_ref, repaired_ref])
     }
 
     pub(crate) async fn execute_reduction(
@@ -246,6 +302,103 @@ impl<'a> GroupReviewOrchestrator<'a> {
             .write_group_review_shard_report_cas(&snapshot.attempt_id, report.clone())?;
         Ok(report)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RepairOutput {
+    pub(crate) repaired_output: String,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum RepairFidelityError {
+    #[error("repair_missing_marker")]
+    MissingMarker,
+    #[error("repair_verdict_mismatch")]
+    VerdictMismatch,
+    #[error("repair_forbidden_approve")]
+    ForbiddenApprove,
+    #[error("repair_finding_not_subtraceable")]
+    FindingNotSubtraceable,
+    #[error("repair_evidence_not_subtraceable")]
+    EvidenceNotSubtraceable,
+    #[error("repair_target_not_subtraceable")]
+    TargetNotSubtraceable,
+    #[error("repair_too_many_findings")]
+    TooManyFindings,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RepairError {
+    #[error("repair_input_too_large")]
+    InputTooLarge,
+    #[error("repair_executor: {0}")]
+    Executor(#[from] GroupReviewExecutionError),
+    #[error("repair_fidelity: {0}")]
+    Fidelity(#[from] RepairFidelityError),
+}
+
+pub(crate) fn validate_repair_fidelity(
+    raw_output: &str,
+    repaired_output: &str,
+    max_findings: usize,
+) -> Result<(), RepairFidelityError> {
+    let raw_verdict = verdict_marker(raw_output).ok_or(RepairFidelityError::MissingMarker)?;
+    let repaired_verdict =
+        verdict_marker(repaired_output).ok_or(RepairFidelityError::MissingMarker)?;
+    if repaired_verdict == ReviewVerdict::Approve {
+        return Err(RepairFidelityError::ForbiddenApprove);
+    }
+    if repaired_verdict != raw_verdict {
+        return Err(RepairFidelityError::VerdictMismatch);
+    }
+    let payload = parse_review_payload(repaired_output, CodingExecutionStage::InternalPrReview);
+    if payload.findings.len() > max_findings {
+        return Err(RepairFidelityError::TooManyFindings);
+    }
+    if payload.findings.iter().any(|finding| {
+        !raw_output.contains(&finding.message)
+            || finding
+                .evidence
+                .iter()
+                .any(|evidence| !raw_output.contains(evidence))
+            || finding
+                .plan_defect_evidence
+                .iter()
+                .any(|evidence| !raw_output.contains(&evidence.source_ref))
+    }) {
+        if payload
+            .findings
+            .iter()
+            .any(|finding| !raw_output.contains(&finding.message))
+        {
+            return Err(RepairFidelityError::FindingNotSubtraceable);
+        }
+        return Err(RepairFidelityError::EvidenceNotSubtraceable);
+    }
+    if payload.findings.iter().any(|finding| {
+        finding.repair_target.as_ref().is_some_and(|target| {
+            target
+                .logical_work_item_ids
+                .iter()
+                .chain(target.work_item_revision_ids.iter())
+                .any(|id| !raw_output.contains(id))
+        })
+    }) {
+        return Err(RepairFidelityError::TargetNotSubtraceable);
+    }
+    Ok(())
+}
+
+fn verdict_marker(output: &str) -> Option<ReviewVerdict> {
+    output.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("GROUP_REVIEW_VERDICT:")?.trim();
+        match value {
+            "approve" => Some(ReviewVerdict::Approve),
+            "request_changes" => Some(ReviewVerdict::RequestChanges),
+            "blocked" => Some(ReviewVerdict::Blocked),
+            _ => None,
+        }
+    })
 }
 
 #[async_trait::async_trait]
