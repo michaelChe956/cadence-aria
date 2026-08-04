@@ -226,7 +226,22 @@ impl<'a> GroupReviewOrchestrator<'a> {
                         && report.run_failure_code.is_none()
                 })
         {
-            self.persist_internal_pr_review_from_reduction(&attempt, snapshot, &reduction)?;
+            let Some(recovery_lease_id) = self.store.claim_group_review_lease(
+                &snapshot.attempt_id,
+                &snapshot.content_hash,
+                "reduction",
+                "all",
+            )?
+            else {
+                return Err(GroupReviewOrchestrationError::ReductionInProgress);
+            };
+            let persist_result =
+                self.persist_internal_pr_review_from_reduction(&attempt, snapshot, &reduction);
+            let release_result =
+                self.store
+                    .release_group_review_lease(&snapshot.attempt_id, &recovery_lease_id, "");
+            persist_result?;
+            release_result?;
             return Ok(reduction);
         }
         let segments =
@@ -351,12 +366,20 @@ impl<'a> GroupReviewOrchestrator<'a> {
         Ok(reduction)
     }
 
-    fn persist_internal_pr_review_from_reduction(
+    pub(crate) fn persist_internal_pr_review_from_reduction(
         &self,
         attempt: &crate::product::coding_models::CodingExecutionAttempt,
         snapshot: &GroupReviewMaterialSnapshot,
         reduction: &GroupReviewReductionReport,
     ) -> Result<(), ProductStoreError> {
+        if self
+            .store
+            .get_active_group_review_snapshot_hash(&snapshot.attempt_id)?
+            .as_deref()
+            != Some(reduction.snapshot_hash.as_str())
+        {
+            return Ok(());
+        }
         let existing = self.store.list_internal_pr_reviews(
             &attempt.project_id,
             &attempt.issue_id,
