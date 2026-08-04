@@ -185,6 +185,43 @@ function ProviderTextEntry({ content }: { content: string }) {
   );
 }
 
+function PromptBlockEntry({ content, version }: { content: string; version?: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const collapsible = content.length > COLLAPSE_THRESHOLD;
+  return (
+    <article className="rounded-2xl border border-[var(--aria-primary)]/50 bg-[var(--aria-primary-soft)] shadow-sm">
+      <div className="flex items-center gap-2 px-4 pt-3 text-xs font-semibold uppercase tracking-wide text-[var(--aria-ink)]">
+        <Sparkles aria-hidden="true" className="h-3.5 w-3.5 text-[var(--aria-primary)]" />
+        Suggested prompt{version ? ` · v${version}` : ""}
+      </div>
+      <div
+        className={`px-4 py-2 text-sm leading-6 whitespace-pre-wrap text-[var(--aria-ink)] transition-all duration-200 ${
+          collapsible && !expanded ? "max-h-48 overflow-hidden" : ""
+        }`}
+      >
+        {content}
+      </div>
+      {collapsible ? (
+        <div
+          className={`px-4 pb-3 ${
+            !expanded ? "pointer-events-none -mt-10 bg-gradient-to-t from-[var(--aria-primary-soft)] to-transparent pb-1 pt-8" : ""
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className={`pointer-events-auto inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold text-[var(--aria-primary)] transition-colors hover:bg-white/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 ${
+              !expanded ? "mt-7" : "mt-0"
+            }`}
+          >
+            {expanded ? "收起" : "展开全文"}
+          </button>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
   switch (entry.type) {
     case "user_message":
@@ -196,17 +233,7 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
     case "provider_text":
       return <ProviderTextEntry content={entry.content} />;
     case "prompt_block":
-      return (
-        <article className="rounded-2xl border border-[var(--aria-primary)]/50 bg-[var(--aria-primary-soft)] px-4 py-4 shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--aria-ink)]">
-            <Sparkles aria-hidden="true" className="h-3.5 w-3.5 text-[var(--aria-primary)]" />
-            Suggested prompt{entry.version ? ` · v${entry.version}` : ""}
-          </div>
-          <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[var(--aria-ink)]">
-            {entry.content}
-          </p>
-        </article>
-      );
+      return <PromptBlockEntry content={entry.content} version={entry.version} />;
     case "generation_image": {
       const extension = entry.mediaType.split("/")[1] ?? "png";
       const dataUri = `data:${entry.mediaType};base64,${entry.base64}`;

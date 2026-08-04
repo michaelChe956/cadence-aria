@@ -108,15 +108,19 @@ impl ImageCreateEngine {
                         .await;
                     match persisted {
                         Ok(()) => {
-                            let _ = event_tx
-                                .send(IterationEvent {
-                                    kind: "text".to_string(),
-                                    text: Some(outcome.readable_text),
-                                    suggested_prompt: None,
-                                    provider_session_id: None,
-                                    error: None,
-                                })
-                                .await;
+                            // 有 suggested_prompt 时只推 prompt（provider 的解释文本对用户无价值，不展示）；
+                            // 无 suggested_prompt 时才推 text 作为 fallback（让用户知道发生了什么）。
+                            if outcome.suggested_prompt.is_none() {
+                                let _ = event_tx
+                                    .send(IterationEvent {
+                                        kind: "text".to_string(),
+                                        text: Some(outcome.readable_text),
+                                        suggested_prompt: None,
+                                        provider_session_id: None,
+                                        error: None,
+                                    })
+                                    .await;
+                            }
                             if let Some(prompt) = outcome.suggested_prompt {
                                 let _ = event_tx
                                     .send(IterationEvent {
