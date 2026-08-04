@@ -79,6 +79,26 @@ fn repair_fidelity_rejects_missing_marker_and_excess_findings() {
 }
 
 #[test]
+fn repair_fidelity_rejects_forged_canonical_evidence_message() {
+    let raw = "GROUP_REVIEW_VERDICT: blocked\nknown issue\nhunk_hash\nknown evidence message";
+    let repaired = "GROUP_REVIEW_VERDICT: blocked\n{\"verdict\":\"blocked\",\"findings\":[{\"message\":\"known issue\",\"evidence\":[{\"kind\":\"hunk\",\"source_ref\":\"hunk_hash\",\"message\":\"forged evidence message\"}]}]}";
+    assert!(matches!(
+        validate_repair_fidelity(raw, repaired, 8),
+        Err(RepairFidelityError::EvidenceNotSubtraceable)
+    ));
+}
+
+#[test]
+fn repair_fidelity_rejects_forged_repair_target_kind() {
+    let raw = "GROUP_REVIEW_VERDICT: blocked\nknown issue\ncurrent_work_item\nwork_item_0001\nrevision_0001";
+    let repaired = "GROUP_REVIEW_VERDICT: blocked\n{\"verdict\":\"blocked\",\"findings\":[{\"message\":\"known issue\",\"repair_target\":{\"kind\":\"upstream_work_item\",\"logical_work_item_ids\":[\"work_item_0001\"],\"work_item_revision_ids\":[\"revision_0001\"]}}]}";
+    assert!(matches!(
+        validate_repair_fidelity(raw, repaired, 8),
+        Err(RepairFidelityError::TargetNotSubtraceable)
+    ));
+}
+
+#[test]
 fn repair_fidelity_rejects_non_subset_evidence_and_target() {
     let raw =
         "GROUP_REVIEW_VERDICT: blocked\nknown issue\nevidence_a\nwork_item_0001\nrevision_0001";
@@ -127,6 +147,27 @@ async fn transport_failure_retries_without_repair_and_cancellation_does_not_retr
         Err(GroupReviewExecutionError::UserCancelled)
     ));
     assert_eq!(cancelled.prompts(), vec!["prompt"]);
+}
+
+#[tokio::test]
+async fn internal_error_does_not_retry() {
+    let executor = FakeGroupReviewExecutor::new(vec![
+        Err(GroupReviewExecutionError::Internal(
+            "adapter error".to_string(),
+        )),
+        Ok(GroupReviewExecutionResult {
+            full_output: "must not run".to_string(),
+            provider_session_id: None,
+        }),
+    ]);
+    let (_root, store, _attempt_id) = execution_store();
+    let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
+
+    assert!(matches!(
+        orchestrator.execute_with_retry("prompt", 3).await,
+        Err(GroupReviewExecutionError::Internal(message)) if message == "adapter error"
+    ));
+    assert_eq!(executor.prompts(), vec!["prompt"]);
 }
 
 #[tokio::test]

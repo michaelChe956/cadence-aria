@@ -361,10 +361,11 @@ pub(crate) fn validate_repair_fidelity(
                 .evidence
                 .iter()
                 .any(|evidence| !raw_output.contains(evidence))
-            || finding
-                .plan_defect_evidence
-                .iter()
-                .any(|evidence| !raw_output.contains(&evidence.source_ref))
+            || finding.plan_defect_evidence.iter().any(|evidence| {
+                !raw_output.contains(&evidence.source_ref)
+                    || !raw_output.contains(&evidence.message)
+                    || !is_known_plan_defect_evidence_kind(&evidence.kind)
+            })
     }) {
         if payload
             .findings
@@ -377,16 +378,29 @@ pub(crate) fn validate_repair_fidelity(
     }
     if payload.findings.iter().any(|finding| {
         finding.repair_target.as_ref().is_some_and(|target| {
-            target
-                .logical_work_item_ids
-                .iter()
-                .chain(target.work_item_revision_ids.iter())
-                .any(|id| !raw_output.contains(id))
+            let kind = match target.kind {
+                crate::product::models::RepairTargetKind::CurrentWorkItem => "current_work_item",
+                crate::product::models::RepairTargetKind::UpstreamWorkItem => "upstream_work_item",
+                crate::product::models::RepairTargetKind::Subgraph => "subgraph",
+            };
+            !raw_output.contains(kind)
+                || target
+                    .logical_work_item_ids
+                    .iter()
+                    .chain(target.work_item_revision_ids.iter())
+                    .any(|id| !raw_output.contains(id))
         })
     }) {
         return Err(RepairFidelityError::TargetNotSubtraceable);
     }
     Ok(())
+}
+
+fn is_known_plan_defect_evidence_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "hunk" | "diff" | "test" | "command" | "log" | "reference"
+    )
 }
 
 fn verdict_marker(output: &str) -> Option<ReviewVerdict> {
