@@ -73,7 +73,7 @@ impl ImageClient {
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(600))
             .build()
             .expect("fixed image HTTP client configuration must be valid");
         Self { http }
@@ -105,6 +105,7 @@ impl ImageClientApi for ImageClient {
             "{}/v1/images/{endpoint}",
             settings.base_url.trim_end_matches('/')
         );
+        let url_for_log = url.clone();
 
         let request = if let Some(reference) = reference {
             let extension = reference
@@ -146,11 +147,41 @@ impl ImageClientApi for ImageClient {
             })
         };
 
+        let has_reference = endpoint == "edits";
+        let started = std::time::Instant::now();
+        eprintln!(
+            "[image-create] POST {url_for_log} (endpoint={endpoint}, has_reference={has_reference}, size={:?}, quality={:?}) starting",
+            req.size, req.quality
+        );
         let response = request
             .bearer_auth(&settings.api_key)
             .send()
             .await
-            .map_err(normalize_reqwest_error)?;
+            .map_err(|error| {
+                eprintln!(
+                    "[image-create] POST {url_for_log} FAILED after {:?}: {error}; debug={error:?}; is_timeout={}; is_connect={}; is_request={}; is_body={}",
+                    started.elapsed(),
+                    error.is_timeout(),
+                    error.is_connect(),
+                    error.is_request(),
+                    error.is_body()
+                );
+                let mut source = std::error::Error::source(&error);
+                let mut depth = 0;
+                while let Some(cause) = source {
+                    eprintln!(
+                        "[image-create] POST {url_for_log} error source[{depth}]: {cause}; debug={cause:?}"
+                    );
+                    source = cause.source();
+                    depth += 1;
+                }
+                normalize_reqwest_error(error)
+            })?;
+        eprintln!(
+            "[image-create] POST {url_for_log} responded {} in {:?}",
+            response.status(),
+            started.elapsed()
+        );
 
         if response.status().is_redirection() {
             return Err(ImageClientError::RedirectBlocked);
