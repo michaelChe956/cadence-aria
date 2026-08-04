@@ -386,20 +386,17 @@ pub(crate) fn reduce_verdict(verdicts: impl IntoIterator<Item = ReviewVerdict>) 
 
 pub(crate) fn finding_fingerprint(finding: &ReviewFinding) -> String {
     let target = finding.repair_target.as_ref();
-    let mut target_ids = target
-        .map(|target| {
-            target
-                .logical_work_item_ids
-                .iter()
-                .chain(target.work_item_revision_ids.iter())
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let target_ids = target.map(|target| {
+        let mut logical_work_item_ids = target.logical_work_item_ids.clone();
+        let mut work_item_revision_ids = target.work_item_revision_ids.clone();
+        logical_work_item_ids.sort();
+        logical_work_item_ids.dedup();
+        work_item_revision_ids.sort();
+        work_item_revision_ids.dedup();
+        (logical_work_item_ids, work_item_revision_ids)
+    });
     let mut contract_refs = finding.contract_refs.clone();
     let mut capability_refs = finding.capability_refs.clone();
-    target_ids.sort();
-    target_ids.dedup();
     contract_refs.sort();
     contract_refs.dedup();
     capability_refs.sort();
@@ -410,22 +407,24 @@ pub(crate) fn finding_fingerprint(finding: &ReviewFinding) -> String {
         .unwrap_or("")
         .replace('\\', "/")
         .to_ascii_lowercase();
-    let hunk_hash = finding
+    let mut hunk_hashes = finding
         .plan_defect_evidence
         .iter()
         .map(|e| e.source_ref.as_str())
         .collect::<Vec<_>>();
-    let input = format!(
-        "{:?}|{}|{}|{}|{}|{}|{}",
-        finding.defect_class,
-        finding.reason_code.as_deref().unwrap_or(""),
-        target_ids.join(","),
-        contract_refs.join(","),
-        capability_refs.join(","),
-        path,
-        hunk_hash.join(",")
-    );
-    hex::encode(Sha256::digest(input.as_bytes()))
+    hunk_hashes.sort_unstable();
+    hunk_hashes.dedup();
+    let input = serde_json::json!({
+        "defect_class": &finding.defect_class,
+        "reason_code": &finding.reason_code,
+        "repair_target_ids": target_ids,
+        "contract_refs": contract_refs,
+        "capability_refs": capability_refs,
+        "path": path,
+        "hunk_hashes": hunk_hashes,
+    });
+    let canonical = serde_json::to_vec(&input).expect("fingerprint fields serialize");
+    hex::encode(Sha256::digest(canonical))
 }
 
 pub(crate) fn merge_findings(

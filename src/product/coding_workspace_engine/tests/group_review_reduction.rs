@@ -11,7 +11,10 @@ use crate::product::coding_workspace_engine::group_review_types::{
     GroupDiffIndex, GroupPartitionResult, GroupReviewGraph, GroupReviewMaterialSnapshot,
     GroupShardSpec, ReductionDiffSelection,
 };
-use crate::product::models::{PlanDefectClass, PlanDefectEvidence, PlanDefectRoute, ProviderName};
+use crate::product::models::{
+    PlanDefectClass, PlanDefectEvidence, PlanDefectRoute, ProviderName, RepairTarget,
+    RepairTargetKind,
+};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use tempfile::TempDir;
 
@@ -154,6 +157,35 @@ fn fingerprints_and_merges_equivalent_findings() {
 }
 
 #[test]
+fn fingerprint_is_independent_of_hunk_evidence_order() {
+    let mut first = finding("same", FindingSeverity::Warning);
+    first.plan_defect_evidence = vec![
+        PlanDefectEvidence {
+            kind: "hunk".to_string(),
+            source_ref: "hunk_b".to_string(),
+            message: String::new(),
+        },
+        PlanDefectEvidence {
+            kind: "hunk".to_string(),
+            source_ref: "hunk_a".to_string(),
+            message: String::new(),
+        },
+    ];
+    let mut second = first.clone();
+    second.plan_defect_evidence.reverse();
+
+    assert_eq!(finding_fingerprint(&first), finding_fingerprint(&second));
+    assert_eq!(
+        merge_findings(
+            &[shard("attempt", "a", ReviewVerdict::Approve, vec![first])],
+            vec![second],
+        )
+        .len(),
+        1
+    );
+}
+
+#[test]
 fn fingerprint_changes_for_structural_identity_fields() {
     let base = finding("base", FindingSeverity::Warning);
     let mut changed = base.clone();
@@ -178,6 +210,53 @@ fn fingerprint_changes_for_structural_identity_fields() {
     changed = base.clone();
     changed.file_path = Some("src/other.rs".to_string());
     assert_ne!(finding_fingerprint(&base), finding_fingerprint(&changed));
+}
+
+#[test]
+fn fingerprint_uses_unambiguous_structured_encoding() {
+    let mut first = finding("same", FindingSeverity::Warning);
+    first.repair_target = Some(RepairTarget {
+        kind: RepairTargetKind::CurrentWorkItem,
+        logical_work_item_ids: vec!["a,b".to_string()],
+        work_item_revision_ids: vec!["c".to_string()],
+    });
+    let mut second = first.clone();
+    second.repair_target = Some(RepairTarget {
+        kind: RepairTargetKind::CurrentWorkItem,
+        logical_work_item_ids: vec!["a".to_string()],
+        work_item_revision_ids: vec!["b,c".to_string()],
+    });
+
+    assert_ne!(finding_fingerprint(&first), finding_fingerprint(&second));
+}
+
+#[test]
+fn plan_defect_target_is_preserved_alongside_implementation_finding() {
+    let implementation = finding("same", FindingSeverity::Error);
+    let mut plan_defect = finding("same", FindingSeverity::Warning);
+    plan_defect.defect_class = PlanDefectClass::DesignAmendmentRequired;
+    plan_defect.recommended_route = PlanDefectRoute::DesignAmendment;
+    plan_defect.repair_target = Some(RepairTarget {
+        kind: RepairTargetKind::CurrentWorkItem,
+        logical_work_item_ids: vec!["work_item_0001".to_string()],
+        work_item_revision_ids: vec!["revision_0001".to_string()],
+    });
+
+    let merged = merge_findings(
+        &[shard(
+            "attempt",
+            "a",
+            ReviewVerdict::Approve,
+            vec![implementation],
+        )],
+        vec![plan_defect.clone()],
+    );
+
+    assert_eq!(merged.len(), 2);
+    assert!(merged.iter().any(|finding| {
+        finding.defect_class == PlanDefectClass::DesignAmendmentRequired
+            && finding.repair_target == plan_defect.repair_target
+    }));
 }
 
 #[test]
