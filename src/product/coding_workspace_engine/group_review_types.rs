@@ -14,47 +14,6 @@ pub(crate) struct PromptSegments {
     pub retry_diagnostic_reserve: String,
 }
 
-impl PromptSegments {
-    pub fn join(&self) -> String {
-        [
-            self.fixed_protocol.as_str(),
-            self.identity.as_str(),
-            self.unit_records.as_str(),
-            self.evidence_digest.as_str(),
-            self.graph.as_str(),
-            self.diff.as_str(),
-            self.retry_diagnostic_reserve.as_str(),
-        ]
-        .join("")
-    }
-
-    pub fn measure(&self) -> PromptBudgetBreakdown {
-        let fixed_protocol = self.fixed_protocol.len();
-        let identity = self.identity.len();
-        let unit_records = self.unit_records.len();
-        let evidence_digest = self.evidence_digest.len();
-        let graph = self.graph.len();
-        let diff = self.diff.len();
-        let retry_diagnostic_reserve = self.retry_diagnostic_reserve.len();
-        PromptBudgetBreakdown {
-            fixed_protocol,
-            identity,
-            unit_records,
-            evidence_digest,
-            graph,
-            diff,
-            retry_diagnostic_reserve,
-            total: fixed_protocol
-                + identity
-                + unit_records
-                + evidence_digest
-                + graph
-                + diff
-                + retry_diagnostic_reserve,
-        }
-    }
-}
-
 pub(crate) struct PromptBudgetBreakdown {
     pub fixed_protocol: usize,
     pub identity: usize,
