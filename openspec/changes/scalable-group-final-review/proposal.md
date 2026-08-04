@@ -31,13 +31,13 @@ Group Final Review 目前把一个 WorkItemGroup 内所有 Work Item 的完整�
 5. 新增容量上限门禁：Work Item 数超过首期支持上限（20）时，在调用任何 Provider 前失败关闭，不得回退单次全量审查，不得提高上限。
 6. 新增 Unit 审查结论身份快照，使组级聚合不再依赖缺少 Work Item 身份的既有报告记录。
 7. 扩展失败语义：区分传输失败与"正常完成但无法解析"，分片与归约各自可按环节重试；结论转写补救必须通过内容保真校验；晚到结果与并发重试由快照 CAS 规则约束。
+8. 限定 per-unit Reviewer 投影绑定要求的适用范围为单项 Coding Unit，组级材料编译由材料快照承载执行身份。
 
 ## Impact
 
 - 新增 capability：`group-review-sharding`
-- 修改 capability：`group-final-review-triage`
+- 修改 capability：`group-final-review-triage`、`work-item-runtime-projection`
 - 受影响 capability（不修改其规范文本，但实现必须保持其既有保证）：
-  - `work-item-runtime-projection`：组级材料编译器是 Revision 数据的规范消费者，不再经 per-unit rendered projection 路径；per-unit Reviewer Projection 与 Renderer Hash 的既有契约不变。
   - `coding-workspace-completion`：分片与归约的中间状态不得被识别为"已有通过 review"；完成条件继续依赖最终归约结论。
   - `project-rule-aware-prompts`：分片与归约 Prompt 继续包含项目规则读取契约。
   - `testing-stage-removal`：组级材料不得引入 TestingReport 或测试派生字段依赖。
