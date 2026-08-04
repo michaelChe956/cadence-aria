@@ -14,7 +14,9 @@ pub(crate) struct GroupReviewerProjectionBinding {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct AuthoritativeGroupReviewerBinding {
+    pub(crate) order_index: u32,
     pub(crate) run: CodingUnitRun,
     pub(crate) projection_binding: GroupReviewerProjectionBinding,
 }
@@ -130,6 +132,7 @@ impl CodingWorkspaceEngine {
                 )));
             }
             bindings.push(AuthoritativeGroupReviewerBinding {
+                order_index: unit.order_index,
                 run,
                 projection_binding: GroupReviewerProjectionBinding {
                     logical_work_item_id: unit.logical_work_item_id,

@@ -1,6 +1,6 @@
 use super::{MAX_CONTEXT_SECTION_CHARS, MAX_DIFF_CONTEXT_CHARS};
 
-pub(super) fn sanitize_context_text(input: &str) -> (String, bool) {
+pub(crate) fn redact_sensitive_patterns(input: &str) -> String {
     let mut lines = Vec::new();
     let mut in_private_key_block = false;
     for line in input.lines() {
@@ -14,16 +14,17 @@ pub(super) fn sanitize_context_text(input: &str) -> (String, bool) {
         if lower.contains("-----begin") && lower.contains("private key") {
             lines.push("[REDACTED_PRIVATE_KEY]".to_string());
             in_private_key_block = true;
-            continue;
-        }
-        if contains_sensitive_keyword(&lower) {
+        } else if contains_sensitive_keyword(&lower) {
             lines.push("[REDACTED]".to_string());
         } else {
             lines.push(line.to_string());
         }
     }
+    lines.join("\n")
+}
 
-    let sanitized = lines.join("\n");
+pub(super) fn sanitize_context_text(input: &str) -> (String, bool) {
+    let sanitized = redact_sensitive_patterns(input);
     if sanitized.len() <= MAX_CONTEXT_SECTION_CHARS {
         return (sanitized, false);
     }

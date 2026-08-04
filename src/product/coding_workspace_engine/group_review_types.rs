@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use serde::Serialize;
+
 pub(crate) struct PromptSegments {
     pub fixed_protocol: String,
     pub identity: String,
@@ -62,6 +64,7 @@ pub(crate) struct PromptBudgetBreakdown {
     pub total: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct GroupReviewMaterialSnapshot {
     pub schema_version: u32,
     pub compiler_version: String,
@@ -78,6 +81,7 @@ pub(crate) struct GroupReviewMaterialSnapshot {
     pub content_hash: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct UnitCrossReviewRecord {
     pub unit_id: String,
     pub unit_run_id: String,
@@ -91,11 +95,13 @@ pub(crate) struct UnitCrossReviewRecord {
     pub routing_targets: Vec<CompactRoutingTarget>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct UnitScopeSummary {
     pub exclusive_scopes: Vec<String>,
     pub forbidden_scopes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct CompactContractInterface {
     pub contract_id: String,
     pub direction: String,
@@ -103,6 +109,7 @@ pub(crate) struct CompactContractInterface {
     pub counterparty_unit_run_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct UnitEvidenceSummary {
     pub required_command_count: usize,
     pub executed_command_count: usize,
@@ -110,12 +117,14 @@ pub(crate) struct UnitEvidenceSummary {
     pub missing_refs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct CompactRoutingTarget {
     pub reason_code: String,
     pub allowed_route: String,
     pub target_contract_refs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct GroupReviewGraph {
     pub contract_edges: Vec<ContractEdge>,
     pub scope_overlaps: Vec<ScopeOverlap>,
@@ -123,6 +132,7 @@ pub(crate) struct GroupReviewGraph {
     pub requirement_coverage: RequirementCoverage,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ContractEdge {
     pub contract_id: String,
     pub producer_unit_run_id: String,
@@ -130,27 +140,35 @@ pub(crate) struct ContractEdge {
     pub matched: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ScopeOverlap {
     pub file_path: String,
     pub unit_run_ids: Vec<String>,
     pub forbidden_hit: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct CommitReachability {
     pub reachable_completion_commits: Vec<String>,
     pub unreachable_completion_commits: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct RequirementCoverage {
     pub covered: Vec<String>,
     pub missing: Vec<String>,
     pub conflicting: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct GroupDiffIndex {
     pub files: Vec<DiffFileEntry>,
+    pub hunks: Vec<DiffHunk>,
+    pub shard_selections: Vec<ShardDiffSelection>,
+    pub reduction_selection: ReductionDiffSelection,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct DiffFileEntry {
     pub path: String,
     pub insertions: u32,
@@ -161,23 +179,27 @@ pub(crate) struct DiffFileEntry {
     pub forbidden_scope_hit: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct DeterministicGroupFinding {
     pub kind: String,
     pub related_unit_run_ids: Vec<String>,
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct GroupPartitionResult {
     pub shards: Vec<GroupShardSpec>,
     pub cross_shard_edges: Vec<CrossShardEdge>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct GroupShardSpec {
     pub shard_id: String,
     pub ordered_unit_run_ids: Vec<String>,
     pub partition_rationale: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct CrossShardEdge {
     pub edge_kind: String,
     pub from_unit_run_id: String,
@@ -185,17 +207,61 @@ pub(crate) struct CrossShardEdge {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct GroupGitFacts {
     pub diff_stat: String,
     pub completion_diffs: Vec<CompletionDiff>,
     pub final_diff: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct CompletionDiff {
     pub unit_run_id: String,
     pub base_commit: String,
     pub completion_commit: String,
     pub patch: String,
+    pub file_stats: Vec<DiffFileStat>,
+    pub hunks: Vec<DiffHunk>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DiffFileStat {
+    pub path: String,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DiffHunk {
+    pub hunk_index: usize,
+    pub path: String,
+    pub owner_unit_run_ids: Vec<String>,
+    pub header: String,
+    pub body: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SelectedDiffFragment {
+    pub path: String,
+    pub level: char,
+    pub hunk_content_hash: String,
+    pub redacted: bool,
+    pub truncated: bool,
+    pub not_shown_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ShardDiffSelection {
+    pub shard_id: String,
+    pub fragments: Vec<SelectedDiffFragment>,
+    pub total_hunks_in_shard: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ReductionDiffSelection {
+    pub fragments: Vec<SelectedDiffFragment>,
+    pub total_cross_shard_hunks: usize,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -62,6 +62,7 @@ mod gates;
 mod git_operation;
 mod group;
 mod group_completion;
+mod group_review_material;
 mod group_review_types;
 mod handoffs;
 mod internal_pr_review;
