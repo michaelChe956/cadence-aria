@@ -86,6 +86,37 @@ fn reduction_report(attempt_id: &str, snapshot_hash: &str) -> GroupReviewReducti
 }
 
 #[test]
+fn group_review_lease_claim_is_single_flight_and_records_completion() {
+    let (_root, store, attempt_id) = setup();
+
+    let lease_id = store
+        .claim_group_review_lease(&attempt_id, "snapshot_a", "shard", "shard_0001")
+        .expect("claim lease")
+        .expect("first caller owns lease");
+    assert_eq!(
+        store
+            .claim_group_review_lease(&attempt_id, "snapshot_a", "shard", "shard_0001")
+            .expect("second claim"),
+        None
+    );
+    assert_eq!(
+        store
+            .get_completed_group_review_result(&attempt_id, "snapshot_a", "shard", "shard_0001")
+            .expect("no completed result"),
+        None
+    );
+    store
+        .release_group_review_lease(&attempt_id, &lease_id, "group_review_shard_shard_0001")
+        .expect("release lease");
+    assert_eq!(
+        store
+            .get_completed_group_review_result(&attempt_id, "snapshot_a", "shard", "shard_0001")
+            .expect("completed result"),
+        Some("group_review_shard_shard_0001".to_string())
+    );
+}
+
+#[test]
 fn activates_and_reads_group_review_snapshot_hash() {
     let (_root, store, attempt_id) = setup();
 
@@ -416,6 +447,93 @@ async fn execute_shards_parses_persists_and_returns_reports() {
             .expect("stored reports")
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn execute_shards_reuses_completed_snapshot_reports_without_provider_calls() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(1, 1, "diff");
+    snapshot.attempt_id = attempt_id.clone();
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+    let first_executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
+        full_output: valid_review_output(0),
+        provider_session_id: None,
+    })]);
+    GroupReviewOrchestrator::new(&first_executor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect("initial execution");
+
+    let retry_executor = FakeGroupReviewExecutor::new(Vec::new());
+    let reports = GroupReviewOrchestrator::new(&retry_executor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect("reuse completed reports");
+    assert_eq!(reports.len(), 1);
+    assert!(retry_executor.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn execute_shards_returns_in_progress_without_duplicate_provider_call() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(1, 1, "diff");
+    snapshot.attempt_id = attempt_id.clone();
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+    let shard_id = &snapshot.partition_result.shards[0].shard_id;
+    store
+        .claim_group_review_lease(&attempt_id, &snapshot.content_hash, "shard", shard_id)
+        .expect("claim lease")
+        .expect("lease owner");
+    let executor = FakeGroupReviewExecutor::new(Vec::new());
+
+    let error = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect_err("duplicate invocation must not execute");
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ShardInProgress { .. }
+    ));
+    assert!(executor.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn execute_shards_supersedes_old_snapshot_and_stores_late_result_as_stale() {
+    let (_root, store, attempt_id) = setup();
+    let mut old_snapshot = material_snapshot(1, 1, "old diff");
+    old_snapshot.attempt_id = attempt_id.clone();
+    let mut new_snapshot = material_snapshot(1, 1, "new diff");
+    new_snapshot.attempt_id = attempt_id.clone();
+    new_snapshot.content_hash = "snapshot_new".to_string();
+    store
+        .activate_group_review_snapshot(&attempt_id, &new_snapshot.content_hash)
+        .expect("supersede snapshot");
+
+    let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
+        full_output: valid_review_output(0),
+        provider_session_id: None,
+    })]);
+    let reports = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_shards(&old_snapshot)
+        .await
+        .expect("late old snapshot is audit-only");
+    assert!(reports.is_empty());
+    assert_eq!(
+        store
+            .get_active_group_review_snapshot_hash(&attempt_id)
+            .expect("active snapshot"),
+        Some(new_snapshot.content_hash)
+    );
+    assert!(
+        store
+            .list_group_review_shard_reports(&attempt_id)
+            .expect("live reports")
+            .is_empty()
     );
 }
 

@@ -276,6 +276,60 @@ fn reduce_verdict_prioritizes_blocked_then_request_changes() {
 }
 
 #[tokio::test]
+async fn reduction_reuses_completed_snapshot_result_without_provider_call() {
+    let (_root, store, attempt_id) = setup();
+    let snapshot = snapshot(attempt_id.clone(), &["a"]);
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("active snapshot");
+    let first_executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
+        full_output: "GROUP_REVIEW_VERDICT\n{\"verdict\":\"approve\",\"summary\":\"done\"}"
+            .to_string(),
+        provider_session_id: None,
+    })]);
+    let shard_reports = vec![shard(&attempt_id, "a", ReviewVerdict::Approve, Vec::new())];
+    GroupReviewOrchestrator::new(&first_executor, &store)
+        .execute_reduction(&snapshot, &shard_reports, &[])
+        .await
+        .expect("first reduction");
+
+    let retry_executor = FakeGroupReviewExecutor::new(Vec::new());
+    let reduction = GroupReviewOrchestrator::new(&retry_executor, &store)
+        .execute_reduction(&snapshot, &shard_reports, &[])
+        .await
+        .expect("reuse reduction");
+    assert_eq!(reduction.snapshot_hash, snapshot.content_hash);
+    assert!(retry_executor.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn reduction_returns_in_progress_without_duplicate_provider_call() {
+    let (_root, store, attempt_id) = setup();
+    let snapshot = snapshot(attempt_id.clone(), &["a"]);
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("active snapshot");
+    store
+        .claim_group_review_lease(&attempt_id, &snapshot.content_hash, "reduction", "all")
+        .expect("claim lease")
+        .expect("lease owner");
+    let executor = FakeGroupReviewExecutor::new(Vec::new());
+    let error = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_reduction(
+            &snapshot,
+            &[shard(&attempt_id, "a", ReviewVerdict::Approve, Vec::new())],
+            &[],
+        )
+        .await
+        .expect_err("duplicate reduction must not execute");
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ReductionInProgress
+    ));
+    assert!(executor.prompts().is_empty());
+}
+
+#[tokio::test]
 async fn reduction_requires_all_shards_before_provider_execution() {
     let (_root, store, attempt_id) = setup();
     let snapshot = snapshot(attempt_id.clone(), &["a", "b"]);
@@ -327,6 +381,39 @@ async fn reduction_executes_for_non_approve_shards_and_persists_internal_review(
             .expect("reviews")
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn stale_reduction_does_not_persist_an_internal_review() {
+    let (_root, store, attempt_id) = setup();
+    let snapshot = snapshot(attempt_id.clone(), &["a"]);
+    store
+        .activate_group_review_snapshot(&attempt_id, "new_snapshot")
+        .expect("new active snapshot");
+    let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
+        full_output: "GROUP_REVIEW_VERDICT\n{\"verdict\":\"approve\",\"summary\":\"done\"}"
+            .to_string(),
+        provider_session_id: None,
+    })]);
+
+    let error = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_reduction(
+            &snapshot,
+            &[shard(&attempt_id, "a", ReviewVerdict::Approve, Vec::new())],
+            &[],
+        )
+        .await
+        .expect_err("late reduction must be stale");
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ReductionStale
+    ));
+    assert!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", &attempt_id)
+            .expect("reviews")
+            .is_empty()
     );
 }
 

@@ -1,6 +1,7 @@
 use std::fs;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::coding_models::{
@@ -10,6 +11,98 @@ use crate::product::coding_models::{
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
+    pub fn claim_group_review_lease(
+        &self,
+        attempt_id: &str,
+        snapshot_hash: &str,
+        stage: &str,
+        shard_id: &str,
+    ) -> Result<Option<String>, ProductStoreError> {
+        validate_group_review_lease_key(attempt_id, snapshot_hash, stage, shard_id)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let root = group_review_root(self, &attempt);
+        let active_path = root.join("active-snapshot.json");
+        let lease_path = root.join("lease-state.json");
+        with_exclusive_lock(&active_path, || {
+            let mut state = read_group_review_lease_state(&lease_path)?;
+            if state.leases.iter().any(|lease| {
+                lease.snapshot_hash == snapshot_hash
+                    && lease.stage == stage
+                    && lease.shard_id == shard_id
+            }) {
+                return Ok(None);
+            }
+            let lease_id = format!("group_review_lease_{}", Uuid::new_v4().simple());
+            state.leases.push(GroupReviewLease {
+                lease_id: lease_id.clone(),
+                snapshot_hash: snapshot_hash.to_string(),
+                stage: stage.to_string(),
+                shard_id: shard_id.to_string(),
+                completed_result_ref: None,
+            });
+            write_json(&lease_path, &state)?;
+            Ok(Some(lease_id))
+        })
+    }
+
+    pub fn release_group_review_lease(
+        &self,
+        attempt_id: &str,
+        lease_id: &str,
+        result_ref: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(attempt_id)?;
+        validate_relative_id(lease_id)?;
+        if !result_ref.is_empty() {
+            validate_relative_id(result_ref)?;
+        }
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let root = group_review_root(self, &attempt);
+        let active_path = root.join("active-snapshot.json");
+        let lease_path = root.join("lease-state.json");
+        with_exclusive_lock(&active_path, || {
+            let mut state = read_group_review_lease_state(&lease_path)?;
+            let Some(index) = state
+                .leases
+                .iter()
+                .position(|lease| lease.lease_id == lease_id)
+            else {
+                return Ok(());
+            };
+            if result_ref.is_empty() {
+                state.leases.remove(index);
+            } else {
+                state.leases[index].completed_result_ref = Some(result_ref.to_string());
+            }
+            write_json(&lease_path, &state)
+        })
+    }
+
+    pub fn get_completed_group_review_result(
+        &self,
+        attempt_id: &str,
+        snapshot_hash: &str,
+        stage: &str,
+        shard_id: &str,
+    ) -> Result<Option<String>, ProductStoreError> {
+        validate_group_review_lease_key(attempt_id, snapshot_hash, stage, shard_id)?;
+        let attempt = self.find_attempt_by_id(attempt_id)?;
+        let root = group_review_root(self, &attempt);
+        let active_path = root.join("active-snapshot.json");
+        let lease_path = root.join("lease-state.json");
+        with_exclusive_lock(&active_path, || {
+            Ok(read_group_review_lease_state(&lease_path)?
+                .leases
+                .iter()
+                .find(|lease| {
+                    lease.snapshot_hash == snapshot_hash
+                        && lease.stage == stage
+                        && lease.shard_id == shard_id
+                })
+                .and_then(|lease| lease.completed_result_ref.clone()))
+        })
+    }
+
     pub fn activate_group_review_snapshot(
         &self,
         attempt_id: &str,
@@ -255,6 +348,42 @@ impl super::CodingAttemptStore {
             ))),
         }
     }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct GroupReviewLeaseState {
+    leases: Vec<GroupReviewLease>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GroupReviewLease {
+    lease_id: String,
+    snapshot_hash: String,
+    stage: String,
+    shard_id: String,
+    completed_result_ref: Option<String>,
+}
+
+fn read_group_review_lease_state(
+    path: &std::path::Path,
+) -> Result<GroupReviewLeaseState, ProductStoreError> {
+    if super::path_is_regular_file(path)? {
+        read_json(path)
+    } else {
+        Ok(GroupReviewLeaseState::default())
+    }
+}
+
+fn validate_group_review_lease_key(
+    attempt_id: &str,
+    snapshot_hash: &str,
+    stage: &str,
+    shard_id: &str,
+) -> Result<(), ProductStoreError> {
+    for value in [attempt_id, snapshot_hash, stage, shard_id] {
+        validate_relative_id(value)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
