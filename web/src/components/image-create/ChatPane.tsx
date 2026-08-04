@@ -150,6 +150,41 @@ export function ChatPane() {
   );
 }
 
+const COLLAPSE_THRESHOLD = 200;
+
+function ProviderTextEntry({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const collapsible = content.length > COLLAPSE_THRESHOLD;
+  return (
+    <article className="w-full max-w-none rounded-2xl rounded-bl-md border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-sm sm:w-auto sm:max-w-[90%]">
+      <div
+        className={`px-4 py-3 text-sm leading-6 whitespace-pre-wrap text-[var(--aria-ink)] transition-all duration-200 ${
+          collapsible && !expanded ? "max-h-48 overflow-hidden" : ""
+        }`}
+      >
+        {content}
+      </div>
+      {collapsible ? (
+        <div
+          className={`px-4 pb-3 ${
+            !expanded ? "pointer-events-none -mt-12 bg-gradient-to-t from-[var(--aria-panel)] to-transparent pb-1 pt-10" : ""
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className={`pointer-events-auto inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold text-[var(--aria-primary)] transition-colors hover:bg-[var(--aria-primary-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 ${
+              !expanded ? "mt-9" : "mt-0"
+            }`}
+          >
+            {expanded ? "收起" : "展开全文"}
+          </button>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
   switch (entry.type) {
     case "user_message":
@@ -159,11 +194,7 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
         </article>
       );
     case "provider_text":
-      return (
-        <article className="w-full max-w-none whitespace-pre-wrap rounded-2xl rounded-bl-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-3 text-sm leading-6 shadow-sm sm:w-auto sm:max-w-[90%]">
-          {entry.content}
-        </article>
-      );
+      return <ProviderTextEntry content={entry.content} />;
     case "prompt_block":
       return (
         <article className="rounded-2xl border border-[var(--aria-primary)]/50 bg-[var(--aria-primary-soft)] px-4 py-4 shadow-sm">
