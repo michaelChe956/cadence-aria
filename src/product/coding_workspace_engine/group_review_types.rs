@@ -242,6 +242,7 @@ pub(crate) struct DiffHunk {
     pub owner_unit_run_ids: Vec<String>,
     pub header: String,
     pub body: String,
+    pub redacted: bool,
     pub content_hash: String,
 }
 

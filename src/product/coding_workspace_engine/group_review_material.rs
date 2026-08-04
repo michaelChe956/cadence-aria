@@ -706,12 +706,16 @@ fn build_diff_index(
                 .insert(diff.unit_run_id.clone());
         }
         for mut hunk in parsed {
-            hunk.body = redact_sensitive_patterns(&hunk.body);
+            let redacted_body = redact_sensitive_patterns(&hunk.body);
+            hunk.redacted = hunk.redacted || redacted_body != hunk.body;
+            hunk.body = redacted_body;
             hunks.push(hunk);
         }
     }
     for mut hunk in parse_hunks(&facts.final_diff, "") {
-        hunk.body = redact_sensitive_patterns(&hunk.body);
+        let redacted_body = redact_sensitive_patterns(&hunk.body);
+        hunk.redacted = redacted_body != hunk.body;
+        hunk.body = redacted_body;
         stats.entry(hunk.path.clone()).or_default();
         path_owners.entry(hunk.path.clone()).or_default();
         hunks.push(hunk);
@@ -786,6 +790,7 @@ fn parse_hunks(patch: &str, owner: &str) -> Vec<DiffHunk> {
                 },
                 header,
                 body: std::mem::take(body),
+                redacted: false,
                 content_hash: sha256(&raw),
             });
             *index += 1;
@@ -998,7 +1003,7 @@ fn select_fragments(
         for (index, hunk) in candidates.iter().enumerate() {
             let text = format!("{}\n{}", hunk.header, hunk.body);
             let redacted = text;
-            let was_redacted = false;
+            let was_redacted = hunk.redacted;
             let allowed = utf8_prefix(&redacted, remaining);
             let truncated = allowed.len() < redacted.len();
             remaining = remaining.saturating_sub(allowed.len());
