@@ -76,17 +76,13 @@ impl PromptSegments {
     }
 }
 
-pub(crate) fn decide_budget(
-    total_bytes: usize,
-    quality_target: usize,
-    hard_cap: usize,
-) -> BudgetDecision {
-    if total_bytes <= quality_target {
-        BudgetDecision::Send
-    } else if total_bytes <= hard_cap {
-        BudgetDecision::SendWithWarning
-    } else {
+pub(crate) fn decide_budget(total_bytes: usize, quality_target: usize) -> BudgetDecision {
+    if total_bytes > GROUP_REVIEW_HARD_CAP_BYTES {
         BudgetDecision::Overflow
+    } else if total_bytes <= quality_target {
+        BudgetDecision::Send
+    } else {
+        BudgetDecision::SendWithWarning
     }
 }
 

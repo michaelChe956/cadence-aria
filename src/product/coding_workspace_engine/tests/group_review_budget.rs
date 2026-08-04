@@ -27,6 +27,10 @@ fn prompt_segments_measure_matches_joined_utf8_bytes() {
     let segments = segments();
 
     let joined = segments.join();
+    assert_eq!(
+        joined,
+        "协议：审查\n身份：组审查员\n单元：α\n证据：✓\n图：→\n差异：你好\n重试：é\n"
+    );
     #[allow(clippy::needless_as_bytes)]
     let joined_bytes = joined.as_bytes().len();
     assert_eq!(segments.measure().total, joined_bytes);
@@ -40,8 +44,7 @@ fn decide_budget_has_send_warning_and_overflow_tiers() {
     assert_eq!(
         decide_budget(
             GROUP_REVIEW_QUALITY_TARGET_BYTES,
-            GROUP_REVIEW_QUALITY_TARGET_BYTES,
-            GROUP_REVIEW_HARD_CAP_BYTES,
+            GROUP_REVIEW_QUALITY_TARGET_BYTES
         ),
         BudgetDecision::Send
     );
@@ -49,7 +52,13 @@ fn decide_budget_has_send_warning_and_overflow_tiers() {
         decide_budget(
             GROUP_REVIEW_QUALITY_TARGET_BYTES + 1,
             GROUP_REVIEW_QUALITY_TARGET_BYTES,
+        ),
+        BudgetDecision::SendWithWarning
+    );
+    assert_eq!(
+        decide_budget(
             GROUP_REVIEW_HARD_CAP_BYTES,
+            GROUP_REVIEW_QUALITY_TARGET_BYTES,
         ),
         BudgetDecision::SendWithWarning
     );
@@ -57,7 +66,6 @@ fn decide_budget_has_send_warning_and_overflow_tiers() {
         decide_budget(
             GROUP_REVIEW_HARD_CAP_BYTES + 1,
             GROUP_REVIEW_QUALITY_TARGET_BYTES,
-            GROUP_REVIEW_HARD_CAP_BYTES,
         ),
         BudgetDecision::Overflow
     );
