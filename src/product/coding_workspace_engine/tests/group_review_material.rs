@@ -130,7 +130,33 @@ fn request() -> ReviewRequest {
 }
 
 fn facts(bindings: &[AuthoritativeGroupReviewerBinding]) -> GroupGitFacts {
-    GroupGitFacts { diff_stat: String::new(), completion_diffs: bindings.iter().map(|binding| CompletionDiff { unit_run_id: binding.run.id.clone(), base_commit: "base".to_string(), completion_commit: binding.run.completion_commit.clone().expect("commit"), patch: format!("diff --git a/src/{0}/file.rs b/src/{0}/file.rs\n@@ -0,0 +1 @@\n+fn {0}() {{}}\n", binding.run.unit_id), file_stats: vec![DiffFileStat { path: format!("src/{}/file.rs", binding.run.unit_id), insertions: 1, deletions: 0 }], hunks: Vec::new() }).collect(), final_diff: String::new() }
+    GroupGitFacts {
+        diff_stat: String::new(),
+        completion_diffs: bindings
+            .iter()
+            .map(|binding| CompletionDiff {
+                unit_run_id: binding.run.id.clone(),
+                base_commit: "base".to_string(),
+                completion_commit: binding.run.completion_commit.clone().expect("commit"),
+                patch: format!(
+                    "diff --git a/src/{0}/file.rs b/src/{0}/file.rs\n@@ -0,0 +1 @@\n+fn {0}() {{}}\n",
+                    binding.run.unit_id
+                ),
+                file_stats: vec![DiffFileStat {
+                    path: format!("src/{}/file.rs", binding.run.unit_id),
+                    insertions: 1,
+                    deletions: 0,
+                }],
+                hunks: Vec::new(),
+            })
+            .collect(),
+        final_diff: String::new(),
+        final_commit: "final".to_string(),
+        completion_commit_in_final: bindings
+            .iter()
+            .filter_map(|binding| binding.run.completion_commit.clone())
+            .collect(),
+    }
 }
 
 #[test]
@@ -238,10 +264,10 @@ fn material_indexes_hunks_and_marks_forbidden_scope() {
         .forbidden_scopes = vec!["src/one/".to_string()];
     let snapshots = vec![snapshot(&unit)];
     let result = compile_group_review_material(
-        &[unit.clone()],
+        std::slice::from_ref(&unit),
         &snapshots,
         &request(),
-        &facts(&[unit]),
+        &facts(std::slice::from_ref(&unit)),
         &FixedMeasurer,
         1_000,
     )
@@ -253,4 +279,263 @@ fn material_indexes_hunks_and_marks_forbidden_scope() {
         vec!["run_one"]
     );
     assert!(!result.diff_index.hunks.is_empty());
+}
+struct InspectingMeasurer;
+impl ShardPromptMeasurer for InspectingMeasurer {
+    fn measure_shard(
+        &self,
+        snapshot: &GroupReviewMaterialSnapshotDraft,
+        _: &GroupShardSpec,
+    ) -> usize {
+        assert!(
+            snapshot
+                .diff_index
+                .hunks
+                .iter()
+                .all(|hunk| !hunk.body.contains("super-secret"))
+        );
+        20_000
+    }
+}
+
+#[test]
+fn material_redacts_hunks_before_budget_measurement() {
+    let unit = binding(1, "secret", Vec::new(), Vec::new());
+    let snapshots = vec![snapshot(&unit)];
+    let mut git_facts = facts(std::slice::from_ref(&unit));
+    git_facts.completion_diffs[0].patch = "diff --git a/src/secret/file.rs b/src/secret/file.rs\n@@ -0,0 +1 @@\n+api_key=super-secret\n".to_string();
+    git_facts.completion_diffs[0].file_stats = Vec::new();
+    let result = compile_group_review_material(
+        &[unit],
+        &snapshots,
+        &request(),
+        &git_facts,
+        &InspectingMeasurer,
+        1,
+    )
+    .expect("redacted material can be measured");
+    assert_eq!(result.diff_index.hunks[0].body, "[REDACTED]");
+}
+
+#[test]
+fn material_persists_header_and_utf8_safe_truncated_fragment_body() {
+    let mut unit = binding(1, "utf8", Vec::new(), Vec::new());
+    unit.projection_binding
+        .projection
+        .scope_policy
+        .forbidden_scopes = vec!["src/utf8/".to_string()];
+    let snapshots = vec![snapshot(&unit)];
+    let mut git_facts = facts(std::slice::from_ref(&unit));
+    git_facts.completion_diffs[0].patch = format!(
+        "diff --git a/src/utf8/file.rs b/src/utf8/file.rs\n@@ -0,0 +1 @@\n+{}\n",
+        "界".repeat(5_000)
+    );
+    git_facts.completion_diffs[0].file_stats = Vec::new();
+    let result = compile_group_review_material(
+        &[unit],
+        &snapshots,
+        &request(),
+        &git_facts,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    let fragment = result.diff_index.shard_selections[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.level != 'E')
+        .expect("fragment");
+    assert!(
+        fragment
+            .body
+            .starts_with("path: src/utf8/file.rs\nstat: +1 -0\n")
+    );
+    assert!(fragment.truncated);
+    assert!(std::str::from_utf8(fragment.body.as_bytes()).is_ok());
+}
+
+#[test]
+fn material_adds_final_only_b_file_hunk_to_selection() {
+    let unit = binding(1, "one", Vec::new(), Vec::new());
+    let snapshots = vec![snapshot(&unit)];
+    let mut git_facts = facts(std::slice::from_ref(&unit));
+    git_facts.final_diff =
+        "diff --git a/final-only.rs b/final-only.rs\n@@ -0,0 +1 @@\n+fn final_only() {}\n"
+            .to_string();
+    let result = compile_group_review_material(
+        &[unit],
+        &snapshots,
+        &request(),
+        &git_facts,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    assert!(
+        result
+            .diff_index
+            .hunks
+            .iter()
+            .any(|hunk| hunk.path == "final-only.rs" && hunk.owner_unit_run_ids.is_empty())
+    );
+    assert!(
+        result.diff_index.shard_selections[0]
+            .fragments
+            .iter()
+            .any(|fragment| fragment.path == "final-only.rs"
+                && fragment.level == 'B'
+                && !fragment.body.is_empty())
+    );
+}
+
+#[test]
+fn material_splits_oversized_affinity_component_and_records_cross_edges() {
+    let bindings = (0..5)
+        .map(|index| {
+            binding(
+                index,
+                &format!("{index}"),
+                Vec::new(),
+                vec![PromisedOutputContract {
+                    contract_id: "shared".to_string(),
+                    capabilities: vec!["x".to_string()],
+                }],
+            )
+        })
+        .collect::<Vec<_>>();
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &facts(&bindings),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    assert_eq!(result.partition_result.shards.len(), 2);
+    assert!(
+        result
+            .partition_result
+            .cross_shard_edges
+            .iter()
+            .any(|edge| edge.edge_kind == "contract_boundary")
+    );
+}
+
+#[test]
+fn material_uses_provider_identity_for_contract_matching() {
+    let wrong = binding(
+        1,
+        "wrong",
+        Vec::new(),
+        vec![PromisedOutputContract {
+            contract_id: "api".to_string(),
+            capabilities: vec!["read".to_string()],
+        }],
+    );
+    let right = binding(
+        2,
+        "right",
+        Vec::new(),
+        vec![PromisedOutputContract {
+            contract_id: "api".to_string(),
+            capabilities: vec!["read".to_string()],
+        }],
+    );
+    let consumer = binding(
+        3,
+        "consumer",
+        vec![RequiredInputContract {
+            contract_id: "api".to_string(),
+            provider_logical_work_item_id: "work_right".to_string(),
+            required_capabilities: vec!["read".to_string()],
+            compatibility_policy: ContractCompatibilityPolicy::RequireAll,
+        }],
+        Vec::new(),
+    );
+    let bindings = vec![wrong, right, consumer];
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &facts(&bindings),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    let edge = result
+        .global_graph
+        .contract_edges
+        .iter()
+        .find(|edge| edge.contract_id == "api")
+        .expect("edge");
+    assert_eq!(edge.producer_unit_run_id, "run_right");
+    assert!(edge.matched);
+}
+
+#[test]
+fn material_rejects_uncompressible_oversized_record() {
+    let mut unit = binding(1, "oversized", Vec::new(), Vec::new());
+    unit.run.id = "x".repeat(900);
+    let snapshots = vec![snapshot(&unit)];
+    let error = compile_group_review_material(
+        std::slice::from_ref(&unit),
+        &snapshots,
+        &request(),
+        &facts(std::slice::from_ref(&unit)),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect_err("oversized identity must fail");
+    assert!(
+        matches!(error, crate::product::coding_workspace_engine::group_review_types::GroupMaterialError::Internal(message) if message == "unit_cross_review_record_exceeds_850_bytes")
+    );
+}
+
+#[test]
+fn material_is_stable_when_completion_diff_input_is_reversed() {
+    let first = binding(1, "a", Vec::new(), Vec::new());
+    let second = binding(2, "b", Vec::new(), Vec::new());
+    let bindings = vec![first, second];
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let forward = facts(&bindings);
+    let mut reverse = facts(&bindings);
+    reverse.completion_diffs.reverse();
+    let first_result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &forward,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    let second_result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &reverse,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    assert_eq!(first_result.content_hash, second_result.content_hash);
+}
+
+#[test]
+fn material_exposes_compiler_version() {
+    let unit = binding(1, "version", Vec::new(), Vec::new());
+    let snapshots = vec![snapshot(&unit)];
+    let result = compile_group_review_material(
+        std::slice::from_ref(&unit),
+        &snapshots,
+        &request(),
+        &facts(std::slice::from_ref(&unit)),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    assert_eq!(result.compiler_version, "group-review-material-compiler-v1");
 }

@@ -58,10 +58,13 @@ pub(crate) fn compile_group_review_material(
     let (diff_index, completion_paths) = build_diff_index(&bindings, git_facts);
     let (global_graph, mut findings) =
         deterministic_checks(&bindings, &snapshot_by_run, &completion_paths, git_facts);
-    let mut unit_records = bindings
-        .iter()
-        .map(|binding| compact_record(binding, snapshot_by_run[&binding.run.id.as_str()]))
-        .collect::<Vec<_>>();
+    let mut unit_records = Vec::with_capacity(bindings.len());
+    for binding in &bindings {
+        unit_records.push(compact_record(
+            binding,
+            snapshot_by_run[&binding.run.id.as_str()],
+        )?);
+    }
     unit_records.sort_by(|left, right| left.unit_run_id.cmp(&right.unit_run_id));
 
     let affinity_edges = affinity_edges(&bindings, &diff_index);
@@ -174,7 +177,7 @@ fn binding_digest(
 fn compact_record(
     binding: &AuthoritativeGroupReviewerBinding,
     snapshot: &UnitReviewConclusionSnapshot,
-) -> UnitCrossReviewRecord {
+) -> Result<UnitCrossReviewRecord, GroupMaterialError> {
     let projection = &binding.projection_binding.projection;
     let mut dependencies = projection
         .input_contract_checks
@@ -246,12 +249,12 @@ fn compact_record(
             })
             .collect(),
     };
-    trim_record(&mut record);
-    record
+    trim_record(&mut record)?;
+    Ok(record)
 }
 
-fn trim_record(record: &mut UnitCrossReviewRecord) {
-    while serde_json::to_vec(record).map_or(0, |bytes| bytes.len()) > MAX_UNIT_RECORD_BYTES {
+fn trim_record(record: &mut UnitCrossReviewRecord) -> Result<(), GroupMaterialError> {
+    while serde_json::to_vec(&*record).map_or(0, |bytes| bytes.len()) > MAX_UNIT_RECORD_BYTES {
         if record.contract_interfaces.pop().is_some()
             || record.routing_targets.pop().is_some()
             || record.dependency_ids.pop().is_some()
@@ -260,8 +263,11 @@ fn trim_record(record: &mut UnitCrossReviewRecord) {
         {
             continue;
         }
-        break;
+        return Err(GroupMaterialError::Internal(
+            "unit_cross_review_record_exceeds_850_bytes".to_string(),
+        ));
     }
+    Ok(())
 }
 
 fn deterministic_checks(
@@ -271,11 +277,15 @@ fn deterministic_checks(
     git_facts: &GroupGitFacts,
 ) -> (GroupReviewGraph, Vec<DeterministicGroupFinding>) {
     let mut findings = Vec::new();
-    let mut outputs = BTreeMap::<String, (&AuthoritativeGroupReviewerBinding, Vec<String>)>::new();
+    let mut outputs =
+        BTreeMap::<(String, String), (&AuthoritativeGroupReviewerBinding, Vec<String>)>::new();
     for binding in bindings {
         for output in &binding.projection_binding.projection.output_contract_checks {
             outputs.insert(
-                output.contract_id.clone(),
+                (
+                    binding.projection_binding.logical_work_item_id.clone(),
+                    output.contract_id.clone(),
+                ),
                 (*binding, sorted_unique(output.capabilities.clone())),
             );
         }
@@ -284,7 +294,10 @@ fn deterministic_checks(
     for binding in bindings {
         for input in &binding.projection_binding.projection.input_contract_checks {
             let (producer, _provided, matched) = outputs
-                .get(&input.contract_id)
+                .get(&(
+                    input.provider_logical_work_item_id.clone(),
+                    input.contract_id.clone(),
+                ))
                 .map(|(producer, provided)| {
                     let matching = match input.compatibility_policy {
                         ContractCompatibilityPolicy::RequireAll => input
@@ -350,15 +363,15 @@ fn deterministic_checks(
     scope_overlaps.sort_by(|left, right| left.file_path.cmp(&right.file_path));
 
     let known_commits = git_facts
-        .completion_diffs
+        .completion_commit_in_final
         .iter()
-        .map(|diff| diff.completion_commit.as_str())
+        .map(String::as_str)
         .collect::<BTreeSet<_>>();
     let mut reachable = Vec::new();
     let mut unreachable = Vec::new();
     for binding in bindings {
         match binding.run.completion_commit.as_deref() {
-            Some(commit) if known_commits.contains(commit) || commit == git_facts.final_diff => {
+            Some(commit) if known_commits.contains(commit) || commit == git_facts.final_commit => {
                 reachable.push(commit.to_string())
             }
             Some(commit) => {
@@ -670,7 +683,9 @@ fn build_diff_index(
     let mut path_owners = BTreeMap::<String, BTreeSet<String>>::new();
     let mut stats = BTreeMap::<String, (u32, u32)>::new();
     let mut hunks = Vec::new();
-    for diff in &facts.completion_diffs {
+    let mut completion_diffs = facts.completion_diffs.iter().collect::<Vec<_>>();
+    completion_diffs.sort_by(|left, right| left.unit_run_id.cmp(&right.unit_run_id));
+    for diff in completion_diffs {
         let parsed = if diff.hunks.is_empty() {
             parse_hunks(&diff.patch, &diff.unit_run_id)
         } else {
@@ -690,16 +705,17 @@ fn build_diff_index(
                 .or_default()
                 .insert(diff.unit_run_id.clone());
         }
-        for hunk in parsed {
+        for mut hunk in parsed {
+            hunk.body = redact_sensitive_patterns(&hunk.body);
             hunks.push(hunk);
         }
     }
-    let final_paths = parse_hunks(&facts.final_diff, "");
-    for hunk in final_paths {
+    for mut hunk in parse_hunks(&facts.final_diff, "") {
+        hunk.body = redact_sensitive_patterns(&hunk.body);
         stats.entry(hunk.path.clone()).or_default();
         path_owners.entry(hunk.path.clone()).or_default();
+        hunks.push(hunk);
     }
-    let involved = contract_involved_runs(bindings);
     let mut files = stats
         .into_iter()
         .map(|(path, (insertions, deletions))| {
@@ -730,8 +746,9 @@ fn build_diff_index(
         left.path
             .cmp(&right.path)
             .then(left.hunk_index.cmp(&right.hunk_index))
+            .then(left.owner_unit_run_ids.cmp(&right.owner_unit_run_ids))
+            .then(left.content_hash.cmp(&right.content_hash))
     });
-    let _ = involved;
     (
         GroupDiffIndex {
             files,
@@ -812,24 +829,6 @@ fn stats_from_patch(patch: &str) -> Vec<DiffFileStat> {
         .collect()
 }
 
-fn contract_involved_runs(bindings: &[&AuthoritativeGroupReviewerBinding]) -> BTreeSet<String> {
-    bindings
-        .iter()
-        .filter(|binding| {
-            !binding
-                .projection_binding
-                .projection
-                .input_contract_checks
-                .is_empty()
-                || !binding
-                    .projection_binding
-                    .projection
-                    .output_contract_checks
-                    .is_empty()
-        })
-        .map(|binding| binding.run.id.clone())
-        .collect()
-}
 fn diff_level(file: &DiffFileEntry, bindings: &[&AuthoritativeGroupReviewerBinding]) -> char {
     if file.forbidden_scope_hit {
         'A'
@@ -884,6 +883,7 @@ fn shard_selections(
                     file.owner_unit_run_ids
                         .iter()
                         .any(|id| members.contains(&id))
+                        || file.ambiguous
                 })
                 .collect::<Vec<_>>();
             ShardDiffSelection {
@@ -948,6 +948,13 @@ fn reduction_selection(
         fragments,
     }
 }
+fn file_header(file: &DiffFileEntry) -> String {
+    format!(
+        "path: {}\nstat: +{} -{}\n",
+        file.path, file.insertions, file.deletions
+    )
+}
+
 fn select_fragments(
     files: &[&DiffFileEntry],
     hunks: &[DiffHunk],
@@ -965,6 +972,10 @@ fn select_fragments(
     let mut result = Vec::new();
     for file in files {
         let level = diff_level(file, bindings);
+        let header = file_header(file);
+        let header_body = utf8_prefix(&header, remaining).to_string();
+        let header_truncated = header_body.len() < header.len();
+        remaining = remaining.saturating_sub(header_body.len());
         let candidates = hunks
             .iter()
             .filter(|hunk| hunk.path == file.path)
@@ -976,23 +987,25 @@ fn select_fragments(
             result.push(SelectedDiffFragment {
                 path: file.path.clone(),
                 level,
+                body: header_body,
                 hunk_content_hash: String::new(),
                 redacted: false,
-                truncated: false,
+                truncated: header_truncated,
                 not_shown_count: candidates.len(),
             });
             continue;
         }
         for (index, hunk) in candidates.iter().enumerate() {
             let text = format!("{}\n{}", hunk.header, hunk.body);
-            let redacted = redact_sensitive_patterns(&text);
-            let was_redacted = redacted != text;
+            let redacted = text;
+            let was_redacted = false;
             let allowed = utf8_prefix(&redacted, remaining);
             let truncated = allowed.len() < redacted.len();
             remaining = remaining.saturating_sub(allowed.len());
             result.push(SelectedDiffFragment {
                 path: file.path.clone(),
                 level,
+                body: format!("{header_body}{allowed}"),
                 hunk_content_hash: hunk.content_hash.clone(),
                 redacted: was_redacted,
                 truncated,

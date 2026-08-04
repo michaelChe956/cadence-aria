@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 
 pub(crate) struct PromptSegments {
@@ -212,6 +214,8 @@ pub(crate) struct GroupGitFacts {
     pub diff_stat: String,
     pub completion_diffs: Vec<CompletionDiff>,
     pub final_diff: String,
+    pub final_commit: String,
+    pub completion_commit_in_final: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -245,6 +249,7 @@ pub(crate) struct DiffHunk {
 pub(crate) struct SelectedDiffFragment {
     pub path: String,
     pub level: char,
+    pub body: String,
     pub hunk_content_hash: String,
     pub redacted: bool,
     pub truncated: bool,
