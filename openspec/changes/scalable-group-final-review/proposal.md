@@ -25,19 +25,27 @@ Group Final Review 目前把一个 WorkItemGroup 内所有 Work Item 的完整�
 将组级审查从"单次全量调用"改为"Rust 侧确定性编译 + 分片语义审查 + 全局归约"。
 
 1. 新增组级审查材料编译能力：从权威 Binding 编译不可变材料快照，并在 Rust 侧完成契约匹配、写入范围、Commit 与证据一致性、Requirement 聚合等确定性检查。
-2. 新增分片编排能力：按依赖与共享写入范围亲和性把 Work Item 分片，每片最多 4 个，逐片执行语义审查。
-3. 新增全局归约能力：最终调用只接收全局单位摘要、各片结论、跨片可疑关系与跨界变更片段，产出最终结论与交付叙事。
-4. 新增单次 Prompt 字节预算门禁：超过硬上限时不调用 Provider，改为可诊断的材料溢出门禁。
-5. 新增 Unit 审查结论身份快照，使组级聚合不再依赖缺少 Work Item 身份的既有报告记录。
-6. 扩展失败语义：区分单片失败与归约失败，支持仅重试失败环节。
+2. 新增确定性分片能力：按 Handoff 依赖、共享文件、契约边界三类亲和边把 Work Item 切分为每片最多 4 个的分片，同一输入必须产生同一分片结果。
+3. 新增全局归约能力：归约阶段只接收全局单位摘要、各分片结论、跨片关系与跨界变更片段，产出最终结论与交付叙事；归约仅在同一快照下全部分片成功后启动。
+4. 新增单次 Prompt 字节预算门禁：以完整 Prompt 的 UTF-8 字节度量，超过硬上限时不调用 Provider，改为可诊断的材料溢出门禁。
+5. 新增容量上限门禁：Work Item 数超过首期支持上限（20）时，在调用任何 Provider 前失败关闭，不得回退单次全量审查，不得提高上限。
+6. 新增 Unit 审查结论身份快照，使组级聚合不再依赖缺少 Work Item 身份的既有报告记录。
+7. 扩展失败语义：区分传输失败与"正常完成但无法解析"，分片与归约各自可按环节重试；结论转写补救必须通过内容保真校验；晚到结果与并发重试由快照 CAS 规则约束。
 
 ## Impact
 
-- 受影响 capability：
-  - 新增 `group-review-sharding`
-  - 修改 `group-final-review-triage`
+- 新增 capability：`group-review-sharding`
+- 修改 capability：`group-final-review-triage`
+- 受影响 capability（不修改其规范文本，但实现必须保持其既有保证）：
+  - `work-item-runtime-projection`：组级材料编译器是 Revision 数据的规范消费者，不再经 per-unit rendered projection 路径；per-unit Reviewer Projection 与 Renderer Hash 的既有契约不变。
+  - `coding-workspace-completion`：分片与归约的中间状态不得被识别为"已有通过 review"；完成条件继续依赖最终归约结论。
+  - `project-rule-aware-prompts`：分片与归约 Prompt 继续包含项目规则读取契约。
+  - `testing-stage-removal`：组级材料不得引入 TestingReport 或测试派生字段依赖。
+  - `work-item-handoff-removal`：跨 Work Item 审查只消费 HandoffRevision 的 contract/capability，不恢复交接摘要。
+  - `provider-stream-log-placement`：分片与归约的原始输出是兼容扩展（新增子命名），既有路径与命名语义不变。
+  - `coding-code-review-triage`：身份快照与单项审查报告的持久化必须原子或幂等，不得引入中间不一致状态。
 - 受影响行为：组级审查的材料组织方式、Provider 调用次数、失败与重试粒度、组级审查产物的持久化结构。
-- 不受影响行为：单项 Code Review 的材料与结论、最终用户可见的 InternalPrReview 结论形态、既有权威 Finding Target 校验规则。
+- 不受影响行为：单项 Code Review 的材料与结论、最终用户可见的 InternalPrReview 结论形态、既有权威 Finding Target 校验规则、既有单项 Renderer Hash 绑定。
 
 ## Non-goals
 
@@ -45,5 +53,12 @@ Group Final Review 目前把一个 WorkItemGroup 内所有 Work Item 的完整�
 2. 不让 Provider 读取工作树之外的审查材料文件。
 3. 不在本变更接入 Provider 原生 JSON Schema 或 Function Call 能力。
 4. 不引入 Provider 特判；三家 Provider 使用同一材料协议。
-5. 本变更容量目标为单组最多 20 个 Work Item；更大规模的树形归约不在范围内。
+5. 本变更容量目标为单组最多 20 个 Work Item；更大规模的树形归约不在范围内，超限时失败关闭。
 6. 不以放宽字节硬上限的方式容纳材料增长。
+7. 不修改单项 Code Review 的 verdict、路由与门禁行为；身份快照仅为组级聚合提供旁路审计数据。
+8. 不把确定性编译器扩展为通用静态分析平台，只覆盖本设计明列的组级事实。
+9. 不新增或恢复 Testing stage、TestingReport、handoff summary 或测试产物作为组级审查输入。
+10. 不自动迁移或按顺序推断历史 CodeReviewReport 的身份；缺少身份快照时失败关闭。
+11. 不改变 provider-raw 既有路径语义；分片与归约产物仅作兼容扩展。
+12. 不允许通过人工继续把容量超限、材料溢出或身份缺失伪装为通过。
+13. 不要求为所有历史 UnitRun 补写 legacy InternalReviewer execution-context hash。

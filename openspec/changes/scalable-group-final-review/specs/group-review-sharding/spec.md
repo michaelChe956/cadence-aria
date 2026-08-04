@@ -16,11 +16,21 @@
 - **WHEN** 某个已完成 Work Item 缺少携带 Unit 身份的单项审查结论记录
 - **THEN** 系统 MUST 以身份缺失原因失败关闭，MUST NOT 按报告顺序或轮次猜测该结论所属 Work Item
 
+#### Scenario: 身份快照写入必须幂等
+
+- **WHEN** 单项审查成功持久化后写入单位审查结论身份快照，且同一 Unit Run 再次触发写入
+- **THEN** 系统 MUST 产生与首次写入相同的内容，MUST NOT 产生重复或冲突记录
+
+#### Scenario: 报告已持久化但身份快照缺失时失败关闭
+
+- **WHEN** 单项审查报告已持久化，但对应的单位审查结论身份快照缺失
+- **THEN** 组级材料编译 MUST 以身份缺失原因失败关闭，MUST NOT 以部分数据继续编译
+
 ### Requirement: 单次 Provider 输入必须受字节预算约束
 
-组级审查的每一次 Provider 调用 MUST 在构建后度量输入字节，并 MUST 依据质量目标与硬上限决定是否发送。系统 MUST NOT 在超过硬上限时调用 Provider。
+组级审查的每一次 Provider 调用 MUST 以实际发送的完整 Prompt 的 UTF-8 字节数度量输入，1 KiB MUST 按 1024 bytes 计算，并 MUST 依据质量目标与硬上限决定是否发送。系统 MUST NOT 在超过硬上限时调用 Provider。
 
-质量目标为 28 KiB，硬上限为 30 KiB。
+首期默认质量目标为 28 KiB，硬上限为 30 KiB。硬上限 MUST NOT 通过配置放宽；质量目标可配置，但配置值 MUST 小于硬上限。
 
 #### Scenario: 未超过质量目标时正常发送
 
@@ -42,24 +52,48 @@
 - **WHEN** 某个 Work Item 的契约接口或写入范围材料自身超过其字段预算
 - **THEN** 系统 MUST NOT 截断契约标识或身份标识后继续，MUST 进一步分片或进入溢出门禁
 
-### Requirement: 组级审查必须按分片上限切分并逐片审查
+#### Scenario: 度量覆盖完整 Prompt
 
-组级审查 MUST 把参与审查的 Work Item 切分为多个分片，每个分片 MUST NOT 超过 4 个 Work Item，并 MUST 逐片执行语义审查。
+- **WHEN** 系统度量某次 Provider 输入的字节数
+- **THEN** 度量对象 MUST 为实际发送的完整 Prompt 的 UTF-8 字节数，MUST NOT 仅统计业务材料部分
 
-#### Scenario: 二十个 Work Item 切分为五个分片
+### Requirement: 组级审查必须按确定性分片规则切分并逐片审查
+
+组级审查 MUST 使用确定性分片规则把参与审查的 Work Item 切分为分片，每个分片 MUST NOT 超过 4 个 Work Item，并 MUST 逐片执行语义审查。同一输入 MUST 产生同一分片结果，MUST NOT 依赖权重打分、随机数或并发顺序。
+
+确定性分片规则为：以 Handoff 依赖边、共享文件边、契约边界边三类亲和边构建连通图；对连通分量按其内部最小 order index 排序；按排序装箱，分量整体能装入当前分片则放入，否则开启新分片；超过 4 个 Work Item 的分量按 order index 稳定切成连续的不超过 4 的组，被切断的边进入跨片边集合；分片内按稳定 order index 排序。
+
+三类亲和边定义为：Handoff 依赖边为下游 Unit 的 input_contract 消费上游 Unit 的 output_contract；共享文件边为两个 Unit 的完成 diff 修改同一文件；契约边界边为两个 Unit 引用同一 contract_id。
+
+#### Scenario: 二十个 Work Item 至少产生五个分片
 
 - **WHEN** 一个 WorkItemGroup 有 20 个已完成且通过权威校验的 Work Item
-- **THEN** 系统 MUST 生成 5 个分片，每个分片的 Work Item 数 MUST NOT 超过 4，并 MUST 在归约前完成全部分片审查
+- **THEN** 系统 MUST 生成至少 5 个分片，每个分片的 Work Item 数 MUST NOT 超过 4
 
-#### Scenario: 强耦合项优先同片
+#### Scenario: 预算压力允许更多更小的分片
 
-- **WHEN** 两个 Work Item 之间存在 Handoff 依赖边或修改同一文件
-- **THEN** 分片 MUST 优先将其归入同一分片，除非该连通分量超过分片上限
+- **WHEN** 某个 Work Item 的材料自身逼近字段预算，导致该分片无法容纳 4 个 Work Item
+- **THEN** 系统 MAY 生成多于基准数量的分片，每个分片仍 MUST NOT 超过 4 个 Work Item
 
-#### Scenario: 超过上限的连通分量必须记录跨片关系
+#### Scenario: Handoff 依赖项同片
 
-- **WHEN** 一个强耦合连通分量的 Work Item 数超过分片上限而被切分
-- **THEN** 所有被切断的契约边、共享路径边与归属歧义边 MUST 进入全局跨片关系集合，并 MUST 在归约阶段被审查
+- **WHEN** Unit B 的 input_contract 消费 Unit A 的 output_contract，且两者所在连通分量不超过分片上限
+- **THEN** Unit A 与 Unit B MUST 位于同一分片
+
+#### Scenario: 共享文件项同片
+
+- **WHEN** Unit A 与 Unit B 的完成 diff 修改同一文件，且两者所在连通分量不超过分片上限
+- **THEN** Unit A 与 Unit B MUST 位于同一分片
+
+#### Scenario: 超量分量稳定切开
+
+- **WHEN** 一个连通分量的 Work Item 数超过 4
+- **THEN** 系统 MUST 按 order index 将该分量切成连续的不超过 4 的组，MUST 将被切断的边写入跨片边集合，且该集合 MUST 在归约阶段被审查
+
+#### Scenario: 分片结果可复现
+
+- **WHEN** 以相同的权威 Binding、ReviewRequest 与 Git 事实两次执行分片
+- **THEN** 两次分片结果 MUST 逐片一致，包括片内顺序与跨片边集合
 
 ### Requirement: 确定性检查必须在调用 Provider 前完成
 
@@ -80,28 +114,45 @@
 - **WHEN** 审查请求的 Commit 不可达，或未包含某个 Work Item 的完成 Commit
 - **THEN** 系统 MUST 在调用 Provider 前标记该一致性失败
 
-### Requirement: 变更材料必须提供完整索引并按风险选择片段
+### Requirement: 变更材料必须提供完整索引并按级别选择片段
 
-组级审查 MUST 提供完整的变更文件索引，并 MUST 按风险选择变更片段正文。系统 MUST NOT 以固定长度前缀截断变更正文作为唯一策略。
+组级审查 MUST 提供完整的变更文件索引，并 MUST 按级别从高到低选择变更片段正文。系统 MUST NOT 以固定长度前缀截断变更正文作为唯一策略。所有进入 Prompt 的片段 MUST 先经过敏感信息脱敏。
+
+片段级别定义为：A 级为命中某 Unit 禁止写入范围的片段；B 级为归属歧义片段；C 级为共享文件片段；D 级为契约相关文件片段；E 级为单 Unit 独占文件片段。
 
 #### Scenario: 索引始终完整
 
 - **WHEN** 组级审查构建变更材料
-- **THEN** 变更文件索引 MUST 包含全部变更路径、增删行数、归属 Unit Run、共享与歧义标记、范围违规标记
+- **THEN** 变更文件索引 MUST 包含全部变更路径、增删行数、归属 Unit Run、共享标记、歧义标记、范围违规标记
 
-#### Scenario: 归约只接收跨片可疑片段
+#### Scenario: 分片选取本片相关片段
+
+- **WHEN** 分片构建变更材料
+- **THEN** 片段正文 MUST 只包含与本片 Unit 相关的 A、B、C、D 级片段，E 级 MUST 只提供文件头部
+
+#### Scenario: 归约选取集合机械确定
 
 - **WHEN** 归约阶段构建变更材料
-- **THEN** 片段正文 MUST 只包含跨分片的共享、歧义、范围或契约可疑片段
+- **THEN** 片段选取集合 MUST 为 A 级命中、B 级命中、被分片切断的边涉及的文件、owner 属于不同分片的 C 与 D 级文件的并集，E 级片段 MUST NOT 进入归约
 
-#### Scenario: 片段必须标注截断与脱敏状态
+#### Scenario: 同级选取顺序稳定
 
-- **WHEN** 任一变更片段被截断或包含被脱敏内容
-- **THEN** 该片段 MUST 标注截断状态、脱敏状态、原始片段哈希与未展示数量
+- **WHEN** 同一片段级别内存在多个候选文件
+- **THEN** 系统 MUST 按文件路径字典序选取，同文件内 MUST 按 diff 原始顺序选取
+
+#### Scenario: 片段必须脱敏并标注截断状态
+
+- **WHEN** 任一变更片段进入 Prompt
+- **THEN** 该片段 MUST 已经过敏感信息脱敏；若被截断，MUST 标注截断状态，并 MUST 记录原始片段哈希与未展示片段数量
 
 ### Requirement: 归约阶段必须产出唯一最终结论
 
 组级审查 MUST 由归约阶段产出唯一最终结论，包含最终判定、发现集合、影响范围、PR 描述与提交信息建议。分片结论 MUST NOT 直接作为组级最终结论完成 Attempt。
+
+#### Scenario: 归约只在全部分片成功后启动
+
+- **WHEN** 同一快照下存在未完成或失败的分片
+- **THEN** 系统 MUST NOT 启动归约阶段
 
 #### Scenario: 分片结论不能完成组级审查
 
@@ -144,28 +195,50 @@
 - **WHEN** 分片与归约结论包含不同判定
 - **THEN** 最终判定 MUST 按阻塞高于要求修改、要求修改高于通过的顺序规约
 
-### Requirement: 失败必须可按环节重试且不得产生通过结论
+### Requirement: 失败必须区分类型、可按环节重试且不得产生通过结论
 
-组级审查 MUST 区分分片失败与归约失败，并 MUST 支持仅重试失败环节。任何未解决的失败 MUST NOT 产生通过结论。
+组级审查 MUST 区分传输失败与完成但无法解析两类失败，并 MUST 支持仅重试失败环节。任何未解决的失败 MUST NOT 产生通过结论。
 
-#### Scenario: 单个分片失败只重试该分片
+传输失败为 Provider 调用失败，包括超时、中断、adapter 错误与用户取消；完成但无法解析为 Provider 正常完成但输出无法解析为结论 JSON。两类失败 MUST 使用互不相同的原因码。
 
-- **WHEN** 某个分片的 Provider 调用失败或未产出结论 JSON
-- **THEN** 系统 MUST 仅重试该分片，MUST NOT 重跑输入未变化的其他成功分片
+#### Scenario: 传输失败直接重试该环节
 
-#### Scenario: 未产出结论时执行受限补救
+- **WHEN** 某个分片或归约的 Provider 调用发生传输失败
+- **THEN** 系统 MUST 以全新运行重试该环节，MUST NOT 执行结论转写补救，MUST NOT 重跑输入未变化的其他成功分片
+
+#### Scenario: 传输失败重试必须有上限
+
+- **WHEN** 同一环节反复发生传输失败
+- **THEN** 系统 MUST 限制该环节的最大重试次数，重试耗尽时 MUST 停止重试并进入该环节的输出无效门禁
+
+#### Scenario: 完成但无法解析时执行受限补救
 
 - **WHEN** Provider 正常完成但未产出结论 JSON
-- **THEN** 系统 MUST 执行一次结论转写补救，补救输入 MUST NOT 重新包含完整分片或归约材料，且 MUST 禁止在补救中重新审查或新增发现
+- **THEN** 系统 MUST 执行一次结论转写补救，补救输入 MUST 只含原始输出与结论契约，MUST NOT 重新包含完整分片或归约材料，且 MUST 禁止在补救中重新审查或新增发现
+
+#### Scenario: 补救输出禁止 approve
+
+- **WHEN** 结论转写补救产出的判定为 approve
+- **THEN** 系统 MUST 视该补救输出为无效，并 MUST 进入输出无效门禁
+
+#### Scenario: 补救输出必须通过保真校验
+
+- **WHEN** 结论转写补救产出非 approve 判定
+- **THEN** 系统 MUST 校验发现数量不超过环节上限、证据引用为该 attempt 已有引用的子集、目标与契约引用通过组级权威校验，且原始输出与补救输出的哈希均已持久化；任一校验失败 MUST 进入输出无效门禁
+
+#### Scenario: 补救输入超限时失败关闭
+
+- **WHEN** 原始输出超过 16 KiB 的补救输入上限
+- **THEN** 系统 MUST NOT 截断原始输出后补救，MUST 直接进入输出无效门禁
 
 #### Scenario: 补救失败进入输出无效门禁
 
-- **WHEN** 结论转写补救仍未产出可解析结论
+- **WHEN** 结论转写补救仍未产出通过校验的结论
 - **THEN** 系统 MUST 保存原始输出与补救输出引用，MUST 进入输出无效门禁，MUST NOT 产生无发现的通过结论
 
 #### Scenario: 归约失败不重跑成功分片
 
-- **WHEN** 归约阶段调用失败或未产出结论 JSON
+- **WHEN** 归约阶段发生传输失败或完成但无法解析
 - **THEN** 系统 MUST 仅重试归约阶段，MUST NOT 重跑输入未变化的成功分片
 
 #### Scenario: 返修只失效受影响环节
@@ -180,17 +253,60 @@
 
 ### Requirement: 分片与归约必须复用同一不可变材料快照
 
-组级审查 MUST 在启动前生成不可变材料快照，并 MUST 使所有分片与归约引用同一快照标识。重试 MUST 复用同一快照。
+组级审查 MUST 在启动前生成不可变材料快照，快照 MUST 采用稳定排序与规范化序列化计算内容哈希，并 MUST 使所有分片与归约引用同一快照标识。
 
-#### Scenario: 重试复用同一快照
+#### Scenario: 输入事实未变化时复用快照
 
-- **WHEN** 某个分片或归约阶段被重试且其输入事实未变化
-- **THEN** 该次重试 MUST 复用原快照标识，MUST NOT 重新编译出不同内容的材料
+- **WHEN** 某个分片或归约阶段被重试，且完成 Commit、Work Item Revision、Handoff Revision、审查请求 Commit、权威 Binding 均未变化
+- **THEN** 该次重试 MUST 复用原快照的内容与内容哈希，MUST NOT 重新采集产生不同内容，并 MAY 重新构建 Prompt 与重新度量字节
 
 #### Scenario: 输入事实变化生成新快照
 
-- **WHEN** Work Item 完成 Commit、Work Item Revision、Handoff Revision、审查请求 Commit 或权威 Binding 中任一项发生变化
-- **THEN** 系统 MUST 生成新的快照，并 MUST 使依赖旧快照的分片与归约结论失效
+- **WHEN** 完成 Commit、Work Item Revision、Handoff Revision、审查请求 Commit 或权威 Binding 中任一项发生变化
+- **THEN** 系统 MUST 生成新的快照，并 MUST 将旧快照标记为 superseded，MUST 使依赖旧快照的分片与归约结论失效
+
+#### Scenario: 晚到结果不得覆盖 active 快照
+
+- **WHEN** 属于旧快照的 Provider 结果在新快照激活后到达
+- **THEN** 系统 MUST 在持久化前校验 active 快照标识，MUST 将该结果保存为 stale 审计记录，MUST NOT 用其覆盖 active 结果、关闭 active 门禁或生成最终结论
+
+#### Scenario: 同一环节并发单飞
+
+- **WHEN** 同一分片或归约在同一快照下已有进行中的 Provider 运行，又触发了重试
+- **THEN** 系统 MUST 等待或复用该运行的结果，MUST NOT 并行发起第二个 Provider 调用
+
+### Requirement: 组级审查容量超限必须失败关闭
+
+系统 MUST 在组级审查启动时校验 Work Item 数量。超过首期支持上限（20）时，MUST 在调用任何 Provider 前失败关闭。
+
+#### Scenario: 超限落地容量门禁
+
+- **WHEN** 一个 WorkItemGroup 已完成且通过权威校验的 Work Item 数超过 20
+- **THEN** 系统 MUST 落地容量超限阻塞门禁，MUST 记录实际数量与支持上限，MUST NOT 调用任何 Provider
+
+#### Scenario: 超限不得回退或放宽
+
+- **WHEN** 容量超限门禁已落地
+- **THEN** 系统 MUST NOT 回退单次全量审查，MUST NOT 提高字节预算上限，MUST NOT 将容量超限与材料溢出混用同一原因码
+
+### Requirement: 组级执行身份与 legacy 执行上下文字段必须兼容
+
+新组级架构 MUST NOT 使用分片或归约材料调用既有 per-unit execution-context 绑定接口。组级执行身份 MUST 由材料快照的 schema 版本、compiler 版本与内容哈希承载。既有 internal_reviewer_execution_context_hash 字段 MUST 只读保留，MUST NOT 补写。
+
+#### Scenario: 历史已绑定 Attempt 可重试
+
+- **WHEN** 一个历史 Attempt 的 UnitRun 已持久化 internal_reviewer_execution_context_hash，且其权威 Binding 校验通过、每个 Unit 具有身份快照
+- **THEN** 该 Attempt MUST 能在新架构下重试，MUST NOT 触发身份不匹配错误，既有哈希字段 MUST 保持不变
+
+#### Scenario: 历史未绑定 Attempt 可重试
+
+- **WHEN** 一个历史 Attempt 的 UnitRun 未持久化 internal_reviewer_execution_context_hash，且其权威 Binding 校验通过、每个 Unit 具有身份快照
+- **THEN** 该 Attempt MUST 能在新架构下重试，系统 MUST NOT 为该 UnitRun 补写该字段
+
+#### Scenario: 新旧产物审计可区分
+
+- **WHEN** 审查一个组级审查结论的执行身份引用
+- **THEN** 引用材料快照哈希的结论与引用 renderer 哈希的历史结论 MUST 可区分，MUST NOT 混用两类身份
 
 ### Requirement: 组级材料协议对所有 Provider 一致
 
