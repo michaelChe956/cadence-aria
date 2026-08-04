@@ -107,13 +107,21 @@ impl ImageClientApi for ImageClient {
         );
 
         let request = if let Some(reference) = reference {
+            let extension = reference
+                .declared_mime
+                .split('/')
+                .nth(1)
+                .filter(|ext| matches!(*ext, "png" | "jpeg" | "webp"))
+                .unwrap_or("png");
+            let file_name = format!("reference.{extension}");
             let image = Part::bytes(reference.bytes)
                 .mime_str(&reference.declared_mime)
                 .map_err(|_| {
                     ImageClientError::InvalidConfig(
                         "reference image has an invalid declared MIME type".to_string(),
                     )
-                })?;
+                })?
+                .file_name(file_name);
             let form = Form::new()
                 .text("model", IMAGE_MODEL)
                 .text("prompt", req.prompt.clone())
