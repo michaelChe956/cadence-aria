@@ -9,6 +9,7 @@ use crate::cross_cutting::bounded_command_runner::{
 };
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
+use crate::cross_cutting::image_client::ImageClient;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_health::{
@@ -16,6 +17,9 @@ use crate::cross_cutting::provider_health::{
 };
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCommand;
+use crate::product::image_create::{
+    ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
+};
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
 use crate::web::handlers::RepositoryRegistrationDependencies;
@@ -117,6 +121,8 @@ pub struct WebAppState {
     pub coding_runs: CodingRunRegistry,
     pub coding_sockets: CodingSocketRegistry,
     pub repository_initialization_runs: RepositoryInitializationRunRegistry,
+    pub image_create_run_registry: Arc<ImageCreateRunRegistry>,
+    pub image_create_engine: Option<Arc<ImageCreateEngine>>,
 }
 
 impl WebAppState {
@@ -146,15 +152,22 @@ impl WebAppState {
                 Arc::new(|_| true)
             };
         let provider_adapter = runtime.provider_adapter();
+        let provider_registry = default_provider_registry(
+            test_controls.clone(),
+            provider_gate.clone(),
+            test_provider_enabled,
+        );
+        let image_create_run_registry = Arc::new(ImageCreateRunRegistry::default());
+        let image_create_engine = Some(build_image_create_engine(
+            &workspace_root,
+            provider_registry.clone(),
+            image_create_run_registry.clone(),
+        ));
         Self {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
             events,
-            provider_registry: default_provider_registry(
-                test_controls.clone(),
-                provider_gate.clone(),
-                test_provider_enabled,
-            ),
+            provider_registry,
             provider_availability,
             provider_adapter,
             provider_health,
@@ -168,6 +181,8 @@ impl WebAppState {
             coding_runs: CodingRunRegistry::default(),
             coding_sockets: CodingSocketRegistry::default(),
             repository_initialization_runs: RepositoryInitializationRunRegistry::default(),
+            image_create_run_registry,
+            image_create_engine,
         }
     }
 
@@ -205,6 +220,11 @@ impl WebAppState {
     ) -> Self {
         let mut state = Self::with_events(workspace_root, runtime, events);
         state.provider_registry = provider_registry;
+        state.image_create_engine = Some(build_image_create_engine(
+            &state.workspace_root,
+            state.provider_registry.clone(),
+            state.image_create_run_registry.clone(),
+        ));
         state
     }
 
@@ -283,6 +303,22 @@ impl WebAppState {
             .expect("provider health error lock")
             .clone()
     }
+}
+
+fn build_image_create_engine(
+    workspace_root: &std::path::Path,
+    provider_registry: Arc<ProviderRegistry>,
+    run_registry: Arc<ImageCreateRunRegistry>,
+) -> Arc<ImageCreateEngine> {
+    let paths = AriaStatePaths::from_workspace_root(workspace_root);
+    Arc::new(ImageCreateEngine::new(
+        paths.clone(),
+        Arc::new(SessionStore::new(paths.clone())),
+        Arc::new(SettingsStore::new(paths)),
+        Arc::new(ImageClient::new()),
+        provider_registry,
+        run_registry,
+    ))
 }
 
 fn availability_from_gate(
@@ -464,6 +500,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn image_create_engine_is_constructed_without_changing_new_signature() {
+        let root = tempdir().expect("root");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+
+        assert!(state.image_create_engine.is_some());
+    }
+
+    #[test]
+    fn injected_provider_registry_rebuilds_image_create_engine() {
+        let root = tempdir().expect("root");
+        let provider_registry = Arc::new(ProviderRegistry::new());
+        let state = WebAppState::with_events_and_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            EventHub::new(),
+            provider_registry.clone(),
+        );
+
+        assert!(Arc::ptr_eq(&state.provider_registry, &provider_registry));
+        assert!(Arc::ptr_eq(
+            state
+                .image_create_engine
+                .as_ref()
+                .expect("image create engine")
+                .iteration_registry(),
+            &provider_registry
+        ));
     }
 
     #[tokio::test]

@@ -24,11 +24,19 @@ export function AppShell({
   }, []);
 
   return (
-    <IssueLifecycleWorkbench
-      focusEntityKey={focusEntityKey}
-      onDrawerFocusChange={onDrawerFocusChange}
-      onOpenWorkspace={onOpenWorkspace}
-      onOpenCodingWorkspace={onOpenCodingWorkspace}
-    />
+    <div className="relative">
+      <a
+        href="/image-create"
+        className="fixed bottom-4 right-4 z-40 rounded-full border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-4 py-2 text-sm font-semibold text-white shadow-lg transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+      >
+        图片创作
+      </a>
+      <IssueLifecycleWorkbench
+        focusEntityKey={focusEntityKey}
+        onDrawerFocusChange={onDrawerFocusChange}
+        onOpenWorkspace={onOpenWorkspace}
+        onOpenCodingWorkspace={onOpenCodingWorkspace}
+      />
+    </div>
   );
 }

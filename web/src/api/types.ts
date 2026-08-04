@@ -1,5 +1,6 @@
 export * from "./types/common";
 export * from "./types/coding";
+export * from "./types/image-create";
 export * from "./types/lifecycle";
 export * from "./types/provider";
 export * from "./types/work-item-plan";

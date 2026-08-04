@@ -13,6 +13,7 @@ pub mod execution_record_store;
 pub mod gate_store;
 pub mod git_workspace_service;
 pub mod id;
+pub mod image_create;
 pub mod issue_store;
 pub mod json_store;
 pub mod lifecycle_store;
