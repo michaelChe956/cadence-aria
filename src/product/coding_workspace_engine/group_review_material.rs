@@ -977,6 +977,9 @@ fn select_fragments(
     let mut result = Vec::new();
     for file in files {
         let level = diff_level(file, bindings);
+        if level == 'E' && !include_e_headers {
+            continue;
+        }
         let header = file_header(file);
         let header_body = utf8_prefix(&header, remaining).to_string();
         let header_truncated = header_body.len() < header.len();
@@ -985,9 +988,6 @@ fn select_fragments(
             .iter()
             .filter(|hunk| hunk.path == file.path)
             .collect::<Vec<_>>();
-        if level == 'E' && !include_e_headers {
-            continue;
-        }
         if level == 'E' {
             result.push(SelectedDiffFragment {
                 path: file.path.clone(),
