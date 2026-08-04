@@ -246,7 +246,9 @@ fn strip_structured_output_block(text: &str) -> String {
     };
     let end_tag_start = start + end_tag_start;
     let after_end_tag = &text[end_tag_start + END.len()..];
-    let end_close = after_end_tag.find('>').map(|i| end_tag_start + END.len() + i + 1);
+    let end_close = after_end_tag
+        .find('>')
+        .map(|i| end_tag_start + END.len() + i + 1);
     let Some(end_close) = end_close else {
         return text.to_string();
     };
