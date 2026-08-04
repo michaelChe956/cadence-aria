@@ -165,11 +165,14 @@ async fn consume_iteration_events(
         match event {
             Some(ProviderEvent::TextDelta { content }) => text_deltas.push_str(&content),
             Some(ProviderEvent::Completed(completion)) => {
-                let readable_text = if !completion.readable_output.trim().is_empty() {
+                // 无论 parse 成功/失败，readable_output 或 text_deltas 都可能残留 sentinel 块，
+                // 统一剥离，确保聊天框不显示 <ARIA_STRUCTURED_OUTPUT> 标签。
+                let raw_readable = if !completion.readable_output.trim().is_empty() {
                     completion.readable_output.clone()
                 } else {
-                    strip_structured_output_block(&text_deltas)
+                    text_deltas
                 };
+                let readable_text = strip_structured_output_block(&raw_readable);
                 let suggested_prompt = match completion.structured_output {
                     StructuredOutputState::Parsed(value) => value
                         .get("suggested_prompt")

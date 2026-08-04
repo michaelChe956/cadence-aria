@@ -168,7 +168,7 @@ export function SessionList({
         )}
       </div>
       {showCreate ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/40 p-4 pt-16 backdrop-blur-sm">
           <form
             role="dialog"
             aria-modal="true"
