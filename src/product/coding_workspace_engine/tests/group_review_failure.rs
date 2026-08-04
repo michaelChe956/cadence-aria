@@ -1,8 +1,15 @@
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+use crate::product::coding_attempt_store::{
+    CodingAttemptStore, CreateBlockedGateInput, CreateCodingAttemptInput,
+};
+use crate::product::coding_models::{
+    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingGateDiagnostic,
+    CodingProviderRole,
+};
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
     FakeGroupReviewExecutor, GroupReviewExecutionError, GroupReviewExecutionResult,
-    GroupReviewOrchestrator, RepairError, RepairFidelityError, validate_repair_fidelity,
+    GroupReviewFailureGateDecision, GroupReviewOrchestrator, RepairError, RepairFidelityError,
+    decide_group_review_failure_gate, validate_repair_fidelity,
 };
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -31,6 +38,223 @@ fn execution_store() -> (TempDir, CodingAttemptStore, String) {
     (root, store, attempt.id)
 }
 
+fn group_review_failure_input(
+    attempt_id: &str,
+    reason_code: &str,
+    evidence_ref: &str,
+) -> CreateBlockedGateInput {
+    CreateBlockedGateInput {
+        attempt_id: attempt_id.to_string(),
+        stage: CodingExecutionStage::InternalPrReview,
+        node_id: Some("group_review_node_0001".to_string()),
+        role: Some(CodingProviderRole::InternalReviewer),
+        title: format!("{reason_code} title"),
+        description: format!("{reason_code} description"),
+        reason_code: Some(reason_code.to_string()),
+        evidence_refs: vec![evidence_ref.to_string()],
+        raw_provider_output_ref: None,
+        available_actions: vec![
+            CodingGateAction {
+                action_id: "retry_group_reduction".to_string(),
+                label: "retry".to_string(),
+                action_type: CodingGateActionType::RetryGroupReduction,
+            },
+            CodingGateAction {
+                action_id: "abort".to_string(),
+                label: "abort".to_string(),
+                action_type: CodingGateActionType::Abort,
+            },
+        ],
+    }
+}
+
+fn group_review_diagnostic(reason_code: &str) -> CodingGateDiagnostic {
+    CodingGateDiagnostic {
+        actual_value: Some("21".to_string()),
+        limit: Some("20".to_string()),
+        phase: "shard".to_string(),
+        run_failure_code: reason_code.to_string(),
+    }
+}
+
+#[test]
+fn group_review_failure_store_replaces_lower_priority_gate_and_preserves_audit() {
+    let (_root, store, attempt_id) = execution_store();
+    let attempt = store.find_attempt_by_id(&attempt_id).expect("attempt");
+    let low = store
+        .create_group_review_failure_gate(
+            &attempt,
+            group_review_failure_input(&attempt_id, "shard_output_invalid", "shard-evidence"),
+            group_review_diagnostic("shard_output_invalid"),
+        )
+        .expect("low-priority gate");
+    let high = store
+        .create_group_review_failure_gate(
+            &attempt,
+            group_review_failure_input(&attempt_id, "material_overflow", "overflow-evidence"),
+            group_review_diagnostic("material_overflow"),
+        )
+        .expect("high-priority gate");
+    let open = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("open gates");
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].gate_id, high.gate_id);
+    assert_eq!(open[0].reason_code.as_deref(), Some("material_overflow"));
+    assert_eq!(
+        open[0]
+            .diagnostic
+            .as_ref()
+            .map(|value| value.run_failure_code.as_str()),
+        Some("material_overflow")
+    );
+    assert!(
+        store
+            .resolve_blocked_gate(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &low.gate_id
+            )
+            .is_ok(),
+        "replaced gate is retained as resolved audit"
+    );
+}
+
+#[test]
+fn lower_priority_and_same_reason_group_review_failures_merge_evidence_without_reopening() {
+    let (_root, store, attempt_id) = execution_store();
+    let attempt = store.find_attempt_by_id(&attempt_id).expect("attempt");
+    let capacity = store
+        .create_group_review_failure_gate(
+            &attempt,
+            group_review_failure_input(&attempt_id, "capacity_exceeded", "capacity-evidence"),
+            group_review_diagnostic("capacity_exceeded"),
+        )
+        .expect("capacity gate");
+    let lower = store
+        .create_group_review_failure_gate(
+            &attempt,
+            group_review_failure_input(&attempt_id, "shard_output_invalid", "shard-evidence"),
+            group_review_diagnostic("shard_output_invalid"),
+        )
+        .expect("lower failure");
+    let same = store
+        .create_group_review_failure_gate(
+            &attempt,
+            group_review_failure_input(&attempt_id, "capacity_exceeded", "new-capacity-evidence"),
+            group_review_diagnostic("capacity_exceeded"),
+        )
+        .expect("same failure");
+    assert_eq!(capacity.gate_id, lower.gate_id);
+    assert_eq!(capacity.gate_id, same.gate_id);
+    let open = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("open gate");
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].reason_code.as_deref(), Some("capacity_exceeded"));
+    assert_eq!(
+        open[0].evidence_refs,
+        vec![
+            "capacity-evidence".to_string(),
+            "shard-evidence".to_string(),
+            "new-capacity-evidence".to_string()
+        ]
+    );
+}
+
+#[test]
+fn concurrent_group_review_failures_leave_only_the_highest_priority_gate_open() {
+    let (_root, store, attempt_id) = execution_store();
+    let attempt = store.find_attempt_by_id(&attempt_id).expect("attempt");
+    let reasons = [
+        "shard_output_invalid",
+        "reduction_output_invalid",
+        "identity_missing",
+        "material_overflow",
+        "capacity_exceeded",
+    ];
+    let workers = reasons
+        .into_iter()
+        .map(|reason| {
+            let store = store.clone();
+            let attempt = attempt.clone();
+            let attempt_id = attempt_id.clone();
+            std::thread::spawn(move || {
+                store
+                    .create_group_review_failure_gate(
+                        &attempt,
+                        group_review_failure_input(&attempt_id, reason, reason),
+                        group_review_diagnostic(reason),
+                    )
+                    .expect("concurrent gate write");
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().expect("worker joins");
+    }
+    let open = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("open gates");
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].reason_code.as_deref(), Some("capacity_exceeded"));
+}
+#[test]
+fn group_review_failure_actions_are_stage_specific_and_exclude_manual_continue() {
+    let (_root, store, attempt_id) = execution_store();
+    let attempt = store.find_attempt_by_id(&attempt_id).expect("attempt");
+    let gate = store
+        .create_group_review_failure_gate(
+            &attempt,
+            group_review_failure_input(&attempt_id, "shard_output_invalid", "evidence"),
+            group_review_diagnostic("shard_output_invalid"),
+        )
+        .expect("failure gate");
+    assert_eq!(
+        gate.available_actions
+            .iter()
+            .map(|action| action.action_type.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            CodingGateActionType::RetryGroupReviewShard,
+            CodingGateActionType::Abort
+        ]
+    );
+    assert!(
+        gate.available_actions
+            .iter()
+            .all(|action| action.action_type != CodingGateActionType::ManualContinue)
+    );
+}
+
+#[test]
+fn higher_priority_group_review_failure_replaces_lower_priority_gate() {
+    assert_eq!(
+        decide_group_review_failure_gate("shard_output_invalid", "material_overflow"),
+        GroupReviewFailureGateDecision::ReplaceExisting
+    );
+}
+
+#[test]
+fn group_review_failure_reason_codes_are_distinct_and_ordered() {
+    let codes = [
+        "capacity_exceeded",
+        "material_overflow",
+        "identity_missing",
+        "reduction_output_invalid",
+        "shard_output_invalid",
+    ];
+    for (higher_index, higher) in codes.iter().enumerate() {
+        for lower in &codes[higher_index + 1..] {
+            assert_eq!(
+                decide_group_review_failure_gate(lower, higher),
+                GroupReviewFailureGateDecision::ReplaceExisting,
+                "{higher} must replace {lower}"
+            );
+        }
+    }
+}
 #[test]
 fn repair_fidelity_rejects_approve_even_when_raw_marker_is_blocked() {
     let raw = "GROUP_REVIEW_VERDICT: blocked\nprovider diagnostic";

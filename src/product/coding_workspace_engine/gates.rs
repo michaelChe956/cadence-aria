@@ -41,6 +41,16 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
             label: "重试 Internal Review".to_string(),
             action_type: CodingGateActionType::RetryInternalReview,
         }),
+        "retry_group_review_shard" => Some(CodingGateAction {
+            action_id: "retry_group_review_shard".to_string(),
+            label: "重试组审查分片".to_string(),
+            action_type: CodingGateActionType::RetryGroupReviewShard,
+        }),
+        "retry_group_reduction" => Some(CodingGateAction {
+            action_id: "retry_group_reduction".to_string(),
+            label: "重试组审查归约".to_string(),
+            action_type: CodingGateActionType::RetryGroupReduction,
+        }),
         "abort" => Some(CodingGateAction {
             action_id: "abort".to_string(),
             label: "终止".to_string(),
@@ -663,6 +673,11 @@ impl CodingWorkspaceEngine {
                 )?;
                 resumed
             }
+            CodingGateActionType::RetryGroupReviewShard
+            | CodingGateActionType::RetryGroupReduction => self.resume_blocked_attempt_at_stage(
+                &current,
+                CodingExecutionStage::InternalPrReview,
+            )?,
             CodingGateActionType::SendToCoder => {
                 if is_code_review_feedback_gate(&gate) {
                     self.send_code_review_feedback_to_coder(&current, extra_context)?

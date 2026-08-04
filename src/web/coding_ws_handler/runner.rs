@@ -165,7 +165,12 @@ pub(crate) fn should_resume_runner_after_gate_response(
 ) -> bool {
     matches!(
         action_id,
-        "retry_coding" | "send_to_coder" | "retry_review" | "retry_internal_review"
+        "retry_coding"
+            | "send_to_coder"
+            | "retry_review"
+            | "retry_internal_review"
+            | "retry_group_review_shard"
+            | "retry_group_reduction"
     ) && matches!(
         previous_attempt.status,
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman

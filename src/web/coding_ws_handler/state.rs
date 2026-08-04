@@ -68,6 +68,7 @@ pub(crate) fn build_coding_session_state(
             reason_code: Some("failed_code_review_recoverable".to_string()),
             evidence_refs: vec![recovery.failed_node_id, recovery.stale_role_run_id],
             raw_provider_output_ref: None,
+            diagnostic: None,
         });
     }
     let role_provider_config_snapshot = coding_store.get_role_provider_config_snapshot(

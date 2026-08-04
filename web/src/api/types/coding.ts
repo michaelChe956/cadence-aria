@@ -320,7 +320,9 @@ export type CodingGateActionType =
   | "manual_continue"
   | "retry_coding"
   | "retry_review"
-  | "retry_internal_review";
+  | "retry_internal_review"
+  | "retry_group_review_shard"
+  | "retry_group_reduction";
 export type CodingGateKind = "permission" | "stage_gate" | "blocked" | "final_confirm";
 
 export type CodingGateAction = {
@@ -342,6 +344,14 @@ export type CodingGateRequired = {
   reason_code?: string | null;
   evidence_refs?: string[];
   raw_provider_output_ref?: string | null;
+  diagnostic?: CodingGateDiagnostic | null;
+};
+
+export type CodingGateDiagnostic = {
+  actual_value?: string | null;
+  limit?: string | null;
+  phase: string;
+  run_failure_code: string;
 };
 
 export type CodingChoiceGateStatus = "open" | "resolved" | "stale" | "cancelled";

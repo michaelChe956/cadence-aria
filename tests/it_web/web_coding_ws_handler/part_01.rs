@@ -329,6 +329,7 @@ fn coding_gate_required_out_message_preserves_action_contract() {
         reason_code: None,
         evidence_refs: Vec::new(),
         raw_provider_output_ref: None,
+        diagnostic: None,
     };
     let message = CodingWsOutMessage::CodingGateRequired { gate };
 

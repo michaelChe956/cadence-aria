@@ -163,6 +163,15 @@ impl super::CodingAttemptStore {
         attempt: &CodingExecutionAttempt,
         input: CreateBlockedGateInput,
     ) -> Result<CodingGateRequired, ProductStoreError> {
+        self.create_blocked_gate_with_diagnostic(attempt, input, None)
+    }
+
+    pub fn create_blocked_gate_with_diagnostic(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        input: CreateBlockedGateInput,
+        diagnostic: Option<crate::product::coding_models::CodingGateDiagnostic>,
+    ) -> Result<CodingGateRequired, ProductStoreError> {
         validate_relative_id(&input.attempt_id)?;
         if let Some(node_id) = &input.node_id {
             validate_relative_id(node_id)?;
@@ -175,48 +184,89 @@ impl super::CodingAttemptStore {
         )?;
         let gates_root =
             self.blocked_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
-        if let Some(existing_path) = matching_open_blocked_gate_path(&gates_root, &input)? {
-            let mut record: BlockedGateRecord = read_json(&existing_path)?;
-            record.gate.title = input.title;
-            record.gate.description = input.description;
-            record.gate.role = input.role;
-            record.gate.available_actions = input.available_actions;
-            record.gate.raw_provider_output_ref = input
-                .raw_provider_output_ref
-                .or(record.gate.raw_provider_output_ref);
-            super::merge_unique_strings(&mut record.gate.evidence_refs, input.evidence_refs);
-            record.updated_at = Utc::now().to_rfc3339();
-            write_json(&existing_path, &record)?;
-            return Ok(record.gate);
-        }
-        let gate_count = super::count_json_files(&gates_root)?
-            + super::count_json_files(&gates_root.join("resolved"))?;
-        let gate_id = next_sequential_id("coding_blocked_gate", gate_count);
-        let now = Utc::now().to_rfc3339();
-        let gate = CodingGateRequired {
-            gate_id: gate_id.clone(),
-            kind: CodingGateKind::Blocked,
-            title: input.title,
-            description: input.description,
-            stage: Some(input.stage),
-            role: input.role,
-            expires_at: None,
-            provider_snapshot: None,
-            available_actions: input.available_actions,
-            reason_code: input.reason_code,
-            evidence_refs: input.evidence_refs,
-            raw_provider_output_ref: input.raw_provider_output_ref,
-        };
-        let record = BlockedGateRecord {
-            gate: gate.clone(),
-            attempt_id: attempt.id.clone(),
-            node_id: input.node_id,
-            status: BlockedGateStatus::Open,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        write_json(&gates_root.join(format!("{gate_id}.json")), &record)?;
-        Ok(gate)
+        let lock_target = gates_root.join("blocked-gate-mutations");
+        with_exclusive_lock(&lock_target, || {
+            if is_group_review_conclusion_reason(input.reason_code.as_deref()) {
+                resolve_open_group_review_failure_gates(&gates_root, &input.attempt_id)?;
+            }
+            create_blocked_gate_unlocked(&gates_root, attempt, input, diagnostic)
+        })
+    }
+
+    pub fn create_group_review_failure_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        mut input: CreateBlockedGateInput,
+        diagnostic: crate::product::coding_models::CodingGateDiagnostic,
+    ) -> Result<CodingGateRequired, ProductStoreError> {
+        input.available_actions =
+            group_review_failure_actions(input.reason_code.as_deref().unwrap_or_default());
+        self.validate_scoped_attempt_record(
+            attempt,
+            &input.attempt_id,
+            "group_review_failure_gate",
+            &input.attempt_id,
+        )?;
+        let gates_root =
+            self.blocked_gates_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        let lock_target = gates_root.join("blocked-gate-mutations");
+        with_exclusive_lock(&lock_target, || {
+            let mut active = super::json_file_paths(&gates_root)?
+                .into_iter()
+                .map(|path| Ok((path.clone(), read_json::<BlockedGateRecord>(&path)?)))
+                .collect::<Result<Vec<_>, ProductStoreError>>()?
+                .into_iter()
+                .filter(|(_, record)| {
+                    record.status == BlockedGateStatus::Open
+                        && record.attempt_id == input.attempt_id
+                        && is_group_review_failure_reason(
+                            record.gate.reason_code.as_deref().unwrap_or_default(),
+                        )
+                })
+                .collect::<Vec<_>>();
+            active.sort_by_key(|(_, record)| {
+                std::cmp::Reverse(group_review_failure_priority(
+                    record.gate.reason_code.as_deref().unwrap_or_default(),
+                ))
+            });
+
+            if let Some((path, mut existing)) = active.into_iter().next() {
+                let decision = group_review_failure_gate_decision(
+                    existing.gate.reason_code.as_deref().unwrap_or_default(),
+                    input.reason_code.as_deref().unwrap_or_default(),
+                );
+                if decision != GroupReviewFailureGateDecision::ReplaceExisting {
+                    super::merge_unique_strings(
+                        &mut existing.gate.evidence_refs,
+                        input.evidence_refs,
+                    );
+                    existing.gate.raw_provider_output_ref = input
+                        .raw_provider_output_ref
+                        .or(existing.gate.raw_provider_output_ref);
+                    existing.gate.diagnostic = Some(diagnostic);
+                    existing.updated_at = Utc::now().to_rfc3339();
+                    write_json(&path, &existing)?;
+                    return Ok(existing.gate);
+                }
+                existing.status = BlockedGateStatus::Resolved;
+                existing.updated_at = Utc::now().to_rfc3339();
+                write_json(&path, &existing)?;
+            }
+
+            for path in super::json_file_paths(&gates_root)? {
+                let mut record: BlockedGateRecord = read_json(&path)?;
+                if record.status == BlockedGateStatus::Open
+                    && record.attempt_id == input.attempt_id
+                    && is_group_review_conclusion_reason(record.gate.reason_code.as_deref())
+                {
+                    record.status = BlockedGateStatus::Resolved;
+                    record.updated_at = Utc::now().to_rfc3339();
+                    write_json(&path, &record)?;
+                }
+            }
+            let gate = create_blocked_gate_unlocked(&gates_root, attempt, input, Some(diagnostic))?;
+            Ok(gate)
+        })
     }
 
     pub fn list_open_blocked_gates(
@@ -571,6 +621,158 @@ impl super::CodingAttemptStore {
         write_json(&path, &gate)?;
         Ok(gate)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupReviewFailureGateDecision {
+    ReplaceExisting,
+    KeepExistingAppendEvidence,
+    MergeEvidence,
+}
+
+pub fn group_review_failure_gate_decision(
+    existing_reason_code: &str,
+    incoming_reason_code: &str,
+) -> GroupReviewFailureGateDecision {
+    let existing_priority = group_review_failure_priority(existing_reason_code);
+    let incoming_priority = group_review_failure_priority(incoming_reason_code);
+    if incoming_priority > existing_priority {
+        GroupReviewFailureGateDecision::ReplaceExisting
+    } else if incoming_reason_code == existing_reason_code {
+        GroupReviewFailureGateDecision::MergeEvidence
+    } else {
+        GroupReviewFailureGateDecision::KeepExistingAppendEvidence
+    }
+}
+
+fn group_review_failure_priority(reason_code: &str) -> u8 {
+    match reason_code {
+        "capacity_exceeded" => 5,
+        "material_overflow" => 4,
+        "identity_missing" => 3,
+        "reduction_output_invalid" => 2,
+        "shard_output_invalid" => 1,
+        _ => 0,
+    }
+}
+
+fn group_review_failure_actions(reason_code: &str) -> Vec<CodingGateAction> {
+    let retry = match reason_code {
+        "reduction_output_invalid" => CodingGateAction {
+            action_id: "retry_group_reduction".to_string(),
+            label: "重试组审查归约".to_string(),
+            action_type: CodingGateActionType::RetryGroupReduction,
+        },
+        _ => CodingGateAction {
+            action_id: "retry_group_review_shard".to_string(),
+            label: "重试组审查分片".to_string(),
+            action_type: CodingGateActionType::RetryGroupReviewShard,
+        },
+    };
+    vec![
+        retry,
+        CodingGateAction {
+            action_id: "abort".to_string(),
+            label: "终止".to_string(),
+            action_type: CodingGateActionType::Abort,
+        },
+    ]
+}
+
+fn is_group_review_failure_reason(reason_code: &str) -> bool {
+    matches!(
+        reason_code,
+        "capacity_exceeded"
+            | "material_overflow"
+            | "identity_missing"
+            | "reduction_output_invalid"
+            | "shard_output_invalid"
+    )
+}
+
+fn is_group_review_conclusion_reason(reason_code: Option<&str>) -> bool {
+    matches!(
+        reason_code,
+        Some(
+            "group_final_review_blocked"
+                | "internal_review_change_requested"
+                | "internal_review_verification_incomplete"
+                | "internal_review_operational_blocker"
+                | "internal_review_human_triage"
+        )
+    )
+}
+
+fn resolve_open_group_review_failure_gates(
+    gates_root: &Path,
+    attempt_id: &str,
+) -> Result<(), ProductStoreError> {
+    for path in super::json_file_paths(gates_root)? {
+        let mut record: BlockedGateRecord = read_json(&path)?;
+        if record.status == BlockedGateStatus::Open
+            && record.attempt_id == attempt_id
+            && is_group_review_failure_reason(
+                record.gate.reason_code.as_deref().unwrap_or_default(),
+            )
+        {
+            record.status = BlockedGateStatus::Resolved;
+            record.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &record)?;
+        }
+    }
+    Ok(())
+}
+
+fn create_blocked_gate_unlocked(
+    gates_root: &Path,
+    attempt: &CodingExecutionAttempt,
+    input: CreateBlockedGateInput,
+    diagnostic: Option<crate::product::coding_models::CodingGateDiagnostic>,
+) -> Result<CodingGateRequired, ProductStoreError> {
+    if let Some(existing_path) = matching_open_blocked_gate_path(gates_root, &input)? {
+        let mut record: BlockedGateRecord = read_json(&existing_path)?;
+        record.gate.title = input.title;
+        record.gate.description = input.description;
+        record.gate.role = input.role;
+        record.gate.available_actions = input.available_actions;
+        record.gate.raw_provider_output_ref = input
+            .raw_provider_output_ref
+            .or(record.gate.raw_provider_output_ref);
+        record.gate.diagnostic = diagnostic.or(record.gate.diagnostic);
+        super::merge_unique_strings(&mut record.gate.evidence_refs, input.evidence_refs);
+        record.updated_at = Utc::now().to_rfc3339();
+        write_json(&existing_path, &record)?;
+        return Ok(record.gate);
+    }
+    let gate_count = super::count_json_files(gates_root)?
+        + super::count_json_files(&gates_root.join("resolved"))?;
+    let gate_id = next_sequential_id("coding_blocked_gate", gate_count);
+    let now = Utc::now().to_rfc3339();
+    let gate = CodingGateRequired {
+        gate_id: gate_id.clone(),
+        kind: CodingGateKind::Blocked,
+        title: input.title,
+        description: input.description,
+        stage: Some(input.stage),
+        role: input.role,
+        expires_at: None,
+        provider_snapshot: None,
+        available_actions: input.available_actions,
+        reason_code: input.reason_code,
+        evidence_refs: input.evidence_refs,
+        raw_provider_output_ref: input.raw_provider_output_ref,
+        diagnostic,
+    };
+    let record = BlockedGateRecord {
+        gate: gate.clone(),
+        attempt_id: attempt.id.clone(),
+        node_id: input.node_id,
+        status: BlockedGateStatus::Open,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    write_json(&gates_root.join(format!("{gate_id}.json")), &record)?;
+    Ok(gate)
 }
 
 fn matching_open_blocked_gate_path(

@@ -18,10 +18,11 @@ use super::group_review_prompts::{build_repair_prompt, build_shard_prompt};
 use super::group_review_types::{GroupReviewMaterialSnapshot, PromptBudgetBreakdown};
 use super::plan_defect_routing::{GroupReviewerProjectionBinding, validate_group_reviewer_finding};
 use super::review_parser::parse_review_payload;
-use crate::product::coding_attempt_store::CodingAttemptStore;
+use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
-    CasOutcome, CodingExecutionStage, GroupReviewObligation, GroupReviewReductionReport,
-    GroupReviewShardReport, InternalPrReview, ReviewFinding, ReviewVerdict,
+    CasOutcome, CodingExecutionStage, CodingGateDiagnostic, CodingProviderRole,
+    GroupReviewObligation, GroupReviewReductionReport, GroupReviewShardReport, InternalPrReview,
+    ReviewFinding, ReviewVerdict,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
@@ -42,6 +43,78 @@ impl<'a> GroupReviewOrchestrator<'a> {
         store: &'a CodingAttemptStore,
     ) -> Self {
         Self { executor, store }
+    }
+
+    pub(crate) fn create_failure_gate(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        node_id: &str,
+        error: &GroupReviewOrchestrationError,
+    ) -> Result<crate::product::coding_models::CodingGateRequired, ProductStoreError> {
+        let (reason_code, phase, actual_value, limit, raw_provider_output_ref) = match error {
+            GroupReviewOrchestrationError::CapacityExceeded => (
+                "capacity_exceeded",
+                "shard",
+                Some(
+                    self.store
+                        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                        .len()
+                        .to_string(),
+                ),
+                Some("20".to_string()),
+                None,
+            ),
+            GroupReviewOrchestrationError::MaterialOverflow { breakdown } => (
+                "material_overflow",
+                "shard",
+                Some(breakdown.total.to_string()),
+                Some("30720".to_string()),
+                None,
+            ),
+            GroupReviewOrchestrationError::IdentityMissing => {
+                ("identity_missing", "rebuild", None, None, None)
+            }
+            GroupReviewOrchestrationError::ShardOutputInvalid { raw_ref, .. } => (
+                "shard_output_invalid",
+                "shard",
+                Some("invalid".to_string()),
+                Some("8".to_string()),
+                Some(raw_ref.clone()),
+            ),
+            GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref } => (
+                "reduction_output_invalid",
+                "reduction",
+                Some("invalid".to_string()),
+                Some("16".to_string()),
+                Some(raw_ref.clone()),
+            ),
+            _ => {
+                return Err(ProductStoreError::Io(
+                    "group_review_failure_gate_unsupported_error".to_string(),
+                ));
+            }
+        };
+        self.store.create_group_review_failure_gate(
+            attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::InternalPrReview,
+                node_id: Some(node_id.to_string()),
+                role: Some(CodingProviderRole::InternalReviewer),
+                title: "组级审查失败".to_string(),
+                description: format!("组级审查在 {phase} 环节失败: {reason_code}"),
+                reason_code: Some(reason_code.to_string()),
+                evidence_refs: raw_provider_output_ref.iter().cloned().collect(),
+                raw_provider_output_ref,
+                available_actions: Vec::new(),
+            },
+            CodingGateDiagnostic {
+                actual_value,
+                limit,
+                phase: phase.to_string(),
+                run_failure_code: reason_code.to_string(),
+            },
+        )
     }
 
     pub(crate) async fn execute_shards(
@@ -683,6 +756,46 @@ pub(crate) enum GroupReviewExecutionError {
     Internal(String),
 }
 
+pub(crate) const GROUP_REVIEW_FAILURE_REASON_CODES: [&str; 5] = [
+    "capacity_exceeded",
+    "material_overflow",
+    "identity_missing",
+    "shard_output_invalid",
+    "reduction_output_invalid",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroupReviewFailureGateDecision {
+    ReplaceExisting,
+    KeepExistingAppendEvidence,
+    MergeEvidence,
+}
+
+pub(crate) fn decide_group_review_failure_gate(
+    existing_reason_code: &str,
+    incoming_reason_code: &str,
+) -> GroupReviewFailureGateDecision {
+    let existing_priority = group_review_failure_priority(existing_reason_code);
+    let incoming_priority = group_review_failure_priority(incoming_reason_code);
+    if incoming_priority > existing_priority {
+        GroupReviewFailureGateDecision::ReplaceExisting
+    } else if incoming_reason_code == existing_reason_code {
+        GroupReviewFailureGateDecision::MergeEvidence
+    } else {
+        GroupReviewFailureGateDecision::KeepExistingAppendEvidence
+    }
+}
+
+pub(crate) fn group_review_failure_priority(reason_code: &str) -> u8 {
+    match reason_code {
+        "capacity_exceeded" => 5,
+        "material_overflow" => 4,
+        "identity_missing" => 3,
+        "reduction_output_invalid" => 2,
+        "shard_output_invalid" => 1,
+        _ => 0,
+    }
+}
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GroupReviewOrchestrationError {
     #[error("capacity_exceeded")]
@@ -701,6 +814,8 @@ pub(crate) enum GroupReviewOrchestrationError {
     ReductionOutputInvalid { raw_ref: String },
     #[error("reduction_stale")]
     ReductionStale,
+    #[error("identity_missing")]
+    IdentityMissing,
     #[error("store: {0}")]
     Store(#[from] ProductStoreError),
     #[error("executor: {0}")]
