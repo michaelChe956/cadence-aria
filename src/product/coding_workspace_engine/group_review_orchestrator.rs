@@ -83,7 +83,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
         let semaphore = Arc::new(Semaphore::new(group_review_shard_concurrency()));
         let mut executions = FuturesUnordered::new();
         let mut reports = existing_reports;
-        let mut claimed_leases: Vec<String> = Vec::new();
+        let mut claimed_leases = ShardLeaseCleanup::new(self.store, &snapshot.attempt_id);
         for (shard, prompt) in prompts {
             if existing_shard_ids.contains(&shard.shard_id) {
                 continue;
@@ -108,15 +108,11 @@ impl<'a> GroupReviewOrchestrator<'a> {
                     reports.push(report);
                     continue;
                 }
-                for lease_id in claimed_leases {
-                    self.store
-                        .release_group_review_lease(&snapshot.attempt_id, &lease_id, "")?;
-                }
                 return Err(GroupReviewOrchestrationError::ShardInProgress {
                     shard_id: shard.shard_id.clone(),
                 });
             };
-            claimed_leases.push(lease_id.clone());
+            claimed_leases.claim(lease_id.clone());
             let semaphore = semaphore.clone();
             executions.push(async move {
                 let _permit = semaphore
@@ -129,19 +125,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
         }
 
         while let Some(result) = executions.next().await {
-            let (shard, lease_id, execution) = match result {
-                Ok(result) => result,
-                Err(error) => {
-                    for lease_id in claimed_leases {
-                        self.store.release_group_review_lease(
-                            &snapshot.attempt_id,
-                            &lease_id,
-                            "",
-                        )?;
-                    }
-                    return Err(error);
-                }
-            };
+            let (shard, lease_id, execution) = result?;
             match self.build_and_store_shard_report(snapshot, shard, &attempt, execution) {
                 Ok(Some(report)) => {
                     self.store.release_group_review_lease(
@@ -149,20 +133,15 @@ impl<'a> GroupReviewOrchestrator<'a> {
                         &lease_id,
                         &report.id,
                     )?;
-                    claimed_leases.retain(|claimed_lease_id| claimed_lease_id != &lease_id);
+                    claimed_leases.complete(&lease_id);
                     reports.push(report);
                 }
                 Ok(None) => {
                     self.store
                         .release_group_review_lease(&snapshot.attempt_id, &lease_id, "")?;
-                    claimed_leases.retain(|claimed_lease_id| claimed_lease_id != &lease_id);
+                    claimed_leases.complete(&lease_id);
                 }
-                Err(error) => {
-                    self.store
-                        .release_group_review_lease(&snapshot.attempt_id, &lease_id, "")?;
-                    claimed_leases.retain(|claimed_lease_id| claimed_lease_id != &lease_id);
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             }
         }
         reports.sort_by(|left, right| left.shard_id.cmp(&right.shard_id));
@@ -233,6 +212,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
         if !has_all_shard_reports(snapshot, shard_reports) {
             return Err(GroupReviewOrchestrationError::ReductionNotReady);
         }
+        let attempt = self.store.find_attempt_by_id(&snapshot.attempt_id)?;
         let active_snapshot = self
             .store
             .get_active_group_review_snapshot_hash(&snapshot.attempt_id)?;
@@ -246,6 +226,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                         && report.run_failure_code.is_none()
                 })
         {
+            self.persist_internal_pr_review_from_reduction(&attempt, snapshot, &reduction)?;
             return Ok(reduction);
         }
         let segments =
@@ -256,7 +237,6 @@ impl<'a> GroupReviewOrchestrator<'a> {
         {
             return Err(GroupReviewOrchestrationError::MaterialOverflow { breakdown });
         }
-        let attempt = self.store.find_attempt_by_id(&snapshot.attempt_id)?;
         let Some(reduction_lease_id) = self.store.claim_group_review_lease(
             &snapshot.attempt_id,
             &snapshot.content_hash,
@@ -361,35 +341,59 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 return Err(GroupReviewOrchestrationError::ReductionStale);
             }
         }
+        let persist_result =
+            self.persist_internal_pr_review_from_reduction(&attempt, snapshot, &reduction);
+        let release_result =
+            self.store
+                .release_group_review_lease(&snapshot.attempt_id, &reduction_lease_id, "");
+        persist_result?;
+        release_result?;
+        Ok(reduction)
+    }
+
+    fn persist_internal_pr_review_from_reduction(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        snapshot: &GroupReviewMaterialSnapshot,
+        reduction: &GroupReviewReductionReport,
+    ) -> Result<(), ProductStoreError> {
         let existing = self.store.list_internal_pr_reviews(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
         )?;
+        let raw_ref = reduction.raw_provider_output_refs.first().ok_or_else(|| {
+            ProductStoreError::NotFound {
+                kind: "group_review_reduction_raw_output",
+                id: reduction.id.clone(),
+            }
+        })?;
+        if existing
+            .iter()
+            .any(|review| review.raw_provider_output_ref.as_deref() == Some(raw_ref.as_str()))
+        {
+            return Ok(());
+        }
+        let raw_output = self.store.read_attempt_artifact_text(attempt, raw_ref)?;
+        let payload = parse_review_payload(&raw_output, CodingExecutionStage::InternalPrReview);
         let review = InternalPrReview {
             id: next_sequential_id("internal_review", existing.len()),
             attempt_id: snapshot.attempt_id.clone(),
             review_request_id: snapshot.review_request_id.clone(),
-            verdict,
-            findings,
-            impact_scope: payload.impact_scope,
-            pr_description: payload.pr_description,
-            commit_message_suggestion: payload.commit_message_suggestion,
+            verdict: reduction.verdict.clone(),
+            findings: reduction.findings.clone(),
+            impact_scope: reduction.impact_scope.clone(),
+            pr_description: reduction.pr_description.clone(),
+            commit_message_suggestion: reduction.commit_message_suggestion.clone(),
             tested_evidence_refs: payload.tested_evidence_refs,
             diff_refs: payload.diff_refs,
             summary: payload.summary,
             created_at: Utc::now().to_rfc3339(),
-            raw_provider_output_ref: Some(raw_ref),
+            raw_provider_output_ref: Some(raw_ref.clone()),
             role_run_id: None,
             run_no: None,
         };
-        self.store.save_internal_pr_review(&attempt, &review)?;
-        self.store.release_group_review_lease(
-            &snapshot.attempt_id,
-            &reduction_lease_id,
-            &reduction.id,
-        )?;
-        Ok(reduction)
+        self.store.save_internal_pr_review(attempt, &review)
     }
 
     fn matching_shard_reports(
@@ -478,6 +482,41 @@ impl<'a> GroupReviewOrchestrator<'a> {
         {
             CasOutcome::Written => Ok(Some(report)),
             CasOutcome::StoredStale => Ok(None),
+        }
+    }
+}
+
+struct ShardLeaseCleanup<'a> {
+    store: &'a CodingAttemptStore,
+    attempt_id: &'a str,
+    lease_ids: Vec<String>,
+}
+
+impl<'a> ShardLeaseCleanup<'a> {
+    fn new(store: &'a CodingAttemptStore, attempt_id: &'a str) -> Self {
+        Self {
+            store,
+            attempt_id,
+            lease_ids: Vec::new(),
+        }
+    }
+
+    fn claim(&mut self, lease_id: String) {
+        self.lease_ids.push(lease_id);
+    }
+
+    fn complete(&mut self, lease_id: &str) {
+        self.lease_ids
+            .retain(|claimed_lease_id| claimed_lease_id != lease_id);
+    }
+}
+
+impl Drop for ShardLeaseCleanup<'_> {
+    fn drop(&mut self) {
+        for lease_id in &self.lease_ids {
+            let _ = self
+                .store
+                .release_group_review_lease(self.attempt_id, lease_id, "");
         }
     }
 }

@@ -538,6 +538,48 @@ async fn execute_shards_supersedes_old_snapshot_and_stores_late_result_as_stale(
 }
 
 #[tokio::test]
+async fn failed_shard_result_releases_every_preclaimed_lease() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(2, 2, "diff");
+    snapshot.attempt_id = attempt_id.clone();
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+    let executor = FakeGroupReviewExecutor::new(vec![
+        Ok(GroupReviewExecutionResult {
+            full_output: valid_review_output(9),
+            provider_session_id: None,
+        }),
+        Ok(GroupReviewExecutionResult {
+            full_output: valid_review_output(0),
+            provider_session_id: None,
+        }),
+    ]);
+
+    let error = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect_err("invalid first shard result");
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ShardOutputInvalid { .. }
+    ));
+    for shard in &snapshot.partition_result.shards {
+        assert!(
+            store
+                .claim_group_review_lease(
+                    &attempt_id,
+                    &snapshot.content_hash,
+                    "shard",
+                    &shard.shard_id
+                )
+                .expect("claim after failure")
+                .is_some()
+        );
+    }
+}
+
+#[tokio::test]
 async fn execute_shards_rejects_more_than_eight_findings() {
     let (_root, store, attempt_id) = setup();
     let mut snapshot = material_snapshot(1, 1, "diff");

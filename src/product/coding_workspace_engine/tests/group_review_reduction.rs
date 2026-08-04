@@ -276,6 +276,60 @@ fn reduce_verdict_prioritizes_blocked_then_request_changes() {
 }
 
 #[tokio::test]
+async fn reduction_recovers_missing_internal_review_from_live_reduction() {
+    let (_root, store, attempt_id) = setup();
+    let snapshot = snapshot(attempt_id.clone(), &["a"]);
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("active snapshot");
+    let attempt = store.find_attempt_by_id(&attempt_id).expect("attempt");
+    let raw_ref = store
+        .save_provider_raw_output(
+            &attempt,
+            CodingExecutionStage::InternalPrReview,
+            "group_review_reduction",
+            "GROUP_REVIEW_VERDICT\n{\"verdict\":\"approve\",\"summary\":\"done\"}",
+        )
+        .expect("raw output");
+    let report = crate::product::coding_models::GroupReviewReductionReport {
+        id: "group_review_reduction_0001".to_string(),
+        attempt_id: attempt_id.clone(),
+        snapshot_hash: snapshot.content_hash.clone(),
+        shard_report_ids: vec!["group_review_shard_a".to_string()],
+        verdict: ReviewVerdict::Approve,
+        findings: Vec::new(),
+        impact_scope: Vec::new(),
+        pr_description: String::new(),
+        commit_message_suggestion: String::new(),
+        provenance: Vec::new(),
+        raw_provider_output_refs: vec![raw_ref],
+        role_run_ids: Vec::new(),
+        run_failure_code: None,
+    };
+    store
+        .write_group_review_reduction_report_cas(&attempt_id, report)
+        .expect("write reduction");
+    let executor = FakeGroupReviewExecutor::new(Vec::new());
+
+    GroupReviewOrchestrator::new(&executor, &store)
+        .execute_reduction(
+            &snapshot,
+            &[shard(&attempt_id, "a", ReviewVerdict::Approve, Vec::new())],
+            &[],
+        )
+        .await
+        .expect("recover internal review");
+    assert_eq!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", &attempt_id)
+            .expect("reviews")
+            .len(),
+        1
+    );
+    assert!(executor.prompts().is_empty());
+}
+
+#[tokio::test]
 async fn reduction_reuses_completed_snapshot_result_without_provider_call() {
     let (_root, store, attempt_id) = setup();
     let snapshot = snapshot(attempt_id.clone(), &["a"]);
