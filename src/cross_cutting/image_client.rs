@@ -71,13 +71,18 @@ pub struct ImageClient {
 
 impl ImageClient {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(600))
-            // reqwest 0.12 在 Linux 默认 TCP_USER_TIMEOUT=30s，会独立于 .timeout() 提前掐断
-            // gpt-image-2 生成耗时较长（网关处理期间不回传 ACK），必须放宽到与总超时一致。
-            .tcp_user_timeout(Duration::from_secs(600))
-            .connect_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(30));
+        // reqwest 0.12 在 Linux 默认 TCP_USER_TIMEOUT=30s，会独立于 .timeout() 提前掐断
+        // gpt-image-2 生成耗时较长（网关处理期间不回传 ACK），必须放宽到与总超时一致。
+        // tcp_user_timeout 仅 Linux 可用，macOS/Windows 无此 API。
+        #[cfg(target_os = "linux")]
+        {
+            builder = builder.tcp_user_timeout(Duration::from_secs(600));
+        }
+        let http = builder
             .build()
             .expect("fixed image HTTP client configuration must be valid");
         Self { http }
