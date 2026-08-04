@@ -30,6 +30,7 @@ pub(crate) struct GroupReviewMaterialSnapshotDraft {
     pub(crate) diff_index: GroupDiffIndex,
     pub(crate) deterministic_findings: Vec<DeterministicGroupFinding>,
     pub(crate) partition_result: GroupPartitionResult,
+    pub(crate) content_hash: String,
 }
 
 pub(crate) trait ShardPromptMeasurer {
@@ -85,6 +86,7 @@ pub(crate) fn compile_group_review_material(
             shards: Vec::new(),
             cross_shard_edges: Vec::new(),
         },
+        content_hash: String::new(),
     };
     repartition_for_budget(
         &mut partition_result,
@@ -706,16 +708,22 @@ fn build_diff_index(
                 .insert(diff.unit_run_id.clone());
         }
         for mut hunk in parsed {
-            let redacted_body = redact_sensitive_patterns(&hunk.body);
-            hunk.redacted = hunk.redacted || redacted_body != hunk.body;
-            hunk.body = redacted_body;
+            let raw_hunk = format!("{}\n{}", hunk.header, hunk.body);
+            let redacted_hunk = redact_sensitive_patterns(&raw_hunk);
+            hunk.redacted = hunk.redacted || redacted_hunk != raw_hunk;
+            let (header, body) = split_redacted_hunk(&redacted_hunk);
+            hunk.header = header;
+            hunk.body = body;
             hunks.push(hunk);
         }
     }
     for mut hunk in parse_hunks(&facts.final_diff, "") {
-        let redacted_body = redact_sensitive_patterns(&hunk.body);
-        hunk.redacted = redacted_body != hunk.body;
-        hunk.body = redacted_body;
+        let raw_hunk = format!("{}\n{}", hunk.header, hunk.body);
+        let redacted_hunk = redact_sensitive_patterns(&raw_hunk);
+        hunk.redacted = redacted_hunk != raw_hunk;
+        let (header, body) = split_redacted_hunk(&redacted_hunk);
+        hunk.header = header;
+        hunk.body = body;
         stats.entry(hunk.path.clone()).or_default();
         path_owners.entry(hunk.path.clone()).or_default();
         hunks.push(hunk);
@@ -724,7 +732,7 @@ fn build_diff_index(
         .into_iter()
         .map(|(path, (insertions, deletions))| {
             let owners = path_owners.get(&path).cloned().unwrap_or_default();
-            let ambiguous = owners.len() != 1;
+            let ambiguous = owners.is_empty();
             let forbidden = bindings.iter().any(|binding| {
                 binding
                     .projection_binding
@@ -765,6 +773,11 @@ fn build_diff_index(
         },
         path_owners,
     )
+}
+
+fn split_redacted_hunk(value: &str) -> (String, String) {
+    let (header, body) = value.split_once('\n').unwrap_or((value, ""));
+    (header.to_string(), body.to_string())
 }
 
 fn parse_hunks(patch: &str, owner: &str) -> Vec<DiffHunk> {
@@ -1002,15 +1015,19 @@ fn select_fragments(
         }
         for (index, hunk) in candidates.iter().enumerate() {
             let text = format!("{}\n{}", hunk.header, hunk.body);
-            let redacted = text;
             let was_redacted = hunk.redacted;
-            let allowed = utf8_prefix(&redacted, remaining);
-            let truncated = allowed.len() < redacted.len();
+            let allowed = utf8_prefix(&text, remaining);
+            let truncated = allowed.len() < text.len();
             remaining = remaining.saturating_sub(allowed.len());
+            let body = if index == 0 {
+                format!("{header_body}{allowed}")
+            } else {
+                allowed.to_string()
+            };
             result.push(SelectedDiffFragment {
                 path: file.path.clone(),
                 level,
-                body: format!("{header_body}{allowed}"),
+                body,
                 hunk_content_hash: hunk.content_hash.clone(),
                 redacted: was_redacted,
                 truncated,

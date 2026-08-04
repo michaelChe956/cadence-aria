@@ -539,3 +539,241 @@ fn material_exposes_compiler_version() {
     .expect("compile");
     assert_eq!(result.compiler_version, "group-review-material-compiler-v1");
 }
+#[test]
+fn material_redacts_sensitive_hunk_header_before_measurement_and_selection() {
+    let unit = binding(1, "header", Vec::new(), Vec::new());
+    let snapshots = vec![snapshot(&unit)];
+    let mut git_facts = facts(std::slice::from_ref(&unit));
+    git_facts.completion_diffs[0].patch = "diff --git a/src/header/file.rs b/src/header/file.rs\n@@ -1 +1 @@ api_key=header-secret\n+safe\n".to_string();
+    git_facts.completion_diffs[0].file_stats = Vec::new();
+    let result = compile_group_review_material(
+        &[unit],
+        &snapshots,
+        &request(),
+        &git_facts,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    assert!(!result.diff_index.hunks[0].header.contains("header-secret"));
+}
+
+#[test]
+fn material_charges_a_file_header_once_across_multiple_hunks() {
+    let mut unit = binding(1, "many", Vec::new(), Vec::new());
+    unit.projection_binding
+        .projection
+        .scope_policy
+        .forbidden_scopes = vec!["src/many/".to_string()];
+    let snapshots = vec![snapshot(&unit)];
+    let mut git_facts = facts(std::slice::from_ref(&unit));
+    git_facts.completion_diffs[0].patch = format!(
+        "diff --git a/src/many/file.rs b/src/many/file.rs\n@@ -0,0 +1 @@\n+{}\n@@ -2,0 +3 @@\n+{}\n",
+        "a".repeat(7_000),
+        "b".repeat(7_000)
+    );
+    git_facts.completion_diffs[0].file_stats = Vec::new();
+    let result = compile_group_review_material(
+        std::slice::from_ref(&unit),
+        &snapshots,
+        &request(),
+        &git_facts,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    let fragments = result.diff_index.shard_selections[0]
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.path == "src/many/file.rs")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fragments
+            .iter()
+            .filter(|fragment| fragment.body.starts_with("path: src/many/file.rs\n"))
+            .count(),
+        1
+    );
+    assert!(
+        fragments
+            .iter()
+            .map(|fragment| fragment.body.len())
+            .sum::<usize>()
+            <= 10_500
+    );
+}
+
+#[test]
+fn material_keeps_units_with_shared_file_in_same_shard() {
+    let left = binding(1, "left", Vec::new(), Vec::new());
+    let right = binding(2, "right", Vec::new(), Vec::new());
+    let bindings = vec![left, right];
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let mut git_facts = facts(&bindings);
+    for diff in &mut git_facts.completion_diffs {
+        diff.patch = "diff --git a/shared.rs b/shared.rs\n@@ -0,0 +1 @@\n+shared\n".to_string();
+        diff.file_stats = vec![DiffFileStat {
+            path: "shared.rs".to_string(),
+            insertions: 1,
+            deletions: 0,
+        }];
+    }
+    let result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &git_facts,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    assert!(
+        result
+            .partition_result
+            .shards
+            .iter()
+            .any(|shard| shard.ordered_unit_run_ids.len() == 2)
+    );
+}
+
+#[test]
+fn material_keeps_units_with_contract_boundary_in_same_shard() {
+    let left = binding(
+        1,
+        "left",
+        Vec::new(),
+        vec![PromisedOutputContract {
+            contract_id: "same".to_string(),
+            capabilities: vec![],
+        }],
+    );
+    let right = binding(
+        2,
+        "right",
+        Vec::new(),
+        vec![PromisedOutputContract {
+            contract_id: "same".to_string(),
+            capabilities: vec![],
+        }],
+    );
+    let bindings = vec![left, right];
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &facts(&bindings),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    assert!(
+        result
+            .partition_result
+            .shards
+            .iter()
+            .any(|shard| shard.ordered_unit_run_ids.len() == 2)
+    );
+}
+
+struct SplittingMeasurer;
+impl ShardPromptMeasurer for SplittingMeasurer {
+    fn measure_shard(
+        &self,
+        snapshot: &GroupReviewMaterialSnapshotDraft,
+        shard: &GroupShardSpec,
+    ) -> usize {
+        assert_eq!(snapshot.content_hash, "");
+        shard.ordered_unit_run_ids.len() * 100
+    }
+}
+
+#[test]
+fn material_budget_repartitions_before_finalizing_hash() {
+    let bindings = (0..4)
+        .map(|index| binding(index, &format!("budget-{index}"), Vec::new(), Vec::new()))
+        .collect::<Vec<_>>();
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &facts(&bindings),
+        &SplittingMeasurer,
+        150,
+    )
+    .expect("compile");
+    assert!(result.partition_result.shards.len() > 1);
+    assert!(!result.content_hash.is_empty());
+}
+
+#[test]
+fn material_assigns_highest_diff_level_when_forbidden_and_shared() {
+    let mut left = binding(1, "left", Vec::new(), Vec::new());
+    left.projection_binding
+        .projection
+        .scope_policy
+        .forbidden_scopes = vec!["shared.rs".to_string()];
+    let right = binding(2, "right", Vec::new(), Vec::new());
+    let bindings = vec![left, right];
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let mut git_facts = facts(&bindings);
+    for diff in &mut git_facts.completion_diffs {
+        diff.patch = "diff --git a/shared.rs b/shared.rs\n@@ -0,0 +1 @@\n+shared\n".to_string();
+        diff.file_stats = vec![DiffFileStat {
+            path: "shared.rs".to_string(),
+            insertions: 1,
+            deletions: 0,
+        }];
+    }
+    let result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &git_facts,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    assert!(
+        result.diff_index.shard_selections[0]
+            .fragments
+            .iter()
+            .any(|fragment| fragment.path == "shared.rs" && fragment.level == 'A')
+    );
+}
+
+#[test]
+fn material_includes_cross_shard_c_file_in_reduction_selection() {
+    let bindings = (0..5)
+        .map(|index| binding(index, &format!("cross-{index}"), Vec::new(), Vec::new()))
+        .collect::<Vec<_>>();
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let mut git_facts = facts(&bindings);
+    for diff in &mut git_facts.completion_diffs {
+        diff.patch = "diff --git a/shared.rs b/shared.rs\n@@ -0,0 +1 @@\n+shared\n".to_string();
+        diff.file_stats = vec![DiffFileStat {
+            path: "shared.rs".to_string(),
+            insertions: 1,
+            deletions: 0,
+        }];
+    }
+    let result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &git_facts,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+    assert_eq!(result.partition_result.shards.len(), 2);
+    assert!(
+        result
+            .diff_index
+            .reduction_selection
+            .fragments
+            .iter()
+            .any(|fragment| fragment.path == "shared.rs" && fragment.level == 'C')
+    );
+}
