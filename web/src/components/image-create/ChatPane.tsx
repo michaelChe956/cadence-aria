@@ -142,19 +142,29 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
           </p>
         </article>
       );
-    case "generation_image":
+    case "generation_image": {
+      const extension = entry.mediaType.split("/")[1] ?? "png";
+      const dataUri = `data:${entry.mediaType};base64,${entry.base64}`;
       return (
         <article className="overflow-hidden rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)]">
           <img
-            src={`data:${entry.mediaType};base64,${entry.base64}`}
+            src={dataUri}
             alt={entry.prompt || "生成图片"}
             className="max-h-[32rem] w-full object-contain"
           />
-          <p className="border-t border-[var(--aria-line)] px-3 py-2 text-xs text-[var(--aria-ink-muted)]">
-            {entry.prompt}
-          </p>
+          <div className="flex items-center justify-between gap-2 border-t border-[var(--aria-line)] px-3 py-2">
+            <p className="text-xs text-[var(--aria-ink-muted)]">{entry.prompt}</p>
+            <a
+              href={dataUri}
+              download={`image-create-${Date.now()}.${extension}`}
+              className="shrink-0 rounded-md bg-[var(--aria-primary)] px-2.5 py-1 text-xs font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+            >
+              下载原图
+            </a>
+          </div>
         </article>
       );
+    }
     case "generation_error":
       return (
         <div

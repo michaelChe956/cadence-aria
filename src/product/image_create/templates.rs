@@ -2,11 +2,13 @@ use super::models::{ImageCreateError, PresetTemplate, TemplateChoice};
 
 const PPT_BUSINESS_ILLUSTRATION_GUIDANCE: &str = "生成适合商业 PPT 的配图。要求：构图简洁、留白充足、主体居中或遵循三分法；风格偏扁平/等距(isometric)/2.5D 插画，色彩克制（主色+1-2 辅色，避免高饱和）；无文字、无水印；背景干净（纯色或轻渐变）；尺寸适配 16:9 或 1:1；视觉传达一个清晰概念，专业克制，不花哨。";
 const BUSINESS_FLOW_DIAGRAM_GUIDANCE: &str = "生成清晰的业务流程图/示意图。要求：明确表达步骤/角色/流向，使用箭头、方框、连线等结构化元素；配色用语义色（开始/结束/判断/动作各一色），整体克制；节点文字为英文或简短中文，排版整齐对齐；风格扁平、线条统一粗细；适合插入文档说明，背景干净。";
+const WEB_PAGE_UI_GUIDANCE: &str = "生成 Web 页面 UI 设计图。要求：现代干净的网页界面布局，包含明确的导航栏、内容区、侧边栏/卡片等结构化区块；遵循常见设计系统（间距统一、圆角适度、阴影克制）；配色专业（主色+中性灰为主，辅以语义色点缀）；按钮、输入框、表格等控件精致对齐；整体高保真、接近真实产品截图质感；适合作为产品原型或设计稿展示，背景干净。";
 
 pub fn preset_templates() -> Vec<PresetTemplate> {
     vec![
         PresetTemplate::PptBusinessIllustration,
         PresetTemplate::BusinessFlowDiagram,
+        PresetTemplate::WebPageUi,
     ]
 }
 
@@ -14,6 +16,7 @@ pub fn preset_guidance(template: PresetTemplate) -> &'static str {
     match template {
         PresetTemplate::PptBusinessIllustration => PPT_BUSINESS_ILLUSTRATION_GUIDANCE,
         PresetTemplate::BusinessFlowDiagram => BUSINESS_FLOW_DIAGRAM_GUIDANCE,
+        PresetTemplate::WebPageUi => WEB_PAGE_UI_GUIDANCE,
     }
 }
 
@@ -49,6 +52,7 @@ mod tests {
             vec![
                 PresetTemplate::PptBusinessIllustration,
                 PresetTemplate::BusinessFlowDiagram,
+                PresetTemplate::WebPageUi,
             ]
         );
     }

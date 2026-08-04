@@ -103,6 +103,7 @@ pub struct SettingsUpdate {
 pub enum PresetTemplate {
     PptBusinessIllustration,
     BusinessFlowDiagram,
+    WebPageUi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

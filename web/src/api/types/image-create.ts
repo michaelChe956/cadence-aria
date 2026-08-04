@@ -30,6 +30,7 @@ export type ImageCreateProvider =
 export const IMAGE_CREATE_PRESET_OPTIONS = [
   "ppt_business_illustration",
   "business_flow_diagram",
+  "web_page_ui",
 ] as const;
 export type ImageCreatePreset =
   (typeof IMAGE_CREATE_PRESET_OPTIONS)[number];

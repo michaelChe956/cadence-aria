@@ -13,6 +13,7 @@ type TemplateSelection = ImageCreatePreset | "custom";
 const TEMPLATE_LABELS: Record<ImageCreatePreset, string> = {
   ppt_business_illustration: "PPT 商务配图",
   business_flow_diagram: "业务流程图",
+  web_page_ui: "Web 页面 UI 图",
 };
 
 export function SessionList() {
@@ -141,6 +142,7 @@ export function SessionList() {
                 >
                   <option value="ppt_business_illustration">PPT 商务配图</option>
                   <option value="business_flow_diagram">业务流程图</option>
+                  <option value="web_page_ui">Web 页面 UI 图</option>
                   <option value="custom">自定义引导词</option>
                 </select>
               </label>
