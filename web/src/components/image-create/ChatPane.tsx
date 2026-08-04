@@ -130,7 +130,7 @@ export function ChatPane() {
           disabled={isBusy || !currentSession}
           rows={3}
           placeholder={isBusy ? "Agent 正在处理上一条消息…" : "描述图片目标或提出修改意见"}
-          className="block min-h-24 w-full resize-y rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-3 text-sm leading-6 text-[var(--aria-ink)] shadow-inner transition-all duration-200 placeholder:text-[var(--aria-ink-muted)] hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70"
+          className="block min-h-24 w-full resize-y rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-3 text-sm leading-6 text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 placeholder:text-[var(--aria-ink-muted)] hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70"
         />
         <div className="mt-3 flex items-center justify-between gap-3">
           <span className="text-xs text-[var(--aria-ink-muted)]">

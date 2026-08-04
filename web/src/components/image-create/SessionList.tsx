@@ -18,7 +18,7 @@ const TEMPLATE_LABELS: Record<ImageCreatePreset, string> = {
 };
 
 const fieldClassName =
-  "mt-1.5 block w-full rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2.5 text-sm font-normal text-[var(--aria-ink)] shadow-inner transition-all duration-200 hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2";
+  "mt-1.5 block w-full rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-2.5 text-sm font-medium text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2";
 
 export function SessionList() {
   const sessions = useImageCreateStore((state) => state.sessions);

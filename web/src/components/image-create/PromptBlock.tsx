@@ -37,7 +37,7 @@ export function PromptBlock() {
         disabled={isBusy}
         rows={7}
         placeholder="Agent 给出的 suggested_prompt 会显示在这里，也可手动填写。"
-        className="mt-4 block min-h-36 w-full resize-y rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-3 text-sm leading-6 text-[var(--aria-ink)] shadow-inner transition-all duration-200 placeholder:text-[var(--aria-ink-muted)] hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70"
+        className="mt-4 block min-h-36 w-full resize-y rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-3 text-sm leading-6 text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 placeholder:text-[var(--aria-ink-muted)] hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-70"
       />
       {retainedPromptNotice ? (
         <p

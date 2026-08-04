@@ -16,7 +16,7 @@ import {
 } from "../../state/image-create-store";
 
 const inputClassName =
-  "mt-1.5 block w-full rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2.5 text-sm font-normal text-[var(--aria-ink)] shadow-inner transition-all duration-200 hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
+  "mt-1.5 block w-full rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-2.5 text-sm font-normal text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
 
 function settingsErrorMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;

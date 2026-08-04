@@ -1,4 +1,4 @@
-import { LoaderCircle, SlidersHorizontal, Wand2 } from "lucide-react";
+import { ChevronDown, LoaderCircle, SlidersHorizontal, Wand2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   IMAGE_BACKGROUND_OPTIONS,
@@ -15,7 +15,7 @@ import {
 import { useImageCreateStore } from "../../state/image-create-store";
 
 const selectClassName =
-  "mt-1.5 block w-full rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel)] px-3 py-2.5 text-sm text-[var(--aria-ink)] shadow-inner transition-all duration-200 hover:border-[var(--aria-line-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
+  "block w-full appearance-none rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] bg-no-repeat px-3.5 py-2.5 pr-10 text-sm font-medium text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
 
 function useElapsedSeconds(active: boolean): number {
   const [seconds, setSeconds] = useState(0);
@@ -162,19 +162,25 @@ function ParameterSelect({
   return (
     <label className="block text-sm font-semibold text-[var(--aria-ink)]">
       {label}
-      <select
-        aria-label={label}
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-        className={selectClassName}
-      >
-        {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
-      </select>
+      <div className="relative mt-1.5">
+        <select
+          aria-label={label}
+          value={value}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value)}
+          className={selectClassName}
+        >
+          {options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+        <ChevronDown
+          aria-hidden="true"
+          className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--aria-ink-muted)]"
+        />
+      </div>
     </label>
   );
 }
