@@ -79,6 +79,13 @@ fn repair_fidelity_rejects_missing_marker_and_excess_findings() {
 }
 
 #[test]
+fn repair_fidelity_allows_raw_traceable_open_canonical_evidence_kind() {
+    let raw = "GROUP_REVIEW_VERDICT: blocked\n{\"kind\":\"test_execution\",\"source_ref\":\"test_ref\",\"message\":\"test failure\"}\nknown issue";
+    let repaired = "GROUP_REVIEW_VERDICT: blocked\n{\"verdict\":\"blocked\",\"findings\":[{\"message\":\"known issue\",\"evidence\":[{\"kind\":\"test_execution\",\"source_ref\":\"test_ref\",\"message\":\"test failure\"}]}]}";
+    assert_eq!(validate_repair_fidelity(raw, repaired, 8), Ok(()));
+}
+
+#[test]
 fn repair_fidelity_rejects_forged_canonical_evidence_message() {
     let raw = "GROUP_REVIEW_VERDICT: blocked\nknown issue\nhunk_hash\nknown evidence message";
     let repaired = "GROUP_REVIEW_VERDICT: blocked\n{\"verdict\":\"blocked\",\"findings\":[{\"message\":\"known issue\",\"evidence\":[{\"kind\":\"hunk\",\"source_ref\":\"hunk_hash\",\"message\":\"forged evidence message\"}]}]}";

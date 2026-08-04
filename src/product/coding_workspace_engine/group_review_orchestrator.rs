@@ -364,7 +364,7 @@ pub(crate) fn validate_repair_fidelity(
             || finding.plan_defect_evidence.iter().any(|evidence| {
                 !raw_output.contains(&evidence.source_ref)
                     || !raw_output.contains(&evidence.message)
-                    || !is_known_plan_defect_evidence_kind(&evidence.kind)
+                    || !raw_output.contains(&evidence.kind)
             })
     }) {
         if payload
@@ -394,13 +394,6 @@ pub(crate) fn validate_repair_fidelity(
         return Err(RepairFidelityError::TargetNotSubtraceable);
     }
     Ok(())
-}
-
-fn is_known_plan_defect_evidence_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "hunk" | "diff" | "test" | "command" | "log" | "reference"
-    )
 }
 
 fn verdict_marker(output: &str) -> Option<ReviewVerdict> {
