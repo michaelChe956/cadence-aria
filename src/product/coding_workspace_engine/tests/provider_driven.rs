@@ -469,5 +469,6 @@ pub(super) fn review_report_requesting_changes(
         raw_provider_output_ref: Some("provider-raw/code-review.txt".to_string()),
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     }
 }

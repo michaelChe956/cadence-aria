@@ -443,6 +443,7 @@ mod gate_coder_feedback;
 mod gate_rework;
 mod git_operation_reconcile;
 mod group_completion_authority;
+mod group_review_identity_snapshot;
 mod group_terminal;
 mod internal_review_triage;
 mod parser_prompt;

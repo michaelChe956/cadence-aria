@@ -53,6 +53,7 @@ fn review_artifacts_round_trip_preserves_evidence() {
         raw_provider_output_ref: Some("provider-raw/code_review/code_review_0001.txt".to_string()),
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     };
     let review_value = serde_json::to_value(&review).expect("serialize code review");
     assert_eq!(

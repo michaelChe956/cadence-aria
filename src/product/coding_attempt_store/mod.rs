@@ -12,6 +12,7 @@ mod gate;
 mod git_operation;
 mod group;
 mod group_initialization;
+mod group_review_store;
 mod group_terminal;
 mod group_validation;
 mod inputs;

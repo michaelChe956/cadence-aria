@@ -1,5 +1,7 @@
 use super::*;
-use crate::product::coding_models::{CodingExecutionUnit, CodingExecutionUnitStatus};
+use crate::product::coding_models::{
+    CodingAttemptScope, CodingExecutionUnit, CodingExecutionUnitStatus,
+};
 use crate::product::models::work_item_revision::HandoffRevision;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
@@ -197,6 +199,11 @@ impl CodingWorkspaceEngine {
             raw_provider_output_ref,
             role_run_id: Some(role_run.id.clone()),
             run_no: Some(role_run.run_no),
+            unit_run_id: if attempt.scope == CodingAttemptScope::WorkItemGroup {
+                Some(self.store.get_active_unit_run(attempt)?.id)
+            } else {
+                None
+            },
         })
     }
 

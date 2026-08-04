@@ -149,6 +149,20 @@ impl CodingWorkspaceEngine {
         let reviewer_projection = self.reviewer_projection_for_attempt(&attempt)?;
         let plan_defect_route = code_review_flow_decision(&report, &reviewer_projection);
         self.store.save_code_review_report(&attempt, &report)?;
+        if let Err(error) =
+            self.store
+                .write_snapshot_for_code_review_report(&attempt, &report, &full_output)
+        {
+            if let Err(rollback_error) = self.store.delete_code_review_report(&attempt, &report.id)
+            {
+                return Err(CodingWorkspaceEngineError::Store(ProductStoreError::Io(
+                    format!(
+                        "code_review_snapshot_write_failed: {error}; report_rollback_failed: {rollback_error}"
+                    ),
+                )));
+            }
+            return Err(error.into());
+        }
         self.emit_code_review_chat_entry(
             &attempt,
             &node.id,

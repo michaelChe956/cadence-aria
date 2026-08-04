@@ -422,5 +422,6 @@ fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeRev
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     }
 }

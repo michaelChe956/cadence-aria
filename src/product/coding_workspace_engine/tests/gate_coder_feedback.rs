@@ -63,6 +63,7 @@ async fn code_review_blocked_gate_accepts_manual_feedback_without_findings() {
                 ),
                 role_run_id: None,
                 run_no: Some(1),
+                unit_run_id: None,
             },
         )
         .expect("code review report");

@@ -176,6 +176,7 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     }
 }
 

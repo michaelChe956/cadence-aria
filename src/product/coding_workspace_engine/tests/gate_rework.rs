@@ -202,6 +202,7 @@ async fn send_to_coder_after_review_limit_uses_latest_code_review_without_qualit
                 ),
                 role_run_id: None,
                 run_no: Some(1),
+                unit_run_id: None,
             },
         )
         .expect("code review report");
@@ -362,6 +363,7 @@ async fn send_to_coder_after_review_limit_accepts_actionable_blocked_code_review
                 ),
                 role_run_id: None,
                 run_no: Some(1),
+                unit_run_id: None,
             },
         )
         .expect("code review report");

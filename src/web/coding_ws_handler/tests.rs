@@ -329,6 +329,7 @@ fn code_review_report_with(
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     }
 }
 

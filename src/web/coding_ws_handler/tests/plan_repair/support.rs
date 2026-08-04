@@ -640,5 +640,6 @@ pub(super) fn plan_defect_report(finding: ReviewFinding) -> CodeReviewReport {
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     }
 }
