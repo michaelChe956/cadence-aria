@@ -218,6 +218,44 @@ pub fn build_work_item_draft_invocation(
     })
 }
 
+/// Providers sometimes emit verification checks only under
+/// `verification_plan.checks`, treating `canonical_contract.verification_checks`
+/// as the same field (observed with Pi). Aria requires both and
+/// `validate_draft_verification_plan` enforces that they are equal, so copy the
+/// plan checks into the contract when only the contract copy is missing. A
+/// missing or empty plan is left untouched so genuinely check-less drafts keep
+/// failing.
+fn backfill_contract_verification_checks(mut value: serde_json::Value) -> serde_json::Value {
+    for draft_path in [Some("draft"), None] {
+        let draft = match draft_path {
+            Some(key) => value.get_mut(key),
+            None => Some(&mut value),
+        };
+        let Some(draft) = draft.filter(|draft| draft.is_object()) else {
+            continue;
+        };
+        let plan_checks = draft
+            .get("verification_plan")
+            .and_then(|plan| plan.get("checks"))
+            .and_then(|checks| checks.as_array())
+            .filter(|checks| !checks.is_empty())
+            .cloned();
+        let Some(plan_checks) = plan_checks else {
+            continue;
+        };
+        let Some(contract) = draft
+            .get_mut("canonical_contract")
+            .filter(|contract| contract.is_object())
+        else {
+            continue;
+        };
+        if contract.get("verification_checks").is_none() {
+            contract["verification_checks"] = serde_json::Value::Array(plan_checks);
+        }
+    }
+    value
+}
+
 pub fn parse_work_item_draft_output(value: serde_json::Value) -> ApiResult<WorkItemDraftCandidate> {
     if value.get("drafts").is_some() || value.get("work_items").is_some() {
         return Err(ApiError::validation(
@@ -232,6 +270,8 @@ pub fn parse_work_item_draft_output(value: serde_json::Value) -> ApiResult<WorkI
             json!({ "field": field }),
         ));
     }
+
+    let value = backfill_contract_verification_checks(value);
 
     let output: ProviderWorkItemDraftInput = serde_json::from_value(value).map_err(|error| {
         ApiError::runtime(

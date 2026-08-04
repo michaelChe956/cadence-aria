@@ -1,0 +1,263 @@
+{
+ "draft": {
+  "outline_id": "outline_backend_lib_and_unit_tests",
+  "logical_work_item_id": "wi_backend_duration_lib",
+  "canonical_contract": {
+   "schema_version": 1,
+   "identity": {
+    "logical_work_item_id": "wi_backend_duration_lib",
+    "title": "新增 formatCompactDuration 共享库（.mjs）及 node:test 单元测试",
+    "kind": "backend"
+   },
+   "goal": {
+    "summary": "以纯 ES Module 新增并导出唯一库函数 formatCompactDuration(totalSeconds)，按 <3600 输出 MM:SS、>=3600 输出 HH:MM:SS、分秒固定两位、小时至少两位且不取模不截断，并为 7 条 Issue 验收示例 + >=100 小时推演示例编写 node:test 单元测试，形成可通过 node --test 验证的 TDD 闭环。"
+   },
+   "non_goals": [
+    "不实现任何 DOM、页面、HTTP API、数据库或第三方依赖（REQ-012）。",
+    "不处理非负安全整数之外的输入行为（REQ-005，契约外不做保证）。",
+    "不新增 TypeScript、不接入构建链、不改 package.json 的全局模块类型（DEC-001 用 .mjs 隔离）。",
+    "不编写演示页面（由 frontend outline 负责）。",
+    "不使用 Playwright CLI 或任何浏览器自动化验证。"
+   ],
+   "input_contracts": [],
+   "output_contracts": [
+    {
+     "contract_id": "oc_format_compact_duration_export",
+     "capabilities": [
+      "导出函数 formatCompactDuration(totalSeconds): string，纯 ES Module（.mjs），无 DOM/网络/全局可变状态依赖；totalSeconds<3600 返回 MM:SS，>=3600 返回 HH:MM:SS，分秒补零到两位，小时至少两位且不取模不截断；仅对非负安全整数承诺行为（对应 API-001/DEC-002/DEC-003/CMP-001）。",
+      "库模块固定相对路径与导出名，供 frontend 演示页以 <script type=module> 相对路径 import（对应 API-002/RSK-001）。"
+     ]
+    }
+   ],
+   "tasks": [
+    {
+     "task_id": "t1_write_failing_tests",
+     "statement": "在 exclusive_write_scopes 内新增 node:test 单元测试文件，直接 import 尚未实现的库模块，覆盖输入 0/1/65/3599/3600/3661/86400 全部 7 条 Issue 示例及 360000 推演示例，断言其期望输出字符串；运行 node --test 观察到因模块/函数缺失而失败（非零测试被执行且未通过）。",
+     "requirement_refs": [
+      "req_export_func",
+      "req_mmss_branch",
+      "req_hhmmss_branch",
+      "req_padding",
+      "req_unit_test_seven_examples",
+      "req_input_contract"
+     ],
+     "done_when_refs": [
+      "ac_unit_tests_red"
+     ]
+    },
+    {
+     "task_id": "t2_implement_minimal",
+     "statement": "在 exclusive_write_scopes 内新增库模块文件（.mjs）并导出 formatCompactDuration，实现 totalSeconds<3600 输出 MM:SS、>=3600 输出 HH:MM:SS，分秒 padStart 到两位，小时至少两位、>=100 按实际位数、不按 24 小时回绕，不访问 DOM/网络/全局可变状态。",
+     "requirement_refs": [
+      "req_export_func",
+      "req_mmss_branch",
+      "req_hhmmss_branch",
+      "req_padding",
+      "req_no_dom_side_effects",
+      "req_esmodule_mjs"
+     ],
+     "done_when_refs": [
+      "ac_examples_pass",
+      "ac_hundred_hours_no_truncate",
+      "ac_no_dom_side_effects"
+     ]
+    },
+    {
+     "task_id": "t3_run_green",
+     "statement": "在 exclusive_write_scopes 内运行 node --test，确认全部单元测试通过且被执行测试数非零。",
+     "requirement_refs": [
+      "req_unit_test_seven_examples",
+      "req_node_test_zero_dep"
+     ],
+     "done_when_refs": [
+      "ac_unit_tests_green",
+      "ac_unit_tests_non_zero"
+     ]
+    }
+   ],
+   "write_policy": {
+    "exclusive_scopes": [
+     "src/duration/**/*.mjs",
+     "src/duration/**/*.test.mjs"
+    ],
+    "forbidden_scopes": [
+     "demo/**",
+     "demo/format-compact-duration/**"
+    ]
+   },
+   "acceptance_criteria": [
+    {
+     "criterion_id": "ac_unit_tests_red",
+     "statement": "运行 node --test 时，TDD 阶段写出的覆盖 0/1/65/3599/3600/3661/86400/360000 的单元测试被执行且因库函数尚未实现而未通过（测试存在、断言已就位）。",
+     "required_evidence": [
+      "non_zero_test_execution"
+     ]
+    },
+    {
+     "criterion_id": "ac_examples_pass",
+     "statement": "从最终代码状态可观测：formatCompactDuration(0)===00:00、(1)===00:01、(65)===01:05、(3599)===59:59、(3600)===01:00:00、(3661)===01:01:01、(86400)===24:00:00 的全部断言在 node --test 输出中通过。",
+     "required_evidence": [
+      "non_zero_test_execution"
+     ]
+    },
+    {
+     "criterion_id": "ac_hundred_hours_no_truncate",
+     "statement": "从最终代码状态可观测：formatCompactDuration(360000)===100:00:00 的断言在 node --test 输出中通过（小时按实际位数输出、不截断、不回绕）。",
+     "required_evidence": [
+      "non_zero_test_execution"
+     ]
+    },
+    {
+     "criterion_id": "ac_unit_tests_green",
+     "statement": "运行 node --test 的输出显示全部单元测试通过、无失败。",
+     "required_evidence": [
+      "non_zero_test_execution"
+     ]
+    },
+    {
+     "criterion_id": "ac_unit_tests_non_zero",
+     "statement": "运行 node --test 的输出显示被执行的测试数量为非零（即实际运行了所写测试用例）。",
+     "required_evidence": [
+      "non_zero_test_execution"
+     ]
+    },
+    {
+     "criterion_id": "ac_no_dom_side_effects",
+     "statement": "从最终代码状态可观测：库模块源码不引用 window/document/fetch 等浏览器/网络全局对象，仅以纯函数计算返回值（对应纯函数与无 DOM 依赖的结构性自检）。",
+     "required_evidence": [
+      "manual_check"
+     ]
+    }
+   ],
+   "handoff_contract": {
+    "required_fields": [
+     "库模块相对路径（handoff 时固定，供 frontend 相对 import）",
+     "导出函数名 formatCompactDuration（逐字一致）",
+     "库模块为 .mjs 纯 ES Module、无 DOM/网络/全局可变状态依赖"
+    ],
+    "provided_contract_refs": [
+     "oc_format_compact_duration_export"
+    ],
+    "reviewer_check_refs": [
+     "ac_unit_tests_red",
+     "ac_examples_pass",
+     "ac_hundred_hours_no_truncate",
+     "ac_unit_tests_green",
+     "ac_unit_tests_non_zero",
+     "ac_no_dom_side_effects"
+    ]
+   },
+   "blocker_rules": [
+    {
+     "reason_code": "missing_node_runtime",
+     "route": "operational_gate",
+     "target_contract_refs": []
+    },
+    {
+     "reason_code": "handoff_path_diverges",
+     "route": "plan_repair_current",
+     "target_contract_refs": [
+      "oc_format_compact_duration_export"
+     ]
+    }
+   ],
+   "design_traceability": [
+    {
+     "source_type": "story_spec",
+     "source_id": "story_spec_0001",
+     "requirement_id": "req_export_func"
+    },
+    {
+     "source_type": "story_spec",
+     "source_id": "story_spec_0001",
+     "requirement_id": "req_mmss_branch"
+    },
+    {
+     "source_type": "story_spec",
+     "source_id": "story_spec_0001",
+     "requirement_id": "req_hhmmss_branch"
+    },
+    {
+     "source_type": "story_spec",
+     "source_id": "story_spec_0001",
+     "requirement_id": "req_padding"
+    },
+    {
+     "source_type": "story_spec",
+     "source_id": "story_spec_0001",
+     "requirement_id": "req_input_contract"
+    },
+    {
+     "source_type": "story_spec",
+     "source_id": "story_spec_0001",
+     "requirement_id": "req_esmodule_mjs"
+    },
+    {
+     "source_type": "story_spec",
+     "source_id": "story_spec_0001",
+     "requirement_id": "req_no_dom_side_effects"
+    },
+    {
+     "source_type": "story_spec",
+     "source_id": "story_spec_0001",
+     "requirement_id": "req_unit_test_seven_examples"
+    },
+    {
+     "source_type": "story_spec",
+     "source_id": "story_spec_0001",
+     "requirement_id": "req_node_test_zero_dep"
+    },
+    {
+     "source_type": "design_spec",
+     "source_id": "design_spec_0001",
+     "requirement_id": "req_export_func"
+    },
+    {
+     "source_type": "design_spec",
+     "source_id": "design_spec_0001",
+     "requirement_id": "req_mmss_branch"
+    },
+    {
+     "source_type": "design_spec",
+     "source_id": "design_spec_0001",
+     "requirement_id": "req_hhmmss_branch"
+    },
+    {
+     "source_type": "design_spec",
+     "source_id": "design_spec_0001",
+     "requirement_id": "req_padding"
+    },
+    {
+     "source_type": "design_spec",
+     "source_id": "design_spec_0001",
+     "requirement_id": "req_input_contract"
+    }
+   ]
+  },
+  "verification_plan": {
+   "checks": [
+    {
+     "check_id": "vc_node_test_red_phase",
+     "command": "node --test",
+     "manual_instruction": null,
+     "required": true,
+     "non_zero_test_execution_required": true
+    },
+    {
+     "check_id": "vc_node_test_green",
+     "command": "node --test",
+     "manual_instruction": null,
+     "required": true,
+     "non_zero_test_execution_required": true
+    },
+    {
+     "check_id": "vc_no_dom_side_effects_source_review",
+     "command": "node --test",
+     "manual_instruction": "仅以源码只读方式确认库模块不引用 window/document/fetch 等浏览器/网络全局对象、为纯函数；该结构性自检与 node --test 同证据来源收口",
+     "required": true,
+     "non_zero_test_execution_required": false
+    }
+   ]
+  }
+ }
+}
