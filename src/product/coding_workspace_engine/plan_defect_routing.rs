@@ -184,7 +184,7 @@ pub(crate) fn unique_authoritative_group_reviewer_binding(
     Ok(selected)
 }
 
-fn validate_group_reviewer_finding(
+pub(crate) fn validate_group_reviewer_finding(
     finding: &ReviewFinding,
     bindings: &[GroupReviewerProjectionBinding],
 ) -> Result<(), PlanRepairError> {

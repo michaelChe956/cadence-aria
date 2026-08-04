@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+use chrono::Utc;
+use sha2::{Digest, Sha256};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Semaphore;
@@ -11,11 +15,14 @@ use super::group_review_budget::{
 };
 use super::group_review_prompts::build_shard_prompt;
 use super::group_review_types::{GroupReviewMaterialSnapshot, PromptBudgetBreakdown};
+use super::plan_defect_routing::{GroupReviewerProjectionBinding, validate_group_reviewer_finding};
 use super::review_parser::parse_review_payload;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingExecutionStage, GroupReviewObligation, GroupReviewShardReport,
+    CodingExecutionStage, GroupReviewObligation, GroupReviewReductionReport,
+    GroupReviewShardReport, InternalPrReview, ReviewFinding, ReviewVerdict,
 };
+use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
 
 #[cfg(test)]
@@ -87,6 +94,99 @@ impl<'a> GroupReviewOrchestrator<'a> {
         }
         reports.sort_by(|left, right| left.shard_id.cmp(&right.shard_id));
         Ok(reports)
+    }
+
+    pub(crate) async fn execute_reduction(
+        &self,
+        snapshot: &GroupReviewMaterialSnapshot,
+        shard_reports: &[GroupReviewShardReport],
+        authoritative_bindings: &[GroupReviewerProjectionBinding],
+    ) -> Result<GroupReviewReductionReport, GroupReviewOrchestrationError> {
+        if !has_all_shard_reports(snapshot, shard_reports) {
+            return Err(GroupReviewOrchestrationError::ReductionNotReady);
+        }
+        let segments =
+            super::group_review_prompts::build_reduction_prompt(snapshot, shard_reports, None);
+        let breakdown = segments.measure();
+        if decide_budget(breakdown.total, GROUP_REVIEW_QUALITY_TARGET_BYTES)
+            == BudgetDecision::Overflow
+        {
+            return Err(GroupReviewOrchestrationError::MaterialOverflow { breakdown });
+        }
+        let attempt = self.store.find_attempt_by_id(&snapshot.attempt_id)?;
+        let execution = self.executor.execute(&segments.join()).await?;
+        let raw_ref = self.store.save_provider_raw_output(
+            &attempt,
+            CodingExecutionStage::InternalPrReview,
+            "group_review_reduction",
+            &execution.full_output,
+        )?;
+        let payload = parse_review_payload(
+            &execution.full_output,
+            CodingExecutionStage::InternalPrReview,
+        );
+        if super::group_review_budget::check_reduction_findings(payload.findings.len())
+            == FindingsDecision::FindingsExceeded
+        {
+            return Err(GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref });
+        }
+        let findings = merge_findings(shard_reports, payload.findings);
+        if findings.iter().any(|finding| {
+            validate_group_reviewer_finding(finding, authoritative_bindings).is_err()
+        }) {
+            return Err(GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref });
+        }
+        let verdict = reduce_verdict(
+            shard_reports
+                .iter()
+                .map(|report| report.verdict.clone())
+                .chain(std::iter::once(payload.verdict)),
+        );
+        let reduction = GroupReviewReductionReport {
+            id: "group_review_reduction_0001".to_string(),
+            attempt_id: snapshot.attempt_id.clone(),
+            snapshot_hash: snapshot.content_hash.clone(),
+            shard_report_ids: shard_reports
+                .iter()
+                .map(|report| report.id.clone())
+                .collect(),
+            verdict: verdict.clone(),
+            findings: findings.clone(),
+            impact_scope: payload.impact_scope.clone(),
+            pr_description: payload.pr_description.clone(),
+            commit_message_suggestion: payload.commit_message_suggestion.clone(),
+            provenance: Vec::new(),
+            raw_provider_output_refs: vec![raw_ref.clone()],
+            role_run_ids: execution.provider_session_id.into_iter().collect(),
+            run_failure_code: None,
+        };
+        let _ = self
+            .store
+            .write_group_review_reduction_report_cas(&snapshot.attempt_id, reduction.clone())?;
+        let existing = self.store.list_internal_pr_reviews(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let review = InternalPrReview {
+            id: next_sequential_id("internal_review", existing.len()),
+            attempt_id: snapshot.attempt_id.clone(),
+            review_request_id: snapshot.review_request_id.clone(),
+            verdict,
+            findings,
+            impact_scope: payload.impact_scope,
+            pr_description: payload.pr_description,
+            commit_message_suggestion: payload.commit_message_suggestion,
+            tested_evidence_refs: payload.tested_evidence_refs,
+            diff_refs: payload.diff_refs,
+            summary: payload.summary,
+            created_at: Utc::now().to_rfc3339(),
+            raw_provider_output_ref: Some(raw_ref),
+            role_run_id: None,
+            run_no: None,
+        };
+        self.store.save_internal_pr_review(&attempt, &review)?;
+        Ok(reduction)
     }
 
     fn build_and_store_shard_report(
@@ -180,6 +280,10 @@ pub(crate) enum GroupReviewOrchestrationError {
     MaterialOverflow { breakdown: PromptBudgetBreakdown },
     #[error("shard_output_invalid: {shard_id}")]
     ShardOutputInvalid { shard_id: String, raw_ref: String },
+    #[error("reduction_not_ready")]
+    ReductionNotReady,
+    #[error("reduction_output_invalid: {raw_ref}")]
+    ReductionOutputInvalid { raw_ref: String },
     #[error("store: {0}")]
     Store(#[from] ProductStoreError),
     #[error("executor: {0}")]
@@ -241,5 +345,130 @@ impl GroupReviewExecutor for FakeGroupReviewExecutor {
                     "fake_group_review_executor_exhausted".to_string(),
                 ))
             })
+    }
+}
+
+fn has_all_shard_reports(
+    snapshot: &GroupReviewMaterialSnapshot,
+    reports: &[GroupReviewShardReport],
+) -> bool {
+    let expected = snapshot
+        .partition_result
+        .shards
+        .iter()
+        .map(|shard| shard.shard_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let valid_reports = reports
+        .iter()
+        .filter(|report| {
+            report.attempt_id == snapshot.attempt_id
+                && report.snapshot_hash == snapshot.content_hash
+                && report.run_failure_code.is_none()
+        })
+        .collect::<Vec<_>>();
+    let actual = valid_reports
+        .iter()
+        .map(|report| report.shard_id.as_str())
+        .collect::<BTreeSet<_>>();
+    expected == actual && valid_reports.len() == expected.len()
+}
+
+pub(crate) fn reduce_verdict(verdicts: impl IntoIterator<Item = ReviewVerdict>) -> ReviewVerdict {
+    verdicts
+        .into_iter()
+        .max_by_key(|verdict| match verdict {
+            ReviewVerdict::Approve => 0,
+            ReviewVerdict::RequestChanges => 1,
+            ReviewVerdict::Blocked => 2,
+        })
+        .unwrap_or(ReviewVerdict::Approve)
+}
+
+pub(crate) fn finding_fingerprint(finding: &ReviewFinding) -> String {
+    let target = finding.repair_target.as_ref();
+    let mut target_ids = target
+        .map(|target| {
+            target
+                .logical_work_item_ids
+                .iter()
+                .chain(target.work_item_revision_ids.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut contract_refs = finding.contract_refs.clone();
+    let mut capability_refs = finding.capability_refs.clone();
+    target_ids.sort();
+    target_ids.dedup();
+    contract_refs.sort();
+    contract_refs.dedup();
+    capability_refs.sort();
+    capability_refs.dedup();
+    let path = finding
+        .file_path
+        .as_deref()
+        .unwrap_or("")
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let hunk_hash = finding
+        .plan_defect_evidence
+        .iter()
+        .map(|e| e.source_ref.as_str())
+        .collect::<Vec<_>>();
+    let input = format!(
+        "{:?}|{}|{}|{}|{}|{}|{}",
+        finding.defect_class,
+        finding.reason_code.as_deref().unwrap_or(""),
+        target_ids.join(","),
+        contract_refs.join(","),
+        capability_refs.join(","),
+        path,
+        hunk_hash.join(",")
+    );
+    hex::encode(Sha256::digest(input.as_bytes()))
+}
+
+pub(crate) fn merge_findings(
+    shard_reports: &[GroupReviewShardReport],
+    reduction_findings: Vec<ReviewFinding>,
+) -> Vec<ReviewFinding> {
+    let mut merged = BTreeMap::<String, ReviewFinding>::new();
+    for finding in shard_reports
+        .iter()
+        .flat_map(|report| report.findings.iter().cloned())
+        .chain(reduction_findings)
+    {
+        let fingerprint = finding_fingerprint(&finding);
+        match merged.get_mut(&fingerprint) {
+            Some(existing) => {
+                if severity_rank(&finding.severity) > severity_rank(&existing.severity) {
+                    existing.severity = finding.severity;
+                }
+                existing.evidence.extend(finding.evidence);
+                existing.evidence.sort();
+                existing.evidence.dedup();
+                existing
+                    .plan_defect_evidence
+                    .extend(finding.plan_defect_evidence);
+                existing
+                    .plan_defect_evidence
+                    .sort_by(|a, b| a.source_ref.cmp(&b.source_ref));
+                existing
+                    .plan_defect_evidence
+                    .dedup_by(|a, b| a.source_ref == b.source_ref);
+            }
+            None => {
+                merged.insert(fingerprint, finding);
+            }
+        }
+    }
+    merged.into_values().collect()
+}
+
+fn severity_rank(severity: &crate::product::coding_models::FindingSeverity) -> u8 {
+    match severity {
+        crate::product::coding_models::FindingSeverity::Info => 0,
+        crate::product::coding_models::FindingSeverity::Warning => 1,
+        crate::product::coding_models::FindingSeverity::Error => 2,
     }
 }

@@ -448,6 +448,7 @@ mod group_review_identity_snapshot;
 mod group_review_material;
 mod group_review_orchestrator;
 mod group_review_prompts;
+mod group_review_reduction;
 mod group_terminal;
 mod internal_review_triage;
 mod parser_prompt;
