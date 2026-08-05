@@ -563,7 +563,7 @@ fn group_final_review_evaluation_context_omits_projection_body_but_keeps_hash() 
         assert!(
             unit.get("reviewer_projection_hash")
                 .and_then(serde_json::Value::as_str)
-                .is_some()
+                .is_some_and(|hash| !hash.is_empty())
         );
     }
 }
