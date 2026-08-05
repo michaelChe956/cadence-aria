@@ -175,7 +175,7 @@ impl CodingWorkspaceEngine {
     pub(crate) fn build_code_review_report(
         &self,
         attempt: &CodingExecutionAttempt,
-        full_output: &str,
+        outcome: ProviderStreamOutcome,
         raw_provider_output_ref: Option<String>,
         role_run: &CodingRoleRun,
     ) -> Result<CodeReviewReport, ProductStoreError> {
@@ -184,7 +184,7 @@ impl CodingWorkspaceEngine {
             &attempt.issue_id,
             &attempt.id,
         )?;
-        let payload = parse_review_payload(full_output, CodingExecutionStage::CodeReview);
+        let payload = parse_code_review_outcome(&outcome);
         Ok(CodeReviewReport {
             id: next_sequential_id("code_review", existing.len()),
             attempt_id: attempt.id.clone(),

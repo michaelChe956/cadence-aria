@@ -1,4 +1,5 @@
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputState;
 
 pub(crate) struct CodeReviewProviderPayload {
     pub(crate) verdict: ReviewVerdict,
@@ -142,6 +143,32 @@ pub(crate) fn parse_group_review_payload(
     Err(GroupReviewParseError::Json(
         last_error.expect("candidates 非空时必然记录过反序列化错误"),
     ))
+}
+pub(crate) fn parse_code_review_outcome(
+    outcome: &ProviderStreamOutcome,
+) -> CodeReviewProviderPayload {
+    let parse_structured_value = |value: &serde_json::Value| {
+        serde_json::from_value::<RawCodeReviewProviderPayload>(value.clone())
+            .map(|raw| raw.into_payload(CodingExecutionStage::CodeReview))
+    };
+
+    match &outcome.structured_output {
+        StructuredOutputState::Parsed(value) => {
+            parse_structured_value(value).unwrap_or_else(|_| {
+                parse_review_payload(&outcome.full_output, CodingExecutionStage::CodeReview)
+            })
+        }
+        StructuredOutputState::Failed(error) => error
+            .recoverable_value
+            .as_ref()
+            .and_then(|value| parse_structured_value(value).ok())
+            .unwrap_or_else(|| {
+                parse_review_payload(&outcome.full_output, CodingExecutionStage::CodeReview)
+            }),
+        StructuredOutputState::NotRequested => {
+            parse_review_payload(&outcome.full_output, CodingExecutionStage::CodeReview)
+        }
+    }
 }
 pub(crate) fn parse_review_payload(
     full_output: &str,

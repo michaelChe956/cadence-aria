@@ -1,4 +1,74 @@
 use super::*;
+use crate::cross_cutting::structured_output::{
+    StructuredOutputError, StructuredOutputErrorCode, StructuredOutputState,
+};
+
+#[test]
+fn code_review_outcome_uses_parsed_sentinel_payload() {
+    let outcome = ProviderStreamOutcome {
+        full_output: "工作流路由回执".to_string(),
+        structured_output: StructuredOutputState::Parsed(serde_json::json!({
+            "verdict": "request_changes",
+            "summary": "需要补充边界测试",
+            "findings": [{
+                "severity": "warning",
+                "file_path": "src/lib.rs",
+                "line": 42,
+                "message": "缺少边界测试",
+                "required_action": "补充边界测试",
+                "source_stage": "code_review"
+            }]
+        })),
+    };
+
+    let parsed = parse_code_review_outcome(&outcome);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::RequestChanges);
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(parsed.findings[0].line, Some(42));
+}
+
+#[test]
+fn code_review_outcome_recovers_valid_payload_from_failed_sentinel() {
+    let outcome = ProviderStreamOutcome {
+        full_output: "不完整的 sentinel".to_string(),
+        structured_output: StructuredOutputState::Failed(StructuredOutputError {
+            code: StructuredOutputErrorCode::MissingEndTag,
+            message: "end tag missing".to_string(),
+            expected_nonce: Some("nonce".to_string()),
+            observed_nonce: None,
+            recoverable_value: Some(serde_json::json!({
+                "verdict": "approve",
+                "summary": "恢复成功",
+                "findings": []
+            })),
+        }),
+    };
+
+    let parsed = parse_code_review_outcome(&outcome);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Approve);
+    assert_eq!(parsed.summary, "恢复成功");
+}
+
+#[test]
+fn code_review_outcome_fails_closed_for_prose_without_recoverable_value() {
+    let outcome = ProviderStreamOutcome {
+        full_output: "审查已完成，未发现问题。".to_string(),
+        structured_output: StructuredOutputState::Failed(StructuredOutputError {
+            code: StructuredOutputErrorCode::MissingStartTag,
+            message: "start tag missing".to_string(),
+            expected_nonce: Some("nonce".to_string()),
+            observed_nonce: None,
+            recoverable_value: None,
+        }),
+    };
+
+    let parsed = parse_code_review_outcome(&outcome);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Blocked);
+    assert!(parsed.summary.contains("review 输出不是有效 JSON"));
+}
 
 #[test]
 fn group_review_parser_returns_error_for_malformed_output_instead_of_blocked_payload() {
