@@ -20,9 +20,9 @@ use super::group_review_budget::{
     group_review_shard_concurrency,
 };
 use super::group_review_prompts::{build_repair_prompt, build_shard_prompt};
-pub(crate) use super::group_review_repair::{
-    RepairError, RepairFidelityError, RepairOutput, validate_repair_fidelity,
-};
+#[cfg(test)]
+pub(crate) use super::group_review_repair::RepairFidelityError;
+pub(crate) use super::group_review_repair::{RepairError, RepairOutput, validate_repair_fidelity};
 use super::group_review_types::{GroupReviewMaterialSnapshot, PromptBudgetBreakdown};
 use super::plan_defect_routing::{GroupReviewerProjectionBinding, validate_group_reviewer_finding};
 use super::review_parser::{CodeReviewProviderPayload, parse_group_review_payload};
@@ -548,7 +548,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
             &attempt.issue_id,
             &attempt.id,
         )?;
-        let raw_ref = reduction.raw_provider_output_refs.first().ok_or_else(|| {
+        let raw_ref = reduction.raw_provider_output_refs.last().ok_or_else(|| {
             ProductStoreError::NotFound {
                 kind: "group_review_reduction_raw_output",
                 id: reduction.id.clone(),

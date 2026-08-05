@@ -701,60 +701,68 @@ impl CodingWorkspaceEngine {
                     .await;
             }
         };
-        let raw_ref = reduction
-            .raw_provider_output_refs
-            .first()
-            .ok_or_else(|| {
+        let completion_result = async {
+            let raw_ref = reduction.raw_provider_output_refs.last().ok_or_else(|| {
                 CodingWorkspaceEngineError::ProviderStream(
                     "group_review_reduction_raw_output_missing".to_string(),
                 )
-            })?
-            .clone();
-        let review = self
-            .store
-            .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .find(|review| review.raw_provider_output_ref.as_deref() == Some(raw_ref.as_str()))
-            .ok_or_else(|| {
-                CodingWorkspaceEngineError::ProviderStream(
-                    "group_review_internal_review_missing".to_string(),
-                )
             })?;
-        let raw_refs = shard_reports
-            .iter()
-            .flat_map(|report| report.raw_provider_output_refs.iter().cloned())
-            .chain(reduction.raw_provider_output_refs.iter().cloned())
-            .collect::<Vec<_>>();
-        self.store.update_role_run_refs(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &role_run.id,
-            raw_refs,
-            vec![review.id.clone()],
-        )?;
-        self.store.update_role_run_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &role_run.id,
-            CodingRoleRunStatus::Completed,
-            None,
-        )?;
-        let node_status = match review.verdict {
-            ReviewVerdict::Approve => CodingTimelineNodeStatus::Completed,
-            ReviewVerdict::RequestChanges => CodingTimelineNodeStatus::Failed,
-            ReviewVerdict::Blocked => CodingTimelineNodeStatus::Blocked,
+            let review = self
+                .store
+                .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                .into_iter()
+                .find(|review| review.raw_provider_output_ref.as_deref() == Some(raw_ref.as_str()))
+                .ok_or_else(|| {
+                    CodingWorkspaceEngineError::ProviderStream(
+                        "group_review_internal_review_missing".to_string(),
+                    )
+                })?;
+            let raw_refs = shard_reports
+                .iter()
+                .flat_map(|report| report.raw_provider_output_refs.iter().cloned())
+                .chain(reduction.raw_provider_output_refs.iter().cloned())
+                .collect::<Vec<_>>();
+            self.store.update_role_run_refs(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &role_run.id,
+                raw_refs,
+                vec![review.id.clone()],
+            )?;
+            self.store.update_role_run_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &role_run.id,
+                CodingRoleRunStatus::Completed,
+                None,
+            )?;
+            let node_status = match review.verdict {
+                ReviewVerdict::Approve => CodingTimelineNodeStatus::Completed,
+                ReviewVerdict::RequestChanges => CodingTimelineNodeStatus::Failed,
+                ReviewVerdict::Blocked => CodingTimelineNodeStatus::Blocked,
+            };
+            self.complete_timeline_node(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &node.id,
+                node_status,
+                Some(review.summary.clone()),
+            )
+            .await?;
+            Ok::<_, CodingWorkspaceEngineError>(review)
+        }
+        .await;
+        let review = match completion_result {
+            Ok(review) => review,
+            Err(error) => {
+                return self
+                    .finalize_group_review_failure(&attempt, &node.id, &role_run.id, error)
+                    .await;
+            }
         };
-        self.complete_timeline_node(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &node.id,
-            node_status,
-            Some(review.summary.clone()),
-        )
-        .await?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::InternalPrReviewComplete {
