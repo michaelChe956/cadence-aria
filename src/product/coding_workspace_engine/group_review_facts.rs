@@ -47,8 +47,8 @@ impl CodingWorkspaceEngine {
                 &args(&["diff", &base_commit, &completion_commit]),
             )
             .map_err(|error| {
-                CodingWorkspaceEngineError::ProviderStream(format!(
-                    "group_review_completion_diff_failed: {}: {error}",
+                CodingWorkspaceEngineError::GroupReviewGitFact(format!(
+                    "completion_diff_failed: {}: {error}",
                     binding.run.id
                 ))
             })?;
@@ -65,8 +65,8 @@ impl CodingWorkspaceEngine {
                 Err(crate::cross_cutting::git_command::GitCommandError::Failed { record })
                     if record.exit_code == Some(1) => {}
                 Err(error) => {
-                    return Err(CodingWorkspaceEngineError::ProviderStream(format!(
-                        "group_review_git_reachability_failed: {}: {error}",
+                    return Err(CodingWorkspaceEngineError::GroupReviewGitFact(format!(
+                        "reachability_failed: {}: {error}",
                         binding.run.id
                     )));
                 }

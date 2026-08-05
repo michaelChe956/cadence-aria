@@ -64,6 +64,7 @@ mod group;
 mod group_completion;
 mod group_review_budget;
 mod group_review_facts;
+mod group_review_failure_handling;
 mod group_review_material;
 mod group_review_orchestrator;
 mod group_review_prompts;

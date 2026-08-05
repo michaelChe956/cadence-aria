@@ -1,6 +1,9 @@
 use super::*;
 use crate::cross_cutting::streaming_provider::{ProviderCompletion, ProviderSession};
-use crate::product::coding_models::{CompactFindingDigest, UnitReviewConclusionSnapshot};
+use crate::product::coding_models::{
+    CodingRoleRunStatus, CodingTimelineNodeStatus, CompactFindingDigest,
+    UnitReviewConclusionSnapshot,
+};
 use crate::product::work_item_projection::renderer_for;
 use std::sync::{Arc, Mutex};
 
@@ -48,8 +51,15 @@ impl StreamingProviderAdapter for GroupReviewRunnerProvider {
     }
 }
 
-#[tokio::test]
-async fn group_final_review_delegates_to_orchestrator_and_activates_snapshot() {
+async fn group_review_runner_fixture(
+    completion_commits_present: bool,
+) -> (
+    tempfile::TempDir,
+    CodingAttemptStore,
+    CodingExecutionAttempt,
+    CodingWorkspaceEngine,
+    GroupReviewRunnerProvider,
+) {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -133,7 +143,7 @@ async fn group_final_review_delegates_to_orchestrator_and_activates_snapshot() {
             operational_retry_count: 0,
             plan_repair_count: 0,
             start_commit: Some(base_commit.clone()),
-            completion_commit: Some(completion_commit.clone()),
+            completion_commit: completion_commits_present.then(|| completion_commit.clone()),
             created_at: "2026-08-04T00:00:00Z".to_string(),
             updated_at: "2026-08-04T00:00:00Z".to_string(),
         };
@@ -201,6 +211,12 @@ async fn group_final_review_delegates_to_orchestrator_and_activates_snapshot() {
     let (event_tx, _event_rx) = mpsc::channel(128);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
     let provider = GroupReviewRunnerProvider::default();
+    (root, store, attempt, engine, provider)
+}
+
+#[tokio::test]
+async fn group_final_review_delegates_to_orchestrator_and_activates_snapshot() {
+    let (_root, store, attempt, engine, provider) = group_review_runner_fixture(true).await;
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let review = engine
@@ -230,4 +246,48 @@ async fn group_final_review_delegates_to_orchestrator_and_activates_snapshot() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn group_final_review_git_fact_failure_closes_running_state_with_failure_gate() {
+    let (_root, store, attempt, engine, provider) = group_review_runner_fixture(false).await;
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = engine
+        .execute_group_final_review_with_commands(&attempt, &provider, &mut command_rx)
+        .await
+        .expect_err("missing completion commit must fail closed");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::GroupReviewBlocked {
+            ref reason_code,
+            gate_id: Some(_)
+        } if reason_code.contains("completion_commit_missing")
+    ));
+    let stored_attempt = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt");
+    assert_eq!(stored_attempt.status, CodingAttemptStatus::Blocked);
+    let role_run = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs")
+        .into_iter()
+        .last()
+        .expect("role run");
+    assert_eq!(role_run.status, CodingRoleRunStatus::Blocked);
+    let node = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline")
+        .into_iter()
+        .last()
+        .expect("node");
+    assert_eq!(node.status, CodingTimelineNodeStatus::Blocked);
+    assert!(node.completed_at.is_some());
+    let gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].reason_code.as_deref(), Some("identity_missing"));
+    assert!(provider.prompts().is_empty());
 }

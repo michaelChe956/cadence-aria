@@ -1,20 +1,5 @@
 use super::*;
 
-fn map_group_review_orchestration_error(
-    error: super::group_review_orchestrator::GroupReviewOrchestrationError,
-) -> CodingWorkspaceEngineError {
-    use super::group_review_orchestrator::{
-        GroupReviewExecutionError, GroupReviewOrchestrationError,
-    };
-
-    match error {
-        GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::UserCancelled) => {
-            CodingWorkspaceEngineError::Aborted
-        }
-        error => CodingWorkspaceEngineError::ProviderStream(error.to_string()),
-    }
-}
-
 pub(crate) fn summarize_push_error(
     remote: &str,
     branch: &str,
@@ -531,10 +516,23 @@ impl CodingWorkspaceEngine {
             CodingRoleRunTrigger::Initial,
             Some(node.id.clone()),
         )?;
-        let reviewer = self
-            .store
-            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .internal_reviewer;
+        let reviewer = match self.store.get_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        ) {
+            Ok(snapshot) => snapshot.internal_reviewer,
+            Err(error) => {
+                return self
+                    .finalize_group_review_failure(
+                        &attempt,
+                        &node.id,
+                        &role_run.id,
+                        CodingWorkspaceEngineError::Store(error),
+                    )
+                    .await;
+            }
+        };
         let executor = RealGroupReviewExecutor::new(
             self,
             attempt.clone(),
@@ -544,22 +542,76 @@ impl CodingWorkspaceEngine {
             reviewer,
         );
         let orchestrator = GroupReviewOrchestrator::new(&executor, &self.store);
-        let bindings = self.authoritative_group_reviewer_bindings(&attempt)?;
+        let bindings = match self.authoritative_group_reviewer_bindings(&attempt) {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                return self
+                    .finalize_group_review_failure(&attempt, &node.id, &role_run.id, error)
+                    .await;
+            }
+        };
         let mut snapshots = Vec::with_capacity(bindings.len());
         for binding in &bindings {
-            let Some(snapshot) = self
+            let snapshot = match self
                 .store
-                .get_unit_review_conclusion_snapshot(&attempt.id, &binding.run.id)?
-            else {
-                let error = GroupReviewOrchestrationError::IdentityMissing;
-                let _ = orchestrator.create_failure_gate(&attempt, &node.id, &error);
-                return Err(map_group_review_orchestration_error(error));
+                .get_unit_review_conclusion_snapshot(&attempt.id, &binding.run.id)
+            {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    return self
+                        .handle_group_review_orchestration_failure(
+                            &orchestrator,
+                            &attempt,
+                            &node.id,
+                            &role_run.id,
+                            GroupReviewOrchestrationError::IdentityMissing,
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    return self
+                        .finalize_group_review_failure(
+                            &attempt,
+                            &node.id,
+                            &role_run.id,
+                            CodingWorkspaceEngineError::Store(error),
+                        )
+                        .await;
+                }
             };
             snapshots.push(snapshot);
         }
-        let git_facts = self
+        let git_facts = match self
             .collect_group_git_facts(&attempt, &bindings, &review_request, &worktree_path)
-            .await?;
+            .await
+        {
+            Ok(facts) => facts,
+            Err(error @ CodingWorkspaceEngineError::CompletionCommitMissing(_)) => {
+                return self
+                    .handle_group_review_orchestration_failure(
+                        &orchestrator,
+                        &attempt,
+                        &node.id,
+                        &role_run.id,
+                        GroupReviewOrchestrationError::IdentityMissing,
+                    )
+                    .await
+                    .map_err(|mapped| match mapped {
+                        CodingWorkspaceEngineError::GroupReviewBlocked { gate_id, .. } => {
+                            CodingWorkspaceEngineError::GroupReviewBlocked {
+                                reason_code: error.to_string(),
+                                gate_id,
+                            }
+                        }
+                        other => other,
+                    });
+            }
+            Err(error) => {
+                return self
+                    .finalize_group_review_failure(&attempt, &node.id, &role_run.id, error)
+                    .await;
+            }
+        };
         let snapshot = match compile_group_review_material(
             &bindings,
             &snapshots,
@@ -572,26 +624,59 @@ impl CodingWorkspaceEngine {
             Err(error) => {
                 let orchestration_error = match error {
                     super::group_review_types::GroupMaterialError::AuthorityValidation(_) => {
-                        GroupReviewOrchestrationError::IdentityMissing
+                        return self
+                            .handle_group_review_orchestration_failure(
+                                &orchestrator,
+                                &attempt,
+                                &node.id,
+                                &role_run.id,
+                                GroupReviewOrchestrationError::IdentityMissing,
+                            )
+                            .await;
                     }
-                    error => {
-                        return Err(CodingWorkspaceEngineError::ProviderStream(
-                            error.to_string(),
-                        ));
+                    super::group_review_types::GroupMaterialError::GitFact(message) => {
+                        CodingWorkspaceEngineError::GroupReviewGitFact(message)
+                    }
+                    super::group_review_types::GroupMaterialError::Internal(message) => {
+                        CodingWorkspaceEngineError::GroupReviewMaterial(message)
                     }
                 };
-                let _ = orchestrator.create_failure_gate(&attempt, &node.id, &orchestration_error);
-                return Err(map_group_review_orchestration_error(orchestration_error));
+                return self
+                    .finalize_group_review_failure(
+                        &attempt,
+                        &node.id,
+                        &role_run.id,
+                        orchestration_error,
+                    )
+                    .await;
             }
         };
-        self.store
-            .activate_group_review_snapshot(&attempt.id, &snapshot.content_hash)?;
+        if let Err(error) = self
+            .store
+            .activate_group_review_snapshot(&attempt.id, &snapshot.content_hash)
+        {
+            return self
+                .finalize_group_review_failure(
+                    &attempt,
+                    &node.id,
+                    &role_run.id,
+                    CodingWorkspaceEngineError::Store(error),
+                )
+                .await;
+        }
 
         let shard_reports = match orchestrator.execute_shards(&snapshot).await {
             Ok(reports) => reports,
             Err(error) => {
-                let _ = orchestrator.create_failure_gate(&attempt, &node.id, &error);
-                return Err(map_group_review_orchestration_error(error));
+                return self
+                    .handle_group_review_orchestration_failure(
+                        &orchestrator,
+                        &attempt,
+                        &node.id,
+                        &role_run.id,
+                        error,
+                    )
+                    .await;
             }
         };
         let projection_bindings = bindings
@@ -604,8 +689,15 @@ impl CodingWorkspaceEngine {
         {
             Ok(reduction) => reduction,
             Err(error) => {
-                let _ = orchestrator.create_failure_gate(&attempt, &node.id, &error);
-                return Err(map_group_review_orchestration_error(error));
+                return self
+                    .handle_group_review_orchestration_failure(
+                        &orchestrator,
+                        &attempt,
+                        &node.id,
+                        &role_run.id,
+                        error,
+                    )
+                    .await;
             }
         };
         let raw_ref = reduction
@@ -958,7 +1050,6 @@ impl CodingWorkspaceEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn summarize_push_error_handles_multibyte_stderr_without_panic() {
         // 多字节 UTF-8 stderr：字节长度 >500 且第 500 字节落在字符中间。

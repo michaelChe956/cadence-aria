@@ -169,6 +169,62 @@ async fn collect_group_git_facts_collects_sorted_patches_stats_and_reachability(
 }
 
 #[tokio::test]
+async fn collect_group_git_facts_treats_non_ancestor_exit_one_as_unreachable() {
+    let root = tempdir().expect("tempdir");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    init_test_git_repo(&worktree);
+    let base_commit = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    run_test_git(&worktree, &["checkout", "-b", "completion-branch"]);
+    fs::write(worktree.join("completion.txt"), "completion\n").expect("completion");
+    run_test_git(&worktree, &["add", "."]);
+    run_test_git(&worktree, &["commit", "-m", "completion"]);
+    let unreachable_completion = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    run_test_git(&worktree, &["checkout", "-b", "final-branch", &base_commit]);
+    fs::write(worktree.join("final.txt"), "final\n").expect("final");
+    run_test_git(&worktree, &["add", "."]);
+    run_test_git(&worktree, &["commit", "-m", "final"]);
+    let final_commit = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx);
+    let mut attempt = test_attempt("attempt_group_git_facts_non_ancestor");
+    attempt.base_branch = base_commit.clone();
+    attempt.worktree_path = Some(worktree.clone());
+    let binding = facts_binding(
+        "run_unreachable",
+        Some(base_commit),
+        Some(unreachable_completion.clone()),
+    );
+
+    let facts = engine
+        .collect_group_git_facts(
+            &attempt,
+            &[binding],
+            &facts_request(&attempt, final_commit),
+            &worktree,
+        )
+        .await
+        .expect("exit 1 means non-ancestor, not collector failure");
+
+    assert_eq!(facts.completion_diffs.len(), 1);
+    assert!(
+        !facts
+            .completion_commit_in_final
+            .contains(&unreachable_completion)
+    );
+}
+
+#[tokio::test]
 async fn collect_group_git_facts_fails_closed_without_completion_commit() {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");

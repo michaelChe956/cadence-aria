@@ -12,6 +12,21 @@ pub enum CodingWorkspaceEngineError {
     ProviderAdapter(#[from] ProviderAdapterError),
     #[error("coding_provider_stream_failed: {0}")]
     ProviderStream(String),
+    #[error("group_review_blocked: {reason_code}; gate_id={gate_id:?}")]
+    GroupReviewBlocked {
+        reason_code: String,
+        gate_id: Option<String>,
+    },
+    #[error("group_review_reduction_stale")]
+    GroupReviewReductionStale,
+    #[error("group_review_executor_transport: {0}")]
+    GroupReviewExecutorTransport(String),
+    #[error("group_review_executor_internal: {0}")]
+    GroupReviewExecutorInternal(String),
+    #[error("group_review_git_fact_error: {0}")]
+    GroupReviewGitFact(String),
+    #[error("group_review_material_error: {0}")]
+    GroupReviewMaterial(String),
     #[error("coding_aborted")]
     Aborted,
     #[error("coding_rework_limit_exceeded: {0}")]
