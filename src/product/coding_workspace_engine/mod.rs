@@ -214,6 +214,8 @@ pub(crate) use prompts::*;
 #[allow(unused_imports)]
 pub(crate) use provider_failure::*;
 #[allow(unused_imports)]
+pub(crate) use provider_stream::ProviderStreamOutcome;
+#[allow(unused_imports)]
 pub(crate) use reports::*;
 #[allow(unused_imports)]
 pub(crate) use review_parser::*;

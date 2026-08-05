@@ -65,13 +65,19 @@ impl CodingWorkspaceEngine {
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .code_reviewer;
         let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
-        let prompt = match self.render_reviewer_unit_run_context(&attempt, &reviewer)? {
+        let nonce = crate::product::workspace_engine::structured_output_nonce();
+        let structured_output_contract = code_review_structured_output_contract(nonce.clone());
+        let terminal_contract = code_review_output_contract(&nonce);
+        let mut prompt = match self.render_reviewer_unit_run_context(&attempt, &reviewer)? {
             Some(rendered) => rendered.text,
             None => {
                 self.build_code_review_prompt(&attempt, worktree_path, retry_diagnostic.as_deref())
                     .await?
             }
         };
+        if !prompt.ends_with(&terminal_contract) {
+            prompt.push_str(&terminal_contract);
+        }
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingExecutionEvent {
@@ -108,8 +114,9 @@ impl CodingWorkspaceEngine {
             streaming_input_from_adapter(&input, worktree_path.clone(), permission_mode);
         provider_input.workspace_session_id = Some(attempt.id.clone());
         provider_input.resume_provider_session_id = resume_provider_session_id;
-        let full_output = self
-            .run_provider_stream_to_completion(CodingProviderStreamRun {
+        provider_input.structured_output_contract = Some(structured_output_contract);
+        let outcome = self
+            .run_structured_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
                 node_id: &node.id,
                 role_run: Some(&role_run),
@@ -126,6 +133,7 @@ impl CodingWorkspaceEngine {
                 suppress_failure_side_effects: false,
             })
             .await?;
+        let full_output = outcome.full_output.clone();
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &attempt,
             CodingExecutionStage::CodeReview,
@@ -142,7 +150,7 @@ impl CodingWorkspaceEngine {
         )?;
         let report = self.build_code_review_report(
             &attempt,
-            &full_output,
+            outcome,
             Some(raw_provider_output_ref.clone()),
             &role_run,
         )?;

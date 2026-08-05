@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub(super) struct CapturingProjectionProvider {
     output: String,
+    wrap_output_in_sentinel: bool,
     inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
 }
 
@@ -17,6 +18,15 @@ impl CapturingProjectionProvider {
     pub(super) fn new(output: impl Into<String>) -> Self {
         Self {
             output: output.into(),
+            wrap_output_in_sentinel: false,
+            inputs: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(super) fn new_sentinel_payload(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            wrap_output_in_sentinel: true,
             inputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -33,15 +43,32 @@ impl StreamingProviderAdapter for CapturingProjectionProvider {
         input: StreamingProviderInput,
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        let structured_output_contract = input.structured_output_contract.clone();
+        let nonce = structured_output_contract
+            .as_ref()
+            .map(|contract| contract.nonce.clone());
         self.inputs.lock().unwrap().push(input);
         let (event_tx, event_rx) = mpsc::channel(4);
         let (command_tx, _command_rx) = mpsc::channel(4);
-        let output = self.output.clone();
+        let output = if self.wrap_output_in_sentinel {
+            let nonce = nonce.expect("sentinel payload requires structured output contract");
+            let (receipt, payload) = self
+                .output
+                .split_once('\n')
+                .expect("sentinel payload requires receipt and JSON payload");
+            format!(
+                "{receipt}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{payload}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">"
+            )
+        } else {
+            self.output.clone()
+        };
         tokio::spawn(async move {
             let _ = event_tx
                 .send(ProviderEvent::Completed(
-                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
-                        output, None,
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+                        output,
+                        structured_output_contract.as_ref(),
+                        None,
                     ),
                 ))
                 .await;
@@ -194,7 +221,22 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
             },
         )
         .unwrap();
-    assert_eq!(reviewer.input().prompt, expected_reviewer.text);
+    let input = reviewer.input();
+    let contract = input
+        .structured_output_contract
+        .as_ref()
+        .expect("code review structured output contract");
+    assert_eq!(contract.schema_name, "coding_workspace_code_review");
+    assert!(input.prompt.contains(&format!(
+        "<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+        contract.nonce
+    )));
+    assert!(input.prompt.contains(&format!(
+        "</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+        contract.nonce
+    )));
+    assert!(input.prompt.ends_with("最终结论的 JSON 必须是合法对象。\n"));
+    assert!(input.prompt.starts_with(&expected_reviewer.text));
     assert_eq!(
         rebound.reviewer_provider_renderer_version,
         expected_reviewer.renderer_version
