@@ -1,4 +1,4 @@
-use super::group_review_orchestrator::GroupReviewExecutionError;
+use super::group_review_errors::GroupReviewExecutionError;
 use super::review_parser::parse_group_review_payload;
 use crate::product::coding_models::{CodingExecutionStage, ReviewVerdict};
 

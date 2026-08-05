@@ -614,7 +614,7 @@ impl CodingWorkspaceEngine {
                                     }),
                                 );
                                 return self
-                                    .fail_provider_stream_with_ownership(
+                                    .fail_provider_protocol_with_ownership(
                                         attempt,
                                         node_id,
                                         suppress_failure_side_effects,
@@ -788,6 +788,20 @@ impl CodingWorkspaceEngine {
             suppress_failure_side_effects,
         )
         .await
+    }
+
+    async fn fail_provider_protocol_with_ownership<T>(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        suppress_failure_side_effects: bool,
+        message: String,
+    ) -> Result<T, CodingWorkspaceEngineError> {
+        if suppress_failure_side_effects {
+            Err(CodingWorkspaceEngineError::ProviderProtocol(message))
+        } else {
+            self.fail_provider_stream(attempt, node_id, message).await
+        }
     }
 
     async fn fail_provider_stream_with_ownership<T>(

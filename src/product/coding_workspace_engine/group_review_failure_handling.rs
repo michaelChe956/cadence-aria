@@ -1,6 +1,5 @@
-use super::group_review_orchestrator::{
-    GroupReviewExecutionError, GroupReviewOrchestrationError, GroupReviewOrchestrator,
-};
+use super::group_review_errors::{GroupReviewExecutionError, GroupReviewOrchestrationError};
+use super::group_review_orchestrator::GroupReviewOrchestrator;
 use super::*;
 
 pub(crate) fn map_group_review_orchestration_error(
@@ -38,6 +37,18 @@ pub(crate) fn map_group_review_orchestration_error(
                 gate_id,
             }
         }
+        GroupReviewOrchestrationError::ShardTransportExhausted { .. } => {
+            CodingWorkspaceEngineError::GroupReviewBlocked {
+                reason_code: "shard_transport_exhausted".to_string(),
+                gate_id,
+            }
+        }
+        GroupReviewOrchestrationError::ReductionTransportExhausted => {
+            CodingWorkspaceEngineError::GroupReviewBlocked {
+                reason_code: "reduction_transport_exhausted".to_string(),
+                gate_id,
+            }
+        }
         GroupReviewOrchestrationError::ShardInProgress { shard_id } => {
             CodingWorkspaceEngineError::GroupReviewBlocked {
                 reason_code: format!("shard_in_progress:{shard_id}"),
@@ -68,6 +79,9 @@ pub(crate) fn map_group_review_orchestration_error(
         GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::Transport(message)) => {
             CodingWorkspaceEngineError::GroupReviewExecutorTransport(message)
         }
+        GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::ProviderProtocol(
+            message,
+        )) => CodingWorkspaceEngineError::GroupReviewExecutorInternal(message),
         GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::Internal(message)) => {
             CodingWorkspaceEngineError::GroupReviewExecutorInternal(message)
         }
@@ -199,7 +213,9 @@ impl CodingWorkspaceEngine {
             | GroupReviewOrchestrationError::MaterialOverflow { .. }
             | GroupReviewOrchestrationError::IdentityMissing
             | GroupReviewOrchestrationError::ShardOutputInvalid { .. }
-            | GroupReviewOrchestrationError::ReductionOutputInvalid { .. } => {
+            | GroupReviewOrchestrationError::ReductionOutputInvalid { .. }
+            | GroupReviewOrchestrationError::ShardTransportExhausted { .. }
+            | GroupReviewOrchestrationError::ReductionTransportExhausted => {
                 match orchestrator.create_failure_gate(attempt, node_id, &error) {
                     Ok(gate) => Some(gate.gate_id),
                     Err(store_error) => {
@@ -245,6 +261,20 @@ mod tests {
                 ref reason_code,
                 gate_id: Some(ref gate_id),
             } if reason_code == "capacity_exceeded" && gate_id == "coding_blocked_gate_0001"
+        ));
+
+        let exhausted = map_group_review_orchestration_error(
+            GroupReviewOrchestrationError::ShardTransportExhausted {
+                shard_id: "shard_0001".to_string(),
+            },
+            Some("coding_blocked_gate_0002".to_string()),
+        );
+        assert!(matches!(
+            exhausted,
+            CodingWorkspaceEngineError::GroupReviewBlocked {
+                ref reason_code,
+                gate_id: Some(ref gate_id),
+            } if reason_code == "shard_transport_exhausted" && gate_id == "coding_blocked_gate_0002"
         ));
 
         let in_progress = map_group_review_orchestration_error(

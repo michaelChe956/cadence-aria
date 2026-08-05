@@ -3,9 +3,12 @@ use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttem
 use crate::product::coding_models::{
     CodingExecutionStage, FindingSeverity, GroupReviewShardReport, ReviewFinding, ReviewVerdict,
 };
+use crate::product::coding_workspace_engine::group_review_errors::{
+    GroupReviewExecutionError, GroupReviewOrchestrationError,
+};
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
-    FakeGroupReviewExecutor, GroupReviewExecutionResult, GroupReviewOrchestrationError,
-    GroupReviewOrchestrator, PersistOutcome, finding_fingerprint, merge_findings, reduce_verdict,
+    FakeGroupReviewExecutor, GroupReviewExecutionResult, GroupReviewOrchestrator, PersistOutcome,
+    finding_fingerprint, merge_findings, reduce_verdict,
 };
 use crate::product::coding_workspace_engine::group_review_types::{
     GroupDiffIndex, GroupPartitionResult, GroupReviewGraph, GroupReviewMaterialSnapshot,
@@ -594,7 +597,7 @@ async fn reduction_rejects_invalid_authoritative_finding_target() {
             full_output: output.to_string(),
             role_run_id: None,
         }),
-        Err(crate::product::coding_workspace_engine::group_review_orchestrator::GroupReviewExecutionError::Internal(
+        Err(GroupReviewExecutionError::Internal(
             "repair must not be used for parseable output".to_string(),
         )),
     ]);
@@ -631,7 +634,7 @@ async fn reduction_rejects_more_than_sixteen_findings() {
             full_output: output,
             role_run_id: None,
         }),
-        Err(crate::product::coding_workspace_engine::group_review_orchestrator::GroupReviewExecutionError::Internal(
+        Err(GroupReviewExecutionError::Internal(
             "repair must not be used for parseable output".to_string(),
         )),
     ]);

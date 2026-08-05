@@ -1,7 +1,8 @@
 use super::*;
 use crate::cross_cutting::streaming_provider::{ProviderCompletion, ProviderSession};
+use crate::product::coding_workspace_engine::group_review_errors::GroupReviewExecutionError;
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
-    GroupReviewExecutionError, GroupReviewExecutor, RealGroupReviewExecutor,
+    GroupReviewExecutor, RealGroupReviewExecutor,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

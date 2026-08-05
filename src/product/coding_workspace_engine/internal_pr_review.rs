@@ -473,10 +473,9 @@ impl CodingWorkspaceEngine {
         _command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
         use super::group_review_budget::GROUP_REVIEW_QUALITY_TARGET_BYTES;
+        use super::group_review_errors::GroupReviewOrchestrationError;
         use super::group_review_material::compile_group_review_material;
-        use super::group_review_orchestrator::{
-            GroupReviewOrchestrationError, GroupReviewOrchestrator, RealGroupReviewExecutor,
-        };
+        use super::group_review_orchestrator::{GroupReviewOrchestrator, RealGroupReviewExecutor};
         use super::group_review_prompts::GroupReviewPromptBuilder;
 
         let attempt = self.store.ensure_provider_run_allowed(attempt)?;

@@ -14,12 +14,14 @@ use crate::product::coding_models::{
 use crate::product::coding_workspace_engine::group_review_budget::{
     GROUP_REVIEW_HARD_CAP_BYTES, GROUP_REVIEW_QUALITY_TARGET_BYTES,
 };
+use crate::product::coding_workspace_engine::group_review_errors::{
+    GroupReviewExecutionError, GroupReviewOrchestrationError,
+};
 use crate::product::coding_workspace_engine::group_review_material::{
     GroupReviewMaterialSnapshotDraft, ShardPromptMeasurer, compile_group_review_material,
 };
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
-    FakeGroupReviewExecutor, GroupReviewExecutionError, GroupReviewExecutionResult,
-    GroupReviewOrchestrationError, GroupReviewOrchestrator,
+    FakeGroupReviewExecutor, GroupReviewExecutionResult, GroupReviewOrchestrator,
 };
 use crate::product::coding_workspace_engine::group_review_prompts::{
     build_reduction_prompt, build_shard_prompt,
@@ -1083,34 +1085,103 @@ async fn step13_14_malformed_json_output_attempts_repair_then_persists_invalid_r
 }
 
 #[tokio::test]
-async fn step13_14_transport_error_shard_does_not_persist_raw_ref() {
+async fn step13_14_transport_error_shard_persists_failure_report() {
     let (_root, store, attempt_id) = e2e_store();
     let (_bindings, _snapshots, snapshot) = twenty_unit_snapshot(&attempt_id);
     store
         .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
         .expect("activate snapshot");
 
-    let shard_count = snapshot.partition_result.shards.len();
-    let mut results = Vec::new();
-    for _ in 0..shard_count {
-        results.push(Err(GroupReviewExecutionError::Transport(
-            "connection refused".to_string(),
-        )));
-    }
-    let executor = FakeGroupReviewExecutor::new(results);
+    let executor = FakeGroupReviewExecutor::new(
+        (0..3)
+            .map(|_| {
+                Err(GroupReviewExecutionError::Transport(
+                    "connection refused".to_string(),
+                ))
+            })
+            .collect(),
+    );
     let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
 
-    let _error = orchestrator
+    let error = orchestrator
         .execute_shards(&snapshot)
         .await
-        .expect_err("transport error must fail");
+        .expect_err("transport exhaustion must fail");
 
-    // Transport errors don't produce raw output, so no shard reports should be stored
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ShardTransportExhausted { .. }
+    ));
+    assert_eq!(executor.prompts().len(), 3, "transport failure is retried");
     let shard_reports = store
         .list_group_review_shard_reports(&attempt_id)
         .expect("shard reports");
-    assert!(
-        shard_reports.is_empty(),
-        "transport errors should not persist shard reports"
+    assert_eq!(shard_reports.len(), 1);
+    assert_eq!(
+        shard_reports[0].run_failure_code.as_deref(),
+        Some("shard_transport_exhausted")
     );
+    assert_eq!(shard_reports[0].verdict, ReviewVerdict::Blocked);
+    assert!(shard_reports[0].findings.is_empty());
+    assert!(shard_reports[0].raw_provider_output_refs.is_empty());
+}
+
+#[tokio::test]
+async fn step13_14_transport_error_reduction_persists_failure_report() {
+    let (_root, store, attempt_id) = e2e_store();
+    let (bindings, _snapshots, snapshot) = twenty_unit_snapshot(&attempt_id);
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+
+    let shard_count = snapshot.partition_result.shards.len();
+    let mut results = (0..shard_count)
+        .map(|_| {
+            Ok(GroupReviewExecutionResult {
+                full_output: valid_shard_output(),
+                role_run_id: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    results.extend((0..3).map(|_| {
+        Err(GroupReviewExecutionError::Transport(
+            "connection refused".to_string(),
+        ))
+    }));
+    let executor = FakeGroupReviewExecutor::new(results);
+    let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
+    let shard_reports = orchestrator
+        .execute_shards(&snapshot)
+        .await
+        .expect("valid shards");
+    let projection_bindings = bindings
+        .iter()
+        .map(|binding| binding.projection_binding.clone())
+        .collect::<Vec<_>>();
+
+    let error = orchestrator
+        .execute_reduction(&snapshot, &shard_reports, &projection_bindings)
+        .await
+        .expect_err("reduction transport exhaustion must fail");
+
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ReductionTransportExhausted
+    ));
+    assert_eq!(
+        executor.prompts().len(),
+        shard_count + 3,
+        "only reduction is retried"
+    );
+    let reduction_reports = store
+        .list_group_review_reduction_reports(&attempt_id)
+        .expect("reduction reports");
+    assert_eq!(reduction_reports.len(), 1);
+    assert_eq!(
+        reduction_reports[0].run_failure_code.as_deref(),
+        Some("reduction_transport_exhausted")
+    );
+    assert_eq!(reduction_reports[0].verdict, ReviewVerdict::Blocked);
+    assert!(reduction_reports[0].findings.is_empty());
+    assert!(reduction_reports[0].raw_provider_output_refs.is_empty());
 }

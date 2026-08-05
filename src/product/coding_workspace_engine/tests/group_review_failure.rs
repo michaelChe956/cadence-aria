@@ -6,10 +6,12 @@ use crate::product::coding_models::{
     CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingGateDiagnostic,
     CodingProviderRole,
 };
+use crate::product::coding_workspace_engine::group_review_errors::{
+    GroupReviewExecutionError, GroupReviewFailureGateDecision, decide_group_review_failure_gate,
+};
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
-    FakeGroupReviewExecutor, GroupReviewExecutionError, GroupReviewExecutionResult,
-    GroupReviewFailureGateDecision, GroupReviewOrchestrator, RepairError, RepairFidelityError,
-    decide_group_review_failure_gate, validate_repair_fidelity,
+    FakeGroupReviewExecutor, GroupReviewExecutionResult, GroupReviewOrchestrator, RepairError,
+    RepairFidelityError, validate_repair_fidelity,
 };
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -243,7 +245,9 @@ fn group_review_failure_reason_codes_are_distinct_and_ordered() {
         "material_overflow",
         "identity_missing",
         "reduction_output_invalid",
+        "reduction_transport_exhausted",
         "shard_output_invalid",
+        "shard_transport_exhausted",
     ];
     for (higher_index, higher) in codes.iter().enumerate() {
         for lower in &codes[higher_index + 1..] {
@@ -418,6 +422,28 @@ async fn repair_returns_output_that_can_be_persisted_as_raw_and_repaired_audit_r
         .expect("persist both audit artifacts");
     assert_eq!(refs.len(), 2);
     assert_ne!(refs[0], refs[1]);
+}
+
+#[tokio::test]
+async fn provider_protocol_error_does_not_retry() {
+    let executor = FakeGroupReviewExecutor::new(vec![
+        Err(GroupReviewExecutionError::ProviderProtocol(
+            "unexpected provider event".to_string(),
+        )),
+        Ok(GroupReviewExecutionResult {
+            full_output: "must not run".to_string(),
+            role_run_id: None,
+        }),
+    ]);
+    let (_root, store, _attempt_id) = execution_store();
+    let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
+
+    assert!(matches!(
+        orchestrator.execute_with_retry("prompt", 3).await,
+        Err(GroupReviewExecutionError::ProviderProtocol(message))
+            if message == "unexpected provider event"
+    ));
+    assert_eq!(executor.prompts(), vec!["prompt"]);
 }
 
 #[tokio::test]

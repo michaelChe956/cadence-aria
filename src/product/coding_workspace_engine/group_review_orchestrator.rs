@@ -19,11 +19,17 @@ use super::group_review_budget::{
     REPAIR_PROMPT_BYTE_CAP, check_capacity, check_shard_findings, decide_budget,
     group_review_shard_concurrency,
 };
+use super::group_review_errors::{
+    GROUP_REVIEW_FAILURE_REASON_CODES, GroupReviewExecutionError, GroupReviewOrchestrationError,
+};
+use super::group_review_failure_reports::{
+    persist_reduction_failure_report, persist_shard_failure_report,
+};
 use super::group_review_prompts::{build_repair_prompt, build_shard_prompt};
 #[cfg(test)]
 pub(crate) use super::group_review_repair::RepairFidelityError;
 pub(crate) use super::group_review_repair::{RepairError, RepairOutput, validate_repair_fidelity};
-use super::group_review_types::{GroupReviewMaterialSnapshot, PromptBudgetBreakdown};
+use super::group_review_types::GroupReviewMaterialSnapshot;
 use super::plan_defect_routing::{GroupReviewerProjectionBinding, validate_group_reviewer_finding};
 use super::review_parser::{CodeReviewProviderPayload, parse_group_review_payload};
 use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
@@ -95,14 +101,28 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 "shard",
                 Some("invalid".to_string()),
                 Some("8".to_string()),
-                Some(raw_ref.clone()),
+                (!raw_ref.is_empty()).then(|| raw_ref.clone()),
             ),
             GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref } => (
                 "reduction_output_invalid",
                 "reduction",
                 Some("invalid".to_string()),
                 Some("16".to_string()),
-                Some(raw_ref.clone()),
+                (!raw_ref.is_empty()).then(|| raw_ref.clone()),
+            ),
+            GroupReviewOrchestrationError::ShardTransportExhausted { .. } => (
+                GROUP_REVIEW_FAILURE_REASON_CODES[3],
+                "shard",
+                None,
+                None,
+                None,
+            ),
+            GroupReviewOrchestrationError::ReductionTransportExhausted => (
+                GROUP_REVIEW_FAILURE_REASON_CODES[4],
+                "reduction",
+                None,
+                None,
+                None,
             ),
             _ => {
                 return Err(ProductStoreError::Io(
@@ -217,14 +237,44 @@ impl<'a> GroupReviewOrchestrator<'a> {
             };
             claimed_leases.claim(lease_id.clone());
             let semaphore = semaphore.clone();
+            let failure_attempt = attempt.clone();
             executions.push(async move {
                 let _permit = semaphore
                     .acquire_owned()
                     .await
                     .expect("group review semaphore is never closed");
-                let result = self
+                let result = match self
                     .execute_with_retry_result(&prompt, GROUP_REVIEW_MAX_ATTEMPTS)
-                    .await?;
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(GroupReviewExecutionError::Transport(_)) => {
+                        persist_shard_failure_report(
+                            self.store,
+                            snapshot,
+                            shard,
+                            &failure_attempt,
+                            "shard_transport_exhausted",
+                        )?;
+                        return Err(GroupReviewOrchestrationError::ShardTransportExhausted {
+                            shard_id: shard.shard_id.clone(),
+                        });
+                    }
+                    Err(GroupReviewExecutionError::ProviderProtocol(_)) => {
+                        persist_shard_failure_report(
+                            self.store,
+                            snapshot,
+                            shard,
+                            &failure_attempt,
+                            "shard_output_invalid",
+                        )?;
+                        return Err(GroupReviewOrchestrationError::ShardOutputInvalid {
+                            shard_id: shard.shard_id.clone(),
+                            raw_ref: String::new(),
+                        });
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 Ok::<_, GroupReviewOrchestrationError>((shard, lease_id, result))
             });
         }
@@ -281,6 +331,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                     last_transport_error = Some(error);
                 }
                 Err(error @ GroupReviewExecutionError::UserCancelled)
+                | Err(error @ GroupReviewExecutionError::ProviderProtocol(_))
                 | Err(error @ GroupReviewExecutionError::Internal(_)) => return Err(error),
             }
         }
@@ -428,6 +479,42 @@ impl<'a> GroupReviewOrchestrator<'a> {
             .await
         {
             Ok(execution) => execution,
+            Err(GroupReviewExecutionError::Transport(_)) => {
+                let persist_result = persist_reduction_failure_report(
+                    self.store,
+                    snapshot,
+                    shard_reports,
+                    &attempt,
+                    "reduction_transport_exhausted",
+                );
+                let release_result = self.store.release_group_review_lease(
+                    &snapshot.attempt_id,
+                    &reduction_lease_id,
+                    "",
+                );
+                persist_result?;
+                release_result?;
+                return Err(GroupReviewOrchestrationError::ReductionTransportExhausted);
+            }
+            Err(GroupReviewExecutionError::ProviderProtocol(_)) => {
+                let persist_result = persist_reduction_failure_report(
+                    self.store,
+                    snapshot,
+                    shard_reports,
+                    &attempt,
+                    "reduction_output_invalid",
+                );
+                let release_result = self.store.release_group_review_lease(
+                    &snapshot.attempt_id,
+                    &reduction_lease_id,
+                    "",
+                );
+                persist_result?;
+                release_result?;
+                return Err(GroupReviewOrchestrationError::ReductionOutputInvalid {
+                    raw_ref: String::new(),
+                });
+            }
             Err(error) => {
                 self.store.release_group_review_lease(
                     &snapshot.attempt_id,
@@ -854,6 +941,14 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
 fn map_group_review_engine_error(error: CodingWorkspaceEngineError) -> GroupReviewExecutionError {
     match error {
         CodingWorkspaceEngineError::Aborted => GroupReviewExecutionError::UserCancelled,
+        CodingWorkspaceEngineError::ProviderProtocol(message) => {
+            GroupReviewExecutionError::ProviderProtocol(message)
+        }
+        CodingWorkspaceEngineError::ProviderStream(message)
+            if message == "provider_choice_unresolved" =>
+        {
+            GroupReviewExecutionError::ProviderProtocol(message)
+        }
         CodingWorkspaceEngineError::ProviderStream(message)
         | CodingWorkspaceEngineError::ProviderAdapter(ProviderAdapterError {
             details: message,
@@ -875,84 +970,6 @@ pub(crate) trait GroupReviewExecutor: Send + Sync {
 pub(crate) struct GroupReviewExecutionResult {
     pub full_output: String,
     pub role_run_id: Option<String>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum GroupReviewExecutionError {
-    #[error("transport: {0}")]
-    Transport(String),
-    #[error("user_cancelled")]
-    UserCancelled,
-    #[error("internal: {0}")]
-    Internal(String),
-}
-
-pub(crate) const GROUP_REVIEW_FAILURE_REASON_CODES: [&str; 5] = [
-    "capacity_exceeded",
-    "material_overflow",
-    "identity_missing",
-    "shard_output_invalid",
-    "reduction_output_invalid",
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GroupReviewFailureGateDecision {
-    ReplaceExisting,
-    KeepExistingAppendEvidence,
-    MergeEvidence,
-}
-
-pub(crate) fn decide_group_review_failure_gate(
-    existing_reason_code: &str,
-    incoming_reason_code: &str,
-) -> GroupReviewFailureGateDecision {
-    let existing_priority = group_review_failure_priority(existing_reason_code);
-    let incoming_priority = group_review_failure_priority(incoming_reason_code);
-    if incoming_priority > existing_priority {
-        GroupReviewFailureGateDecision::ReplaceExisting
-    } else if incoming_reason_code == existing_reason_code {
-        GroupReviewFailureGateDecision::MergeEvidence
-    } else {
-        GroupReviewFailureGateDecision::KeepExistingAppendEvidence
-    }
-}
-
-pub(crate) fn group_review_failure_priority(reason_code: &str) -> u8 {
-    match reason_code {
-        "capacity_exceeded" => 5,
-        "material_overflow" => 4,
-        "identity_missing" => 3,
-        "reduction_output_invalid" => 2,
-        "shard_output_invalid" => 1,
-        _ => 0,
-    }
-}
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum GroupReviewOrchestrationError {
-    #[error("capacity_exceeded")]
-    CapacityExceeded,
-    #[error("material_overflow")]
-    MaterialOverflow { breakdown: PromptBudgetBreakdown },
-    #[error("shard_output_invalid: {shard_id}")]
-    ShardOutputInvalid { shard_id: String, raw_ref: String },
-    #[error("shard_in_progress: {shard_id}")]
-    ShardInProgress { shard_id: String },
-    #[error("reduction_in_progress")]
-    ReductionInProgress,
-    #[error("reduction_not_ready")]
-    ReductionNotReady,
-    #[error("reduction_output_invalid: {raw_ref}")]
-    ReductionOutputInvalid { raw_ref: String },
-    #[error("shard_stale_audit")]
-    ShardStaleAudit,
-    #[error("reduction_stale")]
-    ReductionStale,
-    #[error("identity_missing")]
-    IdentityMissing,
-    #[error("store: {0}")]
-    Store(#[from] ProductStoreError),
-    #[error("executor: {0}")]
-    Executor(#[from] GroupReviewExecutionError),
 }
 
 #[cfg(test)]

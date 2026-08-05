@@ -12,6 +12,8 @@ pub enum CodingWorkspaceEngineError {
     ProviderAdapter(#[from] ProviderAdapterError),
     #[error("coding_provider_stream_failed: {0}")]
     ProviderStream(String),
+    #[error("coding_provider_protocol_error: {0}")]
+    ProviderProtocol(String),
     #[error("group_review_blocked: {reason_code}; gate_id={gate_id:?}")]
     GroupReviewBlocked {
         reason_code: String,

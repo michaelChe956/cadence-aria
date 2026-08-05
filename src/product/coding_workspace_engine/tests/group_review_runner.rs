@@ -1,11 +1,129 @@
 use super::*;
 use crate::cross_cutting::streaming_provider::{ProviderCompletion, ProviderSession};
 use crate::product::coding_models::{
-    CodingRoleRunStatus, CodingTimelineNodeStatus, CompactFindingDigest,
+    CodingAttemptStatus, CodingRoleRunStatus, CodingTimelineNodeStatus, CompactFindingDigest,
     UnitReviewConclusionSnapshot,
 };
 use crate::product::work_item_projection::renderer_for;
 use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Default)]
+struct TransportFailureGroupReviewProvider {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for TransportFailureGroupReviewProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.prompts.lock().expect("prompts").push(input.prompt);
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "connection refused",
+            0,
+        ))
+    }
+}
+
+impl TransportFailureGroupReviewProvider {
+    fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().expect("prompts").clone()
+    }
+}
+
+#[derive(Clone, Default)]
+struct ShardSuccessThenTransportFailureProvider {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ShardSuccessThenTransportFailureProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let is_shard = self.prompts.lock().expect("prompts").is_empty();
+        self.prompts.lock().expect("prompts").push(input.prompt);
+        if !is_shard {
+            return Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "connection refused",
+                0,
+            ));
+        }
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let output = serde_json::json!({
+                "verdict": "approve",
+                "summary": "group review approved",
+                "findings": [],
+                "impact_scope": ["group"],
+                "pr_description": "group description",
+                "commit_message_suggestion": "review group"
+            })
+            .to_string();
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                    output, None,
+                )))
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+impl ShardSuccessThenTransportFailureProvider {
+    fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().expect("prompts").clone()
+    }
+}
+
+#[derive(Clone, Default)]
+struct ProtocolFailureGroupReviewProvider {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ProtocolFailureGroupReviewProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.prompts.lock().expect("prompts").push(input.prompt);
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ProtocolError {
+                    code: "provider_protocol_error".to_string(),
+                    message: "unexpected provider event".to_string(),
+                    context: None,
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+impl ProtocolFailureGroupReviewProvider {
+    fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().expect("prompts").clone()
+    }
+}
 
 #[derive(Clone, Default)]
 struct GroupReviewRunnerProvider {
@@ -234,6 +352,138 @@ async fn group_review_runner_fixture(
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
     let provider = GroupReviewRunnerProvider::default();
     (root, store, attempt, engine, provider)
+}
+
+#[tokio::test]
+async fn group_final_review_transport_exhaustion_persists_shard_report_and_blocks_attempt() {
+    let (_root, store, attempt, engine, _provider) = group_review_runner_fixture(true).await;
+    let provider = TransportFailureGroupReviewProvider::default();
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = engine
+        .execute_group_final_review_with_commands(&attempt, &provider, &mut command_rx)
+        .await
+        .expect_err("transport exhaustion must create a retryable group-review gate");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::GroupReviewBlocked {
+            ref reason_code,
+            gate_id: Some(_),
+        } if reason_code == "shard_transport_exhausted"
+    ));
+    assert_eq!(
+        provider.prompts().len(),
+        3,
+        "transport retries stay in shard"
+    );
+    let reports = store
+        .list_group_review_shard_reports(&attempt.id)
+        .expect("shard reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        reports[0].run_failure_code.as_deref(),
+        Some("shard_transport_exhausted")
+    );
+    assert!(reports[0].raw_provider_output_refs.is_empty());
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("attempt")
+            .status,
+        CodingAttemptStatus::Blocked
+    );
+    let gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("shard_transport_exhausted")
+    );
+}
+
+#[tokio::test]
+async fn group_final_review_reduction_transport_exhaustion_persists_report_and_blocks_attempt() {
+    let (_root, store, attempt, engine, _provider) = group_review_runner_fixture(true).await;
+    let provider = ShardSuccessThenTransportFailureProvider::default();
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = engine
+        .execute_group_final_review_with_commands(&attempt, &provider, &mut command_rx)
+        .await
+        .expect_err("reduction transport exhaustion must create a retryable group-review gate");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::GroupReviewBlocked {
+            ref reason_code,
+            gate_id: Some(_),
+        } if reason_code == "reduction_transport_exhausted"
+    ));
+    assert_eq!(
+        provider.prompts().len(),
+        4,
+        "only reduction retries after the successful shard"
+    );
+    let reports = store
+        .list_group_review_reduction_reports(&attempt.id)
+        .expect("reduction reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        reports[0].run_failure_code.as_deref(),
+        Some("reduction_transport_exhausted")
+    );
+    assert!(reports[0].raw_provider_output_refs.is_empty());
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("attempt")
+            .status,
+        CodingAttemptStatus::Blocked
+    );
+    let gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some("reduction_transport_exhausted")
+    );
+}
+
+#[tokio::test]
+async fn group_final_review_provider_protocol_error_does_not_retry_and_is_output_invalid() {
+    let (_root, store, attempt, engine, _provider) = group_review_runner_fixture(true).await;
+    let provider = ProtocolFailureGroupReviewProvider::default();
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = engine
+        .execute_group_final_review_with_commands(&attempt, &provider, &mut command_rx)
+        .await
+        .expect_err("protocol error must fail closed without transport retry");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::GroupReviewBlocked {
+            ref reason_code,
+            gate_id: Some(_),
+        } if reason_code == "shard_output_invalid"
+    ));
+    assert_eq!(
+        provider.prompts().len(),
+        1,
+        "protocol errors are not retried"
+    );
+    let reports = store
+        .list_group_review_shard_reports(&attempt.id)
+        .expect("shard reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        reports[0].run_failure_code.as_deref(),
+        Some("shard_output_invalid")
+    );
+    assert!(reports[0].raw_provider_output_refs.is_empty());
 }
 
 #[tokio::test]

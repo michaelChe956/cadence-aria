@@ -7,9 +7,12 @@ use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttem
 use crate::product::coding_models::{
     CasOutcome, GroupReviewReductionReport, GroupReviewShardReport, ReviewProvenance, ReviewVerdict,
 };
+use crate::product::coding_workspace_engine::group_review_errors::{
+    GroupReviewExecutionError, GroupReviewOrchestrationError,
+};
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
-    FakeGroupReviewExecutor, GroupReviewExecutionError, GroupReviewExecutionResult,
-    GroupReviewExecutor, GroupReviewOrchestrationError, GroupReviewOrchestrator,
+    FakeGroupReviewExecutor, GroupReviewExecutionResult, GroupReviewExecutor,
+    GroupReviewOrchestrator,
 };
 use crate::product::coding_workspace_engine::group_review_types::{
     CompactContractInterface, CompactRoutingTarget, ContractEdge, DeterministicGroupFinding,

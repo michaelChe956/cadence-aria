@@ -647,18 +647,20 @@ pub fn group_review_failure_gate_decision(
 
 fn group_review_failure_priority(reason_code: &str) -> u8 {
     match reason_code {
-        "capacity_exceeded" => 5,
-        "material_overflow" => 4,
-        "identity_missing" => 3,
-        "reduction_output_invalid" => 2,
-        "shard_output_invalid" => 1,
+        "capacity_exceeded" => 7,
+        "material_overflow" => 6,
+        "identity_missing" => 5,
+        "reduction_output_invalid" => 4,
+        "reduction_transport_exhausted" => 3,
+        "shard_output_invalid" => 2,
+        "shard_transport_exhausted" => 1,
         _ => 0,
     }
 }
 
 fn group_review_failure_actions(reason_code: &str) -> Vec<CodingGateAction> {
     let retry = match reason_code {
-        "reduction_output_invalid" => CodingGateAction {
+        "reduction_output_invalid" | "reduction_transport_exhausted" => CodingGateAction {
             action_id: "retry_group_reduction".to_string(),
             label: "重试组审查归约".to_string(),
             action_type: CodingGateActionType::RetryGroupReduction,
@@ -686,7 +688,9 @@ fn is_group_review_failure_reason(reason_code: &str) -> bool {
             | "material_overflow"
             | "identity_missing"
             | "reduction_output_invalid"
+            | "reduction_transport_exhausted"
             | "shard_output_invalid"
+            | "shard_transport_exhausted"
     )
 }
 
