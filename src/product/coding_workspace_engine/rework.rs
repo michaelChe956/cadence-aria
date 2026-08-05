@@ -229,6 +229,7 @@ impl CodingWorkspaceEngine {
                 fresh_retry,
                 timeout: None,
                 timeout_reason_code: None,
+                suppress_failure_side_effects: false,
             })
             .await?;
         let (plan_defect_report, plan_defect_decision, plan_defect_error) =

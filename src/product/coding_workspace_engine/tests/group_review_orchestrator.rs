@@ -221,14 +221,14 @@ fn stores_stale_reports_without_changing_active_snapshot() {
 async fn fake_executor_and_orchestration_errors_are_constructible() {
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: "output".to_string(),
-        provider_session_id: Some("session_0001".to_string()),
+        role_run_id: Some("session_0001".to_string()),
     })]);
 
     assert_eq!(
         executor.execute("prompt").await.expect("fake result"),
         GroupReviewExecutionResult {
             full_output: "output".to_string(),
-            provider_session_id: Some("session_0001".to_string()),
+            role_run_id: Some("session_0001".to_string()),
         }
     );
     executor.push_result(Err(GroupReviewExecutionError::Transport(
@@ -429,7 +429,7 @@ async fn execute_shards_parses_persists_and_returns_reports() {
         .expect("activate snapshot");
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: valid_review_output(0),
-        provider_session_id: Some("session_0001".to_string()),
+        role_run_id: Some("session_0001".to_string()),
     })]);
 
     let reports = GroupReviewOrchestrator::new(&executor, &store)
@@ -460,7 +460,7 @@ async fn execute_shards_reuses_completed_snapshot_reports_without_provider_calls
         .expect("activate snapshot");
     let first_executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: valid_review_output(0),
-        provider_session_id: None,
+        role_run_id: None,
     })]);
     GroupReviewOrchestrator::new(&first_executor, &store)
         .execute_shards(&snapshot)
@@ -516,7 +516,7 @@ async fn execute_shards_supersedes_old_snapshot_and_stores_late_result_as_stale(
 
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: valid_review_output(0),
-        provider_session_id: None,
+        role_run_id: None,
     })]);
     let reports = GroupReviewOrchestrator::new(&executor, &store)
         .execute_shards(&old_snapshot)
@@ -548,11 +548,11 @@ async fn failed_shard_result_releases_every_preclaimed_lease() {
     let executor = FakeGroupReviewExecutor::new(vec![
         Ok(GroupReviewExecutionResult {
             full_output: valid_review_output(9),
-            provider_session_id: None,
+            role_run_id: None,
         }),
         Ok(GroupReviewExecutionResult {
             full_output: valid_review_output(0),
-            provider_session_id: None,
+            role_run_id: None,
         }),
     ]);
 
@@ -586,7 +586,7 @@ async fn execute_shards_rejects_more_than_eight_findings() {
     snapshot.attempt_id = attempt_id;
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: valid_review_output(9),
-        provider_session_id: None,
+        role_run_id: None,
     })]);
 
     let error = GroupReviewOrchestrator::new(&executor, &store)
@@ -617,7 +617,7 @@ impl GroupReviewExecutor for ConcurrentExecutor {
         self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(GroupReviewExecutionResult {
             full_output: valid_review_output(0),
-            provider_session_id: None,
+            role_run_id: None,
         })
     }
 }

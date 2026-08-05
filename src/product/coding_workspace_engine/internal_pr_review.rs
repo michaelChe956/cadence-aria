@@ -311,6 +311,7 @@ impl CodingWorkspaceEngine {
                 fresh_retry: None,
                 timeout: None,
                 timeout_reason_code: None,
+                suppress_failure_side_effects: false,
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(

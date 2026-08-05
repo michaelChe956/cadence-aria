@@ -20,9 +20,12 @@ use super::group_review_budget::{
     group_review_shard_concurrency,
 };
 use super::group_review_prompts::{build_repair_prompt, build_shard_prompt};
+pub(crate) use super::group_review_repair::{
+    RepairError, RepairFidelityError, RepairOutput, validate_repair_fidelity,
+};
 use super::group_review_types::{GroupReviewMaterialSnapshot, PromptBudgetBreakdown};
 use super::plan_defect_routing::{GroupReviewerProjectionBinding, validate_group_reviewer_finding};
-use super::review_parser::parse_review_payload;
+use super::review_parser::{CodeReviewProviderPayload, parse_group_review_payload};
 use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
 use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
@@ -42,6 +45,8 @@ use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use std::collections::VecDeque;
 #[cfg(test)]
 use std::sync::Mutex;
+
+const GROUP_REVIEW_MAX_ATTEMPTS: usize = 3;
 
 pub(crate) struct GroupReviewOrchestrator<'a> {
     executor: &'a dyn GroupReviewExecutor,
@@ -143,10 +148,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
         snapshot: &GroupReviewMaterialSnapshot,
     ) -> Result<Vec<GroupReviewShardReport>, GroupReviewOrchestrationError> {
         if check_capacity(snapshot.unit_records.len()) == CapacityDecision::CapacityExceeded {
-            let error = GroupReviewOrchestrationError::CapacityExceeded;
-            let attempt = self.store.find_attempt_by_id(&snapshot.attempt_id)?;
-            let _ = self.create_failure_gate(&attempt, "group_review_shard", &error);
-            return Err(error);
+            return Err(GroupReviewOrchestrationError::CapacityExceeded);
         }
 
         // Do all material validation before starting a provider future: a later overflow must
@@ -168,11 +170,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(prompts) => prompts,
-            Err(error) => {
-                let attempt = self.store.find_attempt_by_id(&snapshot.attempt_id)?;
-                let _ = self.create_failure_gate(&attempt, "group_review_shard", &error);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
 
         let existing_reports = self.matching_shard_reports(snapshot)?;
@@ -224,14 +222,19 @@ impl<'a> GroupReviewOrchestrator<'a> {
                     .acquire_owned()
                     .await
                     .expect("group review semaphore is never closed");
-                let result = self.executor.execute(&prompt).await?;
+                let result = self
+                    .execute_with_retry_result(&prompt, GROUP_REVIEW_MAX_ATTEMPTS)
+                    .await?;
                 Ok::<_, GroupReviewOrchestrationError>((shard, lease_id, result))
             });
         }
 
         while let Some(result) = executions.next().await {
             let (shard, lease_id, execution) = result?;
-            match self.build_and_store_shard_report(snapshot, shard, &attempt, execution) {
+            match self
+                .build_and_store_shard_report(snapshot, shard, &attempt, execution)
+                .await
+            {
                 Ok(Some(report)) => {
                     self.store.release_group_review_lease(
                         &snapshot.attempt_id,
@@ -246,10 +249,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                         .release_group_review_lease(&snapshot.attempt_id, &lease_id, "")?;
                     claimed_leases.complete(&lease_id);
                 }
-                Err(error) => {
-                    let _ = self.create_failure_gate(&attempt, "group_review_shard", &error);
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             }
         }
         reports.sort_by(|left, right| left.shard_id.cmp(&right.shard_id));
@@ -261,11 +261,22 @@ impl<'a> GroupReviewOrchestrator<'a> {
         prompt: &str,
         max_attempts: usize,
     ) -> Result<String, GroupReviewExecutionError> {
+        Ok(self
+            .execute_with_retry_result(prompt, max_attempts)
+            .await?
+            .full_output)
+    }
+
+    pub(crate) async fn execute_with_retry_result(
+        &self,
+        prompt: &str,
+        max_attempts: usize,
+    ) -> Result<GroupReviewExecutionResult, GroupReviewExecutionError> {
         let attempts = max_attempts.max(1);
         let mut last_transport_error = None;
         for _ in 0..attempts {
             match self.executor.execute(prompt).await {
-                Ok(result) => return Ok(result.full_output),
+                Ok(result) => return Ok(result),
                 Err(error @ GroupReviewExecutionError::Transport(_)) => {
                     last_transport_error = Some(error);
                 }
@@ -302,6 +313,15 @@ impl<'a> GroupReviewOrchestrator<'a> {
             "group_review_repair_raw",
             raw_output,
         )?;
+        self.persist_repair_outputs_from_raw_ref(attempt, raw_ref, repair)
+    }
+
+    fn persist_repair_outputs_from_raw_ref(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        raw_ref: String,
+        repair: &RepairOutput,
+    ) -> Result<Vec<String>, ProductStoreError> {
         let repaired_ref = self.store.save_provider_raw_output(
             attempt,
             CodingExecutionStage::InternalPrReview,
@@ -309,6 +329,37 @@ impl<'a> GroupReviewOrchestrator<'a> {
             &repair.repaired_output,
         )?;
         Ok(vec![raw_ref, repaired_ref])
+    }
+
+    async fn parse_or_repair_group_review_output(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        raw_output: &str,
+        raw_ref: String,
+        max_findings: usize,
+    ) -> Result<ParsedGroupReviewOutput, ProductStoreError> {
+        match parse_group_review_payload(raw_output, CodingExecutionStage::InternalPrReview) {
+            Ok(payload) => Ok(ParsedGroupReviewOutput {
+                payload,
+                raw_provider_output_refs: vec![raw_ref],
+                output_invalid: false,
+            }),
+            Err(_) => match self.execute_repair(raw_output, max_findings).await {
+                Ok(repair) => match parse_group_review_payload(
+                    &repair.repaired_output,
+                    CodingExecutionStage::InternalPrReview,
+                ) {
+                    Ok(payload) => Ok(ParsedGroupReviewOutput {
+                        payload,
+                        raw_provider_output_refs: self
+                            .persist_repair_outputs_from_raw_ref(attempt, raw_ref, &repair)?,
+                        output_invalid: false,
+                    }),
+                    Err(_) => Ok(ParsedGroupReviewOutput::invalid(raw_ref)),
+                },
+                Err(_) => Ok(ParsedGroupReviewOutput::invalid(raw_ref)),
+            },
+        }
     }
 
     pub(crate) async fn execute_reduction(
@@ -372,7 +423,10 @@ impl<'a> GroupReviewOrchestrator<'a> {
         else {
             return Err(GroupReviewOrchestrationError::ReductionInProgress);
         };
-        let execution = match self.executor.execute(&segments.join()).await {
+        let execution = match self
+            .execute_with_retry_result(&segments.join(), GROUP_REVIEW_MAX_ATTEMPTS)
+            .await
+        {
             Ok(execution) => execution,
             Err(error) => {
                 self.store.release_group_review_lease(
@@ -399,10 +453,15 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 return Err(error.into());
             }
         };
-        let payload = parse_review_payload(
-            &execution.full_output,
-            CodingExecutionStage::InternalPrReview,
-        );
+        let parsed = self
+            .parse_or_repair_group_review_output(
+                &attempt,
+                &execution.full_output,
+                raw_ref.clone(),
+                16,
+            )
+            .await?;
+        let payload = parsed.payload;
         let findings_exceeded =
             super::group_review_budget::check_reduction_findings(payload.findings.len())
                 == FindingsDecision::FindingsExceeded;
@@ -410,7 +469,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
         let finding_contract_invalid = findings.iter().any(|finding| {
             validate_group_reviewer_finding(finding, authoritative_bindings).is_err()
         });
-        let output_invalid = findings_exceeded || finding_contract_invalid;
+        let output_invalid = parsed.output_invalid || findings_exceeded || finding_contract_invalid;
         let verdict = reduce_verdict(
             shard_reports
                 .iter()
@@ -431,8 +490,8 @@ impl<'a> GroupReviewOrchestrator<'a> {
             pr_description: payload.pr_description.clone(),
             commit_message_suggestion: payload.commit_message_suggestion.clone(),
             provenance: Vec::new(),
-            raw_provider_output_refs: vec![raw_ref.clone()],
-            role_run_ids: execution.provider_session_id.into_iter().collect(),
+            raw_provider_output_refs: parsed.raw_provider_output_refs,
+            role_run_ids: execution.role_run_id.into_iter().collect(),
             run_failure_code: output_invalid.then(|| "reduction_output_invalid".to_string()),
         };
         let cas_outcome = match self
@@ -457,11 +516,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                     &reduction_lease_id,
                     "",
                 )?;
-                return if output_invalid {
-                    Err(GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref })
-                } else {
-                    Err(GroupReviewOrchestrationError::ReductionStale)
-                };
+                return Err(GroupReviewOrchestrationError::ReductionStale);
             }
         }
         if output_invalid {
@@ -506,7 +561,13 @@ impl<'a> GroupReviewOrchestrator<'a> {
             return Ok(PersistOutcome::Persisted);
         }
         let raw_output = self.store.read_attempt_artifact_text(attempt, raw_ref)?;
-        let payload = parse_review_payload(&raw_output, CodingExecutionStage::InternalPrReview);
+        let payload =
+            parse_group_review_payload(&raw_output, CodingExecutionStage::InternalPrReview)
+                .map_err(|error| {
+                    ProductStoreError::Json(format!(
+                        "group_review_reduction_raw_output_invalid: {error}"
+                    ))
+                })?;
         let review = InternalPrReview {
             id: next_sequential_id("internal_review", existing.len()),
             attempt_id: snapshot.attempt_id.clone(),
@@ -562,7 +623,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
         Ok(reports)
     }
 
-    fn build_and_store_shard_report(
+    async fn build_and_store_shard_report(
         &self,
         snapshot: &GroupReviewMaterialSnapshot,
         shard: &super::group_review_types::GroupShardSpec,
@@ -575,12 +636,17 @@ impl<'a> GroupReviewOrchestrator<'a> {
             &format!("group_review_{}", shard.shard_id),
             &execution.full_output,
         )?;
-        let payload = parse_review_payload(
-            &execution.full_output,
-            CodingExecutionStage::InternalPrReview,
-        );
-        let output_invalid =
-            check_shard_findings(payload.findings.len()) == FindingsDecision::FindingsExceeded;
+        let parsed = self
+            .parse_or_repair_group_review_output(
+                attempt,
+                &execution.full_output,
+                raw_ref.clone(),
+                8,
+            )
+            .await?;
+        let payload = parsed.payload;
+        let output_invalid = parsed.output_invalid
+            || check_shard_findings(payload.findings.len()) == FindingsDecision::FindingsExceeded;
 
         let selected_diff_refs = snapshot
             .diff_index
@@ -606,8 +672,8 @@ impl<'a> GroupReviewOrchestrator<'a> {
             findings: payload.findings,
             unresolved_obligations: Vec::<GroupReviewObligation>::new(),
             selected_diff_refs,
-            raw_provider_output_refs: vec![raw_ref.clone()],
-            role_run_ids: execution.provider_session_id.into_iter().collect(),
+            raw_provider_output_refs: parsed.raw_provider_output_refs,
+            role_run_ids: execution.role_run_id.into_iter().collect(),
             run_failure_code: output_invalid.then(|| "shard_output_invalid".to_string()),
         };
         match self
@@ -621,13 +687,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 })
             }
             CasOutcome::Written => Ok(Some(report)),
-            CasOutcome::StoredStale if output_invalid => {
-                Err(GroupReviewOrchestrationError::ShardOutputInvalid {
-                    shard_id: shard.shard_id.clone(),
-                    raw_ref,
-                })
-            }
-            CasOutcome::StoredStale => Ok(None),
+            CasOutcome::StoredStale => Err(GroupReviewOrchestrationError::ShardStaleAudit),
         }
     }
 }
@@ -636,6 +696,31 @@ impl<'a> GroupReviewOrchestrator<'a> {
 pub(crate) enum PersistOutcome {
     Persisted,
     SkippedStale,
+}
+
+struct ParsedGroupReviewOutput {
+    payload: CodeReviewProviderPayload,
+    raw_provider_output_refs: Vec<String>,
+    output_invalid: bool,
+}
+
+impl ParsedGroupReviewOutput {
+    fn invalid(raw_ref: String) -> Self {
+        Self {
+            payload: CodeReviewProviderPayload {
+                verdict: ReviewVerdict::Blocked,
+                summary: "组级审查输出无法解析".to_string(),
+                findings: Vec::new(),
+                impact_scope: Vec::new(),
+                pr_description: String::new(),
+                commit_message_suggestion: String::new(),
+                tested_evidence_refs: Vec::new(),
+                diff_refs: Vec::new(),
+            },
+            raw_provider_output_refs: vec![raw_ref],
+            output_invalid: true,
+        }
+    }
 }
 
 struct ShardLeaseCleanup<'a> {
@@ -671,110 +756,6 @@ impl Drop for ShardLeaseCleanup<'_> {
                 .release_group_review_lease(self.attempt_id, lease_id, "");
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RepairOutput {
-    pub(crate) repaired_output: String,
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub(crate) enum RepairFidelityError {
-    #[error("repair_missing_marker")]
-    MissingMarker,
-    #[error("repair_verdict_mismatch")]
-    VerdictMismatch,
-    #[error("repair_forbidden_approve")]
-    ForbiddenApprove,
-    #[error("repair_finding_not_subtraceable")]
-    FindingNotSubtraceable,
-    #[error("repair_evidence_not_subtraceable")]
-    EvidenceNotSubtraceable,
-    #[error("repair_target_not_subtraceable")]
-    TargetNotSubtraceable,
-    #[error("repair_too_many_findings")]
-    TooManyFindings,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum RepairError {
-    #[error("repair_input_too_large")]
-    InputTooLarge,
-    #[error("repair_executor: {0}")]
-    Executor(#[from] GroupReviewExecutionError),
-    #[error("repair_fidelity: {0}")]
-    Fidelity(#[from] RepairFidelityError),
-}
-
-pub(crate) fn validate_repair_fidelity(
-    raw_output: &str,
-    repaired_output: &str,
-    max_findings: usize,
-) -> Result<(), RepairFidelityError> {
-    let raw_verdict = verdict_marker(raw_output).ok_or(RepairFidelityError::MissingMarker)?;
-    let repaired_verdict =
-        verdict_marker(repaired_output).ok_or(RepairFidelityError::MissingMarker)?;
-    if repaired_verdict == ReviewVerdict::Approve {
-        return Err(RepairFidelityError::ForbiddenApprove);
-    }
-    if repaired_verdict != raw_verdict {
-        return Err(RepairFidelityError::VerdictMismatch);
-    }
-    let payload = parse_review_payload(repaired_output, CodingExecutionStage::InternalPrReview);
-    if payload.findings.len() > max_findings {
-        return Err(RepairFidelityError::TooManyFindings);
-    }
-    if payload.findings.iter().any(|finding| {
-        !raw_output.contains(&finding.message)
-            || finding
-                .evidence
-                .iter()
-                .any(|evidence| !raw_output.contains(evidence))
-            || finding.plan_defect_evidence.iter().any(|evidence| {
-                !raw_output.contains(&evidence.source_ref)
-                    || !raw_output.contains(&evidence.message)
-                    || !raw_output.contains(&evidence.kind)
-            })
-    }) {
-        if payload
-            .findings
-            .iter()
-            .any(|finding| !raw_output.contains(&finding.message))
-        {
-            return Err(RepairFidelityError::FindingNotSubtraceable);
-        }
-        return Err(RepairFidelityError::EvidenceNotSubtraceable);
-    }
-    if payload.findings.iter().any(|finding| {
-        finding.repair_target.as_ref().is_some_and(|target| {
-            let kind = match target.kind {
-                crate::product::models::RepairTargetKind::CurrentWorkItem => "current_work_item",
-                crate::product::models::RepairTargetKind::UpstreamWorkItem => "upstream_work_item",
-                crate::product::models::RepairTargetKind::Subgraph => "subgraph",
-            };
-            !raw_output.contains(kind)
-                || target
-                    .logical_work_item_ids
-                    .iter()
-                    .chain(target.work_item_revision_ids.iter())
-                    .any(|id| !raw_output.contains(id))
-        })
-    }) {
-        return Err(RepairFidelityError::TargetNotSubtraceable);
-    }
-    Ok(())
-}
-
-fn verdict_marker(output: &str) -> Option<ReviewVerdict> {
-    output.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("GROUP_REVIEW_VERDICT:")?.trim();
-        match value {
-            "approve" => Some(ReviewVerdict::Approve),
-            "request_changes" => Some(ReviewVerdict::RequestChanges),
-            "blocked" => Some(ReviewVerdict::Blocked),
-            _ => None,
-        }
-    })
 }
 
 pub(crate) struct RealGroupReviewExecutor<'a> {
@@ -859,12 +840,13 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
                 fresh_retry: None,
                 timeout: None,
                 timeout_reason_code: None,
+                suppress_failure_side_effects: true,
             })
             .await
             .map_err(map_group_review_engine_error)?;
         Ok(GroupReviewExecutionResult {
             full_output,
-            provider_session_id: None,
+            role_run_id: Some(self.role_run.id.clone()),
         })
     }
 }
@@ -892,7 +874,7 @@ pub(crate) trait GroupReviewExecutor: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GroupReviewExecutionResult {
     pub full_output: String,
-    pub provider_session_id: Option<String>,
+    pub role_run_id: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -961,6 +943,8 @@ pub(crate) enum GroupReviewOrchestrationError {
     ReductionNotReady,
     #[error("reduction_output_invalid: {raw_ref}")]
     ReductionOutputInvalid { raw_ref: String },
+    #[error("shard_stale_audit")]
+    ShardStaleAudit,
     #[error("reduction_stale")]
     ReductionStale,
     #[error("identity_missing")]

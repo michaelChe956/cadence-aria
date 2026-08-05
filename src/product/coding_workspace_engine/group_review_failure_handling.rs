@@ -56,6 +56,9 @@ pub(crate) fn map_group_review_orchestration_error(
                 gate_id: None,
             }
         }
+        GroupReviewOrchestrationError::ShardStaleAudit => {
+            CodingWorkspaceEngineError::GroupReviewShardStaleAudit
+        }
         GroupReviewOrchestrationError::ReductionStale => {
             CodingWorkspaceEngineError::GroupReviewReductionStale
         }
@@ -77,6 +80,7 @@ enum GroupReviewFailureDisposition {
     Blocked,
     Failed,
     Aborted,
+    StaleAudit,
 }
 
 fn group_review_failure_disposition(
@@ -88,6 +92,10 @@ fn group_review_failure_disposition(
             GroupReviewFailureDisposition::Blocked
         }
         CodingWorkspaceEngineError::Aborted => GroupReviewFailureDisposition::Aborted,
+        CodingWorkspaceEngineError::GroupReviewShardStaleAudit
+        | CodingWorkspaceEngineError::GroupReviewReductionStale => {
+            GroupReviewFailureDisposition::StaleAudit
+        }
         _ => GroupReviewFailureDisposition::Failed,
     }
 }
@@ -148,6 +156,7 @@ impl CodingWorkspaceEngine {
                 self.handle_attempt_failed(&attempt.project_id, &attempt.issue_id, &attempt.id)
                     .await?;
             }
+            GroupReviewFailureDisposition::StaleAudit => {}
             GroupReviewFailureDisposition::Aborted => {
                 self.store.update_role_run_status(
                     &attempt.project_id,
@@ -209,6 +218,7 @@ impl CodingWorkspaceEngine {
             | GroupReviewOrchestrationError::ReductionInProgress
             | GroupReviewOrchestrationError::ReductionNotReady
             | GroupReviewOrchestrationError::ReductionStale
+            | GroupReviewOrchestrationError::ShardStaleAudit
             | GroupReviewOrchestrationError::Store(_)
             | GroupReviewOrchestrationError::Executor(_) => None,
         };

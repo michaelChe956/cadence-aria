@@ -112,6 +112,37 @@ where
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GroupReviewParseError {
+    #[error("group_review_parse: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+/// 组级审查专用的严格解析入口。
+///
+/// 普通 review 路径保留 `parse_review_payload` 的 blocked 合成行为；组级路径
+/// 必须把 provider 输出解析失败显式暴露给编排器，以便先做一次受限修复。
+pub(crate) fn parse_group_review_payload(
+    full_output: &str,
+    default_source_stage: CodingExecutionStage,
+) -> Result<CodeReviewProviderPayload, GroupReviewParseError> {
+    let candidates = extract_json_object_candidates(full_output);
+    if candidates.is_empty() {
+        return serde_json::from_str::<RawCodeReviewProviderPayload>(full_output)
+            .map(|raw| raw.into_payload(default_source_stage))
+            .map_err(GroupReviewParseError::Json);
+    }
+    let mut last_error = None;
+    for json in candidates {
+        match serde_json::from_str::<RawCodeReviewProviderPayload>(json) {
+            Ok(raw) => return Ok(raw.into_payload(default_source_stage)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(GroupReviewParseError::Json(
+        last_error.expect("candidates 非空时必然记录过反序列化错误"),
+    ))
+}
 pub(crate) fn parse_review_payload(
     full_output: &str,
     default_source_stage: CodingExecutionStage,

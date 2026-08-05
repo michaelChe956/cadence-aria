@@ -68,6 +68,7 @@ mod group_review_failure_handling;
 mod group_review_material;
 mod group_review_orchestrator;
 mod group_review_prompts;
+mod group_review_repair;
 mod group_review_types;
 mod handoffs;
 mod internal_pr_review;

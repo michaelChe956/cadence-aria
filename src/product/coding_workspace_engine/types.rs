@@ -17,6 +17,8 @@ pub enum CodingWorkspaceEngineError {
         reason_code: String,
         gate_id: Option<String>,
     },
+    #[error("group_review_shard_stale_audit")]
+    GroupReviewShardStaleAudit,
     #[error("group_review_reduction_stale")]
     GroupReviewReductionStale,
     #[error("group_review_executor_transport: {0}")]
@@ -81,6 +83,9 @@ pub(crate) struct CodingProviderStreamRun<'a> {
     pub(crate) fresh_retry: Option<CodingProviderFreshRetry>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) timeout_reason_code: Option<&'static str>,
+    /// 组级审查拥有失败状态收口权时，stream 层只返回 transport 错误，不直接
+    /// 修改 attempt、role run 或 timeline 状态。
+    pub(crate) suppress_failure_side_effects: bool,
 }
 
 pub(crate) fn run_timeout_sleep(

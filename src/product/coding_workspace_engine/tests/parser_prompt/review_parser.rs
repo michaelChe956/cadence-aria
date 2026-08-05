@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn group_review_parser_returns_error_for_malformed_output_instead_of_blocked_payload() {
+    let result = parse_group_review_payload(
+        "provider output is not json",
+        CodingExecutionStage::InternalPrReview,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn group_review_parser_accepts_fenced_json() {
+    let result = parse_group_review_payload(
+        "```json {\"verdict\":\"approve\",\"findings\":[]} ```",
+        CodingExecutionStage::InternalPrReview,
+    )
+    .expect("valid fenced payload");
+    assert_eq!(result.verdict, ReviewVerdict::Approve);
+}
+
+#[test]
 fn review_parser_preserves_findings_with_common_aliases() {
     let payload = r#"{
       "verdict": "request_changes",

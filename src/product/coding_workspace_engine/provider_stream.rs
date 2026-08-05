@@ -21,6 +21,7 @@ impl CodingWorkspaceEngine {
             fresh_retry,
             timeout,
             timeout_reason_code,
+            suppress_failure_side_effects,
         } = run;
         self.store.ensure_provider_run_allowed(attempt)?;
         let mut active_legacy_input = legacy_input.clone();
@@ -91,7 +92,14 @@ impl CodingWorkspaceEngine {
                         let message = error.to_string();
                         cancel.cancel();
                         drop(session);
-                        return self.fail_provider_stream(attempt, node_id, message).await;
+                        return self
+                            .fail_provider_stream_with_ownership(
+                                attempt,
+                                node_id,
+                                suppress_failure_side_effects,
+                                message,
+                            )
+                            .await;
                     }
                     session
                 }
@@ -108,6 +116,7 @@ impl CodingWorkspaceEngine {
                             &active_legacy_input,
                             provider_name,
                             provider_role,
+                            suppress_failure_side_effects,
                         )
                         .await;
                 }
@@ -126,16 +135,14 @@ impl CodingWorkspaceEngine {
                 }
                 Err(error) => {
                     let message = error.details;
-                    self.record_role_run_event(
-                        attempt,
-                        role_run,
-                        CodingRoleRunEventType::ProviderFailed,
-                        json!({
-                            "phase": "provider_start",
-                            "message": message.clone()
-                        }),
-                    );
-                    return self.fail_provider_stream(attempt, node_id, message).await;
+                    return self
+                        .fail_provider_stream_with_ownership(
+                            attempt,
+                            node_id,
+                            suppress_failure_side_effects,
+                            message,
+                        )
+                        .await;
                 }
             };
             let mut commands_open = true;
@@ -292,7 +299,13 @@ impl CodingWorkspaceEngine {
                                     &open_choice_ids,
                                 ));
                             }
-                            return self.fail_provider_stream_ended(attempt, node_id).await;
+                            return self
+                                .fail_provider_stream_ended_with_ownership(
+                                    attempt,
+                                    node_id,
+                                    suppress_failure_side_effects,
+                                )
+                                .await;
                         };
                         match event {
                             ProviderEvent::TextDelta { content } => {
@@ -576,7 +589,14 @@ impl CodingWorkspaceEngine {
                                         "message": message.clone()
                                     }),
                                 );
-                                return self.fail_provider_stream(attempt, node_id, message).await;
+                                return self
+                                    .fail_provider_stream_with_ownership(
+                                        attempt,
+                                        node_id,
+                                        suppress_failure_side_effects,
+                                        message,
+                                    )
+                                    .await;
                             }
                             ProviderEvent::ProtocolError {
                                 code,
@@ -593,7 +613,14 @@ impl CodingWorkspaceEngine {
                                         "context": context
                                     }),
                                 );
-                                return self.fail_provider_stream(attempt, node_id, message).await;
+                                return self
+                                    .fail_provider_stream_with_ownership(
+                                        attempt,
+                                        node_id,
+                                        suppress_failure_side_effects,
+                                        message,
+                                    )
+                                    .await;
                             }
                             ProviderEvent::PermissionTimeout { permission_id } => {
                                 if !open_choice_ids.is_empty() {
@@ -616,7 +643,12 @@ impl CodingWorkspaceEngine {
                                     }),
                                 );
                                 return self
-                                    .fail_provider_stream(attempt, node_id, message)
+                                    .fail_provider_stream_with_ownership(
+                                        attempt,
+                                        node_id,
+                                        suppress_failure_side_effects,
+                                        message,
+                                    )
                                     .await;
                             }
                         }
@@ -636,6 +668,7 @@ impl CodingWorkspaceEngine {
         input: &AdapterInput,
         provider_name: &ProviderName,
         provider_role: CodingProviderRole,
+        suppress_failure_side_effects: bool,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let cancel = self.cancellation.child_token();
         let mut stream = tokio::select! {
@@ -659,7 +692,14 @@ impl CodingWorkspaceEngine {
             let message = error.to_string();
             cancel.cancel();
             drop(stream);
-            return self.fail_provider_stream(attempt, node_id, message).await;
+            return self
+                .fail_provider_stream_with_ownership(
+                    attempt,
+                    node_id,
+                    suppress_failure_side_effects,
+                    message,
+                )
+                .await;
         }
         let mut full_output = String::new();
         loop {
@@ -730,11 +770,52 @@ impl CodingWorkspaceEngine {
                             "message": message.clone()
                         }),
                     );
-                    return self.fail_provider_stream(attempt, node_id, message).await;
+                    return self
+                        .fail_provider_stream_with_ownership(
+                            attempt,
+                            node_id,
+                            suppress_failure_side_effects,
+                            message,
+                        )
+                        .await;
                 }
             }
         }
 
-        self.fail_provider_stream_ended(attempt, node_id).await
+        self.fail_provider_stream_ended_with_ownership(
+            attempt,
+            node_id,
+            suppress_failure_side_effects,
+        )
+        .await
+    }
+
+    async fn fail_provider_stream_with_ownership<T>(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        suppress_failure_side_effects: bool,
+        message: String,
+    ) -> Result<T, CodingWorkspaceEngineError> {
+        if suppress_failure_side_effects {
+            Err(CodingWorkspaceEngineError::ProviderStream(message))
+        } else {
+            self.fail_provider_stream(attempt, node_id, message).await
+        }
+    }
+
+    async fn fail_provider_stream_ended_with_ownership<T>(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        suppress_failure_side_effects: bool,
+    ) -> Result<T, CodingWorkspaceEngineError> {
+        self.fail_provider_stream_with_ownership(
+            attempt,
+            node_id,
+            suppress_failure_side_effects,
+            "provider stream ended before completion".to_string(),
+        )
+        .await
     }
 }

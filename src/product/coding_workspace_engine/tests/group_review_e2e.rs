@@ -432,13 +432,13 @@ async fn step3_e2e_shards_and_reduction_persist_internal_pr_review() {
         .map(|_| {
             Ok(GroupReviewExecutionResult {
                 full_output: valid_shard_output(),
-                provider_session_id: None,
+                role_run_id: None,
             })
         })
         .collect::<Vec<_>>();
     results.push(Ok(GroupReviewExecutionResult {
         full_output: valid_reduction_output(),
-        provider_session_id: None,
+        role_run_id: None,
     }));
     let executor = FakeGroupReviewExecutor::new(results);
     let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
@@ -916,7 +916,7 @@ async fn step13_14_invalid_shard_output_persists_raw_ref() {
     for _ in 0..shard_count {
         results.push(Ok(GroupReviewExecutionResult {
             full_output: valid_group_review_output("approve", 9), // 9 > 8 shard limit
-            provider_session_id: None,
+            role_run_id: None,
         }));
     }
     let executor = FakeGroupReviewExecutor::new(results);
@@ -975,13 +975,13 @@ async fn step13_14_invalid_reduction_output_persists_raw_ref() {
         .map(|_| {
             Ok(GroupReviewExecutionResult {
                 full_output: valid_shard_output(),
-                provider_session_id: None,
+                role_run_id: None,
             })
         })
         .collect::<Vec<_>>();
     results.push(Ok(GroupReviewExecutionResult {
         full_output: valid_group_review_output("approve", 17), // 17 > 16 reduction limit
-        provider_session_id: None,
+        role_run_id: None,
     }));
     let executor = FakeGroupReviewExecutor::new(results);
     let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
@@ -1047,7 +1047,7 @@ async fn step13_14_malformed_json_output_still_persists_raw_ref() {
     for _ in 0..shard_count {
         results.push(Ok(GroupReviewExecutionResult {
             full_output: "this is not valid JSON at all".to_string(),
-            provider_session_id: None,
+            role_run_id: None,
         }));
     }
     let executor = FakeGroupReviewExecutor::new(results);

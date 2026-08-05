@@ -449,7 +449,7 @@ async fn reduction_reuses_completed_snapshot_result_without_provider_call() {
     let first_executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: "GROUP_REVIEW_VERDICT\n{\"verdict\":\"approve\",\"summary\":\"done\"}"
             .to_string(),
-        provider_session_id: None,
+        role_run_id: None,
     })]);
     let shard_reports = vec![shard(&attempt_id, "a", ReviewVerdict::Approve, Vec::new())];
     GroupReviewOrchestrator::new(&first_executor, &store)
@@ -523,7 +523,7 @@ async fn reduction_executes_for_non_approve_shards_and_persists_internal_review(
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: "GROUP_REVIEW_VERDICT\n{\"verdict\":\"approve\",\"summary\":\"done\"}"
             .to_string(),
-        provider_session_id: None,
+        role_run_id: None,
     })]);
     let reduction = GroupReviewOrchestrator::new(&executor, &store)
         .execute_reduction(
@@ -558,7 +558,7 @@ async fn stale_reduction_does_not_persist_an_internal_review() {
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: "GROUP_REVIEW_VERDICT\n{\"verdict\":\"approve\",\"summary\":\"done\"}"
             .to_string(),
-        provider_session_id: None,
+        role_run_id: None,
     })]);
 
     let error = GroupReviewOrchestrator::new(&executor, &store)
@@ -588,7 +588,7 @@ async fn reduction_rejects_invalid_authoritative_finding_target() {
     let output = "GROUP_REVIEW_VERDICT\n{\"verdict\":\"request_changes\",\"findings\":[{\"message\":\"invalid plan target\",\"defect_class\":\"design_amendment_required\",\"reason_code\":\"unknown\"}]}";
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: output.to_string(),
-        provider_session_id: None,
+        role_run_id: None,
     })]);
     let error = GroupReviewOrchestrator::new(&executor, &store)
         .execute_reduction(
@@ -617,7 +617,7 @@ async fn reduction_rejects_more_than_sixteen_findings() {
     );
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: output,
-        provider_session_id: None,
+        role_run_id: None,
     })]);
     let error = GroupReviewOrchestrator::new(&executor, &store)
         .execute_reduction(

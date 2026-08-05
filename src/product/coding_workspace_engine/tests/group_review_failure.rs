@@ -351,7 +351,7 @@ async fn transport_failure_retries_without_repair_and_cancellation_does_not_retr
         Err(GroupReviewExecutionError::Transport("timeout".to_string())),
         Ok(GroupReviewExecutionResult {
             full_output: "success".to_string(),
-            provider_session_id: None,
+            role_run_id: None,
         }),
     ]);
     let (_root, store, _attempt_id) = execution_store();
@@ -369,7 +369,7 @@ async fn transport_failure_retries_without_repair_and_cancellation_does_not_retr
         Err(GroupReviewExecutionError::UserCancelled),
         Ok(GroupReviewExecutionResult {
             full_output: "must not run".to_string(),
-            provider_session_id: None,
+            role_run_id: None,
         }),
     ]);
     let orchestrator = GroupReviewOrchestrator::new(&cancelled, &store);
@@ -388,7 +388,7 @@ async fn internal_error_does_not_retry() {
         )),
         Ok(GroupReviewExecutionResult {
             full_output: "must not run".to_string(),
-            provider_session_id: None,
+            role_run_id: None,
         }),
     ]);
     let (_root, store, _attempt_id) = execution_store();
@@ -409,7 +409,7 @@ async fn repair_returns_output_that_can_be_persisted_as_raw_and_repaired_audit_r
     let repaired = "GROUP_REVIEW_VERDICT: blocked\n{\"verdict\":\"blocked\",\"findings\":[{\"message\":\"known issue\"}]}";
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: repaired.to_string(),
-        provider_session_id: None,
+        role_run_id: None,
     })]);
     let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
     let repair = orchestrator.execute_repair(raw, 8).await.expect("repair");
