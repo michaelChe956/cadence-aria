@@ -231,6 +231,41 @@ fn shard_and_reduction_prompts_require_the_shared_parseable_json_conclusion_cont
             "{provider} must receive the common finding shape"
         );
         assert!(
+            prompt.fixed_protocol.contains(
+                "defect_class values are implementation_defect, verification_incomplete, current_work_item_invalid, upstream_contract_invalid, dependency_graph_invalid, design_amendment_required, story_amendment_required, operational_blocker."
+            ),
+            "{provider} must receive all defect_class enum values"
+        );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "recommended_route values are coder_rework, verification_retry, plan_repair, story_amendment, design_amendment, operational_gate, human_triage."
+            ),
+            "{provider} must receive all recommended_route enum values"
+        );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "repair_target is an object with kind, logical_work_item_ids, and work_item_revision_ids; omit it or use null when there is no explicit repair target."
+            ),
+            "{provider} must receive the repair_target object contract"
+        );
+        assert!(
+            prompt
+                .fixed_protocol
+                .contains("confidence values are high, medium, or low."),
+            "{provider} must receive the confidence enum"
+        );
+        assert!(
+            prompt
+                .fixed_protocol
+                .contains("\"defect_class\": \"verification_incomplete\"")
+                && prompt
+                    .fixed_protocol
+                    .contains("\"recommended_route\": \"verification_retry\"")
+                && prompt.fixed_protocol.contains("\"repair_target\": null")
+                && prompt.fixed_protocol.contains("\"confidence\": \"high\""),
+            "{provider} must receive the complete verification finding example"
+        );
+        assert!(
             prompt
                 .fixed_protocol
                 .contains("Do not output Markdown fences, bullets, or tables."),

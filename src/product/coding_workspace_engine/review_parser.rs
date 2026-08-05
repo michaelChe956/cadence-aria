@@ -55,7 +55,7 @@ pub(crate) struct RawReviewFinding {
     pub(crate) related_design_constraints: Vec<String>,
     #[serde(default)]
     pub(crate) related_work_item_tasks: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_review_finding_defect_class")]
     pub(crate) defect_class: Option<crate::product::models::PlanDefectClass>,
     #[serde(default)]
     pub(crate) reason_code: Option<String>,
@@ -63,9 +63,12 @@ pub(crate) struct RawReviewFinding {
     pub(crate) contract_refs: Vec<String>,
     #[serde(default)]
     pub(crate) capability_refs: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_review_finding_repair_target")]
     pub(crate) repair_target: Option<crate::product::models::RepairTarget>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_review_finding_recommended_route"
+    )]
     pub(crate) recommended_route: Option<crate::product::models::PlanDefectRoute>,
     #[serde(default)]
     pub(crate) confidence: Option<crate::product::plan_repair::PlanDefectConfidence>,
@@ -76,6 +79,62 @@ pub(crate) struct RawReviewFinding {
 pub(crate) enum RawReviewEvidence {
     Reference(String),
     Canonical(crate::product::models::PlanDefectEvidence),
+}
+
+fn deserialize_review_finding_defect_class<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::product::models::PlanDefectClass>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "missing_verification_evidence" => Ok(Some(
+            crate::product::models::PlanDefectClass::VerificationIncomplete,
+        )),
+        _ => crate::product::models::PlanDefectClass::deserialize(
+            serde::de::value::StringDeserializer::<D::Error>::new(value),
+        )
+        .map(Some),
+    }
+}
+
+fn deserialize_review_finding_repair_target<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::product::models::RepairTarget>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if value == "VerificationRetry" => Ok(None),
+        Some(value) => crate::product::models::RepairTarget::deserialize(value)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
+fn deserialize_review_finding_recommended_route<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::product::models::PlanDefectRoute>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "VerificationRetry" => Ok(Some(
+            crate::product::models::PlanDefectRoute::VerificationRetry,
+        )),
+        _ => crate::product::models::PlanDefectRoute::deserialize(
+            serde::de::value::StringDeserializer::<D::Error>::new(value),
+        )
+        .map(Some),
+    }
 }
 
 fn deserialize_review_finding_source_stage<'de, D>(
