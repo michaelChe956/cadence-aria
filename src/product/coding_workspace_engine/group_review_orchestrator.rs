@@ -20,9 +20,9 @@ use super::plan_defect_routing::{GroupReviewerProjectionBinding, validate_group_
 use super::review_parser::parse_review_payload;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
-    CasOutcome, CodingExecutionStage, CodingGateDiagnostic, CodingProviderRole,
-    GroupReviewObligation, GroupReviewReductionReport, GroupReviewShardReport, InternalPrReview,
-    ReviewFinding, ReviewVerdict,
+    CasOutcome, CodingAttemptStatus, CodingExecutionStage, CodingGateDiagnostic,
+    CodingProviderRole, GroupReviewObligation, GroupReviewReductionReport, GroupReviewShardReport,
+    InternalPrReview, ReviewFinding, ReviewVerdict,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
@@ -94,8 +94,18 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 ));
             }
         };
+        let attempt = if attempt.status == CodingAttemptStatus::Blocked {
+            attempt.clone()
+        } else {
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Blocked,
+            )?
+        };
         self.store.create_group_review_failure_gate(
-            attempt,
+            &attempt,
             CreateBlockedGateInput {
                 attempt_id: attempt.id.clone(),
                 stage: CodingExecutionStage::InternalPrReview,
@@ -122,12 +132,15 @@ impl<'a> GroupReviewOrchestrator<'a> {
         snapshot: &GroupReviewMaterialSnapshot,
     ) -> Result<Vec<GroupReviewShardReport>, GroupReviewOrchestrationError> {
         if check_capacity(snapshot.unit_records.len()) == CapacityDecision::CapacityExceeded {
-            return Err(GroupReviewOrchestrationError::CapacityExceeded);
+            let error = GroupReviewOrchestrationError::CapacityExceeded;
+            let attempt = self.store.find_attempt_by_id(&snapshot.attempt_id)?;
+            let _ = self.create_failure_gate(&attempt, "group_review_shard", &error);
+            return Err(error);
         }
 
         // Do all material validation before starting a provider future: a later overflow must
         // not permit an earlier shard to have already contacted the provider.
-        let prompts = snapshot
+        let prompts = match snapshot
             .partition_result
             .shards
             .iter()
@@ -141,7 +154,15 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 }
                 Ok((shard, segments.join()))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(prompts) => prompts,
+            Err(error) => {
+                let attempt = self.store.find_attempt_by_id(&snapshot.attempt_id)?;
+                let _ = self.create_failure_gate(&attempt, "group_review_shard", &error);
+                return Err(error);
+            }
+        };
 
         let existing_reports = self.matching_shard_reports(snapshot)?;
         if existing_reports.len() == snapshot.partition_result.shards.len() {
@@ -214,7 +235,10 @@ impl<'a> GroupReviewOrchestrator<'a> {
                         .release_group_review_lease(&snapshot.attempt_id, &lease_id, "")?;
                     claimed_leases.complete(&lease_id);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    let _ = self.create_failure_gate(&attempt, "group_review_shard", &error);
+                    return Err(error);
+                }
             }
         }
         reports.sort_by(|left, right| left.shard_id.cmp(&right.shard_id));
