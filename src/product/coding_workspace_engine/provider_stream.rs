@@ -1,12 +1,29 @@
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputState;
 
 mod persistence;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderStreamOutcome {
+    pub(crate) full_output: String,
+    pub(crate) structured_output: StructuredOutputState,
+}
 
 impl CodingWorkspaceEngine {
     pub(crate) async fn run_provider_stream_to_completion(
         &self,
         run: CodingProviderStreamRun<'_>,
     ) -> Result<String, CodingWorkspaceEngineError> {
+        Ok(self
+            .run_structured_provider_stream_to_completion(run)
+            .await?
+            .full_output)
+    }
+
+    pub(crate) async fn run_structured_provider_stream_to_completion(
+        &self,
+        run: CodingProviderStreamRun<'_>,
+    ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
         let CodingProviderStreamRun {
             attempt,
             node_id,
@@ -511,6 +528,7 @@ impl CodingWorkspaceEngine {
                                 );
                             }
                             ProviderEvent::Completed(completion) => {
+                                let structured_output = completion.structured_output.clone();
                                 let completed_output = completion.full_output;
                                 let provider_session_id = completion.provider_session_id;
                                 if !open_choice_ids.is_empty() {
@@ -548,7 +566,10 @@ impl CodingWorkspaceEngine {
                                         "output_bytes": output_bytes
                                     }),
                                 );
-                                return Ok(full_output);
+                                return Ok(ProviderStreamOutcome {
+                                    full_output,
+                                    structured_output,
+                                });
                             }
                             ProviderEvent::Failed { message } => {
                                 if provider_role == CodingProviderRole::Coder
@@ -669,7 +690,7 @@ impl CodingWorkspaceEngine {
         provider_name: &ProviderName,
         provider_role: CodingProviderRole,
         suppress_failure_side_effects: bool,
-    ) -> Result<String, CodingWorkspaceEngineError> {
+    ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
         let cancel = self.cancellation.child_token();
         let mut stream = tokio::select! {
             biased;
@@ -759,7 +780,10 @@ impl CodingWorkspaceEngine {
                             "output_bytes": output_bytes
                         }),
                     );
-                    return Ok(output);
+                    return Ok(ProviderStreamOutcome {
+                        full_output: output,
+                        structured_output: StructuredOutputState::NotRequested,
+                    });
                 }
                 StreamChunk::Error(message) => {
                     self.record_role_run_event(
@@ -831,5 +855,32 @@ impl CodingWorkspaceEngine {
             "provider stream ended before completion".to_string(),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cross_cutting::structured_output::StructuredOutputState;
+    use serde_json::json;
+
+    #[test]
+    fn provider_stream_outcome_keeps_completion_structured_output() {
+        let outcome = ProviderStreamOutcome {
+            full_output: "可读审查回执".to_string(),
+            structured_output: StructuredOutputState::Parsed(json!({
+                "verdict": "approve",
+                "findings": []
+            })),
+        };
+
+        assert_eq!(outcome.full_output, "可读审查回执");
+        assert_eq!(
+            outcome.structured_output,
+            StructuredOutputState::Parsed(json!({
+                "verdict": "approve",
+                "findings": []
+            }))
+        );
     }
 }
