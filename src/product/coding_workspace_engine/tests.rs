@@ -466,6 +466,108 @@ mod runtime_handoff_delta;
 mod runtime_handoff_impact;
 mod schema_v2_runtime;
 
+#[test]
+fn group_final_review_evaluation_context_omits_projection_body_but_keeps_hash() {
+    let root = tempdir().expect("tempdir");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+    seed_group_attempt_fixture(&store, &attempt, true, false);
+
+    let revision_store = WorkItemRevisionStore::new(store.paths());
+    let lineage = revision_store
+        .get_plan_lineage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_plan_0001",
+        )
+        .expect("plan lineage");
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("coding units");
+    for unit in units {
+        let revision = revision_store
+            .get_work_item_revision(
+                &lineage,
+                &unit.logical_work_item_id,
+                &unit.work_item_revision_id,
+            )
+            .expect("work item revision");
+        let bundle = revision_store
+            .get_work_item_projection_bundle(&lineage, &revision.work_item_projection_bundle_id)
+            .expect("projection bundle");
+        store
+            .create_coding_unit_run(
+                &attempt,
+                &CodingUnitRun {
+                    id: format!("{}_run_0001", unit.id),
+                    unit_id: unit.id,
+                    execution_no: 1,
+                    work_item_revision_id: revision.id,
+                    resolved_handoff_revision_ids: Vec::new(),
+                    canonical_contract_hash: bundle.canonical_contract_hash,
+                    projection_bundle_id: bundle.id,
+                    projection_compiler_version: bundle.compiler_version,
+                    coder_provider_renderer_version: "test-renderer-v1".to_string(),
+                    reviewer_provider_renderer_version: "test-renderer-v1".to_string(),
+                    internal_reviewer_provider_renderer_version: None,
+                    coder_projection_hash: bundle.coder_projection_hash,
+                    reviewer_projection_hash: bundle.reviewer_projection_hash,
+                    coder_execution_context_hash: None,
+                    reviewer_execution_context_hash: None,
+                    internal_reviewer_execution_context_hash: None,
+                    status: CodingUnitRunStatus::Completed,
+                    unit_rework_count: 0,
+                    verification_retry_count: 0,
+                    operational_retry_count: 0,
+                    plan_repair_count: 0,
+                    start_commit: None,
+                    completion_commit: None,
+                    created_at: "2026-08-04T00:00:00Z".to_string(),
+                    updated_at: "2026-08-04T00:00:00Z".to_string(),
+                },
+            )
+            .expect("completed unit run");
+    }
+
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let context: serde_json::Value = serde_json::from_str(
+        &engine
+            .group_final_review_evaluation_context_json(&attempt)
+            .expect("group final review evaluation context"),
+    )
+    .expect("evaluation context json");
+    let units = context["units"].as_array().expect("unit contexts");
+
+    assert_eq!(units.len(), 3);
+    for unit in units {
+        let unit = unit.as_object().expect("unit context object");
+        assert!(!unit.contains_key("reviewer_projection"));
+        assert!(
+            unit.get("reviewer_projection_hash")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
+    }
+}
+
 #[tokio::test]
 async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node() {
     let root = tempdir().expect("tempdir");

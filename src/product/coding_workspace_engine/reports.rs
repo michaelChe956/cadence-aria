@@ -124,7 +124,6 @@ impl CodingWorkspaceEngine {
                     "projection_bundle_id": binding.run.projection_bundle_id,
                     "projection_compiler_version": binding.run.projection_compiler_version,
                     "reviewer_projection_hash": binding.run.reviewer_projection_hash,
-                    "reviewer_projection": binding.projection_binding.projection,
                     "resolved_handoff_revision_ids": binding.run.resolved_handoff_revision_ids,
                 })
             })
