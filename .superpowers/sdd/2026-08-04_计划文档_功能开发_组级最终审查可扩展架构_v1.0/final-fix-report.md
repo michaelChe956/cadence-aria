@@ -67,3 +67,27 @@
 - `cargo test --locked --lib group_review`：通过，122 passed。
 - `cargo test --locked`：通过，1601 lib + 148 it_core + 43 it_interactive + 198 it_product + 312 it_web，12 ignored；doc-tests 1 passed。
 - `git diff --check`：通过。
+
+## failure report 审计身份修复
+
+### 修复方法
+
+- 保持 `GroupReviewOrchestrator::new` 既有签名；新增可选 `role_run_id` 字段和 `with_role_run_id` builder。生产组级入口在创建 internal reviewer role run 后注入其 ID。
+- shard/reduction failure report helper 显式接收 `role_run_id`，持久化 `role_run_ids: vec![role_run_id.to_string()]`；四个 transport/protocol 失败调用点均从 orchestrator 传递已注入身份。
+- 未改 `render.rs`，未调用 `bind_unit_run_execution_context`，未补写 hash。
+
+### TDD 证据与 covering test
+
+- RED：先在真实 runner 测试中新增 transport/protocol failure report 的 role run ID 断言；未实现前 shard transport 场景失败，实际 report `role_run_ids` 为 `[]`，期望为 `coding_role_run_0001`。
+- GREEN：`group_final_review_transport_exhaustion_persists_shard_report_and_blocks_attempt` 与 `group_final_review_reduction_transport_exhaustion_persists_report_and_blocks_attempt` 断言失败报告 `role_run_ids` 非空且恰为当前 role run ID，且 attempt、role run、timeline 都为 `Blocked`（timeline 有完成时间）。
+- `group_final_review_provider_protocol_error_does_not_retry_and_is_output_invalid` 断言 protocol failure report 同样带当前 role run ID。
+- `cargo test --locked --lib group_review_runner`：6 passed。
+
+### 标准验证结果
+
+- `cargo fmt --check`：通过。
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`：通过。
+- `cargo check --locked`：通过。
+- `cargo test --locked --lib group_review`：通过。
+- `cargo test --locked`：通过，312 integration tests passed、12 ignored；doc-tests 1 passed。
+- `git diff --check`：通过。

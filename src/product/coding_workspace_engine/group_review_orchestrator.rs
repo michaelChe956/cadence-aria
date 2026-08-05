@@ -57,6 +57,7 @@ const GROUP_REVIEW_MAX_ATTEMPTS: usize = 3;
 pub(crate) struct GroupReviewOrchestrator<'a> {
     executor: &'a dyn GroupReviewExecutor,
     store: &'a CodingAttemptStore,
+    role_run_id: Option<String>,
 }
 
 impl<'a> GroupReviewOrchestrator<'a> {
@@ -64,7 +65,16 @@ impl<'a> GroupReviewOrchestrator<'a> {
         executor: &'a dyn GroupReviewExecutor,
         store: &'a CodingAttemptStore,
     ) -> Self {
-        Self { executor, store }
+        Self {
+            executor,
+            store,
+            role_run_id: None,
+        }
+    }
+
+    pub(crate) fn with_role_run_id(mut self, role_run_id: &str) -> Self {
+        self.role_run_id = Some(role_run_id.to_string());
+        self
     }
 
     pub(crate) fn create_failure_gate(
@@ -254,6 +264,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                             snapshot,
                             shard,
                             &failure_attempt,
+                            self.role_run_id.as_deref().unwrap_or(""),
                             "shard_transport_exhausted",
                         )?;
                         return Err(GroupReviewOrchestrationError::ShardTransportExhausted {
@@ -266,6 +277,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                             snapshot,
                             shard,
                             &failure_attempt,
+                            self.role_run_id.as_deref().unwrap_or(""),
                             "shard_output_invalid",
                         )?;
                         return Err(GroupReviewOrchestrationError::ShardOutputInvalid {
@@ -485,6 +497,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                     snapshot,
                     shard_reports,
                     &attempt,
+                    self.role_run_id.as_deref().unwrap_or(""),
                     "reduction_transport_exhausted",
                 );
                 let release_result = self.store.release_group_review_lease(
@@ -502,6 +515,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                     snapshot,
                     shard_reports,
                     &attempt,
+                    self.role_run_id.as_deref().unwrap_or(""),
                     "reduction_output_invalid",
                 );
                 let release_result = self.store.release_group_review_lease(

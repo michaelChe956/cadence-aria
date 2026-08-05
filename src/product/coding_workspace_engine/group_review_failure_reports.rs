@@ -12,6 +12,7 @@ pub(crate) fn persist_shard_failure_report(
     snapshot: &GroupReviewMaterialSnapshot,
     shard: &GroupShardSpec,
     attempt: &CodingExecutionAttempt,
+    role_run_id: &str,
     run_failure_code: &str,
 ) -> Result<(), GroupReviewOrchestrationError> {
     let selected_diff_refs = snapshot
@@ -39,7 +40,7 @@ pub(crate) fn persist_shard_failure_report(
         unresolved_obligations: Vec::<GroupReviewObligation>::new(),
         selected_diff_refs,
         raw_provider_output_refs: Vec::new(),
-        role_run_ids: Vec::new(),
+        role_run_ids: vec![role_run_id.to_string()],
         run_failure_code: Some(run_failure_code.to_string()),
     };
     match store.write_group_review_shard_report_cas(&attempt.id, report)? {
@@ -53,6 +54,7 @@ pub(crate) fn persist_reduction_failure_report(
     snapshot: &GroupReviewMaterialSnapshot,
     shard_reports: &[GroupReviewShardReport],
     attempt: &CodingExecutionAttempt,
+    role_run_id: &str,
     run_failure_code: &str,
 ) -> Result<(), GroupReviewOrchestrationError> {
     let report = GroupReviewReductionReport {
@@ -70,7 +72,7 @@ pub(crate) fn persist_reduction_failure_report(
         commit_message_suggestion: String::new(),
         provenance: Vec::new(),
         raw_provider_output_refs: Vec::new(),
-        role_run_ids: Vec::new(),
+        role_run_ids: vec![role_run_id.to_string()],
         run_failure_code: Some(run_failure_code.to_string()),
     };
     match store.write_group_review_reduction_report_cas(&attempt.id, report)? {

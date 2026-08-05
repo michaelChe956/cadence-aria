@@ -386,6 +386,23 @@ async fn group_final_review_transport_exhaustion_persists_shard_report_and_block
         Some("shard_transport_exhausted")
     );
     assert!(reports[0].raw_provider_output_refs.is_empty());
+    let role_run = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs")
+        .into_iter()
+        .last()
+        .expect("role run");
+    assert!(!reports[0].role_run_ids.is_empty());
+    assert_eq!(reports[0].role_run_ids, vec![role_run.id.clone()]);
+    assert_eq!(role_run.status, CodingRoleRunStatus::Blocked);
+    let node = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline")
+        .into_iter()
+        .last()
+        .expect("node");
+    assert_eq!(node.status, CodingTimelineNodeStatus::Blocked);
+    assert!(node.completed_at.is_some());
     assert_eq!(
         store
             .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -435,6 +452,23 @@ async fn group_final_review_reduction_transport_exhaustion_persists_report_and_b
         Some("reduction_transport_exhausted")
     );
     assert!(reports[0].raw_provider_output_refs.is_empty());
+    let role_run = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs")
+        .into_iter()
+        .last()
+        .expect("role run");
+    assert!(!reports[0].role_run_ids.is_empty());
+    assert_eq!(reports[0].role_run_ids, vec![role_run.id.clone()]);
+    assert_eq!(role_run.status, CodingRoleRunStatus::Blocked);
+    let node = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline")
+        .into_iter()
+        .last()
+        .expect("node");
+    assert_eq!(node.status, CodingTimelineNodeStatus::Blocked);
+    assert!(node.completed_at.is_some());
     assert_eq!(
         store
             .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -484,6 +518,14 @@ async fn group_final_review_provider_protocol_error_does_not_retry_and_is_output
         Some("shard_output_invalid")
     );
     assert!(reports[0].raw_provider_output_refs.is_empty());
+    let role_run = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs")
+        .into_iter()
+        .last()
+        .expect("role run");
+    assert!(!reports[0].role_run_ids.is_empty());
+    assert_eq!(reports[0].role_run_ids, vec![role_run.id]);
 }
 
 #[tokio::test]

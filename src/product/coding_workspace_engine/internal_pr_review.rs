@@ -541,7 +541,8 @@ impl CodingWorkspaceEngine {
             role_run.clone(),
             reviewer,
         );
-        let orchestrator = GroupReviewOrchestrator::new(&executor, &self.store);
+        let orchestrator =
+            GroupReviewOrchestrator::new(&executor, &self.store).with_role_run_id(&role_run.id);
         let bindings = match self.authoritative_group_reviewer_bindings(&attempt) {
             Ok(bindings) => bindings,
             Err(error) => {
