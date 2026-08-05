@@ -444,6 +444,8 @@ mod gate_rework;
 mod git_operation_reconcile;
 mod group_completion_authority;
 mod group_review_budget;
+mod group_review_compatibility;
+mod group_review_e2e;
 mod group_review_executor;
 mod group_review_facts;
 mod group_review_failure;
