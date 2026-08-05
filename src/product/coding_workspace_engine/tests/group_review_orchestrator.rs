@@ -518,11 +518,14 @@ async fn execute_shards_supersedes_old_snapshot_and_stores_late_result_as_stale(
         full_output: valid_review_output(0),
         role_run_id: None,
     })]);
-    let reports = GroupReviewOrchestrator::new(&executor, &store)
+    let error = GroupReviewOrchestrator::new(&executor, &store)
         .execute_shards(&old_snapshot)
         .await
-        .expect("late old snapshot is audit-only");
-    assert!(reports.is_empty());
+        .expect_err("late old snapshot is an audit-only stale result");
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ShardStaleAudit
+    ));
     assert_eq!(
         store
             .get_active_group_review_snapshot_hash(&attempt_id)
@@ -583,7 +586,10 @@ async fn failed_shard_result_releases_every_preclaimed_lease() {
 async fn execute_shards_rejects_more_than_eight_findings() {
     let (_root, store, attempt_id) = setup();
     let mut snapshot = material_snapshot(1, 1, "diff");
-    snapshot.attempt_id = attempt_id;
+    snapshot.attempt_id = attempt_id.clone();
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
     let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
         full_output: valid_review_output(9),
         role_run_id: None,

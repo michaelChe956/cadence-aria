@@ -1035,7 +1035,7 @@ async fn step13_14_invalid_reduction_output_persists_raw_ref() {
 }
 
 #[tokio::test]
-async fn step13_14_malformed_json_output_still_persists_raw_ref() {
+async fn step13_14_malformed_json_output_attempts_repair_then_persists_invalid_raw_ref() {
     let (_root, store, attempt_id) = e2e_store();
     let (_bindings, _snapshots, snapshot) = twenty_unit_snapshot(&attempt_id);
     store
@@ -1050,28 +1050,36 @@ async fn step13_14_malformed_json_output_still_persists_raw_ref() {
             role_run_id: None,
         }));
     }
+    results.push(Err(GroupReviewExecutionError::Internal(
+        "repair output unavailable".to_string(),
+    )));
     let executor = FakeGroupReviewExecutor::new(results);
     let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
 
-    // Malformed JSON → parse_review_payload returns blocked_review_payload with
-    // verdict=Blocked and 0 findings. This passes the findings limit check,
-    // so shards succeed but with Blocked verdict. The key assertion is that
-    // raw output refs are still persisted for auditability.
-    let shard_reports = orchestrator
+    let error = orchestrator
         .execute_shards(&snapshot)
         .await
-        .expect("malformed JSON produces Blocked verdict but is parseable");
+        .expect_err("malformed JSON must become output-invalid after repair fails");
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ShardOutputInvalid { .. }
+    ));
 
-    assert_eq!(shard_reports.len(), shard_count);
     let stored_reports = store
         .list_group_review_shard_reports(&attempt_id)
         .expect("shard reports");
-    assert_eq!(stored_reports.len(), shard_count);
-    for report in &stored_reports {
-        assert_eq!(report.verdict, ReviewVerdict::Blocked);
-        assert_eq!(report.run_failure_code, None);
-        assert!(!report.raw_provider_output_refs.is_empty());
-    }
+    let failed_report = stored_reports
+        .iter()
+        .find(|report| report.run_failure_code.as_deref() == Some("shard_output_invalid"))
+        .expect("invalid output report");
+    assert_eq!(failed_report.verdict, ReviewVerdict::Blocked);
+    assert_eq!(failed_report.raw_provider_output_refs.len(), 1);
+    assert!(
+        executor
+            .prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Only repair the supplied raw output"))
+    );
 }
 
 #[tokio::test]

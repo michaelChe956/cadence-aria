@@ -147,7 +147,7 @@ async fn real_group_review_executor_returns_provider_full_output() {
     let result = executor.execute("shard prompt").await.expect("execute");
 
     assert_eq!(result.full_output, "executed: shard prompt");
-    assert_eq!(result.role_run_id, None);
+    assert_eq!(result.role_run_id.as_deref(), Some("coding_role_run_0001"));
 }
 
 #[tokio::test]

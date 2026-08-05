@@ -585,11 +585,19 @@ async fn stale_reduction_does_not_persist_an_internal_review() {
 async fn reduction_rejects_invalid_authoritative_finding_target() {
     let (_root, store, attempt_id) = setup();
     let snapshot = snapshot(attempt_id.clone(), &["a"]);
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
     let output = "GROUP_REVIEW_VERDICT\n{\"verdict\":\"request_changes\",\"findings\":[{\"message\":\"invalid plan target\",\"defect_class\":\"design_amendment_required\",\"reason_code\":\"unknown\"}]}";
-    let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
-        full_output: output.to_string(),
-        role_run_id: None,
-    })]);
+    let executor = FakeGroupReviewExecutor::new(vec![
+        Ok(GroupReviewExecutionResult {
+            full_output: output.to_string(),
+            role_run_id: None,
+        }),
+        Err(crate::product::coding_workspace_engine::group_review_orchestrator::GroupReviewExecutionError::Internal(
+            "repair must not be used for parseable output".to_string(),
+        )),
+    ]);
     let error = GroupReviewOrchestrator::new(&executor, &store)
         .execute_reduction(
             &snapshot,
@@ -608,6 +616,9 @@ async fn reduction_rejects_invalid_authoritative_finding_target() {
 async fn reduction_rejects_more_than_sixteen_findings() {
     let (_root, store, attempt_id) = setup();
     let snapshot = snapshot(attempt_id.clone(), &["a"]);
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
     let findings = (0..17)
         .map(|index| serde_json::json!({"message": format!("finding {index}")}))
         .collect::<Vec<_>>();
@@ -615,10 +626,15 @@ async fn reduction_rejects_more_than_sixteen_findings() {
         "GROUP_REVIEW_VERDICT\n{}",
         serde_json::json!({"verdict":"approve", "findings": findings})
     );
-    let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
-        full_output: output,
-        role_run_id: None,
-    })]);
+    let executor = FakeGroupReviewExecutor::new(vec![
+        Ok(GroupReviewExecutionResult {
+            full_output: output,
+            role_run_id: None,
+        }),
+        Err(crate::product::coding_workspace_engine::group_review_orchestrator::GroupReviewExecutionError::Internal(
+            "repair must not be used for parseable output".to_string(),
+        )),
+    ]);
     let error = GroupReviewOrchestrator::new(&executor, &store)
         .execute_reduction(
             &snapshot,
