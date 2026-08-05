@@ -14,19 +14,22 @@ impl CodingWorkspaceEngine {
         worktree_path: &Path,
     ) -> Result<GroupGitFacts, CodingWorkspaceEngineError> {
         let final_commit = review_request.commit_sha.clone();
-        let final_diff = self
-            ._git_service
-            .git_diff(worktree_path, &attempt.base_branch)
-            .await?;
-        let diff_stat = self
-            ._git_service
-            .git_diff_stat(worktree_path, &attempt.base_branch)
-            .await?
-            .files
-            .into_iter()
-            .map(|file| format!("{}\t{}\t{}", file.insertions, file.deletions, file.path))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let final_diff = git_stdout(
+            worktree_path,
+            &args(&["diff", &attempt.base_branch, &final_commit]),
+        )
+        .map_err(|error| {
+            CodingWorkspaceEngineError::GroupReviewGitFact(format!("final_diff_failed: {error}"))
+        })?;
+        let diff_stat = git_stdout(
+            worktree_path,
+            &args(&["diff", "--numstat", &attempt.base_branch, &final_commit]),
+        )
+        .map_err(|error| {
+            CodingWorkspaceEngineError::GroupReviewGitFact(format!(
+                "final_diff_stat_failed: {error}"
+            ))
+        })?;
 
         let mut sorted_bindings = bindings.iter().collect::<Vec<_>>();
         sorted_bindings.sort_by(|left, right| left.run.id.cmp(&right.run.id));

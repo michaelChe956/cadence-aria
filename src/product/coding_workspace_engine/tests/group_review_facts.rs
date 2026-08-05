@@ -225,6 +225,56 @@ async fn collect_group_git_facts_treats_non_ancestor_exit_one_as_unreachable() {
 }
 
 #[tokio::test]
+async fn collect_group_git_facts_uses_review_request_commit_when_head_has_advanced() {
+    let root = tempdir().expect("tempdir");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    init_test_git_repo(&worktree);
+    let base_commit = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    fs::write(worktree.join("reviewed.txt"), "reviewed\n").expect("reviewed");
+    run_test_git(&worktree, &["add", "."]);
+    run_test_git(&worktree, &["commit", "-m", "reviewed"]);
+    let reviewed_commit = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    fs::write(worktree.join("later.txt"), "later\n").expect("later");
+    run_test_git(&worktree, &["add", "."]);
+    run_test_git(&worktree, &["commit", "-m", "later"]);
+
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx);
+    let mut attempt = test_attempt("attempt_group_git_facts_reviewed_commit");
+    attempt.base_branch = base_commit.clone();
+    attempt.worktree_path = Some(worktree.clone());
+    let binding = facts_binding(
+        "run_reviewed",
+        Some(base_commit),
+        Some(reviewed_commit.clone()),
+    );
+
+    let facts = engine
+        .collect_group_git_facts(
+            &attempt,
+            &[binding],
+            &facts_request(&attempt, reviewed_commit.clone()),
+            &worktree,
+        )
+        .await
+        .expect("facts must use the reviewed request commit rather than HEAD");
+
+    assert_eq!(facts.final_commit, reviewed_commit);
+    assert!(facts.final_diff.contains("reviewed.txt"));
+    assert!(!facts.final_diff.contains("later.txt"));
+    assert!(facts.diff_stat.contains("1\t0\treviewed.txt"));
+    assert!(!facts.diff_stat.contains("later.txt"));
+}
+
+#[tokio::test]
 async fn collect_group_git_facts_fails_closed_without_completion_commit() {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
