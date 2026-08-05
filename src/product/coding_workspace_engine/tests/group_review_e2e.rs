@@ -26,14 +26,15 @@ use crate::product::coding_workspace_engine::group_review_prompts::{
 };
 use crate::product::coding_workspace_engine::group_review_types::{
     CompletionDiff, DiffFileStat, GroupGitFacts, GroupReviewMaterialSnapshot, GroupShardSpec,
+    PromptSegments,
 };
 use crate::product::coding_workspace_engine::plan_defect_routing::{
     AuthoritativeGroupReviewerBinding, GroupReviewerProjectionBinding,
 };
 use crate::product::models::ProviderName;
 use crate::product::work_item_contract::{
-    BlockerRoute, ContractCompatibilityPolicy, RequiredInputContract, VerificationCheck,
-    WorkItemWritePolicy,
+    BlockerRoute, ContractCompatibilityPolicy, PromisedOutputContract, RequiredInputContract,
+    VerificationCheck, WorkItemWritePolicy,
 };
 use crate::product::work_item_projection::{ReviewerRequirementCheck, ReviewerWorkItemProjection};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -72,6 +73,43 @@ fn valid_shard_output() -> String {
 
 fn valid_reduction_output() -> String {
     valid_group_review_output("approve", 0)
+}
+
+fn provider_metadata(provider: &ProviderName) -> String {
+    format!(
+        "provider={}",
+        serde_json::to_string(provider)
+            .expect("serialize provider")
+            .trim_matches('"')
+    )
+}
+
+fn prompt_text_without_provider_metadata(prompt: &PromptSegments) -> String {
+    [
+        prompt.fixed_protocol.as_str(),
+        prompt.identity.as_str(),
+        prompt.unit_records.as_str(),
+        prompt.evidence_digest.as_str(),
+        prompt.graph.as_str(),
+        prompt.diff.as_str(),
+    ]
+    .concat()
+}
+
+fn shard_id_for_unit(snapshot: &GroupReviewMaterialSnapshot, unit_run_id: &str) -> String {
+    snapshot
+        .partition_result
+        .shards
+        .iter()
+        .find(|shard| {
+            shard
+                .ordered_unit_run_ids
+                .iter()
+                .any(|id| id == unit_run_id)
+        })
+        .unwrap_or_else(|| panic!("unit {unit_run_id} must be assigned to a shard"))
+        .shard_id
+        .clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +280,22 @@ impl ShardPromptMeasurer for RealMeasurer {
             content_hash: String::new(),
         };
         build_shard_prompt(&full, shard, None).measure().total
+    }
+}
+
+struct ForceSingleUnitMeasurer;
+
+impl ShardPromptMeasurer for ForceSingleUnitMeasurer {
+    fn measure_shard(
+        &self,
+        _snapshot: &GroupReviewMaterialSnapshotDraft,
+        shard: &GroupShardSpec,
+    ) -> usize {
+        if shard.ordered_unit_run_ids.len() > 1 {
+            GROUP_REVIEW_QUALITY_TARGET_BYTES + 1
+        } else {
+            0
+        }
     }
 }
 
@@ -426,11 +480,21 @@ async fn step3_e2e_shards_and_reduction_persist_internal_pr_review() {
 
 #[test]
 fn step3_cross_shard_contract_mismatch_is_detected_by_deterministic_findings() {
-    // Construct two bindings with an unmatched contract: consumer expects capability
-    // that producer does not provide.
-    let producer = e2e_binding(0, "producer", Some("src/producer/".into()), None);
+    // Five units force at least two shards. The producer and consumer are deliberately
+    // separated by order while still sharing a contract boundary.
+    let mut producer = e2e_binding(0, "producer", Some("src/producer/".into()), None);
+    producer
+        .projection_binding
+        .projection
+        .output_contract_checks = vec![PromisedOutputContract {
+        contract_id: "api".to_string(),
+        capabilities: vec!["read".to_string()],
+    }];
+    let mut filler_1 = e2e_binding(1, "contract_fill_1", None, None);
+    let mut filler_2 = e2e_binding(2, "contract_fill_2", None, None);
+    let mut filler_3 = e2e_binding(3, "contract_fill_3", None, None);
     let consumer = AuthoritativeGroupReviewerBinding {
-        order_index: 1,
+        order_index: 4,
         run: CodingUnitRun {
             id: "run_consumer".to_string(),
             unit_id: "consumer".to_string(),
@@ -491,7 +555,16 @@ fn step3_cross_shard_contract_mismatch_is_detected_by_deterministic_findings() {
             },
         },
     };
-    let bindings = vec![producer, consumer];
+    // Avoid accidental affinity edges among fillers; only the producer/consumer contract
+    // relationship may influence partitioning.
+    for filler in [&mut filler_1, &mut filler_2, &mut filler_3] {
+        filler
+            .projection_binding
+            .projection
+            .requirement_matrix
+            .clear();
+    }
+    let bindings = vec![producer, filler_1, filler_2, filler_3, consumer];
     let snapshots = bindings
         .iter()
         .map(|b| e2e_snapshot(b, "compile_only"))
@@ -503,49 +576,72 @@ fn step3_cross_shard_contract_mismatch_is_detected_by_deterministic_findings() {
         &snapshots,
         &request,
         &e2e_facts(&bindings),
-        &RealMeasurer,
+        &ForceSingleUnitMeasurer,
         GROUP_REVIEW_QUALITY_TARGET_BYTES,
     )
     .expect("compile");
 
-    let has_mismatch = snapshot
-        .deterministic_findings
-        .iter()
-        .any(|f| f.kind == "contract_missing_or_capability_mismatch");
+    let producer_shard = shard_id_for_unit(&snapshot, "run_producer");
+    let consumer_shard = shard_id_for_unit(&snapshot, "run_consumer");
+    assert_ne!(
+        producer_shard, consumer_shard,
+        "contract mismatch fixture must span two shards"
+    );
     assert!(
-        has_mismatch,
-        "deterministic findings should include contract mismatch"
+        snapshot
+            .partition_result
+            .cross_shard_edges
+            .iter()
+            .any(|edge| {
+                edge.edge_kind == "contract_boundary"
+                    && [edge.from_unit_run_id.as_str(), edge.to_unit_run_id.as_str()]
+                        .into_iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        == std::collections::BTreeSet::from(["run_consumer", "run_producer"])
+            })
     );
 
-    // The contract edge should be unmatched
+    let mismatch = snapshot
+        .deterministic_findings
+        .iter()
+        .find(|finding| finding.kind == "contract_missing_or_capability_mismatch")
+        .expect("deterministic findings should include contract mismatch");
+    assert_eq!(mismatch.detail, "api");
+    assert_eq!(
+        mismatch.related_unit_run_ids,
+        vec!["run_consumer".to_string(), "run_producer".to_string()]
+    );
+
     let unmatched_edge = snapshot
         .global_graph
         .contract_edges
         .iter()
-        .find(|edge| edge.contract_id == "api");
-    assert!(unmatched_edge.is_some());
-    assert!(!unmatched_edge.unwrap().matched);
+        .find(|edge| edge.contract_id == "api")
+        .expect("contract edge");
+    assert!(!unmatched_edge.matched);
 }
 
 #[test]
-fn step3_cross_shard_shared_file_conflict_is_detected_by_deterministic_findings() {
-    // Two units touch the same file → scope overlap
-    let mut left = e2e_binding(0, "left", Some("src/left/".into()), None);
-    let right = e2e_binding(1, "right", Some("src/right/".into()), None);
-    let bindings = vec![left.clone(), right];
+fn step3_cross_shard_shared_file_is_detected_in_scope_and_partition_graph() {
+    // Five independent units force at least two shards. The first and fifth touch the
+    // same file, producing a shared_file affinity edge that crosses the shard boundary.
+    let bindings = (0..5)
+        .map(|index| e2e_binding(index, &format!("shared_{index}"), None, None))
+        .collect::<Vec<_>>();
     let snapshots = bindings
         .iter()
         .map(|b| e2e_snapshot(b, "compile_only"))
         .collect::<Vec<_>>();
     let mut git_facts = e2e_facts(&bindings);
-    // Both units modify the same file
     for diff in &mut git_facts.completion_diffs {
-        diff.patch = "diff --git a/shared.rs b/shared.rs\n@@ -0,0 +1 @@\n+shared\n".to_string();
-        diff.file_stats = vec![DiffFileStat {
-            path: "shared.rs".to_string(),
-            insertions: 1,
-            deletions: 0,
-        }];
+        if matches!(diff.unit_run_id.as_str(), "run_shared_0" | "run_shared_4") {
+            diff.patch = "diff --git a/shared.rs b/shared.rs\n@@ -0,0 +1 @@\n+shared\n".to_string();
+            diff.file_stats = vec![DiffFileStat {
+                path: "shared.rs".to_string(),
+                insertions: 1,
+                deletions: 0,
+            }];
+        }
     }
     let mut request = e2e_review_request();
     request.attempt_id = "compile_only".to_string();
@@ -554,27 +650,40 @@ fn step3_cross_shard_shared_file_conflict_is_detected_by_deterministic_findings(
         &snapshots,
         &request,
         &git_facts,
-        &RealMeasurer,
+        &ForceSingleUnitMeasurer,
         GROUP_REVIEW_QUALITY_TARGET_BYTES,
     )
     .expect("compile");
 
-    // shared.rs should be in scope_overlaps with 2 owners
+    let left_shard = shard_id_for_unit(&snapshot, "run_shared_0");
+    let right_shard = shard_id_for_unit(&snapshot, "run_shared_4");
+    assert_ne!(
+        left_shard, right_shard,
+        "shared-file fixture must span two shards"
+    );
+    assert!(
+        snapshot
+            .partition_result
+            .cross_shard_edges
+            .iter()
+            .any(|edge| {
+                edge.edge_kind == "shared_file"
+                    && edge.from_unit_run_id == "run_shared_0"
+                    && edge.to_unit_run_id == "run_shared_4"
+            })
+    );
+
     let overlap = snapshot
         .global_graph
         .scope_overlaps
         .iter()
-        .find(|o| o.file_path == "shared.rs");
-    assert!(
-        overlap.is_some(),
-        "shared file should produce scope overlap"
+        .find(|overlap| overlap.file_path == "shared.rs")
+        .expect("shared file should produce scope overlap");
+    assert_eq!(
+        overlap.unit_run_ids,
+        vec!["run_shared_0".to_string(), "run_shared_4".to_string()]
     );
-    let overlap = overlap.unwrap();
-    assert_eq!(overlap.unit_run_ids.len(), 2);
     assert!(!overlap.forbidden_hit);
-
-    // Force different scopes so they land in different shards
-    left.run.id = "run_left_v2".to_string();
 }
 
 #[test]
@@ -628,8 +737,11 @@ fn step3_scope_violation_is_detected_by_deterministic_findings() {
 
 #[test]
 fn step9_10_material_snapshot_is_provider_independent() {
-    // compile_group_review_material is a pure function that does not depend on provider.
-    // Running it with different provider configs should produce identical snapshot.
+    let providers = [
+        ProviderName::ClaudeCode,
+        ProviderName::Codex,
+        ProviderName::Pi,
+    ];
     let bindings = (0..6)
         .map(|index| {
             e2e_binding(
@@ -648,42 +760,51 @@ fn step9_10_material_snapshot_is_provider_independent() {
     request.attempt_id = "compile_only".to_string();
     let facts = e2e_facts(&bindings);
 
-    let snapshot_a = compile_group_review_material(
-        &bindings,
-        &snapshots,
-        &request,
-        &facts,
-        &RealMeasurer,
-        GROUP_REVIEW_QUALITY_TARGET_BYTES,
-    )
-    .expect("compile A");
+    let compiled = providers
+        .iter()
+        .map(|provider| {
+            let provider_config = ProviderConfigSnapshot {
+                author: provider.clone(),
+                reviewer: Some(provider.clone()),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            };
+            let snapshot = compile_group_review_material(
+                &bindings,
+                &snapshots,
+                &request,
+                &facts,
+                &RealMeasurer,
+                GROUP_REVIEW_QUALITY_TARGET_BYTES,
+            )
+            .unwrap_or_else(|error| panic!("compile {provider:?}: {error}"));
+            (provider_config, snapshot)
+        })
+        .collect::<Vec<_>>();
 
-    let snapshot_b = compile_group_review_material(
-        &bindings,
-        &snapshots,
-        &request,
-        &facts,
-        &RealMeasurer,
-        GROUP_REVIEW_QUALITY_TARGET_BYTES,
-    )
-    .expect("compile B");
-
-    // Material content hash must be identical (provider-independent)
-    assert_eq!(
-        snapshot_a.content_hash, snapshot_b.content_hash,
-        "material snapshot must be deterministic and provider-independent"
-    );
-    assert_eq!(
-        snapshot_a.partition_result.shards.len(),
-        snapshot_b.partition_result.shards.len()
-    );
+    assert_eq!(compiled.len(), 3);
+    for (_, snapshot) in &compiled[1..] {
+        assert_eq!(
+            snapshot.content_hash, compiled[0].1.content_hash,
+            "material snapshot must be provider-independent"
+        );
+        assert_eq!(
+            snapshot.partition_result.shards.len(),
+            compiled[0].1.partition_result.shards.len()
+        );
+    }
+    assert_eq!(compiled[0].0.author, ProviderName::ClaudeCode);
+    assert_eq!(compiled[1].0.author, ProviderName::Codex);
+    assert_eq!(compiled[2].0.author, ProviderName::Pi);
 }
 
 #[test]
-fn step9_10_shard_prompts_are_identical_regardless_of_provider_meta() {
-    // build_shard_prompt takes provider_meta: Option<&str>.
-    // When provider_meta is None (as in the orchestrator path), the prompts are identical.
-    // When provider_meta is Some, only the retry_diagnostic_reserve differs.
+fn step9_10_shard_and_reduction_prompts_match_after_removing_provider_metadata() {
+    let providers = [
+        ProviderName::ClaudeCode,
+        ProviderName::Codex,
+        ProviderName::Pi,
+    ];
     let bindings = (0..4)
         .map(|index| {
             e2e_binding(
@@ -711,36 +832,29 @@ fn step9_10_shard_prompts_are_identical_regardless_of_provider_meta() {
     .expect("compile");
 
     for shard in &snapshot.partition_result.shards {
-        let prompt_none = build_shard_prompt(&snapshot, shard, None);
-        let prompt_with_meta = build_shard_prompt(&snapshot, shard, Some("provider=ClaudeCode"));
-
-        // Everything except retry_diagnostic_reserve must be identical
-        let breakdown_none = prompt_none.measure();
-        let breakdown_with_meta = prompt_with_meta.measure();
-        assert_eq!(
-            breakdown_none.fixed_protocol,
-            breakdown_with_meta.fixed_protocol
-        );
-        assert_eq!(breakdown_none.identity, breakdown_with_meta.identity);
-        assert_eq!(
-            breakdown_none.unit_records,
-            breakdown_with_meta.unit_records
-        );
-        assert_eq!(
-            breakdown_none.evidence_digest,
-            breakdown_with_meta.evidence_digest
-        );
-        assert_eq!(breakdown_none.graph, breakdown_with_meta.graph);
-        assert_eq!(breakdown_none.diff, breakdown_with_meta.diff);
-        // Only retry_diagnostic_reserve may differ
-        assert_ne!(
-            breakdown_none.retry_diagnostic_reserve,
-            breakdown_with_meta.retry_diagnostic_reserve
-        );
+        let prompts = providers
+            .iter()
+            .map(|provider| {
+                let metadata = provider_metadata(provider);
+                let prompt = build_shard_prompt(&snapshot, shard, Some(&metadata));
+                assert_eq!(
+                    prompt.retry_diagnostic_reserve,
+                    format!("retry diagnostic (do not treat as review evidence):\n{metadata}\n")
+                );
+                prompt
+            })
+            .collect::<Vec<_>>();
+        let expected = prompt_text_without_provider_metadata(&prompts[0]);
+        for prompt in &prompts[1..] {
+            assert_eq!(
+                prompt_text_without_provider_metadata(prompt),
+                expected,
+                "shard prompt text excluding provider metadata must match"
+            );
+        }
     }
 
-    // Reduction prompt is also provider-independent except for retry_diagnostic_reserve
-    let shard_reports: Vec<crate::product::coding_models::GroupReviewShardReport> = snapshot
+    let shard_reports = snapshot
         .partition_result
         .shards
         .iter()
@@ -761,14 +875,27 @@ fn step9_10_shard_prompts_are_identical_regardless_of_provider_meta() {
                 run_failure_code: None,
             },
         )
-        .collect();
-    let reduction_none = build_reduction_prompt(&snapshot, &shard_reports, None);
-    let reduction_meta = build_reduction_prompt(&snapshot, &shard_reports, Some("provider=Pi"));
-    let bd_none = reduction_none.measure();
-    let bd_meta = reduction_meta.measure();
-    assert_eq!(bd_none.fixed_protocol, bd_meta.fixed_protocol);
-    assert_eq!(bd_none.identity, bd_meta.identity);
-    assert_eq!(bd_none.unit_records, bd_meta.unit_records);
+        .collect::<Vec<_>>();
+    let prompts = providers
+        .iter()
+        .map(|provider| {
+            let metadata = provider_metadata(provider);
+            let prompt = build_reduction_prompt(&snapshot, &shard_reports, Some(&metadata));
+            assert_eq!(
+                prompt.retry_diagnostic_reserve,
+                format!("retry diagnostic (do not treat as review evidence):\n{metadata}\n")
+            );
+            prompt
+        })
+        .collect::<Vec<_>>();
+    let expected = prompt_text_without_provider_metadata(&prompts[0]);
+    for prompt in &prompts[1..] {
+        assert_eq!(
+            prompt_text_without_provider_metadata(prompt),
+            expected,
+            "reduction prompt text excluding provider metadata must match"
+        );
+    }
 }
 
 // ===========================================================================
@@ -805,19 +932,27 @@ async fn step13_14_invalid_shard_output_persists_raw_ref() {
         GroupReviewOrchestrationError::ShardOutputInvalid { ref raw_ref, .. } if !raw_ref.is_empty()
     ));
 
-    // The raw output should be persisted even though the shard failed
-    let _shard_reports = store
+    let shard_reports = store
         .list_group_review_shard_reports(&attempt_id)
         .expect("shard reports");
-    // At least one report should have been written with the raw ref
-    // (CAS may store some, the first invalid one triggers the error)
-    // Verify the raw provider output was saved by checking the error's raw_ref
+    let failed_report = shard_reports
+        .iter()
+        .find(|report| report.run_failure_code.is_some())
+        .expect("failed shard report must be persisted");
+    assert_eq!(
+        failed_report.run_failure_code.as_deref(),
+        Some("shard_output_invalid")
+    );
+    assert!(
+        !failed_report.raw_provider_output_refs.is_empty(),
+        "failed shard report must retain raw provider output refs"
+    );
+
     if let GroupReviewOrchestrationError::ShardOutputInvalid { raw_ref, .. } = error {
-        assert!(
-            !raw_ref.is_empty(),
-            "raw_ref must be non-empty on invalid output"
+        assert_eq!(
+            failed_report.raw_provider_output_refs,
+            vec![raw_ref.clone()]
         );
-        // The raw output should be readable
         let attempt = store.find_attempt_by_id(&attempt_id).expect("attempt");
         let raw = store
             .read_attempt_artifact_text(&attempt, &raw_ref)
@@ -870,10 +1005,26 @@ async fn step13_14_invalid_reduction_output_persists_raw_ref() {
         GroupReviewOrchestrationError::ReductionOutputInvalid { ref raw_ref } if !raw_ref.is_empty()
     ));
 
+    let reduction_reports = store
+        .list_group_review_reduction_reports(&attempt_id)
+        .expect("reduction reports");
+    let failed_report = reduction_reports
+        .iter()
+        .find(|report| report.run_failure_code.is_some())
+        .expect("failed reduction report must be persisted");
+    assert_eq!(
+        failed_report.run_failure_code.as_deref(),
+        Some("reduction_output_invalid")
+    );
+    assert!(
+        !failed_report.raw_provider_output_refs.is_empty(),
+        "failed reduction report must retain raw provider output refs"
+    );
+
     if let GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref } = error {
-        assert!(
-            !raw_ref.is_empty(),
-            "raw_ref must be non-empty on invalid reduction"
+        assert_eq!(
+            failed_report.raw_provider_output_refs,
+            vec![raw_ref.clone()]
         );
         let attempt = store.find_attempt_by_id(&attempt_id).expect("attempt");
         let raw = store

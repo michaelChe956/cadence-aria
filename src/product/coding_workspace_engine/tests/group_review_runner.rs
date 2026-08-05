@@ -12,6 +12,28 @@ struct GroupReviewRunnerProvider {
     prompts: Arc<Mutex<Vec<String>>>,
 }
 
+struct CancelledGroupReviewProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CancelledGroupReviewProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            cancel.cancelled().await;
+            drop(event_tx);
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
 impl GroupReviewRunnerProvider {
     fn prompts(&self) -> Vec<String> {
         self.prompts.lock().expect("prompts").clone()
@@ -246,6 +268,43 @@ async fn group_final_review_delegates_to_orchestrator_and_activates_snapshot() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn group_final_review_cancellation_closes_attempt_role_run_and_timeline() {
+    let (_root, store, attempt, engine, _provider) = group_review_runner_fixture(true).await;
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    engine.cancellation.cancel();
+
+    let error = engine
+        .execute_group_final_review_with_commands(
+            &attempt,
+            &CancelledGroupReviewProvider,
+            &mut command_rx,
+        )
+        .await
+        .expect_err("cancelled group final review must abort");
+
+    assert!(matches!(error, CodingWorkspaceEngineError::Aborted));
+    let stored_attempt = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt");
+    assert_eq!(stored_attempt.status, CodingAttemptStatus::Aborted);
+    let role_run = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs")
+        .into_iter()
+        .last()
+        .expect("role run");
+    assert_eq!(role_run.status, CodingRoleRunStatus::Aborted);
+    let node = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline")
+        .into_iter()
+        .last()
+        .expect("node");
+    assert_eq!(node.status, CodingTimelineNodeStatus::Failed);
+    assert!(node.completed_at.is_some());
 }
 
 #[tokio::test]

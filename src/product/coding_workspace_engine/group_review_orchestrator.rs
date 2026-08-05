@@ -403,21 +403,14 @@ impl<'a> GroupReviewOrchestrator<'a> {
             &execution.full_output,
             CodingExecutionStage::InternalPrReview,
         );
-        if super::group_review_budget::check_reduction_findings(payload.findings.len())
-            == FindingsDecision::FindingsExceeded
-        {
-            self.store
-                .release_group_review_lease(&snapshot.attempt_id, &reduction_lease_id, "")?;
-            return Err(GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref });
-        }
+        let findings_exceeded =
+            super::group_review_budget::check_reduction_findings(payload.findings.len())
+                == FindingsDecision::FindingsExceeded;
         let findings = merge_findings(shard_reports, payload.findings);
-        if findings.iter().any(|finding| {
+        let finding_contract_invalid = findings.iter().any(|finding| {
             validate_group_reviewer_finding(finding, authoritative_bindings).is_err()
-        }) {
-            self.store
-                .release_group_review_lease(&snapshot.attempt_id, &reduction_lease_id, "")?;
-            return Err(GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref });
-        }
+        });
+        let output_invalid = findings_exceeded || finding_contract_invalid;
         let verdict = reduce_verdict(
             shard_reports
                 .iter()
@@ -440,7 +433,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
             provenance: Vec::new(),
             raw_provider_output_refs: vec![raw_ref.clone()],
             role_run_ids: execution.provider_session_id.into_iter().collect(),
-            run_failure_code: None,
+            run_failure_code: output_invalid.then(|| "reduction_output_invalid".to_string()),
         };
         let cas_outcome = match self
             .store
@@ -464,8 +457,17 @@ impl<'a> GroupReviewOrchestrator<'a> {
                     &reduction_lease_id,
                     "",
                 )?;
-                return Err(GroupReviewOrchestrationError::ReductionStale);
+                return if output_invalid {
+                    Err(GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref })
+                } else {
+                    Err(GroupReviewOrchestrationError::ReductionStale)
+                };
             }
+        }
+        if output_invalid {
+            self.store
+                .release_group_review_lease(&snapshot.attempt_id, &reduction_lease_id, "")?;
+            return Err(GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref });
         }
         let persist_result =
             self.persist_internal_pr_review_from_reduction(&attempt, snapshot, &reduction);
@@ -577,12 +579,8 @@ impl<'a> GroupReviewOrchestrator<'a> {
             &execution.full_output,
             CodingExecutionStage::InternalPrReview,
         );
-        if check_shard_findings(payload.findings.len()) == FindingsDecision::FindingsExceeded {
-            return Err(GroupReviewOrchestrationError::ShardOutputInvalid {
-                shard_id: shard.shard_id.clone(),
-                raw_ref,
-            });
-        }
+        let output_invalid =
+            check_shard_findings(payload.findings.len()) == FindingsDecision::FindingsExceeded;
 
         let selected_diff_refs = snapshot
             .diff_index
@@ -608,15 +606,27 @@ impl<'a> GroupReviewOrchestrator<'a> {
             findings: payload.findings,
             unresolved_obligations: Vec::<GroupReviewObligation>::new(),
             selected_diff_refs,
-            raw_provider_output_refs: vec![raw_ref],
+            raw_provider_output_refs: vec![raw_ref.clone()],
             role_run_ids: execution.provider_session_id.into_iter().collect(),
-            run_failure_code: None,
+            run_failure_code: output_invalid.then(|| "shard_output_invalid".to_string()),
         };
         match self
             .store
             .write_group_review_shard_report_cas(&snapshot.attempt_id, report.clone())?
         {
+            CasOutcome::Written if output_invalid => {
+                Err(GroupReviewOrchestrationError::ShardOutputInvalid {
+                    shard_id: shard.shard_id.clone(),
+                    raw_ref,
+                })
+            }
             CasOutcome::Written => Ok(Some(report)),
+            CasOutcome::StoredStale if output_invalid => {
+                Err(GroupReviewOrchestrationError::ShardOutputInvalid {
+                    shard_id: shard.shard_id.clone(),
+                    raw_ref,
+                })
+            }
             CasOutcome::StoredStale => Ok(None),
         }
     }
