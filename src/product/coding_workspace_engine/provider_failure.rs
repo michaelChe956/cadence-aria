@@ -245,6 +245,7 @@ impl CodingWorkspaceEngine {
         Err(CodingWorkspaceEngineError::ProviderStream(message))
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn fail_provider_stream_ended<T>(
         &self,
         attempt: &CodingExecutionAttempt,
