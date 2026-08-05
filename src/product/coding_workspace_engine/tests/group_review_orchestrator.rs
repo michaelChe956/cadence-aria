@@ -586,6 +586,67 @@ async fn failed_shard_result_releases_every_preclaimed_lease() {
 }
 
 #[tokio::test]
+async fn execute_shards_repairs_marker_bullet_markdown_into_a_traceable_json_report() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(1, 1, "diff");
+    snapshot.attempt_id = attempt_id.clone();
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+    let first_response = concat!(
+        "GROUP_REVIEW_VERDICT: request_changes\n",
+        "- boundary validation missing\n",
+        "- evidence: src/lib.rs:42\n"
+    );
+    let repair_response = concat!(
+        "GROUP_REVIEW_VERDICT: request_changes\n",
+        "{\n",
+        "  \"verdict\": \"request_changes\",\n",
+        "  \"summary\": \"boundary validation missing\",\n",
+        "  \"findings\": [{\n",
+        "    \"message\": \"boundary validation missing\",\n",
+        "    \"evidence\": [\"src/lib.rs:42\"]\n",
+        "  }],\n",
+        "  \"impact_scope\": [],\n",
+        "  \"pr_description\": \"\",\n",
+        "  \"commit_message_suggestion\": \"\",\n",
+        "  \"tested_evidence_refs\": [],\n",
+        "  \"diff_refs\": []\n",
+        "}\n"
+    );
+    let executor = FakeGroupReviewExecutor::new(vec![
+        Ok(GroupReviewExecutionResult {
+            full_output: first_response.to_string(),
+            role_run_id: Some("session_0001".to_string()),
+        }),
+        Ok(GroupReviewExecutionResult {
+            full_output: repair_response.to_string(),
+            role_run_id: Some("session_0002".to_string()),
+        }),
+    ]);
+
+    let reports = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect("Markdown first response must succeed after JSON repair");
+
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].verdict, ReviewVerdict::RequestChanges);
+    assert_eq!(reports[0].findings.len(), 1);
+    assert_eq!(
+        reports[0].findings[0].message,
+        "boundary validation missing"
+    );
+    assert_eq!(reports[0].findings[0].evidence, vec!["src/lib.rs:42"]);
+    assert_eq!(reports[0].run_failure_code, None);
+    assert_eq!(reports[0].raw_provider_output_refs.len(), 2);
+    let prompts = executor.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains(first_response));
+    assert!(prompts[1].contains("After the marker, output exactly one valid JSON object."));
+}
+
+#[tokio::test]
 async fn execute_shards_rejects_more_than_eight_findings() {
     let (_root, store, attempt_id) = setup();
     let mut snapshot = material_snapshot(1, 1, "diff");

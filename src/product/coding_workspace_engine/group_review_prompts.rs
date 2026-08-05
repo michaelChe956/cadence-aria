@@ -8,6 +8,31 @@ use crate::product::coding_models::GroupReviewShardReport;
 
 const VERDICT_MARKER: &str = "GROUP_REVIEW_VERDICT: approve|request_changes|blocked";
 
+/// 组级 shard、reduction 与格式修复共用的 provider 无关结论契约。
+///
+/// 该文本必须与 `RawCodeReviewProviderPayload` 的反序列化字段保持一致：组级
+/// parser 为 fail-closed，因此 marker 之后的结论不能是自由格式 Markdown。
+const GROUP_REVIEW_JSON_CONCLUSION_CONTRACT: &str = concat!(
+    "Group-review JSON conclusion contract:\n",
+    "- Allowed verdict values: approve, request_changes, blocked.\n",
+    "- The verdict in the marker MUST equal the JSON `verdict` field.\n",
+    "- After the marker, output exactly one valid JSON object.\n",
+    "- Top-level fields (all required): verdict, summary, findings, impact_scope, pr_description, commit_message_suggestion, tested_evidence_refs, diff_refs.\n",
+    "- Use JSON strings for summary, pr_description, and commit_message_suggestion; use JSON arrays for findings, impact_scope, tested_evidence_refs, and diff_refs.\n",
+    "- Finding fields (use when applicable): severity, file_path, line, message, required_action, source_stage, title, evidence, related_requirements, related_design_constraints, related_work_item_tasks, defect_class, reason_code, contract_refs, capability_refs, repair_target, recommended_route, confidence.\n",
+    "- severity values are error, warning, or info; source_stage is internal_pr_review or group_final_review.\n",
+    "- Minimal request_changes example:\n",
+    "{\"verdict\": \"request_changes\", \"summary\": \"validation is missing\", \"findings\": [{\"severity\": \"warning\", \"message\": \"validation is missing\", \"evidence\": [\"src/lib.rs:42\"]}], \"impact_scope\": [], \"pr_description\": \"\", \"commit_message_suggestion\": \"\", \"tested_evidence_refs\": [], \"diff_refs\": []}\n",
+    "- Do not output Markdown fences, bullets, or tables.\n",
+    "- Do not output prose before the marker or any trailing summary after the JSON object.\n"
+);
+
+fn group_review_json_conclusion_contract() -> String {
+    format!(
+        "- Final output MUST include one `GROUP_REVIEW_VERDICT: <verdict>` marker line; valid marker protocol: `{VERDICT_MARKER}`.\n{GROUP_REVIEW_JSON_CONCLUSION_CONTRACT}"
+    )
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct GroupReviewPromptBuilder;
 
@@ -41,6 +66,7 @@ pub(crate) fn build_shard_prompt(
     shard: &GroupShardSpec,
     retry_diagnostic: Option<&str>,
 ) -> PromptSegments {
+    let conclusion_contract = group_review_json_conclusion_contract();
     let shard_members = shard
         .ordered_unit_run_ids
         .iter()
@@ -70,8 +96,8 @@ pub(crate) fn build_shard_prompt(
     PromptSegments {
         fixed_protocol: format!(
             "You are reviewing deterministic group-review shard `{}`.\n\
-             Output MUST include the exact marker line `{VERDICT_MARKER}`.\n\
-             Review only the supplied shard materials and report concrete, attributable findings.\n",
+             Review only the supplied shard materials and report concrete, attributable findings.\n\
+             {conclusion_contract}",
             shard.shard_id
         ),
         identity: format!(
@@ -109,12 +135,13 @@ pub(crate) fn build_reduction_prompt(
     shard_reports: &[GroupReviewShardReport],
     retry_diagnostic: Option<&str>,
 ) -> PromptSegments {
+    let conclusion_contract = group_review_json_conclusion_contract();
     PromptSegments {
         fixed_protocol: format!(
             "You are the group-review reduction reviewer.\n\
              Merge shard conclusions into one unique final conclusion (唯一最终结论).\n\
              Resolve duplicates deterministically, preserve unresolved obligations, and do not invent evidence.\n\
-             Output MUST include the exact marker line `{VERDICT_MARKER}`.\n"
+             {conclusion_contract}"
         ),
         identity: format!(
             "snapshot_hash: {}\nattempt_id: {}\nreview_request_id: {}\nbase_branch: {}\nfinal_commit: {}\n",
@@ -145,11 +172,16 @@ pub(crate) fn build_reduction_prompt(
 }
 
 pub(crate) fn build_repair_prompt(raw_output: &str) -> PromptSegments {
+    let conclusion_contract = group_review_json_conclusion_contract();
     PromptSegments {
         fixed_protocol: format!(
             "Only repair the supplied raw output into the required conclusion format.\n\
-             Output MUST include the exact marker line `{VERDICT_MARKER}`.\n\
-             只修复输出格式；不得重新审查，不得添加任何新的事实、分析或 findings。\n"
+             Convert only the supplied raw output into the JSON conclusion contract.\n\
+             The JSON verdict MUST equal the verdict in the raw marker.\n\
+             Every finding message, evidence, and repair target MUST be directly traceable to the raw output.\n\
+             Do not re-review or add findings.\n\
+             只修复输出格式；不得重新审查，不得添加任何新的事实、分析或 findings。\n\
+             {conclusion_contract}"
         ),
         identity: String::new(),
         unit_records: String::new(),

@@ -184,43 +184,97 @@ fn prompt_builder_measures_draft_shards_with_the_rendered_prompt() {
 }
 
 #[test]
-fn shard_prompt_requires_verdict_marker_and_includes_unit_records_and_a_to_e_diff() {
-    let prompt = build_shard_prompt(&snapshot(), &shard(), Some("retry diagnostic"));
+fn shard_and_reduction_prompts_require_the_shared_parseable_json_conclusion_contract() {
+    let shard_prompt = build_shard_prompt(&snapshot(), &shard(), Some("retry diagnostic"));
+    let reduction_prompt =
+        build_reduction_prompt(&snapshot(), &[shard_report()], Some("retry diagnostic"));
 
-    assert!(
-        prompt
+    let provider_protocols = ["claude_code", "codex", "pi"].map(|_| {
+        build_shard_prompt(&snapshot(), &shard(), None)
             .fixed_protocol
-            .contains("GROUP_REVIEW_VERDICT: approve|request_changes|blocked")
+            .clone()
+    });
+    assert!(
+        provider_protocols
+            .windows(2)
+            .all(|protocols| protocols[0] == protocols[1]),
+        "all providers must receive identical shared shard-contract text"
     );
-    assert!(prompt.unit_records.contains("run_a"));
-    assert!(prompt.diff.contains("level: A"));
-    assert!(prompt.retry_diagnostic_reserve.contains("retry diagnostic"));
+
+    for (provider, prompt) in [
+        ("claude_code", &shard_prompt),
+        ("codex", &reduction_prompt),
+        ("pi", &build_shard_prompt(&snapshot(), &shard(), None)),
+    ] {
+        assert!(
+            prompt
+                .fixed_protocol
+                .contains("GROUP_REVIEW_VERDICT: approve|request_changes|blocked"),
+            "{provider} must receive the marker protocol"
+        );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "Top-level fields (all required): verdict, summary, findings, impact_scope, pr_description, commit_message_suggestion, tested_evidence_refs, diff_refs."
+            ),
+            "{provider} must receive every parser-aligned top-level field"
+        );
+        assert!(
+            prompt
+                .fixed_protocol
+                .contains("Allowed verdict values: approve, request_changes, blocked."),
+            "{provider} must receive the common verdict enum"
+        );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "Finding fields (use when applicable): severity, file_path, line, message, required_action, source_stage, title, evidence, related_requirements, related_design_constraints, related_work_item_tasks, defect_class, reason_code, contract_refs, capability_refs, repair_target, recommended_route, confidence."
+            ),
+            "{provider} must receive the common finding shape"
+        );
+        assert!(
+            prompt
+                .fixed_protocol
+                .contains("Do not output Markdown fences, bullets, or tables."),
+            "{provider} must be told not to emit Markdown"
+        );
+        assert!(
+            prompt
+                .fixed_protocol
+                .contains("\"verdict\": \"request_changes\""),
+            "{provider} must receive the request_changes JSON example"
+        );
+    }
+
+    assert!(shard_prompt.unit_records.contains("run_a"));
+    assert!(shard_prompt.diff.contains("level: A"));
+    assert!(
+        shard_prompt
+            .retry_diagnostic_reserve
+            .contains("retry diagnostic")
+    );
+    assert!(reduction_prompt.fixed_protocol.contains("唯一最终结论"));
+    assert!(reduction_prompt.graph.contains("跨片关系图"));
+    assert!(reduction_prompt.unit_records.contains("ledger"));
+    assert!(reduction_prompt.unit_records.contains("report_a"));
 }
 
 #[test]
-fn reduction_prompt_requires_merge_rules_cross_shard_graph_and_ledger_lines() {
-    let prompt = build_reduction_prompt(&snapshot(), &[shard_report()], Some("retry diagnostic"));
-
-    assert!(
-        prompt
-            .fixed_protocol
-            .contains("GROUP_REVIEW_VERDICT: approve|request_changes|blocked")
-    );
-    assert!(prompt.fixed_protocol.contains("唯一最终结论"));
-    assert!(prompt.graph.contains("跨片关系图"));
-    assert!(prompt.unit_records.contains("ledger"));
-    assert!(prompt.unit_records.contains("report_a"));
-}
-
-#[test]
-fn repair_prompt_contains_only_raw_output_contract_and_no_rereview_instruction() {
-    let raw_output = "unparseable GROUP_REVIEW_VERDICT output";
+fn repair_prompt_requires_raw_only_json_transcription_without_rereview() {
+    let raw_output = "GROUP_REVIEW_VERDICT: request_changes\n- missing boundary validation";
     let prompt = build_repair_prompt(raw_output);
     let joined = prompt.join();
 
     assert!(joined.contains(raw_output));
-    assert!(joined.contains("只修复输出格式"));
-    assert!(joined.contains("不得重新审查"));
+    assert!(joined.contains("Only repair the supplied raw output"));
+    assert!(
+        joined.contains("Convert only the supplied raw output into the JSON conclusion contract.")
+    );
+    assert!(joined.contains("After the marker, output exactly one valid JSON object."));
+    assert!(joined.contains("The JSON verdict MUST equal the verdict in the raw marker."));
+    assert!(joined.contains(
+        "Every finding message, evidence, and repair target MUST be directly traceable to the raw output."
+    ));
+    assert!(joined.contains("Do not re-review or add findings."));
+    assert!(joined.contains("Do not output Markdown fences, bullets, or tables."));
     assert!(prompt.identity.is_empty());
     assert!(prompt.unit_records.is_empty());
     assert!(prompt.evidence_digest.is_empty());
