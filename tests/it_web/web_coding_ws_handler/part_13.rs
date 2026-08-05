@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn coding_plan_repair_group_final_review_recovery_path_does_not_complete_approve_with_plan_finding()
+async fn coding_plan_repair_group_final_review_orchestrated_path_routes_plan_finding_without_completing()
 {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
@@ -21,8 +21,7 @@ async fn coding_plan_repair_group_final_review_recovery_path_does_not_complete_a
 
     let mut confirmed_gates = HashSet::new();
     let mut bound_first_handoff = false;
-    let mut retried_final_review = false;
-    let mut saw_recovered_review = false;
+    let mut saw_group_review = false;
     for _ in 0..560 {
         match timeout(Duration::from_secs(2), recv_json(&mut ws)).await {
             Ok(CodingWsOutMessage::CodingGateRequired { gate })
@@ -37,22 +36,6 @@ async fn coding_plan_repair_group_final_review_recovery_path_does_not_complete_a
                     send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
                 }
             }
-            Ok(CodingWsOutMessage::CodingGateRequired { gate })
-                if gate.available_actions.iter().any(|action| {
-                    action.action_type == CodingGateActionType::RetryInternalReview
-                }) =>
-            {
-                send_json(
-                    &mut ws,
-                    &CodingWsInMessage::GateResponse {
-                        gate_id: gate.gate_id,
-                        action_id: "retry_internal_review".to_string(),
-                        extra_context: None,
-                    },
-                )
-                .await;
-                retried_final_review = true;
-            }
             Ok(CodingWsOutMessage::CodingSessionState {
                 current_work_item_id,
                 ..
@@ -63,10 +46,10 @@ async fn coding_plan_repair_group_final_review_recovery_path_does_not_complete_a
                 bound_first_handoff = true;
             }
             Ok(CodingWsOutMessage::InternalPrReviewComplete { review })
-                if review.verdict == ReviewVerdict::Approve =>
+                if !review.findings.is_empty() =>
             {
                 assert_eq!(review.findings.len(), 1);
-                saw_recovered_review = true;
+                saw_group_review = true;
                 break;
             }
             Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
@@ -76,8 +59,7 @@ async fn coding_plan_repair_group_final_review_recovery_path_does_not_complete_a
             Err(_) => panic!("timed out before recovered GroupFinalReview"),
         }
     }
-    assert!(retried_final_review, "expected GroupFinalReview retry gate");
-    assert!(saw_recovered_review, "expected recovered GroupFinalReview");
+    assert!(saw_group_review, "expected orchestrated GroupFinalReview");
     tokio::task::yield_now().await;
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")

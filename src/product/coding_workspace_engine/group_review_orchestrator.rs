@@ -7,7 +7,12 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, mpsc};
+
+use super::{
+    CodingProviderStreamRun, CodingWorkspaceEngine, CodingWorkspaceEngineError,
+    provider_type_for_name, role_permission_mode_for_attempt, streaming_input_from_adapter,
+};
 
 use super::group_review_budget::{
     BudgetDecision, CapacityDecision, FindingsDecision, GROUP_REVIEW_QUALITY_TARGET_BYTES,
@@ -18,14 +23,20 @@ use super::group_review_prompts::{build_repair_prompt, build_shard_prompt};
 use super::group_review_types::{GroupReviewMaterialSnapshot, PromptBudgetBreakdown};
 use super::plan_defect_routing::{GroupReviewerProjectionBinding, validate_group_reviewer_finding};
 use super::review_parser::parse_review_payload;
+use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
+use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
-    CasOutcome, CodingAttemptStatus, CodingExecutionStage, CodingGateDiagnostic,
-    CodingProviderRole, GroupReviewObligation, GroupReviewReductionReport, GroupReviewShardReport,
-    InternalPrReview, ReviewFinding, ReviewVerdict,
+    CasOutcome, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    CodingGateDiagnostic, CodingProviderRole, CodingRoleRun, GroupReviewObligation,
+    GroupReviewReductionReport, GroupReviewShardReport, InternalPrReview, ReviewFinding,
+    ReviewVerdict,
 };
+use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
+use crate::product::models::ProviderName;
+use crate::protocol::contracts::{AdapterInput, AdapterRole};
 
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -754,6 +765,110 @@ fn verdict_marker(output: &str) -> Option<ReviewVerdict> {
             _ => None,
         }
     })
+}
+
+pub(crate) struct RealGroupReviewExecutor<'a> {
+    engine: &'a CodingWorkspaceEngine,
+    attempt: CodingExecutionAttempt,
+    provider: &'a dyn StreamingProviderAdapter,
+    node_id: String,
+    role_run: CodingRoleRun,
+    provider_name: ProviderName,
+}
+
+impl<'a> RealGroupReviewExecutor<'a> {
+    pub(crate) fn new(
+        engine: &'a CodingWorkspaceEngine,
+        attempt: CodingExecutionAttempt,
+        provider: &'a dyn StreamingProviderAdapter,
+        node_id: String,
+        role_run: CodingRoleRun,
+        provider_name: ProviderName,
+    ) -> Self {
+        Self {
+            engine,
+            attempt,
+            provider,
+            node_id,
+            role_run,
+            provider_name,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
+    async fn execute(
+        &self,
+        prompt: &str,
+    ) -> Result<GroupReviewExecutionResult, GroupReviewExecutionError> {
+        let worktree_path = self.attempt.worktree_path.clone().ok_or_else(|| {
+            GroupReviewExecutionError::Internal(format!(
+                "coding_attempt_missing_worktree: {}",
+                self.attempt.id
+            ))
+        })?;
+        let input = AdapterInput {
+            provider_type: provider_type_for_name(&self.provider_name),
+            role: AdapterRole::Reviewer,
+            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+            provider_stream_log_dir: Some(
+                self.engine.attempt_provider_stream_log_dir(&self.attempt),
+            ),
+            prompt: prompt.to_string(),
+            context_files: Vec::new(),
+            output_schema: "coding_workspace_internal_pr_review_json".to_string(),
+            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+            max_retries: 0,
+        };
+        let permission_mode = role_permission_mode_for_attempt(
+            &self.engine.store,
+            &self.attempt,
+            CodingProviderRole::InternalReviewer,
+        )
+        .map_err(map_group_review_engine_error)?;
+        let mut provider_input =
+            streaming_input_from_adapter(&input, worktree_path, permission_mode);
+        provider_input.workspace_session_id = Some(self.attempt.id.clone());
+        provider_input.resume_provider_session_id = None;
+        let (command_tx, mut command_rx) = mpsc::channel::<CodingRunnerCommand>(1);
+        drop(command_tx);
+        let full_output = self
+            .engine
+            .run_provider_stream_to_completion(CodingProviderStreamRun {
+                attempt: &self.attempt,
+                node_id: &self.node_id,
+                role_run: Some(&self.role_run),
+                provider: self.provider,
+                legacy_input: &input,
+                input: provider_input,
+                provider_name: &self.provider_name,
+                provider_role: CodingProviderRole::InternalReviewer,
+                command_rx: &mut command_rx,
+                allow_legacy_stream_fallback: true,
+                fresh_retry: None,
+                timeout: None,
+                timeout_reason_code: None,
+            })
+            .await
+            .map_err(map_group_review_engine_error)?;
+        Ok(GroupReviewExecutionResult {
+            full_output,
+            provider_session_id: None,
+        })
+    }
+}
+
+fn map_group_review_engine_error(error: CodingWorkspaceEngineError) -> GroupReviewExecutionError {
+    match error {
+        CodingWorkspaceEngineError::Aborted => GroupReviewExecutionError::UserCancelled,
+        CodingWorkspaceEngineError::ProviderStream(message)
+        | CodingWorkspaceEngineError::ProviderAdapter(ProviderAdapterError {
+            details: message,
+            ..
+        }) => GroupReviewExecutionError::Transport(message),
+        error => GroupReviewExecutionError::Internal(error.to_string()),
+    }
 }
 
 #[async_trait::async_trait]

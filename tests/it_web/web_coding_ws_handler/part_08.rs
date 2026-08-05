@@ -307,6 +307,23 @@ fn materialize_completed_unit_run_for_logical(
     store
         .create_coding_unit_run(&attempt, &run)
         .expect("completed unit run");
+    store
+        .write_unit_review_conclusion_snapshot(
+            &cadence_aria::product::coding_models::UnitReviewConclusionSnapshot {
+                attempt_id: attempt.id.clone(),
+                unit_id: run.unit_id.clone(),
+                unit_run_id: run.id.clone(),
+                logical_work_item_id: logical_work_item_id.to_string(),
+                work_item_revision_id: run.work_item_revision_id.clone(),
+                code_review_report_id: format!("fixture_review_{}", run.id),
+                verdict: ReviewVerdict::Approve,
+                finding_digest: Vec::new(),
+                evidence_refs: Vec::new(),
+                diff_refs: Vec::new(),
+                raw_report_hash: format!("fixture_raw_{}", run.id),
+            },
+        )
+        .expect("completed unit review snapshot");
     run
 }
 

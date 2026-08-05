@@ -1,5 +1,20 @@
 use super::*;
 
+fn map_group_review_orchestration_error(
+    error: super::group_review_orchestrator::GroupReviewOrchestrationError,
+) -> CodingWorkspaceEngineError {
+    use super::group_review_orchestrator::{
+        GroupReviewExecutionError, GroupReviewOrchestrationError,
+    };
+
+    match error {
+        GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::UserCancelled) => {
+            CodingWorkspaceEngineError::Aborted
+        }
+        error => CodingWorkspaceEngineError::ProviderStream(error.to_string()),
+    }
+}
+
 pub(crate) fn summarize_push_error(
     remote: &str,
     branch: &str,
@@ -469,16 +484,191 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
         provider: &dyn StreamingProviderAdapter,
-        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+        _command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
+        use super::group_review_budget::GROUP_REVIEW_QUALITY_TARGET_BYTES;
+        use super::group_review_material::compile_group_review_material;
+        use super::group_review_orchestrator::{
+            GroupReviewOrchestrationError, GroupReviewOrchestrator, RealGroupReviewExecutor,
+        };
+        use super::group_review_prompts::GroupReviewPromptBuilder;
+
         let attempt = self.store.ensure_provider_run_allowed(attempt)?;
         if attempt.scope != CodingAttemptScope::WorkItemGroup {
             return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
                 attempt.id.clone(),
             ));
         }
-        self.execute_internal_pr_review_with_commands(&attempt, provider, command_rx)
+        let worktree_path = attempt
+            .worktree_path
+            .clone()
+            .ok_or_else(|| CodingWorkspaceEngineError::MissingWorktree(attempt.id.clone()))?;
+        let review_request_id = attempt
+            .review_request_id
+            .as_deref()
+            .ok_or_else(|| CodingWorkspaceEngineError::MissingReviewRequest(attempt.id.clone()))?;
+        let review_request = self.store.get_review_request(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            review_request_id,
+        )?;
+        let attempt = self.store.update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::InternalPrReview,
+        )?;
+        let node = self.create_internal_pr_review_timeline_node(&attempt)?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
+            .await;
+        let role_run = self.store.create_role_run(
+            &attempt,
+            CodingExecutionStage::InternalPrReview,
+            CodingProviderRole::InternalReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some(node.id.clone()),
+        )?;
+        let reviewer = self
+            .store
+            .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .internal_reviewer;
+        let executor = RealGroupReviewExecutor::new(
+            self,
+            attempt.clone(),
+            provider,
+            node.id.clone(),
+            role_run.clone(),
+            reviewer,
+        );
+        let orchestrator = GroupReviewOrchestrator::new(&executor, &self.store);
+        let bindings = self.authoritative_group_reviewer_bindings(&attempt)?;
+        let mut snapshots = Vec::with_capacity(bindings.len());
+        for binding in &bindings {
+            let Some(snapshot) = self
+                .store
+                .get_unit_review_conclusion_snapshot(&attempt.id, &binding.run.id)?
+            else {
+                let error = GroupReviewOrchestrationError::IdentityMissing;
+                let _ = orchestrator.create_failure_gate(&attempt, &node.id, &error);
+                return Err(map_group_review_orchestration_error(error));
+            };
+            snapshots.push(snapshot);
+        }
+        let git_facts = self
+            .collect_group_git_facts(&attempt, &bindings, &review_request, &worktree_path)
+            .await?;
+        let snapshot = match compile_group_review_material(
+            &bindings,
+            &snapshots,
+            &review_request,
+            &git_facts,
+            &GroupReviewPromptBuilder,
+            GROUP_REVIEW_QUALITY_TARGET_BYTES,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let orchestration_error = match error {
+                    super::group_review_types::GroupMaterialError::AuthorityValidation(_) => {
+                        GroupReviewOrchestrationError::IdentityMissing
+                    }
+                    error => {
+                        return Err(CodingWorkspaceEngineError::ProviderStream(
+                            error.to_string(),
+                        ));
+                    }
+                };
+                let _ = orchestrator.create_failure_gate(&attempt, &node.id, &orchestration_error);
+                return Err(map_group_review_orchestration_error(orchestration_error));
+            }
+        };
+        self.store
+            .activate_group_review_snapshot(&attempt.id, &snapshot.content_hash)?;
+
+        let shard_reports = match orchestrator.execute_shards(&snapshot).await {
+            Ok(reports) => reports,
+            Err(error) => {
+                let _ = orchestrator.create_failure_gate(&attempt, &node.id, &error);
+                return Err(map_group_review_orchestration_error(error));
+            }
+        };
+        let projection_bindings = bindings
+            .iter()
+            .map(|binding| binding.projection_binding.clone())
+            .collect::<Vec<_>>();
+        let reduction = match orchestrator
+            .execute_reduction(&snapshot, &shard_reports, &projection_bindings)
             .await
+        {
+            Ok(reduction) => reduction,
+            Err(error) => {
+                let _ = orchestrator.create_failure_gate(&attempt, &node.id, &error);
+                return Err(map_group_review_orchestration_error(error));
+            }
+        };
+        let raw_ref = reduction
+            .raw_provider_output_refs
+            .first()
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "group_review_reduction_raw_output_missing".to_string(),
+                )
+            })?
+            .clone();
+        let review = self
+            .store
+            .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .find(|review| review.raw_provider_output_ref.as_deref() == Some(raw_ref.as_str()))
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::ProviderStream(
+                    "group_review_internal_review_missing".to_string(),
+                )
+            })?;
+        let raw_refs = shard_reports
+            .iter()
+            .flat_map(|report| report.raw_provider_output_refs.iter().cloned())
+            .chain(reduction.raw_provider_output_refs.iter().cloned())
+            .collect::<Vec<_>>();
+        self.store.update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            raw_refs,
+            vec![review.id.clone()],
+        )?;
+        self.store.update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            CodingRoleRunStatus::Completed,
+            None,
+        )?;
+        let node_status = match review.verdict {
+            ReviewVerdict::Approve => CodingTimelineNodeStatus::Completed,
+            ReviewVerdict::RequestChanges => CodingTimelineNodeStatus::Failed,
+            ReviewVerdict::Blocked => CodingTimelineNodeStatus::Blocked,
+        };
+        self.complete_timeline_node(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &node.id,
+            node_status,
+            Some(review.summary.clone()),
+        )
+        .await?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::InternalPrReviewComplete {
+                review: Box::new(review.clone()),
+            })
+            .await;
+        Ok(review)
     }
 
     pub async fn execute_review_request(
