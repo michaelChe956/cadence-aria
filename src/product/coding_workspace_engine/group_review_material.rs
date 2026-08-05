@@ -338,14 +338,17 @@ fn deterministic_checks(
 
     let mut scope_overlaps = Vec::new();
     for (path, owners) in completion_paths {
-        let forbidden = bindings.iter().any(|binding| {
-            binding
-                .projection_binding
-                .projection
-                .scope_policy
-                .forbidden_scopes
-                .iter()
-                .any(|scope| scope_allows_path(scope, path, true))
+        let forbidden = owners.iter().any(|owner| {
+            bindings.iter().any(|binding| {
+                binding.run.id == *owner
+                    && binding
+                        .projection_binding
+                        .projection
+                        .scope_policy
+                        .forbidden_scopes
+                        .iter()
+                        .any(|scope| scope_allows_path(scope, path, true))
+            })
         });
         if forbidden {
             findings.push(finding(
@@ -733,14 +736,17 @@ fn build_diff_index(
         .map(|(path, (insertions, deletions))| {
             let owners = path_owners.get(&path).cloned().unwrap_or_default();
             let ambiguous = owners.len() != 1;
-            let forbidden = bindings.iter().any(|binding| {
-                binding
-                    .projection_binding
-                    .projection
-                    .scope_policy
-                    .forbidden_scopes
-                    .iter()
-                    .any(|scope| scope_allows_path(scope, &path, true))
+            let forbidden = owners.iter().any(|owner| {
+                bindings.iter().any(|binding| {
+                    binding.run.id == *owner
+                        && binding
+                            .projection_binding
+                            .projection
+                            .scope_policy
+                            .forbidden_scopes
+                            .iter()
+                            .any(|scope| scope_allows_path(scope, &path, true))
+                })
             });
             DiffFileEntry {
                 path,

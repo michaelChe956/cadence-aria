@@ -255,6 +255,48 @@ fn legacy_attempt_without_scope_deserializes_as_work_item_scope() {
 }
 
 #[test]
+fn saving_group_attempt_preserves_explicit_internal_reviewer_role_config() {
+    let (_tmp, store) = setup_store();
+    let group_attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+
+    let mut role_config = store
+        .get_role_provider_config_snapshot(PROJECT_ID, ISSUE_ID, &group_attempt.id)
+        .expect("bootstrap role config");
+    assert_eq!(role_config.internal_reviewer, ProviderName::Codex);
+
+    role_config.internal_reviewer = ProviderName::ClaudeCode;
+    store
+        .update_role_provider_config_snapshot(PROJECT_ID, ISSUE_ID, &group_attempt.id, role_config)
+        .expect("select internal reviewer");
+
+    store
+        .save_coding_attempt(&group_attempt)
+        .expect("save after group unit completion");
+
+    let persisted = store
+        .get_role_provider_config_snapshot(PROJECT_ID, ISSUE_ID, &group_attempt.id)
+        .expect("persisted role config");
+    assert_eq!(persisted.internal_reviewer, ProviderName::ClaudeCode);
+}
+
+#[test]
 fn creates_group_attempt_and_units_with_single_active_unit() {
     let (_tmp, store) = setup_store();
 

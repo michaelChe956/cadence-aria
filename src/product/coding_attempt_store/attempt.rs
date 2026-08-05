@@ -119,10 +119,6 @@ impl super::CodingAttemptStore {
             &self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
             attempt,
         )?;
-        write_json(
-            &self.role_provider_config_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
-            &CodingRoleProviderConfigSnapshot::from(&attempt.provider_config_snapshot),
-        )?;
         Ok(())
     }
 

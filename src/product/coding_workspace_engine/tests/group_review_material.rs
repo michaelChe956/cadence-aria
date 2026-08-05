@@ -256,6 +256,91 @@ fn material_keeps_handoff_dependency_in_same_shard() {
 }
 
 #[test]
+fn material_only_marks_paths_forbidden_by_their_owning_unit() {
+    let mut owner = binding(1, "owner", Vec::new(), Vec::new());
+    owner
+        .projection_binding
+        .projection
+        .scope_policy
+        .exclusive_scopes = vec!["package.json".to_string()];
+    let mut other = binding(2, "other", Vec::new(), Vec::new());
+    other
+        .projection_binding
+        .projection
+        .scope_policy
+        .forbidden_scopes = vec!["package.json".to_string()];
+    let bindings = vec![owner, other];
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let mut git_facts = facts(&bindings);
+    git_facts.completion_diffs[0].patch =
+        "diff --git a/package.json b/package.json\n@@ -0,0 +1 @@\n+{}\n".to_string();
+    git_facts.completion_diffs[0].file_stats = vec![DiffFileStat {
+        path: "package.json".to_string(),
+        insertions: 1,
+        deletions: 0,
+    }];
+
+    let result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &git_facts,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+
+    assert!(
+        !result.diff_index.files[0].forbidden_scope_hit,
+        "another unit's forbidden scope must not flag the owner's exclusive path"
+    );
+    assert!(
+        result
+            .deterministic_findings
+            .iter()
+            .all(|finding| finding.kind != "forbidden_scope_hit"),
+        "deterministic checks must use the path owner, not every binding"
+    );
+}
+
+#[test]
+fn material_marks_paths_forbidden_by_their_owning_unit() {
+    let mut owner = binding(1, "owner", Vec::new(), Vec::new());
+    owner
+        .projection_binding
+        .projection
+        .scope_policy
+        .forbidden_scopes = vec!["package.json".to_string()];
+    let bindings = vec![owner];
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let mut git_facts = facts(&bindings);
+    git_facts.completion_diffs[0].patch =
+        "diff --git a/package.json b/package.json\n@@ -0,0 +1 @@\n+{}\n".to_string();
+    git_facts.completion_diffs[0].file_stats = vec![DiffFileStat {
+        path: "package.json".to_string(),
+        insertions: 1,
+        deletions: 0,
+    }];
+
+    let result = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &git_facts,
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile");
+
+    assert!(result.diff_index.files[0].forbidden_scope_hit);
+    assert!(result.deterministic_findings.iter().any(|finding| {
+        finding.kind == "forbidden_scope_hit"
+            && finding.detail == "package.json"
+            && finding.related_unit_run_ids == ["run_owner"]
+    }));
+}
+
+#[test]
 fn material_indexes_hunks_and_marks_forbidden_scope() {
     let mut unit = binding(1, "one", Vec::new(), Vec::new());
     unit.projection_binding
