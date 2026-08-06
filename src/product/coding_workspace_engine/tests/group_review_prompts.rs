@@ -209,14 +209,41 @@ fn prompt_builder_measures_draft_shards_with_the_rendered_prompt() {
 
 #[test]
 fn shard_projects_only_relevant_routing_authority_while_reduction_receives_full_index() {
-    let snapshot = snapshot();
+    let mut snapshot = snapshot();
+    snapshot
+        .routing_authority_index
+        .push(RoutingAuthorityEntry {
+            source_unit_run_id: "run_c".to_string(),
+            source_logical_work_item_id: "work_c".to_string(),
+            source_work_item_revision_id: "revision_c".to_string(),
+            reason_code: "reason_run_c".to_string(),
+            allowed_route: PlanDefectRoute::CoderRework,
+            required_target_kind: None,
+            target_contract_refs: vec!["contract_c".to_string()],
+        });
+    snapshot.partition_result.cross_shard_edges = vec![
+        crate::product::coding_workspace_engine::group_review_types::CrossShardEdge {
+            edge_kind: "contract".to_string(),
+            from_unit_run_id: "run_a".to_string(),
+            to_unit_run_id: "run_b".to_string(),
+            detail: "direct shard relationship".to_string(),
+        },
+        crate::product::coding_workspace_engine::group_review_types::CrossShardEdge {
+            edge_kind: "contract".to_string(),
+            from_unit_run_id: "run_b".to_string(),
+            to_unit_run_id: "run_c".to_string(),
+            detail: "unrelated transitive relationship".to_string(),
+        },
+    ];
     let shard_prompt = build_shard_prompt(&snapshot, &shard(), None);
     let reduction_prompt = build_reduction_prompt(&snapshot, &[shard_report()], None);
 
     assert!(shard_prompt.routing_authority.contains("reason_run_a"));
-    assert!(!shard_prompt.routing_authority.contains("reason_run_b"));
+    assert!(shard_prompt.routing_authority.contains("reason_run_b"));
+    assert!(!shard_prompt.routing_authority.contains("reason_run_c"));
     assert!(reduction_prompt.routing_authority.contains("reason_run_a"));
     assert!(reduction_prompt.routing_authority.contains("reason_run_b"));
+    assert!(reduction_prompt.routing_authority.contains("reason_run_c"));
     assert_eq!(shard_prompt.measure().total, shard_prompt.join().len());
     assert_eq!(
         reduction_prompt.measure().total,

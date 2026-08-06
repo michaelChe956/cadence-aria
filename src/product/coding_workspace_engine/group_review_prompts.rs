@@ -222,15 +222,16 @@ fn authority_for_shard<'a>(
     snapshot: &'a GroupReviewMaterialSnapshot,
     shard: &GroupShardSpec,
 ) -> Vec<&'a RoutingAuthorityEntry> {
-    let mut relevant_unit_run_ids = shard
+    let shard_member_run_ids = shard
         .ordered_unit_run_ids
         .iter()
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
+    let mut relevant_unit_run_ids = shard_member_run_ids.clone();
 
     for edge in &snapshot.partition_result.cross_shard_edges {
-        if relevant_unit_run_ids.contains(edge.from_unit_run_id.as_str())
-            || relevant_unit_run_ids.contains(edge.to_unit_run_id.as_str())
+        if shard_member_run_ids.contains(edge.from_unit_run_id.as_str())
+            || shard_member_run_ids.contains(edge.to_unit_run_id.as_str())
         {
             relevant_unit_run_ids.insert(edge.from_unit_run_id.as_str());
             relevant_unit_run_ids.insert(edge.to_unit_run_id.as_str());
