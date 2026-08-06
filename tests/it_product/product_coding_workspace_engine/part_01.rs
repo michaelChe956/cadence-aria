@@ -429,6 +429,39 @@ async fn deleted_group_attempt_releases_transferred_shared_worktree_lock_by_owne
 }
 
 #[tokio::test]
+async fn dirty_group_delete_keeps_transferred_shared_worktree_lock() {
+    let (_root, paths, store, engine, attempt) =
+        running_group_engine_with_two_units_for_terminal_lock_tests();
+    let lifecycle = transferred_group_shared_worktree_lock(&paths, &attempt);
+    let worktree = attempt.worktree_path.as_deref().expect("group worktree");
+    fs::write(worktree.join("dirty.txt"), "uncommitted\n").expect("dirty group worktree");
+
+    let error = engine
+        .handle_delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect_err("dirty group delete keeps the transferred lock");
+
+    assert!(error.to_string().contains("shared_worktree_dirty_manual_gate"));
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("reload attempt")
+            .status,
+        CodingAttemptStatus::Running
+    );
+    let shared = lifecycle
+        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .expect("reload shared worktree")
+        .expect("shared worktree exists");
+    assert_eq!(
+        shared.current_active_work_item_id.as_deref(),
+        Some("work_item_0002")
+    );
+    assert_eq!(shared.current_lock_owner_id.as_deref(), Some(attempt.id.as_str()));
+    assert_eq!(shared.status, IssueSharedWorktreeStatus::Running);
+}
+
+#[tokio::test]
 async fn group_final_confirm_releases_transferred_shared_worktree_lock_by_owner() {
     let (_root, paths, _store, engine, attempt) = group_attempt_waiting_for_final_confirm();
     let lifecycle = LifecycleStore::new(paths.clone());

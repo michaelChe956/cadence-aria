@@ -266,6 +266,12 @@ impl CodingWorkspaceEngine {
         match current.scope {
             CodingAttemptScope::WorkItemGroup => {
                 self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
+                let shared_active_work_item_id = LifecycleStore::new(self.store.paths())
+                    .get_issue_shared_worktree(project_id, issue_id)?
+                    .and_then(|shared| shared.current_active_work_item_id)
+                    .unwrap_or_else(|| active_work_item_id.clone());
+                self.ensure_issue_shared_worktree_clean(&current, &shared_active_work_item_id)
+                    .await?;
             }
             CodingAttemptScope::WorkItem => {
                 self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
