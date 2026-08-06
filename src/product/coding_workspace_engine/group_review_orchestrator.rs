@@ -25,12 +25,14 @@ use super::group_review_errors::{
 use super::group_review_failure_reports::{
     persist_reduction_failure_report, persist_shard_failure_report,
 };
-use super::group_review_prompts::{build_repair_prompt, build_shard_prompt};
+use super::group_review_prompts::{authority_for_shard, build_repair_prompt, build_shard_prompt};
 #[cfg(test)]
 pub(crate) use super::group_review_repair::RepairFidelityError;
 pub(crate) use super::group_review_repair::{RepairError, RepairOutput, validate_repair_fidelity};
 use super::group_review_types::GroupReviewMaterialSnapshot;
-use super::plan_defect_routing::{GroupReviewerProjectionBinding, validate_group_reviewer_finding};
+use super::plan_defect_routing::{
+    GroupReviewerProjectionBinding, validate_group_review_finding_against_snapshot_authority,
+};
 use super::review_parser::{CodeReviewProviderPayload, parse_group_review_payload};
 use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
 use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
@@ -429,7 +431,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
         &self,
         snapshot: &GroupReviewMaterialSnapshot,
         shard_reports: &[GroupReviewShardReport],
-        authoritative_bindings: &[GroupReviewerProjectionBinding],
+        _authoritative_bindings: &[GroupReviewerProjectionBinding],
     ) -> Result<GroupReviewReductionReport, GroupReviewOrchestrationError> {
         if !has_all_shard_reports(snapshot, shard_reports) {
             return Err(GroupReviewOrchestrationError::ReductionNotReady);
@@ -448,6 +450,22 @@ impl<'a> GroupReviewOrchestrator<'a> {
                         && report.run_failure_code.is_none()
                 })
         {
+            if reduction.findings.iter().any(|finding| {
+                validate_group_review_finding_against_snapshot_authority(
+                    finding,
+                    &snapshot.routing_authority_index,
+                    None,
+                )
+                .is_err()
+            }) {
+                return Err(GroupReviewOrchestrationError::ReductionOutputInvalid {
+                    raw_ref: reduction
+                        .raw_provider_output_refs
+                        .last()
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+            }
             let Some(recovery_lease_id) = self.store.claim_group_review_lease(
                 &snapshot.attempt_id,
                 &snapshot.content_hash,
@@ -566,11 +584,20 @@ impl<'a> GroupReviewOrchestrator<'a> {
         let findings_exceeded =
             super::group_review_budget::check_reduction_findings(payload.findings.len())
                 == FindingsDecision::FindingsExceeded;
-        let findings = merge_findings(shard_reports, payload.findings);
-        let finding_contract_invalid = findings.iter().any(|finding| {
-            validate_group_reviewer_finding(finding, authoritative_bindings).is_err()
+        let finding_contract_invalid = payload.findings.iter().any(|finding| {
+            validate_group_review_finding_against_snapshot_authority(
+                finding,
+                &snapshot.routing_authority_index,
+                None,
+            )
+            .is_err()
         });
         let output_invalid = parsed.output_invalid || findings_exceeded || finding_contract_invalid;
+        let findings = if output_invalid {
+            Vec::new()
+        } else {
+            merge_findings(shard_reports, payload.findings)
+        };
         let verdict = reduce_verdict(
             shard_reports
                 .iter()
@@ -746,8 +773,21 @@ impl<'a> GroupReviewOrchestrator<'a> {
             )
             .await?;
         let payload = parsed.payload;
+        let allowed_source_unit_run_ids = authority_for_shard(snapshot, shard)
+            .into_iter()
+            .map(|entry| entry.source_unit_run_id.clone())
+            .collect::<Vec<_>>();
+        let finding_authority_invalid = payload.findings.iter().any(|finding| {
+            validate_group_review_finding_against_snapshot_authority(
+                finding,
+                &snapshot.routing_authority_index,
+                Some(&allowed_source_unit_run_ids),
+            )
+            .is_err()
+        });
         let output_invalid = parsed.output_invalid
-            || check_shard_findings(payload.findings.len()) == FindingsDecision::FindingsExceeded;
+            || check_shard_findings(payload.findings.len()) == FindingsDecision::FindingsExceeded
+            || finding_authority_invalid;
 
         let selected_diff_refs = snapshot
             .diff_index
@@ -770,7 +810,11 @@ impl<'a> GroupReviewOrchestrator<'a> {
             ordered_unit_run_ids: shard.ordered_unit_run_ids.clone(),
             partition_rationale: shard.partition_rationale.clone(),
             verdict: payload.verdict,
-            findings: payload.findings,
+            findings: if output_invalid {
+                Vec::new()
+            } else {
+                payload.findings
+            },
             unresolved_obligations: Vec::<GroupReviewObligation>::new(),
             selected_diff_refs,
             raw_provider_output_refs: parsed.raw_provider_output_refs,

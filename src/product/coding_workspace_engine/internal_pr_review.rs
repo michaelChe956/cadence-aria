@@ -680,12 +680,8 @@ impl CodingWorkspaceEngine {
                     .await;
             }
         };
-        let projection_bindings = bindings
-            .iter()
-            .map(|binding| binding.projection_binding.clone())
-            .collect::<Vec<_>>();
         let reduction = match orchestrator
-            .execute_reduction(&snapshot, &shard_reports, &projection_bindings)
+            .execute_reduction(&snapshot, &shard_reports, &[])
             .await
         {
             Ok(reduction) => reduction,

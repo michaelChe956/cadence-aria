@@ -15,12 +15,13 @@ use crate::product::coding_workspace_engine::group_review_orchestrator::{
     GroupReviewOrchestrator,
 };
 use crate::product::coding_workspace_engine::group_review_types::{
-    CompactContractInterface, ContractEdge, DeterministicGroupFinding, DiffFileEntry, DiffHunk,
-    GroupDiffIndex, GroupPartitionResult, GroupReviewGraph, GroupReviewMaterialSnapshot,
-    GroupShardSpec, PromptBudgetBreakdown, ReductionDiffSelection, RequirementCoverage,
-    ScopeOverlap, ShardDiffSelection, UnitCrossReviewRecord, UnitEvidenceSummary, UnitScopeSummary,
+    CompactContractInterface, ContractEdge, CrossShardEdge, DeterministicGroupFinding,
+    DiffFileEntry, DiffHunk, GroupDiffIndex, GroupPartitionResult, GroupReviewGraph,
+    GroupReviewMaterialSnapshot, GroupShardSpec, PromptBudgetBreakdown, ReductionDiffSelection,
+    RequirementCoverage, RoutingAuthorityEntry, ScopeOverlap, ShardDiffSelection,
+    UnitCrossReviewRecord, UnitEvidenceSummary, UnitScopeSummary,
 };
-use crate::product::models::ProviderName;
+use crate::product::models::{PlanDefectRoute, ProviderName};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use tempfile::TempDir;
 
@@ -312,6 +313,19 @@ fn material_snapshot(
             total_hunks_in_shard: 1,
         })
         .collect();
+    let routing_authority_index = unit_records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| RoutingAuthorityEntry {
+            source_unit_run_id: record.unit_run_id.clone(),
+            source_logical_work_item_id: record.logical_work_item_id.clone(),
+            source_work_item_revision_id: record.work_item_revision_id.clone(),
+            reason_code: format!("reason_run_{index:04}"),
+            allowed_route: PlanDefectRoute::VerificationRetry,
+            required_target_kind: None,
+            target_contract_refs: Vec::new(),
+        })
+        .collect();
     GroupReviewMaterialSnapshot {
         schema_version: 1,
         compiler_version: "test".to_string(),
@@ -320,7 +334,7 @@ fn material_snapshot(
         base_branch: "main".to_string(),
         final_commit: "final_commit".to_string(),
         authoritative_binding_digest: "binding_digest".to_string(),
-        routing_authority_index: Vec::new(),
+        routing_authority_index,
         unit_records,
         global_graph: GroupReviewGraph {
             contract_edges: Vec::<ContractEdge>::new(),
@@ -382,6 +396,47 @@ fn valid_review_output(finding_count: usize) -> String {
             "findings": findings,
         })
     )
+}
+
+fn verification_finding_output(reason_code: &str) -> String {
+    format!(
+        "GROUP_REVIEW_VERDICT\n{}",
+        serde_json::json!({
+            "verdict": "request_changes",
+            "summary": "verification evidence is missing",
+            "findings": [{
+                "severity": "error",
+                "message": "verification evidence is missing",
+                "defect_class": "verification_incomplete",
+                "reason_code": reason_code,
+                "recommended_route": "verification_retry",
+                "contract_refs": [],
+                "capability_refs": [],
+                "repair_target": null,
+                "confidence": "high"
+            }]
+        })
+    )
+}
+
+struct CrossShardAuthorityExecutor;
+
+#[async_trait::async_trait]
+impl GroupReviewExecutor for CrossShardAuthorityExecutor {
+    async fn execute(
+        &self,
+        prompt: &str,
+    ) -> Result<GroupReviewExecutionResult, GroupReviewExecutionError> {
+        let reason_code = if prompt.contains("shard_id: shard_0000\n") {
+            "reason_run_0001"
+        } else {
+            "reason_run_0000"
+        };
+        Ok(GroupReviewExecutionResult {
+            full_output: verification_finding_output(reason_code),
+            role_run_id: None,
+        })
+    }
 }
 
 #[tokio::test]
@@ -450,6 +505,63 @@ async fn execute_shards_parses_persists_and_returns_reports() {
             .expect("stored reports")
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn execute_shards_rejects_reason_code_owned_by_another_shard_before_success_cas() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(2, 2, "diff");
+    snapshot.attempt_id = attempt_id.clone();
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+
+    let error = GroupReviewOrchestrator::new(&CrossShardAuthorityExecutor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect_err("cross-shard authority must fail closed");
+
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ShardOutputInvalid { .. }
+    ));
+    let reports = store
+        .list_group_review_shard_reports(&attempt_id)
+        .expect("stored reports");
+    assert!(
+        reports
+            .iter()
+            .all(|report| report.run_failure_code.as_deref() == Some("shard_output_invalid")),
+        "cross-shard authority must not create a successful shard report"
+    );
+}
+
+#[tokio::test]
+async fn execute_shards_accepts_authority_projected_for_a_direct_cross_shard_edge() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = material_snapshot(2, 2, "diff");
+    snapshot.attempt_id = attempt_id.clone();
+    snapshot.partition_result.cross_shard_edges = vec![CrossShardEdge {
+        edge_kind: "contract".to_string(),
+        from_unit_run_id: "run_0000".to_string(),
+        to_unit_run_id: "run_0001".to_string(),
+        detail: "direct relationship".to_string(),
+    }];
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+
+    let reports = GroupReviewOrchestrator::new(&CrossShardAuthorityExecutor, &store)
+        .execute_shards(&snapshot)
+        .await
+        .expect("direct cross-shard authority is present in each shard prompt");
+
+    assert_eq!(reports.len(), 2);
+    assert!(
+        reports
+            .iter()
+            .all(|report| report.run_failure_code.is_none())
     );
 }
 

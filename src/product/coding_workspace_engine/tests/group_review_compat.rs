@@ -10,7 +10,7 @@ use crate::product::coding_workspace_engine::group_review_orchestrator::{
 };
 use crate::product::coding_workspace_engine::group_review_types::{
     GroupDiffIndex, GroupPartitionResult, GroupReviewGraph, GroupReviewMaterialSnapshot,
-    GroupShardSpec, ReductionDiffSelection,
+    GroupShardSpec, ReductionDiffSelection, RoutingAuthorityEntry,
 };
 use crate::product::coding_workspace_engine::plan_defect_routing::{
     GroupReviewerProjectionBinding, internal_review_flow_decision_with_bindings,
@@ -53,7 +53,15 @@ fn snapshot(attempt_id: String) -> GroupReviewMaterialSnapshot {
         base_branch: "main".to_string(),
         final_commit: "final".to_string(),
         authoritative_binding_digest: "binding".to_string(),
-        routing_authority_index: Vec::new(),
+        routing_authority_index: vec![RoutingAuthorityEntry {
+            source_unit_run_id: "run_0001".to_string(),
+            source_logical_work_item_id: "work_item_0001".to_string(),
+            source_work_item_revision_id: "revision_0001".to_string(),
+            reason_code: "verification_evidence_incomplete".to_string(),
+            allowed_route: PlanDefectRoute::VerificationRetry,
+            required_target_kind: None,
+            target_contract_refs: Vec::new(),
+        }],
         unit_records: Vec::new(),
         global_graph: GroupReviewGraph {
             contract_edges: Vec::new(),
@@ -83,7 +91,7 @@ fn snapshot(attempt_id: String) -> GroupReviewMaterialSnapshot {
         partition_result: GroupPartitionResult {
             shards: vec![GroupShardSpec {
                 shard_id: "a".to_string(),
-                ordered_unit_run_ids: Vec::new(),
+                ordered_unit_run_ids: vec!["run_0001".to_string()],
                 partition_rationale: Vec::new(),
             }],
             cross_shard_edges: Vec::new(),
@@ -220,21 +228,13 @@ async fn multi_finding_incident_drops_invalid_target_and_fails_closed_before_rou
     ]);
     let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
 
-    let shards = orchestrator
+    let error = orchestrator
         .execute_shards(&snapshot)
         .await
-        .expect("invalid repair_target must not cause shard_output_invalid");
-    assert_eq!(shards.len(), 1);
-    assert_eq!(shards[0].findings.len(), 2);
-    assert_eq!(shards[0].findings[0].repair_target, None);
-
-    let error = orchestrator
-        .execute_reduction(&snapshot, &shards, &[verification_binding()])
-        .await
-        .expect_err("invalid upstream human_triage + low finding must fail closed");
+        .expect_err("unauthorized plan finding must fail before shard persistence");
     assert!(matches!(
         error,
-        GroupReviewOrchestrationError::ReductionOutputInvalid { .. }
+        GroupReviewOrchestrationError::ShardOutputInvalid { .. }
     ));
     let reviews = store
         .list_internal_pr_reviews("project_0001", "issue_0001", &attempt_id)

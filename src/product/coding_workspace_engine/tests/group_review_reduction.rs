@@ -12,12 +12,15 @@ use crate::product::coding_workspace_engine::group_review_orchestrator::{
 };
 use crate::product::coding_workspace_engine::group_review_types::{
     GroupDiffIndex, GroupPartitionResult, GroupReviewGraph, GroupReviewMaterialSnapshot,
-    GroupShardSpec, ReductionDiffSelection,
+    GroupShardSpec, ReductionDiffSelection, RoutingAuthorityEntry,
 };
+use crate::product::coding_workspace_engine::plan_defect_routing::GroupReviewerProjectionBinding;
 use crate::product::models::{
     PlanDefectClass, PlanDefectEvidence, PlanDefectRoute, ProviderName, RepairTarget,
     RepairTargetKind,
 };
+use crate::product::work_item_contract::{BlockerRoute, BlockerRule, WorkItemWritePolicy};
+use crate::product::work_item_projection::ReviewerWorkItemProjection;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use tempfile::TempDir;
 
@@ -53,7 +56,18 @@ fn snapshot(attempt_id: String, shard_ids: &[&str]) -> GroupReviewMaterialSnapsh
         base_branch: "main".to_string(),
         final_commit: "final".to_string(),
         authoritative_binding_digest: "binding".to_string(),
-        routing_authority_index: Vec::new(),
+        routing_authority_index: shard_ids
+            .iter()
+            .map(|id| RoutingAuthorityEntry {
+                source_unit_run_id: format!("run_{id}"),
+                source_logical_work_item_id: format!("work_{id}"),
+                source_work_item_revision_id: format!("revision_{id}"),
+                reason_code: format!("reason_{id}"),
+                allowed_route: PlanDefectRoute::VerificationRetry,
+                required_target_kind: None,
+                target_contract_refs: Vec::new(),
+            })
+            .collect(),
         unit_records: Vec::new(),
         global_graph: GroupReviewGraph {
             contract_edges: Vec::new(),
@@ -85,13 +99,36 @@ fn snapshot(attempt_id: String, shard_ids: &[&str]) -> GroupReviewMaterialSnapsh
                 .iter()
                 .map(|id| GroupShardSpec {
                     shard_id: (*id).to_string(),
-                    ordered_unit_run_ids: Vec::new(),
+                    ordered_unit_run_ids: vec![format!("run_{id}")],
                     partition_rationale: Vec::new(),
                 })
                 .collect(),
             cross_shard_edges: Vec::new(),
         },
         content_hash: "snapshot_hash".to_string(),
+    }
+}
+
+fn drifting_story_amendment_binding() -> GroupReviewerProjectionBinding {
+    GroupReviewerProjectionBinding {
+        logical_work_item_id: "work_a".to_string(),
+        projection: ReviewerWorkItemProjection {
+            work_item_revision_id: "revision_a".to_string(),
+            criterion_refs: Vec::new(),
+            requirement_matrix: Vec::new(),
+            scope_policy: WorkItemWritePolicy {
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+            },
+            input_contract_checks: Vec::new(),
+            output_contract_checks: Vec::new(),
+            verification_evidence_rules: Vec::new(),
+            blocker_routing: vec![BlockerRule {
+                reason_code: "reason_a".to_string(),
+                route: BlockerRoute::StoryAmendment,
+                target_contract_refs: Vec::new(),
+            }],
+        },
     }
 }
 
@@ -444,6 +481,75 @@ async fn reduction_recovers_missing_internal_review_from_live_reduction() {
 }
 
 #[tokio::test]
+async fn reduction_recovery_revalidates_snapshot_authority_before_internal_review() {
+    let (_root, store, attempt_id) = setup();
+    let snapshot = snapshot(attempt_id.clone(), &["a"]);
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("active snapshot");
+    let attempt = store.find_attempt_by_id(&attempt_id).expect("attempt");
+    let output = "GROUP_REVIEW_VERDICT\n{\"verdict\":\"request_changes\",\"findings\":[{\"severity\":\"error\",\"message\":\"story contract is incomplete\",\"defect_class\":\"story_amendment_required\",\"reason_code\":\"reason_a\",\"recommended_route\":\"story_amendment\",\"contract_refs\":[],\"capability_refs\":[],\"repair_target\":null,\"confidence\":\"high\"}]}";
+    let raw_ref = store
+        .save_provider_raw_output(
+            &attempt,
+            CodingExecutionStage::InternalPrReview,
+            "group_review_reduction",
+            output,
+        )
+        .expect("raw output");
+    let finding =
+        crate::product::coding_workspace_engine::review_parser::parse_group_review_payload(
+            output,
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("parse provider output")
+        .findings
+        .pop()
+        .expect("finding");
+    store
+        .write_group_review_reduction_report_cas(
+            &attempt_id,
+            crate::product::coding_models::GroupReviewReductionReport {
+                id: "group_review_reduction_0001".to_string(),
+                attempt_id: attempt_id.clone(),
+                snapshot_hash: snapshot.content_hash.clone(),
+                shard_report_ids: vec!["group_review_shard_a".to_string()],
+                verdict: ReviewVerdict::RequestChanges,
+                findings: vec![finding],
+                impact_scope: Vec::new(),
+                pr_description: String::new(),
+                commit_message_suggestion: String::new(),
+                provenance: Vec::new(),
+                raw_provider_output_refs: vec![raw_ref],
+                role_run_ids: Vec::new(),
+                run_failure_code: None,
+            },
+        )
+        .expect("write reduction");
+    let executor = FakeGroupReviewExecutor::new(Vec::new());
+
+    let error = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_reduction(
+            &snapshot,
+            &[shard(&attempt_id, "a", ReviewVerdict::Approve, Vec::new())],
+            &[],
+        )
+        .await
+        .expect_err("recovery must reject a finding outside snapshot authority");
+
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ReductionOutputInvalid { .. }
+    ));
+    assert!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", &attempt_id)
+            .expect("reviews")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn reduction_reuses_completed_snapshot_result_without_provider_call() {
     let (_root, store, attempt_id) = setup();
     let snapshot = snapshot(attempt_id.clone(), &["a"]);
@@ -614,6 +720,87 @@ async fn reduction_rejects_invalid_authoritative_finding_target() {
         error,
         GroupReviewOrchestrationError::ReductionOutputInvalid { .. }
     ));
+}
+
+#[tokio::test]
+async fn reduction_rejects_route_allowed_only_by_drifting_binding_before_finding_persistence() {
+    let (_root, store, attempt_id) = setup();
+    let snapshot = snapshot(attempt_id.clone(), &["a"]);
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+    let output = "GROUP_REVIEW_VERDICT\n{\"verdict\":\"request_changes\",\"findings\":[{\"severity\":\"error\",\"message\":\"story contract is incomplete\",\"defect_class\":\"story_amendment_required\",\"reason_code\":\"reason_a\",\"recommended_route\":\"story_amendment\",\"contract_refs\":[],\"capability_refs\":[],\"repair_target\":null,\"confidence\":\"high\"}]}";
+    let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
+        full_output: output.to_string(),
+        role_run_id: None,
+    })]);
+
+    let error = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_reduction(
+            &snapshot,
+            &[shard(&attempt_id, "a", ReviewVerdict::Approve, Vec::new())],
+            &[drifting_story_amendment_binding()],
+        )
+        .await
+        .expect_err("snapshot authority must override a drifting projection binding");
+
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ReductionOutputInvalid { .. }
+    ));
+    let reports = store
+        .list_group_review_reduction_reports(&attempt_id)
+        .expect("reduction reports");
+    assert!(reports.iter().all(|report| report.findings.is_empty()));
+    assert!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", &attempt_id)
+            .expect("internal reviews")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn reduction_accepts_semantically_identical_authority_from_multiple_units() {
+    let (_root, store, attempt_id) = setup();
+    let mut snapshot = snapshot(attempt_id.clone(), &["a"]);
+    snapshot
+        .routing_authority_index
+        .push(RoutingAuthorityEntry {
+            source_unit_run_id: "run_b".to_string(),
+            source_logical_work_item_id: "work_b".to_string(),
+            source_work_item_revision_id: "revision_b".to_string(),
+            reason_code: "reason_a".to_string(),
+            allowed_route: PlanDefectRoute::VerificationRetry,
+            required_target_kind: None,
+            target_contract_refs: Vec::new(),
+        });
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+    let output = "GROUP_REVIEW_VERDICT\n{\"verdict\":\"request_changes\",\"findings\":[{\"severity\":\"error\",\"message\":\"verification evidence is missing\",\"defect_class\":\"verification_incomplete\",\"reason_code\":\"reason_a\",\"recommended_route\":\"verification_retry\",\"contract_refs\":[],\"capability_refs\":[],\"repair_target\":null,\"confidence\":\"high\"}]}";
+    let executor = FakeGroupReviewExecutor::new(vec![Ok(GroupReviewExecutionResult {
+        full_output: output.to_string(),
+        role_run_id: None,
+    })]);
+
+    let reduction = GroupReviewOrchestrator::new(&executor, &store)
+        .execute_reduction(
+            &snapshot,
+            &[shard(&attempt_id, "a", ReviewVerdict::Approve, Vec::new())],
+            &[],
+        )
+        .await
+        .expect("equivalent authority entries must be one semantic match");
+
+    assert_eq!(reduction.findings.len(), 1);
+    assert_eq!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", &attempt_id)
+            .expect("reviews")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

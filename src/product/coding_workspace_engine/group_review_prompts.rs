@@ -218,7 +218,7 @@ pub(crate) fn build_repair_prompt(raw_output: &str) -> PromptSegments {
     }
 }
 
-fn authority_for_shard<'a>(
+pub(crate) fn authority_for_shard<'a>(
     snapshot: &'a GroupReviewMaterialSnapshot,
     shard: &GroupShardSpec,
 ) -> Vec<&'a RoutingAuthorityEntry> {
