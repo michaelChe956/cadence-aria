@@ -33,7 +33,14 @@ impl CodingWorkspaceEngine {
                 attempt_id.to_string(),
             ));
         }
-        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+        match current.scope {
+            CodingAttemptScope::WorkItemGroup => {
+                self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
+            }
+            CodingAttemptScope::WorkItem => {
+                self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+            }
+        }
         match current.scope {
             CodingAttemptScope::WorkItemGroup => {
                 self.run_group_completion_gates(&current).await?;
@@ -52,13 +59,7 @@ impl CodingWorkspaceEngine {
         )?;
         if updated.scope == CodingAttemptScope::WorkItemGroup {
             self.mark_completed_group_work_items_if_present(&updated)?;
-            let current_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
-            self.release_issue_shared_worktree_lock_if_holder(
-                project_id,
-                issue_id,
-                &current_work_item_id,
-                &updated.id,
-            )?;
+            self.release_issue_shared_worktree_lock_for_attempt(project_id, issue_id, &updated.id)?;
         } else {
             let current_work_item_id = self.active_work_item_id_for_attempt(&updated);
             LifecycleStore::new(self.store.paths()).update_work_item_execution_status(
@@ -113,8 +114,19 @@ impl CodingWorkspaceEngine {
         if current.status == CodingAttemptStatus::Aborted {
             return Ok(current);
         }
-        let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
-        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+        let active_work_item_id = match current.scope {
+            CodingAttemptScope::WorkItemGroup => {
+                self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
+                LifecycleStore::new(self.store.paths())
+                    .get_issue_shared_worktree(project_id, issue_id)?
+                    .and_then(|shared| shared.current_active_work_item_id)
+                    .unwrap_or_else(|| self.active_work_item_id_for_attempt(&current).to_string())
+            }
+            CodingAttemptScope::WorkItem => {
+                self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+                self.active_work_item_id_for_attempt(&current).to_string()
+            }
+        };
         self.ensure_issue_shared_worktree_clean(&current, &active_work_item_id)
             .await?;
 
@@ -137,12 +149,21 @@ impl CodingWorkspaceEngine {
             attempt_id,
             CodingAttemptStatus::Aborted,
         )?;
-        self.release_issue_shared_worktree_lock_if_holder(
-            project_id,
-            issue_id,
-            &active_work_item_id,
-            attempt_id,
-        )?;
+        match updated.scope {
+            CodingAttemptScope::WorkItemGroup => {
+                self.release_issue_shared_worktree_lock_for_attempt(
+                    project_id, issue_id, attempt_id,
+                )?;
+            }
+            CodingAttemptScope::WorkItem => {
+                self.release_issue_shared_worktree_lock_if_holder(
+                    project_id,
+                    issue_id,
+                    &active_work_item_id,
+                    attempt_id,
+                )?;
+            }
+        }
         if let Some(node_id) = self.active_timeline_node_id(project_id, issue_id, attempt_id)? {
             let completed_at = Utc::now().to_rfc3339();
             self.store.update_timeline_node_status(
@@ -174,7 +195,16 @@ impl CodingWorkspaceEngine {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
-        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+        let scope = current.scope.clone();
+        let attempt_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
+        match scope {
+            CodingAttemptScope::WorkItemGroup => {
+                self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
+            }
+            CodingAttemptScope::WorkItem => {
+                self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+            }
+        }
         let updated = if current.status != CodingAttemptStatus::Failed {
             self.store.update_attempt_status(
                 project_id,
@@ -186,17 +216,42 @@ impl CodingWorkspaceEngine {
             current
         };
 
-        self.ensure_issue_shared_worktree_clean(
-            &updated,
-            self.active_work_item_id_for_attempt(&updated),
-        )
-        .await?;
-        self.release_issue_shared_worktree_lock_if_holder(
-            project_id,
-            issue_id,
-            self.active_work_item_id_for_attempt(&updated),
-            &updated.id,
-        )?;
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let active_work_item_id = match scope {
+            CodingAttemptScope::WorkItemGroup => lifecycle
+                .get_issue_shared_worktree(project_id, issue_id)?
+                .and_then(|shared| shared.current_active_work_item_id)
+                .unwrap_or(attempt_work_item_id),
+            CodingAttemptScope::WorkItem => attempt_work_item_id,
+        };
+        if let Err(error) = self
+            .ensure_issue_shared_worktree_clean(&updated, &active_work_item_id)
+            .await
+        {
+            tracing::warn!(
+                attempt_id = %updated.id,
+                error = %error,
+                "failed attempt shared worktree cleanup skipped"
+            );
+            return Ok(updated);
+        }
+        let release_result = match scope {
+            CodingAttemptScope::WorkItemGroup => self
+                .release_issue_shared_worktree_lock_for_attempt(project_id, issue_id, &updated.id),
+            CodingAttemptScope::WorkItem => self.release_issue_shared_worktree_lock_if_holder(
+                project_id,
+                issue_id,
+                &active_work_item_id,
+                &updated.id,
+            ),
+        };
+        if let Err(error) = release_result {
+            tracing::warn!(
+                attempt_id = %updated.id,
+                error = %error,
+                "failed attempt shared worktree lock release failed"
+            );
+        }
         Ok(updated)
     }
 
@@ -208,7 +263,14 @@ impl CodingWorkspaceEngine {
     ) -> Result<(), CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let active_work_item_id = self.active_work_item_id_for_attempt(&current).to_string();
-        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+        match current.scope {
+            CodingAttemptScope::WorkItemGroup => {
+                self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
+            }
+            CodingAttemptScope::WorkItem => {
+                self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+            }
+        }
         if current.status.is_active() {
             self.store.update_attempt_status(
                 project_id,
@@ -217,12 +279,21 @@ impl CodingWorkspaceEngine {
                 CodingAttemptStatus::Aborted,
             )?;
         }
-        self.release_issue_shared_worktree_lock_if_holder(
-            project_id,
-            issue_id,
-            &active_work_item_id,
-            attempt_id,
-        )?;
+        match current.scope {
+            CodingAttemptScope::WorkItemGroup => {
+                self.release_issue_shared_worktree_lock_for_attempt(
+                    project_id, issue_id, attempt_id,
+                )?;
+            }
+            CodingAttemptScope::WorkItem => {
+                self.release_issue_shared_worktree_lock_if_holder(
+                    project_id,
+                    issue_id,
+                    &active_work_item_id,
+                    attempt_id,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -317,7 +388,7 @@ impl CodingWorkspaceEngine {
                 attempt.id.clone(),
             ));
         }
-        self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
+        self.validate_attempt_issue_shared_worktree_owner_if_present(attempt)?;
         self.run_group_completion_gates(attempt).await?;
         let completed = self.store.update_attempt_status(
             &attempt.project_id,
@@ -326,11 +397,9 @@ impl CodingWorkspaceEngine {
             CodingAttemptStatus::Completed,
         )?;
         self.mark_completed_group_work_items_if_present(&completed)?;
-        let current_work_item_id = self.active_work_item_id_for_attempt(attempt).to_string();
-        self.release_issue_shared_worktree_lock_if_holder(
+        self.release_issue_shared_worktree_lock_for_attempt(
             &attempt.project_id,
             &attempt.issue_id,
-            &current_work_item_id,
             &attempt.id,
         )?;
         Ok(completed)

@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
 
 fn running_group_attempt() -> (
     tempfile::TempDir,
@@ -139,6 +140,165 @@ async fn coding_plan_repair_group_terminal_failure_fails_active_unit_and_skips_p
         recoverable_failed_code_review(&store, &failed)
             .expect("inspect fatal review failure")
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn group_review_material_failure_keeps_business_error_when_terminal_lock_was_transferred() {
+    let (root, store, attempt) = running_group_attempt();
+    let lifecycle = LifecycleStore::new(store.paths());
+    let shared_worktree = root.path().join("shared-worktree");
+    fs::create_dir_all(&shared_worktree).expect("create shared worktree");
+    init_test_git_repo(&shared_worktree);
+    fs::write(shared_worktree.join("dirty.txt"), "uncommitted\n").expect("dirty worktree");
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: attempt.branch_name.clone(),
+            worktree_path: shared_worktree,
+            base_branch: attempt.base_branch.clone(),
+        })
+        .expect("upsert shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("acquire first unit lock");
+    lifecycle
+        .transfer_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_0001",
+            "work_item_0002",
+            &attempt.id,
+        )
+        .expect("transfer lock to the second unit");
+    let node_id = "coding_node_0001";
+    store
+        .save_timeline_node(
+            &attempt,
+            CodingTimelineNode {
+                id: node_id.to_string(),
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::InternalPrReview,
+                title: "Group final review".to_string(),
+                status: CodingTimelineNodeStatus::Running,
+                agent_role: Some(CodingAgentRole::Reviewer),
+                summary: None,
+                started_at: "2026-08-06T00:00:00Z".to_string(),
+                completed_at: None,
+                artifact_refs: Vec::new(),
+            },
+        )
+        .expect("save group final review node");
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::InternalPrReview,
+            CodingProviderRole::InternalReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some(node_id.to_string()),
+        )
+        .expect("create group final review role run");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .finalize_group_review_failure(
+            &attempt,
+            node_id,
+            &role_run.id,
+            CodingWorkspaceEngineError::GroupReviewMaterial(
+                "unit_cross_review_record_exceeds_size_limit".into(),
+            ),
+        )
+        .await
+        .expect_err("group review material failure remains surfaced");
+
+    assert!(
+        error.to_string().contains("group_review_material_error"),
+        "terminal lock cleanup must not replace the business error: {error}"
+    );
+    let shared = lifecycle
+        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .expect("reload shared worktree")
+        .expect("shared worktree exists");
+    assert_eq!(
+        shared.current_active_work_item_id.as_deref(),
+        Some("work_item_0002")
+    );
+    assert_eq!(
+        shared.current_lock_owner_id.as_deref(),
+        Some(attempt.id.as_str())
+    );
+    assert_eq!(
+        shared.status,
+        crate::product::models::IssueSharedWorktreeStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn group_final_review_completion_uses_transferred_lock_owner_before_completion_gates() {
+    let (root, store, attempt) = running_group_attempt();
+    for unit in store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("coding units")
+    {
+        store
+            .update_coding_unit_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &unit.id,
+                CodingExecutionUnitStatus::Completed,
+                None,
+            )
+            .expect("complete coding unit");
+    }
+    let lifecycle = LifecycleStore::new(store.paths());
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: attempt.branch_name.clone(),
+            worktree_path: root.path().join("shared-worktree"),
+            base_branch: attempt.base_branch.clone(),
+        })
+        .expect("upsert shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("acquire first unit lock");
+    lifecycle
+        .transfer_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_0001",
+            "work_item_0002",
+            &attempt.id,
+        )
+        .expect("transfer lock to the second unit");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+
+    let error = engine
+        .complete_group_attempt_after_final_review(&attempt)
+        .await
+        .expect_err("missing completion commit still fails the completion gate");
+
+    assert!(
+        error.to_string().contains("completion_commit_missing"),
+        "group completion must pass owner preflight before later gates: {error}"
     );
 }
 

@@ -470,6 +470,22 @@ impl CodingWorkspaceEngine {
         }
     }
 
+    pub(crate) fn release_issue_shared_worktree_lock_for_attempt(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        if lifecycle
+            .get_issue_shared_worktree(project_id, issue_id)?
+            .is_some()
+        {
+            lifecycle.release_issue_worktree_lock_by_owner(project_id, issue_id, attempt_id)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn release_issue_shared_worktree_lock_if_holder(
         &self,
         project_id: &str,
@@ -485,6 +501,28 @@ impl CodingWorkspaceEngine {
         if shared.current_active_work_item_id.is_some() || shared.current_lock_owner_id.is_some() {
             lifecycle.release_issue_worktree_lock(project_id, issue_id, work_item_id, owner_id)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn validate_attempt_issue_shared_worktree_owner_if_present(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let Some(shared) =
+            lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+        else {
+            return Ok(());
+        };
+        let Some(active_work_item_id) = shared.current_active_work_item_id.as_deref() else {
+            return Ok(());
+        };
+        lifecycle.validate_issue_worktree_lock_owner(
+            &attempt.project_id,
+            &attempt.issue_id,
+            active_work_item_id,
+            &attempt.id,
+        )?;
         Ok(())
     }
 
