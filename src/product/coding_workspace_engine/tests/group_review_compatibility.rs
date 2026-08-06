@@ -138,7 +138,7 @@ async fn legacy_hash_fixture(
         })
         .expect("group attempt");
     // Reuse existing seed helper
-    super::seed_group_attempt_fixture(&store, &attempt, true, false);
+    super::seed_group_attempt_fixture_with_compact_routing(&store, &attempt, true, false);
 
     let revision_store =
         crate::product::work_item_revision_store::WorkItemRevisionStore::new(store.paths());

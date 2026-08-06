@@ -14,7 +14,7 @@ use crate::product::work_item_contract::ContractCompatibilityPolicy;
 const COMPILER_VERSION: &str = "group-review-material-compiler-v1";
 const SHARD_DIFF_BUDGET: usize = 10_500;
 const REDUCTION_DIFF_BUDGET: usize = 8_000;
-const MAX_UNIT_RECORD_BYTES: usize = 850;
+const MAX_UNIT_RECORD_BYTES: usize = 1200;
 
 #[derive(serde::Serialize)]
 pub(crate) struct GroupReviewMaterialSnapshotDraft {
@@ -258,15 +258,16 @@ fn compact_record(
 fn trim_record(record: &mut UnitCrossReviewRecord) -> Result<(), GroupMaterialError> {
     while serde_json::to_vec(&*record).map_or(0, |bytes| bytes.len()) > MAX_UNIT_RECORD_BYTES {
         if record.contract_interfaces.pop().is_some()
-            || record.routing_targets.pop().is_some()
             || record.dependency_ids.pop().is_some()
             || record.scope_summary.exclusive_scopes.pop().is_some()
             || record.scope_summary.forbidden_scopes.pop().is_some()
         {
             continue;
         }
+        // routing_targets 是执行正确性数据（provider 必须据此选 reason_code），
+        // 不能为了压缩体积而静默删除；其他字段都裁完仍超限时 fail-closed。
         return Err(GroupMaterialError::Internal(
-            "unit_cross_review_record_exceeds_850_bytes".to_string(),
+            "unit_cross_review_record_exceeds_size_limit".to_string(),
         ));
     }
     Ok(())

@@ -12,8 +12,8 @@ use crate::product::coding_workspace_engine::plan_defect_routing::{
     AuthoritativeGroupReviewerBinding, GroupReviewerProjectionBinding,
 };
 use crate::product::work_item_contract::{
-    BlockerRoute, ContractCompatibilityPolicy, PromisedOutputContract, RequiredInputContract,
-    VerificationCheck, WorkItemWritePolicy,
+    BlockerRoute, BlockerRule, ContractCompatibilityPolicy, PromisedOutputContract,
+    RequiredInputContract, VerificationCheck, WorkItemWritePolicy,
 };
 use crate::product::work_item_projection::{ReviewerRequirementCheck, ReviewerWorkItemProjection};
 
@@ -561,6 +561,77 @@ fn material_uses_provider_identity_for_contract_matching() {
 }
 
 #[test]
+fn material_preserves_routing_targets_while_trimming_non_authoritative_fields() {
+    let mut unit = binding(1, "trimmed", Vec::new(), Vec::new());
+    unit.projection_binding.projection.blocker_routing = vec![BlockerRule {
+        reason_code: "verification_command_failed".to_string(),
+        route: BlockerRoute::VerificationRetry,
+        target_contract_refs: vec!["contract-routing-authority".to_string()],
+    }];
+    unit.projection_binding.projection.input_contract_checks = (0..16)
+        .map(|index| RequiredInputContract {
+            contract_id: format!("contract-{index}-{}", "x".repeat(80)),
+            provider_logical_work_item_id: format!("work-{index}"),
+            required_capabilities: vec!["capability".repeat(12)],
+            compatibility_policy: ContractCompatibilityPolicy::RequireAll,
+        })
+        .collect();
+    unit.projection_binding.projection.scope_policy = WorkItemWritePolicy {
+        exclusive_scopes: vec![format!("src/{}", "exclusive/".repeat(60))],
+        forbidden_scopes: vec![format!("src/{}", "forbidden/".repeat(60))],
+    };
+    let snapshots = vec![snapshot(&unit)];
+    let result = compile_group_review_material(
+        std::slice::from_ref(&unit),
+        &snapshots,
+        &request(),
+        &facts(std::slice::from_ref(&unit)),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("non-authoritative fields should be trim-able");
+    let record = result.unit_records.first().expect("unit record");
+
+    assert_eq!(record.routing_targets.len(), 1);
+    assert_eq!(
+        record.routing_targets[0].reason_code,
+        "verification_command_failed"
+    );
+    assert_eq!(record.routing_targets[0].allowed_route, "VerificationRetry");
+    assert_eq!(
+        record.routing_targets[0].target_contract_refs,
+        ["contract-routing-authority"]
+    );
+    // routing_targets 是权威数据，必须完整保留；其他字段可能被裁（取决于超限程度）
+    // 核心断言：routing_targets 不被裁，其他可裁字段被压缩
+    assert!(!record.routing_targets.is_empty());
+}
+
+#[test]
+fn material_fails_closed_when_routing_targets_alone_exceed_limit() {
+    let mut unit = binding(1, "routing-oversized", Vec::new(), Vec::new());
+    unit.projection_binding.projection.blocker_routing = vec![BlockerRule {
+        reason_code: "routing-authority".repeat(50),
+        route: BlockerRoute::VerificationRetry,
+        target_contract_refs: vec!["contract-ref".repeat(70)],
+    }];
+    let snapshots = vec![snapshot(&unit)];
+    let error = compile_group_review_material(
+        std::slice::from_ref(&unit),
+        &snapshots,
+        &request(),
+        &facts(std::slice::from_ref(&unit)),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect_err("oversized routing authority must fail closed");
+
+    assert!(
+        matches!(error, crate::product::coding_workspace_engine::group_review_types::GroupMaterialError::Internal(message) if message == "unit_cross_review_record_exceeds_size_limit")
+    );
+}
+
+#[test]
 fn material_rejects_uncompressible_oversized_record() {
     let mut unit = binding(1, "oversized", Vec::new(), Vec::new());
     unit.run.id = "x".repeat(900);
@@ -575,7 +646,7 @@ fn material_rejects_uncompressible_oversized_record() {
     )
     .expect_err("oversized identity must fail");
     assert!(
-        matches!(error, crate::product::coding_workspace_engine::group_review_types::GroupMaterialError::Internal(message) if message == "unit_cross_review_record_exceeds_850_bytes")
+        matches!(error, crate::product::coding_workspace_engine::group_review_types::GroupMaterialError::Internal(message) if message == "unit_cross_review_record_exceeds_size_limit")
     );
 }
 

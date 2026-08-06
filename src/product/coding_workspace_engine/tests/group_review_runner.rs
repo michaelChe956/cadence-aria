@@ -233,7 +233,7 @@ async fn group_review_runner_fixture(
             max_auto_rework: 2,
         })
         .expect("group attempt");
-    seed_group_attempt_fixture(&store, &attempt, true, false);
+    seed_group_attempt_fixture_with_compact_routing(&store, &attempt, true, false);
     let revision_store = WorkItemRevisionStore::new(store.paths());
     let lineage = revision_store
         .get_plan_lineage(

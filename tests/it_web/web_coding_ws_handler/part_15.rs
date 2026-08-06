@@ -1,4 +1,12 @@
 fn authoritative_group_blocker_rules_fixture() -> Vec<BlockerRule> {
+    vec![BlockerRule {
+        reason_code: "current_work_item_contract_invalid".to_string(),
+        route: BlockerRoute::PlanRepairCurrent,
+        target_contract_refs: Vec::new(),
+    }]
+}
+
+fn reviewer_triggered_rework_blocker_rules_fixture() -> Vec<BlockerRule> {
     vec![
         BlockerRule {
             reason_code: "current_work_item_contract_invalid".to_string(),

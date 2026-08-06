@@ -108,7 +108,7 @@ fn app_with_group_full_chain_attempt_fixture(
             max_auto_rework: 2,
         },
     );
-    seed_authoritative_group_plan_fixture(&store, &attempt);
+    seed_authoritative_group_plan_fixture(&store, &attempt, false);
     store
         .create_coding_unit(CreateCodingExecutionUnitInput {
             attempt_id: attempt.id.clone(),

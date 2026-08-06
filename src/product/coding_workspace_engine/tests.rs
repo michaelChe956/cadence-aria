@@ -47,6 +47,24 @@ fn seed_group_attempt_fixture(
         with_dependency,
         true,
         &[],
+        false,
+    );
+}
+
+fn seed_group_attempt_fixture_with_compact_routing(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    initialize_attempt: bool,
+    with_dependency: bool,
+) {
+    seed_group_attempt_fixture_with_legacy_work_items(
+        store,
+        attempt,
+        initialize_attempt,
+        with_dependency,
+        true,
+        &[],
+        true,
     );
 }
 
@@ -64,6 +82,7 @@ fn seed_schema_v2_group_attempt_fixture(
         with_dependency,
         false,
         verification_checks,
+        false,
     );
 }
 
@@ -74,6 +93,7 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
     with_dependency: bool,
     include_legacy_work_items: bool,
     verification_checks: &[VerificationCheck],
+    compact_routing: bool,
 ) {
     let lifecycle = LifecycleStore::new(store.paths());
     let work_items = [
@@ -182,33 +202,41 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
                 provided_contract_refs: vec![format!("contract_{work_item_id}")],
                 reviewer_check_refs: Vec::new(),
             },
-            blocker_rules: vec![
-                BlockerRule {
-                    reason_code: "current_work_item_contract_invalid".to_string(),
-                    route: BlockerRoute::PlanRepairCurrent,
-                    target_contract_refs: Vec::new(),
-                },
-                BlockerRule {
-                    reason_code: "story_scope_invalid".to_string(),
-                    route: BlockerRoute::StoryAmendment,
-                    target_contract_refs: Vec::new(),
-                },
-                BlockerRule {
-                    reason_code: "design_constraint_invalid".to_string(),
-                    route: BlockerRoute::DesignAmendment,
-                    target_contract_refs: Vec::new(),
-                },
-                BlockerRule {
-                    reason_code: "verification_incomplete".to_string(),
+            blocker_rules: if compact_routing {
+                vec![BlockerRule {
+                    reason_code: "route".to_string(),
                     route: BlockerRoute::VerificationRetry,
                     target_contract_refs: Vec::new(),
-                },
-                BlockerRule {
-                    reason_code: "operational_blocker".to_string(),
-                    route: BlockerRoute::OperationalGate,
-                    target_contract_refs: Vec::new(),
-                },
-            ],
+                }]
+            } else {
+                vec![
+                    BlockerRule {
+                        reason_code: "current_work_item_contract_invalid".to_string(),
+                        route: BlockerRoute::PlanRepairCurrent,
+                        target_contract_refs: Vec::new(),
+                    },
+                    BlockerRule {
+                        reason_code: "story_scope_invalid".to_string(),
+                        route: BlockerRoute::StoryAmendment,
+                        target_contract_refs: Vec::new(),
+                    },
+                    BlockerRule {
+                        reason_code: "design_constraint_invalid".to_string(),
+                        route: BlockerRoute::DesignAmendment,
+                        target_contract_refs: Vec::new(),
+                    },
+                    BlockerRule {
+                        reason_code: "verification_incomplete".to_string(),
+                        route: BlockerRoute::VerificationRetry,
+                        target_contract_refs: Vec::new(),
+                    },
+                    BlockerRule {
+                        reason_code: "operational_blocker".to_string(),
+                        route: BlockerRoute::OperationalGate,
+                        target_contract_refs: Vec::new(),
+                    },
+                ]
+            },
             design_traceability: Vec::new(),
         };
         let work_item_revision = WorkItemRevision {

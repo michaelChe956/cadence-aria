@@ -267,17 +267,40 @@ fn shard_and_reduction_prompts_require_the_shared_parseable_json_conclusion_cont
             "{provider} must receive the plan-repair target combinations"
         );
         assert!(
-            prompt.fixed_protocol.contains(
-                "Use high or medium confidence for findings that may advance automatically; low confidence enters human triage."
-            ),
-            "{provider} must receive the automatic-routing confidence constraint"
+            !prompt
+                .fixed_protocol
+                .contains("verification_evidence_incomplete"),
+            "{provider} must not receive a hard-coded reason_code example"
         );
         assert!(
-            prompt
-                .fixed_protocol
-                .contains("confidence values are high, medium, or low."),
-            "{provider} must receive the confidence enum"
+            prompt.fixed_protocol.contains(
+                "copy its reason_code VERBATIM. Never invent, translate, paraphrase, or generalize a reason_code."
+            ),
+            "{provider} must receive authoritative routing reason_code constraints"
         );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "If no routing_targets entry applies to what you observed, do NOT invent a plan-defect finding. Emit a plain implementation finding instead"
+            ) && prompt.fixed_protocol.contains("reason_code=null")
+                && prompt.fixed_protocol.contains("recommended_route=coder_rework"),
+            "{provider} must receive the implementation fallback"
+        );
+        assert!(
+            !prompt
+                .fixed_protocol
+                .contains("low confidence enters human triage")
+                && prompt
+                    .fixed_protocol
+                    .contains("confidence MUST be high or medium"),
+            "{provider} must receive the supported confidence constraint"
+        );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "A shard conclusion MUST contain at most 8 findings; a reduction conclusion MUST contain at most 16 findings."
+            ),
+            "{provider} must receive findings limits"
+        );
+
         assert!(
             prompt
                 .fixed_protocol
