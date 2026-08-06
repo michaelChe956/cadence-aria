@@ -23,7 +23,7 @@ use super::group_review_errors::{
     GROUP_REVIEW_FAILURE_REASON_CODES, GroupReviewExecutionError, GroupReviewOrchestrationError,
 };
 use super::group_review_failure_reports::{
-    persist_reduction_failure_report, persist_shard_failure_report,
+    ShardLeaseCleanup, persist_reduction_failure_report, persist_shard_failure_report,
 };
 use super::group_review_prompts::{authority_for_shard, build_repair_prompt, build_shard_prompt};
 #[cfg(test)]
@@ -880,41 +880,6 @@ impl ParsedGroupReviewOutput {
             },
             raw_provider_output_refs: vec![raw_ref],
             output_invalid: true,
-        }
-    }
-}
-
-struct ShardLeaseCleanup<'a> {
-    store: &'a CodingAttemptStore,
-    attempt_id: &'a str,
-    lease_ids: Vec<String>,
-}
-
-impl<'a> ShardLeaseCleanup<'a> {
-    fn new(store: &'a CodingAttemptStore, attempt_id: &'a str) -> Self {
-        Self {
-            store,
-            attempt_id,
-            lease_ids: Vec::new(),
-        }
-    }
-
-    fn claim(&mut self, lease_id: String) {
-        self.lease_ids.push(lease_id);
-    }
-
-    fn complete(&mut self, lease_id: &str) {
-        self.lease_ids
-            .retain(|claimed_lease_id| claimed_lease_id != lease_id);
-    }
-}
-
-impl Drop for ShardLeaseCleanup<'_> {
-    fn drop(&mut self) {
-        for lease_id in &self.lease_ids {
-            let _ = self
-                .store
-                .release_group_review_lease(self.attempt_id, lease_id, "");
         }
     }
 }

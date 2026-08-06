@@ -7,6 +7,41 @@ use crate::product::coding_models::{
 use super::group_review_errors::GroupReviewOrchestrationError;
 use super::group_review_types::{GroupReviewMaterialSnapshot, GroupShardSpec};
 
+pub(super) struct ShardLeaseCleanup<'a> {
+    store: &'a CodingAttemptStore,
+    attempt_id: &'a str,
+    lease_ids: Vec<String>,
+}
+
+impl<'a> ShardLeaseCleanup<'a> {
+    pub(super) fn new(store: &'a CodingAttemptStore, attempt_id: &'a str) -> Self {
+        Self {
+            store,
+            attempt_id,
+            lease_ids: Vec::new(),
+        }
+    }
+
+    pub(super) fn claim(&mut self, lease_id: String) {
+        self.lease_ids.push(lease_id);
+    }
+
+    pub(super) fn complete(&mut self, lease_id: &str) {
+        self.lease_ids
+            .retain(|claimed_lease_id| claimed_lease_id != lease_id);
+    }
+}
+
+impl Drop for ShardLeaseCleanup<'_> {
+    fn drop(&mut self) {
+        for lease_id in &self.lease_ids {
+            let _ = self
+                .store
+                .release_group_review_lease(self.attempt_id, lease_id, "");
+        }
+    }
+}
+
 pub(crate) fn persist_shard_failure_report(
     store: &CodingAttemptStore,
     snapshot: &GroupReviewMaterialSnapshot,
