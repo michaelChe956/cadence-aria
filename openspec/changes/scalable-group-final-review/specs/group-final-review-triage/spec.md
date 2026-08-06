@@ -45,6 +45,32 @@
 - **WHEN** 分别以容量超限、材料溢出、分片输出无效、归约输出无效、权威身份缺失落地门禁
 - **THEN** 五次落地的原因码 MUST 互不相同，且 MUST 与既有人工路由决策的原因码互不相同
 
+### Requirement: 组级审查进入终态时必须按 Attempt owner 释放共享 worktree 锁
+
+组级审查使 Coding Attempt 进入失败、用户终止、删除、最终确认或组完成终态时，系统 MUST 通过统一的 owner-based 释放入口处理共享 worktree 锁。该入口 MUST 仅以 attempt_id 与持久化的 current_lock_owner_id 是否相等判断是否释放，MUST NOT 以 current_work_item_id、回退的首个 Work Item 或调用方传入的 Work Item 作为前置条件。
+
+锁不存在或 owner 不匹配时 MUST 幂等 no-op；owner 匹配时 MUST 清除该 attempt 所拥有的共享锁和运行态游标。清理错误 MUST 记录为诊断，MUST NOT 覆盖已经确定的材料、Provider 或业务失败原因，也 MUST NOT 阻止 Attempt 进入原定终态。
+
+#### Scenario: 组级材料失败释放已转移的共享锁
+
+- **WHEN** 组级审查因材料编译失败而使 Attempt 失败，且该 Attempt 拥有的共享锁已转移到不是首个 Work Item 的 Work Item
+- **THEN** 系统 MUST 按 attempt owner 释放该锁，MUST 保留材料编译失败作为用户可见的原始失败原因
+
+#### Scenario: 终态释放不依赖当前 Work Item
+
+- **WHEN** 一个进入失败、用户终止、删除、最终确认或组完成终态的 Attempt 的 current_work_item_id 为空或与共享锁记录的 active Work Item 不同
+- **THEN** 系统 MUST 仍按 attempt owner 尝试释放共享锁，MUST NOT 因 Work Item 不匹配留下锁
+
+#### Scenario: 不属于该 Attempt 的锁保持不变
+
+- **WHEN** 一个终态 Attempt 尝试清理共享 worktree 锁，但 current_lock_owner_id 属于另一 Attempt
+- **THEN** 系统 MUST 不修改该锁，并将此次清理视为成功的幂等 no-op
+
+#### Scenario: 清理错误不覆盖原始失败
+
+- **WHEN** 组级审查已确定材料或 Provider 失败，随后 owner-based 锁释放发生存储错误
+- **THEN** 系统 MUST 保留并返回原始失败原因，MAY 记录锁清理诊断，但 MUST NOT 将用户可见失败替换为锁清理错误
+
 ### Requirement: 组级失败门禁必须提供按环节重试的动作
 
 组级审查的失败门禁 MUST 提供重试动作，且重试 MUST 只作用于失败环节。

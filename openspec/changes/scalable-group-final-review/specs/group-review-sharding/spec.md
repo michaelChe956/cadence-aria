@@ -67,6 +67,39 @@
 - **WHEN** 系统度量某次 Provider 输入的字节数
 - **THEN** 度量对象 MUST 为实际发送的完整 Prompt 的 UTF-8 字节数，MUST NOT 仅统计业务材料部分
 
+### Requirement: 路由权限必须作为快照级权威材料投影给分片与归约
+
+系统 MUST 从权威 Binding 与既有组级目标校验规则编译不可变的 routing authority index。每个权限条目 MUST 包含合法的 reason_code、目标 Work Item Revision、路由种类与所需契约引用。该索引 MUST 稳定排序、纳入快照内容哈希，且 MUST NOT 由 UnitCrossReviewRecord 或 Provider 文本推断补全。
+
+UnitCrossReviewRecord MUST 只保留身份、Commit、依赖、范围、契约与验证摘要，MUST NOT 内嵌完整 reason_code、路由目标或权限集合；系统 MUST 保持既有单条 1,200-byte 持久化上限，MUST NOT 通过提高该上限保存完整权限。
+
+分片 Prompt MUST 只携带与本分片 Unit 或跨片边相关的权限投影；归约 Prompt MUST 携带同一快照的完整权限索引。权限投影 MUST 计入实际发送 Prompt 的字节预算，MUST NOT 静默截断 reason_code、目标 Revision、路由种类或契约引用。
+
+#### Scenario: 分片 Prompt 只携带可路由到本分片的权限
+
+- **WHEN** 系统为一个分片构建审查 Prompt
+- **THEN** Prompt MUST 包含该分片 Unit 及其跨片关系所需的完整权限条目，MUST NOT 包含与该分片无关的可路由目标
+
+#### Scenario: 归约 Prompt 携带全量权限
+
+- **WHEN** 系统为归约阶段构建 Prompt
+- **THEN** Prompt MUST 包含 active 快照的完整权限索引，使 Provider 能判定每个合法 reason_code、目标 Work Item Revision、路由种类与契约引用
+
+#### Scenario: 权限缺失时不得调用 Provider
+
+- **WHEN** 编译分片或归约 Prompt 所需的权限条目缺失、无法从权威 Binding 唯一解析，或包含的权限投影超过 Prompt 硬上限
+- **THEN** 系统 MUST 在调用 Provider 前失败关闭，并记录可诊断的权限或材料溢出原因
+
+#### Scenario: 分片输出在落库前按权限投影校验
+
+- **WHEN** 分片 Provider 返回可解析结论
+- **THEN** 系统 MUST 在持久化该结论前校验每个 finding 的 reason_code、目标 Work Item Revision、路由种类与契约引用均属于该分片的权限投影；任一项不匹配 MUST 视为分片输出无效
+
+#### Scenario: 归约输出在路由前按完整权限校验
+
+- **WHEN** 归约 Provider 返回可解析结论
+- **THEN** 系统 MUST 在持久化、分诊或路由前校验每个 finding 的 reason_code、目标 Work Item Revision、路由种类与契约引用均属于快照的完整权限索引；任一项不匹配 MUST 视为归约输出无效，MUST NOT 猜测或选择首个 Work Item 作为目标
+
 ### Requirement: 组级审查必须按确定性分片规则切分并逐片审查
 
 组级审查 MUST 使用确定性分片规则把参与审查的 Work Item 切分为分片，每个分片 MUST NOT 超过 4 个 Work Item，并 MUST 逐片执行语义审查。同一输入 MUST 产生同一分片结果，MUST NOT 依赖权重打分、随机数或并发顺序。

@@ -83,15 +83,24 @@ Authoritative Bindings / ReviewRequest / Unit Review Conclusion Snapshots / Git 
 - diff_index（变更文件完整索引）；
 - deterministic_findings（确定性检查产出的候选发现）；
 - partition_result（分片结果与跨片边集合）；
+- routing_authority_index（按 reason_code、目标 Work Item Revision、允许路由与契约引用建立的规范性路由权限索引）；
 - content_hash。
 
 快照采用稳定排序与规范化序列化：所有集合按字典序排序，序列化输出不含时间戳、随机数或环境相关字段；content_hash 为规范化字节的 SHA-256。重试必须复用同一快照。以下事实变化时生成新快照并使旧快照标记 superseded：Work Item 返修产生新的完成 Commit、Work Item Revision 变化、Handoff Revision 变化、审查请求 Commit 变化、权威 Binding 变化。
 
 ### 单位记录与全局账目
 
-分片使用的单位记录（UnitCrossReviewRecord）保留组级语义必需内容：身份标识（unit_id、unit_run_id、logical_work_item_id、work_item_revision_id、completion_commit）、依赖关系、写入范围摘要、契约接口摘要、证据状态摘要、可路由目标摘要。它不复制完整 Reviewer Projection。
+分片使用的单位记录（UnitCrossReviewRecord）只保留组级语义必需内容：身份标识（unit_id、unit_run_id、logical_work_item_id、work_item_revision_id、completion_commit）、依赖关系、写入范围摘要、契约接口摘要与证据状态摘要。它不复制完整 Reviewer Projection，也不得内嵌 reason_code、路由目标或完整路由权限；这些内容只存在于快照级 routing_authority_index。该拆分保持既有单条 1,200-byte 持久化上限，不以提高该上限换取材料容量。
 
 归约使用的全局账目行（GlobalUnitLedgerRow）进一步折叠为：身份摘要、所属分片、Commit 状态、证据状态、共享范围标记、未决接口计数。
+
+### 路由权限索引与 Prompt 投影
+
+材料编译器从权威 Binding 和既有目标校验规则一次性生成 routing_authority_index。每个条目至少包含 reason_code、允许的目标 Work Item Revision、允许的路由种类以及必需的契约引用；索引与其他快照字段一起稳定排序、规范化序列化并纳入 content_hash。它是 Provider 所见路由权限的唯一来源，不能由 UnitCrossReviewRecord、分片报告或自然语言推断补全。
+
+分片 Prompt 只投影与该分片 Unit 或其跨片边相关的权限条目；归约 Prompt 必须投影同一快照的完整权限索引，因为归约可以把最终发现路由给任一参与 Work Item。二者均把权限索引计入完整 Prompt 的字节预算，且不得静默裁剪 reason_code、目标 Revision 或契约引用。若所需权限缺失，或完整 Prompt 超过硬上限，编译在调用 Provider 前失败关闭。
+
+Provider 输出解析后，分片结果在持久化前必须以其分片权限投影校验；归约结果在持久化、分诊或路由前必须以完整权限索引校验。任何不存在的 reason_code、不允许的目标、路由种类或契约引用均为无效输出，不能通过猜测、改写为普通 finding 或选择首个 Work Item 修复。
 
 ### 单位审查结论身份快照
 
@@ -173,7 +182,7 @@ order index 取自权威 Binding 解析出的 Unit 顺序；order index 相同�
 | 归约结论最大发现数 | 16 | 硬契约 |
 | 分片并发上限 | 2 | 可配置默认值 |
 
-每次构建 Prompt 后记录分段字节：fixed_protocol、identity、unit_records、evidence_digest、graph、diff、retry_diagnostic_reserve、total。
+每次构建 Prompt 后记录分段字节：fixed_protocol、identity、unit_records、routing_authority、evidence_digest、graph、diff、retry_diagnostic_reserve、total。
 
 行为规则：不超过质量目标时正常发送；介于质量目标与硬上限之间时发送并记录预算告警；超过硬上限时禁止调用 Provider，持久化包含各分段字节的溢出诊断。单个字段超限时不得静默截断身份与契约标识，应进一步分片或进入溢出门禁。
 
@@ -256,6 +265,12 @@ order index 取自权威 Binding 解析出的 Unit 顺序；order index 相同�
 ### 前端
 
 首期最终用户可见结果继续为 InternalPrReview；分片与归约产物先作为后端审计数据，前端仅需表达组级分片进行中与可重试状态。
+
+## Attempt 与共享 worktree 锁的终态清理
+
+共享 worktree 锁的所有权属于 Coding Attempt，而不是某一时刻的 active Work Item。组级审查的失败、用户终止、attempt 删除、最终确认与组完成均必须走同一 owner-based 释放入口：仅当持久化锁的 current_lock_owner_id 等于该 attempt_id 时清除锁与运行态游标；不匹配或锁不存在时幂等 no-op。终态释放不得以 current_work_item_id、回退得到的首个 Work Item 或调用方传入的 Work Item 作为前置条件。
+
+若业务流程已产生失败原因，锁释放或清理自身的异常只能记录为诊断，不能覆盖原始失败原因、转换 attempt 为另一种失败，或阻止其进入终态。这样已在 Work Item 间转移的共享锁不会因组级材料失败而成为孤儿锁。
 
 ## 权衡
 
