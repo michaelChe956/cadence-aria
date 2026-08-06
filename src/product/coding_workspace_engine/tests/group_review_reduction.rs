@@ -520,7 +520,7 @@ async fn reduction_recovery_revalidates_snapshot_authority_before_internal_revie
                 pr_description: String::new(),
                 commit_message_suggestion: String::new(),
                 provenance: Vec::new(),
-                raw_provider_output_refs: vec![raw_ref],
+                raw_provider_output_refs: vec![raw_ref.clone()],
                 role_run_ids: Vec::new(),
                 run_failure_code: None,
             },
@@ -541,6 +541,16 @@ async fn reduction_recovery_revalidates_snapshot_authority_before_internal_revie
         error,
         GroupReviewOrchestrationError::ReductionOutputInvalid { .. }
     ));
+    let reports = store
+        .list_group_review_reduction_reports(&attempt_id)
+        .expect("reduction reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        reports[0].run_failure_code.as_deref(),
+        Some("reduction_output_invalid")
+    );
+    assert!(reports[0].findings.is_empty());
+    assert_eq!(reports[0].raw_provider_output_refs, vec![raw_ref]);
     assert!(
         store
             .list_internal_pr_reviews("project_0001", "issue_0001", &attempt_id)

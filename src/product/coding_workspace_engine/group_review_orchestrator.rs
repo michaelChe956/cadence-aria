@@ -450,22 +450,6 @@ impl<'a> GroupReviewOrchestrator<'a> {
                         && report.run_failure_code.is_none()
                 })
         {
-            if reduction.findings.iter().any(|finding| {
-                validate_group_review_finding_against_snapshot_authority(
-                    finding,
-                    &snapshot.routing_authority_index,
-                    None,
-                )
-                .is_err()
-            }) {
-                return Err(GroupReviewOrchestrationError::ReductionOutputInvalid {
-                    raw_ref: reduction
-                        .raw_provider_output_refs
-                        .last()
-                        .cloned()
-                        .unwrap_or_default(),
-                });
-            }
             let Some(recovery_lease_id) = self.store.claim_group_review_lease(
                 &snapshot.attempt_id,
                 &snapshot.content_hash,
@@ -475,6 +459,38 @@ impl<'a> GroupReviewOrchestrator<'a> {
             else {
                 return Err(GroupReviewOrchestrationError::ReductionInProgress);
             };
+            if reduction.findings.iter().any(|finding| {
+                validate_group_review_finding_against_snapshot_authority(
+                    finding,
+                    &snapshot.routing_authority_index,
+                    None,
+                )
+                .is_err()
+            }) {
+                let raw_ref = reduction
+                    .raw_provider_output_refs
+                    .last()
+                    .cloned()
+                    .unwrap_or_default();
+                let mut invalid_reduction = reduction;
+                invalid_reduction.findings.clear();
+                invalid_reduction.run_failure_code = Some("reduction_output_invalid".to_string());
+                let persist_result = self.store.write_group_review_reduction_report_cas(
+                    &snapshot.attempt_id,
+                    invalid_reduction,
+                );
+                let release_result = self.store.release_group_review_lease(
+                    &snapshot.attempt_id,
+                    &recovery_lease_id,
+                    "",
+                );
+                let cas_outcome = persist_result?;
+                release_result?;
+                if cas_outcome == CasOutcome::StoredStale {
+                    return Err(GroupReviewOrchestrationError::ReductionStale);
+                }
+                return Err(GroupReviewOrchestrationError::ReductionOutputInvalid { raw_ref });
+            }
             let persist_result =
                 self.persist_internal_pr_review_from_reduction(&attempt, snapshot, &reduction);
             let release_result =
