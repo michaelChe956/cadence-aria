@@ -116,6 +116,10 @@ fn incident_output() -> String {
     )
 }
 
+fn multi_finding_incident_output() -> String {
+    include_str!("../../../../tests/fixtures/provider/group_review_multi_finding.txt").to_string()
+}
+
 fn verification_binding() -> GroupReviewerProjectionBinding {
     GroupReviewerProjectionBinding {
         logical_work_item_id: "work_item_0001".to_string(),
@@ -192,6 +196,51 @@ async fn incident_aliases_normalize_through_shard_and_reduction_to_verification_
     assert_eq!(
         internal_review_flow_decision_with_bindings(&reviews[0], &[binding]),
         CodeReviewFlowDecision::RetryVerification
+    );
+}
+
+#[tokio::test]
+async fn multi_finding_incident_drops_invalid_target_and_fails_closed_before_routing() {
+    let (_root, store, attempt_id) = setup();
+    let snapshot = snapshot(attempt_id.clone());
+    store
+        .activate_group_review_snapshot(&attempt_id, &snapshot.content_hash)
+        .expect("activate snapshot");
+    let executor = FakeGroupReviewExecutor::new(vec![
+        Ok(GroupReviewExecutionResult {
+            full_output: multi_finding_incident_output(),
+            role_run_id: None,
+        }),
+        Ok(GroupReviewExecutionResult {
+            full_output: "GROUP_REVIEW_VERDICT: approve\n{\"verdict\":\"approve\",\"findings\":[]}"
+                .to_string(),
+            role_run_id: None,
+        }),
+    ]);
+    let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
+
+    let shards = orchestrator
+        .execute_shards(&snapshot)
+        .await
+        .expect("invalid repair_target must not cause shard_output_invalid");
+    assert_eq!(shards.len(), 1);
+    assert_eq!(shards[0].findings.len(), 2);
+    assert_eq!(shards[0].findings[0].repair_target, None);
+
+    let error = orchestrator
+        .execute_reduction(&snapshot, &shards, &[verification_binding()])
+        .await
+        .expect_err("invalid upstream human_triage + low finding must fail closed");
+    assert!(matches!(
+        error,
+        GroupReviewOrchestrationError::ReductionOutputInvalid { .. }
+    ));
+    let reviews = store
+        .list_internal_pr_reviews("project_0001", "issue_0001", &attempt_id)
+        .expect("internal reviews");
+    assert!(
+        reviews.is_empty(),
+        "fail-closed reduction must not start plan repair"
     );
 }
 

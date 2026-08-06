@@ -2,6 +2,7 @@ use super::*;
 use crate::cross_cutting::structured_output::{
     StructuredOutputError, StructuredOutputErrorCode, StructuredOutputState,
 };
+use crate::product::models::RepairTargetKind;
 
 #[test]
 fn code_review_outcome_uses_parsed_sentinel_payload() {
@@ -347,8 +348,28 @@ fn review_parser_rejects_unknown_recommended_route_after_compatibility_normaliza
 }
 
 #[test]
-fn review_parser_rejects_non_object_non_whitelisted_repair_targets() {
-    for repair_target in [serde_json::json!(42), serde_json::json!(true)] {
+fn review_parser_drops_invalid_repair_targets_without_rejecting_payload() {
+    let invalid_targets = [
+        serde_json::json!({
+            "kind": "work_item",
+            "logical_work_item_ids": ["wi_1"],
+            "work_item_revision_ids": ["rev_1"]
+        }),
+        serde_json::json!(42),
+        serde_json::json!(true),
+        serde_json::json!(["current_work_item"]),
+        serde_json::json!({
+            "logical_work_item_ids": ["wi_1"],
+            "work_item_revision_ids": ["rev_1"]
+        }),
+        serde_json::json!({
+            "kind": "current_work_item",
+            "logical_work_item_ids": ["wi_1"]
+        }),
+        serde_json::json!("not-a-verification-retry"),
+    ];
+
+    for repair_target in invalid_targets {
         let payload = serde_json::json!({
             "verdict": "request_changes",
             "findings": [{
@@ -357,13 +378,48 @@ fn review_parser_rejects_non_object_non_whitelisted_repair_targets() {
             }]
         });
 
-        assert!(
-            parse_group_review_payload(
-                &payload.to_string(),
-                CodingExecutionStage::InternalPrReview,
-            )
-            .is_err()
-        );
+        let parsed = parse_group_review_payload(
+            &payload.to_string(),
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("invalid repair_target must not reject the finding");
+        assert_eq!(parsed.findings[0].repair_target, None);
+    }
+}
+
+#[test]
+fn review_parser_preserves_all_canonical_repair_targets() {
+    for kind in ["current_work_item", "upstream_work_item", "subgraph"] {
+        let payload = serde_json::json!({
+            "verdict": "request_changes",
+            "findings": [{
+                "message": "canonical repair target",
+                "repair_target": {
+                    "kind": kind,
+                    "logical_work_item_ids": ["wi_1"],
+                    "work_item_revision_ids": ["rev_1"]
+                }
+            }]
+        });
+
+        let parsed = parse_group_review_payload(
+            &payload.to_string(),
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("canonical repair_target must parse");
+        let target = parsed.findings[0]
+            .repair_target
+            .as_ref()
+            .expect("canonical repair_target must be preserved");
+        assert_eq!(target.logical_work_item_ids, ["wi_1"]);
+        assert_eq!(target.work_item_revision_ids, ["rev_1"]);
+        let expected_kind = match kind {
+            "current_work_item" => RepairTargetKind::CurrentWorkItem,
+            "upstream_work_item" => RepairTargetKind::UpstreamWorkItem,
+            "subgraph" => RepairTargetKind::Subgraph,
+            _ => unreachable!("test only enumerates canonical repair target kinds"),
+        };
+        assert_eq!(target.kind, expected_kind);
     }
 }
 

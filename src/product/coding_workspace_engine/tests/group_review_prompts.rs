@@ -249,6 +249,30 @@ fn shard_and_reduction_prompts_require_the_shared_parseable_json_conclusion_cont
             "{provider} must receive the repair_target object contract"
         );
         assert!(
+            prompt.fixed_protocol.contains(
+                "repair_target.kind values are current_work_item, upstream_work_item, or subgraph."
+            ),
+            "{provider} must receive the repair_target kind allowlist"
+        );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "verification_incomplete -> verification_retry -> null; implementation_defect -> coder_rework -> null."
+            ),
+            "{provider} must receive the verification and implementation route combinations"
+        );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "current_work_item_invalid or upstream_contract_invalid -> plan_repair -> corresponding current_work_item or upstream_work_item target."
+            ),
+            "{provider} must receive the plan-repair target combinations"
+        );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "Use high or medium confidence for findings that may advance automatically; low confidence enters human triage."
+            ),
+            "{provider} must receive the automatic-routing confidence constraint"
+        );
+        assert!(
             prompt
                 .fixed_protocol
                 .contains("confidence values are high, medium, or low."),

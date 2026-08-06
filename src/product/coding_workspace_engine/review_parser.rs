@@ -111,9 +111,7 @@ where
     match value {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::String(value)) if value == "VerificationRetry" => Ok(None),
-        Some(value) => crate::product::models::RepairTarget::deserialize(value)
-            .map(Some)
-            .map_err(serde::de::Error::custom),
+        Some(value) => Ok(crate::product::models::RepairTarget::deserialize(value).ok()),
     }
 }
 
