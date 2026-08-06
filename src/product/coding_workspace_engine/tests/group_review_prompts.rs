@@ -7,12 +7,13 @@ use crate::product::coding_workspace_engine::group_review_prompts::{
     GroupReviewPromptBuilder, build_reduction_prompt, build_repair_prompt, build_shard_prompt,
 };
 use crate::product::coding_workspace_engine::group_review_types::{
-    CommitReachability, CompactContractInterface, CompactRoutingTarget, DeterministicGroupFinding,
-    DiffFileEntry, GroupDiffIndex, GroupPartitionResult, GroupReviewGraph,
-    GroupReviewMaterialSnapshot, GroupShardSpec, ReductionDiffSelection, RequirementCoverage,
+    CommitReachability, CompactContractInterface, DeterministicGroupFinding, DiffFileEntry,
+    GroupDiffIndex, GroupPartitionResult, GroupReviewGraph, GroupReviewMaterialSnapshot,
+    GroupShardSpec, ReductionDiffSelection, RequirementCoverage, RoutingAuthorityEntry,
     ScopeOverlap, SelectedDiffFragment, ShardDiffSelection, UnitCrossReviewRecord,
     UnitEvidenceSummary, UnitScopeSummary,
 };
+use crate::product::models::PlanDefectRoute;
 
 fn snapshot() -> GroupReviewMaterialSnapshot {
     GroupReviewMaterialSnapshot {
@@ -23,6 +24,15 @@ fn snapshot() -> GroupReviewMaterialSnapshot {
         base_branch: "main".to_string(),
         final_commit: "commit_final".to_string(),
         authoritative_binding_digest: "binding_digest".to_string(),
+        routing_authority_index: vec![RoutingAuthorityEntry {
+            source_unit_run_id: "run_a".to_string(),
+            source_logical_work_item_id: "work_a".to_string(),
+            source_work_item_revision_id: "revision_a".to_string(),
+            reason_code: "contract_gap".to_string(),
+            allowed_route: PlanDefectRoute::CoderRework,
+            required_target_kind: None,
+            target_contract_refs: vec!["contract_a".to_string()],
+        }],
         unit_records: vec![UnitCrossReviewRecord {
             unit_id: "unit_a".to_string(),
             unit_run_id: "run_a".to_string(),
@@ -46,11 +56,6 @@ fn snapshot() -> GroupReviewMaterialSnapshot {
                 manual_check_count: 0,
                 missing_refs: Vec::new(),
             },
-            routing_targets: vec![CompactRoutingTarget {
-                reason_code: "contract_gap".to_string(),
-                allowed_route: "coder_rework".to_string(),
-                target_contract_refs: vec!["contract_a".to_string()],
-            }],
         }],
         global_graph: GroupReviewGraph {
             contract_edges: Vec::new(),
@@ -159,6 +164,7 @@ fn draft(snapshot: GroupReviewMaterialSnapshot) -> GroupReviewMaterialSnapshotDr
         base_branch: snapshot.base_branch,
         final_commit: snapshot.final_commit,
         authoritative_binding_digest: snapshot.authoritative_binding_digest,
+        routing_authority_index: snapshot.routing_authority_index,
         unit_records: snapshot.unit_records,
         global_graph: snapshot.global_graph,
         diff_index: snapshot.diff_index,

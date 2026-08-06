@@ -9,6 +9,8 @@ use super::plan_defect_routing::AuthoritativeGroupReviewerBinding;
 use crate::cross_cutting::worktree::scope_allows_path;
 use crate::product::coding_evaluation_context::redact_sensitive_patterns;
 use crate::product::coding_models::{ReviewRequest, UnitReviewConclusionSnapshot};
+use crate::product::models::PlanDefectRoute;
+use crate::product::plan_repair::normalize_blocker_route;
 use crate::product::work_item_contract::ContractCompatibilityPolicy;
 
 const COMPILER_VERSION: &str = "group-review-material-compiler-v1";
@@ -25,6 +27,7 @@ pub(crate) struct GroupReviewMaterialSnapshotDraft {
     pub(crate) base_branch: String,
     pub(crate) final_commit: String,
     pub(crate) authoritative_binding_digest: String,
+    pub(crate) routing_authority_index: Vec<RoutingAuthorityEntry>,
     pub(crate) unit_records: Vec<UnitCrossReviewRecord>,
     pub(crate) global_graph: GroupReviewGraph,
     pub(crate) diff_index: GroupDiffIndex,
@@ -59,6 +62,7 @@ pub(crate) fn compile_group_review_material(
     let (diff_index, completion_paths) = build_diff_index(&bindings, git_facts);
     let (global_graph, mut findings) =
         deterministic_checks(&bindings, &snapshot_by_run, &completion_paths, git_facts);
+    let routing_authority_index = routing_authority_index(&bindings);
     let mut unit_records = Vec::with_capacity(bindings.len());
     for binding in &bindings {
         unit_records.push(compact_record(
@@ -78,6 +82,7 @@ pub(crate) fn compile_group_review_material(
         base_branch: review_request.base_branch.clone(),
         final_commit: review_request.commit_sha.clone(),
         authoritative_binding_digest: binding_digest(&bindings)?,
+        routing_authority_index,
         unit_records,
         global_graph,
         diff_index,
@@ -176,6 +181,56 @@ fn binding_digest(
     Ok(sha256(&values))
 }
 
+fn routing_authority_index(
+    bindings: &[&AuthoritativeGroupReviewerBinding],
+) -> Vec<RoutingAuthorityEntry> {
+    let mut entries = bindings
+        .iter()
+        .flat_map(|binding| {
+            binding
+                .projection_binding
+                .projection
+                .blocker_routing
+                .iter()
+                .map(|rule| {
+                    let normalized = normalize_blocker_route(rule.route.clone());
+                    RoutingAuthorityEntry {
+                        source_unit_run_id: binding.run.id.clone(),
+                        source_logical_work_item_id: binding
+                            .projection_binding
+                            .logical_work_item_id
+                            .clone(),
+                        source_work_item_revision_id: binding.run.work_item_revision_id.clone(),
+                        reason_code: rule.reason_code.clone(),
+                        allowed_route: normalized.route,
+                        required_target_kind: normalized.required_target_kind,
+                        target_contract_refs: sorted_unique(rule.target_contract_refs.clone()),
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        left.source_unit_run_id
+            .cmp(&right.source_unit_run_id)
+            .then(left.reason_code.cmp(&right.reason_code))
+            .then(route_sort_key(&left.allowed_route).cmp(route_sort_key(&right.allowed_route)))
+            .then(left.target_contract_refs.cmp(&right.target_contract_refs))
+    });
+    entries
+}
+
+fn route_sort_key(route: &PlanDefectRoute) -> &'static str {
+    match route {
+        PlanDefectRoute::CoderRework => "coder_rework",
+        PlanDefectRoute::VerificationRetry => "verification_retry",
+        PlanDefectRoute::PlanRepair => "plan_repair",
+        PlanDefectRoute::StoryAmendment => "story_amendment",
+        PlanDefectRoute::DesignAmendment => "design_amendment",
+        PlanDefectRoute::OperationalGate => "operational_gate",
+        PlanDefectRoute::HumanTriage => "human_triage",
+    }
+}
+
 fn compact_record(
     binding: &AuthoritativeGroupReviewerBinding,
     snapshot: &UnitReviewConclusionSnapshot,
@@ -241,15 +296,6 @@ fn compact_record(
                 .count(),
             missing_refs: Vec::new(),
         },
-        routing_targets: projection
-            .blocker_routing
-            .iter()
-            .map(|rule| CompactRoutingTarget {
-                reason_code: rule.reason_code.clone(),
-                allowed_route: format!("{:?}", rule.route),
-                target_contract_refs: sorted_unique(rule.target_contract_refs.clone()),
-            })
-            .collect(),
     };
     trim_record(&mut record)?;
     Ok(record)
@@ -264,8 +310,6 @@ fn trim_record(record: &mut UnitCrossReviewRecord) -> Result<(), GroupMaterialEr
         {
             continue;
         }
-        // routing_targets 是执行正确性数据（provider 必须据此选 reason_code），
-        // 不能为了压缩体积而静默删除；其他字段都裁完仍超限时 fail-closed。
         return Err(GroupMaterialError::Internal(
             "unit_cross_review_record_exceeds_size_limit".to_string(),
         ));
@@ -1071,6 +1115,7 @@ fn finalize(
         base_branch: draft.base_branch,
         final_commit: draft.final_commit,
         authoritative_binding_digest: draft.authoritative_binding_digest,
+        routing_authority_index: draft.routing_authority_index,
         unit_records: draft.unit_records,
         global_graph: draft.global_graph,
         diff_index: draft.diff_index,

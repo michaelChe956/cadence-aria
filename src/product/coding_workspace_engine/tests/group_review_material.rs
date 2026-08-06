@@ -11,6 +11,7 @@ use crate::product::coding_workspace_engine::group_review_types::{
 use crate::product::coding_workspace_engine::plan_defect_routing::{
     AuthoritativeGroupReviewerBinding, GroupReviewerProjectionBinding,
 };
+use crate::product::models::{PlanDefectRoute, RepairTargetKind};
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, ContractCompatibilityPolicy, PromisedOutputContract,
     RequiredInputContract, VerificationCheck, WorkItemWritePolicy,
@@ -161,8 +162,18 @@ fn facts(bindings: &[AuthoritativeGroupReviewerBinding]) -> GroupGitFacts {
 
 #[test]
 fn group_review_material_content_hash_is_stable_across_input_order() {
-    let first = binding(2, "b", Vec::new(), Vec::new());
-    let second = binding(1, "a", Vec::new(), Vec::new());
+    let mut first = binding(2, "b", Vec::new(), Vec::new());
+    first.projection_binding.projection.blocker_routing = vec![BlockerRule {
+        reason_code: "reason_b".to_string(),
+        route: BlockerRoute::PlanRepairUpstream,
+        target_contract_refs: vec!["contract_z".to_string(), "contract_a".to_string()],
+    }];
+    let mut second = binding(1, "a", Vec::new(), Vec::new());
+    second.projection_binding.projection.blocker_routing = vec![BlockerRule {
+        reason_code: "reason_a".to_string(),
+        route: BlockerRoute::VerificationRetry,
+        target_contract_refs: Vec::new(),
+    }];
     let forward = vec![first.clone(), second.clone()];
     let reverse = vec![second.clone(), first.clone()];
     let forward_snapshots = forward.iter().map(snapshot).collect::<Vec<_>>();
@@ -186,6 +197,15 @@ fn group_review_material_content_hash_is_stable_across_input_order() {
     )
     .expect("compile");
     assert_eq!(forward_result.content_hash, reverse_result.content_hash);
+    assert_eq!(forward_result.routing_authority_index.len(), 2);
+    assert_eq!(
+        forward_result.routing_authority_index[0].source_unit_run_id,
+        "run_a"
+    );
+    assert_eq!(
+        forward_result.routing_authority_index[1].target_contract_refs,
+        ["contract_a", "contract_z"]
+    );
 }
 
 #[test]
@@ -561,7 +581,7 @@ fn material_uses_provider_identity_for_contract_matching() {
 }
 
 #[test]
-fn material_preserves_routing_targets_while_trimming_non_authoritative_fields() {
+fn material_moves_routing_authority_out_of_trimmed_unit_record() {
     let mut unit = binding(1, "trimmed", Vec::new(), Vec::new());
     unit.projection_binding.projection.blocker_routing = vec![BlockerRule {
         reason_code: "verification_command_failed".to_string(),
@@ -592,31 +612,75 @@ fn material_preserves_routing_targets_while_trimming_non_authoritative_fields() 
     .expect("non-authoritative fields should be trim-able");
     let record = result.unit_records.first().expect("unit record");
 
-    assert_eq!(record.routing_targets.len(), 1);
+    assert!(record.contract_interfaces.len() < 16);
+    assert_eq!(result.routing_authority_index.len(), 1);
+    let authority = &result.routing_authority_index[0];
+    assert_eq!(authority.source_unit_run_id, "run_trimmed");
+    assert_eq!(authority.source_logical_work_item_id, "work_trimmed");
+    assert_eq!(authority.source_work_item_revision_id, "revision_trimmed");
+    assert_eq!(authority.reason_code, "verification_command_failed");
+    assert_eq!(authority.allowed_route, PlanDefectRoute::VerificationRetry);
+    assert_eq!(authority.required_target_kind, None);
     assert_eq!(
-        record.routing_targets[0].reason_code,
-        "verification_command_failed"
-    );
-    assert_eq!(record.routing_targets[0].allowed_route, "VerificationRetry");
-    assert_eq!(
-        record.routing_targets[0].target_contract_refs,
+        authority.target_contract_refs,
         ["contract-routing-authority"]
     );
-    // routing_targets 是权威数据，必须完整保留；其他字段可能被裁（取决于超限程度）
-    // 核心断言：routing_targets 不被裁，其他可裁字段被压缩
-    assert!(!record.routing_targets.is_empty());
+    assert!(serde_json::to_vec(record).unwrap().len() <= 1_200);
 }
 
 #[test]
-fn material_fails_closed_when_routing_targets_alone_exceed_limit() {
-    let mut unit = binding(1, "routing-oversized", Vec::new(), Vec::new());
-    unit.projection_binding.projection.blocker_routing = vec![BlockerRule {
-        reason_code: "routing-authority".repeat(50),
-        route: BlockerRoute::VerificationRetry,
-        target_contract_refs: vec!["contract-ref".repeat(70)],
-    }];
+fn material_keeps_realistic_full_routing_authority_without_exceeding_record_limit() {
+    let mut unit = binding(1, "full-routing", Vec::new(), Vec::new());
+    unit.projection_binding.projection.blocker_routing = vec![
+        BlockerRule {
+            reason_code: "verification_command_failed".to_string(),
+            route: BlockerRoute::VerificationRetry,
+            target_contract_refs: Vec::new(),
+        },
+        BlockerRule {
+            reason_code: "acceptance_criteria_not_met".to_string(),
+            route: BlockerRoute::CoderRework,
+            target_contract_refs: Vec::new(),
+        },
+        BlockerRule {
+            reason_code: "upstream_handoff_fields_missing".to_string(),
+            route: BlockerRoute::PlanRepairUpstream,
+            target_contract_refs: vec!["oc_compact_duration_module".to_string()],
+        },
+        BlockerRule {
+            reason_code: "upstream_module_path_or_export_mismatch".to_string(),
+            route: BlockerRoute::PlanRepairUpstream,
+            target_contract_refs: vec!["oc_compact_duration_module".to_string()],
+        },
+        BlockerRule {
+            reason_code: "upstream_module_behavior_contradicts_examples".to_string(),
+            route: BlockerRoute::PlanRepairUpstream,
+            target_contract_refs: vec!["oc_compact_duration_module".to_string()],
+        },
+        BlockerRule {
+            reason_code: "web_test_glob_not_registered".to_string(),
+            route: BlockerRoute::PlanRepairUpstream,
+            target_contract_refs: vec!["oc_repo_test_glob_registration".to_string()],
+        },
+        BlockerRule {
+            reason_code: "page_requires_write_outside_scope".to_string(),
+            route: BlockerRoute::PlanRepairCurrent,
+            target_contract_refs: vec!["oc_compact_duration_module".to_string()],
+        },
+        BlockerRule {
+            reason_code: "out_of_contract_input_semantics_undefined".to_string(),
+            route: BlockerRoute::StoryAmendment,
+            target_contract_refs: vec!["oc_compact_duration_module".to_string()],
+        },
+        BlockerRule {
+            reason_code: "module_loading_strategy_infeasible_without_build".to_string(),
+            route: BlockerRoute::DesignAmendment,
+            target_contract_refs: vec!["oc_compact_duration_module".to_string()],
+        },
+    ];
     let snapshots = vec![snapshot(&unit)];
-    let error = compile_group_review_material(
+
+    let result = compile_group_review_material(
         std::slice::from_ref(&unit),
         &snapshots,
         &request(),
@@ -624,10 +688,58 @@ fn material_fails_closed_when_routing_targets_alone_exceed_limit() {
         &FixedMeasurer,
         1_000,
     )
-    .expect_err("oversized routing authority must fail closed");
+    .expect("full authoritative routing must remain reviewable");
 
+    let record = result.unit_records.first().expect("unit record");
+    assert!(serde_json::to_vec(record).unwrap().len() <= 1_200);
+    assert_eq!(result.routing_authority_index.len(), 9);
     assert!(
-        matches!(error, crate::product::coding_workspace_engine::group_review_types::GroupMaterialError::Internal(message) if message == "unit_cross_review_record_exceeds_size_limit")
+        result
+            .routing_authority_index
+            .iter()
+            .any(|target| target.reason_code == "module_loading_strategy_infeasible_without_build")
+    );
+    let current_repair = result
+        .routing_authority_index
+        .iter()
+        .find(|target| target.reason_code == "page_requires_write_outside_scope")
+        .expect("current work item repair authority");
+    assert_eq!(current_repair.allowed_route, PlanDefectRoute::PlanRepair);
+    assert_eq!(
+        current_repair.required_target_kind,
+        Some(RepairTargetKind::CurrentWorkItem)
+    );
+}
+
+#[test]
+fn material_keeps_long_routing_authority_outside_unit_record() {
+    let mut unit = binding(1, "routing-oversized", Vec::new(), Vec::new());
+    unit.projection_binding.projection.blocker_routing = vec![BlockerRule {
+        reason_code: "routing-authority".repeat(50),
+        route: BlockerRoute::VerificationRetry,
+        target_contract_refs: vec!["contract-ref".repeat(70)],
+    }];
+    let snapshots = vec![snapshot(&unit)];
+    let result = compile_group_review_material(
+        std::slice::from_ref(&unit),
+        &snapshots,
+        &request(),
+        &facts(std::slice::from_ref(&unit)),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("long routing authority must not consume unit record bytes");
+
+    let record = result.unit_records.first().expect("unit record");
+    assert!(serde_json::to_vec(record).unwrap().len() <= 1_200);
+    assert_eq!(result.routing_authority_index.len(), 1);
+    assert_eq!(
+        result.routing_authority_index[0].reason_code,
+        "routing-authority".repeat(50)
+    );
+    assert_eq!(
+        result.routing_authority_index[0].target_contract_refs,
+        ["contract-ref".repeat(70)]
     );
 }
 

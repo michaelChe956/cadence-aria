@@ -274,6 +274,7 @@ impl ShardPromptMeasurer for RealMeasurer {
             base_branch: snapshot.base_branch.clone(),
             final_commit: snapshot.final_commit.clone(),
             authoritative_binding_digest: snapshot.authoritative_binding_digest.clone(),
+            routing_authority_index: snapshot.routing_authority_index.clone(),
             unit_records: snapshot.unit_records.clone(),
             global_graph: snapshot.global_graph.clone(),
             diff_index: snapshot.diff_index.clone(),

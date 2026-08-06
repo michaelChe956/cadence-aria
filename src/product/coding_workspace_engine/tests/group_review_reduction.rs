@@ -53,6 +53,7 @@ fn snapshot(attempt_id: String, shard_ids: &[&str]) -> GroupReviewMaterialSnapsh
         base_branch: "main".to_string(),
         final_commit: "final".to_string(),
         authoritative_binding_digest: "binding".to_string(),
+        routing_authority_index: Vec::new(),
         unit_records: Vec::new(),
         global_graph: GroupReviewGraph {
             contract_edges: Vec::new(),

@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
+use crate::product::models::{PlanDefectRoute, RepairTargetKind};
+
 pub(crate) struct PromptSegments {
     pub fixed_protocol: String,
     pub identity: String,
@@ -35,6 +37,7 @@ pub(crate) struct GroupReviewMaterialSnapshot {
     pub base_branch: String,
     pub final_commit: String,
     pub authoritative_binding_digest: String,
+    pub routing_authority_index: Vec<RoutingAuthorityEntry>,
     pub unit_records: Vec<UnitCrossReviewRecord>,
     pub global_graph: GroupReviewGraph,
     pub diff_index: GroupDiffIndex,
@@ -54,7 +57,6 @@ pub(crate) struct UnitCrossReviewRecord {
     pub scope_summary: UnitScopeSummary,
     pub contract_interfaces: Vec<CompactContractInterface>,
     pub evidence_summary: UnitEvidenceSummary,
-    pub routing_targets: Vec<CompactRoutingTarget>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,10 +81,14 @@ pub(crate) struct UnitEvidenceSummary {
     pub missing_refs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct CompactRoutingTarget {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct RoutingAuthorityEntry {
+    pub source_unit_run_id: String,
+    pub source_logical_work_item_id: String,
+    pub source_work_item_revision_id: String,
     pub reason_code: String,
-    pub allowed_route: String,
+    pub allowed_route: PlanDefectRoute,
+    pub required_target_kind: Option<RepairTargetKind>,
     pub target_contract_refs: Vec<String>,
 }
 

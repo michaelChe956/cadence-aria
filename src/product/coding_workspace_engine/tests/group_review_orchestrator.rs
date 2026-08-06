@@ -15,11 +15,10 @@ use crate::product::coding_workspace_engine::group_review_orchestrator::{
     GroupReviewOrchestrator,
 };
 use crate::product::coding_workspace_engine::group_review_types::{
-    CompactContractInterface, CompactRoutingTarget, ContractEdge, DeterministicGroupFinding,
-    DiffFileEntry, DiffHunk, GroupDiffIndex, GroupPartitionResult, GroupReviewGraph,
-    GroupReviewMaterialSnapshot, GroupShardSpec, PromptBudgetBreakdown, ReductionDiffSelection,
-    RequirementCoverage, ScopeOverlap, ShardDiffSelection, UnitCrossReviewRecord,
-    UnitEvidenceSummary, UnitScopeSummary,
+    CompactContractInterface, ContractEdge, DeterministicGroupFinding, DiffFileEntry, DiffHunk,
+    GroupDiffIndex, GroupPartitionResult, GroupReviewGraph, GroupReviewMaterialSnapshot,
+    GroupShardSpec, PromptBudgetBreakdown, ReductionDiffSelection, RequirementCoverage,
+    ScopeOverlap, ShardDiffSelection, UnitCrossReviewRecord, UnitEvidenceSummary, UnitScopeSummary,
 };
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -285,7 +284,6 @@ fn material_snapshot(
                 manual_check_count: 0,
                 missing_refs: Vec::new(),
             },
-            routing_targets: Vec::<CompactRoutingTarget>::new(),
         })
         .collect::<Vec<_>>();
     let shards = (0..shard_count)
@@ -321,6 +319,7 @@ fn material_snapshot(
         base_branch: "main".to_string(),
         final_commit: "final_commit".to_string(),
         authoritative_binding_digest: "binding_digest".to_string(),
+        routing_authority_index: Vec::new(),
         unit_records,
         global_graph: GroupReviewGraph {
             contract_edges: Vec::<ContractEdge>::new(),
