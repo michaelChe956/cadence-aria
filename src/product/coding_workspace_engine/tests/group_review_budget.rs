@@ -14,6 +14,7 @@ fn segments() -> PromptSegments {
     PromptSegments {
         fixed_protocol: "协议：审查\n".to_string(),
         identity: "身份：组审查员\n".to_string(),
+        routing_authority: "权限：reason_run_a\n".to_string(),
         unit_records: "单元：α\n".to_string(),
         evidence_digest: "证据：✓\n".to_string(),
         graph: "图：→\n".to_string(),
@@ -29,10 +30,14 @@ fn prompt_segments_measure_matches_joined_utf8_bytes() {
     let joined = segments.join();
     assert_eq!(
         joined,
-        "协议：审查\n身份：组审查员\n单元：α\n证据：✓\n图：→\n差异：你好\n重试：é\n"
+        "协议：审查\n身份：组审查员\n权限：reason_run_a\n单元：α\n证据：✓\n图：→\n差异：你好\n重试：é\n"
     );
     #[allow(clippy::needless_as_bytes)]
     let joined_bytes = joined.as_bytes().len();
+    assert_eq!(
+        segments.measure().routing_authority,
+        segments.routing_authority.len()
+    );
     assert_eq!(segments.measure().total, joined_bytes);
     assert_eq!(GROUP_REVIEW_QUALITY_TARGET_BYTES, 28 * 1024);
     assert_eq!(GROUP_REVIEW_HARD_CAP_BYTES, 30 * 1024);

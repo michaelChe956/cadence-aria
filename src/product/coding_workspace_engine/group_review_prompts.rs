@@ -2,7 +2,8 @@
 
 use super::group_review_material::{GroupReviewMaterialSnapshotDraft, ShardPromptMeasurer};
 use super::group_review_types::{
-    GroupReviewMaterialSnapshot, GroupShardSpec, PromptSegments, SelectedDiffFragment,
+    GroupReviewMaterialSnapshot, GroupShardSpec, PromptSegments, RoutingAuthorityEntry,
+    SelectedDiffFragment,
 };
 use crate::product::coding_models::GroupReviewShardReport;
 
@@ -28,14 +29,14 @@ const GROUP_REVIEW_JSON_CONCLUSION_CONTRACT: &str = concat!(
     "- verification_incomplete -> verification_retry -> null; implementation_defect -> coder_rework -> null.\n",
     "- current_work_item_invalid or upstream_contract_invalid -> plan_repair -> corresponding current_work_item or upstream_work_item target.\n",
     "- story_amendment_required/design_amendment_required -> matching amendment route; operational_blocker -> operational_gate; dependency_graph_invalid -> plan_repair.\n",
-    "- Authoritative routing: for a plan-defect finding (defect_class is NOT implementation_defect), select exactly ONE applicable entry from the relevant unit record's routing_targets, then copy its reason_code VERBATIM. Never invent, translate, paraphrase, or generalize a reason_code.\n",
+    "- Authoritative routing: for a plan-defect finding (defect_class is NOT implementation_defect), select exactly ONE applicable entry from the provided routing_authority, then copy its reason_code VERBATIM. Never invent, translate, paraphrase, or generalize a reason_code.\n",
     "- recommended_route MUST equal that selected entry's allowed_route converted to snake_case; repair_target.kind MUST be the kind that route requires (or null when the route accepts no target).\n",
     "- Every contract_refs element MUST come from that selected entry's target_contract_refs; an empty contract_refs array is always acceptable. Do not add contract references that the entry does not list.\n",
-    "- If no routing_targets entry applies to what you observed, do NOT invent a plan-defect finding. Emit a plain implementation finding instead: defect_class=implementation_defect, recommended_route=coder_rework, reason_code=null, contract_refs=[], capability_refs=[], repair_target=null, confidence=null, and string-only evidence (no canonical evidence object).\n",
+    "- If no provided routing_authority entry applies to what you observed, do NOT invent a plan-defect finding. Emit a plain implementation finding instead: defect_class=implementation_defect, recommended_route=coder_rework, reason_code=null, contract_refs=[], capability_refs=[], repair_target=null, confidence=null, and string-only evidence (no canonical evidence object).\n",
     "- An implementation finding MUST leave every plan-defect field empty as listed above; attaching reason_code, refs, target, confidence, or a canonical evidence object to an implementation finding makes the whole conclusion invalid.\n",
     "- For plan-defect findings, confidence MUST be high or medium; do not use low. Leave confidence null for implementation findings.\n",
     "- A shard conclusion MUST contain at most 8 findings; a reduction conclusion MUST contain at most 16 findings. Aggregate or merge related observations instead of emitting one finding per item.\n",
-    "- Verification finding example (copy reason_code from the unit's routing_targets, do not use this placeholder literally): {\"severity\": \"error\", \"message\": \"verification evidence is missing\", \"defect_class\": \"verification_incomplete\", \"reason_code\": \"<one reason_code copied from routing_targets>\", \"evidence\": [\"the required command output was not recorded\"], \"contract_refs\": [], \"capability_refs\": [], \"repair_target\": null, \"recommended_route\": \"verification_retry\", \"confidence\": \"high\"}.\n",
+    "- Verification finding example (copy reason_code from the provided routing_authority entry, do not use this placeholder literally): {\"severity\": \"error\", \"message\": \"verification evidence is missing\", \"defect_class\": \"verification_incomplete\", \"reason_code\": \"<one reason_code copied from routing_authority>\", \"evidence\": [\"the required command output was not recorded\"], \"contract_refs\": [], \"capability_refs\": [], \"repair_target\": null, \"recommended_route\": \"verification_retry\", \"confidence\": \"high\"}.\n",
     "- Minimal request_changes example:\n",
     "{\"verdict\": \"request_changes\", \"summary\": \"validation is missing\", \"findings\": [{\"severity\": \"warning\", \"message\": \"validation is missing\", \"evidence\": [\"src/lib.rs:42\"]}], \"impact_scope\": [], \"pr_description\": \"\", \"commit_message_suggestion\": \"\", \"tested_evidence_refs\": [], \"diff_refs\": []}\n",
     "- Do not output Markdown fences, bullets, or tables.\n",
@@ -127,6 +128,10 @@ pub(crate) fn build_shard_prompt(
             serde_json::to_string(&shard.ordered_unit_run_ids).expect("serialize shard members"),
             serde_json::to_string(&shard.partition_rationale).expect("serialize rationale"),
         ),
+        routing_authority: render_json_section(
+            "routing_authority",
+            &authority_for_shard(snapshot, shard),
+        ),
         unit_records: render_json_section("unit_records", &unit_records),
         evidence_digest: format!(
             "deterministic_findings:\n{}",
@@ -167,6 +172,10 @@ pub(crate) fn build_reduction_prompt(
             snapshot.base_branch,
             snapshot.final_commit,
         ),
+        routing_authority: render_json_section(
+            "routing_authority",
+            &snapshot.routing_authority_index,
+        ),
         unit_records: render_shard_report_ledger(shard_reports),
         evidence_digest: format!(
             "deterministic_findings:\n{}",
@@ -200,12 +209,39 @@ pub(crate) fn build_repair_prompt(raw_output: &str) -> PromptSegments {
              {conclusion_contract}"
         ),
         identity: String::new(),
+        routing_authority: String::new(),
         unit_records: String::new(),
         evidence_digest: String::new(),
         graph: String::new(),
         diff: raw_output.to_string(),
         retry_diagnostic_reserve: String::new(),
     }
+}
+
+fn authority_for_shard<'a>(
+    snapshot: &'a GroupReviewMaterialSnapshot,
+    shard: &GroupShardSpec,
+) -> Vec<&'a RoutingAuthorityEntry> {
+    let mut relevant_unit_run_ids = shard
+        .ordered_unit_run_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for edge in &snapshot.partition_result.cross_shard_edges {
+        if relevant_unit_run_ids.contains(edge.from_unit_run_id.as_str())
+            || relevant_unit_run_ids.contains(edge.to_unit_run_id.as_str())
+        {
+            relevant_unit_run_ids.insert(edge.from_unit_run_id.as_str());
+            relevant_unit_run_ids.insert(edge.to_unit_run_id.as_str());
+        }
+    }
+
+    snapshot
+        .routing_authority_index
+        .iter()
+        .filter(|entry| relevant_unit_run_ids.contains(entry.source_unit_run_id.as_str()))
+        .collect()
 }
 
 fn render_json_section<T: serde::Serialize>(title: &str, value: &T) -> String {

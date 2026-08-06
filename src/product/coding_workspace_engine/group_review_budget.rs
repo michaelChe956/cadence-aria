@@ -40,6 +40,7 @@ impl PromptSegments {
         [
             self.fixed_protocol.as_str(),
             self.identity.as_str(),
+            self.routing_authority.as_str(),
             self.unit_records.as_str(),
             self.evidence_digest.as_str(),
             self.graph.as_str(),
@@ -52,6 +53,7 @@ impl PromptSegments {
     pub(crate) fn measure(&self) -> PromptBudgetBreakdown {
         let fixed_protocol = self.fixed_protocol.len();
         let identity = self.identity.len();
+        let routing_authority = self.routing_authority.len();
         let unit_records = self.unit_records.len();
         let evidence_digest = self.evidence_digest.len();
         let graph = self.graph.len();
@@ -60,6 +62,7 @@ impl PromptSegments {
         PromptBudgetBreakdown {
             fixed_protocol,
             identity,
+            routing_authority,
             unit_records,
             evidence_digest,
             graph,
@@ -67,6 +70,7 @@ impl PromptSegments {
             retry_diagnostic_reserve,
             total: fixed_protocol
                 + identity
+                + routing_authority
                 + unit_records
                 + evidence_digest
                 + graph

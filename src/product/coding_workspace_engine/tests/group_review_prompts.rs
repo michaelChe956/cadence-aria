@@ -24,15 +24,26 @@ fn snapshot() -> GroupReviewMaterialSnapshot {
         base_branch: "main".to_string(),
         final_commit: "commit_final".to_string(),
         authoritative_binding_digest: "binding_digest".to_string(),
-        routing_authority_index: vec![RoutingAuthorityEntry {
-            source_unit_run_id: "run_a".to_string(),
-            source_logical_work_item_id: "work_a".to_string(),
-            source_work_item_revision_id: "revision_a".to_string(),
-            reason_code: "contract_gap".to_string(),
-            allowed_route: PlanDefectRoute::CoderRework,
-            required_target_kind: None,
-            target_contract_refs: vec!["contract_a".to_string()],
-        }],
+        routing_authority_index: vec![
+            RoutingAuthorityEntry {
+                source_unit_run_id: "run_a".to_string(),
+                source_logical_work_item_id: "work_a".to_string(),
+                source_work_item_revision_id: "revision_a".to_string(),
+                reason_code: "reason_run_a".to_string(),
+                allowed_route: PlanDefectRoute::CoderRework,
+                required_target_kind: None,
+                target_contract_refs: vec!["contract_a".to_string()],
+            },
+            RoutingAuthorityEntry {
+                source_unit_run_id: "run_b".to_string(),
+                source_logical_work_item_id: "work_b".to_string(),
+                source_work_item_revision_id: "revision_b".to_string(),
+                reason_code: "reason_run_b".to_string(),
+                allowed_route: PlanDefectRoute::CoderRework,
+                required_target_kind: None,
+                target_contract_refs: vec!["contract_b".to_string()],
+            },
+        ],
         unit_records: vec![UnitCrossReviewRecord {
             unit_id: "unit_a".to_string(),
             unit_run_id: "run_a".to_string(),
@@ -118,7 +129,14 @@ fn snapshot() -> GroupReviewMaterialSnapshot {
         }],
         partition_result: GroupPartitionResult {
             shards: vec![shard()],
-            cross_shard_edges: Vec::new(),
+            cross_shard_edges: vec![
+                crate::product::coding_workspace_engine::group_review_types::CrossShardEdge {
+                    edge_kind: "contract".to_string(),
+                    from_unit_run_id: "run_a".to_string(),
+                    to_unit_run_id: "run_external".to_string(),
+                    detail: "requires cross-shard review".to_string(),
+                },
+            ],
         },
         content_hash: "snapshot_hash".to_string(),
     }
@@ -186,6 +204,23 @@ fn prompt_builder_measures_draft_shards_with_the_rendered_prompt() {
     assert_eq!(
         GroupReviewPromptBuilder.measure_shard(&draft(snapshot), &shard()),
         expected
+    );
+}
+
+#[test]
+fn shard_projects_only_relevant_routing_authority_while_reduction_receives_full_index() {
+    let snapshot = snapshot();
+    let shard_prompt = build_shard_prompt(&snapshot, &shard(), None);
+    let reduction_prompt = build_reduction_prompt(&snapshot, &[shard_report()], None);
+
+    assert!(shard_prompt.routing_authority.contains("reason_run_a"));
+    assert!(!shard_prompt.routing_authority.contains("reason_run_b"));
+    assert!(reduction_prompt.routing_authority.contains("reason_run_a"));
+    assert!(reduction_prompt.routing_authority.contains("reason_run_b"));
+    assert_eq!(shard_prompt.measure().total, shard_prompt.join().len());
+    assert_eq!(
+        reduction_prompt.measure().total,
+        reduction_prompt.join().len()
     );
 }
 
@@ -286,7 +321,17 @@ fn shard_and_reduction_prompts_require_the_shared_parseable_json_conclusion_cont
         );
         assert!(
             prompt.fixed_protocol.contains(
-                "If no routing_targets entry applies to what you observed, do NOT invent a plan-defect finding. Emit a plain implementation finding instead"
+                "select exactly ONE applicable entry from the provided routing_authority"
+            ),
+            "{provider} must select plan-defect routing only from the provided authority projection"
+        );
+        assert!(
+            !prompt.fixed_protocol.contains("routing_targets"),
+            "{provider} must not be instructed to read routing targets from unit records"
+        );
+        assert!(
+            prompt.fixed_protocol.contains(
+                "If no provided routing_authority entry applies to what you observed, do NOT invent a plan-defect finding. Emit a plain implementation finding instead"
             ) && prompt.fixed_protocol.contains("reason_code=null")
                 && prompt.fixed_protocol.contains("recommended_route=coder_rework"),
             "{provider} must receive the implementation fallback"
@@ -364,6 +409,7 @@ fn repair_prompt_requires_raw_only_json_transcription_without_rereview() {
     assert!(joined.contains("Do not re-review or add findings."));
     assert!(joined.contains("Do not output Markdown fences, bullets, or tables."));
     assert!(prompt.identity.is_empty());
+    assert!(prompt.routing_authority.is_empty());
     assert!(prompt.unit_records.is_empty());
     assert!(prompt.evidence_digest.is_empty());
     assert!(prompt.graph.is_empty());

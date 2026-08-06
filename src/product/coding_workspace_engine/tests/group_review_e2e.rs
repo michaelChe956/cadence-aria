@@ -90,6 +90,7 @@ fn prompt_text_without_provider_metadata(prompt: &PromptSegments) -> String {
     [
         prompt.fixed_protocol.as_str(),
         prompt.identity.as_str(),
+        prompt.routing_authority.as_str(),
         prompt.unit_records.as_str(),
         prompt.evidence_digest.as_str(),
         prompt.graph.as_str(),

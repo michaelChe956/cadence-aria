@@ -9,6 +9,7 @@ use crate::product::models::{PlanDefectRoute, RepairTargetKind};
 pub(crate) struct PromptSegments {
     pub fixed_protocol: String,
     pub identity: String,
+    pub routing_authority: String,
     pub unit_records: String,
     pub evidence_digest: String,
     pub graph: String,
@@ -20,6 +21,7 @@ pub(crate) struct PromptSegments {
 pub(crate) struct PromptBudgetBreakdown {
     pub fixed_protocol: usize,
     pub identity: usize,
+    pub routing_authority: usize,
     pub unit_records: usize,
     pub evidence_digest: usize,
     pub graph: usize,

@@ -249,6 +249,7 @@ async fn fake_executor_and_orchestration_errors_are_constructible() {
         breakdown: PromptBudgetBreakdown {
             fixed_protocol: 1,
             identity: 0,
+            routing_authority: 0,
             unit_records: 0,
             evidence_digest: 0,
             graph: 0,
