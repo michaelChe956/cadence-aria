@@ -713,6 +713,19 @@ pub(crate) async fn delete_coding_attempt(
             .handle_delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .await
             .map_err(coding_workspace_api_error)?;
+    } else if let Ok(Some(shared)) =
+        lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+    {
+        // active work item 不匹配（failed attempt 的 current_work_item_id 可能已变
+        // 或已清空），但锁仍可能由本 attempt 持有：按 owner 幂等释放，
+        // 避免残留孤儿锁阻塞后续 attempt。
+        if shared.current_lock_owner_id.as_deref() == Some(attempt.id.as_str()) {
+            let _ = lifecycle.release_issue_worktree_lock_by_owner(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            );
+        }
     }
 
     cleanup_coding_attempt_workspace(&repository, &attempt).await?;
