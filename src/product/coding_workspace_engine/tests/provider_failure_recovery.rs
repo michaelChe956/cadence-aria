@@ -697,7 +697,7 @@ async fn automatic_retry_role_run_create_failure_leaves_no_orphan_timeline_node(
 }
 
 #[tokio::test]
-async fn reviewer_initial_invocation_preserves_persisted_provider_session() {
+async fn reviewer_transport_failure_then_invalid_structured_output_stops_without_retry_budget() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let worktree = attempt.worktree_path.clone().expect("worktree");
     init_test_git_repo(&worktree);
@@ -716,13 +716,16 @@ async fn reviewer_initial_invocation_preserves_persisted_provider_session() {
         .expect("seed reviewer conversation");
     let provider = TransportFailuresThenSuccessProvider::new(1, "not structured review output");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
-    let _ = engine
+    let report = engine
         .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
-        .await;
+        .await
+        .expect("invalid structured output blocks review without a third retry");
 
+    assert_eq!(report.verdict, ReviewVerdict::Blocked);
+    assert!(report.summary.contains("不是有效 JSON"));
     let inputs = provider.recorded_inputs();
     assert_eq!(inputs.len(), 2);
     assert_eq!(
@@ -730,6 +733,25 @@ async fn reviewer_initial_invocation_preserves_persisted_provider_session() {
         Some("reviewer-session-before-retry")
     );
     assert_eq!(inputs[1].resume_provider_session_id, None);
+    let persisted = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("blocked attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reviewer role runs");
+    assert_eq!(runs.len(), 2, "invalid output must not start a third retry");
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Failed);
+    assert_eq!(runs[1].status, CodingRoleRunStatus::Blocked);
+    assert_eq!(runs[0].trigger, CodingRoleRunTrigger::Initial);
+    assert_eq!(runs[1].trigger, CodingRoleRunTrigger::AutomaticRetry);
+    assert_eq!(runs[1].retry_metadata.as_ref().unwrap().attempt_no, 2);
+    assert_eq!(runs[1].reason_code.as_deref(), Some("code_review_blocked"));
+    let gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reviewer failure gate");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].reason_code.as_deref(), Some("code_review_blocked"));
 }
 
 #[tokio::test]

@@ -187,6 +187,91 @@ async fn reviewer_three_transport_failures_open_one_human_gate_after_third_run()
     assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
 }
 
+#[tokio::test]
+async fn reviewer_retries_once_then_succeeds_with_two_auditable_runs() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = TransportFailuresThenSuccessProvider::new(
+        1,
+        r#"{"verdict":"approve","summary":"retry review completed","findings":[]}"#,
+    );
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let report = engine
+        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .await
+        .expect("second fresh reviewer invocation succeeds");
+
+    assert_eq!(report.verdict, ReviewVerdict::Approve);
+    assert_eq!(report.summary, "retry review completed");
+    let inputs = provider.recorded_inputs();
+    assert_eq!(inputs.len(), 2);
+    assert!(inputs.iter().all(|input| input.working_dir == worktree));
+    assert!(
+        inputs
+            .iter()
+            .all(|input| input.resume_provider_session_id.is_none())
+    );
+    let nonces = inputs
+        .iter()
+        .map(|input| {
+            input
+                .structured_output_contract
+                .as_ref()
+                .expect("review contract")
+                .nonce
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(nonces[0], nonces[1]);
+
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reviewer role runs");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Failed);
+    assert_eq!(runs[0].trigger, CodingRoleRunTrigger::Initial);
+    assert_eq!(
+        runs[0].reason_code.as_deref(),
+        Some("provider_connection_interrupted")
+    );
+    assert_eq!(runs[1].status, CodingRoleRunStatus::Completed);
+    assert_eq!(runs[1].trigger, CodingRoleRunTrigger::AutomaticRetry);
+    assert_eq!(runs[0].retry_metadata.as_ref().unwrap().attempt_no, 1);
+    assert_eq!(runs[1].retry_metadata.as_ref().unwrap().attempt_no, 2);
+    assert_eq!(
+        runs[1]
+            .retry_metadata
+            .as_ref()
+            .unwrap()
+            .prior_run_id
+            .as_deref(),
+        Some(runs[0].id.as_str())
+    );
+    assert_eq!(runs[0].raw_provider_output_refs.len(), 1);
+    assert_eq!(runs[1].raw_provider_output_refs.len(), 2);
+
+    let review_nodes = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("review timeline nodes")
+        .into_iter()
+        .filter(|node| node.stage == CodingExecutionStage::CodeReview)
+        .collect::<Vec<_>>();
+    assert_eq!(review_nodes.len(), 2);
+    assert_eq!(review_nodes[0].status, CodingTimelineNodeStatus::Failed);
+    assert_eq!(review_nodes[1].status, CodingTimelineNodeStatus::Completed);
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
+    );
+}
+
 #[test]
 fn provider_retry_classifier_retries_only_transport_failures() {
     let cases = [
