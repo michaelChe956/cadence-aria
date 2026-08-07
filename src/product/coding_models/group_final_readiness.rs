@@ -49,7 +49,7 @@ pub struct GroupFinalReadinessUnit {
     pub review_verdict: Option<ReviewVerdict>,
     pub review_summary: Option<String>,
     pub review_findings: Option<Vec<ReviewFinding>>,
-    pub review_raw_ref: Option<String>,
+    pub review_raw_provider_output_ref: Option<String>,
     pub handoff_revision_id: Option<String>,
     pub plan_revision_id: Option<String>,
 }
@@ -61,4 +61,5 @@ pub struct GroupFinalReadinessSnapshot {
     pub status: GroupFinalReadinessStatus,
     pub units: Vec<GroupFinalReadinessUnit>,
     pub diagnostics: Vec<GroupFinalReadinessDiagnostic>,
+    pub created_at: String,
 }

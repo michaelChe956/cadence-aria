@@ -9,7 +9,9 @@ use crate::product::coding_models::{
     GroupFinalReadinessStatus, GroupFinalReadinessUnit, ReviewFinding, ReviewVerdict,
 };
 use crate::product::json_store::write_json;
-use crate::product::models::{PlanDefectClass, PlanDefectRoute, ProviderName};
+use crate::product::models::{
+    PlanDefectClass, PlanDefectRoute, ProviderName, RepairTarget, RepairTargetKind,
+};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 mod attempt_creation_concurrency;
@@ -774,7 +776,7 @@ fn ready_unit(
         review_verdict: Some(ReviewVerdict::Approve),
         review_summary: Some(format!("{unit_id} review approved")),
         review_findings: Some(vec![final_readiness_finding()]),
-        review_raw_ref: Some(format!("provider-raw/code-review/{unit_id}.txt")),
+        review_raw_provider_output_ref: Some(format!("provider-raw/code-review/{unit_id}.txt")),
         handoff_revision_id: Some(format!("handoff_revision_{unit_id}")),
         plan_revision_id: Some(format!("plan_revision_{unit_id}")),
     }
@@ -791,6 +793,7 @@ fn group_final_readiness_round_trips_complete_snapshot() {
             ready_unit("unit_0002", "work_item_0002", "unit_run_0002"),
         ],
         diagnostics: Vec::new(),
+        created_at: "caller-supplied-value-must-not-be-persisted".to_string(),
     };
 
     store
@@ -813,9 +816,29 @@ fn group_final_readiness_round_trips_complete_snapshot() {
         Some(vec![final_readiness_finding()])
     );
     assert_eq!(
-        restored.units[0].review_raw_ref.as_deref(),
+        restored.units[0].review_raw_provider_output_ref.as_deref(),
         Some("provider-raw/code-review/unit_0001.txt")
     );
+    assert!(
+        serde_json::to_value(&restored)
+            .expect("serialize restored snapshot")
+            .get("units")
+            .and_then(|units| units.get(0))
+            .and_then(|unit| unit.get("review_raw_ref"))
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(&restored)
+            .expect("serialize restored snapshot")
+            .get("units")
+            .and_then(|units| units.get(0))
+            .and_then(|unit| unit.get("review_raw_provider_output_ref"))
+            .is_some()
+    );
+    let created_at = chrono::DateTime::parse_from_rfc3339(&restored.created_at)
+        .expect("writer stamps snapshot with RFC3339 time");
+    assert_eq!(created_at.offset().local_minus_utc(), 0);
+    assert_ne!(restored.created_at, snapshot.created_at);
     assert_eq!(
         restored.units[1].handoff_revision_id.as_deref(),
         Some("handoff_revision_unit_0002")
@@ -827,13 +850,14 @@ fn group_final_readiness_round_trips_complete_snapshot() {
 }
 
 #[test]
-fn readiness_store_rejects_snapshot_for_different_attempt() {
+fn group_final_readiness_rejects_snapshot_for_different_attempt() {
     let (_tmp, store, attempt) = setup();
     let mut snapshot = GroupFinalReadinessSnapshot {
         attempt_id: "coding_attempt_other".to_string(),
         status: GroupFinalReadinessStatus::Complete,
         units: vec![ready_unit("unit_0001", "work_item_0001", "unit_run_0001")],
         diagnostics: Vec::new(),
+        created_at: String::new(),
     };
 
     assert!(matches!(
@@ -848,7 +872,7 @@ fn readiness_store_rejects_snapshot_for_different_attempt() {
     store
         .write_group_final_readiness_snapshot(&attempt, &snapshot)
         .expect("write valid snapshot");
-    snapshot.attempt_id = "coding_attempt_other".to_string();
+    snapshot.attempt_id = "../other-attempt".to_string();
     write_json(
         &store.group_final_readiness_snapshot_path(&attempt),
         &snapshot,
@@ -865,14 +889,14 @@ fn readiness_store_rejects_snapshot_for_different_attempt() {
 }
 
 #[test]
-fn incomplete_snapshot_keeps_explicit_diagnostics() {
+fn group_final_readiness_incomplete_snapshot_keeps_explicit_diagnostics() {
     let (_tmp, store, attempt) = setup();
     let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
     unit.code_review_report_id = None;
     unit.review_verdict = None;
     unit.review_summary = None;
     unit.review_findings = None;
-    unit.review_raw_ref = None;
+    unit.review_raw_provider_output_ref = None;
     let snapshot = GroupFinalReadinessSnapshot {
         attempt_id: attempt.id.clone(),
         status: GroupFinalReadinessStatus::Incomplete,
@@ -882,6 +906,7 @@ fn incomplete_snapshot_keeps_explicit_diagnostics() {
             unit_id: Some("unit_0001".to_string()),
             message: "unit_0001 is missing code-review evidence".to_string(),
         }],
+        created_at: String::new(),
     };
 
     store
@@ -898,7 +923,7 @@ fn incomplete_snapshot_keeps_explicit_diagnostics() {
 }
 
 #[test]
-fn readiness_store_returns_none_when_snapshot_does_not_exist() {
+fn group_final_readiness_returns_none_when_snapshot_does_not_exist() {
     let (_tmp, store, attempt) = setup();
 
     assert_eq!(
@@ -910,34 +935,146 @@ fn readiness_store_returns_none_when_snapshot_does_not_exist() {
 }
 
 #[test]
-fn readiness_store_rejects_empty_incomplete_diagnostics() {
+fn group_final_readiness_rejects_complete_snapshot_without_authoritative_evidence() {
     let (_tmp, store, attempt) = setup();
-    let snapshot = GroupFinalReadinessSnapshot {
+    let missing_evidence: [(&str, fn(&mut GroupFinalReadinessUnit)); 6] = [
+        (
+            "code_review_report_id",
+            |unit: &mut GroupFinalReadinessUnit| unit.code_review_report_id = None,
+        ),
+        ("review_verdict", |unit: &mut GroupFinalReadinessUnit| {
+            unit.review_verdict = None
+        }),
+        ("review_summary", |unit: &mut GroupFinalReadinessUnit| {
+            unit.review_summary = None
+        }),
+        ("review_findings", |unit: &mut GroupFinalReadinessUnit| {
+            unit.review_findings = None
+        }),
+        (
+            "handoff_revision_id",
+            |unit: &mut GroupFinalReadinessUnit| unit.handoff_revision_id = None,
+        ),
+        ("plan_revision_id", |unit: &mut GroupFinalReadinessUnit| {
+            unit.plan_revision_id = None
+        }),
+    ];
+
+    let empty_units = GroupFinalReadinessSnapshot {
+        attempt_id: attempt.id.clone(),
+        status: GroupFinalReadinessStatus::Complete,
+        units: Vec::new(),
+        diagnostics: Vec::new(),
+        created_at: String::new(),
+    };
+    assert_invalid_group_final_readiness_snapshot(
+        store
+            .write_group_final_readiness_snapshot(&attempt, &empty_units)
+            .expect_err("complete snapshot without units must be rejected"),
+        "complete snapshot must include at least one unit",
+    );
+
+    for (field, clear_field) in missing_evidence {
+        let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
+        clear_field(&mut unit);
+        let snapshot = GroupFinalReadinessSnapshot {
+            attempt_id: attempt.id.clone(),
+            status: GroupFinalReadinessStatus::Complete,
+            units: vec![unit],
+            diagnostics: Vec::new(),
+            created_at: String::new(),
+        };
+
+        assert_invalid_group_final_readiness_snapshot(
+            store
+                .write_group_final_readiness_snapshot(&attempt, &snapshot)
+                .expect_err("complete snapshot without authoritative evidence must be rejected"),
+            &format!("complete unit unit_0001 is missing {field}"),
+        );
+    }
+}
+
+#[test]
+fn group_final_readiness_rejects_empty_or_blank_diagnostics_as_invalid_records() {
+    let (_tmp, store, attempt) = setup();
+    let empty_diagnostics = GroupFinalReadinessSnapshot {
         attempt_id: attempt.id.clone(),
         status: GroupFinalReadinessStatus::Incomplete,
         units: Vec::new(),
         diagnostics: Vec::new(),
+        created_at: String::new(),
     };
+    assert_invalid_group_final_readiness_snapshot(
+        store
+            .write_group_final_readiness_snapshot(&attempt, &empty_diagnostics)
+            .expect_err("empty incomplete diagnostics must be rejected"),
+        "incomplete snapshot must include diagnostics",
+    );
 
-    assert!(matches!(
-        store.write_group_final_readiness_snapshot(&attempt, &snapshot),
-        Err(ProductStoreError::IdentityMismatch {
-            kind: "group_final_readiness_snapshot",
-            ..
-        })
-    ));
+    let blank_message = GroupFinalReadinessSnapshot {
+        attempt_id: attempt.id.clone(),
+        status: GroupFinalReadinessStatus::Incomplete,
+        units: Vec::new(),
+        diagnostics: vec![GroupFinalReadinessDiagnostic {
+            kind: GroupFinalReadinessDiagnosticKind::CodeReviewMissing,
+            unit_id: None,
+            message: " \t ".to_string(),
+        }],
+        created_at: String::new(),
+    };
+    assert_invalid_group_final_readiness_snapshot(
+        store
+            .write_group_final_readiness_snapshot(&attempt, &blank_message)
+            .expect_err("blank diagnostic messages must be rejected"),
+        "diagnostic message must not be empty",
+    );
 }
 
 #[test]
-fn readiness_store_rejects_escaping_artifact_references() {
+fn group_final_readiness_rejects_escaping_repair_target_ids() {
+    let (_tmp, store, attempt) = setup();
+    for repair_target in [
+        RepairTarget {
+            kind: RepairTargetKind::CurrentWorkItem,
+            logical_work_item_ids: vec!["../work-item".to_string()],
+            work_item_revision_ids: vec!["work_item_revision_0001".to_string()],
+        },
+        RepairTarget {
+            kind: RepairTargetKind::CurrentWorkItem,
+            logical_work_item_ids: vec!["work_item_0001".to_string()],
+            work_item_revision_ids: vec!["../work-item-revision".to_string()],
+        },
+    ] {
+        let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
+        let mut finding = final_readiness_finding();
+        finding.repair_target = Some(repair_target);
+        unit.review_findings = Some(vec![finding]);
+        let snapshot = GroupFinalReadinessSnapshot {
+            attempt_id: attempt.id.clone(),
+            status: GroupFinalReadinessStatus::Complete,
+            units: vec![unit],
+            diagnostics: Vec::new(),
+            created_at: String::new(),
+        };
+
+        assert!(matches!(
+            store.write_group_final_readiness_snapshot(&attempt, &snapshot),
+            Err(ProductStoreError::PathEscape(_))
+        ));
+    }
+}
+
+#[test]
+fn group_final_readiness_rejects_escaping_artifact_references() {
     let (_tmp, store, attempt) = setup();
     let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
-    unit.review_raw_ref = Some("../outside.txt".to_string());
+    unit.review_raw_provider_output_ref = Some("../outside.txt".to_string());
     let snapshot = GroupFinalReadinessSnapshot {
         attempt_id: attempt.id.clone(),
         status: GroupFinalReadinessStatus::Complete,
         units: vec![unit],
         diagnostics: Vec::new(),
+        created_at: String::new(),
     };
 
     assert!(matches!(
@@ -963,8 +1100,19 @@ fn group_final_readiness_model_defaults_missing_future_fields() {
     );
 
     assert!(snapshot.diagnostics.is_empty());
+    assert!(snapshot.created_at.is_empty());
     assert_eq!(snapshot.units[0].commit_shas, Vec::<String>::new());
     assert!(snapshot.units[0].review_verdict.is_none());
+}
+
+fn assert_invalid_group_final_readiness_snapshot(error: ProductStoreError, expected_reason: &str) {
+    assert!(matches!(
+        error,
+        ProductStoreError::InvalidRecord {
+            kind: "group_final_readiness_snapshot",
+            reason,
+        } if reason == expected_reason
+    ));
 }
 
 fn read_json_from_str(value: &str) -> GroupFinalReadinessSnapshot {

@@ -330,6 +330,9 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
                 | ProductStoreError::IdentityMismatch { kind, id } => {
                     json!({ "kind": kind, "id": id })
                 }
+                ProductStoreError::InvalidRecord { kind, reason } => {
+                    json!({ "kind": kind, "reason": reason })
+                }
                 ProductStoreError::Io(message)
                 | ProductStoreError::Json(message)
                 | ProductStoreError::PathEscape(message) => json!({ "message": message }),
