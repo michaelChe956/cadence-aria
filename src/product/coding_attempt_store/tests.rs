@@ -764,14 +764,15 @@ fn ready_unit(
     GroupFinalReadinessUnit {
         unit_id: unit_id.to_string(),
         logical_work_item_id: logical_work_item_id.to_string(),
-        unit_run_id: unit_run_id.to_string(),
-        start_commit: format!("start_commit_{unit_id}"),
-        completion_commit: format!("completion_commit_{unit_id}"),
+        unit_run_id: Some(unit_run_id.to_string()),
+        start_commit: Some(format!("start_commit_{unit_id}")),
+        completion_commit: Some(format!("completion_commit_{unit_id}")),
         commit_shas: vec![
             format!("start_commit_{unit_id}"),
             format!("completion_commit_{unit_id}"),
         ],
         diff_ref: format!("diffs/{unit_id}.patch"),
+        empty_observation: false,
         code_review_report_id: Some(format!("code_review_report_{unit_id}")),
         review_verdict: Some(ReviewVerdict::Approve),
         review_summary: Some(format!("{unit_id} review approved")),
@@ -812,6 +813,18 @@ fn group_final_readiness_round_trips_complete_snapshot() {
         vec!["start_commit_unit_0001", "completion_commit_unit_0001"]
     );
     assert_eq!(
+        restored.units[0].unit_run_id.as_deref(),
+        Some("unit_run_0001")
+    );
+    assert_eq!(
+        restored.units[0].start_commit.as_deref(),
+        Some("start_commit_unit_0001")
+    );
+    assert_eq!(
+        restored.units[0].completion_commit.as_deref(),
+        Some("completion_commit_unit_0001")
+    );
+    assert_eq!(
         restored.units[0].review_findings,
         Some(vec![final_readiness_finding()])
     );
@@ -846,6 +859,47 @@ fn group_final_readiness_round_trips_complete_snapshot() {
     assert_eq!(
         restored.units[1].plan_revision_id.as_deref(),
         Some("plan_revision_unit_0002")
+    );
+    assert!(!restored.units[1].empty_observation);
+}
+
+#[test]
+fn group_final_readiness_empty_observation_requires_empty_git_facts() {
+    let (_tmp, store, attempt) = setup();
+    let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
+    unit.empty_observation = true;
+    unit.commit_shas.clear();
+    unit.diff_ref.clear();
+    let snapshot = GroupFinalReadinessSnapshot {
+        attempt_id: attempt.id.clone(),
+        status: GroupFinalReadinessStatus::Complete,
+        units: vec![unit.clone()],
+        diagnostics: Vec::new(),
+        created_at: String::new(),
+    };
+
+    store
+        .write_group_final_readiness_snapshot(&attempt, &snapshot)
+        .expect("empty observation snapshot");
+    assert!(
+        store
+            .get_group_final_readiness_snapshot(&attempt)
+            .expect("read snapshot")
+            .expect("snapshot")
+            .units[0]
+            .empty_observation
+    );
+
+    unit.commit_shas = vec!["completion_commit_unit_0001".to_string()];
+    let inconsistent = GroupFinalReadinessSnapshot {
+        units: vec![unit],
+        ..snapshot
+    };
+    assert_invalid_group_final_readiness_snapshot(
+        store
+            .write_group_final_readiness_snapshot(&attempt, &inconsistent)
+            .expect_err("empty observation must not include git facts"),
+        "empty observation unit unit_0001 must not include git range facts",
     );
 }
 
@@ -1101,6 +1155,19 @@ fn group_final_readiness_model_defaults_missing_future_fields() {
 
     assert!(snapshot.diagnostics.is_empty());
     assert!(snapshot.created_at.is_empty());
+    assert_eq!(
+        snapshot.units[0].unit_run_id.as_deref(),
+        Some("unit_run_0001")
+    );
+    assert_eq!(
+        snapshot.units[0].start_commit.as_deref(),
+        Some("start_commit_0001")
+    );
+    assert_eq!(
+        snapshot.units[0].completion_commit.as_deref(),
+        Some("completion_commit_0001")
+    );
+    assert!(!snapshot.units[0].empty_observation);
     assert_eq!(snapshot.units[0].commit_shas, Vec::<String>::new());
     assert!(snapshot.units[0].review_verdict.is_none());
 }

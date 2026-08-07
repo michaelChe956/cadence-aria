@@ -65,13 +65,22 @@ fn validate_snapshot(snapshot: &GroupFinalReadinessSnapshot) -> Result<(), Produ
 
     for unit in &snapshot.units {
         for id in [
-            unit.unit_id.as_str(),
-            unit.logical_work_item_id.as_str(),
-            unit.unit_run_id.as_str(),
-            unit.start_commit.as_str(),
-            unit.completion_commit.as_str(),
-        ] {
+            Some(unit.unit_id.as_str()),
+            Some(unit.logical_work_item_id.as_str()),
+            unit.unit_run_id.as_deref(),
+            unit.start_commit.as_deref(),
+            unit.completion_commit.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             validate_relative_id(id)?;
+        }
+        if unit.empty_observation && (!unit.commit_shas.is_empty() || !unit.diff_ref.is_empty()) {
+            return Err(invalid_record(&format!(
+                "empty observation unit {} must not include git range facts",
+                unit.unit_id
+            )));
         }
         if snapshot.status == GroupFinalReadinessStatus::Complete {
             validate_complete_unit(unit)?;
@@ -119,6 +128,9 @@ fn validate_complete_unit(
     unit: &crate::product::coding_models::GroupFinalReadinessUnit,
 ) -> Result<(), ProductStoreError> {
     for (field, value) in [
+        ("unit_run_id", unit.unit_run_id.is_some()),
+        ("start_commit", unit.start_commit.is_some()),
+        ("completion_commit", unit.completion_commit.is_some()),
         (
             "code_review_report_id",
             unit.code_review_report_id.is_some(),
