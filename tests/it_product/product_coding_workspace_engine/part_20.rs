@@ -171,6 +171,7 @@ fn group_attempt_with_committed_unit_changes(
         )
         .expect("set head commit");
 
+    write_complete_group_final_readiness_snapshot(&store, &attempt);
     (root, paths, store, engine, attempt)
 }
 

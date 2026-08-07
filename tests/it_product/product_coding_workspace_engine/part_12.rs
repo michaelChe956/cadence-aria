@@ -185,6 +185,55 @@ fn create_completed_unit_run_for_test(
         .expect("completed unit run");
 }
 
+fn complete_group_final_readiness_snapshot(
+    attempt: &CodingExecutionAttempt,
+    units: &[cadence_aria::product::coding_models::CodingExecutionUnit],
+) -> cadence_aria::product::coding_models::GroupFinalReadinessSnapshot {
+    use cadence_aria::product::coding_models::{
+        GroupFinalReadinessSnapshot, GroupFinalReadinessStatus, GroupFinalReadinessUnit,
+    };
+
+    GroupFinalReadinessSnapshot {
+        attempt_id: attempt.id.clone(),
+        status: GroupFinalReadinessStatus::Complete,
+        units: units
+            .iter()
+            .map(|unit| GroupFinalReadinessUnit {
+                unit_id: unit.id.clone(),
+                logical_work_item_id: unit.logical_work_item_id.clone(),
+                unit_run_id: Some(format!("fixture_run_{}", unit.id)),
+                start_commit: Some("seed-commit".to_string()),
+                completion_commit: Some("seed-commit".to_string()),
+                empty_observation: true,
+                code_review_report_id: Some(format!("fixture_review_{}", unit.id)),
+                review_verdict: Some(ReviewVerdict::Approve),
+                review_summary: Some("fixture independent review approved".to_string()),
+                review_findings: Some(Vec::new()),
+                handoff_revision_id: Some(format!("fixture_handoff_{}", unit.id)),
+                plan_revision_id: Some("plan_revision_0001".to_string()),
+                ..Default::default()
+            })
+            .collect(),
+        diagnostics: Vec::new(),
+        created_at: "2026-08-07T00:00:00Z".to_string(),
+    }
+}
+
+fn write_complete_group_final_readiness_snapshot(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("group coding units");
+    store
+        .write_group_final_readiness_snapshot(
+            attempt,
+            &complete_group_final_readiness_snapshot(attempt, &units),
+        )
+        .expect("complete group final readiness snapshot");
+}
+
 fn init_group_worktree(worktree: &Path) {
     init_repo(worktree);
     fs::create_dir_all(worktree.join("src")).expect("create group src dir");
@@ -654,5 +703,6 @@ fn group_attempt_waiting_for_final_confirm() -> (
             artifact_refs: Vec::new(),
         })
         .expect("save final confirm node");
+    write_complete_group_final_readiness_snapshot(&store, &attempt);
     (root, paths, store, engine, attempt)
 }

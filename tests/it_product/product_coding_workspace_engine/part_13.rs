@@ -393,10 +393,11 @@ async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
         .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .await
         .expect_err("legacy group without authoritative binding must fail closed");
-    assert!(
-        error.to_string().contains("coding_attempt_plan_binding"),
-        "unexpected failure-closed error: {error}"
-    );
+    assert!(matches!(
+        error,
+        cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::FinalConfirmNotReady(ref id)
+            if id == &attempt.id
+    ));
 
     let persisted = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
