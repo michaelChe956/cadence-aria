@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
 
-use crate::product::coding_attempt_store::FailedCodeReviewRecoveryPhase;
+use crate::product::coding_attempt_store::{CreateBlockedGateInput, FailedCodeReviewRecoveryPhase};
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage, CodingProviderRole,
     CodingRoleRunStatus, CodingRoleRunTrigger,
@@ -44,6 +44,106 @@ async fn group_failed_review_recovery_gate_reuses_dirty_gate_without_persisting_
 #[tokio::test]
 async fn work_item_failed_review_recovery_gate_reuses_dirty_gate_without_persisting_changes() {
     assert_recovery_gate(CodingAttemptScope::WorkItem).await;
+}
+
+#[tokio::test]
+async fn manual_coder_retry_links_to_exhausted_cycle_instead_of_replacing_history() {
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItem).await;
+    let failed_coder = fixture
+        .store
+        .create_role_run(
+            &fixture.attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_manual_retry".to_string()),
+        )
+        .expect("seed exhausted coder run");
+    let failed_coder = fixture
+        .store
+        .update_role_run_status(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &failed_coder.id,
+            CodingRoleRunStatus::Failed,
+            Some("provider_connection_interrupted".to_string()),
+        )
+        .expect("fail exhausted coder run");
+    let gate = fixture
+        .store
+        .create_blocked_gate(
+            &fixture.attempt,
+            CreateBlockedGateInput {
+                attempt_id: fixture.attempt.id.clone(),
+                stage: CodingExecutionStage::Coding,
+                node_id: Some("coding_node_manual_retry".to_string()),
+                role: Some(CodingProviderRole::Coder),
+                title: "Coder 执行中断".to_string(),
+                description: "transport exhausted".to_string(),
+                reason_code: Some("coder_provider_interrupted".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    crate::product::coding_workspace_engine::coding_gate_action_for_id(
+                        "retry_coding",
+                    )
+                    .expect("retry coding action"),
+                ],
+            },
+        )
+        .expect("seed coder retry gate");
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+
+    let running = engine
+        .handle_blocked_gate_response(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &gate.gate_id,
+            "retry_coding",
+            None,
+        )
+        .await
+        .expect("manual coder retry");
+    let retry = fixture
+        .store
+        .latest_role_run(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+        )
+        .expect("load coder retry")
+        .expect("manual coder retry run");
+    let metadata = retry.retry_metadata.expect("manual retry metadata");
+
+    assert_eq!(retry.trigger, CodingRoleRunTrigger::ManualRetry);
+    assert_eq!(metadata.attempt_no, 1);
+    assert_eq!(
+        metadata.prior_run_id.as_deref(),
+        Some(failed_coder.id.as_str())
+    );
+    assert_ne!(
+        metadata.cycle_id,
+        failed_coder.retry_metadata.unwrap().cycle_id
+    );
+    assert_eq!(
+        fixture
+            .store
+            .get_role_run(
+                &running.project_id,
+                &running.issue_id,
+                &running.id,
+                &failed_coder.id,
+            )
+            .expect("failed coder history")
+            .status,
+        CodingRoleRunStatus::Failed
+    );
 }
 
 #[test]
@@ -205,7 +305,7 @@ async fn failed_code_review_is_recovered_in_place_without_changing_execution_fin
         Some(retry.id.as_str())
     );
     assert_eq!(retry.status, CodingRoleRunStatus::Running);
-    assert_eq!(retry.trigger, CodingRoleRunTrigger::RetryReview);
+    assert_eq!(retry.trigger, CodingRoleRunTrigger::ManualRetry);
     assert_eq!(retry.node_id, None);
     assert_eq!(
         retry.supersedes_run_id.as_deref(),
@@ -467,7 +567,7 @@ async fn failed_code_review_recovery_journal_prefixes_converge_idempotently() {
         assert_eq!(runs.len(), 2, "{prefix:?}: {runs:?}");
         let retry = runs
             .iter()
-            .find(|run| run.trigger == CodingRoleRunTrigger::RetryReview)
+            .find(|run| run.trigger == CodingRoleRunTrigger::ManualRetry)
             .expect("stable retry role run");
         assert_eq!(
             retry.supersedes_run_id.as_deref(),

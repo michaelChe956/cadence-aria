@@ -55,13 +55,30 @@ impl CodingWorkspaceEngine {
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
-        let role_run = self.store.create_role_run(
-            &attempt,
+        let role_run = match self.store.latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
             CodingExecutionStage::Coding,
             CodingProviderRole::Coder,
-            CodingRoleRunTrigger::Initial,
-            Some(node.id.clone()),
-        )?;
+        )? {
+            Some(run) if run.status == CodingRoleRunStatus::Running && run.node_id.is_none() => {
+                self.store.attach_role_run_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &run.id,
+                    node.id.clone(),
+                )?
+            }
+            _ => self.store.create_role_run(
+                &attempt,
+                CodingExecutionStage::Coding,
+                CodingProviderRole::Coder,
+                CodingRoleRunTrigger::Initial,
+                Some(node.id.clone()),
+            )?,
+        };
 
         let coder_provider = self
             .store

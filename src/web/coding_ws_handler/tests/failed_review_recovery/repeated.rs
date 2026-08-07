@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 use crate::product::coding_attempt_store::FailedCodeReviewRecoveryPhase;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage, CodingRoleRunStatus,
+    CodingRoleRunTrigger,
 };
 use crate::product::coding_workspace_engine::{
     CodingWorkspaceEngine, recoverable_failed_code_review,
@@ -117,4 +118,51 @@ async fn completed_journal_rotates_when_later_review_is_interrupted() {
         &running,
         &first_gate_retry,
     ));
+}
+
+#[tokio::test]
+async fn manual_reviewer_retry_starts_linked_cycle_with_fresh_two_retry_budget() {
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
+    let gate_id = fixture
+        .dirty_gate
+        .as_ref()
+        .expect("provider interruption gate")
+        .gate_id
+        .clone();
+    let stale = fixture
+        .store
+        .get_role_run(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &fixture.stale_role_run_id,
+        )
+        .expect("exhausted reviewer run");
+    let stale_cycle = stale.retry_metadata.expect("stale retry cycle");
+
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+    let running = engine
+        .recover_failed_code_review(&gate_id)
+        .await
+        .expect("manual reviewer retry");
+    let retry = fixture
+        .store
+        .latest_role_run(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingExecutionStage::CodeReview,
+            crate::product::coding_models::CodingProviderRole::CodeReviewer,
+        )
+        .expect("load reviewer retry")
+        .expect("manual reviewer retry run");
+    let metadata = retry.retry_metadata.expect("manual retry metadata");
+
+    assert_eq!(retry.trigger, CodingRoleRunTrigger::ManualRetry);
+    assert_ne!(metadata.cycle_id, stale_cycle.cycle_id);
+    assert_eq!(metadata.attempt_no, 1);
+    assert_eq!(metadata.prior_run_id.as_deref(), Some(stale.id.as_str()));
+    assert_eq!(stale.status, CodingRoleRunStatus::Failed);
 }

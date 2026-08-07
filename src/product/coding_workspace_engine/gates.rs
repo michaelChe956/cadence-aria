@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::coding_models::CodingRoleRunRetryMetadata;
 
 mod schema_v2;
 
@@ -657,7 +658,15 @@ impl CodingWorkspaceEngine {
                     &CodingProviderRole::Coder,
                     &coder_provider,
                 )?;
-                self.resume_blocked_attempt_at_stage(&cleared, CodingExecutionStage::Coding)?
+                let resumed =
+                    self.resume_blocked_attempt_at_stage(&cleared, CodingExecutionStage::Coding)?;
+                self.create_manual_provider_retry_role_run_if_failed(
+                    &resumed,
+                    CodingExecutionStage::Coding,
+                    CodingProviderRole::Coder,
+                    gate.reason_code.clone(),
+                )?;
+                resumed
             }
             CodingGateActionType::RetryReview => {
                 if gate.stage == Some(CodingExecutionStage::InternalPrReview)
@@ -814,6 +823,45 @@ impl CodingWorkspaceEngine {
             )?;
         }
         Ok(updated)
+    }
+
+    fn create_manual_provider_retry_role_run_if_failed(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
+        reason_code: Option<String>,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let Some(failed) = self.store.latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            stage.clone(),
+            role.clone(),
+        )?
+        else {
+            return Ok(());
+        };
+        if failed.status != CodingRoleRunStatus::Failed {
+            return Ok(());
+        }
+
+        let mut retry = self.store.create_role_run(
+            attempt,
+            stage,
+            role,
+            CodingRoleRunTrigger::ManualRetry,
+            None,
+        )?;
+        retry.retry_metadata = Some(CodingRoleRunRetryMetadata {
+            cycle_id: retry.id.clone(),
+            attempt_no: 1,
+            prior_run_id: Some(failed.id),
+        });
+        retry.reason_code = reason_code;
+        self.store
+            .save_role_run(&attempt.project_id, &attempt.issue_id, &retry)?;
+        Ok(())
     }
 }
 
