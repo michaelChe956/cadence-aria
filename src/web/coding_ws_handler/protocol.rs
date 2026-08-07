@@ -6,8 +6,8 @@ use crate::product::coding_models::{
     CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingChoiceGate, CodingExecutionStage,
     CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunSnapshot,
-    CodingTimelineNode, CodingTimelineNodeStatus, InternalPrReview, ReviewRequest,
-    WorkItemExecutionPlan,
+    CodingTimelineNode, CodingTimelineNodeStatus, GroupFinalReadinessSnapshot, InternalPrReview,
+    ReviewRequest, WorkItemExecutionPlan,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
@@ -48,6 +48,8 @@ pub enum CodingWsOutMessage {
         code_review_reports: Box<Vec<CodeReviewReport>>,
         review_request: Box<Option<ReviewRequest>>,
         internal_pr_review: Box<Option<InternalPrReview>>,
+        #[serde(default)]
+        group_final_readiness: Box<Option<GroupFinalReadinessSnapshot>>,
         pending_gates: Box<Vec<CodingGateRequiredModel>>,
         pending_choices: Box<Vec<CodingChoiceGate>>,
         role_runs: Box<Vec<CodingRoleRunSnapshot>>,

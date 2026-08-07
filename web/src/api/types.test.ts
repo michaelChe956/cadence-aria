@@ -10,6 +10,7 @@ import type {
   GenerateWorkItemsRequest,
   IssueLifecycleResponse,
   IssueWorkItemPlanDetailDto,
+  GroupFinalReadinessSnapshot,
   InternalPrReview,
   LifecycleWorkItem,
   NodeDetail,
@@ -23,6 +24,46 @@ import type {
 } from "./types";
 
 describe("workspace websocket protocol types", () => {
+  it("describes group final readiness snapshots", () => {
+    const readiness: GroupFinalReadinessSnapshot = {
+      attempt_id: "coding_attempt_0001",
+      status: "complete",
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          logical_work_item_id: "work_item_0001",
+          unit_run_id: "coding_unit_run_0001",
+          start_commit: "BASE",
+          completion_commit: "C2",
+          commit_shas: ["C1", "C2"],
+          diff_ref: "diffs/coding_unit_0001.patch",
+          empty_observation: false,
+          code_review_report_id: "code_review_0001",
+          review_verdict: "approve",
+          review_summary: "review ok",
+          review_findings: [
+            {
+              severity: "info",
+              file_path: "src/web/types.rs",
+              line: 545,
+              message: "reviewed",
+              required_action: null,
+              source_stage: "code_review",
+            },
+          ],
+          review_raw_provider_output_ref: "provider-raw/code-review.txt",
+          handoff_revision_id: "handoff_revision_0001",
+          plan_revision_id: "plan_revision_0001",
+        },
+      ],
+      diagnostics: [],
+      created_at: "2026-08-07T00:00:00Z",
+    };
+
+    expect(readiness.units[0].commit_shas).toEqual(["C1", "C2"]);
+    expect(readiness.units[0].review_findings).toHaveLength(1);
+  });
+
   it("describes the full coding attempt address", () => {
     const address: CodingAttemptAddress = {
       projectId: "project_0001",
@@ -264,6 +305,7 @@ describe("workspace websocket protocol types", () => {
       code_review_reports: [],
       review_request: null,
       internal_pr_review: null,
+      group_final_readiness: null,
       pending_gates: [],
       pending_choices: [],
       work_item_execution_plan: null,
@@ -354,6 +396,7 @@ describe("workspace websocket protocol types", () => {
       code_review_reports: [],
       review_request: null,
       internal_pr_review: null,
+      group_final_readiness: null,
       pending_gates: [],
       pending_choices: [],
     };

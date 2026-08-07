@@ -5,6 +5,7 @@ import type {
   CodingRoleRun,
   CodingTimelineNode,
   CodingWsOutMessage,
+  GroupFinalReadinessSnapshot,
   WorkItemExecutionPlan,
 } from "../api/types";
 import { useCodingWorkspaceStore } from "./coding-workspace-store";
@@ -122,6 +123,59 @@ function roleRun(overrides: Partial<CodingRoleRun> = {}): CodingRoleRun {
   };
 }
 
+function completeGroupFinalReadiness(): GroupFinalReadinessSnapshot {
+  return {
+    attempt_id: "coding_attempt_0001",
+    status: "complete",
+    units: [
+      {
+        unit_id: "coding_unit_0001",
+        logical_work_item_id: "work_item_0001",
+        unit_run_id: "coding_unit_run_0001",
+        start_commit: "BASE",
+        completion_commit: "C2",
+        commit_shas: ["C1", "C2"],
+        diff_ref: "diffs/coding_unit_0001.patch",
+        empty_observation: false,
+        code_review_report_id: "code_review_0001",
+        review_verdict: "approve",
+        review_summary: "review ok",
+        review_findings: [
+          {
+            severity: "info",
+            file_path: "src/web/types.rs",
+            line: 545,
+            message: "reviewed",
+            required_action: null,
+            source_stage: "code_review",
+          },
+        ],
+        review_raw_provider_output_ref: "provider-raw/code-review.txt",
+        handoff_revision_id: "handoff_revision_0001",
+        plan_revision_id: "plan_revision_0001",
+      },
+    ],
+    diagnostics: [],
+    created_at: "2026-08-07T00:00:00Z",
+  };
+}
+
+function incompleteGroupFinalReadiness(): GroupFinalReadinessSnapshot {
+  return {
+    attempt_id: "coding_attempt_0001",
+    status: "incomplete",
+    units: [],
+    diagnostics: [
+      {
+        kind: "code_review_missing",
+        unit_id: "coding_unit_0001",
+        message: "unit review is missing",
+      },
+    ],
+    created_at: "2026-08-07T00:00:00Z",
+  };
+}
+
 function sessionState(
   overrides: Partial<Extract<CodingWsOutMessage, { type: "coding_session_state" }>> = {},
 ): Extract<CodingWsOutMessage, { type: "coding_session_state" }> {
@@ -197,6 +251,45 @@ function executionPlan(): WorkItemExecutionPlan {
 describe("coding workspace store", () => {
   beforeEach(() => {
     useCodingWorkspaceStore.getState().reset();
+  });
+
+  it("hydrates complete group final readiness with review findings and ordered commits", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.setSessionState(
+      {
+        ...sessionState(),
+        group_final_readiness: completeGroupFinalReadiness(),
+      } as Extract<CodingWsOutMessage, { type: "coding_session_state" }>,
+    );
+
+    expect(useCodingWorkspaceStore.getState().groupFinalReadiness?.units[0].commit_shas).toEqual([
+      "C1",
+      "C2",
+    ]);
+    expect(useCodingWorkspaceStore.getState().groupFinalReadiness?.units[0].review_findings).toHaveLength(
+      1,
+    );
+  });
+
+  it("retains incomplete diagnostics from a session-state update", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.setSessionState(
+      {
+        ...sessionState(),
+        group_final_readiness: incompleteGroupFinalReadiness(),
+      } as Extract<CodingWsOutMessage, { type: "coding_session_state" }>,
+    );
+
+    expect(useCodingWorkspaceStore.getState().groupFinalReadiness?.status).toBe("incomplete");
+    expect(useCodingWorkspaceStore.getState().groupFinalReadiness?.diagnostics).toEqual([
+      {
+        kind: "code_review_missing",
+        unit_id: "coding_unit_0001",
+        message: "unit review is missing",
+      },
+    ]);
   });
 
   it("initializes attempt state from a websocket session snapshot", () => {

@@ -15,6 +15,7 @@ import type {
   CodingTimelineNodeStatus,
   CodingWsOutMessage,
   ExecutionEvent,
+  GroupFinalReadinessSnapshot,
   InternalPrReview,
   PlanAmendmentManifest,
   PlanRepairSessionSnapshot,
@@ -97,6 +98,7 @@ export interface CodingWorkspaceState {
   diffSummary: null;
   codeReviewReports: CodeReviewReport[];
   internalPrReview: InternalPrReview | null;
+  groupFinalReadiness: GroupFinalReadinessSnapshot | null;
   reviewRequest: ReviewRequest | null;
   roleRuns: CodingRoleRun[];
   logs: CodingLogEntry[];
@@ -196,6 +198,7 @@ const initialState: CodingWorkspaceState = {
   diffSummary: null,
   codeReviewReports: [],
   internalPrReview: null,
+  groupFinalReadiness: null,
   reviewRequest: null,
   roleRuns: [],
   logs: [],
@@ -264,6 +267,7 @@ export const useCodingWorkspaceStore = create<
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
+        groupFinalReadiness: snapshot.group_final_readiness ?? null,
         roleRuns,
         pendingGates,
         workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,

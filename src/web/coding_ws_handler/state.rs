@@ -39,6 +39,7 @@ pub(crate) fn build_coding_session_state(
         .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
         .last();
+    let group_final_readiness = coding_store.get_group_final_readiness_snapshot(&attempt)?;
     let pending_gates = coding_pending_gates(coding_store, &attempt)?;
     let role_provider_config_snapshot = coding_store.get_role_provider_config_snapshot(
         &attempt.project_id,
@@ -92,6 +93,7 @@ pub(crate) fn build_coding_session_state(
         code_review_reports: Box::new(code_review_reports),
         review_request: Box::new(review_request),
         internal_pr_review: Box::new(internal_pr_review),
+        group_final_readiness: Box::new(group_final_readiness),
         pending_gates: Box::new(pending_gates),
         pending_choices: Box::new(pending_choices),
         role_runs: Box::new(role_runs),

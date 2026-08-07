@@ -11,7 +11,8 @@ use crate::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptScope, CodingAttemptStatus,
     CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingProviderPermissionMode,
     CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, ReviewFinding, ReviewVerdict,
+    CodingTimelineNodeStatus, FindingSeverity, GroupFinalReadinessSnapshot,
+    GroupFinalReadinessStatus, GroupFinalReadinessUnit, ReviewFinding, ReviewVerdict,
 };
 use crate::product::coding_work_item_context::select_work_item_markdown;
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
@@ -524,6 +525,58 @@ fn coding_execution_context_uses_workspace_artifact_when_final_compile_is_missin
     assert!(markdown.contains("# Workspace Work Item"));
     assert!(!markdown.contains("# Final Compile Work Item"));
     assert_eq!(context.verification_commands, vec!["cargo check --locked"]);
+}
+
+#[test]
+fn coding_session_state_includes_group_final_readiness_snapshot() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+    let coding_store = CodingAttemptStore::new(app_paths);
+    coding_store
+        .save_coding_attempt(&attempt)
+        .expect("save coding attempt");
+    let readiness = GroupFinalReadinessSnapshot {
+        attempt_id: attempt.id.clone(),
+        status: GroupFinalReadinessStatus::Complete,
+        units: vec![GroupFinalReadinessUnit {
+            unit_id: "coding_unit_0001".to_string(),
+            logical_work_item_id: attempt.work_item_id.clone(),
+            unit_run_id: Some("coding_unit_run_0001".to_string()),
+            start_commit: Some("BASE".to_string()),
+            completion_commit: Some("C2".to_string()),
+            commit_shas: vec!["C1".to_string(), "C2".to_string()],
+            diff_ref: "diffs/coding_unit_0001.patch".to_string(),
+            empty_observation: false,
+            code_review_report_id: Some("code_review_0001".to_string()),
+            review_verdict: Some(ReviewVerdict::Approve),
+            review_summary: Some("review ok".to_string()),
+            review_findings: Some(Vec::new()),
+            review_raw_provider_output_ref: None,
+            handoff_revision_id: Some("handoff_revision_0001".to_string()),
+            plan_revision_id: Some("plan_revision_0001".to_string()),
+        }],
+        diagnostics: Vec::new(),
+        created_at: "2026-08-07T00:00:00Z".to_string(),
+    };
+    coding_store
+        .write_group_final_readiness_snapshot(&attempt, &readiness)
+        .expect("write group final readiness");
+
+    let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");
+    let CodingWsOutMessage::CodingSessionState {
+        group_final_readiness,
+        ..
+    } = state
+    else {
+        panic!("expected coding session state");
+    };
+
+    let readiness = group_final_readiness
+        .as_ref()
+        .as_ref()
+        .expect("group final readiness must be included");
+    assert_eq!(readiness.attempt_id, "coding_attempt_0001");
+    assert_eq!(readiness.status, GroupFinalReadinessStatus::Complete);
+    assert_eq!(readiness.units[0].commit_shas, vec!["C1", "C2"]);
 }
 
 #[test]

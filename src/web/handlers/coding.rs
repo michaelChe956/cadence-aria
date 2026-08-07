@@ -545,6 +545,9 @@ pub(crate) async fn get_coding_attempt(
         .map_err(product_store_api_error)?
         .into_iter()
         .last();
+    let group_final_readiness = coding_store
+        .get_group_final_readiness_snapshot(&attempt)
+        .map_err(product_store_api_error)?;
     let pending_choices = coding_store
         .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -580,6 +583,7 @@ pub(crate) async fn get_coding_attempt(
         code_review_reports,
         review_request,
         internal_pr_review,
+        group_final_readiness,
         pending_gates,
         pending_choices,
         role_runs,

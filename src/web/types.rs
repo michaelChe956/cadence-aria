@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use crate::product::coding_models::{
     CodeReviewReport, CodingChoiceGate, CodingGateRequired, CodingRoleRunSnapshot,
-    CodingTimelineNode, InternalPrReview, ReviewRequest, WorkItemExecutionPlan,
+    CodingTimelineNode, GroupFinalReadinessSnapshot, InternalPrReview, ReviewRequest,
+    WorkItemExecutionPlan,
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -543,6 +544,8 @@ pub struct CodingAttemptSnapshotResponse {
     pub code_review_reports: Vec<CodeReviewReport>,
     pub review_request: Option<ReviewRequest>,
     pub internal_pr_review: Option<InternalPrReview>,
+    #[serde(default)]
+    pub group_final_readiness: Option<GroupFinalReadinessSnapshot>,
     pub pending_gates: Vec<CodingGateRequired>,
     pub pending_choices: Vec<CodingChoiceGate>,
     #[serde(default)]

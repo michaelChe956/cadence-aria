@@ -299,6 +299,47 @@ export type InternalPrReview = {
   run_no?: number | null;
 };
 
+export type GroupFinalReadinessStatus = "complete" | "incomplete";
+export type GroupFinalReadinessDiagnosticKind =
+  | "unit_run_missing"
+  | "completion_commit_missing"
+  | "code_review_missing"
+  | "handoff_missing"
+  | "plan_binding_mismatch"
+  | "identity_mismatch";
+
+export type GroupFinalReadinessDiagnostic = {
+  kind: GroupFinalReadinessDiagnosticKind;
+  unit_id: string | null;
+  message: string;
+};
+
+export type GroupFinalReadinessUnit = {
+  unit_id: string;
+  logical_work_item_id: string;
+  unit_run_id: string | null;
+  start_commit: string | null;
+  completion_commit: string | null;
+  commit_shas: string[];
+  diff_ref: string;
+  empty_observation: boolean;
+  code_review_report_id: string | null;
+  review_verdict: CodingReviewVerdict | null;
+  review_summary: string | null;
+  review_findings: ReviewFinding[] | null;
+  review_raw_provider_output_ref: string | null;
+  handoff_revision_id: string | null;
+  plan_revision_id: string | null;
+};
+
+export type GroupFinalReadinessSnapshot = {
+  attempt_id: string;
+  status: GroupFinalReadinessStatus;
+  units: GroupFinalReadinessUnit[];
+  diagnostics: GroupFinalReadinessDiagnostic[];
+  created_at: string;
+};
+
 export type CodingEntryType =
   | { type: "user_message" }
   | { type: "assistant_message" }
@@ -404,6 +445,7 @@ export type CodingAttemptSnapshotResponse = {
   code_review_reports: CodeReviewReport[];
   review_request: ReviewRequest | null;
   internal_pr_review: InternalPrReview | null;
+  group_final_readiness?: GroupFinalReadinessSnapshot | null;
   pending_gates: CodingGateRequired[];
   pending_choices: CodingChoiceGate[];
   role_runs?: CodingRoleRun[];
