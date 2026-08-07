@@ -22,6 +22,16 @@ fn commit_unit_change(worktree: &Path, relative_path: &str, contents: &str) -> S
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+fn git_head(worktree: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree)
+        .output()
+        .expect("git rev-parse HEAD");
+    assert!(output.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 /// 构造一个等待最终确认的 group attempt：两个已完成 unit，各自有真实 completion commit。
 ///
 /// `unit2_relative_path` 决定第二个 unit 实际改了哪个文件；scope 参数用于分别隔离
@@ -43,6 +53,7 @@ fn group_attempt_with_committed_unit_changes(
         .worktree_path
         .clone()
         .expect("group attempt worktree path");
+    let unit1_start_commit = git_head(&worktree);
 
     for (work_item_id, scope, forbidden_scopes) in [
         ("work_item_0001", "src/backend.rs", Vec::new()),
@@ -87,9 +98,16 @@ fn group_attempt_with_committed_unit_changes(
             &attempt.issue_id,
             &attempt.id,
             "coding_unit_0001",
-            Some(unit1_commit),
+            Some(unit1_commit.clone()),
         )
         .expect("set unit1 completion commit");
+    create_completed_unit_run_for_test(
+        &store,
+        &attempt,
+        "coding_unit_0001",
+        &unit1_start_commit,
+        &unit1_commit,
+    );
 
     let unit2_commit = commit_unit_change(&worktree, unit2_relative_path, "// unit2 changed\n");
     let unit2_commit_for_head = unit2_commit.clone();
@@ -112,6 +130,13 @@ fn group_attempt_with_committed_unit_changes(
             Some(unit2_commit),
         )
         .expect("set unit2 completion commit");
+    create_completed_unit_run_for_test(
+        &store,
+        &attempt,
+        "coding_unit_0002",
+        &unit1_commit,
+        &unit2_commit_for_head,
+    );
 
     let attempt = store
         .update_attempt_status(

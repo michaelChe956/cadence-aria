@@ -54,6 +54,7 @@ fn expected_coder_sections(
             "Write Policy",
             serde_json::json!({
                 "write_policy": &projection.write_policy,
+                "commit_responsibility": "提交责任：先检查完整 Git 状态；仅根据本 Work Item 的 write_policy 精确暂存允许路径；创建本 Work Item 的提交。\n报告：列出暂存文件、提交 SHA、提交后的 Git 状态。\n禁止：不得使用无差别全量暂存；不得删除、清理或提交无法由当前 write_policy 解释的内容。遇到它们时保留并报告。",
             }),
         ),
         (

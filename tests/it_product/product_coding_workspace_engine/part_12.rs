@@ -138,6 +138,53 @@ fn group_engine_with_last_running_unit() -> (
     (root, paths, store, engine, attempt)
 }
 
+fn create_completed_unit_run_for_test(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    unit_id: &str,
+    start_commit: &str,
+    completion_commit: &str,
+) {
+    let unit = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("coding units")
+        .into_iter()
+        .find(|unit| unit.id == unit_id)
+        .expect("coding unit");
+    store
+        .create_coding_unit_run(
+            attempt,
+            &CodingUnitRun {
+                id: format!("coding_unit_run_fixture_{unit_id}"),
+                unit_id: unit.id,
+                execution_no: 1,
+                work_item_revision_id: unit.work_item_revision_id,
+                resolved_handoff_revision_ids: Vec::new(),
+                canonical_contract_hash: "fixture_contract_hash".to_string(),
+                projection_bundle_id: "fixture_projection_bundle".to_string(),
+                projection_compiler_version: "fixture_compiler".to_string(),
+                coder_provider_renderer_version: "fixture_renderer".to_string(),
+                reviewer_provider_renderer_version: "fixture_renderer".to_string(),
+                internal_reviewer_provider_renderer_version: None,
+                coder_projection_hash: "fixture_coder_projection".to_string(),
+                reviewer_projection_hash: "fixture_reviewer_projection".to_string(),
+                coder_execution_context_hash: None,
+                reviewer_execution_context_hash: None,
+                internal_reviewer_execution_context_hash: None,
+                status: CodingUnitRunStatus::Completed,
+                unit_rework_count: 0,
+                verification_retry_count: 0,
+                operational_retry_count: 0,
+                plan_repair_count: 0,
+                start_commit: Some(start_commit.to_string()),
+                completion_commit: Some(completion_commit.to_string()),
+                created_at: "2026-08-07T00:00:00Z".to_string(),
+                updated_at: "2026-08-07T00:00:00Z".to_string(),
+            },
+        )
+        .expect("completed unit run");
+}
+
 fn init_group_worktree(worktree: &Path) {
     init_repo(worktree);
     fs::create_dir_all(worktree.join("src")).expect("create group src dir");
