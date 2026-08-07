@@ -1,10 +1,21 @@
 use super::*;
+use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::product::coding_models::{
     CodeReviewReport, CodingExecutionUnit, CodingUnitRun, CodingUnitRunStatus,
     GroupFinalReadinessDiagnosticKind, GroupFinalReadinessStatus, ReviewFinding,
 };
+use crate::product::lifecycle_store::{
+    CreateWorkspaceSessionInput, UpsertIssueSharedWorktreeInput,
+};
 use crate::product::models::HandoffRevision;
+use crate::product::models::WorkspaceType;
 use crate::product::work_item_projection::renderer_for;
+use crate::web::coding_ws_handler::execute_start_coding_flow;
+use crate::web::runtime::WebRuntime;
+use crate::web::state::WebAppState;
+use crate::web::workspace_ws_types::{
+    ArtifactPayload, ArtifactVersion, WorkItemRevisionHistoryDto,
+};
 
 struct ReadinessFixture {
     _root: tempfile::TempDir,
@@ -146,10 +157,11 @@ fn seed_completed_run(
 }
 
 fn seed_handoff(fixture: &ReadinessFixture, unit: &CodingExecutionUnit, run: &CodingUnitRun) {
-    seed_handoff_with_commit(
+    seed_handoff_with_id_and_commit(
         fixture,
         unit,
         run,
+        "handoff_revision_0001",
         run.completion_commit
             .as_deref()
             .unwrap_or(fixture.start_commit.as_str()),
@@ -162,6 +174,16 @@ fn seed_handoff_with_commit(
     run: &CodingUnitRun,
     commit_sha: &str,
 ) {
+    seed_handoff_with_id_and_commit(fixture, unit, run, "handoff_revision_0001", commit_sha);
+}
+
+fn seed_handoff_with_id_and_commit(
+    fixture: &ReadinessFixture,
+    unit: &CodingExecutionUnit,
+    run: &CodingUnitRun,
+    id: &str,
+    commit_sha: &str,
+) {
     let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
     let lineage = revision_store
         .get_plan_lineage(
@@ -171,7 +193,7 @@ fn seed_handoff_with_commit(
         )
         .expect("lineage");
     let handoff = HandoffRevision {
-        id: "handoff_revision_0001".to_string(),
+        id: id.to_string(),
         logical_work_item_id: unit.logical_work_item_id.clone(),
         work_item_revision_id: run.work_item_revision_id.clone(),
         coding_unit_run_id: run.id.clone(),
@@ -194,6 +216,426 @@ fn seed_handoff_with_commit(
             Some(handoff.id.clone()),
         )
         .expect("latest handoff pointer");
+}
+
+fn seed_runner_revision_history(fixture: &ReadinessFixture) {
+    let lifecycle = LifecycleStore::new(fixture.store.paths());
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: fixture.attempt.project_id.clone(),
+            issue_id: fixture.attempt.issue_id.clone(),
+            entity_id: fixture
+                .attempt
+                .work_item_group_id
+                .clone()
+                .expect("group plan id"),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .expect("plan workspace session");
+    lifecycle
+        .save_artifact_versions(
+            &session.id,
+            &[ArtifactVersion {
+                version: 1,
+                payload: ArtifactPayload::WorkItemRevisionHistory {
+                    history: Box::new(WorkItemRevisionHistoryDto {
+                        entries: Vec::new(),
+                    }),
+                },
+                generated_by: ProviderName::Codex,
+                reviewed_by: None,
+                review_verdict: None,
+                confirmed_by: None,
+                is_current: true,
+                created_at: "2026-08-07T00:00:00Z".to_string(),
+                source_node_id: "timeline_node_compile".to_string(),
+            }],
+        )
+        .expect("revision history artifact");
+}
+
+fn seed_complete_group_readiness(fixture: &ReadinessFixture) -> CodingExecutionAttempt {
+    let completion = fixture.start_commit.clone();
+    for unit in fixture
+        .store
+        .list_coding_units(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("units")
+    {
+        let run = seed_completed_run(fixture, &unit, Some(completion.clone()), Vec::new());
+        seed_handoff_with_id_and_commit(
+            fixture,
+            &unit,
+            &run,
+            &format!("handoff_revision_{:04}", unit.order_index + 1),
+            &completion,
+        );
+        fixture
+            .store
+            .save_code_review_report(
+                &fixture.attempt,
+                &review_report(
+                    &fixture.attempt,
+                    &format!("code_review_report_{:04}", unit.order_index + 1),
+                    &run,
+                    "2026-08-07T00:00:00Z",
+                    ReviewVerdict::Approve,
+                    "independent review approved",
+                ),
+            )
+            .expect("review report");
+        fixture
+            .store
+            .update_coding_unit_status(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                CodingExecutionUnitStatus::Completed,
+                Some("independent review approved".to_string()),
+            )
+            .expect("complete unit");
+        fixture
+            .store
+            .update_coding_unit_completion_commit(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                Some(completion.clone()),
+            )
+            .expect("unit completion commit");
+    }
+    let mut attempt = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("stored attempt");
+    attempt.head_commit = Some(completion);
+    fixture
+        .store
+        .save_coding_attempt(&attempt)
+        .expect("attempt head");
+    fixture
+        .store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt")
+}
+
+#[tokio::test]
+async fn fresh_group_enters_waiting_final_confirm_without_any_group_provider_run() {
+    let fixture = readiness_fixture();
+    let running = seed_complete_group_readiness(&fixture);
+    let running = fixture
+        .store
+        .update_attempt_stage(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingExecutionStage::ReviewRequest,
+        )
+        .expect("review request stage");
+    seed_runner_revision_history(&fixture);
+    let remote = fixture._root.path().join("origin.git");
+    let status = std::process::Command::new("git")
+        .args(["init", "--bare", remote.to_str().expect("remote path")])
+        .status()
+        .expect("create bare origin");
+    assert!(status.success(), "create bare origin");
+    run_test_git(&fixture.worktree, &["branch", "aria/issues/issue_0001"]);
+    run_test_git(
+        &fixture.worktree,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+
+    // An empty registry proves this tail path cannot invoke a Group Reviewer, shard,
+    // reduction, or any other provider after unit-level evidence is complete.
+    let state = WebAppState::with_provider_registry(
+        fixture._root.path().to_path_buf(),
+        WebRuntime::new_fake(fixture._root.path().to_path_buf()),
+        ProviderRegistry::new(),
+    );
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let store = fixture.store.clone();
+    let engine =
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx.clone());
+    let (_command_tx, command_rx) = mpsc::channel(1);
+
+    execute_start_coding_flow(&state, &store, &engine, &event_tx, command_rx, &running)
+        .await
+        .expect("runner transitions directly to human final confirmation");
+
+    let prepared = store
+        .get_attempt(&running.project_id, &running.issue_id, &running.id)
+        .expect("prepared attempt");
+    assert_eq!(prepared.stage, CodingExecutionStage::FinalConfirm);
+    assert_eq!(prepared.status, CodingAttemptStatus::WaitingForHuman);
+    assert!(
+        store
+            .get_group_final_readiness_snapshot(&prepared)
+            .expect("stored readiness")
+            .is_some_and(|snapshot| snapshot.status == GroupFinalReadinessStatus::Complete)
+    );
+    assert!(
+        store
+            .list_role_runs(&prepared.project_id, &prepared.issue_id, &prepared.id)
+            .expect("role runs")
+            .iter()
+            .all(|run| run.role != CodingProviderRole::InternalReviewer)
+    );
+    assert!(
+        store
+            .get_timeline_nodes(&prepared.project_id, &prepared.issue_id, &prepared.id)
+            .expect("timeline")
+            .iter()
+            .all(|node| node.stage != CodingExecutionStage::InternalPrReview)
+    );
+    assert!(
+        store
+            .list_group_review_shard_reports(&prepared.id)
+            .expect("shard reports")
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_group_review_reduction_reports(&prepared.id)
+            .expect("reduction reports")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn preparing_complete_group_creates_human_final_confirm_without_group_provider_run() {
+    let fixture = readiness_fixture();
+    let running = seed_complete_group_readiness(&fixture);
+
+    let prepared = fixture
+        .engine
+        .prepare_group_final_confirm_from_readiness(&running)
+        .await
+        .expect("prepare human final confirmation");
+
+    assert_eq!(prepared.stage, CodingExecutionStage::FinalConfirm);
+    assert_eq!(prepared.status, CodingAttemptStatus::WaitingForHuman);
+    assert!(
+        fixture
+            .store
+            .get_group_final_readiness_snapshot(&prepared)
+            .expect("stored readiness")
+            .is_some_and(|snapshot| snapshot.status == GroupFinalReadinessStatus::Complete)
+    );
+    assert!(
+        fixture
+            .store
+            .list_role_runs(&prepared.project_id, &prepared.issue_id, &prepared.id)
+            .expect("role runs")
+            .iter()
+            .all(|run| run.role != CodingProviderRole::InternalReviewer)
+    );
+    assert!(
+        fixture
+            .store
+            .get_timeline_nodes(&prepared.project_id, &prepared.issue_id, &prepared.id)
+            .expect("timeline")
+            .iter()
+            .all(|node| node.stage != CodingExecutionStage::InternalPrReview)
+    );
+    assert!(
+        fixture
+            .store
+            .list_group_review_shard_reports(&prepared.id)
+            .expect("shard reports")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .store
+            .list_group_review_reduction_reports(&prepared.id)
+            .expect("reduction reports")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .store
+            .get_timeline_nodes(&prepared.project_id, &prepared.issue_id, &prepared.id)
+            .expect("timeline")
+            .iter()
+            .any(|node| {
+                node.stage == CodingExecutionStage::FinalConfirm
+                    && node.status == CodingTimelineNodeStatus::Pending
+                    && node.title == "等待人工最终确认"
+            })
+    );
+}
+
+#[tokio::test]
+async fn incomplete_readiness_cannot_be_final_confirmed() {
+    let fixture = readiness_fixture();
+    for unit in fixture
+        .store
+        .list_coding_units(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("units")
+    {
+        fixture
+            .store
+            .update_coding_unit_status(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                CodingExecutionUnitStatus::Completed,
+                Some("independent review approved".to_string()),
+            )
+            .expect("complete unit");
+    }
+    let running = fixture
+        .store
+        .update_attempt_status(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt");
+    let prepared = fixture
+        .engine
+        .prepare_group_final_confirm_from_readiness(&running)
+        .await
+        .expect("prepare incomplete readiness for human diagnosis");
+    let snapshot = fixture
+        .store
+        .get_group_final_readiness_snapshot(&prepared)
+        .expect("stored readiness")
+        .expect("incomplete readiness snapshot");
+    assert_eq!(snapshot.status, GroupFinalReadinessStatus::Incomplete);
+    assert!(snapshot.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == GroupFinalReadinessDiagnosticKind::UnitRunMissing
+    }));
+
+    let error = fixture
+        .engine
+        .handle_final_confirm(&prepared.project_id, &prepared.issue_id, &prepared.id)
+        .await
+        .expect_err("incomplete snapshot must block final confirm");
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::FinalConfirmNotReady(ref id) if id == &prepared.id
+    ));
+    let persisted = fixture
+        .store
+        .get_attempt(&prepared.project_id, &prepared.issue_id, &prepared.id)
+        .expect("persisted attempt");
+    assert_eq!(persisted.stage, CodingExecutionStage::FinalConfirm);
+    assert_eq!(persisted.status, CodingAttemptStatus::WaitingForHuman);
+}
+
+#[tokio::test]
+async fn final_confirm_keeps_range_scope_and_dirty_worktree_gate() {
+    let fixture = readiness_fixture();
+    let running = seed_complete_group_readiness(&fixture);
+    let prepared = fixture
+        .engine
+        .prepare_group_final_confirm_from_readiness(&running)
+        .await
+        .expect("prepare final confirmation");
+    let lifecycle = LifecycleStore::new(fixture.store.paths());
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: prepared.project_id.clone(),
+            issue_id: prepared.issue_id.clone(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: prepared.branch_name.clone(),
+            worktree_path: fixture.worktree.clone(),
+            base_branch: prepared.base_branch.clone(),
+        })
+        .expect("shared worktree");
+    let lock_work_item_id = fixture
+        .store
+        .list_coding_units(&prepared.project_id, &prepared.issue_id, &prepared.id)
+        .expect("completed units")
+        .into_iter()
+        .max_by_key(|unit| unit.order_index)
+        .expect("last completed unit")
+        .logical_work_item_id;
+    lifecycle
+        .try_acquire_issue_worktree_lock(
+            &prepared.project_id,
+            &prepared.issue_id,
+            &lock_work_item_id,
+            &prepared.id,
+        )
+        .expect("shared worktree lock");
+    fs::write(
+        fixture.worktree.join("manual-residue.txt"),
+        "leave this alone\n",
+    )
+    .expect("dirty residue");
+    let head_before = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]);
+
+    let error = fixture
+        .engine
+        .handle_final_confirm(&prepared.project_id, &prepared.issue_id, &prepared.id)
+        .await
+        .expect_err("dirty worktree must remain a final-confirm gate");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::SharedWorktreeDirtyManualGate(_)
+    ));
+    assert_eq!(
+        fs::read_to_string(fixture.worktree.join("manual-residue.txt")).expect("residue remains"),
+        "leave this alone\n"
+    );
+    assert_eq!(
+        git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]),
+        head_before,
+        "final confirm must not create a commit for residue"
+    );
+    assert!(
+        fixture
+            .store
+            .list_rework_instructions(&prepared.project_id, &prepared.issue_id, &prepared.id)
+            .expect("rework instructions")
+            .is_empty()
+    );
+    let lineage = WorkItemRevisionStore::new(fixture.store.paths())
+        .get_plan_lineage(
+            &prepared.project_id,
+            &prepared.issue_id,
+            prepared.work_item_group_id.as_deref().expect("plan id"),
+        )
+        .expect("plan lineage");
+    assert!(
+        WorkItemRevisionStore::new(fixture.store.paths())
+            .list_open_repair_requests(&lineage)
+            .expect("repair requests")
+            .is_empty()
+    );
 }
 
 fn review_report(

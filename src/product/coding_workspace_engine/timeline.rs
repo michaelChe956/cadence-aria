@@ -123,6 +123,47 @@ impl CodingWorkspaceEngine {
         Ok(node)
     }
 
+    pub(crate) fn create_pending_final_confirm_timeline_node(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingTimelineNode, ProductStoreError> {
+        let existing =
+            self.store
+                .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let node = if let Some(node) = existing.into_iter().rev().find(|node| {
+            node.stage == CodingExecutionStage::FinalConfirm
+                && matches!(
+                    node.status,
+                    CodingTimelineNodeStatus::Pending
+                        | CodingTimelineNodeStatus::Running
+                        | CodingTimelineNodeStatus::Blocked
+                )
+        }) {
+            node
+        } else {
+            let existing = self.store.get_timeline_nodes(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )?;
+            let node = CodingTimelineNode {
+                id: format!("coding_node_{:04}", existing.len() + 1),
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::FinalConfirm,
+                title: "等待人工最终确认".to_string(),
+                status: CodingTimelineNodeStatus::Pending,
+                agent_role: Some(CodingAgentRole::System),
+                summary: Some("所有 Work Item 已完成独立审查，等待人工最终确认".to_string()),
+                started_at: Utc::now().to_rfc3339(),
+                completed_at: None,
+                artifact_refs: Vec::new(),
+            };
+            self.store.save_timeline_node(attempt, node.clone())?;
+            node
+        };
+        Ok(node)
+    }
+
     pub(crate) fn create_completed_final_confirm_timeline_node(
         &self,
         attempt: &CodingExecutionAttempt,

@@ -1,5 +1,8 @@
 use super::*;
-use crate::product::coding_models::{CodingAttemptScope, CodingStageGateStatus};
+use crate::product::coding_models::{
+    CodingAttemptScope, CodingStageGateStatus, GroupFinalReadinessStatus,
+};
+use crate::product::json_store::ProductStoreError;
 
 impl CodingWorkspaceEngine {
     pub(crate) fn active_work_item_id_for_attempt<'a>(
@@ -32,6 +35,35 @@ impl CodingWorkspaceEngine {
             return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
                 attempt_id.to_string(),
             ));
+        }
+        if current.scope == CodingAttemptScope::WorkItemGroup {
+            // Snapshot reads validate the stored attempt identity. A mismatch is intentionally
+            // collapsed to the public FinalConfirmNotReady diagnostic instead of leaking a
+            // malformed record through the socket protocol.
+            let readiness = match self.store.get_group_final_readiness_snapshot(&current) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
+                        attempt_id.to_string(),
+                    ));
+                }
+                Err(ProductStoreError::IdentityMismatch {
+                    kind: "group_final_readiness_snapshot",
+                    ..
+                }) => {
+                    return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
+                        attempt_id.to_string(),
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if readiness.attempt_id != current.id
+                || readiness.status != GroupFinalReadinessStatus::Complete
+            {
+                return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
+                    attempt_id.to_string(),
+                ));
+            }
         }
         match current.scope {
             CodingAttemptScope::WorkItemGroup => {
@@ -385,6 +417,49 @@ impl CodingWorkspaceEngine {
         Ok(completed)
     }
 
+    /// 将已完成独立审查的 group attempt 交给人工最终确认。
+    ///
+    /// Readiness 快照仅汇总并持久化权威证据，不会创建 finding、返工或 Plan Repair。
+    /// 即使快照不完整，也保留在人工确认界面以展示诊断；`handle_final_confirm`
+    /// 会拒绝不完整、缺失或身份不匹配的快照。
+    pub(crate) async fn prepare_group_final_confirm_from_readiness(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup
+            || !self.group_attempt_ready_for_final_review(attempt)?
+        {
+            return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
+                attempt.id.clone(),
+            ));
+        }
+
+        self.build_group_final_readiness_snapshot(attempt).await?;
+        let staged = self.store.update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::FinalConfirm,
+        )?;
+        let updated = self.store.update_attempt_status(
+            &staged.project_id,
+            &staged.issue_id,
+            &staged.id,
+            CodingAttemptStatus::WaitingForHuman,
+        )?;
+        let node = self.create_pending_final_confirm_timeline_node(&updated)?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingTimelineNodeCreated { node })
+            .await;
+        Ok(updated)
+    }
+
+    #[allow(dead_code)]
+    /// Historical recovery compatibility only. It preserves former attempts that
+    /// had already completed an InternalPrReview; fresh group attempts are routed
+    /// through `prepare_group_final_confirm_from_readiness` and user-driven
+    /// `handle_final_confirm`.
     pub(crate) async fn complete_group_attempt_after_final_review(
         &self,
         attempt: &CodingExecutionAttempt,
