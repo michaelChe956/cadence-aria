@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use crate::product::coding_models::{
     CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole, CodingRoleRun,
-    CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{
@@ -18,10 +18,98 @@ impl super::CodingAttemptStore {
         trigger: CodingRoleRunTrigger,
         node_id: Option<String>,
     ) -> Result<CodingRoleRun, ProductStoreError> {
+        validate_relative_id(&attempt.project_id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        validate_relative_id(&attempt.id)?;
         if let Some(node_id) = &node_id {
             validate_relative_id(node_id)?;
         }
         let existing = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let id = next_sequential_id("coding_role_run", existing.len());
+        let run_no = existing
+            .iter()
+            .filter(|run| run.stage == stage && run.role == role)
+            .map(|run| run.run_no)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let run = CodingRoleRun {
+            id: id.clone(),
+            attempt_id: attempt.id.clone(),
+            stage,
+            role,
+            run_no,
+            status: CodingRoleRunStatus::Running,
+            trigger,
+            retry_metadata: Some(CodingRoleRunRetryMetadata {
+                cycle_id: id.clone(),
+                attempt_no: 1,
+                prior_run_id: None,
+            }),
+            node_id,
+            started_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+            supersedes_run_id: None,
+            superseded_by_run_id: None,
+            reason_code: None,
+            raw_provider_output_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+        };
+        self.save_role_run(&attempt.project_id, &attempt.issue_id, &run)?;
+        Ok(run)
+    }
+
+    pub fn create_retry_role_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
+        trigger: CodingRoleRunTrigger,
+        node_id: Option<String>,
+        retry: CodingRoleRunRetryMetadata,
+    ) -> Result<CodingRoleRun, ProductStoreError> {
+        validate_relative_id(&attempt.project_id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        validate_relative_id(&attempt.id)?;
+        validate_retry_metadata(&retry)?;
+        if let Some(node_id) = &node_id {
+            validate_relative_id(node_id)?;
+        }
+
+        let prior_run_id = retry
+            .prior_run_id
+            .as_deref()
+            .ok_or_else(|| invalid_retry_metadata("missing_prior_run_id"))?;
+        let prior = self.get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            prior_run_id,
+        )?;
+        let Some(prior_retry) = prior.retry_metadata.as_ref() else {
+            return Err(invalid_retry_metadata("prior_run_missing_retry_metadata"));
+        };
+        if prior.status != CodingRoleRunStatus::Failed
+            || prior.stage != stage
+            || prior.role != role
+            || prior_retry.cycle_id != retry.cycle_id
+            || prior_retry.attempt_no != retry.attempt_no - 1
+        {
+            return Err(invalid_retry_metadata(prior.id));
+        }
+
+        let existing = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        if existing.iter().any(|run| {
+            run.retry_metadata.as_ref().is_some_and(|existing_retry| {
+                existing_retry.cycle_id == retry.cycle_id
+                    && existing_retry.attempt_no == retry.attempt_no
+            })
+        }) {
+            return Err(invalid_retry_metadata(format!(
+                "{}:{}",
+                retry.cycle_id, retry.attempt_no
+            )));
+        }
         let id = next_sequential_id("coding_role_run", existing.len());
         let run_no = existing
             .iter()
@@ -38,6 +126,7 @@ impl super::CodingAttemptStore {
             run_no,
             status: CodingRoleRunStatus::Running,
             trigger,
+            retry_metadata: Some(retry),
             node_id,
             started_at: Utc::now().to_rfc3339(),
             completed_at: None,
@@ -200,5 +289,24 @@ impl super::CodingAttemptStore {
                 .role_runs_root(project_id, issue_id, attempt_id)
                 .join(format!("{role_run_id}.json")),
         )
+    }
+}
+
+fn validate_retry_metadata(retry: &CodingRoleRunRetryMetadata) -> Result<(), ProductStoreError> {
+    validate_relative_id(&retry.cycle_id)?;
+    let Some(prior_run_id) = retry.prior_run_id.as_deref() else {
+        return Err(invalid_retry_metadata("missing_prior_run_id"));
+    };
+    validate_relative_id(prior_run_id)?;
+    if !(2..=3).contains(&retry.attempt_no) {
+        return Err(invalid_retry_metadata(retry.attempt_no.to_string()));
+    }
+    Ok(())
+}
+
+fn invalid_retry_metadata(id: impl Into<String>) -> ProductStoreError {
+    ProductStoreError::Conflict {
+        kind: "coding_role_run_retry_metadata",
+        id: id.into(),
     }
 }

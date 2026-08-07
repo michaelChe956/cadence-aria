@@ -17,8 +17,18 @@ pub enum CodingRoleRunStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CodingRoleRunTrigger {
     Initial,
+    AutomaticRetry,
+    ManualRetry,
     RetryReview,
     RetryInternalReview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingRoleRunRetryMetadata {
+    pub cycle_id: String,
+    pub attempt_no: u32,
+    #[serde(default)]
+    pub prior_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +40,8 @@ pub struct CodingRoleRun {
     pub run_no: u32,
     pub status: CodingRoleRunStatus,
     pub trigger: CodingRoleRunTrigger,
+    #[serde(default)]
+    pub retry_metadata: Option<CodingRoleRunRetryMetadata>,
     pub node_id: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,

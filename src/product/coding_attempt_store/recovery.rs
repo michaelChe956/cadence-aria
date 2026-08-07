@@ -501,6 +501,7 @@ impl super::CodingAttemptStore {
                 run_no,
                 status: CodingRoleRunStatus::Running,
                 trigger: CodingRoleRunTrigger::RetryReview,
+                retry_metadata: None,
                 node_id: None,
                 started_at: Utc::now().to_rfc3339(),
                 completed_at: None,

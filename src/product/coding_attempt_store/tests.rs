@@ -16,6 +16,7 @@ mod git_operation;
 mod group_uniqueness;
 mod plan_repair;
 mod provider_stream_log_root;
+mod role_run;
 mod unit_run_execution_context;
 
 const PROJECT_ID: &str = "project_0001";
