@@ -418,7 +418,6 @@ impl CodingWorkspaceEngine {
         stage: CodingExecutionStage,
         role: CodingProviderRole,
         prior_run: &CodingRoleRun,
-        node_id: &str,
     ) -> Result<CodingRoleRun, CodingWorkspaceEngineError> {
         let prior_retry = prior_run.retry_metadata.as_ref().ok_or_else(|| {
             CodingWorkspaceEngineError::ProviderStream(
@@ -431,7 +430,7 @@ impl CodingWorkspaceEngine {
                 stage,
                 role,
                 CodingRoleRunTrigger::AutomaticRetry,
-                Some(node_id.to_string()),
+                None,
                 crate::product::coding_models::CodingRoleRunRetryMetadata {
                     cycle_id: prior_retry.cycle_id.clone(),
                     attempt_no: prior_retry.attempt_no + 1,
@@ -456,26 +455,57 @@ impl CodingWorkspaceEngine {
         )
         .await;
         let current = self.ensure_provider_retry_cycle_active(&current)?;
+        let role_run =
+            match self.create_automatic_retry_role_run(&current, stage.clone(), role, prior_run) {
+                Ok(role_run) => role_run,
+                Err(error) => return Err(error),
+            };
         let node = match stage {
-            CodingExecutionStage::Coding => self.create_coding_timeline_node(&current)?,
-            CodingExecutionStage::CodeReview => self.create_code_review_timeline_node(&current)?,
+            CodingExecutionStage::Coding => self.create_coding_timeline_node(&current),
+            CodingExecutionStage::CodeReview => self.create_code_review_timeline_node(&current),
             _ => unreachable!("automatic retry only supports coder and code reviewer"),
         };
-        let role_run = match self
-            .create_automatic_retry_role_run(&current, stage, role, prior_run, &node.id)
-        {
+        let node = match node {
+            Ok(node) => node,
+            Err(error) => {
+                self.store.update_role_run_status(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    &role_run.id,
+                    CodingRoleRunStatus::Failed,
+                    Some("automatic_retry_timeline_create_failed".to_string()),
+                )?;
+                return Err(error.into());
+            }
+        };
+        let role_run = match self.store.attach_role_run_node(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+            &role_run.id,
+            node.id.clone(),
+        ) {
             Ok(role_run) => role_run,
             Err(error) => {
+                self.store.update_role_run_status(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    &role_run.id,
+                    CodingRoleRunStatus::Failed,
+                    Some("automatic_retry_timeline_bind_failed".to_string()),
+                )?;
                 self.complete_timeline_node(
                     &current.project_id,
                     &current.issue_id,
                     &current.id,
                     &node.id,
                     CodingTimelineNodeStatus::Failed,
-                    Some("创建自动重试 role run 失败".to_string()),
+                    Some("绑定自动重试 role run 失败".to_string()),
                 )
                 .await?;
-                return Err(error);
+                return Err(error.into());
             }
         };
         if let Err(error) = self.ensure_provider_retry_cycle_active(&current) {
@@ -669,8 +699,12 @@ impl CodingWorkspaceEngine {
             self.store
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         if current.status != CodingAttemptStatus::Aborted {
-            self.handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
-                .await?;
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Aborted,
+            )?;
         }
         self.store.update_role_run_status(
             &attempt.project_id,

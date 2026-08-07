@@ -51,6 +51,10 @@ enum RetryBoundaryMutation {
         lifecycle: LifecycleStore,
         attempt: CodingExecutionAttempt,
     },
+    RoleRunCreateFailure {
+        store: CodingAttemptStore,
+        attempt: CodingExecutionAttempt,
+    },
 }
 
 struct RetryBoundaryMutationProvider {
@@ -180,6 +184,34 @@ impl StreamingProviderAdapter for RetryBoundaryMutationProvider {
                         )
                         .expect("acquire changed owner");
                 }
+                RetryBoundaryMutation::RoleRunCreateFailure { store, attempt } => {
+                    let prior = store
+                        .latest_role_run(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            CodingExecutionStage::Coding,
+                            CodingProviderRole::Coder,
+                        )
+                        .expect("initial coder role run")
+                        .expect("initial coder role run exists");
+                    let mut conflicting_retry = prior.clone();
+                    conflicting_retry.id = "coding_role_run_9999".to_string();
+                    conflicting_retry.status = CodingRoleRunStatus::Failed;
+                    conflicting_retry.retry_metadata =
+                        Some(crate::product::coding_models::CodingRoleRunRetryMetadata {
+                            cycle_id: prior.id.clone(),
+                            attempt_no: 2,
+                            prior_run_id: Some(prior.id.clone()),
+                        });
+                    conflicting_retry.node_id = None;
+                    conflicting_retry.reason_code =
+                        Some("test_injected_retry_conflict".to_string());
+                    conflicting_retry.completed_at = Some("2026-08-07T00:00:00Z".to_string());
+                    store
+                        .save_role_run(&attempt.project_id, &attempt.issue_id, &conflicting_retry)
+                        .expect("inject automatic retry role-run create conflict");
+                }
             }
         }
         let (event_tx, event_rx) = mpsc::channel(1);
@@ -242,6 +274,69 @@ impl StreamingProviderAdapter for CancelledProvider {
             commands: command_tx,
         })
     }
+}
+
+fn configure_dirty_shared_worktree(
+    _root: &tempfile::TempDir,
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    let worktree = attempt.worktree_path.as_ref().expect("attempt worktree");
+    init_test_git_repo(worktree);
+    fs::write(worktree.join("dirty.rs"), "pub fn dirty() {}\n").expect("dirty shared worktree");
+    let lifecycle = LifecycleStore::new(store.paths());
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: attempt.branch_name.clone(),
+            worktree_path: worktree.clone(),
+            base_branch: attempt.base_branch.clone(),
+        })
+        .expect("shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.work_item_id,
+            &attempt.id,
+        )
+        .expect("shared worktree lock");
+}
+
+fn assert_cancelled_provider_run_has_no_gate(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    role: CodingProviderRole,
+) {
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("aborted attempt")
+            .status,
+        CodingAttemptStatus::Aborted
+    );
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs");
+    let run = runs
+        .iter()
+        .find(|run| run.role == role)
+        .expect("cancelled provider role run");
+    assert_eq!(run.status, CodingRoleRunStatus::Aborted);
+    assert_eq!(run.reason_code.as_deref(), Some("abort_attempt"));
+    let nodes = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline nodes");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -446,6 +541,129 @@ async fn cancelled_reviewer_run_finalizes_current_run_and_node_without_retry_or_
         .expect("reviewer nodes");
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_coder_run_with_dirty_shared_worktree_finalizes_without_manual_gate() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    configure_dirty_shared_worktree(&root, &store, &attempt);
+    let provider = CancelledProvider::new();
+    let (tx, _rx) = mpsc::channel(16);
+    let cancellation = CancellationToken::new();
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_cancellation(cancellation.clone());
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let context = CodingExecutionContext::default();
+
+    let execute =
+        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+    let cancel = async {
+        tokio::time::timeout(Duration::from_millis(250), provider.started.notified())
+            .await
+            .expect("coder provider did not start");
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(execute, cancel);
+
+    assert!(matches!(
+        result.expect_err("cancelled coder must not open a dirty-worktree gate"),
+        CodingWorkspaceEngineError::Aborted
+    ));
+    assert_cancelled_provider_run_has_no_gate(&store, &attempt, CodingProviderRole::Coder);
+}
+
+#[tokio::test]
+async fn cancelled_reviewer_run_with_dirty_shared_worktree_finalizes_without_manual_gate() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    configure_dirty_shared_worktree(&root, &store, &attempt);
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    let provider = CancelledProvider::new();
+    let (tx, _rx) = mpsc::channel(16);
+    let cancellation = CancellationToken::new();
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_cancellation(cancellation.clone());
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let execute = engine.execute_code_review_with_commands(&attempt, &provider, &mut command_rx);
+    let cancel = async {
+        tokio::time::timeout(Duration::from_millis(250), provider.started.notified())
+            .await
+            .expect("reviewer provider did not start");
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(execute, cancel);
+
+    assert!(matches!(
+        result.expect_err("cancelled reviewer must not open a dirty-worktree gate"),
+        CodingWorkspaceEngineError::Aborted
+    ));
+    assert_eq!(
+        worktree,
+        *attempt
+            .worktree_path
+            .as_ref()
+            .expect("worktree remains configured")
+    );
+    assert_cancelled_provider_run_has_no_gate(&store, &attempt, CodingProviderRole::CodeReviewer);
+}
+
+#[tokio::test]
+async fn automatic_retry_role_run_create_failure_leaves_no_orphan_timeline_node() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let provider =
+        RetryBoundaryMutationProvider::new(RetryBoundaryMutation::RoleRunCreateFailure {
+            store: store.clone(),
+            attempt: attempt.clone(),
+        });
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = engine
+        .execute_coding_with_commands(
+            &attempt,
+            &provider,
+            &CodingExecutionContext::default(),
+            &mut command_rx,
+        )
+        .await
+        .expect_err("injected retry role-run creation conflict stops the retry cycle");
+
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::Store(ProductStoreError::Conflict {
+            kind: "coding_role_run_retry_metadata",
+            ..
+        })
+    ));
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    let nodes = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline nodes");
+    assert_eq!(
+        nodes.len(),
+        1,
+        "failed retry creation must not leave an orphan node"
+    );
+    assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs");
+    let initial = runs
+        .iter()
+        .find(|run| run.id == "coding_role_run_0001")
+        .expect("initial coder run");
+    assert_eq!(initial.status, CodingRoleRunStatus::Failed);
+    assert_eq!(
+        initial.reason_code.as_deref(),
+        Some("provider_connection_interrupted")
+    );
     assert!(
         store
             .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
