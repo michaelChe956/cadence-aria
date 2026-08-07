@@ -326,12 +326,12 @@ impl CodingWorkspaceEngine {
             .collect::<Vec<_>>();
 
         // 写入范围门禁的 changed_files 必须来自 git 事实：每个已完成 unit 的
-        // completion_commit 决定它实际改了哪些文件，从而保住 per-unit 归属判定。
+        // start_commit..completion_commit 决定它实际改了哪些文件，从而保住 per-unit 归属判定。
         // 不得依赖交接摘要字段——那会让门禁随摘要移除而空转、越界写入静默放行。
         if self.schema_v2_group_plan_lineage(attempt)?.is_some() {
             for facts in self.schema_v2_group_completion_gate_facts(attempt)? {
                 let changed_files = self
-                    .changed_files_for_unit_completion_commit(attempt, &facts.handoff.commit_sha)
+                    .changed_files_for_unit_completion_range(attempt, &facts.run)
                     .await?;
                 self.validate_changed_files_for_runtime(
                     &facts.runtime,
@@ -358,13 +358,9 @@ impl CodingWorkspaceEngine {
                     .ok_or_else(|| {
                         CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone())
                     })?;
-                let Some(completion_commit) = unit.completion_commit.as_deref() else {
-                    return Err(CodingWorkspaceEngineError::CompletionCommitMissing(
-                        format!("{}:{}", attempt.id, unit.id),
-                    ));
-                };
+                let run = self.completed_unit_run_for_group_completion_gate(attempt, unit)?;
                 let changed_files = self
-                    .changed_files_for_unit_completion_commit(attempt, completion_commit)
+                    .changed_files_for_unit_completion_range(attempt, &run)
                     .await?;
                 self.validate_changed_files_for_work_item(
                     work_item,

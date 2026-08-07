@@ -1,12 +1,14 @@
 use super::*;
-use crate::product::coding_models::{CodingAttemptScope, CodingExecutionUnit, CodingUnitRunStatus};
-use crate::product::models::{HandoffRevision, WorkItemPlanLineage};
+use crate::product::coding_models::{
+    CodingAttemptScope, CodingExecutionUnit, CodingUnitRun, CodingUnitRunStatus,
+};
+use crate::product::models::WorkItemPlanLineage;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_runtime_reader::{ResolvedWorkItemRuntime, WorkItemRuntimeReader};
 
 pub(super) struct SchemaV2GroupCompletionGateFacts {
     pub(super) runtime: ResolvedWorkItemRuntime,
-    pub(super) handoff: HandoffRevision,
+    pub(super) run: CodingUnitRun,
 }
 
 impl CodingWorkspaceEngine {
@@ -69,22 +71,7 @@ impl CodingWorkspaceEngine {
         reader: &WorkItemRuntimeReader,
         unit: CodingExecutionUnit,
     ) -> Result<SchemaV2GroupCompletionGateFacts, CodingWorkspaceEngineError> {
-        let run = self
-            .store
-            .list_coding_unit_runs(attempt, &unit.id)?
-            .into_iter()
-            .max_by_key(|run| run.execution_no)
-            .ok_or_else(|| ProductStoreError::IdentityMismatch {
-                kind: "runtime_binding_missing",
-                id: unit.id.clone(),
-            })?;
-        if run.status != CodingUnitRunStatus::Completed {
-            return Err(ProductStoreError::IdentityMismatch {
-                kind: "runtime_binding_integrity_mismatch",
-                id: unit.logical_work_item_id.clone(),
-            }
-            .into());
-        }
+        let run = self.completed_unit_run_for_group_completion_gate(attempt, &unit)?;
         let runtime = reader.normative_context_for_unit(attempt, &unit, Some(&run))?;
         let handoff_id = unit.latest_handoff_revision_id.as_deref().ok_or_else(|| {
             ProductStoreError::IdentityMismatch {
@@ -104,28 +91,78 @@ impl CodingWorkspaceEngine {
             }
             .into());
         }
-        Ok(SchemaV2GroupCompletionGateFacts { runtime, handoff })
+        Ok(SchemaV2GroupCompletionGateFacts { runtime, run })
     }
 
-    /// 某个已完成 unit 的 completion commit 实际改动的文件清单。
+    pub(super) fn completed_unit_run_for_group_completion_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit: &CodingExecutionUnit,
+    ) -> Result<CodingUnitRun, CodingWorkspaceEngineError> {
+        let run = self
+            .store
+            .list_coding_unit_runs(attempt, &unit.id)?
+            .into_iter()
+            .max_by_key(|run| run.execution_no)
+            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                kind: "runtime_binding_missing",
+                id: unit.id.clone(),
+            })?;
+        if run.status != CodingUnitRunStatus::Completed
+            || run.completion_commit.is_none()
+            || run.completion_commit != unit.completion_commit
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "runtime_binding_integrity_mismatch",
+                id: unit.logical_work_item_id.clone(),
+            }
+            .into());
+        }
+        Ok(run)
+    }
+
+    /// 某个已完成 unit 在 `start_commit..completion_commit` 内任一提交改动过的文件清单。
     ///
     /// 组完成写入范围门禁的唯一数据源。worktree 缺失时必须失败关闭；commit
     /// 存在时必须取到真实 git 事实，不得用空清单让范围校验静默空转。
-    pub(crate) async fn changed_files_for_unit_completion_commit(
+    pub(crate) async fn changed_files_for_unit_completion_range(
         &self,
         attempt: &CodingExecutionAttempt,
-        completion_commit: &str,
+        run: &CodingUnitRun,
     ) -> Result<Vec<String>, CodingWorkspaceEngineError> {
+        if run.status != CodingUnitRunStatus::Completed {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "runtime_binding_integrity_mismatch",
+                id: run.id.clone(),
+            }
+            .into());
+        }
+        let start_commit = run.start_commit.as_deref().ok_or_else(|| {
+            CodingWorkspaceEngineError::CompletionCommitMissing(format!("{}:start", run.id))
+        })?;
+        let completion_commit = run
+            .completion_commit
+            .as_deref()
+            .ok_or_else(|| CodingWorkspaceEngineError::CompletionCommitMissing(run.id.clone()))?;
         let worktree_path = self.attempt_worktree_path(attempt).await?;
         if !worktree_path.exists() {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
             ));
         }
-        Ok(self
+        let commits = self
             ._git_service
-            .git_commit_changed_files(&worktree_path, completion_commit)
-            .await?)
+            .git_commit_range_commits(&worktree_path, start_commit, completion_commit)
+            .await?;
+        let mut changed_files = std::collections::BTreeSet::new();
+        for commit in commits {
+            changed_files.extend(
+                self._git_service
+                    .git_commit_changed_files(&worktree_path, &commit)
+                    .await?,
+            );
+        }
+        Ok(changed_files.into_iter().collect())
     }
 
     pub(super) fn validate_changed_files_for_runtime(

@@ -234,6 +234,162 @@ async fn assert_completion_preflight_is_zero_write(
 }
 
 #[tokio::test]
+async fn group_completion_records_existing_coder_head_without_staging_or_commit() {
+    let fixture = group_completion_fixture(false, false);
+    fs::write(fixture.worktree.join("unit1.txt"), "coder-owned change\n").expect("coder change");
+    run_test_git(&fixture.worktree, &["add", "unit1.txt"]);
+    run_test_git(&fixture.worktree, &["commit", "-m", "coder completes unit"]);
+    let coder_head = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    fs::write(
+        fixture.worktree.join("unowned-staged.txt"),
+        "preserve and report\n",
+    )
+    .expect("unowned staged change");
+    run_test_git(&fixture.worktree, &["add", "unowned-staged.txt"]);
+    let source_run = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+
+    let updated = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect("record the existing coder head");
+    let persisted_run = fixture
+        .store
+        .list_coding_unit_runs(&updated, &source_run.unit_id)
+        .expect("source runs")
+        .into_iter()
+        .find(|run| run.id == source_run.id)
+        .expect("source run");
+
+    assert_eq!(
+        git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]).trim(),
+        coder_head
+    );
+    assert!(
+        git_stdout(&fixture.worktree, &["diff", "--cached", "--name-only"])
+            .contains("unowned-staged.txt")
+    );
+    assert_eq!(
+        persisted_run.completion_commit.as_deref(),
+        Some(coder_head.as_str())
+    );
+}
+
+#[tokio::test]
+async fn group_scope_gate_validates_full_unit_run_range_after_rework() {
+    let fixture = group_completion_fixture(false, false);
+    fs::write(
+        fixture.worktree.join("initial-change.rs"),
+        "initial implementation\n",
+    )
+    .expect("initial change");
+    run_test_git(&fixture.worktree, &["add", "initial-change.rs"]);
+    run_test_git(
+        &fixture.worktree,
+        &["commit", "-m", "coder initial implementation"],
+    );
+    fs::write(fixture.worktree.join("rework-change.rs"), "review rework\n").expect("rework change");
+    run_test_git(&fixture.worktree, &["add", "rework-change.rs"]);
+    run_test_git(&fixture.worktree, &["commit", "-m", "coder review rework"]);
+    let completion_commit = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let run = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Completed,
+        Some(completion_commit),
+        None,
+    );
+
+    let changed_files = fixture
+        .engine
+        .changed_files_for_unit_completion_range(&fixture.attempt, &run)
+        .await
+        .expect("read the completed unit range");
+
+    assert_eq!(
+        changed_files,
+        vec![
+            "initial-change.rs".to_string(),
+            "rework-change.rs".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn group_scope_gate_treats_equal_start_and_completion_as_empty() {
+    let fixture = group_completion_fixture(false, false);
+    let run = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Completed,
+        Some(fixture.original_head.clone()),
+        None,
+    );
+
+    let changed_files = fixture
+        .engine
+        .changed_files_for_unit_completion_range(&fixture.attempt, &run)
+        .await
+        .expect("equal range is an empty observation");
+
+    assert!(changed_files.is_empty());
+}
+
+#[tokio::test]
+async fn group_scope_gate_keeps_paths_reverted_later_in_the_unit_run() {
+    let fixture = group_completion_fixture(false, false);
+    fs::write(
+        fixture.worktree.join("forbidden-during-run.rs"),
+        "temporary violation\n",
+    )
+    .expect("introduce forbidden path");
+    run_test_git(&fixture.worktree, &["add", "forbidden-during-run.rs"]);
+    run_test_git(
+        &fixture.worktree,
+        &["commit", "-m", "coder introduces forbidden path"],
+    );
+    fs::remove_file(fixture.worktree.join("forbidden-during-run.rs"))
+        .expect("revert forbidden path");
+    run_test_git(&fixture.worktree, &["add", "-u"]);
+    run_test_git(
+        &fixture.worktree,
+        &["commit", "-m", "coder reverts forbidden path"],
+    );
+    let completion_commit = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let run = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Completed,
+        Some(completion_commit),
+        None,
+    );
+
+    let changed_files = fixture
+        .engine
+        .changed_files_for_unit_completion_range(&fixture.attempt, &run)
+        .await
+        .expect("preserve all paths touched by the unit run");
+
+    assert_eq!(changed_files, vec!["forbidden-during-run.rs".to_string()]);
+}
+
+#[tokio::test]
 async fn coding_plan_repair_group_completion_missing_run_is_zero_write() {
     let fixture = group_completion_fixture(false, true);
     assert_completion_preflight_is_zero_write(&fixture, "coding_unit_run").await;
