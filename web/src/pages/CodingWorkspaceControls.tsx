@@ -3,6 +3,8 @@ import { useState, type FormEvent } from "react";
 import type {
   CodingExecutionStage,
   CodingGateRequired,
+  GroupFinalReadinessDiagnostic,
+  GroupFinalReadinessStatus,
   CodingProviderRole,
 } from "../api/types";
 import { StageGateEntry } from "../components/coding-workspace/StageGateEntry";
@@ -75,12 +77,16 @@ export function CodingComposer({
   status,
   statusText,
   pendingGate,
+  groupFinalReadinessStatus,
+  groupFinalReadinessDiagnostics = [],
 }: {
   api: ReturnType<typeof useCodingWorkspaceWs>;
   stage: CodingExecutionStage | null;
   status: string | null;
   statusText: string;
   pendingGate?: CodingPendingGate | null;
+  groupFinalReadinessStatus?: GroupFinalReadinessStatus | null;
+  groupFinalReadinessDiagnostics?: GroupFinalReadinessDiagnostic[];
 }) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -146,7 +152,14 @@ export function CodingComposer({
             <Send className="h-3.5 w-3.5" />
             发送上下文
           </button>
-          <ActionButtons api={api} stage={stage} status={status} compact />
+          <ActionButtons
+            api={api}
+            stage={stage}
+            status={status}
+            compact
+            groupFinalReadinessStatus={groupFinalReadinessStatus}
+            groupFinalReadinessDiagnostics={groupFinalReadinessDiagnostics}
+          />
         </div>
       </div>
     </form>
@@ -158,15 +171,23 @@ export function ActionButtons({
   stage,
   status,
   compact = false,
+  groupFinalReadinessStatus,
+  groupFinalReadinessDiagnostics = [],
 }: {
   api: ReturnType<typeof useCodingWorkspaceWs>;
   stage: CodingExecutionStage | null;
   status: string | null;
   compact?: boolean;
+  groupFinalReadinessStatus?: GroupFinalReadinessStatus | null;
+  groupFinalReadinessDiagnostics?: GroupFinalReadinessDiagnostic[];
 }) {
   const buttonClass = compact
     ? "inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-line)] bg-white px-2 text-xs font-semibold hover:bg-[var(--aria-panel-muted)]"
     : "inline-flex h-8 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold hover:bg-[var(--aria-panel-muted)]";
+
+  const finalConfirmReady =
+    groupFinalReadinessStatus === "complete" && groupFinalReadinessDiagnostics.length === 0;
+  const finalConfirmDiagnostic = groupFinalReadinessDiagnostics[0]?.message;
 
   if (stage === "prepare_context") {
     return (
@@ -209,16 +230,23 @@ export function ActionButtons({
 
   if (stage === "final_confirm" && status === "waiting_for_human") {
     return (
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
           onClick={api.finalConfirm}
-          className={buttonClass}
+          disabled={!finalConfirmReady}
+          title={finalConfirmReady ? undefined : finalConfirmDiagnostic ?? "最终确认证据尚未完整"}
+          className={`${buttonClass} disabled:cursor-not-allowed disabled:opacity-50`}
           aria-label={compact ? "底部确认完成" : undefined}
         >
           <Check className="h-3.5 w-3.5" />
           确认完成
         </button>
+        {!compact && !finalConfirmReady && finalConfirmDiagnostic ? (
+          <span className="max-w-64 text-xs text-[var(--aria-danger)]" role="status">
+            {finalConfirmDiagnostic}
+          </span>
+        ) : null}
         <button
           type="button"
           onClick={api.abortAttempt}

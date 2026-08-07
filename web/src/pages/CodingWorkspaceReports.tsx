@@ -11,13 +11,15 @@ import type {
   ReviewFinding,
   WorkItemExecutionPlan,
 } from "../api/types";
+import { GroupFinalReadinessPanel } from "../components/coding-workspace/GroupFinalReadinessPanel";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { errorMessage } from "./CodingWorkspaceControls";
 
 export function ReviewPanel() {
   const codeReviews = useCodingWorkspaceStore((state) => state.codeReviewReports);
   const internalReview = useCodingWorkspaceStore((state) => state.internalPrReview);
-  if (codeReviews.length === 0 && !internalReview) {
+  const groupFinalReadiness = useCodingWorkspaceStore((state) => state.groupFinalReadiness);
+  if (codeReviews.length === 0 && !internalReview && !groupFinalReadiness) {
     return <div className="text-[var(--aria-ink-muted)]">暂无审查报告</div>;
   }
   return (
@@ -29,7 +31,10 @@ export function ReviewPanel() {
           report={report}
         />
       ))}
-      {internalReview ? <ReviewReportCard title="GroupFinalReview" report={internalReview} /> : null}
+      {groupFinalReadiness ? <GroupFinalReadinessPanel readiness={groupFinalReadiness} /> : null}
+      {!groupFinalReadiness && internalReview ? (
+        <ReviewReportCard title="GroupFinalReview" report={internalReview} />
+      ) : null}
     </div>
   );
 }

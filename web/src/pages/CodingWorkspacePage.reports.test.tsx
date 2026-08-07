@@ -258,6 +258,122 @@ describe("CodingWorkspacePage reports and history", () => {
     expect(screen.getByText("error").className).toContain("text-red");
   });
 
+  it("shows both C1 and C2, independent review findings, handoff and plan revision", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "waiting_for_human",
+      stage: "final_confirm",
+      activeTab: "review",
+      groupFinalReadiness: {
+        attempt_id: "coding_attempt_0001",
+        status: "complete",
+        created_at: "2026-08-07T00:00:00Z",
+        diagnostics: [],
+        units: [
+          {
+            unit_id: "coding_unit_0001",
+            logical_work_item_id: "C1",
+            unit_run_id: "unit_run_0001",
+            start_commit: "1111111",
+            completion_commit: "2222222",
+            commit_shas: ["1111111", "2222222"],
+            diff_ref: "diffs/C1.patch",
+            empty_observation: false,
+            code_review_report_id: "code_review_C1",
+            review_verdict: "approve",
+            review_summary: "C1 independent review passed",
+            review_findings: [
+              {
+                severity: "warning",
+                file_path: "src/c1.ts",
+                line: 12,
+                message: "C1 finding",
+                required_action: "follow up",
+                source_stage: "code_review",
+              },
+            ],
+            review_raw_provider_output_ref: "raw/C1-review.txt",
+            handoff_revision_id: "handoff_C1",
+            plan_revision_id: "plan_C1",
+          },
+          {
+            unit_id: "coding_unit_0002",
+            logical_work_item_id: "C2",
+            unit_run_id: "unit_run_0002",
+            start_commit: "2222222",
+            completion_commit: "3333333",
+            commit_shas: ["3333333"],
+            diff_ref: "diffs/C2.patch",
+            empty_observation: false,
+            code_review_report_id: "code_review_C2",
+            review_verdict: "approve",
+            review_summary: "C2 independent review passed",
+            review_findings: [],
+            review_raw_provider_output_ref: "raw/C2-review.txt",
+            handoff_revision_id: "handoff_C2",
+            plan_revision_id: "plan_C2",
+          },
+        ],
+      },
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+
+    expect(screen.getByText("C1")).toBeInTheDocument();
+    expect(screen.getByText("C2")).toBeInTheDocument();
+    expect(screen.getAllByText("独立代码审查")).toHaveLength(2);
+    expect(screen.getByText("1111111..2222222")).toBeInTheDocument();
+    expect(screen.getByText("diffs/C1.patch")).toBeInTheDocument();
+    expect(screen.getByText("C1 finding")).toBeInTheDocument();
+    expect(screen.getByText("raw/C1-review.txt")).toBeInTheDocument();
+    expect(screen.getByText("handoff_C1")).toBeInTheDocument();
+    expect(screen.getByText("plan_C1")).toBeInTheDocument();
+  });
+
+  it("labels an equal commit range as no observable git increment", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "waiting_for_human",
+      stage: "final_confirm",
+      activeTab: "review",
+      groupFinalReadiness: {
+        attempt_id: "coding_attempt_0001",
+        status: "complete",
+        created_at: "2026-08-07T00:00:00Z",
+        diagnostics: [],
+        units: [
+          {
+            unit_id: "coding_unit_empty",
+            logical_work_item_id: "C-empty",
+            unit_run_id: "unit_run_empty",
+            start_commit: "4444444",
+            completion_commit: "4444444",
+            commit_shas: [],
+            diff_ref: "diffs/C-empty.patch",
+            empty_observation: false,
+            code_review_report_id: "code_review_empty",
+            review_verdict: "approve",
+            review_summary: "No change review",
+            review_findings: [],
+            review_raw_provider_output_ref: null,
+            handoff_revision_id: "handoff_empty",
+            plan_revision_id: "plan_empty",
+          },
+        ],
+      },
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+
+    expect(screen.getByText("无可观察 Git 增量")).toBeInTheDocument();
+  });
+
   it("renders GroupFinalReview impact scope and PR text suggestions", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({

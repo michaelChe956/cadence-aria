@@ -383,7 +383,13 @@ export function CodingWorkspacePage({
         </div>
         <div className="flex min-w-0 items-center justify-end gap-2">
           {pendingGate?.kind === "blocked" ? null : (
-            <ActionButtons api={api} stage={store.stage} status={store.status} />
+            <ActionButtons
+              api={api}
+              stage={store.stage}
+              status={store.status}
+              groupFinalReadinessStatus={store.groupFinalReadiness?.status}
+              groupFinalReadinessDiagnostics={store.groupFinalReadiness?.diagnostics}
+            />
           )}
         </div>
       </header>
@@ -519,6 +525,8 @@ export function CodingWorkspacePage({
                     : pendingGate?.title ?? "Coding Workspace"
                 }
                 pendingGate={pendingGate}
+                groupFinalReadinessStatus={store.groupFinalReadiness?.status}
+                groupFinalReadinessDiagnostics={store.groupFinalReadiness?.diagnostics}
               />
             </div>
           )}
@@ -644,7 +652,7 @@ function displayCodingStage(stage: string) {
     code_review: "Code Reviewer",
     review_request: "准备 PR",
     internal_pr_review: "GroupFinalReview",
-    final_confirm: "最终确认",
+    final_confirm: "人工组最终确认",
   };
   return labels[stage] ?? stage;
 }

@@ -699,12 +699,47 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(deleteCodingAttempt).not.toHaveBeenCalled();
   });
 
-  it("sends final confirm and abort actions", async () => {
+  it("disables final confirm for incomplete readiness but leaves abort available", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "waiting_for_human",
+      stage: "final_confirm",
+      groupFinalReadiness: {
+        attempt_id: "coding_attempt_0001",
+        status: "incomplete",
+        units: [],
+        diagnostics: [
+          {
+            kind: "code_review_missing",
+            unit_id: "coding_unit_0001",
+            message: "C1 缺少独立代码审查",
+          },
+        ],
+        created_at: "2026-08-07T00:00:00Z",
+      },
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "确认完成" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "中止" })).toBeEnabled();
+    expect(screen.getByText("C1 缺少独立代码审查")).toBeInTheDocument();
+  });
+
+  it("sends final confirm and abort actions when readiness is complete", async () => {
     const api = mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_0001",
       status: "waiting_for_human",
       stage: "final_confirm",
+      groupFinalReadiness: {
+        attempt_id: "coding_attempt_0001",
+        status: "complete",
+        units: [],
+        diagnostics: [],
+        created_at: "2026-08-07T00:00:00Z",
+      },
     });
 
     render(
