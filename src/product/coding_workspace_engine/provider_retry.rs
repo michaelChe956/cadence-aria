@@ -54,6 +54,18 @@ impl RetryableProviderFailure {
             Self::Upstream5xx { .. } => "provider_upstream_5xx",
         }
     }
+
+    pub(crate) fn is_reason_code(reason_code: &str) -> bool {
+        [
+            Self::StartIo,
+            Self::StreamEnded,
+            Self::ConnectionInterrupted,
+            Self::ExecutionTimeout,
+            Self::Upstream5xx { status: 500 },
+        ]
+        .iter()
+        .any(|failure| failure.reason_code() == reason_code)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

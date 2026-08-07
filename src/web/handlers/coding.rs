@@ -4,7 +4,7 @@ use super::*;
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_models::CodingAttemptScope;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
-use crate::web::coding_ws_handler::coding_role_run_snapshots;
+use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapshots};
 use crate::web::state::CodingAttemptRunKey;
 
 mod group;
@@ -525,6 +525,10 @@ pub(crate) async fn get_coding_attempt(
         path.issue_id.as_deref(),
         &path.attempt_id,
     )?;
+    let attempt = coding_store
+        .reconcile_linked_plan_repair_pause(&attempt)
+        .map_err(product_store_api_error)?
+        .attempt;
     let timeline_nodes = coding_store
         .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -546,6 +550,8 @@ pub(crate) async fn get_coding_attempt(
         .map_err(product_store_api_error)?;
     let role_runs =
         coding_role_run_snapshots(&coding_store, &attempt).map_err(product_store_api_error)?;
+    let pending_gates =
+        coding_pending_gates(&coding_store, &attempt).map_err(coding_workspace_api_error)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
     let work_item_execution_plan = coding_store
         .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -574,7 +580,7 @@ pub(crate) async fn get_coding_attempt(
         code_review_reports,
         review_request,
         internal_pr_review,
-        pending_gates: Vec::new(),
+        pending_gates,
         pending_choices,
         role_runs,
         work_item_execution_plan,

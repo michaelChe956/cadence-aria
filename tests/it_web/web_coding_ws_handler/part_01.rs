@@ -15,7 +15,8 @@ use cadence_aria::product::coding_models::{
     CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
     CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
-    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
+    CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
+    CodingTimelineNodeStatus,
     PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, WorkItemExecutionPlan,
 };
 use cadence_aria::product::lifecycle_store::{
@@ -66,6 +67,7 @@ use tokio::time::{Duration, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -503,6 +505,223 @@ async fn coding_session_snapshot_includes_role_runs() {
     }
 
     ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaustion_gate() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let app = app_with_attempt(root.path());
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let mut attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    attempt.status = CodingAttemptStatus::Blocked;
+    attempt.stage = CodingExecutionStage::CodeReview;
+    store.save_coding_attempt(&attempt).expect("blocked attempt");
+
+    let failed_node = CodingTimelineNode {
+        id: "coding_node_0009".to_string(),
+        attempt_id: attempt.id.clone(),
+        stage: CodingExecutionStage::CodeReview,
+        title: "代码审查".to_string(),
+        status: CodingTimelineNodeStatus::Failed,
+        agent_role: Some(CodingAgentRole::Reviewer),
+        summary: Some("transport exhausted".to_string()),
+        started_at: "2026-08-07T00:00:00Z".to_string(),
+        completed_at: Some("2026-08-07T00:00:01Z".to_string()),
+        artifact_refs: Vec::new(),
+    };
+    store.save_timeline_node(&attempt, failed_node).expect("failed node");
+    let first = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0009".to_string()),
+        )
+        .expect("first role run");
+    let raw_refs = (1..=3)
+        .map(|index| {
+            store
+                .save_provider_raw_output(
+                    &attempt,
+                    CodingExecutionStage::CodeReview,
+                    "retry_exhausted_fixture",
+                    &format!("transport failure {index}"),
+                )
+                .expect("raw output")
+        })
+        .collect::<Vec<_>>();
+    store
+        .update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &first.id,
+            vec![raw_refs[0].clone()],
+            Vec::new(),
+        )
+        .expect("first raw ref");
+    store
+        .update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &first.id,
+            CodingRoleRunStatus::Failed,
+            Some("provider_connection_interrupted".to_string()),
+        )
+        .expect("first failure");
+    let cycle_id = first.retry_metadata.as_ref().expect("cycle metadata").cycle_id.clone();
+    let second = store
+        .create_retry_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::AutomaticRetry,
+            Some("coding_node_0009".to_string()),
+            CodingRoleRunRetryMetadata {
+                cycle_id: cycle_id.clone(),
+                attempt_no: 2,
+                prior_run_id: Some(first.id.clone()),
+            },
+        )
+        .expect("second role run");
+    store
+        .update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &second.id,
+            vec![raw_refs[1].clone()],
+            Vec::new(),
+        )
+        .expect("second raw ref");
+    store
+        .update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &second.id,
+            CodingRoleRunStatus::Failed,
+            Some("provider_connection_interrupted".to_string()),
+        )
+        .expect("second failure");
+    let third = store
+        .create_retry_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::AutomaticRetry,
+            Some("coding_node_0009".to_string()),
+            CodingRoleRunRetryMetadata {
+                cycle_id,
+                attempt_no: 3,
+                prior_run_id: Some(second.id.clone()),
+            },
+        )
+        .expect("third role run");
+    store
+        .update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &third.id,
+            vec![raw_refs[2].clone()],
+            Vec::new(),
+        )
+        .expect("third raw ref");
+    store
+        .update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &third.id,
+            CodingRoleRunStatus::Failed,
+            Some("provider_connection_interrupted".to_string()),
+        )
+        .expect("third failure");
+    let gate = store
+        .create_blocked_gate(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                node_id: Some("coding_node_0009".to_string()),
+                role: Some(CodingProviderRole::CodeReviewer),
+                title: "代码审查中断".to_string(),
+                description: "transport exhausted".to_string(),
+                reason_code: Some("code_review_provider_interrupted".to_string()),
+                evidence_refs: vec!["coding_node_0009".to_string(), third.id.clone()],
+                raw_provider_output_ref: Some(raw_refs[2].clone()),
+                available_actions: vec![CodingGateAction {
+                    action_id: "retry_review".to_string(),
+                    label: "重试代码审查".to_string(),
+                    action_type: CodingGateActionType::RetryReview,
+                }],
+            },
+        )
+        .expect("exhausted gate");
+
+    let rest_response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::GET)
+                .uri(
+                    "/api/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001",
+                )
+                .body(axum::body::Body::empty())
+                .expect("REST request"),
+        )
+        .await
+        .expect("REST response");
+    assert_eq!(rest_response.status(), axum::http::StatusCode::OK);
+    let rest: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(rest_response.into_body(), usize::MAX)
+            .await
+            .expect("REST body"),
+    )
+    .expect("REST JSON");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let url = format!(
+        "ws://{addr}/ws/projects/project_0001/issues/issue_0001/coding-attempts/coding_attempt_0001"
+    );
+    let (mut ws, _) = connect_async(url).await.expect("connect WS");
+    let ws_state = recv_json_value(&mut ws).await;
+
+    assert_eq!(rest["role_runs"], ws_state["role_runs"]);
+    assert_eq!(rest["pending_gates"], ws_state["pending_gates"]);
+    assert_eq!(
+        rest["role_runs"][2]["raw_provider_output_refs"],
+        serde_json::json!([raw_refs[2]])
+    );
+    assert_eq!(rest["pending_gates"][0]["gate_id"], gate.gate_id);
+    assert_eq!(rest["pending_gates"][0]["reason_code"], "code_review_provider_interrupted");
+    assert_eq!(rest["role_runs"][2]["retry_metadata"]["attempt_no"], 3);
+    assert_eq!(rest["role_runs"][2]["status"], "failed");
+    let retry_exhausted = |snapshot: &serde_json::Value| {
+        snapshot["role_runs"][2]["trigger"] == "automatic_retry"
+            && snapshot["role_runs"][2]["status"] == "failed"
+            && snapshot["role_runs"][2]["retry_metadata"]["attempt_no"] == 3
+            && snapshot["role_runs"][2]["reason_code"] == "provider_connection_interrupted"
+            && snapshot["pending_gates"].as_array().is_some_and(|gates| {
+                gates.iter().any(|gate| {
+                    gate["stage"] == "code_review"
+                        && gate["role"] == "code_reviewer"
+                        && gate["reason_code"] == "code_review_provider_interrupted"
+                })
+            })
+    };
+    assert!(retry_exhausted(&rest));
+    assert!(retry_exhausted(&ws_state));
+
+    ws.close(None).await.expect("close WS");
     server.abort();
 }
 
