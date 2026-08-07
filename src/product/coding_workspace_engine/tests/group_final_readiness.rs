@@ -146,6 +146,22 @@ fn seed_completed_run(
 }
 
 fn seed_handoff(fixture: &ReadinessFixture, unit: &CodingExecutionUnit, run: &CodingUnitRun) {
+    seed_handoff_with_commit(
+        fixture,
+        unit,
+        run,
+        run.completion_commit
+            .as_deref()
+            .unwrap_or(fixture.start_commit.as_str()),
+    );
+}
+
+fn seed_handoff_with_commit(
+    fixture: &ReadinessFixture,
+    unit: &CodingExecutionUnit,
+    run: &CodingUnitRun,
+    commit_sha: &str,
+) {
     let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
     let lineage = revision_store
         .get_plan_lineage(
@@ -162,15 +178,22 @@ fn seed_handoff(fixture: &ReadinessFixture, unit: &CodingExecutionUnit, run: &Co
         provided_contracts: Vec::new(),
         provided_capabilities: std::collections::BTreeMap::new(),
         contract_hash: "handoff_contract_hash".to_string(),
-        commit_sha: run
-            .completion_commit
-            .clone()
-            .unwrap_or_else(|| fixture.start_commit.clone()),
+        commit_sha: commit_sha.to_string(),
         created_at: "2026-08-07T00:00:00Z".to_string(),
     };
     revision_store
         .put_handoff_revision(&lineage, &handoff)
         .expect("handoff");
+    fixture
+        .store
+        .update_coding_unit_latest_handoff_revision_id(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &unit.id,
+            Some(handoff.id.clone()),
+        )
+        .expect("latest handoff pointer");
 }
 
 fn review_report(
@@ -190,7 +213,7 @@ fn review_report(
             severity: FindingSeverity::Info,
             file_path: Some("rework.rs".to_string()),
             line: Some(1),
-            message: "review evidence".to_string(),
+            message: format!("review evidence {id}"),
             required_action: None,
             source_stage: CodingExecutionStage::CodeReview,
             evidence: Vec::new(),
@@ -229,12 +252,7 @@ fn complete_other_units(fixture: &ReadinessFixture, completion: &str) {
         .into_iter()
         .skip(1)
     {
-        let run = seed_completed_run(
-            fixture,
-            &unit,
-            Some(completion.to_string()),
-            vec![format!("handoff_revision_{}", unit.order_index + 1)],
-        );
+        let run = seed_completed_run(fixture, &unit, Some(completion.to_string()), Vec::new());
         let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
         let lineage = revision_store
             .get_plan_lineage(
@@ -243,22 +261,30 @@ fn complete_other_units(fixture: &ReadinessFixture, completion: &str) {
                 "work_item_plan_0001",
             )
             .expect("lineage");
+        let handoff = HandoffRevision {
+            id: format!("handoff_revision_{}", unit.order_index + 1),
+            logical_work_item_id: unit.logical_work_item_id.clone(),
+            work_item_revision_id: run.work_item_revision_id.clone(),
+            coding_unit_run_id: run.id.clone(),
+            provided_contracts: Vec::new(),
+            provided_capabilities: std::collections::BTreeMap::new(),
+            contract_hash: format!("handoff_contract_hash_{}", unit.order_index + 1),
+            commit_sha: completion.to_string(),
+            created_at: "2026-08-07T00:00:00Z".to_string(),
+        };
         revision_store
-            .put_handoff_revision(
-                &lineage,
-                &HandoffRevision {
-                    id: format!("handoff_revision_{}", unit.order_index + 1),
-                    logical_work_item_id: unit.logical_work_item_id.clone(),
-                    work_item_revision_id: run.work_item_revision_id.clone(),
-                    coding_unit_run_id: run.id.clone(),
-                    provided_contracts: Vec::new(),
-                    provided_capabilities: std::collections::BTreeMap::new(),
-                    contract_hash: format!("handoff_contract_hash_{}", unit.order_index + 1),
-                    commit_sha: completion.to_string(),
-                    created_at: "2026-08-07T00:00:00Z".to_string(),
-                },
-            )
+            .put_handoff_revision(&lineage, &handoff)
             .expect("handoff");
+        fixture
+            .store
+            .update_coding_unit_latest_handoff_revision_id(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                Some(handoff.id),
+            )
+            .expect("latest handoff pointer");
         fixture
             .store
             .save_code_review_report(
@@ -296,7 +322,7 @@ async fn readiness_includes_coder_commit_and_rework_commit_for_one_unit_run() {
         &fixture,
         &unit,
         Some(rework_commit.clone()),
-        vec!["handoff_revision_0001".to_string()],
+        vec!["upstream_handoff_revision_0001".to_string()],
     );
     seed_handoff(&fixture, &unit, &run);
     fixture
@@ -354,6 +380,29 @@ async fn readiness_includes_coder_commit_and_rework_commit_for_one_unit_run() {
         Some("latest independent review")
     );
     assert_eq!(
+        unit_snapshot.review_findings,
+        Some(vec![ReviewFinding {
+            severity: FindingSeverity::Info,
+            file_path: Some("rework.rs".to_string()),
+            line: Some(1),
+            message: "review evidence code_review_report_latest".to_string(),
+            required_action: None,
+            source_stage: CodingExecutionStage::CodeReview,
+            evidence: Vec::new(),
+            plan_defect_evidence: Vec::new(),
+            related_requirements: Vec::new(),
+            related_design_constraints: Vec::new(),
+            related_work_item_tasks: Vec::new(),
+            defect_class: crate::product::models::PlanDefectClass::ImplementationDefect,
+            reason_code: None,
+            contract_refs: Vec::new(),
+            capability_refs: Vec::new(),
+            repair_target: None,
+            recommended_route: crate::product::models::PlanDefectRoute::CoderRework,
+            confidence: None,
+        }]),
+    );
+    assert_eq!(
         unit_snapshot.review_raw_provider_output_ref.as_deref(),
         Some("provider-raw/code_review_report_latest.txt")
     );
@@ -388,7 +437,7 @@ async fn readiness_marks_equal_start_and_completion_as_empty_observation() {
         &fixture,
         &unit,
         Some(fixture.start_commit.clone()),
-        vec!["handoff_revision_0001".to_string()],
+        Vec::new(),
     );
     seed_handoff(&fixture, &unit, &run);
     fixture
@@ -459,6 +508,95 @@ async fn readiness_keeps_units_with_missing_run_or_completion_commit() {
 }
 
 #[tokio::test]
+async fn readiness_marks_mismatched_published_handoff_as_identity_mismatch() {
+    let fixture = readiness_fixture();
+    let unit = first_unit(&fixture);
+    let run = seed_completed_run(
+        &fixture,
+        &unit,
+        Some(fixture.start_commit.clone()),
+        Vec::new(),
+    );
+    seed_handoff_with_commit(&fixture, &unit, &run, "wrong_completion_commit");
+    fixture
+        .store
+        .save_code_review_report(
+            &fixture.attempt,
+            &review_report(
+                &fixture.attempt,
+                "code_review_report_0001",
+                &run,
+                "2026-08-07T00:00:00Z",
+                ReviewVerdict::Approve,
+                "approved",
+            ),
+        )
+        .expect("review report");
+
+    let snapshot = fixture
+        .engine
+        .build_group_final_readiness_snapshot(&fixture.attempt)
+        .await
+        .expect("persist incomplete identity-mismatch snapshot");
+    let first = snapshot.units.first().expect("first unit");
+    assert_eq!(snapshot.status, GroupFinalReadinessStatus::Incomplete);
+    assert!(first.handoff_revision_id.is_none());
+    assert!(snapshot.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == GroupFinalReadinessDiagnosticKind::IdentityMismatch
+            && diagnostic.unit_id.as_deref() == Some(first.unit_id.as_str())
+    }));
+}
+
+#[tokio::test]
+async fn readiness_marks_missing_published_handoff_as_handoff_missing() {
+    let fixture = readiness_fixture();
+    let unit = first_unit(&fixture);
+    let run = seed_completed_run(
+        &fixture,
+        &unit,
+        Some(fixture.start_commit.clone()),
+        Vec::new(),
+    );
+    fixture
+        .store
+        .update_coding_unit_latest_handoff_revision_id(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &unit.id,
+            Some("handoff_revision_missing".to_string()),
+        )
+        .expect("missing latest handoff pointer");
+    fixture
+        .store
+        .save_code_review_report(
+            &fixture.attempt,
+            &review_report(
+                &fixture.attempt,
+                "code_review_report_0001",
+                &run,
+                "2026-08-07T00:00:00Z",
+                ReviewVerdict::Approve,
+                "approved",
+            ),
+        )
+        .expect("review report");
+
+    let snapshot = fixture
+        .engine
+        .build_group_final_readiness_snapshot(&fixture.attempt)
+        .await
+        .expect("persist incomplete missing-handoff snapshot");
+    let first = snapshot.units.first().expect("first unit");
+    assert_eq!(snapshot.status, GroupFinalReadinessStatus::Incomplete);
+    assert!(first.handoff_revision_id.is_none());
+    assert!(snapshot.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == GroupFinalReadinessDiagnosticKind::HandoffMissing
+            && diagnostic.unit_id.as_deref() == Some(first.unit_id.as_str())
+    }));
+}
+
+#[tokio::test]
 async fn readiness_persists_diagnostic_for_missing_review_handoff_or_binding() {
     for (case, omit_review, omit_handoff, replace_binding) in [
         ("review", true, false, false),
@@ -471,10 +609,7 @@ async fn readiness_persists_diagnostic_for_missing_review_handoff_or_binding() {
             &fixture,
             &unit,
             Some(fixture.start_commit.clone()),
-            (!omit_handoff)
-                .then(|| "handoff_revision_0001".to_string())
-                .into_iter()
-                .collect(),
+            Vec::new(),
         );
         if !omit_handoff {
             seed_handoff(&fixture, &unit, &run);

@@ -15,7 +15,7 @@ impl CodingWorkspaceEngine {
     /// 从 group attempt 的权威 unit/run/review/handoff/plan 记录构建只读 readiness 证据。
     ///
     /// 该路径只读取 store 与 git 事实；它不会调用 provider，也不会基于 review
-    /// verdict 生成 finding、rework 或 Plan Repair 副作用。
+    /// verdict 生成 finding、返工或 Plan Repair 副作用。
     pub(crate) async fn build_group_final_readiness_snapshot(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -114,8 +114,8 @@ impl CodingWorkspaceEngine {
                             == Some(&unit.work_item_revision_id)
                     })
             });
-            snapshot.units.push(
-                self.build_group_final_readiness_unit(
+            let (snapshot_unit, handoff_diagnostic) = self
+                .build_group_final_readiness_unit(
                     attempt,
                     &worktree_path,
                     &reports,
@@ -124,14 +124,15 @@ impl CodingWorkspaceEngine {
                     lineage.as_ref(),
                     plan_binding_matches,
                 )
-                .await?,
-            );
+                .await?;
+            snapshot.units.push(snapshot_unit);
             self.append_unit_diagnostics(
                 &unit,
                 &snapshot.units.last().expect("unit was just pushed"),
                 &reports,
                 binding.as_ref(),
                 plan_binding_matches,
+                handoff_diagnostic,
                 &mut snapshot.diagnostics,
             );
         }
@@ -161,7 +162,13 @@ impl CodingWorkspaceEngine {
         binding: Option<&crate::product::coding_models::CodingAttemptPlanBinding>,
         lineage: Option<&crate::product::models::WorkItemPlanLineage>,
         plan_binding_matches: bool,
-    ) -> Result<GroupFinalReadinessUnit, CodingWorkspaceEngineError> {
+    ) -> Result<
+        (
+            GroupFinalReadinessUnit,
+            Option<GroupFinalReadinessDiagnostic>,
+        ),
+        CodingWorkspaceEngineError,
+    > {
         let mut result = GroupFinalReadinessUnit {
             unit_id: unit.id.clone(),
             logical_work_item_id: unit.logical_work_item_id.clone(),
@@ -180,35 +187,92 @@ impl CodingWorkspaceEngine {
                     .then_with(|| left.id.cmp(&right.id))
             });
         let Some(run) = run else {
-            return Ok(result);
+            return Ok((result, None));
         };
 
         result.unit_run_id = Some(run.id.clone());
         result.start_commit = run.start_commit.clone();
         result.completion_commit = run.completion_commit.clone();
-        result.handoff_revision_id = run.resolved_handoff_revision_ids.last().cloned();
+        let handoff_id = unit.latest_handoff_revision_id.clone();
+        result.handoff_revision_id = handoff_id.clone();
         result.plan_revision_id = plan_binding_matches
             .then(|| binding.map(|binding| binding.bound_plan_revision_id.clone()))
             .flatten();
-
-        if let Some(handoff_id) = result.handoff_revision_id.as_deref()
-            && let Some(lineage) = lineage
-        {
-            match WorkItemRevisionStore::new(self.store.paths()).get_handoff_revision(
-                lineage,
-                &unit.logical_work_item_id,
-                handoff_id,
-            ) {
-                Ok(handoff)
-                    if handoff.coding_unit_run_id == run.id
-                        && handoff.work_item_revision_id == run.work_item_revision_id
-                        && handoff.logical_work_item_id == unit.logical_work_item_id => {}
-                Ok(_) | Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {
-                    result.handoff_revision_id = None;
+        let handoff_diagnostic = match (handoff_id.as_deref(), lineage) {
+            (None, _) => Some(diagnostic(
+                GroupFinalReadinessDiagnosticKind::HandoffMissing,
+                Some(unit.id.clone()),
+                format!(
+                    "unit run {} has no published output handoff revision",
+                    run.id
+                ),
+            )),
+            (Some(handoff_id), Some(lineage)) => {
+                match WorkItemRevisionStore::new(self.store.paths()).get_handoff_revision(
+                    lineage,
+                    &unit.logical_work_item_id,
+                    handoff_id,
+                ) {
+                    Ok(handoff)
+                        if handoff.coding_unit_run_id == run.id
+                            && handoff.work_item_revision_id == run.work_item_revision_id
+                            && handoff.logical_work_item_id == unit.logical_work_item_id
+                            && run.completion_commit.as_deref().is_some_and(
+                                |completion_commit| handoff.commit_sha == completion_commit,
+                            ) =>
+                    {
+                        None
+                    }
+                    Ok(_) => {
+                        result.handoff_revision_id = None;
+                        Some(diagnostic(
+                            GroupFinalReadinessDiagnosticKind::IdentityMismatch,
+                            Some(unit.id.clone()),
+                            format!(
+                                "published output handoff revision {handoff_id} does not match unit run {} identity",
+                                run.id
+                            ),
+                        ))
+                    }
+                    Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {
+                        result.handoff_revision_id = None;
+                        Some(diagnostic(
+                            GroupFinalReadinessDiagnosticKind::HandoffMissing,
+                            Some(unit.id.clone()),
+                            format!(
+                                "published output handoff revision {handoff_id} for unit run {} was not found",
+                                run.id
+                            ),
+                        ))
+                    }
+                    Err(crate::product::json_store::ProductStoreError::IdentityMismatch {
+                        ..
+                    }) => {
+                        result.handoff_revision_id = None;
+                        Some(diagnostic(
+                            GroupFinalReadinessDiagnosticKind::IdentityMismatch,
+                            Some(unit.id.clone()),
+                            format!(
+                                "published output handoff revision {handoff_id} does not match unit run {} identity",
+                                run.id
+                            ),
+                        ))
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) => return Err(error.into()),
             }
-        }
+            (Some(handoff_id), None) => {
+                result.handoff_revision_id = None;
+                Some(diagnostic(
+                    GroupFinalReadinessDiagnosticKind::HandoffMissing,
+                    Some(unit.id.clone()),
+                    format!(
+                        "published output handoff revision {handoff_id} for unit run {} cannot be read without plan lineage",
+                        run.id
+                    ),
+                ))
+            }
+        };
 
         let report = reports
             .iter()
@@ -245,7 +309,7 @@ impl CodingWorkspaceEngine {
                 result.diff_ref = format!("{start}..{completion}");
             }
         }
-        Ok(result)
+        Ok((result, handoff_diagnostic))
     }
 
     fn append_unit_diagnostics(
@@ -255,6 +319,7 @@ impl CodingWorkspaceEngine {
         reports: &[CodeReviewReport],
         binding: Option<&crate::product::coding_models::CodingAttemptPlanBinding>,
         plan_binding_matches: bool,
+        handoff_diagnostic: Option<GroupFinalReadinessDiagnostic>,
         diagnostics: &mut Vec<GroupFinalReadinessDiagnostic>,
     ) {
         let unit_id = Some(unit.id.clone());
@@ -292,12 +357,8 @@ impl CodingWorkspaceEngine {
                 format!("unit run {run_id} has no independent code review report"),
             ));
         }
-        if snapshot_unit.handoff_revision_id.is_none() {
-            diagnostics.push(diagnostic(
-                GroupFinalReadinessDiagnosticKind::HandoffMissing,
-                unit_id.clone(),
-                format!("unit run {run_id} has no resolved handoff revision"),
-            ));
+        if let Some(handoff_diagnostic) = handoff_diagnostic {
+            diagnostics.push(handoff_diagnostic);
         }
         if !plan_binding_matches {
             diagnostics.push(plan_binding_diagnostic(unit, binding));
