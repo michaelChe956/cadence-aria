@@ -181,21 +181,6 @@ impl CodingWorkspaceEngine {
             env_vars: BTreeMap::new(),
             timeout_secs: legacy_input.timeout,
         };
-        let fresh_retry = (coder_provider == ProviderName::Codex
-            && resume_provider_session_id.is_some())
-        .then(|| {
-            let fresh_legacy_input = AdapterInput {
-                prompt: full_prompt.clone(),
-                ..legacy_input.clone()
-            };
-            let mut fresh_input = input.clone();
-            fresh_input.prompt = full_prompt;
-            fresh_input.resume_provider_session_id = None;
-            CodingProviderFreshRetry {
-                legacy_input: fresh_legacy_input,
-                input: fresh_input,
-            }
-        });
         let stream_result = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -208,7 +193,6 @@ impl CodingWorkspaceEngine {
                 provider_role: CodingProviderRole::Coder,
                 command_rx,
                 allow_legacy_stream_fallback: true,
-                fresh_retry,
                 timeout: None,
                 timeout_reason_code: None,
                 suppress_failure_side_effects: false,

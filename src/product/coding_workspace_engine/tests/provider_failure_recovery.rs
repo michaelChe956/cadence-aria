@@ -6,6 +6,118 @@ const ISSUE_ID: &str = "issue_0001";
 const WORK_ITEM_ID: &str = "work_item_0001";
 const NODE_ID: &str = "coding_node_0009";
 
+#[test]
+fn provider_retry_classifier_retries_only_transport_failures() {
+    let cases = [
+        (
+            CodingWorkspaceEngineError::ProviderStream("provider start I/O error".to_string()),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderAdapter(ProviderAdapterError::execution_failed(
+                None,
+                "",
+                "Text file busy",
+                0,
+            )),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream(
+                "provider stream ended before completion".to_string(),
+            ),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("connection reset by peer".to_string()),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("provider execution timeout".to_string()),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("upstream returned HTTP 503".to_string()),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("upstream returned HTTP 504".to_string()),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("request id 1503 failed".to_string()),
+            false,
+        ),
+        (CodingWorkspaceEngineError::Aborted, false),
+        (
+            CodingWorkspaceEngineError::ProviderProtocol("invalid event".to_string()),
+            false,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream(
+                "structured output parser error".to_string(),
+            ),
+            false,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("permission timeout".to_string()),
+            false,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("choice timeout".to_string()),
+            false,
+        ),
+    ];
+
+    for (error, retryable) in cases {
+        assert_eq!(
+            classify_provider_failure(&error).is_retryable(),
+            retryable,
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn provider_invocation_outcome_keeps_typed_failure_and_interaction_wait() {
+    let retry = ProviderInvocationOutcome::from_result(
+        Err(CodingWorkspaceEngineError::ProviderAdapter(
+            ProviderAdapterError::execution_failed(None, "", "Text file busy", 0),
+        )),
+        "partial".to_string(),
+    );
+    let ProviderInvocationOutcome::RetryableTransport {
+        failure,
+        reason_code,
+        message,
+        partial_output,
+    } = retry
+    else {
+        panic!("real provider start I/O must remain a typed retryable outcome");
+    };
+    assert_eq!(failure, RetryableProviderFailure::StartIo);
+    assert_eq!(reason_code, "provider_start_io");
+    assert!(message.contains("ProviderExecutionFailed"));
+    assert!(message.contains("Text file busy"));
+    assert_eq!(partial_output, "partial");
+
+    for timeout in ["permission timeout", "choice timeout"] {
+        let waiting = ProviderInvocationOutcome::from_result(
+            Err(CodingWorkspaceEngineError::ProviderStream(
+                timeout.to_string(),
+            )),
+            String::new(),
+        );
+        assert!(matches!(
+            waiting,
+            ProviderInvocationOutcome::NonRetryable {
+                interaction_wait: true,
+                ..
+            }
+        ));
+    }
+}
+
 #[tokio::test]
 async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_worktree() {
     let root = tempdir().expect("tempdir");

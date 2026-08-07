@@ -82,28 +82,81 @@ impl StreamingProviderAdapter for AlwaysResumeStallProvider {
 }
 
 #[tokio::test]
-async fn initial_coder_resume_stall_retries_once_with_fresh_full_prompt() {
+async fn coder_resume_stall_maps_to_retryable_transport_without_same_role_run_restart() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let attempt = seed_stale_coder_conversation(&store, &attempt);
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_resume_invocation".to_string()),
+        )
+        .expect("role run");
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = ResumeStallThenFreshSuccessProvider::default();
     let (_command_tx, mut command_rx) = mpsc::channel(1);
-
-    engine
-        .execute_coding_with_commands(&attempt, &provider, &coding_context(), &mut command_rx)
-        .await
-        .expect("fresh retry completes coding");
-
-    assert_fresh_retry_inputs(provider.recorded_inputs());
-    let persisted = store
-        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("persisted attempt");
-    assert_eq!(persisted.status, CodingAttemptStatus::Running);
-    assert_eq!(
-        persisted.provider_conversations[0].provider_session_id,
-        "fresh-thread"
+    let worktree = attempt.worktree_path.clone().expect("worktree path");
+    let legacy_input = AdapterInput {
+        provider_type: ProviderType::Codex,
+        role: AdapterRole::Executor,
+        worktree_path: Some(worktree.to_string_lossy().to_string()),
+        provider_stream_log_dir: None,
+        prompt: "resume coder".to_string(),
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_markdown".to_string(),
+        timeout: 30,
+        max_retries: 0,
+    };
+    let mut input = streaming_input_from_adapter(
+        &legacy_input,
+        worktree,
+        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
     );
+    input.resume_provider_session_id = Some("stale-thread".to_string());
+    let provider_name = ProviderName::Codex;
+
+    let outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "coding_resume_invocation",
+            role_run: Some(&role_run),
+            provider: &provider,
+            legacy_input: &legacy_input,
+            input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut command_rx,
+            allow_legacy_stream_fallback: true,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+        })
+        .await;
+
+    assert!(matches!(
+        outcome,
+        ProviderInvocationOutcome::RetryableTransport {
+            failure: RetryableProviderFailure::ConnectionInterrupted,
+            ref reason_code,
+            ref message,
+            ref partial_output,
+        } if reason_code == "provider_connection_interrupted"
+            && message.contains("Codex resume stalled")
+            && partial_output.is_empty()
+    ));
+    assert_eq!(provider.recorded_inputs().len(), 1);
+    let persisted = store
+        .get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+        )
+        .expect("persisted role run");
+    assert_eq!(persisted.raw_provider_output_refs.len(), 1);
     assert!(
         store
             .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -113,7 +166,7 @@ async fn initial_coder_resume_stall_retries_once_with_fresh_full_prompt() {
 }
 
 #[tokio::test]
-async fn coder_rework_resume_stall_retries_once_with_fresh_full_prompt() {
+async fn coder_rework_resume_stall_does_not_restart_provider_in_same_role_run() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let attempt = seed_stale_coder_conversation(&store, &attempt);
     let attempt = store
@@ -129,7 +182,7 @@ async fn coder_rework_resume_stall_retries_once_with_fresh_full_prompt() {
     let provider = ResumeStallThenFreshSuccessProvider::default();
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
-    let updated = engine
+    let error = engine
         .execute_coder_fix_from_review(
             &attempt,
             &review_report_requesting_changes(&attempt),
@@ -138,15 +191,10 @@ async fn coder_rework_resume_stall_retries_once_with_fresh_full_prompt() {
             &mut command_rx,
         )
         .await
-        .expect("fresh retry completes reviewer rework");
+        .expect_err("resume stall must be handed to the outer retry coordinator");
 
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
-    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
-    let inputs = provider.recorded_inputs();
-    assert_fresh_retry_inputs(inputs.clone());
-    assert!(inputs[1].prompt.contains("reviewer requested changes"));
-    assert!(inputs[1].prompt.contains("missing validation"));
-    assert!(inputs[1].prompt.contains("add validation"));
+    assert!(error.to_string().contains("Codex resume stalled"));
+    assert_eq!(provider.recorded_inputs().len(), 1);
 }
 
 #[tokio::test]
@@ -310,7 +358,7 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
         ),
         "unexpected error: {error:?}"
     );
-    assert_eq!(provider.inputs.lock().expect("inputs").len(), 2);
+    assert_eq!(provider.inputs.lock().expect("inputs").len(), 1);
     let persisted = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("persisted attempt");
@@ -376,17 +424,6 @@ fn coding_context() -> CodingExecutionContext {
         work_item_markdown: Some("# Draft 4\n\n- 修复 Provider 恢复问题".to_string()),
         verification_commands: vec!["cargo test --locked --lib coder_resume_recovery".to_string()],
     }
-}
-
-fn assert_fresh_retry_inputs(inputs: Vec<StreamingProviderInput>) {
-    assert_eq!(inputs.len(), 2);
-    assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("stale-thread")
-    );
-    assert_eq!(inputs[1].resume_provider_session_id, None);
-    assert!(inputs[0].prompt.contains("增量代码编写指令"));
-    assert!(inputs[1].prompt.contains("已确认 Work Item"));
 }
 
 fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeReviewReport {

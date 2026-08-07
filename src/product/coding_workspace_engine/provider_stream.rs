@@ -1,5 +1,6 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputState;
+use std::sync::{Arc, Mutex};
 
 mod persistence;
 
@@ -10,6 +11,66 @@ pub(crate) struct ProviderStreamOutcome {
 }
 
 impl CodingWorkspaceEngine {
+    /// 供外层重试协调器使用的单次调用入口；stream 层不在此路径创建失败门禁。
+    #[allow(dead_code)]
+    pub(crate) async fn run_provider_stream_invocation(
+        &self,
+        mut run: CodingProviderStreamRun<'_>,
+    ) -> ProviderInvocationOutcome {
+        run.suppress_failure_side_effects = true;
+        let attempt = run.attempt;
+        let role_run = run.role_run;
+        let partial_output_observer = Arc::new(Mutex::new(String::new()));
+        let result = self
+            .run_structured_provider_stream_to_completion_with_partial_output(
+                run,
+                Some(partial_output_observer.clone()),
+            )
+            .await;
+        let partial_output = partial_output_observer
+            .lock()
+            .map(|output| output.clone())
+            .unwrap_or_default();
+        let output_for_persistence = result
+            .as_ref()
+            .map(|outcome| outcome.full_output.as_str())
+            .unwrap_or(partial_output.as_str());
+        if let Some(role_run) = role_run
+            && let Err(error) =
+                self.persist_invocation_partial_output(attempt, role_run, output_for_persistence)
+        {
+            return ProviderInvocationOutcome::NonRetryable {
+                reason_code: "provider_raw_output_persistence".to_string(),
+                error,
+                interaction_wait: false,
+            };
+        }
+        ProviderInvocationOutcome::from_result(result, partial_output)
+    }
+
+    fn persist_invocation_partial_output(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role_run: &CodingRoleRun,
+        partial_output: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let raw_provider_output_ref = self.store.save_provider_raw_output(
+            attempt,
+            role_run.stage.clone(),
+            "provider_stream_attempt",
+            partial_output,
+        )?;
+        self.store.update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            vec![raw_provider_output_ref],
+            Vec::new(),
+        )?;
+        Ok(())
+    }
+
     pub(crate) async fn run_provider_stream_to_completion(
         &self,
         run: CodingProviderStreamRun<'_>,
@@ -24,6 +85,15 @@ impl CodingWorkspaceEngine {
         &self,
         run: CodingProviderStreamRun<'_>,
     ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
+        self.run_structured_provider_stream_to_completion_with_partial_output(run, None)
+            .await
+    }
+
+    async fn run_structured_provider_stream_to_completion_with_partial_output(
+        &self,
+        run: CodingProviderStreamRun<'_>,
+        partial_output_observer: Option<Arc<Mutex<String>>>,
+    ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
         let CodingProviderStreamRun {
             attempt,
             node_id,
@@ -35,16 +105,14 @@ impl CodingWorkspaceEngine {
             provider_role,
             command_rx,
             allow_legacy_stream_fallback,
-            fresh_retry,
             timeout,
             timeout_reason_code,
             suppress_failure_side_effects,
         } = run;
         self.store.ensure_provider_run_allowed(attempt)?;
-        let mut active_legacy_input = legacy_input.clone();
-        let mut active_input = input;
-        let mut fresh_retry = fresh_retry;
-        'provider_attempt: loop {
+        let active_legacy_input = legacy_input.clone();
+        let active_input = input;
+        {
             let cancel = self.cancellation.child_token();
             self.record_role_run_event(
                 attempt,
@@ -134,11 +202,12 @@ impl CodingWorkspaceEngine {
                             provider_name,
                             provider_role,
                             suppress_failure_side_effects,
+                            partial_output_observer,
                         )
                         .await;
                 }
                 Err(error) if !allow_legacy_stream_fallback => {
-                    let message = error.details;
+                    let message = error.details.clone();
                     self.record_role_run_event(
                         attempt,
                         role_run,
@@ -148,10 +217,17 @@ impl CodingWorkspaceEngine {
                             "message": message.clone()
                         }),
                     );
-                    return Err(CodingWorkspaceEngineError::ProviderStream(message));
+                    return Err(if suppress_failure_side_effects {
+                        CodingWorkspaceEngineError::ProviderAdapter(error)
+                    } else {
+                        CodingWorkspaceEngineError::ProviderStream(message)
+                    });
                 }
                 Err(error) => {
-                    let message = error.details;
+                    let message = error.details.clone();
+                    if suppress_failure_side_effects {
+                        return Err(CodingWorkspaceEngineError::ProviderAdapter(error));
+                    }
                     return self
                         .fail_provider_stream_with_ownership(
                             attempt,
@@ -336,6 +412,10 @@ impl CodingWorkspaceEngine {
                                 }
                                 let content_for_event = content.clone();
                                 full_output.push_str(&content);
+                                append_partial_output(
+                                    partial_output_observer.as_ref(),
+                                    &content_for_event,
+                                );
                                 let _ = self
                                     .event_tx
                                     .send(CodingWsOutMessage::CodingStreamChunk {
@@ -572,36 +652,6 @@ impl CodingWorkspaceEngine {
                                 });
                             }
                             ProviderEvent::Failed { message } => {
-                                if provider_role == CodingProviderRole::Coder
-                                    && provider_name == &ProviderName::Codex
-                                    && active_input.resume_provider_session_id.is_some()
-                                    && crate::cross_cutting::codex_provider::is_resume_stall_failure(
-                                        &message,
-                                    )
-                                    && let Some(fresh) = fresh_retry.take()
-                                {
-                                    self.record_role_run_event(
-                                        attempt,
-                                        role_run,
-                                        CodingRoleRunEventType::ProviderFailed,
-                                        json!({
-                                            "code": "codex_resume_stall_fresh_retry",
-                                            "message": message,
-                                            "resume_provider_session_id": active_input
-                                                .resume_provider_session_id
-                                                .clone()
-                                        }),
-                                    );
-                                    cancel.cancel();
-                                    self.clear_attempt_provider_conversation(
-                                        attempt,
-                                        &CodingProviderRole::Coder,
-                                        provider_name,
-                                    )?;
-                                    active_legacy_input = fresh.legacy_input;
-                                    active_input = fresh.input;
-                                    continue 'provider_attempt;
-                                }
                                 self.record_role_run_event(
                                     attempt,
                                     role_run,
@@ -690,6 +740,7 @@ impl CodingWorkspaceEngine {
         provider_name: &ProviderName,
         provider_role: CodingProviderRole,
         suppress_failure_side_effects: bool,
+        partial_output_observer: Option<Arc<Mutex<String>>>,
     ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
         let cancel = self.cancellation.child_token();
         let mut stream = tokio::select! {
@@ -740,6 +791,7 @@ impl CodingWorkspaceEngine {
                 StreamChunk::Text(content) => {
                     let content_for_event = content.clone();
                     full_output.push_str(&content);
+                    append_partial_output(partial_output_observer.as_ref(), &content_for_event);
                     let _ = self
                         .event_tx
                         .send(CodingWsOutMessage::CodingStreamChunk {
@@ -855,6 +907,14 @@ impl CodingWorkspaceEngine {
             "provider stream ended before completion".to_string(),
         )
         .await
+    }
+}
+
+fn append_partial_output(observer: Option<&Arc<Mutex<String>>>, content: &str) {
+    if let Some(observer) = observer
+        && let Ok(mut output) = observer.lock()
+    {
+        output.push_str(content);
     }
 }
 
