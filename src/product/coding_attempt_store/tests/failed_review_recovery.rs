@@ -7,10 +7,175 @@ use crate::product::coding_attempt_store::{
     FailedCodeReviewRecoveryJournal, FailedCodeReviewRecoveryPhase,
 };
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionStage, CodingProviderRole, CodingRoleRunStatus,
-    CodingRoleRunTrigger,
+    CodingAgentRole, CodingAttemptStatus, CodingExecutionStage, CodingProviderRole,
+    CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
+    CodingTimelineNodeStatus,
 };
 use crate::product::json_store::{ProductStoreError, read_json, write_json};
+
+#[test]
+fn failed_review_retry_identity_accepts_new_legacy_and_normalized_legacy_shapes() {
+    let (_tmp, store, attempt, journal) = recovery_boundary_fixture();
+    let stale = store
+        .get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &journal.expected_stale_role_run_id,
+        )
+        .expect("stale reviewer run");
+    let mut retry = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::RetryReview,
+            None,
+        )
+        .expect("legacy retry run");
+    retry.status = CodingRoleRunStatus::Running;
+    retry.supersedes_run_id = Some(stale.id.clone());
+    retry.retry_metadata = None;
+    store
+        .save_role_run(&attempt.project_id, &attempt.issue_id, &retry)
+        .expect("save legacy retry");
+    assert!(crate::product::coding_attempt_store::is_failed_review_manual_retry(&retry, &journal));
+
+    retry.retry_metadata = Some(CodingRoleRunRetryMetadata {
+        cycle_id: retry.id.clone(),
+        attempt_no: 1,
+        prior_run_id: Some(stale.id.clone()),
+    });
+    store
+        .save_role_run(&attempt.project_id, &attempt.issue_id, &retry)
+        .expect("normalize legacy retry");
+    assert!(crate::product::coding_attempt_store::is_failed_review_manual_retry(&retry, &journal));
+
+    retry.trigger = CodingRoleRunTrigger::ManualRetry;
+    assert!(crate::product::coding_attempt_store::is_failed_review_manual_retry(&retry, &journal));
+}
+
+#[test]
+fn manual_retry_store_write_persists_only_a_fully_linked_run() {
+    let (_tmp, store, attempt, journal) = recovery_boundary_fixture();
+    let stale = store
+        .get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &journal.expected_stale_role_run_id,
+        )
+        .expect("failed prior reviewer run");
+
+    let retry = store
+        .create_manual_retry_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            &stale,
+            Some("code_review_provider_interrupted".to_string()),
+        )
+        .expect("atomic manual retry write");
+    let persisted = store
+        .get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &retry.id,
+        )
+        .expect("persisted manual retry");
+    let metadata = persisted.retry_metadata.expect("complete retry metadata");
+
+    assert_eq!(persisted.trigger, CodingRoleRunTrigger::ManualRetry);
+    assert_eq!(
+        persisted.reason_code.as_deref(),
+        Some("code_review_provider_interrupted")
+    );
+    assert_eq!(metadata.cycle_id, persisted.id);
+    assert_eq!(metadata.attempt_no, 1);
+    assert_eq!(metadata.prior_run_id.as_deref(), Some(stale.id.as_str()));
+}
+
+#[test]
+fn normalized_legacy_recovery_journal_can_yield_to_plan_repair_after_provider_start() {
+    let (_tmp, store, attempt, mut journal) = recovery_boundary_fixture();
+    let stale = store
+        .get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &journal.expected_stale_role_run_id,
+        )
+        .expect("stale reviewer run");
+    let node = CodingTimelineNode {
+        id: "coding_node_0010".to_string(),
+        attempt_id: attempt.id.clone(),
+        stage: CodingExecutionStage::CodeReview,
+        title: "代码审查".to_string(),
+        status: CodingTimelineNodeStatus::Running,
+        agent_role: Some(CodingAgentRole::Reviewer),
+        summary: None,
+        started_at: "2026-08-07T00:00:00Z".to_string(),
+        completed_at: None,
+        artifact_refs: Vec::new(),
+    };
+    store.save_timeline_node(&attempt, node.clone()).unwrap();
+    let mut retry = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::RetryReview,
+            None,
+        )
+        .expect("legacy retry run");
+    retry.supersedes_run_id = Some(stale.id.clone());
+    retry.retry_metadata = Some(CodingRoleRunRetryMetadata {
+        cycle_id: retry.id.clone(),
+        attempt_no: 1,
+        prior_run_id: Some(stale.id),
+    });
+    store
+        .save_role_run(&attempt.project_id, &attempt.issue_id, &retry)
+        .expect("Task 5 normalized legacy retry");
+    let retry = store
+        .attach_role_run_node(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &retry.id,
+            node.id.clone(),
+        )
+        .expect("bind recovery retry node");
+    store
+        .append_role_run_event(
+            &attempt,
+            &retry,
+            crate::product::coding_models::CodingRoleRunEventType::ProviderStart,
+            serde_json::json!({"provider": "legacy"}),
+        )
+        .expect("record ProviderStart");
+    journal.retry_role_run_id = Some(retry.id.clone());
+    journal.phase = FailedCodeReviewRecoveryPhase::Completed;
+    journal.runner_started_at = Some("2026-08-07T00:00:01Z".to_string());
+    journal.completed_at = Some("2026-08-07T00:00:01Z".to_string());
+    write_json(&current_path(&store, &attempt), &journal).expect("complete legacy journal");
+
+    store
+        .ensure_plan_repair_can_win_recovery_arbitration(&attempt)
+        .expect("normalized legacy journal yields to plan repair");
+    assert!(
+        store
+            .get_archived_failed_code_review_recovery_journal(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &journal.expected_gate_id,
+            )
+            .expect("legacy journal archive lookup")
+            .is_some()
+    );
+}
 
 fn journal(
     attempt: &crate::product::coding_models::CodingExecutionAttempt,

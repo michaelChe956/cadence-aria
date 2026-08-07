@@ -140,6 +140,65 @@ impl super::CodingAttemptStore {
         Ok(run)
     }
 
+    pub fn create_manual_retry_role_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
+        prior: &CodingRoleRun,
+        reason_code: Option<String>,
+    ) -> Result<CodingRoleRun, ProductStoreError> {
+        validate_relative_id(&attempt.project_id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        validate_relative_id(&attempt.id)?;
+        validate_relative_id(&prior.id)?;
+        let existing = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let latest = existing
+            .iter()
+            .rev()
+            .find(|run| run.stage == stage && run.role == role)
+            .ok_or_else(|| invalid_retry_metadata("missing_prior_run"))?;
+        if latest.id != prior.id
+            || latest.attempt_id != attempt.id
+            || latest.status != CodingRoleRunStatus::Failed
+        {
+            return Err(invalid_retry_metadata(prior.id.clone()));
+        }
+
+        let id = next_sequential_id("coding_role_run", existing.len());
+        let run_no = existing
+            .iter()
+            .filter(|run| run.stage == stage && run.role == role)
+            .map(|run| run.run_no)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let run = CodingRoleRun {
+            id: id.clone(),
+            attempt_id: attempt.id.clone(),
+            stage,
+            role,
+            run_no,
+            status: CodingRoleRunStatus::Running,
+            trigger: CodingRoleRunTrigger::ManualRetry,
+            retry_metadata: Some(CodingRoleRunRetryMetadata {
+                cycle_id: id,
+                attempt_no: 1,
+                prior_run_id: Some(prior.id.clone()),
+            }),
+            node_id: None,
+            started_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+            supersedes_run_id: None,
+            superseded_by_run_id: None,
+            reason_code,
+            raw_provider_output_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+        };
+        self.save_role_run(&attempt.project_id, &attempt.issue_id, &run)?;
+        Ok(run)
+    }
+
     pub fn list_role_runs(
         &self,
         project_id: &str,

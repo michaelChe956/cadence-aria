@@ -37,7 +37,9 @@ pub use git_operation::*;
 pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;
-pub(crate) use recovery::FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE;
+pub(crate) use recovery::{
+    FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, is_failed_review_manual_retry,
+};
 pub use recovery::{FailedCodeReviewRecoveryJournal, FailedCodeReviewRecoveryPhase};
 pub(crate) use utils::*;
 

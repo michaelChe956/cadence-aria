@@ -3,17 +3,16 @@ use std::path::{Path, PathBuf};
 
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, FailedCodeReviewRecoveryJournal,
-    FailedCodeReviewRecoveryPhase,
+    FailedCodeReviewRecoveryPhase, is_failed_review_manual_retry,
 };
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
     CodingExecutionUnitStatus, CodingGateRequired, CodingProviderRole, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingTimelineNodeStatus,
+    CodingTimelineNodeStatus,
 };
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
 use super::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
-use crate::product::coding_models::CodingRoleRun;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FailedCodeReviewRecovery {
@@ -463,20 +462,6 @@ fn attempt_execution_fingerprint_is_valid(
         .worktree_path
         .as_deref()
         .is_some_and(|path| path.is_dir()))
-}
-
-fn is_failed_review_manual_retry(
-    run: &CodingRoleRun,
-    journal: &FailedCodeReviewRecoveryJournal,
-) -> bool {
-    (run.trigger == CodingRoleRunTrigger::ManualRetry
-        && run.retry_metadata.as_ref().is_some_and(|metadata| {
-            metadata.cycle_id == run.id
-                && metadata.attempt_no == 1
-                && metadata.prior_run_id.as_deref()
-                    == Some(journal.expected_stale_role_run_id.as_str())
-        }))
-        || (run.trigger == CodingRoleRunTrigger::RetryReview && run.retry_metadata.is_none())
 }
 
 fn child_directories(path: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {

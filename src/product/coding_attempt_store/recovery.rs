@@ -790,18 +790,18 @@ fn validate_stale_role_run(
     Ok(())
 }
 
-fn is_failed_review_manual_retry(
+pub(crate) fn is_failed_review_manual_retry(
     run: &CodingRoleRun,
     journal: &FailedCodeReviewRecoveryJournal,
 ) -> bool {
-    (run.trigger == CodingRoleRunTrigger::ManualRetry
-        && run.retry_metadata.as_ref().is_some_and(|retry| {
-            retry.cycle_id == run.id
-                && retry.attempt_no == 1
-                && retry.prior_run_id.as_deref()
-                    == Some(journal.expected_stale_role_run_id.as_str())
-        }))
-        || (run.trigger == CodingRoleRunTrigger::RetryReview && run.retry_metadata.is_none())
+    let has_linked_metadata = run.retry_metadata.as_ref().is_some_and(|retry| {
+        retry.cycle_id == run.id
+            && retry.attempt_no == 1
+            && retry.prior_run_id.as_deref() == Some(journal.expected_stale_role_run_id.as_str())
+    });
+    (run.trigger == CodingRoleRunTrigger::ManualRetry && has_linked_metadata)
+        || (run.trigger == CodingRoleRunTrigger::RetryReview
+            && (run.retry_metadata.is_none() || has_linked_metadata))
 }
 
 fn recovery_state_changed() -> ProductStoreError {
