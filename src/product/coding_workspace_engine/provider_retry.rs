@@ -706,6 +706,11 @@ impl CodingWorkspaceEngine {
                 CodingAttemptStatus::Aborted,
             )?;
         }
+        self.release_issue_shared_worktree_lock_for_attempt(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
         self.store.update_role_run_status(
             &attempt.project_id,
             &attempt.issue_id,

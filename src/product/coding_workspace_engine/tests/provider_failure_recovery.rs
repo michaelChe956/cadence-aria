@@ -337,6 +337,30 @@ fn assert_cancelled_provider_run_has_no_gate(
             .expect("open gates")
             .is_empty()
     );
+    let lifecycle = LifecycleStore::new(store.paths());
+    let shared = lifecycle
+        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .expect("shared worktree")
+        .expect("shared worktree exists");
+    assert_eq!(shared.current_active_work_item_id, None);
+    assert_eq!(shared.current_lock_owner_id, None);
+    let replacement = lifecycle
+        .try_acquire_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_0002",
+            "coding_attempt_after_cancel",
+        )
+        .expect("another work item can acquire the released shared lock");
+    assert!(replacement.acquired);
+    assert_eq!(
+        replacement.worktree.current_active_work_item_id.as_deref(),
+        Some("work_item_0002")
+    );
+    assert_eq!(
+        replacement.worktree.current_lock_owner_id.as_deref(),
+        Some("coding_attempt_after_cancel")
+    );
 }
 
 #[tokio::test]
