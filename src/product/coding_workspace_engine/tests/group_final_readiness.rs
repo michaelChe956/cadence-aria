@@ -1,8 +1,9 @@
 use super::*;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::product::coding_models::{
-    CodeReviewReport, CodingExecutionUnit, CodingUnitRun, CodingUnitRunStatus,
-    GroupFinalReadinessDiagnosticKind, GroupFinalReadinessStatus, ReviewFinding,
+    CasOutcome, CodeReviewReport, CodingExecutionUnit, CodingUnitRun, CodingUnitRunStatus,
+    GroupFinalReadinessDiagnosticKind, GroupFinalReadinessStatus, GroupReviewReductionReport,
+    GroupReviewShardReport, ReviewFinding,
 };
 use crate::product::lifecycle_store::{
     CreateWorkspaceSessionInput, UpsertIssueSharedWorktreeInput,
@@ -336,6 +337,288 @@ fn seed_complete_group_readiness(fixture: &ReadinessFixture) -> CodingExecutionA
             CodingAttemptStatus::Running,
         )
         .expect("running attempt")
+}
+
+fn seed_legacy_group_review_reports(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> (GroupReviewShardReport, GroupReviewReductionReport) {
+    let snapshot_hash = "legacy_group_review_snapshot";
+    store
+        .activate_group_review_snapshot(&attempt.id, snapshot_hash)
+        .expect("activate legacy group-review snapshot");
+    let shard = GroupReviewShardReport {
+        id: "group_review_shard_legacy_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        snapshot_hash: snapshot_hash.to_string(),
+        shard_id: "legacy_0001".to_string(),
+        ordered_unit_run_ids: Vec::new(),
+        partition_rationale: vec!["historical shard".to_string()],
+        verdict: ReviewVerdict::Approve,
+        findings: Vec::new(),
+        unresolved_obligations: Vec::new(),
+        selected_diff_refs: Vec::new(),
+        raw_provider_output_refs: Vec::new(),
+        role_run_ids: Vec::new(),
+        run_failure_code: None,
+    };
+    assert!(matches!(
+        store
+            .write_group_review_shard_report_cas(&attempt.id, shard.clone())
+            .expect("write legacy shard report"),
+        CasOutcome::Written
+    ));
+    let reduction = GroupReviewReductionReport {
+        id: "group_review_reduction_legacy_0001".to_string(),
+        attempt_id: attempt.id.clone(),
+        snapshot_hash: snapshot_hash.to_string(),
+        shard_report_ids: vec![shard.id.clone()],
+        verdict: ReviewVerdict::Approve,
+        findings: Vec::new(),
+        impact_scope: vec!["historical group".to_string()],
+        pr_description: "legacy reduction report".to_string(),
+        commit_message_suggestion: "legacy group review".to_string(),
+        provenance: Vec::new(),
+        raw_provider_output_refs: Vec::new(),
+        role_run_ids: Vec::new(),
+        run_failure_code: None,
+    };
+    assert!(matches!(
+        store
+            .write_group_review_reduction_report_cas(&attempt.id, reduction.clone())
+            .expect("write legacy reduction report"),
+        CasOutcome::Written
+    ));
+    (shard, reduction)
+}
+
+#[tokio::test]
+async fn legacy_attempt_with_reduction_artifact_recovers_to_human_final_without_provider_call() {
+    let fixture = readiness_fixture();
+    let running = seed_complete_group_readiness(&fixture);
+    let legacy = fixture
+        .store
+        .update_attempt_stage(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("historical internal review stage");
+    let (shard, reduction) = seed_legacy_group_review_reports(&fixture.store, &legacy);
+    let legacy_role_run = fixture
+        .store
+        .create_role_run(
+            &legacy,
+            CodingExecutionStage::InternalPrReview,
+            CodingProviderRole::InternalReviewer,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("historical group-review role run");
+    fixture
+        .store
+        .update_role_run_status(
+            &legacy.project_id,
+            &legacy.issue_id,
+            &legacy.id,
+            &legacy_role_run.id,
+            CodingRoleRunStatus::Completed,
+            Some("legacy reduction persisted before restart".to_string()),
+        )
+        .expect("complete historical group-review role run");
+    seed_runner_revision_history(&fixture);
+
+    // An empty registry makes any accidental internal-review, shard, or reduction provider
+    // lookup fail. A successful recovery therefore proves the legacy path stays human-only.
+    let state = WebAppState::with_provider_registry(
+        fixture._root.path().to_path_buf(),
+        WebRuntime::new_fake(fixture._root.path().to_path_buf()),
+        ProviderRegistry::new(),
+    );
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(
+        fixture.store.clone(),
+        GitWorkspaceService::new(),
+        event_tx.clone(),
+    );
+    let (command_tx, command_rx) = mpsc::channel(1);
+    command_tx
+        .send(CodingRunnerCommand::StageGateConfirm {
+            stage: CodingExecutionStage::InternalPrReview,
+        })
+        .await
+        .expect("legacy stage gate confirmation");
+
+    execute_start_coding_flow(
+        &state,
+        &fixture.store,
+        &engine,
+        &event_tx,
+        command_rx,
+        &legacy,
+    )
+    .await
+    .expect("legacy recovery must enter human final confirmation");
+
+    let recovered = fixture
+        .store
+        .get_attempt(&legacy.project_id, &legacy.issue_id, &legacy.id)
+        .expect("recovered attempt");
+    assert_eq!(recovered.stage, CodingExecutionStage::FinalConfirm);
+    assert_eq!(recovered.status, CodingAttemptStatus::WaitingForHuman);
+    assert!(
+        fixture
+            .store
+            .get_group_final_readiness_snapshot(&recovered)
+            .expect("readiness snapshot")
+            .is_some_and(|snapshot| snapshot.status == GroupFinalReadinessStatus::Complete)
+    );
+    let internal_reviewer_runs = fixture
+        .store
+        .list_role_runs(&recovered.project_id, &recovered.issue_id, &recovered.id)
+        .expect("role runs")
+        .into_iter()
+        .filter(|run| run.role == CodingProviderRole::InternalReviewer)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        internal_reviewer_runs.len(),
+        1,
+        "legacy recovery must not create another InternalPrReview provider run"
+    );
+    assert_eq!(internal_reviewer_runs[0].id, legacy_role_run.id);
+    let reductions = fixture
+        .store
+        .list_group_review_reduction_reports(&recovered.id)
+        .expect("legacy reduction reader");
+    assert_eq!(reductions.len(), 1);
+    assert_eq!(reductions[0].id, reduction.id);
+    assert_eq!(reductions[0].pr_description, reduction.pr_description);
+    let shards = fixture
+        .store
+        .list_group_review_shard_reports(&recovered.id)
+        .expect("legacy shard reader");
+    assert_eq!(shards.len(), 1);
+    assert_eq!(shards[0].id, shard.id);
+    assert_eq!(shards[0].partition_rationale, shard.partition_rationale);
+}
+
+#[tokio::test]
+async fn legacy_identity_mismatch_records_diagnostic_and_does_not_start_reduction() {
+    let fixture = readiness_fixture();
+    let running = seed_complete_group_readiness(&fixture);
+    let unit = first_unit(&fixture);
+    let run = fixture
+        .store
+        .list_coding_unit_runs(&running, &unit.id)
+        .expect("unit runs")
+        .into_iter()
+        .next()
+        .expect("completed unit run");
+    seed_handoff_with_id_and_commit(
+        &fixture,
+        &unit,
+        &run,
+        "handoff_revision_legacy_identity_mismatch",
+        "unverified_historical_commit",
+    );
+    let legacy = fixture
+        .store
+        .update_attempt_stage(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("historical internal review stage");
+    seed_runner_revision_history(&fixture);
+
+    let state = WebAppState::with_provider_registry(
+        fixture._root.path().to_path_buf(),
+        WebRuntime::new_fake(fixture._root.path().to_path_buf()),
+        ProviderRegistry::new(),
+    );
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(
+        fixture.store.clone(),
+        GitWorkspaceService::new(),
+        event_tx.clone(),
+    );
+    let (command_tx, command_rx) = mpsc::channel(1);
+    command_tx
+        .send(CodingRunnerCommand::StageGateConfirm {
+            stage: CodingExecutionStage::InternalPrReview,
+        })
+        .await
+        .expect("legacy identity-mismatch stage gate confirmation");
+
+    execute_start_coding_flow(
+        &state,
+        &fixture.store,
+        &engine,
+        &event_tx,
+        command_rx,
+        &legacy,
+    )
+    .await
+    .expect("identity-mismatched legacy recovery must remain visible to a human");
+
+    let recovered = fixture
+        .store
+        .get_attempt(&legacy.project_id, &legacy.issue_id, &legacy.id)
+        .expect("recovered attempt");
+    assert_eq!(recovered.stage, CodingExecutionStage::FinalConfirm);
+    assert_eq!(recovered.status, CodingAttemptStatus::WaitingForHuman);
+    let snapshot = fixture
+        .store
+        .get_group_final_readiness_snapshot(&recovered)
+        .expect("readiness snapshot")
+        .expect("incomplete readiness snapshot");
+    assert_eq!(snapshot.status, GroupFinalReadinessStatus::Incomplete);
+    assert!(snapshot.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == GroupFinalReadinessDiagnosticKind::IdentityMismatch
+    }));
+    assert!(
+        fixture
+            .store
+            .list_group_review_shard_reports(&recovered.id)
+            .expect("shard reports")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .store
+            .list_group_review_reduction_reports(&recovered.id)
+            .expect("reduction reports")
+            .is_empty()
+    );
+    assert!(matches!(
+        engine
+            .handle_final_confirm(&recovered.project_id, &recovered.issue_id, &recovered.id)
+            .await,
+        Err(CodingWorkspaceEngineError::FinalConfirmNotReady(ref id)) if id == &recovered.id
+    ));
+}
+
+#[test]
+fn legacy_shard_and_reduction_reports_remain_readable() {
+    let fixture = readiness_fixture();
+    let (shard, reduction) = seed_legacy_group_review_reports(&fixture.store, &fixture.attempt);
+
+    let shards = fixture
+        .store
+        .list_group_review_shard_reports(&fixture.attempt.id)
+        .expect("historical shard reports remain readable");
+    assert_eq!(shards.len(), 1);
+    assert_eq!(shards[0].id, shard.id);
+    assert_eq!(shards[0].partition_rationale, shard.partition_rationale);
+    let reductions = fixture
+        .store
+        .list_group_review_reduction_reports(&fixture.attempt.id)
+        .expect("historical reduction reports remain readable");
+    assert_eq!(reductions.len(), 1);
+    assert_eq!(reductions[0].id, reduction.id);
+    assert_eq!(reductions[0].shard_report_ids, reduction.shard_report_ids);
 }
 
 #[tokio::test]

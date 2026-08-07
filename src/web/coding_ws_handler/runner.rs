@@ -388,8 +388,28 @@ pub(crate) async fn execute_start_coding_flow(
             }
         }
 
-        // Recovery compatibility: an attempt persisted by the former group-review
-        // pipeline may already be in this stage. Fresh group attempts never enter it.
+        // Recovery compatibility: historical group attempts may already have entered
+        // InternalPrReview under the former shard/reduction pipeline. They must never
+        // resume a provider-backed review: rebuild only the authoritative readiness
+        // evidence and hand it to the human FinalConfirm surface. Incomplete evidence,
+        // including identity mismatches, stays visible there and `handle_final_confirm`
+        // remains fail-closed.
+        if current.stage == CodingExecutionStage::InternalPrReview
+            && current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
+        {
+            current = engine
+                .prepare_group_final_confirm_from_readiness(&current)
+                .await?;
+            return emit_current_session_state(
+                event_tx,
+                coding_store,
+                &current,
+                engine.cancellation_token(),
+            )
+            .await;
+        }
+
+        // Single-work-item attempts retain the InternalPrReview provider flow.
         if current.stage == CodingExecutionStage::InternalPrReview {
             let Some(next) = await_stage_gate(
                 &mut command_rx,

@@ -2,8 +2,11 @@ use super::group_review_errors::{GroupReviewExecutionError, GroupReviewOrchestra
 use super::group_review_orchestrator::GroupReviewOrchestrator;
 use super::*;
 
-// Legacy group review execution path; new group attempts use human final confirmation
-// (Task 3). Retained for Task 6 legacy compatibility reader; remove or keep in Task 6.
+// Legacy group review executor retained for regression coverage
+// (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+// and legacy artifact reader support. No production callers remain after the
+// Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
+// no longer need regression coverage.
 #[allow(dead_code)]
 pub(crate) fn map_group_review_orchestration_error(
     error: GroupReviewOrchestrationError,
@@ -92,8 +95,11 @@ pub(crate) fn map_group_review_orchestration_error(
     }
 }
 
-// Legacy group review execution path; new group attempts use human final confirmation
-// (Task 3). Retained for Task 6 legacy compatibility reader; remove or keep in Task 6.
+// Legacy group review executor retained for regression coverage
+// (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+// and legacy artifact reader support. No production callers remain after the
+// Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
+// no longer need regression coverage.
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum GroupReviewFailureDisposition {
@@ -103,8 +109,11 @@ enum GroupReviewFailureDisposition {
     StaleAudit,
 }
 
-// Legacy group review execution path; new group attempts use human final confirmation
-// (Task 3). Retained for Task 6 legacy compatibility reader; remove or keep in Task 6.
+// Legacy group review executor retained for regression coverage
+// (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+// and legacy artifact reader support. No production callers remain after the
+// Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
+// no longer need regression coverage.
 #[allow(dead_code)]
 fn group_review_failure_disposition(
     error: &CodingWorkspaceEngineError,
@@ -124,8 +133,11 @@ fn group_review_failure_disposition(
 }
 
 impl CodingWorkspaceEngine {
-    // Legacy group review execution path; new group attempts use human final confirmation
-    // (Task 3). Retained for Task 6 legacy compatibility reader; remove or keep in Task 6.
+    // Legacy group review executor retained for regression coverage
+    // (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+    // and legacy artifact reader support. No production callers remain after the
+    // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
+    // no longer need regression coverage.
     #[allow(dead_code)]
     pub(crate) async fn finalize_group_review_failure(
         &self,
@@ -212,8 +224,11 @@ impl CodingWorkspaceEngine {
         Err(error)
     }
 
-    // Legacy group review execution path; new group attempts use human final confirmation
-    // (Task 3). Retained for Task 6 legacy compatibility reader; remove or keep in Task 6.
+    // Legacy group review executor retained for regression coverage
+    // (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+    // and legacy artifact reader support. No production callers remain after the
+    // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
+    // no longer need regression coverage.
     #[allow(dead_code)]
     pub(crate) async fn handle_group_review_orchestration_failure(
         &self,

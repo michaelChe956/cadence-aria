@@ -6,8 +6,11 @@ use crate::product::coding_workspace_engine::group_review_types::{CompletionDiff
 use crate::product::coding_workspace_engine::plan_defect_routing::AuthoritativeGroupReviewerBinding;
 
 impl CodingWorkspaceEngine {
-    // Legacy group review execution path; new group attempts use human final confirmation
-    // (Task 3). Retained for Task 6 legacy compatibility reader; remove or keep in Task 6.
+    // Legacy group review executor retained for regression coverage
+    // (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+    // and legacy artifact reader support. No production callers remain after the
+    // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
+    // no longer need regression coverage.
     #[allow(dead_code)]
     pub(crate) async fn collect_group_git_facts(
         &self,
