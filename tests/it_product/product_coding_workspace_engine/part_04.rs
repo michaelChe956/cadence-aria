@@ -487,7 +487,10 @@ async fn execute_coding_persists_coder_role_run_and_full_output_chat_entry() {
     assert!(role_run.completed_at.is_some());
     assert_eq!(
         role_run.raw_provider_output_refs,
-        vec!["provider-raw/coding/coder_output_0001.txt".to_string()]
+        vec![
+            "provider-raw/coding/provider_stream_attempt_0001.txt".to_string(),
+            "provider-raw/coding/coder_output_0001.txt".to_string(),
+        ]
     );
 
     let events = store
