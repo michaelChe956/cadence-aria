@@ -1,7 +1,10 @@
 use super::*;
 use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use tokio::sync::Notify;
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
@@ -19,6 +22,20 @@ struct TransportFailuresThenSuccessProvider {
 #[derive(Default)]
 struct PermissionTimeoutProvider {
     starts: AtomicUsize,
+}
+
+struct CancelledProvider {
+    starts: AtomicUsize,
+    started: Arc<Notify>,
+}
+
+impl CancelledProvider {
+    fn new() -> Self {
+        Self {
+            starts: AtomicUsize::new(0),
+            started: Arc::new(Notify::new()),
+        }
+    }
 }
 
 enum RetryBoundaryMutation {
@@ -205,6 +222,28 @@ impl StreamingProviderAdapter for PermissionTimeoutProvider {
     }
 }
 
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CancelledProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _keep_stream_open = event_tx;
+            std::future::pending::<()>().await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
 #[tokio::test]
 async fn coder_permission_timeout_keeps_existing_failure_gate_without_retrying() {
     let (_root, store, attempt) = running_attempt_with_worktree();
@@ -312,6 +351,146 @@ async fn reviewer_permission_timeout_keeps_existing_failure_gate_without_retryin
 }
 
 #[tokio::test]
+async fn cancelled_coder_run_finalizes_current_run_and_node_without_retry_or_gate() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let provider = CancelledProvider::new();
+    let (tx, _rx) = mpsc::channel(16);
+    let cancellation = CancellationToken::new();
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_cancellation(cancellation.clone());
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let context = CodingExecutionContext::default();
+
+    let execute =
+        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+    let cancel = async {
+        tokio::time::timeout(Duration::from_millis(250), provider.started.notified())
+            .await
+            .expect("coder provider did not start");
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(execute, cancel);
+    let error = result.expect_err("cancelled coder invocation stops without an automatic retry");
+
+    assert!(
+        matches!(error, CodingWorkspaceEngineError::Aborted),
+        "unexpected cancellation error: {error:?}"
+    );
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("aborted attempt")
+            .status,
+        CodingAttemptStatus::Aborted
+    );
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("coder runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Aborted);
+    assert_eq!(runs[0].reason_code.as_deref(), Some("abort_attempt"));
+    let nodes = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("coder nodes");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_reviewer_run_finalizes_current_run_and_node_without_retry_or_gate() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
+    let provider = CancelledProvider::new();
+    let (tx, _rx) = mpsc::channel(16);
+    let cancellation = CancellationToken::new();
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_cancellation(cancellation.clone());
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let execute = engine.execute_code_review_with_commands(&attempt, &provider, &mut command_rx);
+    let cancel = async {
+        tokio::time::timeout(Duration::from_millis(250), provider.started.notified())
+            .await
+            .expect("reviewer provider did not start");
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(execute, cancel);
+    let error = result.expect_err("cancelled reviewer invocation stops without an automatic retry");
+
+    assert!(matches!(error, CodingWorkspaceEngineError::Aborted));
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("aborted attempt")
+            .status,
+        CodingAttemptStatus::Aborted
+    );
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reviewer runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Aborted);
+    assert_eq!(runs[0].reason_code.as_deref(), Some("abort_attempt"));
+    let nodes = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reviewer nodes");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn reviewer_initial_invocation_preserves_persisted_provider_session() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
+    let attempt = store
+        .replace_attempt_provider_conversations(
+            &attempt,
+            vec![ProviderConversationRef {
+                role: ProviderConversationRole::CodeReviewer,
+                provider: ProviderName::ClaudeCode,
+                provider_session_id: "reviewer-session-before-retry".to_string(),
+                updated_at: "2026-08-07T00:00:00Z".to_string(),
+                last_node_id: Some("coding_node_0001".to_string()),
+            }],
+        )
+        .expect("seed reviewer conversation");
+    let provider = TransportFailuresThenSuccessProvider::new(1, "not structured review output");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let _ = engine
+        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .await;
+
+    let inputs = provider.recorded_inputs();
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(
+        inputs[0].resume_provider_session_id.as_deref(),
+        Some("reviewer-session-before-retry")
+    );
+    assert_eq!(inputs[1].resume_provider_session_id, None);
+}
+
+#[tokio::test]
 async fn abort_during_transport_failure_creates_no_automatic_retry_records() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let provider = RetryBoundaryMutationProvider::new(RetryBoundaryMutation::Abort {
@@ -340,19 +519,25 @@ async fn abort_during_transport_failure_creates_no_automatic_retry_records() {
             .status,
         CodingAttemptStatus::Aborted
     );
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Failed);
     assert_eq!(
-        store
-            .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("role runs")
-            .len(),
-        1
+        runs[0].reason_code.as_deref(),
+        Some("provider_retry_attempt_state_changed")
     );
-    assert_eq!(
+    let nodes = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline nodes");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
+    assert!(
         store
-            .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("timeline nodes")
-            .len(),
-        1
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
     );
 }
 
@@ -385,19 +570,93 @@ async fn plan_repair_during_transport_failure_creates_no_automatic_retry_records
             .status,
         CodingAttemptStatus::AwaitingPlanAmendment
     );
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Failed);
     assert_eq!(
-        store
-            .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("role runs")
-            .len(),
-        1
+        runs[0].reason_code.as_deref(),
+        Some("provider_retry_attempt_state_changed")
     );
+    let nodes = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline nodes");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn plan_repair_after_retry_preflight_creates_no_retry_records_or_provider_start() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let (_pause, reached, resume) = register_coding_mutation_test_pause(
+        store.paths().root(),
+        CodingMutationTestPoint::ProviderFailure,
+    );
+    let provider = TransportFailuresThenSuccessProvider::new(usize::MAX, "unused");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let context = CodingExecutionContext::default();
+
+    let execute =
+        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+    let enter_plan_repair = async {
+        tokio::time::timeout(Duration::from_millis(250), reached)
+            .await
+            .expect("retry preflight did not reach the controlled pause")
+            .expect("retry preflight pause sender dropped");
+        store
+            .update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::AwaitingPlanAmendment,
+            )
+            .expect("enter plan repair after retry preflight");
+        resume.send(()).expect("resume retry preflight");
+    };
+    let (result, ()) = tokio::join!(execute, enter_plan_repair);
+    let error = result.expect_err("Plan Repair rejects retry creation after the first preflight");
+
+    assert!(
+        error
+            .to_string()
+            .contains("provider_retry_attempt_state_changed")
+    );
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
     assert_eq!(
         store
-            .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("timeline nodes")
-            .len(),
-        1
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("Plan Repair attempt")
+            .status,
+        CodingAttemptStatus::AwaitingPlanAmendment
+    );
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Failed);
+    assert_eq!(
+        runs[0].reason_code.as_deref(),
+        Some("provider_connection_interrupted")
+    );
+    let nodes = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline nodes");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
     );
 }
 
@@ -481,19 +740,25 @@ async fn owner_change_during_transport_failure_creates_no_automatic_retry_record
         })
     ));
     assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    let runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, CodingRoleRunStatus::Failed);
     assert_eq!(
-        store
-            .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("role runs")
-            .len(),
-        1
+        runs[0].reason_code.as_deref(),
+        Some("provider_retry_attempt_state_changed")
     );
-    assert_eq!(
+    let nodes = store
+        .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("timeline nodes");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].status, CodingTimelineNodeStatus::Failed);
+    assert!(
         store
-            .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("timeline nodes")
-            .len(),
-        1
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
     );
 }
 

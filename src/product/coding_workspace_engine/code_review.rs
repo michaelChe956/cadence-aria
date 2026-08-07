@@ -64,6 +64,15 @@ impl CodingWorkspaceEngine {
             .store
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .code_reviewer;
+        let initial_resume_provider_session_id = attempt
+            .provider_conversations
+            .iter()
+            .find(|conversation| {
+                conversation.role == ProviderConversationRole::CodeReviewer
+                    && conversation.provider == reviewer
+            })
+            .map(|conversation| conversation.provider_session_id.trim().to_string())
+            .filter(|session_id| !session_id.is_empty());
         let retry_success = self
             .run_code_reviewer_with_retry_cycle(CodeReviewerRetryCycleInput {
                 attempt: &attempt,
@@ -72,6 +81,7 @@ impl CodingWorkspaceEngine {
                 provider,
                 reviewer: &reviewer,
                 worktree_path,
+                initial_resume_provider_session_id,
                 command_rx,
             })
             .await?;
