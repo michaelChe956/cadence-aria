@@ -256,20 +256,24 @@ impl CodingWorkspaceEngine {
                     }
                     _ = &mut timeout => {
                         cancel.cancel();
+                        let waiting_for_choice = !open_choice_ids.is_empty();
+                        let reason_code = if waiting_for_choice {
+                            "choice_timeout"
+                        } else {
+                            timeout_reason_code.unwrap_or("provider_stream_timeout")
+                        };
                         self.record_role_run_event(
                             attempt,
                             role_run,
                             CodingRoleRunEventType::Timeout,
                             json!({
                                 "phase": "provider_stream",
-                                "reason_code": timeout_reason_code
-                                    .unwrap_or("provider_stream_timeout")
+                                "reason_code": reason_code,
+                                "choice_ids": open_choice_ids
                             }),
                         );
                         return Err(CodingWorkspaceEngineError::ProviderStream(
-                            timeout_reason_code
-                                .unwrap_or("provider_stream_timeout")
-                                .to_string(),
+                            reason_code.to_string(),
                         ));
                     }
                     command = command_rx.recv(), if commands_open => {
@@ -403,6 +407,10 @@ impl CodingWorkspaceEngine {
                         match event {
                             ProviderEvent::TextDelta { content } => {
                                 if !open_choice_ids.is_empty() {
+                                    append_partial_output(
+                                        partial_output_observer.as_ref(),
+                                        &content,
+                                    );
                                     return Err(self.unresolved_provider_choice_error(
                                         attempt,
                                         role_run,

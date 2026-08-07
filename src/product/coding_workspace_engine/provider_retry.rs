@@ -137,7 +137,7 @@ fn classify_adapter_error(error: &ProviderAdapterError) -> ProviderFailureClassi
             retryable(RetryableProviderFailure::ExecutionTimeout, message)
         }
         ProviderErrorCode::ProviderExecutionFailed => {
-            retryable(RetryableProviderFailure::StartIo, message)
+            non_retryable("provider_execution_failed", false)
         }
         ProviderErrorCode::ProviderParseError => non_retryable("provider_parse_error", false),
         ProviderErrorCode::ProviderCommandMissing => {
@@ -166,6 +166,9 @@ fn adapter_error_message(error: &ProviderAdapterError) -> String {
 }
 
 fn classify_stream_message(message: &str) -> ProviderFailureClassification {
+    if message.eq_ignore_ascii_case("provider_choice_unresolved") {
+        return non_retryable("provider_choice_unresolved", true);
+    }
     if is_permission_wait(message) {
         return non_retryable("permission_timeout", true);
     }
@@ -221,9 +224,7 @@ fn classify_transport_message(message: &str) -> Option<ProviderFailureClassifica
             message.to_string(),
         ));
     }
-    if (lower.contains("start") || lower.contains("spawn"))
-        && (lower.contains("i/o") || lower.contains("io error") || lower.contains("input/output"))
-    {
+    if is_start_io_message(&lower) {
         return Some(retryable(
             RetryableProviderFailure::StartIo,
             message.to_string(),
@@ -233,11 +234,47 @@ fn classify_transport_message(message: &str) -> Option<ProviderFailureClassifica
 }
 
 fn upstream_status(message: &str) -> Option<u16> {
-    message
-        .split(|character: char| !character.is_ascii_digit())
+    let tokens = message
+        .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
-        .filter_map(|token| token.parse::<u16>().ok())
-        .find(|status| matches!(status, 503 | 504))
+        .collect::<Vec<_>>();
+
+    tokens.iter().enumerate().find_map(|(index, token)| {
+        let status = token.parse::<u16>().ok()?;
+        if !matches!(status, 503 | 504) {
+            return None;
+        }
+        let context = &tokens[index.saturating_sub(5)..index];
+        let nearest_identifier = context
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(offset, token)| {
+                matches!(*token, "id" | "port" | "count").then_some(offset)
+            });
+        let nearest_upstream_context = context
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(offset, token)| is_upstream_status_context(token).then_some(offset));
+        let identifier_is_closer = nearest_identifier
+            .zip(nearest_upstream_context)
+            .is_some_and(|(identifier, upstream)| identifier > upstream);
+        (!identifier_is_closer && nearest_upstream_context.is_some()).then_some(status)
+    })
+}
+
+fn is_upstream_status_context(token: &str) -> bool {
+    matches!(token, "http" | "status" | "upstream" | "gateway")
+}
+
+fn is_start_io_message(message: &str) -> bool {
+    message.contains("text file busy")
+        || message.contains("resource temporarily unavailable")
+        || ((message.contains("start") || message.contains("spawn"))
+            && (message.contains("i/o")
+                || message.contains("io error")
+                || message.contains("input/output")))
 }
 
 fn is_permission_wait(message: &str) -> bool {

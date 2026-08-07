@@ -45,7 +45,43 @@ fn provider_retry_classifier_retries_only_transport_failures() {
             true,
         ),
         (
+            CodingWorkspaceEngineError::ProviderStream("gateway returned status 504".to_string()),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("HTTP/1.1 503".to_string()),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream(
+                "HTTP status server error (503 Service Unavailable)".to_string(),
+            ),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("HTTP error code 503".to_string()),
+            true,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream(
+                "request id abc: upstream returned HTTP 503".to_string(),
+            ),
+            true,
+        ),
+        (
             CodingWorkspaceEngineError::ProviderStream("request id 1503 failed".to_string()),
+            false,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("request id 503 failed".to_string()),
+            false,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("port 504 unavailable".to_string()),
+            false,
+        ),
+        (
+            CodingWorkspaceEngineError::ProviderStream("retry count 503".to_string()),
             false,
         ),
         (CodingWorkspaceEngineError::Aborted, false),
@@ -74,6 +110,23 @@ fn provider_retry_classifier_retries_only_transport_failures() {
             classify_provider_failure(&error).is_retryable(),
             retryable,
             "{error}"
+        );
+    }
+}
+
+#[test]
+fn provider_retry_classifier_fails_closed_for_unrecognized_adapter_execution_failures() {
+    for stderr in [
+        "request id 503 failed",
+        "port 504 unavailable",
+        "retry count 503",
+    ] {
+        let error = CodingWorkspaceEngineError::ProviderAdapter(
+            ProviderAdapterError::execution_failed(None, "", stderr, 1),
+        );
+        assert!(
+            !classify_provider_failure(&error).is_retryable(),
+            "{stderr}"
         );
     }
 }
