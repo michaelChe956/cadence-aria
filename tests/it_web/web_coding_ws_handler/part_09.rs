@@ -225,12 +225,26 @@ async fn group_attempt_runs_group_final_review_when_review_request_push_fails() 
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let app = app_with_group_full_chain_attempt_and_provider(
         root.path(),
-        Arc::new(GroupFinalReviewPlanDefectProvider::normal()),
+        Arc::new(IndependentCodeReviewPlanDefectProvider::approve_all()),
     );
     // 注入拒绝 push 的 pre-receive hook，使 review_request push 必然失败
     let hook = root.path().join("remote.git/hooks/pre-receive");
     fs::write(&hook, "#!/bin/sh\nexit 1\n").expect("rejecting hook");
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod hook");
+    let rejected_output = Command::new("git")
+        .args(["push", "origin", "HEAD:aria/issues/issue_0001"])
+        .current_dir(root.path().join("repo"))
+        .output()
+        .expect("probe rejected push");
+    let rejected_stderr = String::from_utf8_lossy(&rejected_output.stderr);
+    assert!(
+        !rejected_output.status.success(),
+        "pre-receive hook must reject the probe push"
+    );
+    assert!(
+        rejected_stderr.contains("[remote rejected]"),
+        "push rejection diagnostic must remain machine-detectable: {rejected_stderr}"
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -244,19 +258,16 @@ async fn group_attempt_runs_group_final_review_when_review_request_push_fails() 
     send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
 
     let mut confirmed_gates = HashSet::new();
-    let mut saw_group_final_review = false;
     let mut bound_first_handoff = false;
     let mut saw_failed_review_request = false;
-    for _ in 0..520 {
+    let mut reached_human_final_confirm = false;
+    for _ in 0..320 {
         match timeout(Duration::from_secs(2), recv_json(&mut ws)).await {
             Ok(CodingWsOutMessage::CodingGateRequired { gate }) => {
                 if gate.kind == CodingGateKind::StageGate
                     && let Some(stage) = gate.stage.clone()
                     && confirmed_gates.insert(gate.gate_id)
                 {
-                    if stage == CodingExecutionStage::InternalPrReview {
-                        materialize_completed_unit_run_for_logical(&store, "work_item_0002");
-                    }
                     send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
                 }
             }
@@ -274,10 +285,22 @@ async fn group_attempt_runs_group_final_review_when_review_request_push_fails() 
                     saw_failed_review_request = true;
                 }
             }
-            Ok(CodingWsOutMessage::InternalPrReviewComplete { review }) => {
-                assert_eq!(review.verdict, ReviewVerdict::Approve);
-                saw_group_final_review = true;
+            Ok(CodingWsOutMessage::CodingSessionState { status, stage, .. })
+                if status == CodingAttemptStatus::WaitingForHuman
+                    && stage == CodingExecutionStage::FinalConfirm =>
+            {
+                reached_human_final_confirm = true;
                 break;
+            }
+            Ok(CodingWsOutMessage::InternalPrReviewComplete { .. }) => {
+                panic!("fresh group must not run the removed provider group review");
+            }
+            Ok(CodingWsOutMessage::CodingProtocolError { code, message })
+                if code == "coding_start_failed" && message.contains("git_push_indeterminate") =>
+            {
+                panic!(
+                    "review-request push rejection must be recorded as Failed, not indeterminate"
+                );
             }
             Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
                 panic!("unexpected coding protocol error {code}: {message}");
@@ -291,7 +314,7 @@ async fn group_attempt_runs_group_final_review_when_review_request_push_fails() 
                     .list_review_requests("project_0001", "issue_0001", "coding_attempt_0001")
                     .expect("review requests");
                 panic!(
-                    "timed out before GroupFinalReview: status={:?} stage={:?} current={:?} requests={requests:?}",
+                    "timed out before FinalConfirm: status={:?} stage={:?} current={:?} requests={requests:?}",
                     attempt.status, attempt.stage, attempt.current_work_item_id,
                 );
             }
@@ -302,8 +325,8 @@ async fn group_attempt_runs_group_final_review_when_review_request_push_fails() 
         "expected push to fail and emit a Failed review request"
     );
     assert!(
-        saw_group_final_review,
-        "GroupFinalReview must run even when review_request push fails"
+        reached_human_final_confirm,
+        "group must reach human FinalConfirm even when review_request push fails"
     );
     let requests = store
         .list_review_requests("project_0001", "issue_0001", "coding_attempt_0001")
@@ -313,6 +336,18 @@ async fn group_attempt_runs_group_final_review_when_review_request_push_fails() 
     assert!(
         request.push_error.is_some(),
         "push_error should be recorded on the failed review request"
+    );
+    let attempt = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    assert_eq!(attempt.status, CodingAttemptStatus::WaitingForHuman);
+    assert_eq!(attempt.stage, CodingExecutionStage::FinalConfirm);
+    assert!(
+        store
+            .list_internal_pr_reviews("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("internal reviews")
+            .is_empty(),
+        "fresh groups must not persist provider group reviews"
     );
 
     ws.close(None).await.expect("close ws");
