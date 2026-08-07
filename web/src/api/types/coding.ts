@@ -299,7 +299,18 @@ export type InternalPrReview = {
   run_no?: number | null;
 };
 
+export type GroupReviewArtifactRef = {
+  id: string;
+  raw_provider_output_refs: string[];
+};
+
+export type GroupReviewArtifactProjection = {
+  shard_reports: GroupReviewArtifactRef[];
+  reduction_reports: GroupReviewArtifactRef[];
+};
+
 export type GroupFinalReadinessStatus = "complete" | "incomplete";
+
 export type GroupFinalReadinessDiagnosticKind =
   | "unit_run_missing"
   | "completion_commit_missing"
@@ -445,6 +456,7 @@ export type CodingAttemptSnapshotResponse = {
   code_review_reports: CodeReviewReport[];
   review_request: ReviewRequest | null;
   internal_pr_review: InternalPrReview | null;
+  group_review_artifacts?: GroupReviewArtifactProjection | null;
   group_final_readiness?: GroupFinalReadinessSnapshot | null;
   pending_gates: CodingGateRequired[];
   pending_choices: CodingChoiceGate[];
@@ -525,6 +537,7 @@ export type CodingWsOutMessage =
       verification_commands: string[];
       work_item_execution_plan: WorkItemExecutionPlan | null;
       linked_plan_repair: PlanRepairSessionSnapshot | null;
+      group_review_artifacts?: GroupReviewArtifactProjection | null;
       require_execution_plan_confirm: boolean;
     } & Omit<CodingAttemptSnapshotResponse, "attempt">)
   | { type: "coding_stage_change"; stage: CodingExecutionStage }

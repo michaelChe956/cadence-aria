@@ -5,6 +5,7 @@ use crate::product::coding_models::{
     CasOutcome, GroupFinalReadinessDiagnosticKind, GroupFinalReadinessStatus,
     GroupReviewReductionReport, GroupReviewShardReport,
 };
+use crate::product::json_store::write_json;
 use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
 use crate::web::coding_ws_handler::execute_start_coding_flow;
 use crate::web::runtime::WebRuntime;
@@ -479,6 +480,43 @@ async fn preparing_group_final_confirm_twice_reuses_pending_timeline_node() {
     );
 }
 
+#[tokio::test]
+async fn final_confirm_rejects_complete_snapshot_with_contradictory_diagnostics() {
+    let fixture = readiness_fixture();
+    let running = seed_complete_group_readiness(&fixture);
+    let prepared = fixture
+        .engine
+        .prepare_group_final_confirm_from_readiness(&running)
+        .await
+        .expect("prepare final confirmation");
+    let mut snapshot = fixture
+        .store
+        .get_group_final_readiness_snapshot(&prepared)
+        .expect("read readiness")
+        .expect("readiness snapshot");
+    snapshot.diagnostics.push(
+        crate::product::coding_models::GroupFinalReadinessDiagnostic {
+            kind: GroupFinalReadinessDiagnosticKind::CodeReviewMissing,
+            unit_id: None,
+            message: "contradictory persisted diagnostic".to_string(),
+        },
+    );
+    write_json(
+        &fixture.store.group_final_readiness_snapshot_path(&prepared),
+        &snapshot,
+    )
+    .expect("forge contradictory persisted snapshot");
+
+    let error = fixture
+        .engine
+        .handle_final_confirm(&prepared.project_id, &prepared.issue_id, &prepared.id)
+        .await
+        .expect_err("final confirm must reject contradictory diagnostics");
+    assert!(matches!(
+        error,
+        CodingWorkspaceEngineError::FinalConfirmNotReady(ref id) if id == &prepared.id
+    ));
+}
 #[tokio::test]
 async fn incomplete_readiness_cannot_be_final_confirmed() {
     let fixture = readiness_fixture();

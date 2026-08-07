@@ -16,6 +16,7 @@ import type {
   CodingWsOutMessage,
   ExecutionEvent,
   GroupFinalReadinessSnapshot,
+  GroupReviewArtifactProjection,
   InternalPrReview,
   PlanAmendmentManifest,
   PlanRepairSessionSnapshot,
@@ -99,6 +100,7 @@ export interface CodingWorkspaceState {
   codeReviewReports: CodeReviewReport[];
   internalPrReview: InternalPrReview | null;
   groupFinalReadiness: GroupFinalReadinessSnapshot | null;
+  groupReviewArtifacts: GroupReviewArtifactProjection | null;
   reviewRequest: ReviewRequest | null;
   roleRuns: CodingRoleRun[];
   logs: CodingLogEntry[];
@@ -199,6 +201,7 @@ const initialState: CodingWorkspaceState = {
   codeReviewReports: [],
   internalPrReview: null,
   groupFinalReadiness: null,
+  groupReviewArtifacts: null,
   reviewRequest: null,
   roleRuns: [],
   logs: [],
@@ -268,6 +271,7 @@ export const useCodingWorkspaceStore = create<
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
         groupFinalReadiness: snapshot.group_final_readiness ?? null,
+        groupReviewArtifacts: snapshot.group_review_artifacts ?? null,
         roleRuns,
         pendingGates,
         workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,

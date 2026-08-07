@@ -38,14 +38,6 @@ const BASE_ROLES: ProviderConfigRow[] = [
   },
 ];
 
-const GROUP_FINAL_REVIEW_ROLE: ProviderConfigRow = {
-  selectRole: "internal_reviewer",
-  providerKey: "internal_reviewer",
-  modeRole: "internal_reviewer",
-  lockRole: "internal_reviewer",
-  label: "GroupFinalReview",
-};
-
 const PERMISSION_MODE_LABELS: Record<CodingProviderPermissionMode, string> = {
   auto: "Auto",
   supervised: "Supervised",
@@ -83,10 +75,9 @@ export function CodingProviderConfigPanel({
     return null;
   }
   const providerOptions = getProviderOptions(availabilitySnapshot);
-  const roles =
-    attemptScope === "work_item_group"
-      ? [...BASE_ROLES, GROUP_FINAL_REVIEW_ROLE]
-      : BASE_ROLES;
+  const roles = BASE_ROLES.filter(
+    (role) => attemptScope !== "work_item_group" || role.selectRole !== "internal_reviewer",
+  );
 
   return (
     <div

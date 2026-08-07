@@ -135,7 +135,7 @@ afterEach(() => {
 });
 
 describe("CodingProviderConfigPanel", () => {
-  it("三角色均可选 Pi，且 Pi 角色只提供 Auto", async () => {
+  it("hides the retired group final reviewer provider", async () => {
     setHealthWithPi(true);
     const onSelect = vi.fn();
     const onPermissionModeSelect = vi.fn();
@@ -152,7 +152,7 @@ describe("CodingProviderConfigPanel", () => {
       />,
     );
 
-    for (const label of ["Coder", "Code Reviewer", "GroupFinalReview"]) {
+    for (const label of ["Coder", "Code Reviewer"]) {
       const role = screen.getByRole("group", { name: `${label} Provider 配置` });
       expect(
         within(role).getByRole("button", { name: `将 ${label} 切换为 Pi` }),
@@ -188,7 +188,7 @@ describe("CodingProviderConfigPanel", () => {
       />,
     );
 
-    for (const label of ["Coder", "Code Reviewer", "GroupFinalReview"]) {
+    for (const label of ["Coder", "Code Reviewer"]) {
       const role = screen.getByRole("group", { name: `${label} Provider 配置` });
       expect(
         within(role).getByRole("button", { name: `将 ${label} 切换为 Pi` }),
@@ -224,23 +224,12 @@ describe("CodingProviderConfigPanel", () => {
     expect(onSelect).toHaveBeenCalledWith("coder", "codex");
   });
 
-  it("uses the same catalog for the work item group final reviewer", () => {
+  it("hides the retired group final reviewer provider", () => {
     setProviderHealth(false, true);
     renderPanel({ attemptScope: "work_item_group" });
-    const groupReviewer = screen.getByRole("group", {
-      name: "GroupFinalReview Provider 配置",
-    });
-
     expect(
-      within(groupReviewer).getByRole("button", {
-        name: "将 GroupFinalReview 切换为 Claude Code CLI",
-      }),
-    ).toBeDisabled();
-    expect(
-      within(groupReviewer).getByRole("button", {
-        name: "将 GroupFinalReview 切换为 Codex CLI",
-      }),
-    ).toBeEnabled();
+      screen.queryByRole("group", { name: "GroupFinalReview Provider 配置" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps an unavailable saved configuration visible without fallback", () => {

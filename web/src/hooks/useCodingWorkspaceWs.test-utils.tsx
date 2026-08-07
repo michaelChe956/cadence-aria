@@ -87,6 +87,7 @@ export function codingSessionState(overrides: Record<string, unknown> = {}) {
     code_review_reports: [],
     review_request: null,
     internal_pr_review: null,
+    group_review_artifacts: null,
     pending_gates: [],
     pending_choices: [],
     ...overrides,

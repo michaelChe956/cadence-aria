@@ -6,13 +6,14 @@ use crate::product::coding_models::{
     CodingGateAction, CodingGateActionType, CodingGateKind,
     CodingGateRequired as CodingGateRequiredModel, CodingProviderRole, CodingRoleRunEvent,
     CodingRoleRunEventPreview, CodingRoleRunEventSummary, CodingRoleRunEventType,
-    CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus,
+    CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus, GroupReviewArtifactRef,
 };
 use crate::product::coding_workspace_engine::{
     CodingWorkspaceEngineError, recoverable_failed_code_review,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::web::handlers::{coding_attempt_scope_text, coding_execution_unit_dto};
+use crate::web::types::GroupReviewArtifactProjection;
 
 use super::{CodingWsOutMessage, coding_execution_context, stage_gate_required};
 
@@ -40,6 +41,29 @@ pub(crate) fn build_coding_session_state(
         .into_iter()
         .last();
     let group_final_readiness = coding_store.get_group_final_readiness_snapshot(&attempt)?;
+    let group_review_artifacts = {
+        let projection = GroupReviewArtifactProjection {
+            shard_reports: coding_store
+                .list_group_review_shard_reports_for_attempt(&attempt)?
+                .into_iter()
+                .map(|report| GroupReviewArtifactRef {
+                    id: report.id,
+                    raw_provider_output_refs: report.raw_provider_output_refs,
+                })
+                .collect(),
+            reduction_reports: coding_store
+                .list_group_review_reduction_reports_for_attempt(&attempt)?
+                .into_iter()
+                .map(|report| GroupReviewArtifactRef {
+                    id: report.id,
+                    raw_provider_output_refs: report.raw_provider_output_refs,
+                })
+                .collect(),
+        };
+        let has_artifacts =
+            !projection.shard_reports.is_empty() || !projection.reduction_reports.is_empty();
+        has_artifacts.then_some(projection)
+    };
     let pending_gates = coding_pending_gates(coding_store, &attempt)?;
     let role_provider_config_snapshot = coding_store.get_role_provider_config_snapshot(
         &attempt.project_id,
@@ -93,6 +117,7 @@ pub(crate) fn build_coding_session_state(
         code_review_reports: Box::new(code_review_reports),
         review_request: Box::new(review_request),
         internal_pr_review: Box::new(internal_pr_review),
+        group_review_artifacts: Box::new(group_review_artifacts),
         group_final_readiness: Box::new(group_final_readiness),
         pending_gates: Box::new(pending_gates),
         pending_choices: Box::new(pending_choices),

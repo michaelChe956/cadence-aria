@@ -50,6 +50,10 @@ impl CodingWorkspaceEngine {
                 Err(ProductStoreError::IdentityMismatch {
                     kind: "group_final_readiness_snapshot",
                     ..
+                })
+                | Err(ProductStoreError::InvalidRecord {
+                    kind: "group_final_readiness_snapshot",
+                    ..
                 }) => {
                     return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
                         attempt_id.to_string(),
@@ -59,6 +63,7 @@ impl CodingWorkspaceEngine {
             };
             if readiness.attempt_id != current.id
                 || readiness.status != GroupFinalReadinessStatus::Complete
+                || !readiness.diagnostics.is_empty()
             {
                 return Err(CodingWorkspaceEngineError::FinalConfirmNotReady(
                     attempt_id.to_string(),

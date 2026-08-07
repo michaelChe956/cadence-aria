@@ -223,6 +223,20 @@ impl super::CodingAttemptStore {
         self.list_group_review_reports(attempt_id, "reduction-reports")
     }
 
+    pub fn list_group_review_shard_reports_for_attempt(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    ) -> Result<Vec<GroupReviewShardReport>, ProductStoreError> {
+        self.list_group_review_reports_for_attempt(attempt, "shard-reports")
+    }
+
+    pub fn list_group_review_reduction_reports_for_attempt(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    ) -> Result<Vec<GroupReviewReductionReport>, ProductStoreError> {
+        self.list_group_review_reports_for_attempt(attempt, "reduction-reports")
+    }
+
     fn list_group_review_reports<T: serde::de::DeserializeOwned>(
         &self,
         attempt_id: &str,
@@ -230,7 +244,18 @@ impl super::CodingAttemptStore {
     ) -> Result<Vec<T>, ProductStoreError> {
         validate_relative_id(attempt_id)?;
         let attempt = self.find_attempt_by_id(attempt_id)?;
-        let root = group_review_root(self, &attempt).join(kind);
+        self.list_group_review_reports_for_attempt(&attempt, kind)
+    }
+
+    fn list_group_review_reports_for_attempt<T: serde::de::DeserializeOwned>(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        kind: &str,
+    ) -> Result<Vec<T>, ProductStoreError> {
+        let root = group_review_root(self, attempt).join(kind);
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
         let mut reports = Vec::new();
         for path in super::json_file_paths(&root)? {
             reports.push(read_json(&path)?);

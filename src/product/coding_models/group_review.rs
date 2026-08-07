@@ -33,6 +33,12 @@ pub enum SnapshotRebuildError {
     Store(#[from] crate::product::json_store::ProductStoreError),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupReviewArtifactRef {
+    pub id: String,
+    pub raw_provider_output_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupReviewShardReport {
     pub id: String,

@@ -25,8 +25,8 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus,
-    WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
+    CodingExecutionUnitStatus, CodingTimelineNode, CodingTimelineNodeStatus,
+    GroupReviewArtifactRef, PushStatus, WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
 };
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::gate_store::GateStore;

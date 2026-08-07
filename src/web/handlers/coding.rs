@@ -513,6 +513,33 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
     })
 }
 
+fn coding_group_review_artifacts(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Option<GroupReviewArtifactProjection>, ProductStoreError> {
+    let projection = GroupReviewArtifactProjection {
+        shard_reports: coding_store
+            .list_group_review_shard_reports_for_attempt(attempt)?
+            .into_iter()
+            .map(|report| GroupReviewArtifactRef {
+                id: report.id,
+                raw_provider_output_refs: report.raw_provider_output_refs,
+            })
+            .collect(),
+        reduction_reports: coding_store
+            .list_group_review_reduction_reports_for_attempt(attempt)?
+            .into_iter()
+            .map(|report| GroupReviewArtifactRef {
+                id: report.id,
+                raw_provider_output_refs: report.raw_provider_output_refs,
+            })
+            .collect(),
+    };
+    let has_artifacts =
+        !projection.shard_reports.is_empty() || !projection.reduction_reports.is_empty();
+    Ok(has_artifacts.then_some(projection))
+}
+
 pub(crate) async fn get_coding_attempt(
     State(state): State<WebAppState>,
     Path(path): Path<CodingAttemptRoutePath>,
@@ -556,6 +583,8 @@ pub(crate) async fn get_coding_attempt(
     let pending_gates =
         coding_pending_gates(&coding_store, &attempt).map_err(coding_workspace_api_error)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
+    let group_review_artifacts =
+        coding_group_review_artifacts(&coding_store, &attempt).map_err(product_store_api_error)?;
     let work_item_execution_plan = coding_store
         .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -570,6 +599,8 @@ pub(crate) async fn get_coding_attempt(
         Vec::new()
     };
 
+    let provider_config_snapshot = attempt.provider_config_snapshot.clone();
+
     Ok(Json(CodingAttemptSnapshotResponse {
         attempt: coding_attempt_dto(&attempt),
         attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
@@ -577,12 +608,13 @@ pub(crate) async fn get_coding_attempt(
         current_work_item_id: attempt.current_work_item_id.clone(),
         active_unit_id: attempt.active_unit_id.clone(),
         units,
-        provider_config_snapshot: attempt.provider_config_snapshot,
+        provider_config_snapshot,
         timeline_nodes,
         active_node_id,
         code_review_reports,
         review_request,
         internal_pr_review,
+        group_review_artifacts,
         group_final_readiness,
         pending_gates,
         pending_choices,

@@ -18,6 +18,7 @@ mod attempt_creation_concurrency;
 mod failed_review_recovery;
 mod failed_review_recovery_rollback;
 mod git_operation;
+mod group_final_readiness;
 mod group_uniqueness;
 mod plan_repair;
 mod provider_stream_log_root;

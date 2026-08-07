@@ -55,6 +55,11 @@ fn validate_snapshot(snapshot: &GroupFinalReadinessSnapshot) -> Result<(), Produ
                 "complete snapshot must include at least one unit",
             ));
         }
+        GroupFinalReadinessStatus::Complete if !snapshot.diagnostics.is_empty() => {
+            return Err(invalid_record(
+                "complete snapshot must not carry diagnostics",
+            ));
+        }
         GroupFinalReadinessStatus::Incomplete if snapshot.diagnostics.is_empty() => {
             return Err(invalid_record(
                 "incomplete snapshot must include diagnostics",
@@ -79,6 +84,19 @@ fn validate_snapshot(snapshot: &GroupFinalReadinessSnapshot) -> Result<(), Produ
         if unit.empty_observation && (!unit.commit_shas.is_empty() || !unit.diff_ref.is_empty()) {
             return Err(invalid_record(format!(
                 "empty observation unit {} must not include git range facts",
+                unit.unit_id
+            )));
+        }
+        if !unit.empty_observation
+            && unit
+                .start_commit
+                .as_ref()
+                .zip(unit.completion_commit.as_ref())
+                .is_some_and(|(start, completion)| start != completion)
+            && unit.commit_shas.is_empty()
+        {
+            return Err(invalid_record(format!(
+                "non-empty observation unit {} must include commit range facts",
                 unit.unit_id
             )));
         }

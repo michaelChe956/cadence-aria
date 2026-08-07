@@ -388,7 +388,7 @@ describe("CodingWorkspacePage gate panels", () => {
     expect(api.sendMaxAutoReworkSelect).toHaveBeenCalledWith(4);
   });
 
-  it("shows GroupFinalReview provider only for work item group attempts", async () => {
+  it("hides the retired group final review provider for work item group attempts", async () => {
     mockCodingWs();
     useCodingWorkspaceStore.setState({
       attemptId: "coding_attempt_group_0001",
@@ -424,7 +424,7 @@ describe("CodingWorkspacePage gate panels", () => {
     const panel = screen.getByTestId("coding-provider-config-panel");
     expect(panel).toHaveTextContent("Coder");
     expect(panel).toHaveTextContent("Code Reviewer");
-    expect(panel).toHaveTextContent("GroupFinalReview");
+    expect(panel).not.toHaveTextContent("GroupFinalReview");
     expect(panel).not.toHaveTextContent("Internal Reviewer");
     expect(panel).not.toHaveTextContent("Tester Plan");
     expect(panel).not.toHaveTextContent("Tester Execute");

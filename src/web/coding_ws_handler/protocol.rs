@@ -14,7 +14,7 @@ use crate::product::models::ProviderName;
 use crate::product::models::{
     PlanAmendmentManifest, PlanRepairRequest, PlanRepairSessionSnapshotDto, WorkspaceSessionLink,
 };
-use crate::web::types::CodingExecutionUnitDto;
+use crate::web::types::{CodingExecutionUnitDto, GroupReviewArtifactProjection};
 use crate::web::workspace_ws_types::{
     ChoiceOption, ProviderConfigSnapshot, WsExecutionEvent, WsPermissionRiskLevel,
 };
@@ -48,6 +48,8 @@ pub enum CodingWsOutMessage {
         code_review_reports: Box<Vec<CodeReviewReport>>,
         review_request: Box<Option<ReviewRequest>>,
         internal_pr_review: Box<Option<InternalPrReview>>,
+        #[serde(default)]
+        group_review_artifacts: Box<Option<GroupReviewArtifactProjection>>,
         #[serde(default)]
         group_final_readiness: Box<Option<GroupFinalReadinessSnapshot>>,
         pending_gates: Box<Vec<CodingGateRequiredModel>>,
@@ -134,6 +136,7 @@ pub enum CodingWsOutMessage {
 }
 
 pub type PlanRepairRequestDto = PlanRepairRequest;
+
 pub type WorkspaceSessionLinkDto = WorkspaceSessionLink;
 pub type PlanAmendmentManifestDto = PlanAmendmentManifest;
 
