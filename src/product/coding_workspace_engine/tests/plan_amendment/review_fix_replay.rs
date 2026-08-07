@@ -152,12 +152,12 @@ async fn coding_amendment_completed_replay_accepts_group_completion_head_evoluti
         "// completed\n",
     )
     .unwrap();
-    run_test_git(&worktree, &["add", "completed_after_amendment.rs"]);
+    run_test_git(worktree, &["add", "completed_after_amendment.rs"]);
     run_test_git(
-        &worktree,
+        worktree,
         &["commit", "-m", "coder completes amended work item"],
     );
-    let coder_completion_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+    let coder_completion_head = git_stdout(worktree, &["rev-parse", "HEAD"])
         .trim()
         .to_string();
     let review_ready = fixture
