@@ -17,9 +17,7 @@ export function RoleRunHistoryPanel({
   onSelectNode,
 }: RoleRunHistoryPanelProps) {
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
-  const ordered = [...roleRuns].sort((a, b) =>
-    a.started_at === b.started_at ? a.run_no - b.run_no : a.started_at.localeCompare(b.started_at),
-  );
+  const ordered = orderRoleRuns(roleRuns);
   const nodeTitleById = new Map(timelineNodes.map((node) => [node.id, node.title]));
 
   return (
@@ -71,12 +69,27 @@ export function RoleRunHistoryPanel({
                   </span>
                 </div>
                 <div className="truncate text-[var(--aria-ink-muted)]">{title}</div>
-                <div className="truncate font-mono text-[var(--aria-ink-muted)]">
-                  {run.trigger}
+                <div
+                  aria-atomic="true"
+                  aria-live="polite"
+                  className="grid min-w-0 gap-0.5 text-[var(--aria-ink-muted)]"
+                >
+                  <div className="truncate font-mono">{retryDescription(run)}</div>
+                  {run.retry_metadata ? (
+                    <div className="truncate font-mono">
+                      周期：{run.retry_metadata.cycle_id} · 第 {run.retry_metadata.attempt_no}/3 次
+                    </div>
+                  ) : null}
+                  {run.reason_code ? (
+                    <div className="truncate">
+                      {run.status === "failed" ? "失败：" : "原因："}
+                      {run.reason_code}
+                    </div>
+                  ) : null}
+                  {isAutomaticRetryExhausted(run) ? (
+                    <div>自动重试已耗尽，等待人工处理</div>
+                  ) : null}
                 </div>
-                {run.reason_code ? (
-                  <div className="truncate text-[var(--aria-ink-muted)]">{run.reason_code}</div>
-                ) : null}
                 <EventSummary run={run} />
                 {expanded ? (
                   <div className="grid min-w-0 gap-2 border-t border-[var(--aria-line)] pt-2">
@@ -92,6 +105,46 @@ export function RoleRunHistoryPanel({
       )}
     </section>
   );
+}
+
+function orderRoleRuns(roleRuns: CodingRoleRun[]) {
+  const cycleStartedAt = new Map<string, string>();
+  for (const run of roleRuns) {
+    const cycleId = roleRunCycleId(run);
+    const firstStartedAt = cycleStartedAt.get(cycleId);
+    if (!firstStartedAt || run.started_at < firstStartedAt) {
+      cycleStartedAt.set(cycleId, run.started_at);
+    }
+  }
+  return [...roleRuns].sort((a, b) => {
+    const aCycleId = roleRunCycleId(a);
+    const bCycleId = roleRunCycleId(b);
+    const byCycleStart = (cycleStartedAt.get(aCycleId) ?? "").localeCompare(
+      cycleStartedAt.get(bCycleId) ?? "",
+    );
+    if (byCycleStart !== 0) return byCycleStart;
+    const byCycleId = aCycleId.localeCompare(bCycleId);
+    if (byCycleId !== 0) return byCycleId;
+    const byOrdinal = (a.retry_metadata?.attempt_no ?? a.run_no) - (b.retry_metadata?.attempt_no ?? b.run_no);
+    if (byOrdinal !== 0) return byOrdinal;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+function roleRunCycleId(run: CodingRoleRun) {
+  return run.retry_metadata?.cycle_id ?? `legacy:${run.id}`;
+}
+
+function retryDescription(run: CodingRoleRun) {
+  const retry = run.retry_metadata;
+  if (run.trigger === "automatic_retry" && retry) {
+    return `第 ${retry.attempt_no}/3 次自动重试`;
+  }
+  return `触发：${run.trigger}`;
+}
+
+function isAutomaticRetryExhausted(run: CodingRoleRun) {
+  return run.retry_exhausted === true;
 }
 
 function EventSummary({ run }: { run: CodingRoleRun }) {

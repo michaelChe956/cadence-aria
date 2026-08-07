@@ -4,6 +4,7 @@ use super::*;
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_models::CodingAttemptScope;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use crate::web::coding_ws_handler::coding_role_run_snapshots;
 use crate::web::state::CodingAttemptRunKey;
 
 mod group;
@@ -543,6 +544,8 @@ pub(crate) async fn get_coding_attempt(
     let pending_choices = coding_store
         .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    let role_runs =
+        coding_role_run_snapshots(&coding_store, &attempt).map_err(product_store_api_error)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
     let work_item_execution_plan = coding_store
         .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -573,6 +576,7 @@ pub(crate) async fn get_coding_attempt(
         internal_pr_review,
         pending_gates: Vec::new(),
         pending_choices,
+        role_runs,
         work_item_execution_plan,
     }))
 }

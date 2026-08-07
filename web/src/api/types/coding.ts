@@ -128,6 +128,8 @@ export type CodingRoleRunStatus =
   | "aborted";
 export type CodingRoleRunTrigger =
   | "initial"
+  | "automatic_retry"
+  | "manual_retry"
   | "retry_review"
   | "retry_internal_review";
 
@@ -168,6 +170,12 @@ export type CodingRoleRunEventPreview = {
   artifact_ref?: string | null;
 };
 
+export type CodingRoleRunRetryMetadata = {
+  cycle_id: string;
+  attempt_no: number;
+  prior_run_id?: string | null;
+};
+
 export type CodingRolePermissionModes = {
   coder: CodingProviderPermissionMode;
   code_reviewer: CodingProviderPermissionMode;
@@ -203,6 +211,8 @@ export type CodingRoleRun = {
   run_no: number;
   status: CodingRoleRunStatus;
   trigger: CodingRoleRunTrigger;
+  retry_metadata?: CodingRoleRunRetryMetadata | null;
+  retry_exhausted?: boolean;
   node_id: string | null;
   started_at: string;
   completed_at: string | null;

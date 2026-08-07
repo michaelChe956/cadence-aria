@@ -377,6 +377,87 @@ describe("coding workspace store", () => {
     });
   });
 
+  it("keeps a failed automatic attempt when a later stream completion arrives", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(
+      sessionState({
+        role_runs: [
+          roleRun({
+            id: "coding_role_run_0002",
+            status: "failed",
+            trigger: "automatic_retry",
+            reason_code: "provider_503",
+            retry_metadata: {
+              cycle_id: "provider_retry_cycle_0001",
+              attempt_no: 2,
+              prior_run_id: "coding_role_run_0001",
+            },
+          }),
+        ],
+      }),
+    );
+
+    store.replacePendingEntry({
+      id: "coding_chat_entry_0002",
+      type: "provider_stream",
+      role: "code_reviewer",
+      content: "迟到的 provider completion",
+      timestamp: "2026-06-12T00:01:00Z",
+      node_id: "coding_node_0003",
+      metadata: { role_run_id: "coding_role_run_0002" },
+    });
+
+    expect(useCodingWorkspaceStore.getState().roleRuns[0]).toMatchObject({
+      status: "failed",
+      trigger: "automatic_retry",
+      retry_metadata: { attempt_no: 2 },
+    });
+  });
+
+  it("marks automatic retries exhausted only when their blocked gate is present", () => {
+    const store = useCodingWorkspaceStore.getState();
+    const thirdTransportFailure = roleRun({
+      status: "failed",
+      trigger: "automatic_retry",
+      retry_metadata: {
+        cycle_id: "provider_retry_cycle_0001",
+        attempt_no: 3,
+        prior_run_id: "coding_role_run_0002",
+      },
+      reason_code: "provider_503",
+    });
+
+    store.setSessionState(sessionState({ role_runs: [thirdTransportFailure] }));
+
+    expect(useCodingWorkspaceStore.getState().roleRuns[0].retry_exhausted).not.toBe(true);
+
+    store.addPendingGate(blockedGate({ reason_code: "code_review_provider_interrupted" }));
+
+    expect(useCodingWorkspaceStore.getState().roleRuns[0].retry_exhausted).toBe(true);
+
+    store.resolvePendingGate("gate_0001");
+
+    expect(useCodingWorkspaceStore.getState().roleRuns[0].retry_exhausted).not.toBe(true);
+
+    store.setSessionState(
+      sessionState({
+        role_runs: [thirdTransportFailure],
+        pending_gates: [blockedGate({ reason_code: "code_review_provider_interrupted" })],
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().roleRuns[0].retry_exhausted).toBe(true);
+
+    store.setSessionState(
+      sessionState({
+        role_runs: [roleRun({ ...thirdTransportFailure, reason_code: "review_payload_parse_error" })],
+        pending_gates: [blockedGate({ reason_code: "code_review_provider_interrupted" })],
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().roleRuns[0].retry_exhausted).not.toBe(true);
+  });
+
   it("adds and updates timeline nodes while clearing inactive active node", () => {
     const store = useCodingWorkspaceStore.getState();
     store.addTimelineNode(codingNode());

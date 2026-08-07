@@ -316,6 +316,11 @@ describe("workspace websocket protocol types", () => {
           run_no: 1,
           status: "running",
           trigger: "initial",
+          retry_metadata: {
+            cycle_id: "provider_retry_cycle_0001",
+            attempt_no: 2,
+            prior_run_id: "coding_role_run_0000",
+          },
           node_id: "coding_node_0003",
           started_at: "2026-06-13T00:00:00Z",
           completed_at: null,
@@ -358,6 +363,11 @@ describe("workspace websocket protocol types", () => {
     expect(outbound.type).toBe("coding_session_state");
     expect(outbound.role_runs?.[0].event_summary?.event_count).toBe(2);
     expect(outbound.role_runs?.[0].recent_events?.[0].detail).toBe("No tasks found");
+    expect(outbound.role_runs?.[0].retry_metadata).toEqual({
+      cycle_id: "provider_retry_cycle_0001",
+      attempt_no: 2,
+      prior_run_id: "coding_role_run_0000",
+    });
     expect(outbound.units[0].unit_id).toBe("coding_unit_0001");
     expect(inbound.type).toBe("start_coding");
   });

@@ -232,6 +232,8 @@ export const useCodingWorkspaceStore = create<
         null;
       const selectedNode = timelineNodes.find((node) => node.id === selectedNodeId);
       const nextTab = selectedNode ? stageToArtifactTab(selectedNode.stage) : null;
+      const pendingGates = mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates);
+      const roleRuns = withRetryExhaustion(snapshot.role_runs ?? [], pendingGates);
       return {
         projectId: snapshot.project_id,
         issueId: snapshot.issue_id,
@@ -262,8 +264,8 @@ export const useCodingWorkspaceStore = create<
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
-        roleRuns: snapshot.role_runs ?? [],
-        pendingGates: mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates),
+        roleRuns,
+        pendingGates,
         workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,
         activePlanRepair,
         requireExecutionPlanConfirm: snapshot.require_execution_plan_confirm ?? false,
@@ -352,18 +354,26 @@ export const useCodingWorkspaceStore = create<
     })),
 
   addPendingGate: (gate) =>
-    set((state) => ({
-      pendingGates: upsertByKey(
+    set((state) => {
+      const pendingGates = upsertByKey(
         state.pendingGates,
         withGateUiState(gate, state.pendingGates.find((existing) => existing.gate_id === gate.gate_id)),
         "gate_id",
-      ),
-    })),
+      );
+      return {
+        pendingGates,
+        roleRuns: withRetryExhaustion(state.roleRuns, pendingGates),
+      };
+    }),
 
   resolvePendingGate: (gateId) =>
-    set((state) => ({
-      pendingGates: state.pendingGates.filter((gate) => gate.gate_id !== gateId),
-    })),
+    set((state) => {
+      const pendingGates = state.pendingGates.filter((gate) => gate.gate_id !== gateId);
+      return {
+        pendingGates,
+        roleRuns: withRetryExhaustion(state.roleRuns, pendingGates),
+      };
+    }),
 
   markGateSubmitting: (gateId) =>
     set((state) => ({
@@ -716,8 +726,13 @@ function upsertRoleRunFromCompletedProviderEntry(
     stage: existing?.stage ?? node?.stage ?? stageForRoleRunRole(role),
     role,
     run_no: existing?.run_no ?? metadataNumber(entry.metadata, "run_no") ?? 1,
-    status: "completed",
+    status:
+      existing?.status === "failed" && existing.trigger === "automatic_retry"
+        ? "failed"
+        : "completed",
     trigger: existing?.trigger ?? "initial",
+    retry_metadata: existing?.retry_metadata ?? null,
+    retry_exhausted: existing?.retry_exhausted ?? false,
     node_id: existing?.node_id ?? entry.node_id ?? null,
     started_at: existing?.started_at ?? metadataString(entry.metadata, "started_at") ?? entry.timestamp,
     completed_at: metadataString(entry.metadata, "completed_at") ?? entry.timestamp,
@@ -768,6 +783,50 @@ function metadataString(metadata: ChatEntry["metadata"], key: string): string | 
 function metadataNumber(metadata: ChatEntry["metadata"], key: string): number | null {
   const value = metadata?.[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function withRetryExhaustion(
+  roleRuns: CodingRoleRun[],
+  pendingGates: CodingPendingGate[],
+): CodingRoleRun[] {
+  return roleRuns.map((run) => ({
+    ...run,
+    retry_exhausted:
+      run.trigger === "automatic_retry" &&
+      run.status === "failed" &&
+      (run.retry_metadata?.attempt_no ?? 0) >= 3 &&
+      pendingGates.some(
+        (gate) =>
+          gate.kind === "blocked" &&
+          gate.stage === run.stage &&
+          gate.role === run.role &&
+          gate.reason_code === providerInterruptedGateReason(run.role) &&
+          isTransportFailureReason(run.reason_code),
+      ),
+  }));
+}
+
+function providerInterruptedGateReason(role: CodingProviderRole) {
+  switch (role) {
+    case "coder":
+      return "coder_provider_interrupted";
+    case "code_reviewer":
+      return "code_review_provider_interrupted";
+    case "internal_reviewer":
+      return "internal_review_provider_interrupted";
+  }
+}
+
+function isTransportFailureReason(reasonCode: string | null | undefined) {
+  return (
+    reasonCode === "provider_503" ||
+    reasonCode === "provider_504" ||
+    reasonCode === "provider_start_io" ||
+    reasonCode === "provider_stream_ended" ||
+    reasonCode === "provider_connection_interrupted" ||
+    reasonCode === "provider_execution_timeout" ||
+    reasonCode === "provider_upstream_5xx"
+  );
 }
 
 function uniqueStrings(values: string[]): string[] {

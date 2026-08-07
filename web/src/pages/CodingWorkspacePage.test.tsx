@@ -249,6 +249,141 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(screen.getByText("work_item_0001")).toBeInTheDocument();
   });
 
+  it("renders automatic retry history and waits for human handling after the third failure", async () => {
+    mockCodingWs();
+    mockCodingSessionState({
+      role_runs: [
+        {
+          id: "coding_role_run_0001",
+          attempt_id: "coding_attempt_0001",
+          stage: "code_review",
+          role: "code_reviewer",
+          run_no: 1,
+          status: "failed",
+          trigger: "initial",
+          retry_metadata: {
+            cycle_id: "provider_retry_cycle_0001",
+            attempt_no: 1,
+            prior_run_id: null,
+          },
+          node_id: "coding_node_0001",
+          started_at: "2026-06-13T00:00:00Z",
+          completed_at: "2026-06-13T00:00:01Z",
+          reason_code: "provider_503",
+          raw_provider_output_refs: ["provider-raw/review_0001.txt"],
+          artifact_refs: [],
+        },
+        {
+          id: "coding_role_run_0002",
+          attempt_id: "coding_attempt_0001",
+          stage: "code_review",
+          role: "code_reviewer",
+          run_no: 2,
+          status: "running",
+          trigger: "automatic_retry",
+          retry_metadata: {
+            cycle_id: "provider_retry_cycle_0001",
+            attempt_no: 2,
+            prior_run_id: "coding_role_run_0001",
+          },
+          node_id: "coding_node_0002",
+          started_at: "2026-06-13T00:00:02Z",
+          completed_at: null,
+          reason_code: null,
+          raw_provider_output_refs: [],
+          artifact_refs: [],
+        },
+      ],
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "角色运行历史" }));
+
+    expect(screen.getByText("第 2/3 次自动重试")).toBeInTheDocument();
+    expect(screen.getByText("失败：provider_503")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("自动重试已耗尽，等待人工处理")).not.toBeInTheDocument();
+    });
+
+    mockCodingSessionState({
+      status: "blocked",
+      role_runs: [
+        {
+          id: "coding_role_run_0003",
+          attempt_id: "coding_attempt_0001",
+          stage: "code_review",
+          role: "code_reviewer",
+          run_no: 3,
+          status: "failed",
+          trigger: "automatic_retry",
+          retry_metadata: {
+            cycle_id: "provider_retry_cycle_0001",
+            attempt_no: 3,
+            prior_run_id: "coding_role_run_0002",
+          },
+          node_id: "coding_node_0003",
+          started_at: "2026-06-13T00:00:03Z",
+          completed_at: "2026-06-13T00:00:04Z",
+          reason_code: "provider_503",
+          raw_provider_output_refs: ["provider-raw/review_0003.txt"],
+          artifact_refs: [],
+        },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("第 3/3 次自动重试")).toBeInTheDocument();
+      expect(screen.queryByText("自动重试已耗尽，等待人工处理")).not.toBeInTheDocument();
+    });
+
+    mockCodingSessionState({
+      status: "blocked",
+      role_runs: [
+        {
+          id: "coding_role_run_0003",
+          attempt_id: "coding_attempt_0001",
+          stage: "code_review",
+          role: "code_reviewer",
+          run_no: 3,
+          status: "failed",
+          trigger: "automatic_retry",
+          retry_metadata: {
+            cycle_id: "provider_retry_cycle_0001",
+            attempt_no: 3,
+            prior_run_id: "coding_role_run_0002",
+          },
+          node_id: "coding_node_0003",
+          started_at: "2026-06-13T00:00:03Z",
+          completed_at: "2026-06-13T00:00:04Z",
+          reason_code: "provider_503",
+          raw_provider_output_refs: ["provider-raw/review_0003.txt"],
+          artifact_refs: [],
+        },
+      ],
+      pending_gates: [
+        {
+          gate_id: "coding_blocked_gate_0001",
+          kind: "blocked",
+          title: "Provider 重试已耗尽",
+          description: "等待人工处理",
+          stage: "code_review",
+          role: "code_reviewer",
+          reason_code: "code_review_provider_interrupted",
+          available_actions: [
+            {
+              action_id: "retry_review",
+              label: "重试代码审查",
+              action_type: "retry_review",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(await screen.findByText("自动重试已耗尽，等待人工处理")).toBeInTheDocument();
+  });
+
   it("loads and renders the coding attempt git diff in result tabs", async () => {
     mockCodingWs();
     vi.mocked(getCodingAttemptDiff).mockResolvedValue({

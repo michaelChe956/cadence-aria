@@ -4,8 +4,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::product::coding_models::{
-    CodeReviewReport, CodingChoiceGate, CodingGateRequired, CodingTimelineNode, InternalPrReview,
-    ReviewRequest, WorkItemExecutionPlan,
+    CodeReviewReport, CodingChoiceGate, CodingGateRequired, CodingRoleRunSnapshot,
+    CodingTimelineNode, InternalPrReview, ReviewRequest, WorkItemExecutionPlan,
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -545,6 +545,8 @@ pub struct CodingAttemptSnapshotResponse {
     pub internal_pr_review: Option<InternalPrReview>,
     pub pending_gates: Vec<CodingGateRequired>,
     pub pending_choices: Vec<CodingChoiceGate>,
+    #[serde(default)]
+    pub role_runs: Vec<CodingRoleRunSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item_execution_plan: Option<WorkItemExecutionPlan>,
 }
