@@ -1,6 +1,37 @@
-use super::{CodingWorkspaceEngineError, ProviderStreamOutcome};
-use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use super::*;
 use crate::protocol::provider_errors::ProviderErrorCode;
+
+const MAX_PROVIDER_INVOCATIONS_PER_CYCLE: u32 = 3;
+
+pub(crate) struct ProviderRetryCycleSuccess {
+    pub(crate) outcome: ProviderStreamOutcome,
+    pub(crate) role_run: CodingRoleRun,
+    pub(crate) node: CodingTimelineNode,
+}
+
+pub(crate) struct CoderRetryCycleInput<'a> {
+    pub(crate) attempt: &'a CodingExecutionAttempt,
+    pub(crate) initial_node: CodingTimelineNode,
+    pub(crate) initial_role_run: CodingRoleRun,
+    pub(crate) provider: &'a dyn StreamingProviderAdapter,
+    pub(crate) provider_name: &'a ProviderName,
+    pub(crate) worktree_path: &'a Path,
+    pub(crate) initial_prompt: String,
+    pub(crate) fresh_prompt: String,
+    pub(crate) initial_prompt_mode: CodingPromptMode,
+    pub(crate) initial_resume_provider_session_id: Option<String>,
+    pub(crate) command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
+}
+
+pub(crate) struct CodeReviewerRetryCycleInput<'a> {
+    pub(crate) attempt: &'a CodingExecutionAttempt,
+    pub(crate) initial_node: CodingTimelineNode,
+    pub(crate) initial_role_run: CodingRoleRun,
+    pub(crate) provider: &'a dyn StreamingProviderAdapter,
+    pub(crate) reviewer: &'a ProviderName,
+    pub(crate) worktree_path: &'a Path,
+    pub(crate) command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
+}
 
 /// Provider 调用中允许交给外层协调器自动恢复的技术失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +134,425 @@ impl ProviderInvocationOutcome {
                     interaction_wait,
                 },
             },
+        }
+    }
+}
+
+impl CodingWorkspaceEngine {
+    pub(crate) async fn run_coder_with_retry_cycle(
+        &self,
+        input: CoderRetryCycleInput<'_>,
+    ) -> Result<ProviderRetryCycleSuccess, CodingWorkspaceEngineError> {
+        let CoderRetryCycleInput {
+            attempt,
+            initial_node,
+            initial_role_run,
+            provider,
+            provider_name,
+            worktree_path,
+            initial_prompt,
+            fresh_prompt,
+            initial_prompt_mode,
+            initial_resume_provider_session_id,
+            command_rx,
+        } = input;
+        let permission_mode =
+            role_permission_mode_for_attempt(&self.store, attempt, CodingProviderRole::Coder)?;
+        let mut node = initial_node;
+        let mut role_run = self.ensure_retry_cycle_metadata(attempt, initial_role_run)?;
+
+        for attempt_no in 1..=MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
+            if attempt_no > 1 {
+                self.ensure_provider_retry_cycle_active(attempt)?;
+                node = self.create_coding_timeline_node(attempt)?;
+                let _ = self
+                    .event_tx
+                    .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
+                    .await;
+                role_run = self.create_automatic_retry_role_run(
+                    attempt,
+                    CodingExecutionStage::Coding,
+                    CodingProviderRole::Coder,
+                    &role_run,
+                    &node.id,
+                )?;
+            }
+
+            let (prompt, prompt_mode, resume_provider_session_id) = if attempt_no == 1 {
+                (
+                    initial_prompt.clone(),
+                    initial_prompt_mode,
+                    initial_resume_provider_session_id.clone(),
+                )
+            } else {
+                (
+                    fresh_prompt.clone(),
+                    CodingPromptMode::FullConversation,
+                    None,
+                )
+            };
+            let _ = self
+                .event_tx
+                .send(CodingWsOutMessage::CodingExecutionEvent {
+                    event: provider_prompt_event(
+                        &node.id,
+                        provider_name,
+                        prompt.clone(),
+                        prompt_mode.event_detail(),
+                    ),
+                })
+                .await;
+            let legacy_input = AdapterInput {
+                provider_type: provider_type_for_name(provider_name),
+                role: AdapterRole::Executor,
+                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+                provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
+                prompt: prompt.clone(),
+                context_files: Vec::new(),
+                output_schema: "coding_workspace_markdown".to_string(),
+                timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+                max_retries: 0,
+            };
+            let mut provider_input = streaming_input_from_adapter(
+                &legacy_input,
+                worktree_path.to_path_buf(),
+                permission_mode.clone(),
+            );
+            provider_input.workspace_session_id = Some(attempt.id.clone());
+            provider_input.resume_provider_session_id = resume_provider_session_id;
+            let outcome = self
+                .run_provider_stream_invocation(CodingProviderStreamRun {
+                    attempt,
+                    node_id: &node.id,
+                    role_run: Some(&role_run),
+                    provider,
+                    legacy_input: &legacy_input,
+                    input: provider_input,
+                    provider_name,
+                    provider_role: CodingProviderRole::Coder,
+                    command_rx: &mut *command_rx,
+                    allow_legacy_stream_fallback: true,
+                    timeout: None,
+                    timeout_reason_code: None,
+                    suppress_failure_side_effects: true,
+                })
+                .await;
+            if let Some(outcome) = self
+                .resolve_provider_retry_cycle_outcome(
+                    attempt, &node, &role_run, attempt_no, outcome,
+                )
+                .await?
+            {
+                return Ok(ProviderRetryCycleSuccess {
+                    outcome,
+                    role_run,
+                    node,
+                });
+            }
+        }
+
+        unreachable!("provider retry cycle is bounded to three invocations")
+    }
+
+    pub(crate) async fn run_code_reviewer_with_retry_cycle(
+        &self,
+        input: CodeReviewerRetryCycleInput<'_>,
+    ) -> Result<ProviderRetryCycleSuccess, CodingWorkspaceEngineError> {
+        let CodeReviewerRetryCycleInput {
+            attempt,
+            initial_node,
+            initial_role_run,
+            provider,
+            reviewer,
+            worktree_path,
+            command_rx,
+        } = input;
+        let permission_mode = role_permission_mode_for_attempt(
+            &self.store,
+            attempt,
+            CodingProviderRole::CodeReviewer,
+        )?;
+        let mut node = initial_node;
+        let mut role_run = self.ensure_retry_cycle_metadata(attempt, initial_role_run)?;
+
+        for attempt_no in 1..=MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
+            if attempt_no > 1 {
+                self.ensure_provider_retry_cycle_active(attempt)?;
+                node = self.create_code_review_timeline_node(attempt)?;
+                let _ = self
+                    .event_tx
+                    .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
+                    .await;
+                role_run = self.create_automatic_retry_role_run(
+                    attempt,
+                    CodingExecutionStage::CodeReview,
+                    CodingProviderRole::CodeReviewer,
+                    &role_run,
+                    &node.id,
+                )?;
+            }
+
+            let retry_diagnostic = self.retry_diagnostic_for_previous_run(attempt, &role_run)?;
+            let nonce = crate::product::workspace_engine::structured_output_nonce();
+            let structured_output_contract = code_review_structured_output_contract(nonce.clone());
+            let terminal_contract = code_review_output_contract(&nonce);
+            let mut prompt = match self.render_reviewer_unit_run_context(attempt, reviewer)? {
+                Some(rendered) => rendered.text,
+                None => {
+                    self.build_code_review_prompt(
+                        attempt,
+                        worktree_path,
+                        retry_diagnostic.as_deref(),
+                    )
+                    .await?
+                }
+            };
+            if !prompt.ends_with(&terminal_contract) {
+                prompt.push_str(&terminal_contract);
+            }
+            let _ = self
+                .event_tx
+                .send(CodingWsOutMessage::CodingExecutionEvent {
+                    event: provider_prompt_event(
+                        &node.id,
+                        reviewer,
+                        prompt.clone(),
+                        CodingPromptMode::FullConversation.event_detail(),
+                    ),
+                })
+                .await;
+            let legacy_input = AdapterInput {
+                provider_type: provider_type_for_name(reviewer),
+                role: AdapterRole::Reviewer,
+                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+                provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
+                prompt,
+                context_files: Vec::new(),
+                output_schema: "coding_workspace_code_review_json".to_string(),
+                timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+                max_retries: 0,
+            };
+            let mut provider_input = streaming_input_from_adapter(
+                &legacy_input,
+                worktree_path.to_path_buf(),
+                permission_mode.clone(),
+            );
+            provider_input.workspace_session_id = Some(attempt.id.clone());
+            provider_input.resume_provider_session_id = None;
+            provider_input.structured_output_contract = Some(structured_output_contract);
+            let outcome = self
+                .run_provider_stream_invocation(CodingProviderStreamRun {
+                    attempt,
+                    node_id: &node.id,
+                    role_run: Some(&role_run),
+                    provider,
+                    legacy_input: &legacy_input,
+                    input: provider_input,
+                    provider_name: reviewer,
+                    provider_role: CodingProviderRole::CodeReviewer,
+                    command_rx: &mut *command_rx,
+                    allow_legacy_stream_fallback: true,
+                    timeout: None,
+                    timeout_reason_code: None,
+                    suppress_failure_side_effects: true,
+                })
+                .await;
+            if let Some(outcome) = self
+                .resolve_provider_retry_cycle_outcome(
+                    attempt, &node, &role_run, attempt_no, outcome,
+                )
+                .await?
+            {
+                return Ok(ProviderRetryCycleSuccess {
+                    outcome,
+                    role_run,
+                    node,
+                });
+            }
+        }
+
+        unreachable!("provider retry cycle is bounded to three invocations")
+    }
+
+    fn ensure_retry_cycle_metadata(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        mut role_run: CodingRoleRun,
+    ) -> Result<CodingRoleRun, CodingWorkspaceEngineError> {
+        if role_run.retry_metadata.is_none() {
+            role_run.retry_metadata =
+                Some(crate::product::coding_models::CodingRoleRunRetryMetadata {
+                    cycle_id: role_run.id.clone(),
+                    attempt_no: 1,
+                    prior_run_id: None,
+                });
+            self.store
+                .save_role_run(&attempt.project_id, &attempt.issue_id, &role_run)?;
+        }
+        Ok(role_run)
+    }
+
+    fn create_automatic_retry_role_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        stage: CodingExecutionStage,
+        role: CodingProviderRole,
+        prior_run: &CodingRoleRun,
+        node_id: &str,
+    ) -> Result<CodingRoleRun, CodingWorkspaceEngineError> {
+        let prior_retry = prior_run.retry_metadata.as_ref().ok_or_else(|| {
+            CodingWorkspaceEngineError::ProviderStream(
+                "provider_retry_cycle_metadata_missing".to_string(),
+            )
+        })?;
+        self.store
+            .create_retry_role_run(
+                attempt,
+                stage,
+                role,
+                CodingRoleRunTrigger::AutomaticRetry,
+                Some(node_id.to_string()),
+                crate::product::coding_models::CodingRoleRunRetryMetadata {
+                    cycle_id: prior_retry.cycle_id.clone(),
+                    attempt_no: prior_retry.attempt_no + 1,
+                    prior_run_id: Some(prior_run.id.clone()),
+                },
+            )
+            .map_err(CodingWorkspaceEngineError::from)
+    }
+
+    fn ensure_provider_retry_cycle_active(
+        &self,
+        expected: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        self.validate_attempt_issue_shared_worktree_lock_if_present(expected)?;
+        let current =
+            self.store
+                .get_attempt(&expected.project_id, &expected.issue_id, &expected.id)?;
+        if current.status != CodingAttemptStatus::Running || current.stage != expected.stage {
+            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                "provider_retry_attempt_state_changed: {}",
+                expected.id
+            )));
+        }
+        let current = self.store.ensure_provider_run_allowed(&current)?;
+        if current.status != CodingAttemptStatus::Running || current.stage != expected.stage {
+            return Err(CodingWorkspaceEngineError::ProviderStream(format!(
+                "provider_retry_attempt_state_changed: {}",
+                expected.id
+            )));
+        }
+        self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
+        Ok(current)
+    }
+
+    async fn resolve_provider_retry_cycle_outcome(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node: &CodingTimelineNode,
+        role_run: &CodingRoleRun,
+        attempt_no: u32,
+        outcome: ProviderInvocationOutcome,
+    ) -> Result<Option<ProviderStreamOutcome>, CodingWorkspaceEngineError> {
+        match outcome {
+            ProviderInvocationOutcome::Completed(outcome) => Ok(Some(outcome)),
+            ProviderInvocationOutcome::Cancelled => Err(CodingWorkspaceEngineError::Aborted),
+            ProviderInvocationOutcome::RetryableTransport {
+                failure: _,
+                reason_code,
+                message,
+                partial_output: _,
+            } => {
+                self.ensure_provider_retry_cycle_active(attempt)?;
+                self.store.update_role_run_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &role_run.id,
+                    CodingRoleRunStatus::Failed,
+                    Some(reason_code),
+                )?;
+                self.complete_timeline_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &node.id,
+                    CodingTimelineNodeStatus::Failed,
+                    Some(message.clone()),
+                )
+                .await?;
+                if attempt_no < MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
+                    Ok(None)
+                } else {
+                    self.fail_provider_stream::<Option<ProviderStreamOutcome>>(
+                        attempt, &node.id, message,
+                    )
+                    .await
+                }
+            }
+            ProviderInvocationOutcome::NonRetryable {
+                reason_code,
+                error,
+                interaction_wait,
+            } => {
+                if interaction_wait && reason_code != "permission_timeout" {
+                    self.store.update_role_run_status(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                        &role_run.id,
+                        CodingRoleRunStatus::Blocked,
+                        Some(reason_code),
+                    )?;
+                    self.complete_timeline_node(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                        &node.id,
+                        CodingTimelineNodeStatus::Blocked,
+                        Some(error.to_string()),
+                    )
+                    .await?;
+                    return Err(error);
+                }
+                match error {
+                    CodingWorkspaceEngineError::ProviderAdapter(error) => {
+                        self.fail_provider_stream::<Option<ProviderStreamOutcome>>(
+                            attempt,
+                            &node.id,
+                            error.details,
+                        )
+                        .await
+                    }
+                    CodingWorkspaceEngineError::ProviderStream(message)
+                    | CodingWorkspaceEngineError::ProviderProtocol(message) => {
+                        self.fail_provider_stream::<Option<ProviderStreamOutcome>>(
+                            attempt, &node.id, message,
+                        )
+                        .await
+                    }
+                    error => {
+                        self.store.update_role_run_status(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &role_run.id,
+                            CodingRoleRunStatus::Failed,
+                            Some(reason_code),
+                        )?;
+                        self.complete_timeline_node(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &node.id,
+                            CodingTimelineNodeStatus::Failed,
+                            Some(error.to_string()),
+                        )
+                        .await?;
+                        Err(error)
+                    }
+                }
+            }
         }
     }
 }

@@ -64,74 +64,20 @@ impl CodingWorkspaceEngine {
             .store
             .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)?
             .code_reviewer;
-        let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
-        let nonce = crate::product::workspace_engine::structured_output_nonce();
-        let structured_output_contract = code_review_structured_output_contract(nonce.clone());
-        let terminal_contract = code_review_output_contract(&nonce);
-        let mut prompt = match self.render_reviewer_unit_run_context(&attempt, &reviewer)? {
-            Some(rendered) => rendered.text,
-            None => {
-                self.build_code_review_prompt(&attempt, worktree_path, retry_diagnostic.as_deref())
-                    .await?
-            }
-        };
-        if !prompt.ends_with(&terminal_contract) {
-            prompt.push_str(&terminal_contract);
-        }
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(
-                    &node.id,
-                    &reviewer,
-                    prompt.clone(),
-                    CodingPromptMode::FullConversation.event_detail(),
-                ),
-            })
-            .await;
-        let input = AdapterInput {
-            provider_type: provider_type_for_name(&reviewer),
-            role: AdapterRole::Reviewer,
-            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(&attempt)),
-            prompt,
-            context_files: Vec::new(),
-            output_schema: "coding_workspace_code_review_json".to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-            max_retries: 0,
-        };
-        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
-            &attempt,
-            &CodingProviderRole::CodeReviewer,
-            &reviewer,
-        );
-        let permission_mode = role_permission_mode_for_attempt(
-            &self.store,
-            &attempt,
-            CodingProviderRole::CodeReviewer,
-        )?;
-        let mut provider_input =
-            streaming_input_from_adapter(&input, worktree_path.clone(), permission_mode);
-        provider_input.workspace_session_id = Some(attempt.id.clone());
-        provider_input.resume_provider_session_id = resume_provider_session_id;
-        provider_input.structured_output_contract = Some(structured_output_contract);
-        let outcome = self
-            .run_structured_provider_stream_to_completion(CodingProviderStreamRun {
+        let retry_success = self
+            .run_code_reviewer_with_retry_cycle(CodeReviewerRetryCycleInput {
                 attempt: &attempt,
-                node_id: &node.id,
-                role_run: Some(&role_run),
+                initial_node: node,
+                initial_role_run: role_run,
                 provider,
-                legacy_input: &input,
-                input: provider_input,
-                provider_name: &reviewer,
-                provider_role: CodingProviderRole::CodeReviewer,
+                reviewer: &reviewer,
+                worktree_path,
                 command_rx,
-                allow_legacy_stream_fallback: true,
-                timeout: None,
-                timeout_reason_code: None,
-                suppress_failure_side_effects: false,
             })
             .await?;
+        let outcome = retry_success.outcome;
+        let role_run = retry_success.role_run;
+        let node = retry_success.node;
         let full_output = outcome.full_output.clone();
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &attempt,

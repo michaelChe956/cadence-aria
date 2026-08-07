@@ -163,18 +163,6 @@ impl CodingWorkspaceEngine {
             CodingPromptMode::FullConversation => full_prompt.clone(),
             CodingPromptMode::DeltaOnly => delta_prompt,
         };
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(
-                    &node.id,
-                    &coder_provider_name,
-                    prompt.clone(),
-                    prompt_mode.event_detail(),
-                ),
-            })
-            .await;
-
         let role_run = self.store.create_role_run(
             &updated,
             CodingExecutionStage::Coding,
@@ -182,40 +170,24 @@ impl CodingWorkspaceEngine {
             CodingRoleRunTrigger::Initial,
             Some(node.id.clone()),
         )?;
-        let input = AdapterInput {
-            provider_type: provider_type_for_name(&coder_provider_name),
-            role: AdapterRole::Executor,
-            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
-            prompt,
-            context_files: Vec::new(),
-            output_schema: "coding_workspace_markdown".to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-            max_retries: 0,
-        };
-        let permission_mode =
-            role_permission_mode_for_attempt(&self.store, &updated, CodingProviderRole::Coder)?;
-        let mut provider_input =
-            streaming_input_from_adapter(&input, worktree_path, permission_mode);
-        provider_input.workspace_session_id = Some(updated.id.clone());
-        provider_input.resume_provider_session_id = resume_provider_session_id.clone();
-        let full_output = self
-            .run_provider_stream_to_completion(CodingProviderStreamRun {
+        let retry_success = self
+            .run_coder_with_retry_cycle(CoderRetryCycleInput {
                 attempt: &updated,
-                node_id: &node.id,
-                role_run: Some(&role_run),
+                initial_node: node,
+                initial_role_run: role_run,
                 provider,
-                legacy_input: &input,
-                input: provider_input,
                 provider_name: &coder_provider_name,
-                provider_role: CodingProviderRole::Coder,
+                worktree_path: &worktree_path,
+                initial_prompt: prompt,
+                fresh_prompt: full_prompt,
+                initial_prompt_mode: prompt_mode,
+                initial_resume_provider_session_id: resume_provider_session_id,
                 command_rx,
-                allow_legacy_stream_fallback: true,
-                timeout: None,
-                timeout_reason_code: None,
-                suppress_failure_side_effects: false,
             })
             .await?;
+        let full_output = retry_success.outcome.full_output;
+        let role_run = retry_success.role_run;
+        let node = retry_success.node;
         let (plan_defect_report, plan_defect_decision, plan_defect_error) =
             match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
                 Ok(report) if report.findings.is_empty() => (None, None, None),
