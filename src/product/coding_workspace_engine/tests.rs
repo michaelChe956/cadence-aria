@@ -472,6 +472,8 @@ mod gate_rework;
 mod git_operation_reconcile;
 mod group_completion_authority;
 mod group_final_readiness;
+mod group_final_readiness_builder;
+mod group_final_readiness_support;
 mod group_review_budget;
 mod group_review_compat;
 mod group_review_compatibility;
