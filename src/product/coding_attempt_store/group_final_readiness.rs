@@ -77,7 +77,7 @@ fn validate_snapshot(snapshot: &GroupFinalReadinessSnapshot) -> Result<(), Produ
             validate_relative_id(id)?;
         }
         if unit.empty_observation && (!unit.commit_shas.is_empty() || !unit.diff_ref.is_empty()) {
-            return Err(invalid_record(&format!(
+            return Err(invalid_record(format!(
                 "empty observation unit {} must not include git range facts",
                 unit.unit_id
             )));
@@ -142,7 +142,7 @@ fn validate_complete_unit(
         ("plan_revision_id", unit.plan_revision_id.is_some()),
     ] {
         if !value {
-            return Err(invalid_record(&format!(
+            return Err(invalid_record(format!(
                 "complete unit {} is missing {field}",
                 unit.unit_id
             )));

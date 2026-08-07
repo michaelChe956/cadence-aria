@@ -27,6 +27,7 @@ mod unit_run_execution_context;
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
 const WORK_ITEM_ID: &str = "work_item_0001";
+type MissingEvidenceCase = (&'static str, fn(&mut GroupFinalReadinessUnit));
 
 fn setup_store() -> (TempDir, CodingAttemptStore) {
     let tmp = TempDir::new().unwrap();
@@ -991,7 +992,7 @@ fn group_final_readiness_returns_none_when_snapshot_does_not_exist() {
 #[test]
 fn group_final_readiness_rejects_complete_snapshot_without_authoritative_evidence() {
     let (_tmp, store, attempt) = setup();
-    let missing_evidence: [(&str, fn(&mut GroupFinalReadinessUnit)); 6] = [
+    let missing_evidence: [MissingEvidenceCase; 6] = [
         (
             "code_review_report_id",
             |unit: &mut GroupFinalReadinessUnit| unit.code_review_report_id = None,

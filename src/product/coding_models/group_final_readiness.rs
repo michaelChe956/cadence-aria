@@ -12,19 +12,15 @@ pub enum GroupFinalReadinessStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum GroupFinalReadinessDiagnosticKind {
+    #[default]
     UnitRunMissing,
     CompletionCommitMissing,
     CodeReviewMissing,
     HandoffMissing,
     PlanBindingMismatch,
     IdentityMismatch,
-}
-
-impl Default for GroupFinalReadinessDiagnosticKind {
-    fn default() -> Self {
-        Self::UnitRunMissing
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

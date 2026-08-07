@@ -11,6 +11,13 @@ use crate::product::coding_models::{
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
+#[derive(Clone, Copy)]
+struct GroupFinalReadinessPlanContext<'a> {
+    binding: Option<&'a crate::product::coding_models::CodingAttemptPlanBinding>,
+    lineage: Option<&'a crate::product::models::WorkItemPlanLineage>,
+    binding_matches: bool,
+}
+
 impl CodingWorkspaceEngine {
     /// 从 group attempt 的权威 unit/run/review/handoff/plan 记录构建只读 readiness 证据。
     ///
@@ -114,24 +121,26 @@ impl CodingWorkspaceEngine {
                             == Some(&unit.work_item_revision_id)
                     })
             });
+            let plan_context = GroupFinalReadinessPlanContext {
+                binding: binding.as_ref(),
+                lineage: lineage.as_ref(),
+                binding_matches: plan_binding_matches,
+            };
             let (snapshot_unit, handoff_diagnostic) = self
                 .build_group_final_readiness_unit(
                     attempt,
                     &worktree_path,
                     &reports,
                     &unit,
-                    binding.as_ref(),
-                    lineage.as_ref(),
-                    plan_binding_matches,
+                    plan_context,
                 )
                 .await?;
             snapshot.units.push(snapshot_unit);
             self.append_unit_diagnostics(
                 &unit,
-                &snapshot.units.last().expect("unit was just pushed"),
+                snapshot.units.last().expect("unit was just pushed"),
                 &reports,
-                binding.as_ref(),
-                plan_binding_matches,
+                plan_context,
                 handoff_diagnostic,
                 &mut snapshot.diagnostics,
             );
@@ -159,9 +168,7 @@ impl CodingWorkspaceEngine {
         worktree_path: &std::path::Path,
         reports: &[CodeReviewReport],
         unit: &CodingExecutionUnit,
-        binding: Option<&crate::product::coding_models::CodingAttemptPlanBinding>,
-        lineage: Option<&crate::product::models::WorkItemPlanLineage>,
-        plan_binding_matches: bool,
+        plan_context: GroupFinalReadinessPlanContext<'_>,
     ) -> Result<
         (
             GroupFinalReadinessUnit,
@@ -195,10 +202,15 @@ impl CodingWorkspaceEngine {
         result.completion_commit = run.completion_commit.clone();
         let handoff_id = unit.latest_handoff_revision_id.clone();
         result.handoff_revision_id = handoff_id.clone();
-        result.plan_revision_id = plan_binding_matches
-            .then(|| binding.map(|binding| binding.bound_plan_revision_id.clone()))
+        result.plan_revision_id = plan_context
+            .binding_matches
+            .then(|| {
+                plan_context
+                    .binding
+                    .map(|binding| binding.bound_plan_revision_id.clone())
+            })
             .flatten();
-        let handoff_diagnostic = match (handoff_id.as_deref(), lineage) {
+        let handoff_diagnostic = match (handoff_id.as_deref(), plan_context.lineage) {
             (None, _) => Some(diagnostic(
                 GroupFinalReadinessDiagnosticKind::HandoffMissing,
                 Some(unit.id.clone()),
@@ -317,8 +329,7 @@ impl CodingWorkspaceEngine {
         unit: &CodingExecutionUnit,
         snapshot_unit: &GroupFinalReadinessUnit,
         reports: &[CodeReviewReport],
-        binding: Option<&crate::product::coding_models::CodingAttemptPlanBinding>,
-        plan_binding_matches: bool,
+        plan_context: GroupFinalReadinessPlanContext<'_>,
         handoff_diagnostic: Option<GroupFinalReadinessDiagnostic>,
         diagnostics: &mut Vec<GroupFinalReadinessDiagnostic>,
     ) {
@@ -329,8 +340,8 @@ impl CodingWorkspaceEngine {
                 unit_id.clone(),
                 format!("unit {} has no completed unit run", unit.id),
             ));
-            if !plan_binding_matches {
-                diagnostics.push(plan_binding_diagnostic(unit, binding));
+            if !plan_context.binding_matches {
+                diagnostics.push(plan_binding_diagnostic(unit, plan_context.binding));
             }
             return;
         };
@@ -360,8 +371,8 @@ impl CodingWorkspaceEngine {
         if let Some(handoff_diagnostic) = handoff_diagnostic {
             diagnostics.push(handoff_diagnostic);
         }
-        if !plan_binding_matches {
-            diagnostics.push(plan_binding_diagnostic(unit, binding));
+        if !plan_context.binding_matches {
+            diagnostics.push(plan_binding_diagnostic(unit, plan_context.binding));
         }
     }
 }
