@@ -33,7 +33,7 @@ pub(crate) fn recoverable_failed_code_review(
     )?;
     if let Some(journal) = recovery_journal.as_ref() {
         if !journal.is_completed() {
-            if !journal_recovery_prefix_is_valid(coding_store, attempt, &journal)? {
+            if !journal_recovery_prefix_is_valid(coding_store, attempt, journal)? {
                 return Ok(None);
             }
             return Ok(Some(FailedCodeReviewRecovery {
@@ -42,7 +42,7 @@ pub(crate) fn recoverable_failed_code_review(
                 stale_role_run_id: journal.expected_stale_role_run_id.clone(),
             }));
         }
-        if completed_journal_waits_for_retry_node(coding_store, attempt, &journal)? {
+        if completed_journal_waits_for_retry_node(coding_store, attempt, journal)? {
             return Ok(Some(FailedCodeReviewRecovery {
                 gate_id: journal.expected_gate_id.clone(),
                 failed_node_id: journal.expected_failed_node_id.clone(),
