@@ -11,6 +11,7 @@ mod context;
 mod gate;
 mod git_operation;
 mod group;
+mod group_final_readiness;
 mod group_initialization;
 mod group_review_store;
 mod group_terminal;

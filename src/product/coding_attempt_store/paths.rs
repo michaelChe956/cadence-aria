@@ -47,6 +47,14 @@ impl super::CodingAttemptStore {
             .join(attempt_id)
     }
 
+    pub(crate) fn group_final_readiness_snapshot_path(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    ) -> PathBuf {
+        self.attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("group-final-readiness.json")
+    }
+
     pub(crate) fn work_item_execution_plan_path(
         &self,
         project_id: &str,
