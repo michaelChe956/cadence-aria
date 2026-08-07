@@ -465,6 +465,9 @@ impl CodingWorkspaceEngine {
         Ok(review)
     }
 
+    // Legacy group review execution path; new group attempts use human final confirmation
+    // (Task 3). Retained for Task 6 legacy compatibility reader; remove or keep in Task 6.
+    #[allow(dead_code)]
     pub(crate) async fn execute_group_final_review_with_commands(
         &self,
         attempt: &CodingExecutionAttempt,

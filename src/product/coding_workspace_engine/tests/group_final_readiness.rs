@@ -490,6 +490,42 @@ async fn preparing_complete_group_creates_human_final_confirm_without_group_prov
 }
 
 #[tokio::test]
+async fn preparing_group_final_confirm_twice_reuses_pending_timeline_node() {
+    let fixture = readiness_fixture();
+    let running = seed_complete_group_readiness(&fixture);
+
+    let first = fixture
+        .engine
+        .prepare_group_final_confirm_from_readiness(&running)
+        .await
+        .expect("prepare initial human final confirmation");
+    let second = fixture
+        .engine
+        .prepare_group_final_confirm_from_readiness(&first)
+        .await
+        .expect("repeat preparation reuses pending final confirmation");
+
+    assert_eq!(second.stage, CodingExecutionStage::FinalConfirm);
+    assert_eq!(second.status, CodingAttemptStatus::WaitingForHuman);
+    let final_confirm_nodes = fixture
+        .store
+        .get_timeline_nodes(&second.project_id, &second.issue_id, &second.id)
+        .expect("timeline nodes")
+        .into_iter()
+        .filter(|node| node.stage == CodingExecutionStage::FinalConfirm)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        final_confirm_nodes.len(),
+        1,
+        "repeat preparation must reuse the pending human final-confirm timeline node"
+    );
+    assert_eq!(
+        final_confirm_nodes[0].status,
+        CodingTimelineNodeStatus::Pending
+    );
+}
+
+#[tokio::test]
 async fn incomplete_readiness_cannot_be_final_confirmed() {
     let fixture = readiness_fixture();
     for unit in fixture

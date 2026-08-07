@@ -87,6 +87,9 @@ pub(crate) enum GroupReviewOrchestrationError {
     #[error("reduction_stale")]
     ReductionStale,
     #[error("identity_missing")]
+    // Legacy group review execution path; new group attempts use human final confirmation
+    // (Task 3). Retained for Task 6 legacy compatibility reader; remove or keep in Task 6.
+    #[allow(dead_code)]
     IdentityMissing,
     #[error("store: {0}")]
     Store(#[from] ProductStoreError),
