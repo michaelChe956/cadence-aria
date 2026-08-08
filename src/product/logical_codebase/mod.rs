@@ -1,7 +1,12 @@
+pub mod migration;
 pub mod registry;
 pub mod store;
 pub mod types;
 
+pub use migration::{
+    IdentityMigrationJournal, IdentityMigrationJournalStore, IdentityMigrationPhase,
+    RepositoryIdentityMapping,
+};
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
 };
