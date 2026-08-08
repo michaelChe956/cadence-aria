@@ -103,6 +103,39 @@ impl IdentityRegistryStore {
         }
     }
 
+    pub fn find_by_logical_id(
+        &self,
+        project_id: &str,
+        logical_repository_id: LogicalRepositoryId,
+    ) -> Result<Vec<IdentityRegistryEntry>, ProductStoreError> {
+        let registry = match self.load(project_id)? {
+            Some(registry) => registry,
+            None => return Ok(Vec::new()),
+        };
+        Ok(registry
+            .entries
+            .into_iter()
+            .filter(|entry| entry.logical_repository_id == logical_repository_id)
+            .collect())
+    }
+
+    pub fn find_by_physical_id(
+        &self,
+        project_id: &str,
+        physical_repository_id: &str,
+    ) -> Result<Vec<IdentityRegistryEntry>, ProductStoreError> {
+        validate_relative_id(physical_repository_id)?;
+        let registry = match self.load(project_id)? {
+            Some(registry) => registry,
+            None => return Ok(Vec::new()),
+        };
+        Ok(registry
+            .entries
+            .into_iter()
+            .filter(|entry| entry.physical_repository_id == physical_repository_id)
+            .collect())
+    }
+
     pub fn upsert_active(
         &self,
         project_id: &str,

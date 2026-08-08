@@ -13,9 +13,10 @@ use crate::product::id::{next_sequential_id, repo_hash_for_path};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IdentityMigrationExecutor,
-    IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseFeature,
-    LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
-    RepositoryCheckoutRecord, RepositoryReferenceScanner, RepositorySourceIdentity, RepositoryType,
+    IdentityMigrationJournal, IdentityMigrationJournalStore, IdentityRegistryEntry,
+    IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseFeature, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    RepositoryReferenceScanner, RepositorySourceIdentity, RepositoryType,
 };
 use crate::product::models::RepositoryRecord;
 
@@ -79,6 +80,12 @@ pub struct RepositoryDeletionReceipt {
     pub deleted_at: String,
     #[serde(default)]
     pub legacy_delete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionSource {
+    LogicalAuthority,
+    LegacyProjection,
 }
 
 #[derive(Debug, Clone)]
@@ -647,6 +654,236 @@ impl RepositoryStore {
             .mark_delete_completed(project_id, &receipt)
     }
 
+    pub fn resolve_logical_repository(
+        &self,
+        project_id: &str,
+        logical_id: LogicalRepositoryId,
+    ) -> Result<
+        (
+            CodebaseMemberRecord,
+            RepositoryCheckoutRecord,
+            RepositoryRecord,
+        ),
+        ProductStoreError,
+    > {
+        self.resolve_logical_repository_with_source(project_id, logical_id)
+            .map(|(member, checkout, repository, _)| (member, checkout, repository))
+    }
+
+    /// Resolves a legacy physical repository ID only during the persisted
+    /// dual-read migration window. This is deliberately separate from the
+    /// logical-ID reader so callers cannot accidentally treat a physical ID
+    /// as an authority identifier after cutover.
+    pub fn resolve_legacy_physical_repository_if_dual(
+        &self,
+        project_id: &str,
+        physical_repository_id: &str,
+    ) -> Result<
+        (
+            CodebaseMemberRecord,
+            RepositoryCheckoutRecord,
+            RepositoryRecord,
+        ),
+        ProductStoreError,
+    > {
+        validate_relative_id(project_id)?;
+        validate_relative_id(physical_repository_id)?;
+        let journal = IdentityMigrationJournalStore::new(self.paths.clone()).load(project_id)?;
+        if !journal
+            .as_ref()
+            .is_some_and(IdentityMigrationJournal::permits_legacy_projection)
+        {
+            return Err(ProductStoreError::NotFound {
+                kind: "logical_repository",
+                id: physical_repository_id.to_string(),
+            });
+        }
+        let matches = IdentityRegistryStore::new(self.paths.clone())
+            .find_by_physical_id(project_id, physical_repository_id)?;
+        let [entry] = matches.as_slice() else {
+            return Err(identity_resolution_error(
+                physical_repository_id,
+                matches.is_empty(),
+            ));
+        };
+        let (member, checkout, repository, source) =
+            self.resolve_logical_repository_with_source(project_id, entry.logical_repository_id)?;
+        tracing::warn!(
+            project_id,
+            logical_repository_id = %entry.logical_repository_id.0,
+            physical_repository_id,
+            resolution_source = ?source,
+            metric = "identity_resolution_legacy_projection",
+            "resolved legacy physical repository through unique registry mapping"
+        );
+        Ok((member, checkout, repository))
+    }
+
+    pub fn resolve_logical_repository_with_source(
+        &self,
+        project_id: &str,
+        logical_id: LogicalRepositoryId,
+    ) -> Result<
+        (
+            CodebaseMemberRecord,
+            RepositoryCheckoutRecord,
+            RepositoryRecord,
+            ResolutionSource,
+        ),
+        ProductStoreError,
+    > {
+        self.ensure_identity_schema(project_id)?;
+        validate_relative_id(project_id)?;
+        let authority = LogicalCodebaseStore::new(self.paths.clone());
+        let Some(manifest) = authority.load_manifest(project_id)? else {
+            return self.resolve_legacy_projection_if_dual(project_id, logical_id);
+        };
+        if !manifest.member_ids.contains(&logical_id) {
+            return self.resolve_legacy_projection_if_dual(project_id, logical_id);
+        }
+
+        let Some(member) = authority.load_member(project_id, logical_id)? else {
+            return self.resolve_legacy_projection_if_dual(project_id, logical_id);
+        };
+        validate_relative_id(&member.physical_repository_id)?;
+        let repository = self
+            .list_compatibility_projection(project_id)?
+            .into_iter()
+            .find(|record| record.id == member.physical_repository_id)
+            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                kind: "logical_repository",
+                id: logical_id.0.to_string(),
+            })?;
+        let checkout_id =
+            repository
+                .primary_checkout_id
+                .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                    kind: "logical_repository",
+                    id: logical_id.0.to_string(),
+                })?;
+        let checkout = authority
+            .load_checkout(project_id, checkout_id)?
+            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                kind: "logical_repository",
+                id: logical_id.0.to_string(),
+            })?;
+        if member.logical_repository_id != logical_id
+            || member.status != MemberStatus::Active
+            || !member.checkout_ids.contains(&checkout_id)
+            || checkout.logical_repository_id != logical_id
+            || checkout.physical_repository_id != member.physical_repository_id
+            || repository.project_id != project_id
+            || repository.logical_repository_id != Some(logical_id)
+            || repository.identity_schema_version != 1
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "logical_repository",
+                id: logical_id.0.to_string(),
+            });
+        }
+        Ok((
+            member,
+            checkout,
+            repository,
+            ResolutionSource::LogicalAuthority,
+        ))
+    }
+
+    fn resolve_legacy_projection_if_dual(
+        &self,
+        project_id: &str,
+        logical_id: LogicalRepositoryId,
+    ) -> Result<
+        (
+            CodebaseMemberRecord,
+            RepositoryCheckoutRecord,
+            RepositoryRecord,
+            ResolutionSource,
+        ),
+        ProductStoreError,
+    > {
+        let journal = IdentityMigrationJournalStore::new(self.paths.clone()).load(project_id)?;
+        if !journal
+            .as_ref()
+            .is_some_and(IdentityMigrationJournal::permits_legacy_projection)
+        {
+            return Err(ProductStoreError::NotFound {
+                kind: "logical_repository",
+                id: logical_id.0.to_string(),
+            });
+        }
+
+        let matches = IdentityRegistryStore::new(self.paths.clone())
+            .find_by_logical_id(project_id, logical_id)?;
+        let [entry] = matches.as_slice() else {
+            return Err(identity_resolution_error(
+                &logical_id.0.to_string(),
+                matches.is_empty(),
+            ));
+        };
+        validate_relative_id(&entry.physical_repository_id)?;
+        let repository = self
+            .list_compatibility_projection(project_id)?
+            .into_iter()
+            .find(|record| record.id == entry.physical_repository_id)
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "repository",
+                id: entry.physical_repository_id.clone(),
+            })?;
+        if repository.project_id != project_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "legacy_projection",
+                id: logical_id.0.to_string(),
+            });
+        }
+
+        let member = CodebaseMemberRecord {
+            logical_repository_id: logical_id,
+            physical_repository_id: entry.physical_repository_id.clone(),
+            alias: repository.name.clone(),
+            role: "legacy_projection".to_string(),
+            ordinal: 0,
+            source_identity: entry.source_identity.clone(),
+            repo_type: RepositoryType::Unknown,
+            tech_stack: Vec::new(),
+            owner: None,
+            tags: Vec::new(),
+            default_ref: None,
+            checkout_ids: vec![entry.primary_checkout_id],
+            status: MemberStatus::Active,
+            created_at: repository.created_at.clone(),
+            updated_at: repository.updated_at.clone(),
+        };
+        let checkout = RepositoryCheckoutRecord {
+            checkout_id: entry.primary_checkout_id,
+            logical_repository_id: logical_id,
+            physical_repository_id: entry.physical_repository_id.clone(),
+            kind: CheckoutKind::Main,
+            canonical_path: repository.path.clone(),
+            checkout_path_hash: repository.repo_hash.clone(),
+            git_dir_identity: entry.source_identity.git_dir_identity(),
+            revision: None,
+            availability: CheckoutAvailability::Unresolved,
+            observed_at: repository.updated_at.clone(),
+            created_at: repository.created_at.clone(),
+            updated_at: repository.updated_at.clone(),
+        };
+        tracing::warn!(
+            project_id,
+            logical_repository_id = %logical_id.0,
+            physical_repository_id = %entry.physical_repository_id,
+            resolution_source = "legacy_projection",
+            metric = "identity_resolution_legacy_projection",
+            "using controlled legacy repository projection"
+        );
+        Ok((
+            member,
+            checkout,
+            repository,
+            ResolutionSource::LegacyProjection,
+        ))
+    }
+
     fn resolve_logical_by_physical(
         &self,
         project_id: &str,
@@ -886,6 +1123,20 @@ impl RepositoryStore {
 
     fn repos_path(&self, project_id: &str) -> PathBuf {
         self.paths.project_root(project_id).join("repos.json")
+    }
+}
+
+fn identity_resolution_error(id: &str, missing: bool) -> ProductStoreError {
+    if missing {
+        ProductStoreError::NotFound {
+            kind: "identity_resolution_missing",
+            id: id.to_string(),
+        }
+    } else {
+        ProductStoreError::Ambiguous {
+            kind: "identity_resolution_ambiguous",
+            id: id.to_string(),
+        }
     }
 }
 
@@ -1364,13 +1615,26 @@ mod tests {
     use std::process::Command;
 
     use super::*;
-    use crate::product::logical_codebase::LogicalCodebaseFeature;
+    use crate::product::logical_codebase::{
+        IdentityMigrationJournal, IdentityMigrationJournalStore, IdentityMigrationPhase,
+        LogicalCodebaseFeature, LogicalCodebaseManifest,
+    };
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
 
     struct RepositoryStoreFixture {
         _root: tempfile::TempDir,
         store: RepositoryStore,
         git_root: PathBuf,
+    }
+
+    struct ResolutionFixture {
+        _root: tempfile::TempDir,
+        paths: ProductAppPaths,
+        store: RepositoryStore,
+        logical_id: LogicalRepositoryId,
+        physical_id: String,
+        checkout_id: RepositoryCheckoutId,
+        source_identity: RepositorySourceIdentity,
     }
 
     fn repository_store_fixture_with_feature_enabled() -> RepositoryStoreFixture {
@@ -1399,6 +1663,257 @@ mod tests {
             ),
             git_root,
         }
+    }
+
+    fn resolution_fixture() -> ResolutionFixture {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path());
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "project".to_string(),
+                description: None,
+            })
+            .expect("create project");
+        let logical_id = LogicalRepositoryId(Uuid::new_v4());
+        let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+        let physical_id = "repository_0001".to_string();
+        let source_identity = RepositorySourceIdentity {
+            scheme: "test".to_string(),
+            key_digest: "sha256:resolution-fixture".to_string(),
+            canonical_git_dir: PathBuf::from("/workspace/api/.git"),
+            canonical_origin: None,
+            first_seen_path_hash: "sha256:first-seen".to_string(),
+        };
+        let fixture = ResolutionFixture {
+            _root: root,
+            store: RepositoryStore::with_logical_codebase_feature(
+                paths.clone(),
+                LogicalCodebaseFeature::enabled(),
+            ),
+            paths,
+            logical_id,
+            physical_id,
+            checkout_id,
+            source_identity,
+        };
+        IdentityRegistryStore::new(fixture.paths.clone())
+            .upsert_active(
+                "project_0001",
+                IdentityRegistryEntry::active(
+                    fixture.source_identity.clone(),
+                    fixture.logical_id,
+                    fixture.physical_id.clone(),
+                    fixture.checkout_id,
+                    "resolution-fixture".to_string(),
+                ),
+            )
+            .expect("write registry mapping");
+        fixture
+    }
+
+    impl ResolutionFixture {
+        fn write_authority_with_path(&self, path: &str) {
+            let authority = LogicalCodebaseStore::new(self.paths.clone());
+            authority
+                .save_manifest(
+                    "project_0001",
+                    &LogicalCodebaseManifest::new(
+                        "project_0001",
+                        PathBuf::from("/workspace"),
+                        vec![self.logical_id],
+                    ),
+                )
+                .expect("write manifest");
+            authority
+                .save_member(
+                    "project_0001",
+                    &CodebaseMemberRecord {
+                        logical_repository_id: self.logical_id,
+                        physical_repository_id: self.physical_id.clone(),
+                        alias: "api".to_string(),
+                        role: "repository".to_string(),
+                        ordinal: 1,
+                        source_identity: self.source_identity.clone(),
+                        repo_type: RepositoryType::Unknown,
+                        tech_stack: Vec::new(),
+                        owner: None,
+                        tags: Vec::new(),
+                        default_ref: None,
+                        checkout_ids: vec![self.checkout_id],
+                        status: MemberStatus::Active,
+                        created_at: "2026-08-08T00:00:00Z".to_string(),
+                        updated_at: "2026-08-08T00:00:00Z".to_string(),
+                    },
+                )
+                .expect("write member");
+            authority
+                .save_checkout(
+                    "project_0001",
+                    &RepositoryCheckoutRecord {
+                        checkout_id: self.checkout_id,
+                        logical_repository_id: self.logical_id,
+                        physical_repository_id: self.physical_id.clone(),
+                        kind: CheckoutKind::Main,
+                        canonical_path: PathBuf::from(path),
+                        checkout_path_hash: "sha256:authority-path".to_string(),
+                        git_dir_identity: self.source_identity.git_dir_identity(),
+                        revision: None,
+                        availability: CheckoutAvailability::Available,
+                        observed_at: "2026-08-08T00:00:00Z".to_string(),
+                        created_at: "2026-08-08T00:00:00Z".to_string(),
+                        updated_at: "2026-08-08T00:00:00Z".to_string(),
+                    },
+                )
+                .expect("write checkout");
+        }
+
+        fn write_compatible_repository_projection(&self) {
+            write_json(
+                &self.store.repos_path("project_0001"),
+                &[RepositoryRecord {
+                    id: self.physical_id.clone(),
+                    project_id: "project_0001".to_string(),
+                    name: "api".to_string(),
+                    path: PathBuf::from("/workspace/api-projection"),
+                    repo_hash: "sha256:projection-path".to_string(),
+                    runtime_root: PathBuf::from("/workspace/api-projection/.aria/runtime"),
+                    default_policy_preset: "manual-write".to_string(),
+                    default_provider_mode: "fake".to_string(),
+                    created_at: "2026-08-08T00:00:00Z".to_string(),
+                    logical_repository_id: Some(self.logical_id),
+                    primary_checkout_id: Some(self.checkout_id),
+                    identity_schema_version: 1,
+                    updated_at: "2026-08-08T00:00:00Z".to_string(),
+                }],
+            )
+            .expect("write compatibility projection");
+        }
+
+        fn remove_authority_member(&self) {
+            fs::remove_file(
+                self.paths
+                    .logical_codebase_root("project_0001")
+                    .join("members")
+                    .join(format!("{}.json", self.logical_id.0)),
+            )
+            .expect("remove authority member");
+        }
+
+        fn set_read_mode(&self, read_mode: &str) {
+            let mut journal = IdentityMigrationJournal::new("project_0001", "fixture");
+            journal.phase = IdentityMigrationPhase::Completed;
+            journal.read_mode = Some(read_mode.to_string());
+            IdentityMigrationJournalStore::new(self.paths.clone())
+                .save("project_0001", &journal)
+                .expect("save migration journal");
+        }
+    }
+
+    #[test]
+    fn missing_authority_member_in_dual_mode_uses_unique_legacy_projection() {
+        let fixture = resolution_fixture();
+        fixture.write_authority_with_path("/workspace/api-authority");
+        fixture.write_compatible_repository_projection();
+        fixture.set_read_mode("dual");
+        fixture.remove_authority_member();
+
+        let (_, checkout, _, source) = fixture
+            .store
+            .resolve_logical_repository_with_source("project_0001", fixture.logical_id)
+            .expect("unique dual projection must resolve");
+        assert_eq!(source, ResolutionSource::LegacyProjection);
+        assert_eq!(
+            checkout.canonical_path,
+            PathBuf::from("/workspace/api-projection")
+        );
+    }
+
+    #[test]
+    fn dual_mode_identity_resolution_is_missing_or_ambiguous_without_guessing() {
+        let fixture = resolution_fixture();
+        fixture.write_authority_with_path("/workspace/api-authority");
+        fixture.write_compatible_repository_projection();
+        fixture.set_read_mode("dual");
+        fixture.remove_authority_member();
+
+        let missing_id = LogicalRepositoryId(Uuid::new_v4());
+        assert!(matches!(
+            fixture
+                .store
+                .resolve_logical_repository("project_0001", missing_id),
+            Err(ProductStoreError::NotFound {
+                kind: "identity_resolution_missing",
+                ..
+            })
+        ));
+
+        IdentityRegistryStore::new(fixture.paths.clone())
+            .upsert_active(
+                "project_0001",
+                IdentityRegistryEntry::active(
+                    RepositorySourceIdentity {
+                        key_digest: "sha256:resolution-fixture-duplicate".to_string(),
+                        ..fixture.source_identity.clone()
+                    },
+                    fixture.logical_id,
+                    "repository_0002".to_string(),
+                    RepositoryCheckoutId(Uuid::new_v4()),
+                    "resolution-fixture-duplicate".to_string(),
+                ),
+            )
+            .expect("write duplicate logical mapping");
+        assert!(matches!(
+            fixture
+                .store
+                .resolve_logical_repository("project_0001", fixture.logical_id),
+            Err(ProductStoreError::Ambiguous {
+                kind: "identity_resolution_ambiguous",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn logical_resolution_prefers_authority_and_allows_single_legacy_fallback_only_in_dual_mode() {
+        let fixture = resolution_fixture();
+        fixture.write_authority_with_path("/workspace/api-authority");
+        fixture.write_compatible_repository_projection();
+        fixture.set_read_mode("dual");
+
+        let (_, checkout, physical) = fixture
+            .store
+            .resolve_logical_repository("project_0001", fixture.logical_id)
+            .unwrap();
+        assert_eq!(
+            checkout.canonical_path,
+            std::path::PathBuf::from("/workspace/api-authority")
+        );
+        assert_eq!(physical.id, "repository_0001");
+
+        let (_, legacy_checkout, legacy_physical) = fixture
+            .store
+            .resolve_legacy_physical_repository_if_dual("project_0001", "repository_0001")
+            .unwrap();
+        assert_eq!(
+            legacy_checkout.canonical_path,
+            std::path::PathBuf::from("/workspace/api-authority")
+        );
+        assert_eq!(legacy_physical.id, "repository_0001");
+
+        fixture.remove_authority_member();
+        let fallback = fixture
+            .store
+            .resolve_logical_repository("project_0001", fixture.logical_id)
+            .unwrap();
+        assert_eq!(fallback.2.id, "repository_0001");
+
+        fixture.set_read_mode("logical_authoritative");
+        assert!(matches!(
+            fixture
+                .store
+                .resolve_logical_repository("project_0001", fixture.logical_id),
+            Err(ProductStoreError::NotFound { .. })
+        ));
     }
 
     #[test]

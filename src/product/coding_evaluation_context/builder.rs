@@ -12,6 +12,7 @@ use crate::product::models::{
     IssueWorkItemPlan, LifecycleWorkItemRecord, WorkItemDraftRecord, WorkItemPlanCompileStatus,
     WorkspaceType,
 };
+use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::product::work_item_runtime_reader::{ResolvedWorkItemRuntime, WorkItemRuntimeReader};
 
@@ -196,12 +197,27 @@ fn build_schema_v2_evaluation_context_pack(
     repo_diff_base: Option<&str>,
 ) -> Result<EvaluationContextPack, ProductStoreError> {
     let mut context_warnings = Vec::new();
-    let issue = IssueStore::new(lifecycle.app_paths().clone())
+    let _issue = IssueStore::new(lifecycle.app_paths().clone())
         .get(&attempt.project_id, &attempt.issue_id)?;
-    let repository_id = issue.repo_id.ok_or_else(|| ProductStoreError::NotFound {
-        kind: "repository",
-        id: format!("issue:{}:repo_id", attempt.issue_id),
-    })?;
+    let repository_id = issue_selection_logical_repository_id(&lifecycle.app_paths(), attempt)
+        .or_else(|error| {
+            if schema_v2_active_unit_runtime(&lifecycle.app_paths(), attempt)?.is_none() {
+                return Err(error);
+            }
+            let issue = IssueStore::new(lifecycle.app_paths())
+                .get(&attempt.project_id, &attempt.issue_id)?;
+            let physical_repository_id =
+                issue.repo_id.ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "repository",
+                    id: format!("issue:{}:repo_id", attempt.issue_id),
+                })?;
+            RepositoryStore::new(lifecycle.app_paths())
+                .resolve_legacy_physical_repository_if_dual(
+                    &attempt.project_id,
+                    &physical_repository_id,
+                )
+                .map(|(_, _, repository)| repository.id)
+        })?;
     let stories = lifecycle.list_story_specs(&attempt.project_id, &attempt.issue_id)?;
     let designs = lifecycle.list_design_specs(&attempt.project_id, &attempt.issue_id)?;
     let story_specs = contexts_for_story_specs(
@@ -284,6 +300,31 @@ fn build_schema_v2_evaluation_context_pack(
         quality_bypass_audits,
         context_warnings,
     })
+}
+
+fn issue_selection_logical_repository_id(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<String, ProductStoreError> {
+    #[derive(serde::Deserialize)]
+    struct IssueCodebaseSelection {
+        focus: Vec<crate::product::logical_codebase::LogicalRepositoryId>,
+    }
+
+    let selection: IssueCodebaseSelection = crate::product::json_store::read_json(
+        &paths
+            .issue_root(&attempt.project_id, &attempt.issue_id)
+            .join("codebase-selection.json"),
+    )?;
+    let [logical_repository_id] = selection.focus.as_slice() else {
+        return Err(ProductStoreError::Ambiguous {
+            kind: "issue_codebase_selection",
+            id: attempt.issue_id.clone(),
+        });
+    };
+    let (_, _, repository) = RepositoryStore::new(paths.clone())
+        .resolve_logical_repository(&attempt.project_id, *logical_repository_id)?;
+    Ok(repository.id)
 }
 
 pub(super) fn schema_v2_active_unit_runtime(

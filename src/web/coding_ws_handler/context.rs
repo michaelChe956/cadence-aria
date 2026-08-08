@@ -16,7 +16,6 @@ use crate::product::coding_workspace_runner::{
     apply_provider_selection_to_snapshots, coding_provider_role_for_stage,
     parse_coding_provider_role,
 };
-use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 
 use super::active_coding_timeline_node_id;
@@ -103,37 +102,56 @@ pub(crate) fn repository_path_for_attempt(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<PathBuf, CodingWorkspaceEngineError> {
-    let repository_id = if is_schema_v2_group_attempt(app_paths, attempt)? {
-        IssueStore::new(app_paths.clone())
-            .get(&attempt.project_id, &attempt.issue_id)?
-            .repo_id
-            .ok_or_else(|| ProductStoreError::NotFound {
-                kind: "repository",
-                id: format!("issue:{}:repo_id", attempt.issue_id),
-            })?
+    let repository_store = RepositoryStore::new(app_paths.clone());
+    let (_, checkout, _) = if let Some(snapshot) = attempt.target_snapshot.as_ref() {
+        repository_store
+            .resolve_logical_repository(&attempt.project_id, snapshot.logical_repository_id)?
+    } else if is_schema_v2_group_attempt(app_paths, attempt)? {
+        let logical_repository_id = issue_selection_logical_repository_id(app_paths, attempt)?;
+        repository_store.resolve_logical_repository(&attempt.project_id, logical_repository_id)?
     } else {
         let current_work_item_id = current_work_item_id_for_attempt(attempt);
-        LifecycleStore::new(app_paths.clone())
+        let work_item = LifecycleStore::new(app_paths.clone())
             .list_work_items(&attempt.project_id, &attempt.issue_id)?
             .into_iter()
             .find(|work_item| work_item.id == current_work_item_id)
             .ok_or_else(|| ProductStoreError::NotFound {
                 kind: "work_item",
                 id: current_work_item_id.to_string(),
-            })?
-            .repository_id
+            })?;
+        match work_item.target_repository_id {
+            Some(logical_repository_id) => repository_store
+                .resolve_logical_repository(&attempt.project_id, logical_repository_id)?,
+            None => repository_store.resolve_legacy_physical_repository_if_dual(
+                &attempt.project_id,
+                &work_item.repository_id,
+            )?,
+        }
     };
-    RepositoryStore::new(app_paths.clone())
-        .list(&attempt.project_id)?
-        .into_iter()
-        .find(|repository| repository.id == repository_id)
-        .map(|repository| repository.path)
-        .ok_or({
-            CodingWorkspaceEngineError::Store(ProductStoreError::NotFound {
-                kind: "repository",
-                id: repository_id,
-            })
-        })
+    Ok(checkout.canonical_path)
+}
+
+fn issue_selection_logical_repository_id(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<crate::product::logical_codebase::LogicalRepositoryId, ProductStoreError> {
+    #[derive(serde::Deserialize)]
+    struct IssueCodebaseSelection {
+        focus: Vec<crate::product::logical_codebase::LogicalRepositoryId>,
+    }
+
+    let selection: IssueCodebaseSelection = crate::product::json_store::read_json(
+        &app_paths
+            .issue_root(&attempt.project_id, &attempt.issue_id)
+            .join("codebase-selection.json"),
+    )?;
+    let [logical_repository_id] = selection.focus.as_slice() else {
+        return Err(ProductStoreError::Ambiguous {
+            kind: "issue_codebase_selection",
+            id: attempt.issue_id.clone(),
+        });
+    };
+    Ok(*logical_repository_id)
 }
 
 pub(crate) fn update_provider_selection(

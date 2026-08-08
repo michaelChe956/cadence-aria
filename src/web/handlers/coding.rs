@@ -124,7 +124,7 @@ pub async fn create_coding_attempt(
         ));
     }
 
-    let repository = find_repository(&app_paths, &project_id, &work_item.repository_id)?;
+    let repository = resolve_work_item_repository(&app_paths, &project_id, work_item)?;
     if !is_git_repo(&repository.path) {
         return Err(ApiError::validation(
             "repository_path_not_git_repo",
@@ -260,6 +260,84 @@ pub async fn create_coding_attempt(
     );
 
     Ok(Json(coding_attempt_dto(&attempt)))
+}
+
+fn resolve_work_item_repository(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    work_item: &LifecycleWorkItemRecord,
+) -> ApiResult<RepositoryRecord> {
+    let store = RepositoryStore::new(app_paths.clone());
+    match work_item.target_repository_id {
+        Some(logical_repository_id) => store
+            .resolve_logical_repository(project_id, logical_repository_id)
+            .map(|(_, _, repository)| repository)
+            .map_err(product_store_api_error),
+        None => store
+            .resolve_legacy_physical_repository_if_dual(project_id, &work_item.repository_id)
+            .map(|(_, _, repository)| repository)
+            .map_err(product_store_api_error),
+    }
+}
+
+fn resolve_attempt_repository(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    attempt: &CodingExecutionAttempt,
+) -> ApiResult<RepositoryRecord> {
+    let store = RepositoryStore::new(app_paths.clone());
+    if let Some(snapshot) = attempt.target_snapshot.as_ref() {
+        return store
+            .resolve_logical_repository(&attempt.project_id, snapshot.logical_repository_id)
+            .map(|(_, _, repository)| repository)
+            .map_err(product_store_api_error);
+    }
+    if is_schema_v2_group_attempt(app_paths, attempt).map_err(product_store_api_error)? {
+        return resolve_issue_selection_repository(app_paths, attempt);
+    }
+    let current_work_item_id = attempt
+        .current_work_item_id
+        .as_deref()
+        .unwrap_or(&attempt.work_item_id);
+    let work_item = lifecycle
+        .list_work_items(&attempt.project_id, &attempt.issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .find(|work_item| work_item.id == current_work_item_id)
+        .ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "work_item",
+                id: current_work_item_id.to_string(),
+            })
+        })?;
+    resolve_work_item_repository(app_paths, &attempt.project_id, &work_item)
+}
+
+fn resolve_issue_selection_repository(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> ApiResult<RepositoryRecord> {
+    #[derive(serde::Deserialize)]
+    struct IssueCodebaseSelection {
+        focus: Vec<crate::product::logical_codebase::LogicalRepositoryId>,
+    }
+
+    let selection: IssueCodebaseSelection = crate::product::json_store::read_json(
+        &app_paths
+            .issue_root(&attempt.project_id, &attempt.issue_id)
+            .join("codebase-selection.json"),
+    )
+    .map_err(product_store_api_error)?;
+    let [logical_repository_id] = selection.focus.as_slice() else {
+        return Err(product_store_api_error(ProductStoreError::Ambiguous {
+            kind: "issue_codebase_selection",
+            id: attempt.issue_id.clone(),
+        }));
+    };
+    RepositoryStore::new(app_paths.clone())
+        .resolve_logical_repository(&attempt.project_id, *logical_repository_id)
+        .map(|(_, _, repository)| repository)
+        .map_err(product_store_api_error)
 }
 
 pub(crate) fn save_work_item_execution_plan_for_attempt(
@@ -722,33 +800,7 @@ pub(crate) async fn delete_coding_attempt(
         .current_work_item_id
         .as_deref()
         .unwrap_or(&attempt.work_item_id);
-    let repository_id =
-        if is_schema_v2_group_attempt(&app_paths, &attempt).map_err(product_store_api_error)? {
-            IssueStore::new(app_paths.clone())
-                .get(&attempt.project_id, &attempt.issue_id)
-                .map_err(product_store_api_error)?
-                .repo_id
-                .ok_or_else(|| {
-                    product_store_api_error(ProductStoreError::NotFound {
-                        kind: "issue_repository",
-                        id: attempt.issue_id.clone(),
-                    })
-                })?
-        } else {
-            lifecycle
-                .list_work_items(&attempt.project_id, &attempt.issue_id)
-                .map_err(product_store_api_error)?
-                .into_iter()
-                .find(|work_item| work_item.id == active_work_item_id)
-                .ok_or_else(|| {
-                    product_store_api_error(ProductStoreError::NotFound {
-                        kind: "work_item",
-                        id: active_work_item_id.to_string(),
-                    })
-                })?
-                .repository_id
-        };
-    let repository = find_repository(&app_paths, &attempt.project_id, &repository_id)?;
+    let repository = resolve_attempt_repository(&app_paths, &lifecycle, &attempt)?;
 
     if let Ok(Some(shared)) =
         lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)

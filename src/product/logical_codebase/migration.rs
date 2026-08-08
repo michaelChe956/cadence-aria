@@ -79,6 +79,10 @@ pub struct IdentityMigrationJournal {
 }
 
 impl IdentityMigrationJournal {
+    pub fn permits_legacy_projection(&self) -> bool {
+        self.read_mode.as_deref() == Some("dual")
+    }
+
     pub fn new(project_id: &str, source_repos_digest: &str) -> Self {
         let now = Utc::now().to_rfc3339();
         Self {
@@ -221,8 +225,20 @@ impl IdentityMigrationExecutor {
             if journal.phase == IdentityMigrationPhase::BackfillingCompatibility {
                 self.backfill_compatibility(&mut journal)?;
             }
-            if journal.phase == IdentityMigrationPhase::DualReadWrite {
-                self.switch_reads(&mut journal)?;
+            match journal.phase {
+                IdentityMigrationPhase::DualReadWrite => self.switch_reads(&mut journal)?,
+                IdentityMigrationPhase::SwitchingReads
+                | IdentityMigrationPhase::LegacyFallbackRemoved
+                | IdentityMigrationPhase::Completed => {}
+                IdentityMigrationPhase::Failed => return self.failed_migration_error(&journal),
+                phase => {
+                    return Err(ProductStoreError::InvalidRecord {
+                        kind: "identity_migration_phase",
+                        reason: format!(
+                            "unsupported migration phase after authority migration: {phase:?}"
+                        ),
+                    });
+                }
             }
             Ok(())
         })
@@ -243,8 +259,22 @@ impl IdentityMigrationExecutor {
             if journal.phase == IdentityMigrationPhase::Mapping {
                 self.persist_mappings_from_source_identity(&mut journal)?;
             }
-            if journal.phase == IdentityMigrationPhase::WritingAuthority {
-                self.write_authority_records(&mut journal)?;
+            match journal.phase {
+                IdentityMigrationPhase::WritingAuthority => {
+                    self.write_authority_records(&mut journal)?
+                }
+                IdentityMigrationPhase::BackfillingCompatibility
+                | IdentityMigrationPhase::DualReadWrite
+                | IdentityMigrationPhase::SwitchingReads
+                | IdentityMigrationPhase::LegacyFallbackRemoved
+                | IdentityMigrationPhase::Completed => {}
+                IdentityMigrationPhase::Failed => return self.failed_migration_error(&journal),
+                phase => {
+                    return Err(ProductStoreError::InvalidRecord {
+                        kind: "identity_migration_phase",
+                        reason: format!("unsupported migration phase through authority: {phase:?}"),
+                    });
+                }
             }
             Ok(())
         })

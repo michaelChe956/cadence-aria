@@ -5,7 +5,6 @@ use super::{
     RuntimeBindingProviderConfigInput, coding_provider_config_snapshot_for_runtime_binding,
 };
 use crate::product::coding_attempt_store::CodingGroupInitializationPhase;
-use crate::product::issue_store::IssueStore;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 pub async fn create_group_coding_attempt(
@@ -63,17 +62,7 @@ pub async fn create_group_coding_attempt(
             id: plan_id.clone(),
         })
     })?;
-    let repository_id = IssueStore::new(app_paths.clone())
-        .get(&project_id, &issue_id)
-        .map_err(product_store_api_error)?
-        .repo_id
-        .ok_or_else(|| {
-            product_store_api_error(ProductStoreError::NotFound {
-                kind: "repository",
-                id: format!("issue:{issue_id}:repo_id"),
-            })
-        })?;
-    let repository = find_repository(&app_paths, &project_id, &repository_id)?;
+    let repository = resolve_issue_selection_repository(&app_paths, &project_id, &issue_id)?;
     if !is_git_repo(&repository.path) {
         return Err(ApiError::validation(
             "repository_path_not_git_repo",
@@ -252,6 +241,34 @@ pub async fn create_group_coding_attempt(
         .advance_group_initialization_phase(&journal, CodingGroupInitializationPhase::Completed)
         .map_err(coding_group_attempt_incomplete_api_error)?;
     Ok(Json(coding_attempt_dto(&persisted_attempt)))
+}
+
+fn resolve_issue_selection_repository(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<RepositoryRecord> {
+    #[derive(serde::Deserialize)]
+    struct IssueCodebaseSelection {
+        focus: Vec<crate::product::logical_codebase::LogicalRepositoryId>,
+    }
+
+    let selection: IssueCodebaseSelection = crate::product::json_store::read_json(
+        &app_paths
+            .issue_root(project_id, issue_id)
+            .join("codebase-selection.json"),
+    )
+    .map_err(product_store_api_error)?;
+    let [logical_repository_id] = selection.focus.as_slice() else {
+        return Err(product_store_api_error(ProductStoreError::Ambiguous {
+            kind: "issue_codebase_selection",
+            id: issue_id.to_string(),
+        }));
+    };
+    RepositoryStore::new(app_paths.clone())
+        .resolve_logical_repository(project_id, *logical_repository_id)
+        .map(|(_, _, repository)| repository)
+        .map_err(product_store_api_error)
 }
 
 fn issue_worktree_active_api_error(error: ProductStoreError) -> ApiError {
