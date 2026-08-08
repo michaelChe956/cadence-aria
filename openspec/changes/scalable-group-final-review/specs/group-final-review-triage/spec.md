@@ -1,201 +1,78 @@
-# group-final-review-triage Specification
-
 ## ADDED Requirements
 
-### Requirement: 组级审查的材料、容量与输出失败必须落地可区分的阻塞门禁
+### Requirement: 新 Group attempt 的最终审查不得调用 Group Reviewer Provider
 
-组级审查在产出评审结论之前发生的失败 MUST 落地阻塞门禁，并 MUST 使用与既有人工路由决策互不相同的原因码。系统 MUST NOT 因这些失败而静默退出流程或产生通过结论。
+当 Group attempt 的每个 Work Item 已完成其独立 Coder 与 Code Reviewer 流程后，系统 MUST NOT 启动 Internal Group Reviewer、shard、reduction 或任何替代的自动语义审查 Provider 调用。系统 MUST 直接生成组就绪检查并进入人工最终确认流程。
 
-需要区分的门禁种类为：容量超限、材料溢出、权威身份缺失、分片输出无效、归约输出无效。
+#### Scenario: 全部 Work Item 独立审查完成
 
-门禁原因码用于区分门禁种类；运行失败码用于区分同一门禁种类下的具体成因，例如传输失败重试耗尽与结论转写补救无效。同一门禁种类 MAY 对应多个运行失败码，门禁 MUST 同时记录门禁原因码与运行失败码。
+- **WHEN** Group attempt 的全部 Work Item 已完成且各自拥有最新的通过 Code Review 记录
+- **THEN** 系统 MUST 生成组就绪检查，MUST NOT 创建 Internal Group Reviewer、shard 或 reduction Provider 运行
 
-#### Scenario: 容量超限落地门禁
+#### Scenario: Group Final 不产生 Provider 输出无效门禁
 
-- **WHEN** 组级审查启动时已完成且通过权威校验的 Work Item 数超过支持上限
-- **THEN** 系统 MUST 落地容量超限阻塞门禁，attempt 状态 MUST 为阻塞，MUST NOT 调用任何 Provider
+- **WHEN** 新 Group attempt 到达最终审查步骤
+- **THEN** 系统 MUST NOT 因不存在的 group Provider 输出创建 `reduction_output_invalid`、shard 输出无效或对应重试门禁
 
-#### Scenario: 材料溢出落地门禁
+### Requirement: 组就绪检查必须提供客观的人工审查证据
 
-- **WHEN** 组级审查构建的分片或归约输入超过字节硬上限
-- **THEN** 系统 MUST 落地材料溢出阻塞门禁，attempt 状态 MUST 为阻塞，MUST NOT 调用 Provider
+组就绪检查 MUST 从权威执行记录生成每个 Work Item 的 UnitRun `start_commit`、terminal completion commit、完整提交区间及有序提交引用、最新独立 Code Review 的结论/发现/摘要与原始输出证据引用、resolved handoff 和绑定的 Work Item Plan revision。所有文件与 diff 引用 MUST 由 `start_commit..completion_commit` 区间派生，MUST NOT 只使用末尾 commit 的父提交 diff。检查 MUST 验证全部 Unit 已完成、必需 completion commit 与独立审查记录存在、handoff 与依赖解析一致，以及 attempt 的计划 binding 与活跃 revision 一致。
 
-#### Scenario: 分片输出无效落地门禁
+该检查 MUST NOT 生成代码语义 finding、重新解释 Code Review 结论、执行新的文件写入范围判断或自动启动 Coder rework 与 Plan Repair。`start_commit` 与 completion commit 相同 MUST 表示空观察区间，而非把该起始提交相对父提交的改动归属给当前 Work Item。
 
-- **WHEN** 某个分片的 Provider 发生传输失败且重试耗尽，或正常完成但未产出可解析结论且结论转写补救未通过保真校验
-- **THEN** 系统 MUST 落地分片输出无效阻塞门禁，attempt 状态 MUST 为阻塞
+#### Scenario: 组就绪检查完整
 
-#### Scenario: 归约输出无效落地门禁
+- **WHEN** 全部 Work Item 的权威 UnitRun、completion commit、独立审查、handoff 和计划 binding 均一致
+- **THEN** 系统 MUST 持久化包含这些证据的完整组就绪检查，并允许进入人工最终确认
 
-- **WHEN** 归约阶段的 Provider 发生传输失败且重试耗尽，或正常完成但未产出可解析结论且结论转写补救未通过保真校验
-- **THEN** 系统 MUST 落地归约输出无效阻塞门禁，attempt 状态 MUST 为阻塞
+#### Scenario: Coder rework 的全部提交在人工审查中可见
 
-#### Scenario: 权威身份缺失落地门禁
+- **WHEN** 一个 Work Item 在同一 UnitRun 内先由 Coder 创建提交、后经 Code Review rework 创建新的 terminal commit
+- **THEN** 就绪检查和人工 Final 面板 MUST 展示从该 UnitRun `start_commit` 至 terminal commit 的完整提交区间、相关 diff/evidence 与独立审查结论，不得只展示返修提交
 
-- **WHEN** 组级审查材料编译因权威校验不通过或单位审查结论身份缺失而失败
-- **THEN** 系统 MUST 落地权威身份缺失阻塞门禁，MUST NOT 调用 Provider
+#### Scenario: Coder 未产生新的可观察提交
 
-#### Scenario: 同一门禁种类下运行失败码可区分
+- **WHEN** 一个 Work Item 的 terminal completion commit 等于其 UnitRun `start_commit`
+- **THEN** 就绪检查 MUST 将其展示为无可观察 Git 增量，并保留该 Coder 的原始输出引用；系统 MUST NOT 将起始提交的父提交 diff 显示为当前 Work Item 的证据
 
-- **WHEN** 某个分片先因传输失败重试耗尽落地输出无效门禁，另一次因结论转写补救无效落地输出无效门禁
-- **THEN** 两次门禁的门禁原因码 MAY 相同，但记录的运行失败码 MUST 互不相同
+#### Scenario: 缺少客观完成证据
 
-#### Scenario: 五类门禁原因码互不相同
+- **WHEN** 任一 Work Item 缺少 completion commit、最新独立审查记录、resolved handoff 或与活跃计划不一致的 binding
+- **THEN** 系统 MUST 持久化具体的不一致诊断，MUST NOT 允许人工最终确认完成该 attempt
 
-- **WHEN** 分别以容量超限、材料溢出、分片输出无效、归约输出无效、权威身份缺失落地门禁
-- **THEN** 五次落地的原因码 MUST 互不相同，且 MUST 与既有人工路由决策的原因码互不相同
+### Requirement: 人工最终确认是新 Group attempt 的唯一最终语义决策
 
-### Requirement: 组级审查进入终态时必须按 Attempt owner 释放共享 worktree 锁
+完整的组就绪检查完成后，系统 MUST 向用户展示全部 Work Item 的客观证据并等待明确的人工 Final Confirm。只有该确认才可以使 Group attempt 进入完成终态。人工最终确认 MUST NOT 生成新的 Coder rework、Plan Repair 或自动 Provider 调用。
 
-组级审查使 Coding Attempt 进入失败、用户终止、删除、最终确认或组完成终态时，系统 MUST 通过统一的 owner-based 释放入口处理共享 worktree 锁。该入口 MUST 仅以 attempt_id 与持久化的 current_lock_owner_id 是否相等判断是否释放，MUST NOT 以 current_work_item_id、回退的首个 Work Item 或调用方传入的 Work Item 作为前置条件。
+#### Scenario: 用户确认完整组
 
-锁不存在或 owner 不匹配时 MUST 幂等 no-op；owner 匹配时 MUST 清除该 attempt 所拥有的共享锁和运行态游标。清理错误 MUST 记录为诊断，MUST NOT 覆盖已经确定的材料、Provider 或业务失败原因，也 MUST NOT 阻止 Attempt 进入原定终态。
+- **WHEN** 用户已查看完整组就绪检查并执行明确的 Final Confirm
+- **THEN** 系统 MUST 完成该 Group attempt，且 MUST 不启动任何 Group Reviewer Provider
 
-#### Scenario: 组级材料失败释放已转移的共享锁
+#### Scenario: 人工确认不绕过不完整检查
 
-- **WHEN** 组级审查因材料编译失败而使 Attempt 失败，且该 Attempt 拥有的共享锁已转移到不是首个 Work Item 的 Work Item
-- **THEN** 系统 MUST 按 attempt owner 释放该锁，MUST 保留材料编译失败作为用户可见的原始失败原因
+- **WHEN** 组就绪检查包含未解决的不一致诊断
+- **THEN** 系统 MUST 拒绝 Final Confirm 并保持 attempt 未完成
 
-#### Scenario: 终态释放不依赖当前 Work Item
+### Requirement: 人工 Final Confirm 保留既有终态完整性检查
 
-- **WHEN** 一个进入失败、用户终止、删除、最终确认或组完成终态的 Attempt 的 current_work_item_id 为空或与共享锁记录的 active Work Item 不同
-- **THEN** 系统 MUST 仍按 attempt owner 尝试释放共享锁，MUST NOT 因 Work Item 不匹配留下锁
+完整组就绪检查只决定用户是否具备作出最终语义决定的证据，不得取消既有的 completion binding、基于 UnitRun 完整提交区间的写入范围检查或 shared worktree 清洁性检查。用户执行 Final Confirm 时，系统 MUST 继续执行这些既有终态检查；其失败 MUST 以既有确定性诊断或人工清理动作呈现，MUST NOT 转换为 Group Reviewer finding、Coder rework 或 Plan Repair。
 
-#### Scenario: 不属于该 Attempt 的锁保持不变
+#### Scenario: 范围外残留不被自动处理
 
-- **WHEN** 一个终态 Attempt 尝试清理共享 worktree 锁，但 current_lock_owner_id 属于另一 Attempt
-- **THEN** 系统 MUST 不修改该锁，并将此次清理视为成功的幂等 no-op
+- **WHEN** Coder 报告共享 worktree 中存在不属于当前 Work Item `write_policy` 的未跟踪或修改内容，且组就绪检查其余证据完整
+- **THEN** 系统 MUST 不自动暂存、提交或删除该残留；若 Final Confirm 命中既有 shared-worktree-clean 检查，系统 MUST 保留其人工清理语义而不是创建新的 Group Review 门禁
 
-#### Scenario: 清理错误不覆盖原始失败
+### Requirement: 历史 Group Final 产物保持可读且不得触发新 Provider 调用
 
-- **WHEN** 组级审查已确定材料或 Provider 失败，随后 owner-based 锁释放发生存储错误
-- **THEN** 系统 MUST 保留并返回原始失败原因，MAY 记录锁清理诊断，但 MUST NOT 将用户可见失败替换为锁清理错误
+已持久化的 shard、reduction 或 InternalPrReview 产物 MUST 保持可读，以供历史 attempt 审计。恢复未终态的历史 Group attempt 时，系统 MUST 使用权威记录生成组就绪检查并转入人工最终确认；系统 MUST NOT 为恢复而启动新的 shard、reduction 或 Internal Group Reviewer 调用。权威身份不一致时 MUST 失败关闭并显示诊断。
 
-### Requirement: 组级失败门禁必须提供按环节重试的动作
+#### Scenario: 恢复含 reduction 产物的历史 attempt
 
-组级审查的失败门禁 MUST 提供重试动作，且重试 MUST 只作用于失败环节。
+- **WHEN** 历史 Group attempt 已保存 reduction 原始输出或审查产物但尚未完成
+- **THEN** 系统 MUST 保持其可读取，并以当前权威记录生成组就绪检查，MUST NOT 重新调用 reduction Provider
 
-#### Scenario: 分片失败门禁只重试该分片
+#### Scenario: 历史身份不一致
 
-- **WHEN** 用户在分片输出无效门禁上执行重试
-- **THEN** 系统 MUST 仅重新执行该分片，MUST NOT 重新执行输入未变化的其他成功分片
-
-#### Scenario: 归约失败门禁只重试归约
-
-- **WHEN** 用户在归约输出无效门禁上执行重试
-- **THEN** 系统 MUST 仅重新执行归约阶段，MUST NOT 重新执行输入未变化的成功分片
-
-#### Scenario: 溢出门禁重试只重建 Prompt 并重新度量
-
-- **WHEN** 用户在材料溢出门禁上执行重试，且输入事实未变化
-- **THEN** 系统 MUST 复用原快照内容重新构建 Prompt 并重新度量字节，MUST NOT 重新采集产生不同的快照内容；仍超过硬上限时 MUST 再次落地溢出门禁
-
-#### Scenario: 容量门禁与身份门禁的重试重新校验前置条件
-
-- **WHEN** 用户在容量超限或权威身份缺失门禁上执行重试
-- **THEN** 系统 MUST 重新校验 Work Item 数量或权威 Binding 与身份快照，条件仍不满足时 MUST 再次落地对应门禁
-
-### Requirement: 组级失败门禁必须单活并按优先级替换
-
-同一时刻组级审查 MUST 最多存在一个开放的失败门禁。新的失败 MUST 按固定优先级替换旧的开放失败门禁，被替换的门禁 MUST 关闭并保留审计记录。
-
-优先级 MUST 为：容量超限高于材料溢出，材料溢出高于身份缺失，身份缺失高于归约输出无效，归约输出无效高于分片输出无效。
-
-#### Scenario: 新失败替换旧失败门禁
-
-- **WHEN** 组级审查已有一个开放的分片输出无效门禁，随后归约材料编译发生溢出
-- **THEN** 系统 MUST 关闭分片输出无效门禁并落地材料溢出门禁，任一时刻 MUST 最多一个开放的失败门禁
-
-#### Scenario: 低优先级失败不得替换高优先级门禁
-
-- **WHEN** 组级审查已有一个开放的高优先级失败门禁，随后到达优先级更低的失败
-- **THEN** 系统 MUST 保留现有门禁，MUST 将新失败作为证据附加到该门禁，MUST NOT 关闭高优先级门禁或改用低优先级原因码
-
-#### Scenario: 同优先级失败合并证据不重开门禁
-
-- **WHEN** 组级审查已有一个开放的失败门禁，随后到达相同原因码的失败
-- **THEN** 系统 MUST 复用该门禁并合并证据，MUST NOT 关闭后重开或产生第二个门禁
-
-#### Scenario: 门禁落地与替换必须原子
-
-- **WHEN** 多个失败并发到达并触发门禁落地或替换
-- **THEN** 门禁的落地与替换 MUST 为单个原子操作，任一时刻 MUST 最多一个开放的失败门禁
-
-#### Scenario: 被替换门禁保留审计记录
-
-- **WHEN** 一个开放的失败门禁被更高优先级失败替换
-- **THEN** 系统 MUST 关闭旧门禁并 MUST 保留其审计记录，MUST NOT 物理删除
-
-#### Scenario: 低优先级失败不得替换高优先级门禁
-
-- **WHEN** 组级审查已有一个开放的高优先级失败门禁，随后到达优先级更低的失败
-- **THEN** 系统 MUST 保留现有门禁，MUST 将该低优先级失败记录为现有门禁的附加证据，MUST NOT 关闭或替换现有门禁
-
-#### Scenario: 同优先级失败合并证据
-
-- **WHEN** 组级审查已有一个开放的失败门禁，随后到达同一门禁种类的失败
-- **THEN** 系统 MUST 复用现有门禁并合并其证据与运行失败码，MUST NOT 关闭后重开产生第二个门禁
-
-#### Scenario: 门禁落地与替换必须原子
-
-- **WHEN** 多个失败并发触发门禁落地或替换
-- **THEN** 门禁的落地与替换 MUST 作为单一原子操作完成，任一时刻 MUST 最多存在一个开放的失败门禁
-
-#### Scenario: 失败门禁与评审结论门禁不叠加
-
-- **WHEN** 组级审查因容量、材料、身份或输出失败而落地失败门禁
-- **THEN** 系统 MUST NOT 同时落地由评审结论驱动的门禁
-
-## MODIFIED Requirements
-
-### Requirement: 分诊门禁提供可操作动作
-
-评审结论分诊门禁 MUST 提供重试评审、人工继续、终止三个动作，使用户在任何停机原因下都能继续或结束流程。
-
-组级失败门禁（容量超限、材料溢出、权威身份缺失、分片输出无效、归约输出无效）MUST 只提供重试该环节与终止两个动作，MUST NOT 提供人工继续。系统 MUST NOT 允许任何动作把组级失败门禁转为通过结论。
-
-#### Scenario: 评审结论门禁动作可用
-
-- **WHEN** internal PR review 的评审结论分诊门禁向用户呈现
-- **THEN** 动作集合 MUST 含重试评审、人工继续、终止
-
-#### Scenario: 组级失败门禁不提供人工继续
-
-- **WHEN** 组级失败门禁向用户呈现
-- **THEN** 动作集合 MUST 只含重试该环节与终止，MUST NOT 含人工继续
-
-#### Scenario: 失败门禁不得被伪装为通过
-
-- **WHEN** 用户在组级失败门禁上执行任意可用动作
-- **THEN** 系统 MUST NOT 产生通过结论，MUST NOT 完成组级审查
-
-#### Scenario: 分诊动作不触发计划修订
-
-- **WHEN** 用户在评审结论分诊门禁上执行任意动作
-- **THEN** MUST NOT 唤起计划修订流程
-
-### Requirement: 同一次评审结论只落地一个阻塞门禁
-
-系统 MUST NOT 为同一次评审结论落地多个阻塞门禁。门禁落地判定 MUST 由流程决策驱动，且各判定条件 MUST 互斥。
-
-在组级分片与归约架构下，评审结论门禁 MUST 以归约阶段产出的最终评审结论为依据。分片结论 MUST NOT 独立落地评审结论门禁。
-
-#### Scenario: 每次结论至多一个门禁
-
-- **WHEN** internal PR review 完成任意一次评审并推出流程决策
-- **THEN** 落地的阻塞门禁数量 MUST 不超过一个
-
-#### Scenario: 阻塞结论与分诊决策不重复落地
-
-- **WHEN** 评审结论为阻塞，且该结论推出的流程决策属于需要人工介入的四类之一
-- **THEN** 系统 MUST 只落地一个阻塞门禁，MUST NOT 因结论与决策各自落地而产生两个
-
-#### Scenario: 组级归约结论至多一个门禁
-
-- **WHEN** 组级审查完成任意一次归约并推出流程决策
-- **THEN** 落地的评审结论门禁数量 MUST 不超过一个
-
-#### Scenario: 分片结论不独立落地评审门禁
-
-- **WHEN** 某个分片给出要求修改或阻塞结论
-- **THEN** 系统 MUST NOT 据此落地评审结论门禁，MUST 等待归约阶段产出最终结论后再判定
+- **WHEN** 恢复历史 Group attempt 时其 UnitRun、handoff 或 plan binding 无法唯一校验
+- **THEN** 系统 MUST 失败关闭并提供身份诊断，MUST NOT 推断或重建 Group Provider 审查结论
