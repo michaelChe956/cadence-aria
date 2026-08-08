@@ -17,7 +17,8 @@ pub use reference_scanner::{
 };
 pub use registration::{
     AggregateRootPreflight, AggregateRootPreflightError, AttachOnlyRegistrationInput,
-    CanonicalAggregateRoot, LogicalCodebaseRegistrationCoordinator,
+    CanonicalAggregateRoot, LogicalCodebaseRegistrationCoordinator, RegistrationCandidate,
+    RegistrationCandidateState, RegistrationPreflightInput, RegistrationPreflightResult,
 };
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,

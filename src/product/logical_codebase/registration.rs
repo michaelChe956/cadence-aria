@@ -1,13 +1,16 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::logical_codebase::{
-    CodebaseMemberRecord, LogicalCodebaseFeature, LogicalCodebaseStore, RepositoryType,
+    CodebaseMemberRecord, IdentityRegistryStore, LogicalCodebaseFeature, LogicalCodebaseStore,
+    RepositorySourceIdentity, RepositoryType,
 };
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 
@@ -15,6 +18,118 @@ use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalAggregateRoot {
     pub canonical_path: PathBuf,
+}
+
+/// The caller-owned preflight manifest. An empty `paths` list requests
+/// recursive child Git-directory discovery below the already admitted
+/// aggregate root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationPreflightInput {
+    pub project_id: String,
+    pub aggregate_root: CanonicalAggregateRoot,
+    pub paths: Vec<PathBuf>,
+}
+
+/// A category assigned to one submitted or discovered registration candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationCandidateState {
+    Eligible,
+    NonGit,
+    Duplicate,
+    Nested,
+    /// Retained in the public classification vocabulary. A dirty repository
+    /// remains registrable and is reported as [`Self::NeedsAttention`].
+    Dirty,
+    Missing,
+    OutsideRoot,
+    NeedsAttention,
+}
+
+/// The complete read-only observation made for one registration candidate.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegistrationCandidate {
+    pub submitted_path: PathBuf,
+    pub canonical_path: Option<PathBuf>,
+    pub git_root: Option<PathBuf>,
+    pub source_identity: Option<RepositorySourceIdentity>,
+    pub state: RegistrationCandidateState,
+    pub reason: String,
+    pub preflight_revision: String,
+}
+
+impl RegistrationCandidate {
+    fn missing(submitted_path: PathBuf) -> Self {
+        Self::new(
+            submitted_path,
+            None,
+            None,
+            None,
+            RegistrationCandidateState::Missing,
+            "path_missing",
+            None,
+            None,
+        )
+    }
+
+    fn outside_root(submitted_path: PathBuf, canonical_path: PathBuf) -> Self {
+        Self::new(
+            submitted_path,
+            Some(canonical_path),
+            None,
+            None,
+            RegistrationCandidateState::OutsideRoot,
+            "outside_aggregate_root",
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        submitted_path: PathBuf,
+        canonical_path: Option<PathBuf>,
+        git_root: Option<PathBuf>,
+        source_identity: Option<RepositorySourceIdentity>,
+        state: RegistrationCandidateState,
+        reason: impl Into<String>,
+        head: Option<&str>,
+        status: Option<&str>,
+    ) -> Self {
+        let preflight_revision = preflight_revision(
+            canonical_path.as_deref(),
+            git_root.as_deref(),
+            source_identity.as_ref(),
+            head,
+            status,
+        );
+        Self {
+            submitted_path,
+            canonical_path,
+            git_root,
+            source_identity,
+            state,
+            reason: reason.into(),
+            preflight_revision,
+        }
+    }
+}
+
+/// A complete, independently classified registration preflight result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationPreflightResult {
+    pub project_id: String,
+    pub aggregate_root: CanonicalAggregateRoot,
+    pub candidates: Vec<RegistrationCandidate>,
+}
+
+impl RegistrationPreflightResult {
+    pub fn count(&self, state: RegistrationCandidateState) -> usize {
+        self.candidates
+            .iter()
+            .filter(|candidate| candidate.state == state)
+            .count()
+    }
 }
 
 /// A deterministic admission failure for the aggregate root.
@@ -374,6 +489,178 @@ impl LogicalCodebaseRegistrationCoordinator {
         }
     }
 
+    /// Reads a submitted manifest (or discovers child Git directories when the
+    /// manifest is empty) and classifies every candidate independently.
+    /// This method only invokes read-only Git probes and never changes a
+    /// checkout, index, ref, config, or branch.
+    pub fn preflight(
+        &self,
+        input: RegistrationPreflightInput,
+    ) -> Result<RegistrationPreflightResult, ProductStoreError> {
+        validate_relative_id(&input.project_id)?;
+        let submitted_paths = if input.paths.is_empty() {
+            discover_git_directories(&input.aggregate_root.canonical_path)?
+        } else {
+            input.paths
+        };
+        let mut candidates = Vec::with_capacity(submitted_paths.len());
+        let mut seen = Vec::new();
+
+        for submitted_path in submitted_paths {
+            let (candidate, evidence) = match fs::canonicalize(&submitted_path) {
+                Err(_) => (RegistrationCandidate::missing(submitted_path), None),
+                Ok(canonical_path)
+                    if !canonical_path.starts_with(&input.aggregate_root.canonical_path) =>
+                {
+                    (
+                        RegistrationCandidate::outside_root(submitted_path, canonical_path),
+                        None,
+                    )
+                }
+                Ok(canonical_path) => self.classify_git_candidate(
+                    &input.project_id,
+                    submitted_path,
+                    canonical_path,
+                    &seen,
+                )?,
+            };
+            if let Some(evidence) = evidence {
+                seen.push(evidence);
+            }
+            candidates.push(candidate);
+        }
+
+        Ok(RegistrationPreflightResult {
+            project_id: input.project_id,
+            aggregate_root: input.aggregate_root,
+            candidates,
+        })
+    }
+
+    fn classify_git_candidate(
+        &self,
+        project_id: &str,
+        submitted_path: PathBuf,
+        canonical_path: PathBuf,
+        seen: &[GitCandidateEvidence],
+    ) -> Result<(RegistrationCandidate, Option<GitCandidateEvidence>), ProductStoreError> {
+        if !canonical_path.is_dir() {
+            return Ok((
+                RegistrationCandidate::new(
+                    submitted_path,
+                    Some(canonical_path),
+                    None,
+                    None,
+                    RegistrationCandidateState::NonGit,
+                    "not_git_repository",
+                    None,
+                    None,
+                ),
+                None,
+            ));
+        }
+
+        let Some(git_root) = git_probe(&canonical_path, &["rev-parse", "--show-toplevel"])? else {
+            return Ok((
+                RegistrationCandidate::new(
+                    submitted_path,
+                    Some(canonical_path),
+                    None,
+                    None,
+                    RegistrationCandidateState::NonGit,
+                    "not_git_repository",
+                    None,
+                    None,
+                ),
+                None,
+            ));
+        };
+        let git_root = fs::canonicalize(git_root.trim()).map_err(|error| {
+            ProductStoreError::Io(format!(
+                "canonicalize Git root reported for {}: {error}",
+                canonical_path.display()
+            ))
+        })?;
+        let git_dir = git_probe(&canonical_path, &["rev-parse", "--git-dir"])?
+            .ok_or_else(|| git_probe_inconsistent(&canonical_path, "git_dir"))?;
+        let git_dir = PathBuf::from(git_dir.trim());
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            canonical_path.join(git_dir)
+        };
+        let canonical_git_dir = fs::canonicalize(&git_dir).map_err(|error| {
+            ProductStoreError::Io(format!(
+                "canonicalize Git directory {} reported for {}: {error}",
+                git_dir.display(),
+                canonical_path.display()
+            ))
+        })?;
+        let canonical_origin =
+            git_probe(&canonical_path, &["config", "--get", "remote.origin.url"])?.and_then(
+                |origin| {
+                    let origin = origin.trim();
+                    (!origin.is_empty()).then(|| origin.to_string())
+                },
+            );
+        let status = git_probe(&canonical_path, &["status", "--porcelain"])?
+            .ok_or_else(|| git_probe_inconsistent(&canonical_path, "status"))?;
+        // An unborn repository is still a Git repository. Its absent HEAD is
+        // represented by an empty component in the revision digest.
+        let head = git_probe(&canonical_path, &["rev-parse", "HEAD"])?;
+        let source_identity = RepositorySourceIdentity::from_git_parts(
+            &canonical_path,
+            canonical_git_dir.clone(),
+            canonical_origin,
+        );
+        let evidence = GitCandidateEvidence {
+            git_root: git_root.clone(),
+            canonical_git_dir,
+            source_key_digest: source_identity.key_digest.clone(),
+        };
+
+        let duplicate_reason = if seen.iter().any(|prior| {
+            prior.canonical_git_dir == evidence.canonical_git_dir
+                || prior.source_key_digest == evidence.source_key_digest
+        }) {
+            Some("duplicate_source_identity")
+        } else if IdentityRegistryStore::new(self.paths.clone())
+            .find_by_source(project_id, &source_identity)?
+            .is_some()
+        {
+            Some("already_registered")
+        } else {
+            None
+        };
+        let nested = seen.iter().any(|prior| {
+            git_root.starts_with(&prior.git_root) || prior.git_root.starts_with(&git_root)
+        });
+
+        let (state, reason) = if let Some(reason) = duplicate_reason {
+            (RegistrationCandidateState::Duplicate, reason)
+        } else if nested {
+            (RegistrationCandidateState::Nested, "nested_repository")
+        } else if !status.is_empty() {
+            (RegistrationCandidateState::NeedsAttention, "dirty_worktree")
+        } else {
+            (RegistrationCandidateState::Eligible, "eligible")
+        };
+
+        Ok((
+            RegistrationCandidate::new(
+                submitted_path,
+                Some(canonical_path),
+                Some(git_root),
+                Some(source_identity),
+                state,
+                reason,
+                head.as_deref().map(str::trim),
+                Some(&status),
+            ),
+            Some(evidence),
+        ))
+    }
+
     pub fn attach_member(
         &self,
         input: AttachOnlyRegistrationInput,
@@ -427,6 +714,117 @@ impl LogicalCodebaseRegistrationCoordinator {
     }
 }
 
+#[derive(Debug, Clone)]
+struct GitCandidateEvidence {
+    git_root: PathBuf,
+    canonical_git_dir: PathBuf,
+    source_key_digest: String,
+}
+
+fn discover_git_directories(root: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
+    let mut directories = Vec::new();
+    discover_git_directories_recursive(root, root, &mut directories)?;
+    directories.sort();
+    Ok(directories)
+}
+
+fn discover_git_directories_recursive(
+    root: &Path,
+    directory: &Path,
+    directories: &mut Vec<PathBuf>,
+) -> Result<(), ProductStoreError> {
+    let entries = fs::read_dir(directory).map_err(|error| {
+        ProductStoreError::Io(format!(
+            "read aggregate directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            ProductStoreError::Io(format!(
+                "read aggregate directory entry {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            ProductStoreError::Io(format!(
+                "inspect aggregate entry {}: {error}",
+                path.display()
+            ))
+        })?;
+        if !file_type.is_dir() || path.file_name().is_some_and(|name| name == ".git") {
+            continue;
+        }
+        if path == root {
+            continue;
+        }
+        if path.join(".git").exists() {
+            directories.push(path.clone());
+        }
+        discover_git_directories_recursive(root, &path, directories)?;
+    }
+    Ok(())
+}
+
+/// Runs a Git probe without changing the checkout. A nonzero Git exit is an
+/// expected negative observation (for example, a non-Git directory or a
+/// missing origin) and therefore returns `Ok(None)`.
+fn git_probe(
+    repository_path: &Path,
+    arguments: &[&str],
+) -> Result<Option<String>, ProductStoreError> {
+    let output = Command::new("git")
+        .current_dir(repository_path)
+        .args(arguments)
+        .output()
+        .map_err(|error| {
+            ProductStoreError::Io(format!("run git in {}: {error}", repository_path.display()))
+        })?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    String::from_utf8(output.stdout)
+        .map(Some)
+        .map_err(|error| ProductStoreError::Io(format!("Git output was not UTF-8: {error}")))
+}
+
+fn git_probe_inconsistent(repository_path: &Path, observation: &str) -> ProductStoreError {
+    ProductStoreError::Io(format!(
+        "Git probe for {} succeeded without {observation} in {}",
+        repository_path.display(),
+        repository_path.display()
+    ))
+}
+
+fn preflight_revision(
+    canonical_path: Option<&Path>,
+    git_root: Option<&Path>,
+    source_identity: Option<&RepositorySourceIdentity>,
+    head: Option<&str>,
+    status: Option<&str>,
+) -> String {
+    let status_digest = format!(
+        "sha256:{:x}",
+        Sha256::digest(status.unwrap_or_default().as_bytes())
+    );
+    let payload = format!(
+        "{}\0{}\0{}\0{}\0{}",
+        canonical_path
+            .map(|path| path.to_string_lossy())
+            .unwrap_or_default(),
+        git_root
+            .map(|path| path.to_string_lossy())
+            .unwrap_or_default(),
+        source_identity
+            .map(|identity| identity.key_digest.as_str())
+            .unwrap_or_default(),
+        head.unwrap_or_default(),
+        status_digest,
+    );
+    format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -451,6 +849,143 @@ mod tests {
         head_before: String,
         branch_before: String,
         status_before: String,
+    }
+
+    struct ScanFixture {
+        _temp: tempfile::TempDir,
+        paths: ProductAppPaths,
+        root: CanonicalAggregateRoot,
+        clean_git: PathBuf,
+        non_git: PathBuf,
+        nested_git: PathBuf,
+        dirty_git: PathBuf,
+        missing: PathBuf,
+        outside: PathBuf,
+        coordinator: LogicalCodebaseRegistrationCoordinator,
+    }
+
+    #[test]
+    fn preflight_groups_mixed_manifest_and_marks_dirty_repository_needs_attention() {
+        let fixture = scan_fixture();
+        let result = fixture
+            .coordinator
+            .preflight(RegistrationPreflightInput {
+                project_id: "project_0001".into(),
+                aggregate_root: fixture.root.clone(),
+                paths: vec![
+                    fixture.clean_git.clone(),
+                    fixture.non_git.clone(),
+                    fixture.clean_git.clone(),
+                    fixture.nested_git.clone(),
+                    fixture.dirty_git.clone(),
+                    fixture.missing.clone(),
+                    fixture.outside.clone(),
+                ],
+            })
+            .unwrap();
+
+        assert_eq!(result.count(RegistrationCandidateState::Eligible), 1);
+        assert_eq!(result.count(RegistrationCandidateState::NonGit), 1);
+        assert_eq!(result.count(RegistrationCandidateState::Duplicate), 1);
+        assert_eq!(result.count(RegistrationCandidateState::Nested), 1);
+        assert_eq!(result.count(RegistrationCandidateState::NeedsAttention), 1);
+        assert_eq!(result.count(RegistrationCandidateState::Missing), 1);
+        assert_eq!(result.count(RegistrationCandidateState::OutsideRoot), 1);
+    }
+
+    #[test]
+    fn preflight_discovers_direct_child_repositories_and_registry_duplicates() {
+        let fixture = scan_fixture();
+        let initial = fixture
+            .coordinator
+            .preflight(RegistrationPreflightInput {
+                project_id: "project_0001".into(),
+                aggregate_root: fixture.root.clone(),
+                paths: vec![],
+            })
+            .unwrap();
+        assert_eq!(initial.count(RegistrationCandidateState::Eligible), 1);
+        assert_eq!(initial.count(RegistrationCandidateState::NeedsAttention), 1);
+        assert_eq!(initial.count(RegistrationCandidateState::Nested), 1);
+
+        let clean = initial
+            .candidates
+            .iter()
+            .find(|candidate| candidate.state == RegistrationCandidateState::Eligible)
+            .unwrap();
+        let source_identity = clean.source_identity.clone().unwrap();
+        IdentityRegistryStore::new(fixture.paths.clone())
+            .upsert_active(
+                "project_0001",
+                crate::product::logical_codebase::IdentityRegistryEntry::active(
+                    source_identity,
+                    crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::nil()),
+                    "repository_0001".into(),
+                    crate::product::logical_codebase::RepositoryCheckoutId(uuid::Uuid::nil()),
+                    "test-create".into(),
+                ),
+            )
+            .unwrap();
+
+        let duplicate = fixture
+            .coordinator
+            .preflight(RegistrationPreflightInput {
+                project_id: "project_0001".into(),
+                aggregate_root: fixture.root.clone(),
+                paths: vec![fixture.clean_git.clone()],
+            })
+            .unwrap();
+        assert_eq!(duplicate.count(RegistrationCandidateState::Duplicate), 1);
+        assert_eq!(duplicate.candidates[0].reason, "already_registered");
+    }
+
+    #[test]
+    fn preflight_revisions_change_with_head_and_worktree_status() {
+        let fixture = scan_fixture();
+        let first = fixture
+            .coordinator
+            .preflight(RegistrationPreflightInput {
+                project_id: "project_0001".into(),
+                aggregate_root: fixture.root.clone(),
+                paths: vec![fixture.clean_git.clone()],
+            })
+            .unwrap();
+        fs::write(fixture.clean_git.join("README.md"), "changed\n").unwrap();
+        let dirty = fixture
+            .coordinator
+            .preflight(RegistrationPreflightInput {
+                project_id: "project_0001".into(),
+                aggregate_root: fixture.root.clone(),
+                paths: vec![fixture.clean_git.clone()],
+            })
+            .unwrap();
+        assert_eq!(
+            dirty.candidates[0].state,
+            RegistrationCandidateState::NeedsAttention
+        );
+        assert_ne!(
+            first.candidates[0].preflight_revision,
+            dirty.candidates[0].preflight_revision
+        );
+
+        git(&fixture.clean_git, &["add", "README.md"]);
+        git(&fixture.clean_git, &["commit", "--quiet", "-m", "changed"]);
+        let committed = fixture
+            .coordinator
+            .preflight(RegistrationPreflightInput {
+                project_id: "project_0001".into(),
+                aggregate_root: fixture.root.clone(),
+                paths: vec![fixture.clean_git.clone()],
+            })
+            .unwrap();
+        assert_eq!(
+            committed.candidates[0].state,
+            RegistrationCandidateState::Eligible
+        );
+        assert_ne!(
+            dirty.candidates[0].preflight_revision,
+            committed.candidates[0].preflight_revision
+        );
     }
 
     #[test]
@@ -726,6 +1261,65 @@ mod tests {
             symlink_member,
             nested_worktree_member,
         }
+    }
+
+    fn scan_fixture() -> ScanFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join("aria-state"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "project".into(),
+                description: None,
+            })
+            .unwrap();
+
+        let root = temp.path().join("aggregate-root");
+        let clean_git = root.join("clean-git");
+        let non_git = root.join("non-git");
+        let nested_git = clean_git.join("nested-git");
+        let dirty_git = root.join("dirty-git");
+        let missing = root.join("missing");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&non_git).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        init_git_repository(&clean_git);
+        fs::write(clean_git.join(".git/info/exclude"), "nested-git/\n").unwrap();
+        init_git_repository(&nested_git);
+        init_git_repository(&dirty_git);
+        fs::write(dirty_git.join("README.md"), "dirty\n").unwrap();
+
+        let repositories = RepositoryStore::with_logical_codebase_feature(
+            paths.clone(),
+            LogicalCodebaseFeature::enabled(),
+        );
+        ScanFixture {
+            _temp: temp,
+            paths: paths.clone(),
+            root: CanonicalAggregateRoot {
+                canonical_path: fs::canonicalize(root).unwrap(),
+            },
+            clean_git,
+            non_git,
+            nested_git,
+            dirty_git,
+            missing,
+            outside,
+            coordinator: LogicalCodebaseRegistrationCoordinator::new(
+                paths,
+                repositories,
+                LogicalCodebaseFeature::enabled(),
+            ),
+        }
+    }
+
+    fn init_git_repository(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        git(path, &["init", "--quiet"]);
+        git(path, &["config", "user.email", "aria@example.invalid"]);
+        git(path, &["config", "user.name", "Aria Test"]);
+        fs::write(path.join("README.md"), "# Repository\n").unwrap();
+        git(path, &["add", "README.md"]);
+        git(path, &["commit", "--quiet", "-m", "initial"]);
     }
 
     fn attach_fixture() -> AttachFixture {
