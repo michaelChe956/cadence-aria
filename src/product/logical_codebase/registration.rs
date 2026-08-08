@@ -989,14 +989,17 @@ impl LogicalCodebaseRegistrationCoordinator {
             }
 
             item.retry_count = item.retry_count.saturating_add(1);
+            let profile = RepositoryProfileDetector::detect(&item.git_root)?;
+            item.repo_type = profile.repo_type.clone();
+            item.tech_stack = profile.tech_stack.clone();
             let item_key = batch_item_idempotency_key(batch_id, &item.source_digest);
             match self.attach_member(AttachOnlyRegistrationInput {
                 project_id: project_id.to_string(),
                 alias: item.alias.clone(),
                 role: item.role.clone(),
                 canonical_path: item.canonical_path.clone(),
-                repo_type: item.repo_type.clone(),
-                tech_stack: item.tech_stack.clone(),
+                repo_type: profile.repo_type,
+                tech_stack: profile.tech_stack,
                 idempotency_key: item_key,
             }) {
                 Ok(_) => {
@@ -1710,6 +1713,55 @@ fn preflight_revision(
     format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))
 }
 
+/// The repository profile observed from deterministic, read-only filesystem signals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedRepositoryProfile {
+    pub repo_type: RepositoryType,
+    pub tech_stack: Vec<String>,
+    pub initialization_commands: Vec<String>,
+}
+
+/// Detects member technology without invoking package managers, build tools, or
+/// repository initialization commands.
+pub struct RepositoryProfileDetector;
+
+impl RepositoryProfileDetector {
+    pub fn detect(root: &Path) -> Result<DetectedRepositoryProfile, ProductStoreError> {
+        let package_json = root.join("package.json").is_file();
+        let pnpm =
+            root.join("pnpm-lock.yaml").is_file() || root.join("pnpm-workspace.yaml").is_file();
+        let vite = ["vite.config.ts", "vite.config.js", "vite.config.mts"]
+            .iter()
+            .any(|name| root.join(name).is_file());
+
+        if package_json {
+            let mut tech_stack = vec!["package.json".to_string()];
+            if pnpm {
+                tech_stack.push("pnpm".to_string());
+            }
+            if vite {
+                tech_stack.push("vite".to_string());
+            }
+            let repo_type = if vite {
+                RepositoryType::Frontend
+            } else {
+                RepositoryType::Library
+            };
+            return Ok(DetectedRepositoryProfile {
+                repo_type,
+                tech_stack,
+                initialization_commands: Vec::new(),
+            });
+        }
+
+        Ok(DetectedRepositoryProfile {
+            repo_type: RepositoryType::Unknown,
+            tech_stack: Vec::new(),
+            initialization_commands: Vec::new(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1725,6 +1777,34 @@ mod tests {
     };
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
     use crate::product::repository_store::RepositoryStore;
+
+    #[test]
+    fn frontend_and_lib_manifest_profiles_are_detected_without_java_initialization() {
+        let fixture = tempfile::tempdir().unwrap();
+        let web = fixture.path().join("web");
+        let shared = fixture.path().join("shared");
+        fs::create_dir_all(&web).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(
+            web.join("package.json"),
+            r#"{"name":"web","scripts":{"test":"vitest"}}"#,
+        )
+        .unwrap();
+        fs::write(web.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'").unwrap();
+        fs::write(web.join("vite.config.ts"), "export default {}").unwrap();
+        fs::write(shared.join("package.json"), r#"{"name":"shared"}"#).unwrap();
+
+        let frontend = RepositoryProfileDetector::detect(&web).unwrap();
+        let library = RepositoryProfileDetector::detect(&shared).unwrap();
+        let parsed: RepositoryType = serde_json::from_str("\"lib\"").unwrap();
+
+        assert_eq!(frontend.repo_type, RepositoryType::Frontend);
+        assert_eq!(frontend.tech_stack, vec!["package.json", "pnpm", "vite"]);
+        assert!(frontend.initialization_commands.is_empty());
+        assert_eq!(library.repo_type, RepositoryType::Library);
+        assert!(library.initialization_commands.is_empty());
+        assert_eq!(parsed, RepositoryType::Library);
+    }
 
     struct AttachFixture {
         _root: tempfile::TempDir,
