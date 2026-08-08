@@ -45,3 +45,29 @@ fn group_final_readiness_rejects_complete_snapshot_with_diagnostics() {
         "complete snapshot must not carry diagnostics",
     );
 }
+
+#[test]
+fn group_final_readiness_rejects_non_empty_observation_even_when_commits_are_equal() {
+    // reviewer 边界：empty_observation == false 声明有可观察增量，
+    // 即便 start == completion 也不应绕过 commit_shas 非空要求。
+    let (_tmp, store, attempt) = setup();
+    let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
+    unit.commit_shas.clear();
+    unit.start_commit = Some("commit_unit_0001".to_string());
+    unit.completion_commit = Some("commit_unit_0001".to_string());
+    // empty_observation 保持默认 false（矛盾状态）
+    let snapshot = GroupFinalReadinessSnapshot {
+        attempt_id: attempt.id.clone(),
+        status: GroupFinalReadinessStatus::Complete,
+        units: vec![unit],
+        diagnostics: Vec::new(),
+        created_at: String::new(),
+    };
+
+    assert_invalid_group_final_readiness_snapshot(
+        store
+            .write_group_final_readiness_snapshot(&attempt, &snapshot)
+            .expect_err("non-empty observation must include commit range facts"),
+        "non-empty observation unit unit_0001 must include commit range facts",
+    );
+}

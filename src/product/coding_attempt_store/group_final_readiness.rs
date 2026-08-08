@@ -87,19 +87,6 @@ fn validate_snapshot(snapshot: &GroupFinalReadinessSnapshot) -> Result<(), Produ
                 unit.unit_id
             )));
         }
-        if !unit.empty_observation
-            && unit
-                .start_commit
-                .as_ref()
-                .zip(unit.completion_commit.as_ref())
-                .is_some_and(|(start, completion)| start != completion)
-            && unit.commit_shas.is_empty()
-        {
-            return Err(invalid_record(format!(
-                "non-empty observation unit {} must include commit range facts",
-                unit.unit_id
-            )));
-        }
         if snapshot.status == GroupFinalReadinessStatus::Complete {
             validate_complete_unit(unit)?;
         }
@@ -165,6 +152,12 @@ fn validate_complete_unit(
                 unit.unit_id
             )));
         }
+    }
+    if !unit.empty_observation && unit.commit_shas.is_empty() {
+        return Err(invalid_record(format!(
+            "non-empty observation unit {} must include commit range facts",
+            unit.unit_id
+        )));
     }
     Ok(())
 }
