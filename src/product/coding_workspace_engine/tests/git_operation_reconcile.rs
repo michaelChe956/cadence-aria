@@ -558,3 +558,51 @@ async fn abort_reconciles_unjournaled_worktree_side_effect_before_aborted_status
     assert_eq!(journal.phase, CodingGitOperationPhase::BranchCreated);
     assert_eq!(reconciled.phase, CodingGitOperationPhase::Compensated);
 }
+
+#[tokio::test]
+async fn worktree_prepare_records_base_head_for_first_unit_start_commit() {
+    // execute_worktree_prepare 是 group attempt 获取 worktree 的主路径（不是 start_attempt，
+    // 后者在首次调用时 worktree_path 还是 None）。worktree 创建成功后必须记录 base HEAD
+    // 到 attempt.head_commit，否则首个 UnitRun 的 start_commit 会是 None，导致 readiness
+    // 证据链断裂（Plan B 报 identity_mismatch: no start commit）。
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    init_test_git_repo(&repo);
+    let base_branch = git_stdout(&repo, &["branch", "--show-current"])
+        .trim()
+        .to_string();
+    let expected_base_head = git_stdout(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch,
+            branch_name: "aria/work-items/work_item_0001/attempt-base-head".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            max_auto_rework: 2,
+        })
+        .expect("attempt");
+    assert!(attempt.head_commit.is_none(), "attempt 创建时 head_commit 应为 None");
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+
+    let updated = engine
+        .execute_worktree_prepare(&attempt, &repo)
+        .await
+        .expect("worktree prepare");
+
+    assert_eq!(
+        updated.head_commit.as_deref(),
+        Some(expected_base_head.as_str()),
+        "worktree prepare 后必须记录 base HEAD 作为首个 unit 的 start_commit 证据"
+    );
+}
