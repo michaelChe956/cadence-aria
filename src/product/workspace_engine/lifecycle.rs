@@ -118,6 +118,7 @@ fn recover_complete_artifact_misclassified_as_text_fallback(
             author: session.author_provider.clone(),
             reviewer: session.reviewer_provider.clone(),
             review_rounds: session.review_rounds,
+            permission_modes: session.permission_modes.clone(),
         },
         retry: None,
     });
@@ -620,6 +621,16 @@ impl WorkspaceEngine {
         reviewer_enabled: bool,
     ) -> Result<(TimelineNode, WsOutMessage), String> {
         let mut locked_snapshot = provider_config;
+        locked_snapshot.permission_modes.author = permission_mode_for_provider(
+            &locked_snapshot.author,
+            locked_snapshot.permission_modes.author.clone(),
+        );
+        if let Some(reviewer) = &locked_snapshot.reviewer {
+            locked_snapshot.permission_modes.reviewer = permission_mode_for_provider(
+                reviewer,
+                locked_snapshot.permission_modes.reviewer.clone(),
+            );
+        }
         if !reviewer_enabled {
             locked_snapshot.reviewer = None;
             locked_snapshot.review_rounds = 0;
@@ -628,6 +639,7 @@ impl WorkspaceEngine {
         self.session.author_provider = locked_snapshot.author.clone();
         self.session.reviewer_provider = locked_snapshot.reviewer.clone();
         self.session.review_rounds = locked_snapshot.review_rounds;
+        self.session.permission_modes = locked_snapshot.permission_modes.clone();
 
         if let Some(store) = &self.lifecycle_store {
             let reviewer_provider = locked_snapshot
@@ -641,6 +653,12 @@ impl WorkspaceEngine {
                     reviewer_provider,
                 )
                 .map_err(|error| format!("persist provider lock failed: {error}"))?;
+            store
+                .update_workspace_session_permission_modes(
+                    &self.session.session_id,
+                    locked_snapshot.permission_modes.clone(),
+                )
+                .map_err(|error| format!("persist permission mode lock failed: {error}"))?;
             store
                 .update_workspace_session_status(
                     &self.session.session_id,

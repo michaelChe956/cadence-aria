@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::coding_models::{CodeReviewReport, ReviewVerdict};
 
 #[tokio::test]
 async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts() {
@@ -23,6 +24,7 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -135,6 +137,26 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
             )
             .expect("handoff revision binding");
         store
+            .save_code_review_report(
+                &attempt,
+                &CodeReviewReport {
+                    id: format!("code_review_report_{}", unit.order_index + 1),
+                    attempt_id: attempt.id.clone(),
+                    round: 1,
+                    verdict: ReviewVerdict::Approve,
+                    findings: Vec::new(),
+                    tested_evidence_refs: Vec::new(),
+                    diff_refs: Vec::new(),
+                    summary: "independent review approved".to_string(),
+                    created_at: "2026-07-27T00:00:00Z".to_string(),
+                    raw_provider_output_ref: None,
+                    role_run_id: None,
+                    run_no: Some(1),
+                    unit_run_id: Some(format!("coding_unit_run_{}", unit.order_index + 1)),
+                },
+            )
+            .expect("code review report");
+        store
             .update_coding_unit_status(
                 &attempt.project_id,
                 &attempt.issue_id,
@@ -166,6 +188,14 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
 
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let snapshot = engine
+        .build_group_final_readiness_snapshot(&attempt)
+        .await
+        .expect("complete readiness snapshot");
+    assert_eq!(
+        snapshot.status,
+        crate::product::coding_models::GroupFinalReadinessStatus::Complete
+    );
     let updated = engine
         .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .await

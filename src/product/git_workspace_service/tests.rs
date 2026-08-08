@@ -22,6 +22,21 @@ fn git(repo: &Path, args: &[&str]) {
     );
 }
 
+fn git_with_commit_date(repo: &Path, args: &[&str], commit_date: &str) {
+    let output = StdCommand::new("git")
+        .args(args)
+        .env("GIT_AUTHOR_DATE", commit_date)
+        .env("GIT_COMMITTER_DATE", commit_date)
+        .current_dir(repo)
+        .output()
+        .expect("run dated git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn head(repo: &Path) -> Vec<u8> {
     StdCommand::new("git")
         .args(["rev-parse", "HEAD"])
@@ -74,6 +89,136 @@ fn initialize_commit_fixture(repo: &Path) -> Vec<u8> {
     fs::write(repo.join("README.md"), "changed\n").expect("write change");
     git(repo, &["add", "README.md"]);
     before
+}
+
+fn commit(repo: &Path, message: &str) -> String {
+    git(repo, &["commit", "-m", message]);
+    String::from_utf8(head(repo))
+        .expect("HEAD is utf-8")
+        .trim()
+        .to_string()
+}
+
+fn commit_at(repo: &Path, message: &str, commit_date: &str) -> String {
+    git_with_commit_date(repo, &["commit", "-m", message], commit_date);
+    String::from_utf8(head(repo))
+        .expect("HEAD is utf-8")
+        .trim()
+        .to_string()
+}
+
+#[tokio::test]
+async fn commit_range_includes_initial_and_rework_commits() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    let c0 = commit(repo, "base");
+
+    fs::write(repo.join("initial.txt"), "initial coder change\n").expect("write initial");
+    git(repo, &["add", "initial.txt"]);
+    let c1 = commit(repo, "initial coder change");
+
+    fs::write(repo.join("initial.txt"), "reworked coder change\n").expect("rework initial");
+    fs::write(repo.join("rework.txt"), "rework commit\n").expect("write rework");
+    git(repo, &["add", "initial.txt", "rework.txt"]);
+    let c2 = commit(repo, "coder rework");
+
+    let service = GitWorkspaceService::new();
+    assert_eq!(
+        service
+            .git_commit_range_commits(repo, &c0, &c2)
+            .await
+            .expect("read commit range"),
+        vec![c1, c2.clone()]
+    );
+    assert_eq!(
+        service
+            .git_commit_range_changed_files(repo, &c0, &c2)
+            .await
+            .expect("read changed files"),
+        vec!["initial.txt", "rework.txt"]
+    );
+}
+
+#[tokio::test]
+async fn equal_commit_range_is_an_empty_observation() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    let c0 = commit(repo, "base");
+
+    let service = GitWorkspaceService::new();
+    assert!(
+        service
+            .git_commit_range_commits(repo, &c0, &c0)
+            .await
+            .expect("read empty commit range")
+            .is_empty()
+    );
+    assert!(
+        service
+            .git_commit_range_changed_files(repo, &c0, &c0)
+            .await
+            .expect("read empty changed-file range")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn commit_range_commits_uses_topological_order_for_merge_history() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    let c0 = commit_at(repo, "base", "1000000000 +0000");
+
+    fs::write(repo.join("main-1.txt"), "main one\n").expect("write main one");
+    git(repo, &["add", "main-1.txt"]);
+    let main1 = commit_at(repo, "main one", "1000000100 +0000");
+    git(repo, &["branch", "feature", &c0]);
+
+    fs::write(repo.join("main-2.txt"), "main two\n").expect("write main two");
+    git(repo, &["add", "main-2.txt"]);
+    let main2 = commit_at(repo, "main two", "1000000300 +0000");
+
+    git(repo, &["switch", "feature"]);
+    fs::write(repo.join("feature-1.txt"), "feature one\n").expect("write feature one");
+    git(repo, &["add", "feature-1.txt"]);
+    let feature1 = commit_at(repo, "feature one", "1000000200 +0000");
+    fs::write(repo.join("feature-2.txt"), "feature two\n").expect("write feature two");
+    git(repo, &["add", "feature-2.txt"]);
+    let feature2 = commit_at(repo, "feature two", "1000000400 +0000");
+
+    git(repo, &["switch", "-"]);
+    git_with_commit_date(
+        repo,
+        &["merge", "--no-ff", "feature", "-m", "merge feature"],
+        "1000000500 +0000",
+    );
+    let merge = String::from_utf8(head(repo))
+        .expect("HEAD is utf-8")
+        .trim()
+        .to_string();
+
+    let service = GitWorkspaceService::new();
+    assert_eq!(
+        service
+            .git_commit_range_commits(repo, &c0, &merge)
+            .await
+            .expect("read merge commit range"),
+        vec![main1, main2, feature1, feature2, merge]
+    );
 }
 
 #[tokio::test]

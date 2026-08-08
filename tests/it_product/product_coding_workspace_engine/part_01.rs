@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
@@ -34,10 +35,10 @@ use cadence_aria::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore, UpsertIssueSharedWorktreeInput,
 };
 use cadence_aria::product::models::{
-    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderConversationRef,
-    ProviderConversationRole, ProviderName, RepositoryProfileConfidence, VerificationCommand,
-    VerificationCommandSafety, VerificationCommandSource, VerificationFallbackPolicy,
-    VerificationScope, WorkItemStatus, WorkspaceType,
+    IssueSharedWorktreeStatus, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
+    ProviderConversationRef, ProviderConversationRole, ProviderName, RepositoryProfileConfidence,
+    VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
+    VerificationFallbackPolicy, VerificationScope, WorkItemStatus, WorkspaceType,
 };
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 use cadence_aria::web::coding_ws_handler::CodingWsOutMessage;
@@ -106,6 +107,7 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -262,6 +264,349 @@ async fn final_confirm_releases_issue_shared_worktree_lock() {
     );
 }
 
+fn transferred_group_shared_worktree_lock(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> LifecycleStore {
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: attempt.branch_name.clone(),
+            worktree_path: attempt.worktree_path.clone().expect("group worktree"),
+            base_branch: attempt.base_branch.clone(),
+        })
+        .expect("upsert shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("acquire first unit lock");
+    lifecycle
+        .transfer_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_0001",
+            "work_item_0002",
+            &attempt.id,
+        )
+        .expect("transfer lock to the second unit");
+    lifecycle
+}
+
+fn running_group_engine_with_two_units_for_terminal_lock_tests() -> (
+    tempfile::TempDir,
+    ProductAppPaths,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    CodingExecutionAttempt,
+) {
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_group_work_items_and_plan(&paths);
+    let store = CodingAttemptStore::new(paths.clone());
+    let worktree = root.path().join("group-worktree");
+    init_group_worktree(&worktree);
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create group attempt");
+    seed_authoritative_group_terminal_fixture(&store, &attempt);
+    for (index, work_item_id) in ["work_item_0001", "work_item_0002"]
+        .into_iter()
+        .enumerate()
+    {
+        store
+            .create_coding_unit(CreateCodingExecutionUnitInput {
+                attempt_id: attempt.id.clone(),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                plan_id: "work_item_plan_0001".to_string(),
+                logical_work_item_id: work_item_id.to_string(),
+                work_item_revision_id: format!("work_item_revision_{:04}", index + 1),
+                dependency_logical_work_item_ids: if index == 1 {
+                    vec!["work_item_0001".to_string()]
+                } else {
+                    Vec::new()
+                },
+                order_index: index as u32,
+                status: if index == 0 {
+                    CodingExecutionUnitStatus::Running
+                } else {
+                    CodingExecutionUnitStatus::Pending
+                },
+            })
+            .expect("create group coding unit");
+    }
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("start group attempt");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    (root, paths, store, engine, attempt)
+}
+
+fn assert_group_shared_worktree_lock_released(
+    lifecycle: &LifecycleStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    let shared = lifecycle
+        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .expect("reload shared worktree")
+        .expect("shared worktree exists");
+    assert_eq!(shared.current_active_work_item_id, None);
+    assert_eq!(shared.current_lock_owner_id, None);
+    assert_eq!(shared.status, IssueSharedWorktreeStatus::Ready);
+}
+
+#[tokio::test]
+async fn failed_group_attempt_releases_transferred_shared_worktree_lock_by_owner() {
+    let (_root, paths, _store, engine, attempt) =
+        running_group_engine_with_two_units_for_terminal_lock_tests();
+    let lifecycle = transferred_group_shared_worktree_lock(&paths, &attempt);
+
+    let failed = engine
+        .handle_attempt_failed(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect("group failure releases the transferred lock owned by the attempt");
+
+    assert_eq!(failed.status, CodingAttemptStatus::Failed);
+    assert_eq!(failed.current_work_item_id, None);
+    assert_group_shared_worktree_lock_released(&lifecycle, &attempt);
+}
+
+#[tokio::test]
+async fn aborted_group_attempt_releases_transferred_shared_worktree_lock_by_owner() {
+    let (_root, paths, _store, engine, attempt) =
+        running_group_engine_with_two_units_for_terminal_lock_tests();
+    let lifecycle = transferred_group_shared_worktree_lock(&paths, &attempt);
+
+    engine
+        .handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect("group abort releases the transferred lock owned by the attempt");
+
+    assert_group_shared_worktree_lock_released(&lifecycle, &attempt);
+}
+
+#[tokio::test]
+async fn deleted_group_attempt_releases_transferred_shared_worktree_lock_by_owner() {
+    let (_root, paths, _store, engine, attempt) =
+        running_group_engine_with_two_units_for_terminal_lock_tests();
+    let lifecycle = transferred_group_shared_worktree_lock(&paths, &attempt);
+
+    engine
+        .handle_delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect("group delete releases the transferred lock owned by the attempt");
+
+    assert_group_shared_worktree_lock_released(&lifecycle, &attempt);
+}
+
+#[tokio::test]
+async fn dirty_group_delete_keeps_transferred_shared_worktree_lock() {
+    let (_root, paths, store, engine, attempt) =
+        running_group_engine_with_two_units_for_terminal_lock_tests();
+    let lifecycle = transferred_group_shared_worktree_lock(&paths, &attempt);
+    let worktree = attempt.worktree_path.as_deref().expect("group worktree");
+    fs::write(worktree.join("dirty.txt"), "uncommitted\n").expect("dirty group worktree");
+
+    let error = engine
+        .handle_delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect_err("dirty group delete keeps the transferred lock");
+
+    assert!(error.to_string().contains("shared_worktree_dirty_manual_gate"));
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("reload attempt")
+            .status,
+        CodingAttemptStatus::Running
+    );
+    let shared = lifecycle
+        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .expect("reload shared worktree")
+        .expect("shared worktree exists");
+    assert_eq!(
+        shared.current_active_work_item_id.as_deref(),
+        Some("work_item_0002")
+    );
+    assert_eq!(shared.current_lock_owner_id.as_deref(), Some(attempt.id.as_str()));
+    assert_eq!(shared.status, IssueSharedWorktreeStatus::Running);
+}
+
+#[tokio::test]
+async fn group_final_confirm_releases_transferred_shared_worktree_lock_by_owner() {
+    let (_root, paths, _store, engine, attempt) = group_attempt_waiting_for_final_confirm();
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .release_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_0002",
+            &attempt.id,
+        )
+        .expect("reset fixture lock");
+    let lifecycle = transferred_group_shared_worktree_lock(&paths, &attempt);
+
+    engine
+        .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect("group final confirm releases the transferred lock owned by the attempt");
+
+    assert_group_shared_worktree_lock_released(&lifecycle, &attempt);
+}
+
+fn single_work_item_engine_with_same_owner_lock_on_another_work_item() -> (
+    tempfile::TempDir,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    CodingExecutionAttempt,
+    LifecycleStore,
+) {
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let (store, attempt) =
+        coding_store_with_attempt(root.path(), "work_item_0001", "aria/work-items/work_item_0001");
+    let lifecycle = LifecycleStore::new(paths);
+    lifecycle
+        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            repository_id: "repository_0001".to_string(),
+            branch_name: attempt.branch_name.clone(),
+            worktree_path: root.path().join("shared-worktree"),
+            base_branch: attempt.base_branch.clone(),
+        })
+        .expect("upsert shared worktree");
+    lifecycle
+        .try_acquire_issue_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            "work_item_0002",
+            &attempt.id,
+        )
+        .expect("acquire same-owner lock for another work item");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    (root, store, engine, attempt, lifecycle)
+}
+
+#[tokio::test]
+async fn single_work_item_abort_rejects_same_owner_lock_for_another_work_item() {
+    let (_root, store, engine, attempt, lifecycle) =
+        single_work_item_engine_with_same_owner_lock_on_another_work_item();
+
+    engine
+        .handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect_err("single work-item abort keeps exact work-item validation");
+
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("reload attempt")
+            .status,
+        CodingAttemptStatus::Created
+    );
+    let shared = lifecycle
+        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .expect("reload shared worktree")
+        .expect("shared worktree exists");
+    assert_eq!(
+        shared.current_active_work_item_id.as_deref(),
+        Some("work_item_0002")
+    );
+}
+
+#[tokio::test]
+async fn single_work_item_failure_rejects_same_owner_lock_for_another_work_item() {
+    let (_root, store, engine, attempt, lifecycle) =
+        single_work_item_engine_with_same_owner_lock_on_another_work_item();
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("start attempt");
+
+    engine
+        .handle_attempt_failed(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect_err("single work-item failure keeps exact work-item validation");
+
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("reload attempt")
+            .status,
+        CodingAttemptStatus::Running
+    );
+    let shared = lifecycle
+        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .expect("reload shared worktree")
+        .expect("shared worktree exists");
+    assert_eq!(
+        shared.current_active_work_item_id.as_deref(),
+        Some("work_item_0002")
+    );
+}
+
+#[tokio::test]
+async fn single_work_item_delete_rejects_same_owner_lock_for_another_work_item() {
+    let (_root, store, engine, attempt, lifecycle) =
+        single_work_item_engine_with_same_owner_lock_on_another_work_item();
+
+    engine
+        .handle_delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .await
+        .expect_err("single work-item delete keeps exact work-item validation");
+
+    assert_eq!(
+        store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("reload attempt")
+            .status,
+        CodingAttemptStatus::Created
+    );
+    let shared = lifecycle
+        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .expect("reload shared worktree")
+        .expect("shared worktree exists");
+    assert_eq!(
+        shared.current_active_work_item_id.as_deref(),
+        Some("work_item_0002")
+    );
+}
+
 #[tokio::test]
 async fn failed_attempt_releases_issue_shared_worktree_lock() {
     let root = tempdir().expect("root");
@@ -347,12 +692,12 @@ async fn dirty_shared_worktree_blocks_lock_release_and_next_work_item() {
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
 
-    let error = engine
+    let failed = engine
         .handle_attempt_failed("project_0001", "issue_0001", &attempt.id)
         .await
-        .expect_err("dirty worktree keeps lock");
+        .expect("dirty worktree diagnostics must not replace terminal failure");
 
-    assert!(format!("{error}").contains("shared_worktree_dirty_manual_gate"));
+    assert_eq!(failed.status, CodingAttemptStatus::Failed);
     let shared = lifecycle
         .get_issue_shared_worktree("project_0001", "issue_0001")
         .expect("load shared")
@@ -470,6 +815,7 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
                 author: ProviderName::ClaudeCode,
                 reviewer: Some(ProviderName::Codex),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             ..create_input()
         })
@@ -501,11 +847,11 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
     assert_eq!(inputs.len(), 2);
     assert_eq!(
         inputs[0].permission_mode,
-        ProviderPermissionMode::Supervised
+        ProviderPermissionMode::Auto
     );
     assert_eq!(
         inputs[1].permission_mode,
-        ProviderPermissionMode::Supervised
+        ProviderPermissionMode::Auto
     );
     assert_eq!(inputs[0].timeout_secs, 10_800);
     assert_eq!(inputs[1].timeout_secs, 10_800);
@@ -529,6 +875,7 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             ..create_input()
         })

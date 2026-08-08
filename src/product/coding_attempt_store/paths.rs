@@ -5,6 +5,28 @@ use crate::product::coding_models::{CodingExecutionAttempt, CodingExecutionStage
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
 impl super::CodingAttemptStore {
+    pub(crate) fn unit_review_conclusion_snapshot_path(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        unit_run_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("unit-review-conclusion-snapshots")
+            .join(format!("{unit_run_id}.json"))
+    }
+
+    pub(crate) fn code_review_report_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        report_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("code-reviews")
+            .join(format!("{report_id}.json"))
+    }
+
     pub(crate) fn attempt_path(
         &self,
         project_id: &str,
@@ -23,6 +45,14 @@ impl super::CodingAttemptStore {
     ) -> PathBuf {
         self.coding_attempts_root(project_id, issue_id)
             .join(attempt_id)
+    }
+
+    pub(crate) fn group_final_readiness_snapshot_path(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    ) -> PathBuf {
+        self.attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("group-final-readiness.json")
     }
 
     pub(crate) fn work_item_execution_plan_path(

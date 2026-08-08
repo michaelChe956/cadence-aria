@@ -414,6 +414,7 @@ impl WorkspaceEngine {
             author: self.session.author_provider.clone(),
             reviewer: self.session.reviewer_provider.clone(),
             review_rounds: self.session.review_rounds,
+            permission_modes: self.session.permission_modes.clone(),
         }
     }
 

@@ -7,17 +7,26 @@ import {
 import type {
   CodingAttemptAddress,
   CodeReviewReport,
+  GroupReviewArtifactProjection,
   InternalPrReview,
   ReviewFinding,
   WorkItemExecutionPlan,
 } from "../api/types";
+import { GroupFinalReadinessPanel } from "../components/coding-workspace/GroupFinalReadinessPanel";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { errorMessage } from "./CodingWorkspaceControls";
 
 export function ReviewPanel() {
   const codeReviews = useCodingWorkspaceStore((state) => state.codeReviewReports);
   const internalReview = useCodingWorkspaceStore((state) => state.internalPrReview);
-  if (codeReviews.length === 0 && !internalReview) {
+  const groupFinalReadiness = useCodingWorkspaceStore((state) => state.groupFinalReadiness);
+  const groupReviewArtifacts = useCodingWorkspaceStore((state) => state.groupReviewArtifacts);
+  if (
+    codeReviews.length === 0 &&
+    !internalReview &&
+    !groupFinalReadiness &&
+    !groupReviewArtifacts
+  ) {
     return <div className="text-[var(--aria-ink-muted)]">暂无审查报告</div>;
   }
   return (
@@ -29,11 +38,45 @@ export function ReviewPanel() {
           report={report}
         />
       ))}
-      {internalReview ? <ReviewReportCard title="GroupFinalReview" report={internalReview} /> : null}
+      {groupFinalReadiness ? <GroupFinalReadinessPanel readiness={groupFinalReadiness} /> : null}
+      {internalReview ? (
+        <ReviewReportCard title="历史 Group Final Review（只读）" report={internalReview} />
+      ) : null}
+      {groupReviewArtifacts ? <GroupReviewArtifactHistory artifacts={groupReviewArtifacts} /> : null}
     </div>
   );
 }
 
+function GroupReviewArtifactHistory({ artifacts }: { artifacts: GroupReviewArtifactProjection }) {
+  const reportRows = [
+    ...artifacts.shard_reports.map((report) => ({ kind: "shard", report })),
+    ...artifacts.reduction_reports.map((report) => ({ kind: "reduction", report })),
+  ];
+  if (reportRows.length === 0) return null;
+  return (
+    <section
+      data-testid="group-review-artifact-history"
+      className="space-y-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3"
+      aria-label="历史组审查产物"
+    >
+      <h3 className="text-xs font-semibold text-[var(--aria-ink)]">
+        历史 Group Review 产物（{reportRows.length} 个）
+      </h3>
+      <ul className="space-y-2 text-xs">
+        {reportRows.map(({ kind, report }) => (
+          <li key={`${kind}-${report.id}`} className="space-y-1">
+            <div className="font-mono text-[var(--aria-ink)]">历史 {kind}: {report.id}</div>
+            {report.raw_provider_output_refs.map((ref) => (
+              <div key={ref} className="break-all font-mono text-[var(--aria-ink-muted)]">
+                raw ref: {ref}
+              </div>
+            ))}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 function ReviewReportCard({
   title,
   report,
@@ -44,7 +87,9 @@ function ReviewReportCard({
   return (
     <div className="rounded-md border border-[var(--aria-line)] p-2">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-xs font-semibold">{title}</div>
+        <div className="text-xs font-semibold">
+          {isInternalPrReview(report) ? "GroupFinalReview（历史只读）" : title}
+        </div>
         <StatusBadge value={report.verdict} />
       </div>
       <div className="mt-1 text-xs text-[var(--aria-ink-muted)]">{report.summary}</div>

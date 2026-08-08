@@ -16,6 +16,8 @@ pub enum ProductStoreError {
     Ambiguous { kind: &'static str, id: String },
     #[error("product_store_conflict: {kind} {id}")]
     Conflict { kind: &'static str, id: String },
+    #[error("product_store_invalid_record: {kind} {reason}")]
+    InvalidRecord { kind: &'static str, reason: String },
     #[error("product_store_identity_mismatch: {kind} {id}")]
     IdentityMismatch { kind: &'static str, id: String },
     #[error("product_store_path_escape: {0}")]

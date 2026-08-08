@@ -127,6 +127,7 @@ fn provider_type_key(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::ClaudeCode => "claude_code",
         ProviderType::Codex => "codex",
+        ProviderType::Pi => unreachable!("provider capability probe has no pi compatibility entry"),
         ProviderType::Fake => "fake",
     }
 }

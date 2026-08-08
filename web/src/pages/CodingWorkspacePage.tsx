@@ -1,4 +1,13 @@
-import { ArrowLeft, History, Settings2, Trash2, Wifi, WifiOff, X } from "lucide-react";
+import {
+  ArrowLeft,
+  CheckCircle2,
+  History,
+  Settings2,
+  Trash2,
+  Wifi,
+  WifiOff,
+  X,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { deleteCodingAttempt } from "../api/client";
 import type { CodingAttemptAddress } from "../api/types";
@@ -383,10 +392,37 @@ export function CodingWorkspacePage({
         </div>
         <div className="flex min-w-0 items-center justify-end gap-2">
           {pendingGate?.kind === "blocked" ? null : (
-            <ActionButtons api={api} stage={store.stage} status={store.status} />
+            <ActionButtons
+              api={api}
+              stage={store.stage}
+              status={store.status}
+              groupFinalReadinessStatus={store.groupFinalReadiness?.status}
+              groupFinalReadinessDiagnostics={store.groupFinalReadiness?.diagnostics}
+            />
           )}
         </div>
       </header>
+      {store.attemptScope === "work_item_group" &&
+      store.status === "completed" ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex shrink-0 items-center gap-2 border-b border-[var(--aria-success)] bg-[var(--aria-success-soft)] px-4 py-2 text-xs text-[var(--aria-success)]"
+        >
+          <CheckCircle2 className="h-4 w-4 shrink-0" />
+          <span className="font-semibold">组级 Coding Workspace 已完成</span>
+          <span className="text-[var(--aria-ink-muted)]">
+            {store.units.length > 0
+              ? `${store.units.length} 个 Work Item 已完成并确认`
+              : "所有 Work Item 已完成并确认"}
+          </span>
+          {store.headCommit ? (
+            <span className="truncate font-mono text-[var(--aria-ink-muted)]">
+              最终提交 {store.headCommit.slice(0, 12)}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
       {store.attemptScope === "work_item_group" && store.units.length > 0 ? (
         <CodingWorkspaceGroupProgress
           planId={store.workItemGroupId}
@@ -519,6 +555,8 @@ export function CodingWorkspacePage({
                     : pendingGate?.title ?? "Coding Workspace"
                 }
                 pendingGate={pendingGate}
+                groupFinalReadinessStatus={store.groupFinalReadiness?.status}
+                groupFinalReadinessDiagnostics={store.groupFinalReadiness?.diagnostics}
               />
             </div>
           )}
@@ -644,7 +682,7 @@ function displayCodingStage(stage: string) {
     code_review: "Code Reviewer",
     review_request: "准备 PR",
     internal_pr_review: "GroupFinalReview",
-    final_confirm: "最终确认",
+    final_confirm: "人工组最终确认",
   };
   return labels[stage] ?? stage;
 }

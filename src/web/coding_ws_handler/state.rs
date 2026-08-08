@@ -6,13 +6,14 @@ use crate::product::coding_models::{
     CodingGateAction, CodingGateActionType, CodingGateKind,
     CodingGateRequired as CodingGateRequiredModel, CodingProviderRole, CodingRoleRunEvent,
     CodingRoleRunEventPreview, CodingRoleRunEventSummary, CodingRoleRunEventType,
-    CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus,
+    CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus, GroupReviewArtifactRef,
 };
 use crate::product::coding_workspace_engine::{
     CodingWorkspaceEngineError, recoverable_failed_code_review,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::web::handlers::{coding_attempt_scope_text, coding_execution_unit_dto};
+use crate::web::types::GroupReviewArtifactProjection;
 
 use super::{CodingWsOutMessage, coding_execution_context, stage_gate_required};
 
@@ -39,37 +40,31 @@ pub(crate) fn build_coding_session_state(
         .list_internal_pr_reviews(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         .into_iter()
         .last();
-    let mut pending_gates: Vec<CodingGateRequiredModel> = coding_store
-        .list_open_stage_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        .into_iter()
-        .map(stage_gate_required)
-        .collect();
-    pending_gates.extend(
-        coding_store
-            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .filter(|gate| blocked_gate_is_actionable_for_attempt(&attempt, gate)),
-    );
-    if let Some(recovery) = recoverable_failed_code_review(coding_store, &attempt)? {
-        pending_gates.push(CodingGateRequiredModel {
-            gate_id: recovery.gate_id,
-            kind: CodingGateKind::Blocked,
-            title: "代码审查中断".to_string(),
-            description: "上次代码审查已中断，可保留当前修改并重试 Reviewer。".to_string(),
-            stage: Some(CodingExecutionStage::CodeReview),
-            role: Some(CodingProviderRole::CodeReviewer),
-            expires_at: None,
-            provider_snapshot: None,
-            available_actions: vec![CodingGateAction {
-                action_id: "retry_review".to_string(),
-                label: "重试代码审查".to_string(),
-                action_type: CodingGateActionType::RetryReview,
-            }],
-            reason_code: Some("failed_code_review_recoverable".to_string()),
-            evidence_refs: vec![recovery.failed_node_id, recovery.stale_role_run_id],
-            raw_provider_output_ref: None,
-        });
-    }
+    let group_final_readiness = coding_store.get_group_final_readiness_snapshot(&attempt)?;
+    let group_review_artifacts = {
+        let projection = GroupReviewArtifactProjection {
+            shard_reports: coding_store
+                .list_group_review_shard_reports_for_attempt(&attempt)?
+                .into_iter()
+                .map(|report| GroupReviewArtifactRef {
+                    id: report.id,
+                    raw_provider_output_refs: report.raw_provider_output_refs,
+                })
+                .collect(),
+            reduction_reports: coding_store
+                .list_group_review_reduction_reports_for_attempt(&attempt)?
+                .into_iter()
+                .map(|report| GroupReviewArtifactRef {
+                    id: report.id,
+                    raw_provider_output_refs: report.raw_provider_output_refs,
+                })
+                .collect(),
+        };
+        let has_artifacts =
+            !projection.shard_reports.is_empty() || !projection.reduction_reports.is_empty();
+        has_artifacts.then_some(projection)
+    };
+    let pending_gates = coding_pending_gates(coding_store, &attempt)?;
     let role_provider_config_snapshot = coding_store.get_role_provider_config_snapshot(
         &attempt.project_id,
         &attempt.issue_id,
@@ -122,6 +117,8 @@ pub(crate) fn build_coding_session_state(
         code_review_reports: Box::new(code_review_reports),
         review_request: Box::new(review_request),
         internal_pr_review: Box::new(internal_pr_review),
+        group_review_artifacts: Box::new(group_review_artifacts),
+        group_final_readiness: Box::new(group_final_readiness),
         pending_gates: Box::new(pending_gates),
         pending_choices: Box::new(pending_choices),
         role_runs: Box::new(role_runs),
@@ -130,6 +127,45 @@ pub(crate) fn build_coding_session_state(
         work_item_execution_plan: Box::new(work_item_execution_plan),
         linked_plan_repair: Box::new(linked_plan_repair),
     })
+}
+
+pub(crate) fn coding_pending_gates(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Vec<CodingGateRequiredModel>, CodingWorkspaceEngineError> {
+    let mut pending_gates: Vec<CodingGateRequiredModel> = coding_store
+        .list_open_stage_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        .into_iter()
+        .map(stage_gate_required)
+        .collect();
+    pending_gates.extend(
+        coding_store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .filter(|gate| blocked_gate_is_actionable_for_attempt(attempt, gate)),
+    );
+    if let Some(recovery) = recoverable_failed_code_review(coding_store, attempt)? {
+        pending_gates.push(CodingGateRequiredModel {
+            gate_id: recovery.gate_id,
+            kind: CodingGateKind::Blocked,
+            title: "代码审查中断".to_string(),
+            description: "上次代码审查已中断，可保留当前修改并重试 Reviewer。".to_string(),
+            stage: Some(CodingExecutionStage::CodeReview),
+            role: Some(CodingProviderRole::CodeReviewer),
+            expires_at: None,
+            provider_snapshot: None,
+            available_actions: vec![CodingGateAction {
+                action_id: "retry_review".to_string(),
+                label: "重试代码审查".to_string(),
+                action_type: CodingGateActionType::RetryReview,
+            }],
+            reason_code: Some("failed_code_review_recoverable".to_string()),
+            evidence_refs: vec![recovery.failed_node_id, recovery.stale_role_run_id],
+            raw_provider_output_ref: None,
+            diagnostic: None,
+        });
+    }
+    Ok(pending_gates)
 }
 
 fn blocked_gate_is_actionable_for_attempt(

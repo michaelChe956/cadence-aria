@@ -4,6 +4,7 @@ use super::*;
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_models::CodingAttemptScope;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapshots};
 use crate::web::state::CodingAttemptRunKey;
 
 mod group;
@@ -443,6 +444,7 @@ pub(crate) fn coding_provider_config_snapshot(
             author,
             reviewer: Some(reviewer),
             review_rounds: session.review_rounds,
+            permission_modes: session.permission_modes.clone(),
         });
     }
 
@@ -453,6 +455,7 @@ pub(crate) fn coding_provider_config_snapshot(
         author: author.clone(),
         reviewer: Some(author),
         review_rounds: 1,
+        permission_modes: WorkspaceRolePermissionModes::default(),
     })
 }
 
@@ -495,6 +498,7 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
             author,
             reviewer: Some(reviewer),
             review_rounds: session.review_rounds,
+            permission_modes: session.permission_modes.clone(),
         });
     }
 
@@ -505,7 +509,35 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
         author: author.clone(),
         reviewer: Some(author),
         review_rounds: 1,
+        permission_modes: WorkspaceRolePermissionModes::default(),
     })
+}
+
+fn coding_group_review_artifacts(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Option<GroupReviewArtifactProjection>, ProductStoreError> {
+    let projection = GroupReviewArtifactProjection {
+        shard_reports: coding_store
+            .list_group_review_shard_reports_for_attempt(attempt)?
+            .into_iter()
+            .map(|report| GroupReviewArtifactRef {
+                id: report.id,
+                raw_provider_output_refs: report.raw_provider_output_refs,
+            })
+            .collect(),
+        reduction_reports: coding_store
+            .list_group_review_reduction_reports_for_attempt(attempt)?
+            .into_iter()
+            .map(|report| GroupReviewArtifactRef {
+                id: report.id,
+                raw_provider_output_refs: report.raw_provider_output_refs,
+            })
+            .collect(),
+    };
+    let has_artifacts =
+        !projection.shard_reports.is_empty() || !projection.reduction_reports.is_empty();
+    Ok(has_artifacts.then_some(projection))
 }
 
 pub(crate) async fn get_coding_attempt(
@@ -520,6 +552,10 @@ pub(crate) async fn get_coding_attempt(
         path.issue_id.as_deref(),
         &path.attempt_id,
     )?;
+    let attempt = coding_store
+        .reconcile_linked_plan_repair_pause(&attempt)
+        .map_err(product_store_api_error)?
+        .attempt;
     let timeline_nodes = coding_store
         .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -536,10 +572,19 @@ pub(crate) async fn get_coding_attempt(
         .map_err(product_store_api_error)?
         .into_iter()
         .last();
+    let group_final_readiness = coding_store
+        .get_group_final_readiness_snapshot(&attempt)
+        .map_err(product_store_api_error)?;
     let pending_choices = coding_store
         .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    let role_runs =
+        coding_role_run_snapshots(&coding_store, &attempt).map_err(product_store_api_error)?;
+    let pending_gates =
+        coding_pending_gates(&coding_store, &attempt).map_err(coding_workspace_api_error)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
+    let group_review_artifacts =
+        coding_group_review_artifacts(&coding_store, &attempt).map_err(product_store_api_error)?;
     let work_item_execution_plan = coding_store
         .get_work_item_execution_plan(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
@@ -554,6 +599,8 @@ pub(crate) async fn get_coding_attempt(
         Vec::new()
     };
 
+    let provider_config_snapshot = attempt.provider_config_snapshot.clone();
+
     Ok(Json(CodingAttemptSnapshotResponse {
         attempt: coding_attempt_dto(&attempt),
         attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
@@ -561,14 +608,17 @@ pub(crate) async fn get_coding_attempt(
         current_work_item_id: attempt.current_work_item_id.clone(),
         active_unit_id: attempt.active_unit_id.clone(),
         units,
-        provider_config_snapshot: attempt.provider_config_snapshot,
+        provider_config_snapshot,
         timeline_nodes,
         active_node_id,
         code_review_reports,
         review_request,
         internal_pr_review,
-        pending_gates: Vec::new(),
+        group_review_artifacts,
+        group_final_readiness,
+        pending_gates,
         pending_choices,
+        role_runs,
         work_item_execution_plan,
     }))
 }
@@ -709,6 +759,19 @@ pub(crate) async fn delete_coding_attempt(
             .handle_delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .await
             .map_err(coding_workspace_api_error)?;
+    } else if let Ok(Some(shared)) =
+        lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+    {
+        // active work item 不匹配（failed attempt 的 current_work_item_id 可能已变
+        // 或已清空），但锁仍可能由本 attempt 持有：按 owner 幂等释放，
+        // 避免残留孤儿锁阻塞后续 attempt。
+        if shared.current_lock_owner_id.as_deref() == Some(attempt.id.as_str()) {
+            let _ = lifecycle.release_issue_worktree_lock_by_owner(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            );
+        }
     }
 
     cleanup_coding_attempt_workspace(&repository, &attempt).await?;

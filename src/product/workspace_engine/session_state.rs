@@ -217,6 +217,7 @@ pub(crate) fn initial_timeline(session: &WorkspaceSession) -> (Vec<TimelineNode>
             author: session.author_provider.clone(),
             reviewer: session.reviewer_provider.clone(),
             review_rounds: session.review_rounds,
+            permission_modes: session.permission_modes.clone(),
         },
         retry: None,
     };

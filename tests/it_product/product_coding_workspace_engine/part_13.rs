@@ -259,6 +259,11 @@ async fn group_final_confirm_completes_attempt_after_all_units_completed() {
 async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
     let (_root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
     let lifecycle = LifecycleStore::new(paths.clone());
+    let worktree = attempt
+        .worktree_path
+        .as_ref()
+        .expect("group attempt worktree path");
+    let completion_commit = git_head(worktree);
     for work_item_id in ["work_item_0001", "work_item_0002"] {
         lifecycle
             .create_work_item(CreateWorkItemInput {
@@ -289,7 +294,7 @@ async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
                 &attempt.issue_id,
                 &attempt.id,
                 unit_id,
-                Some("seed-commit".to_string()),
+                Some(completion_commit.clone()),
             )
             .expect("set completion commit");
     }
@@ -303,6 +308,15 @@ async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
             Some("frontend done".to_string()),
         )
         .expect("complete unit2");
+    for unit_id in ["coding_unit_0001", "coding_unit_0002"] {
+        create_completed_unit_run_for_test(
+            &store,
+            &attempt,
+            unit_id,
+            &completion_commit,
+            &completion_commit,
+        );
+    }
     let attempt = store
         .update_attempt_status(
             &attempt.project_id,
@@ -379,10 +393,11 @@ async fn group_final_confirm_without_authoritative_plan_binding_fails_closed() {
         .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .await
         .expect_err("legacy group without authoritative binding must fail closed");
-    assert!(
-        error.to_string().contains("coding_attempt_plan_binding"),
-        "unexpected failure-closed error: {error}"
-    );
+    assert!(matches!(
+        error,
+        cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngineError::FinalConfirmNotReady(ref id)
+            if id == &attempt.id
+    ));
 
     let persisted = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)

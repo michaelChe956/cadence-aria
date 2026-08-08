@@ -1,6 +1,7 @@
 mod claude_code;
 mod codex;
 mod fake;
+mod pi;
 
 use std::collections::BTreeSet;
 
@@ -19,6 +20,7 @@ use super::{
 use claude_code::ClaudeCodeProjectionRenderer;
 use codex::CodexProjectionRenderer;
 use fake::FakeProjectionRenderer;
+use pi::PiProjectionRenderer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectionRenderRole {
@@ -184,6 +186,7 @@ pub fn renderer_for(provider: &ProviderName) -> Box<dyn ProviderProjectionRender
     match provider {
         ProviderName::Codex => Box::new(CodexProjectionRenderer),
         ProviderName::ClaudeCode => Box::new(ClaudeCodeProjectionRenderer),
+        ProviderName::Pi => Box::new(PiProjectionRenderer),
         ProviderName::Fake => Box::new(FakeProjectionRenderer),
     }
 }
@@ -261,6 +264,7 @@ fn coder_sections(
     #[derive(Serialize)]
     struct WritePolicy<'a> {
         write_policy: &'a crate::product::work_item_contract::WorkItemWritePolicy,
+        commit_responsibility: &'static str,
     }
 
     #[derive(Serialize)]
@@ -326,6 +330,7 @@ fn coder_sections(
             ProjectionSectionId::WritePolicy,
             &WritePolicy {
                 write_policy: &projection.write_policy,
+                commit_responsibility: "提交责任：先检查完整 Git 状态；仅根据本 Work Item 的 write_policy 精确暂存允许路径；创建本 Work Item 的提交。\n报告：列出暂存文件、提交 SHA、提交后的 Git 状态。\n禁止：不得使用无差别全量暂存；不得删除、清理或提交无法由当前 write_policy 解释的内容。遇到它们时保留并报告。",
             },
         )?,
         typed_section(
@@ -550,5 +555,62 @@ mod tests {
             error,
             ProjectionRenderError::MandatorySectionMissing("Write Policy".to_string())
         );
+    }
+
+    #[test]
+    fn coder_context_assigns_precise_commit_responsibility_and_preserves_unowned_changes() {
+        let projection = CoderWorkItemProjection {
+            work_item_revision_id: "work_item_revision_0001".to_string(),
+            objective: "implement the work item".to_string(),
+            required_input_contracts: Vec::new(),
+            task_refs: Vec::new(),
+            tasks: Vec::new(),
+            write_policy: crate::product::work_item_contract::WorkItemWritePolicy {
+                exclusive_scopes: vec!["src/product/**".to_string()],
+                forbidden_scopes: Vec::new(),
+            },
+            acceptance_criteria: Vec::new(),
+            verification_checks: Vec::new(),
+            blocker_rules: Vec::new(),
+            handoff_contract: crate::product::work_item_contract::HandoffContract {
+                required_fields: Vec::new(),
+                provided_contract_refs: Vec::new(),
+                reviewer_check_refs: Vec::new(),
+            },
+        };
+        let envelope = CoderExecutionEnvelope {
+            repository_state_ref: "C0".to_string(),
+            resolved_handoff_revision_ids: Vec::new(),
+            unit_run_id: "coding_unit_run_0001".to_string(),
+            previous_actionable_review: None,
+            start_commit: Some("C0".to_string()),
+        };
+
+        let rendered = render_coder_with_profile(
+            ProviderRenderProfile {
+                provider_label: "Test",
+                renderer_version: "test-renderer-v1",
+                permission_and_tool_hint: "test permissions",
+                structured_output_wrapper: "test output",
+            },
+            &projection,
+            &envelope,
+        )
+        .expect("render coder context");
+
+        assert!(rendered.text.contains("检查完整 Git 状态"));
+        assert!(
+            rendered
+                .text
+                .contains("根据本 Work Item 的 write_policy 精确暂存允许路径")
+        );
+        assert!(rendered.text.contains("创建本 Work Item 的提交"));
+        assert!(
+            rendered
+                .text
+                .contains("列出暂存文件、提交 SHA、提交后的 Git 状态")
+        );
+        assert!(rendered.text.contains("保留并报告"));
+        assert!(!rendered.text.contains("目录名黑名单"));
     }
 }

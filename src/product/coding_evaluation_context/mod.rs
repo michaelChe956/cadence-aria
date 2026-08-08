@@ -8,6 +8,8 @@ mod builder;
 mod methods;
 mod repo;
 mod sanitize;
+
+pub(crate) use sanitize::redact_sensitive_patterns;
 mod specs;
 
 #[cfg(test)]

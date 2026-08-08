@@ -341,6 +341,69 @@ async fn coding_ws_permission_mode_select_updates_role_config() {
 }
 
 #[tokio::test]
+async fn coding_ws_permission_mode_select_normalizes_pi_to_auto() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::ProviderSelect {
+            role: "coder".to_string(),
+            provider: ProviderName::Pi,
+        },
+    )
+    .await;
+    let _provider_update = recv_json(&mut ws).await;
+    let _provider_state = recv_json(&mut ws).await;
+
+    send_json(
+        &mut ws,
+        &CodingWsInMessage::PermissionModeSelect {
+            role: "coder".to_string(),
+            permission_mode: CodingProviderPermissionMode::Supervised,
+        },
+    )
+    .await;
+
+    let _permission_update = recv_json(&mut ws).await;
+    match recv_json(&mut ws).await {
+        CodingWsOutMessage::CodingSessionState {
+            role_provider_config_snapshot,
+            ..
+        } => {
+            assert_eq!(
+                role_provider_config_snapshot
+                    .permission_mode_for_role(&CodingProviderRole::Coder),
+                CodingProviderPermissionMode::Auto
+            );
+        }
+        other => panic!("expected updated coding session state, got {other:?}"),
+    }
+
+    let snapshot = store
+        .get_role_provider_config_snapshot("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("role config");
+    assert_eq!(
+        snapshot.permission_mode_for_role(&CodingProviderRole::Coder),
+        CodingProviderPermissionMode::Auto
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
 async fn coding_ws_stage_gate_timeout_auto_starts_stage() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");

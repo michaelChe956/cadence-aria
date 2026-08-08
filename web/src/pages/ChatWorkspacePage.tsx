@@ -100,6 +100,7 @@ export function ChatWorkspacePage({
   const stage = useWorkspaceStore((state) => state.stage);
   const providers = useWorkspaceStore((state) => state.providers);
   const reviewRounds = useWorkspaceStore((state) => state.reviewRounds);
+  const permissionModes = useWorkspaceStore((state) => state.permissionModes);
   const providerLocked = useWorkspaceStore((state) => state.providerLocked);
   const providerLockedAt = useWorkspaceStore((state) => state.providerLockedAt);
   const superpowersEnabled = useWorkspaceStore(
@@ -343,10 +344,15 @@ export function ChatWorkspacePage({
   });
 
   function handleStartGeneration() {
-    const { providers, reviewerEnabled, reviewRounds } =
+    const { providers, reviewerEnabled, reviewRounds, permissionModes } =
       useWorkspaceStore.getState();
     sendStartGeneration(
-      providerConfigFor(providers, reviewerEnabled, reviewRounds),
+      providerConfigFor(
+        providers,
+        reviewerEnabled,
+        reviewRounds,
+        permissionModes,
+      ),
       reviewerEnabled,
     );
   }
@@ -458,6 +464,10 @@ export function ChatWorkspacePage({
       reviewerEnabled={reviewerEnabled}
       onToggleReviewer={(enabled) =>
         useWorkspaceStore.setState({ reviewerEnabled: enabled })
+      }
+      permissionModes={permissionModes}
+      onPermissionModeSelect={(role, mode) =>
+        useWorkspaceStore.getState().setPermissionMode(role, mode)
       }
       rounds={reviewRounds}
       onChangeRounds={(rounds) =>

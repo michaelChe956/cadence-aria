@@ -129,6 +129,7 @@ fn create_input_for(
             author: ProviderName::Fake,
             reviewer: Some(ProviderName::Fake),
             review_rounds: 1,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
         max_auto_rework: 2,
     }
@@ -155,6 +156,7 @@ fn group_create_input(current_work_item_id: &str) -> CreateGroupCodingAttemptInp
             author: ProviderName::Fake,
             reviewer: Some(ProviderName::Fake),
             review_rounds: 1,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
         max_auto_rework: 2,
     }
@@ -174,6 +176,7 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     }
 }
 

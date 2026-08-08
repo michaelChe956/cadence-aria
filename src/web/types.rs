@@ -4,7 +4,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::product::coding_models::{
-    CodeReviewReport, CodingChoiceGate, CodingGateRequired, CodingTimelineNode, InternalPrReview,
+    CodeReviewReport, CodingChoiceGate, CodingGateRequired, CodingRoleRunSnapshot,
+    CodingTimelineNode, GroupFinalReadinessSnapshot, GroupReviewArtifactRef, InternalPrReview,
     ReviewRequest, WorkItemExecutionPlan,
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -527,6 +528,12 @@ pub struct RequestExecutionPlanChangeRequest {
     pub note: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GroupReviewArtifactProjection {
+    pub shard_reports: Vec<GroupReviewArtifactRef>,
+    pub reduction_reports: Vec<GroupReviewArtifactRef>,
+}
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CodingAttemptSnapshotResponse {
@@ -543,8 +550,14 @@ pub struct CodingAttemptSnapshotResponse {
     pub code_review_reports: Vec<CodeReviewReport>,
     pub review_request: Option<ReviewRequest>,
     pub internal_pr_review: Option<InternalPrReview>,
+    #[serde(default)]
+    pub group_review_artifacts: Option<GroupReviewArtifactProjection>,
+    #[serde(default)]
+    pub group_final_readiness: Option<GroupFinalReadinessSnapshot>,
     pub pending_gates: Vec<CodingGateRequired>,
     pub pending_choices: Vec<CodingChoiceGate>,
+    #[serde(default)]
+    pub role_runs: Vec<CodingRoleRunSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item_execution_plan: Option<WorkItemExecutionPlan>,
 }

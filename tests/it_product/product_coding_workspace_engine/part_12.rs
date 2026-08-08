@@ -41,6 +41,7 @@ fn group_engine_with_two_units() -> (
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -101,6 +102,7 @@ fn group_engine_with_last_running_unit() -> (
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -134,6 +136,102 @@ fn group_engine_with_last_running_unit() -> (
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     (root, paths, store, engine, attempt)
+}
+
+fn create_completed_unit_run_for_test(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    unit_id: &str,
+    start_commit: &str,
+    completion_commit: &str,
+) {
+    let unit = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("coding units")
+        .into_iter()
+        .find(|unit| unit.id == unit_id)
+        .expect("coding unit");
+    store
+        .create_coding_unit_run(
+            attempt,
+            &CodingUnitRun {
+                id: format!("coding_unit_run_fixture_{unit_id}"),
+                unit_id: unit.id,
+                execution_no: 1,
+                work_item_revision_id: unit.work_item_revision_id,
+                resolved_handoff_revision_ids: Vec::new(),
+                canonical_contract_hash: "fixture_contract_hash".to_string(),
+                projection_bundle_id: "fixture_projection_bundle".to_string(),
+                projection_compiler_version: "fixture_compiler".to_string(),
+                coder_provider_renderer_version: "fixture_renderer".to_string(),
+                reviewer_provider_renderer_version: "fixture_renderer".to_string(),
+                internal_reviewer_provider_renderer_version: None,
+                coder_projection_hash: "fixture_coder_projection".to_string(),
+                reviewer_projection_hash: "fixture_reviewer_projection".to_string(),
+                coder_execution_context_hash: None,
+                reviewer_execution_context_hash: None,
+                internal_reviewer_execution_context_hash: None,
+                status: CodingUnitRunStatus::Completed,
+                unit_rework_count: 0,
+                verification_retry_count: 0,
+                operational_retry_count: 0,
+                plan_repair_count: 0,
+                start_commit: Some(start_commit.to_string()),
+                completion_commit: Some(completion_commit.to_string()),
+                created_at: "2026-08-07T00:00:00Z".to_string(),
+                updated_at: "2026-08-07T00:00:00Z".to_string(),
+            },
+        )
+        .expect("completed unit run");
+}
+
+fn complete_group_final_readiness_snapshot(
+    attempt: &CodingExecutionAttempt,
+    units: &[cadence_aria::product::coding_models::CodingExecutionUnit],
+) -> cadence_aria::product::coding_models::GroupFinalReadinessSnapshot {
+    use cadence_aria::product::coding_models::{
+        GroupFinalReadinessSnapshot, GroupFinalReadinessStatus, GroupFinalReadinessUnit,
+    };
+
+    GroupFinalReadinessSnapshot {
+        attempt_id: attempt.id.clone(),
+        status: GroupFinalReadinessStatus::Complete,
+        units: units
+            .iter()
+            .map(|unit| GroupFinalReadinessUnit {
+                unit_id: unit.id.clone(),
+                logical_work_item_id: unit.logical_work_item_id.clone(),
+                unit_run_id: Some(format!("fixture_run_{}", unit.id)),
+                start_commit: Some("seed-commit".to_string()),
+                completion_commit: Some("seed-commit".to_string()),
+                empty_observation: true,
+                code_review_report_id: Some(format!("fixture_review_{}", unit.id)),
+                review_verdict: Some(ReviewVerdict::Approve),
+                review_summary: Some("fixture independent review approved".to_string()),
+                review_findings: Some(Vec::new()),
+                handoff_revision_id: Some(format!("fixture_handoff_{}", unit.id)),
+                plan_revision_id: Some("plan_revision_0001".to_string()),
+                ..Default::default()
+            })
+            .collect(),
+        diagnostics: Vec::new(),
+        created_at: "2026-08-07T00:00:00Z".to_string(),
+    }
+}
+
+fn write_complete_group_final_readiness_snapshot(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    let units = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("group coding units");
+    store
+        .write_group_final_readiness_snapshot(
+            attempt,
+            &complete_group_final_readiness_snapshot(attempt, &units),
+        )
+        .expect("complete group final readiness snapshot");
 }
 
 fn init_group_worktree(worktree: &Path) {
@@ -487,6 +585,7 @@ fn completed_group_attempt_with_handoff_revisions() -> (
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -604,5 +703,6 @@ fn group_attempt_waiting_for_final_confirm() -> (
             artifact_refs: Vec::new(),
         })
         .expect("save final confirm node");
+    write_complete_group_final_readiness_snapshot(&store, &attempt);
     (root, paths, store, engine, attempt)
 }

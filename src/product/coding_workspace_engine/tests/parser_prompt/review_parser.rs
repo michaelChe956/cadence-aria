@@ -1,4 +1,94 @@
 use super::*;
+use crate::cross_cutting::structured_output::{
+    StructuredOutputError, StructuredOutputErrorCode, StructuredOutputState,
+};
+use crate::product::models::RepairTargetKind;
+
+#[test]
+fn code_review_outcome_uses_parsed_sentinel_payload() {
+    let outcome = ProviderStreamOutcome {
+        full_output: "工作流路由回执".to_string(),
+        structured_output: StructuredOutputState::Parsed(serde_json::json!({
+            "verdict": "request_changes",
+            "summary": "需要补充边界测试",
+            "findings": [{
+                "severity": "warning",
+                "file_path": "src/lib.rs",
+                "line": 42,
+                "message": "缺少边界测试",
+                "required_action": "补充边界测试",
+                "source_stage": "code_review"
+            }]
+        })),
+    };
+
+    let parsed = parse_code_review_outcome(&outcome);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::RequestChanges);
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(parsed.findings[0].line, Some(42));
+}
+
+#[test]
+fn code_review_outcome_recovers_valid_payload_from_failed_sentinel() {
+    let outcome = ProviderStreamOutcome {
+        full_output: "不完整的 sentinel".to_string(),
+        structured_output: StructuredOutputState::Failed(StructuredOutputError {
+            code: StructuredOutputErrorCode::MissingEndTag,
+            message: "end tag missing".to_string(),
+            expected_nonce: Some("nonce".to_string()),
+            observed_nonce: None,
+            recoverable_value: Some(serde_json::json!({
+                "verdict": "approve",
+                "summary": "恢复成功",
+                "findings": []
+            })),
+        }),
+    };
+
+    let parsed = parse_code_review_outcome(&outcome);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Approve);
+    assert_eq!(parsed.summary, "恢复成功");
+}
+
+#[test]
+fn code_review_outcome_fails_closed_for_prose_without_recoverable_value() {
+    let outcome = ProviderStreamOutcome {
+        full_output: "审查已完成，未发现问题。".to_string(),
+        structured_output: StructuredOutputState::Failed(StructuredOutputError {
+            code: StructuredOutputErrorCode::MissingStartTag,
+            message: "start tag missing".to_string(),
+            expected_nonce: Some("nonce".to_string()),
+            observed_nonce: None,
+            recoverable_value: None,
+        }),
+    };
+
+    let parsed = parse_code_review_outcome(&outcome);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::Blocked);
+    assert!(parsed.summary.contains("review 输出不是有效 JSON"));
+}
+
+#[test]
+fn group_review_parser_returns_error_for_malformed_output_instead_of_blocked_payload() {
+    let result = parse_group_review_payload(
+        "provider output is not json",
+        CodingExecutionStage::InternalPrReview,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn group_review_parser_accepts_fenced_json() {
+    let result = parse_group_review_payload(
+        "```json {\"verdict\":\"approve\",\"findings\":[]} ```",
+        CodingExecutionStage::InternalPrReview,
+    )
+    .expect("valid fenced payload");
+    assert_eq!(result.verdict, ReviewVerdict::Approve);
+}
 
 #[test]
 fn review_parser_preserves_findings_with_common_aliases() {
@@ -181,6 +271,221 @@ fn review_parser_accepts_group_final_review_source_stage_alias() {
     assert_eq!(
         parsed.findings[0].source_stage,
         CodingExecutionStage::InternalPrReview
+    );
+}
+
+#[test]
+fn review_parser_normalizes_incident_verification_finding_without_coder_route() {
+    let payload = serde_json::json!({
+        "verdict": "request_changes",
+        "summary": "verification evidence is missing",
+        "findings": [{
+            "severity": "error",
+            "message": "verification evidence is missing",
+            "defect_class": "missing_verification_evidence",
+            "reason_code": "verification_evidence_incomplete",
+            "repair_target": "VerificationRetry",
+            "recommended_route": "VerificationRetry",
+            "confidence": "high",
+            "evidence": ["cargo test --locked was not recorded"]
+        }]
+    });
+
+    let parsed =
+        parse_group_review_payload(&payload.to_string(), CodingExecutionStage::InternalPrReview)
+            .expect("incident aliases must normalize");
+    let finding = &parsed.findings[0];
+
+    assert_eq!(
+        finding.defect_class,
+        crate::product::models::PlanDefectClass::VerificationIncomplete
+    );
+    assert_eq!(finding.repair_target, None);
+    assert_eq!(
+        finding.recommended_route,
+        crate::product::models::PlanDefectRoute::VerificationRetry
+    );
+    assert_eq!(
+        finding.confidence,
+        Some(crate::product::plan_repair::PlanDefectConfidence::High)
+    );
+    assert_ne!(
+        finding.recommended_route,
+        crate::product::models::PlanDefectRoute::CoderRework
+    );
+}
+
+#[test]
+fn review_parser_rejects_unknown_defect_class_after_compatibility_normalization() {
+    let payload = serde_json::json!({
+        "verdict": "request_changes",
+        "findings": [{
+            "message": "unknown class",
+            "defect_class": "unrecognized_future_class"
+        }]
+    });
+
+    assert!(
+        parse_group_review_payload(&payload.to_string(), CodingExecutionStage::InternalPrReview,)
+            .is_err()
+    );
+}
+
+#[test]
+fn review_parser_rejects_unknown_recommended_route_after_compatibility_normalization() {
+    let payload = serde_json::json!({
+        "verdict": "request_changes",
+        "findings": [{
+            "message": "unknown route",
+            "recommended_route": "VerifyRetry"
+        }]
+    });
+
+    assert!(
+        parse_group_review_payload(&payload.to_string(), CodingExecutionStage::InternalPrReview,)
+            .is_err()
+    );
+}
+
+#[test]
+fn review_parser_drops_invalid_repair_targets_without_rejecting_payload() {
+    let invalid_targets = [
+        serde_json::json!({
+            "kind": "work_item",
+            "logical_work_item_ids": ["wi_1"],
+            "work_item_revision_ids": ["rev_1"]
+        }),
+        serde_json::json!(42),
+        serde_json::json!(true),
+        serde_json::json!(["current_work_item"]),
+        serde_json::json!({
+            "logical_work_item_ids": ["wi_1"],
+            "work_item_revision_ids": ["rev_1"]
+        }),
+        serde_json::json!({
+            "kind": "current_work_item",
+            "logical_work_item_ids": ["wi_1"]
+        }),
+        serde_json::json!("not-a-verification-retry"),
+    ];
+
+    for repair_target in invalid_targets {
+        let payload = serde_json::json!({
+            "verdict": "request_changes",
+            "findings": [{
+                "message": "invalid repair target",
+                "repair_target": repair_target
+            }]
+        });
+
+        let parsed = parse_group_review_payload(
+            &payload.to_string(),
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("invalid repair_target must not reject the finding");
+        assert_eq!(parsed.findings[0].repair_target, None);
+    }
+}
+
+#[test]
+fn review_parser_preserves_all_canonical_repair_targets() {
+    for kind in ["current_work_item", "upstream_work_item", "subgraph"] {
+        let payload = serde_json::json!({
+            "verdict": "request_changes",
+            "findings": [{
+                "message": "canonical repair target",
+                "repair_target": {
+                    "kind": kind,
+                    "logical_work_item_ids": ["wi_1"],
+                    "work_item_revision_ids": ["rev_1"]
+                }
+            }]
+        });
+
+        let parsed = parse_group_review_payload(
+            &payload.to_string(),
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("canonical repair_target must parse");
+        let target = parsed.findings[0]
+            .repair_target
+            .as_ref()
+            .expect("canonical repair_target must be preserved");
+        assert_eq!(target.logical_work_item_ids, ["wi_1"]);
+        assert_eq!(target.work_item_revision_ids, ["rev_1"]);
+        let expected_kind = match kind {
+            "current_work_item" => RepairTargetKind::CurrentWorkItem,
+            "upstream_work_item" => RepairTargetKind::UpstreamWorkItem,
+            "subgraph" => RepairTargetKind::Subgraph,
+            _ => unreachable!("test only enumerates canonical repair target kinds"),
+        };
+        assert_eq!(target.kind, expected_kind);
+    }
+}
+
+#[test]
+fn review_parser_accepts_only_canonical_confidence_values() {
+    for (value, expected) in [
+        (
+            "high",
+            crate::product::plan_repair::PlanDefectConfidence::High,
+        ),
+        (
+            "medium",
+            crate::product::plan_repair::PlanDefectConfidence::Medium,
+        ),
+        (
+            "low",
+            crate::product::plan_repair::PlanDefectConfidence::Low,
+        ),
+    ] {
+        let payload = serde_json::json!({
+            "verdict": "request_changes",
+            "findings": [{"message": "confidence", "confidence": value}]
+        });
+        let parsed = parse_group_review_payload(
+            &payload.to_string(),
+            CodingExecutionStage::InternalPrReview,
+        )
+        .expect("canonical confidence must parse");
+        assert_eq!(parsed.findings[0].confidence, Some(expected));
+    }
+
+    let payload = serde_json::json!({
+        "verdict": "request_changes",
+        "findings": [{"message": "confidence", "confidence": "certain"}]
+    });
+    assert!(
+        parse_group_review_payload(&payload.to_string(), CodingExecutionStage::InternalPrReview,)
+            .is_err()
+    );
+}
+
+#[test]
+fn review_parser_preserves_canonical_plan_defect_finding_without_compatibility_path() {
+    let payload = serde_json::json!({
+        "verdict": "request_changes",
+        "findings": [{
+            "message": "canonical verification finding",
+            "defect_class": "verification_incomplete",
+            "repair_target": null,
+            "recommended_route": "verification_retry",
+            "confidence": "high"
+        }]
+    });
+
+    let parsed =
+        parse_group_review_payload(&payload.to_string(), CodingExecutionStage::InternalPrReview)
+            .expect("canonical finding must parse");
+    let finding = &parsed.findings[0];
+    assert_eq!(
+        finding.defect_class,
+        crate::product::models::PlanDefectClass::VerificationIncomplete
+    );
+    assert_eq!(finding.repair_target, None);
+    assert_eq!(
+        finding.recommended_route,
+        crate::product::models::PlanDefectRoute::VerificationRetry
     );
 }
 

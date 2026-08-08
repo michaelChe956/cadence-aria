@@ -53,7 +53,11 @@ where
             status_code: "provider_available",
         });
     }
-    for fallback in [ProviderName::ClaudeCode, ProviderName::Codex] {
+    for fallback in [
+        ProviderName::ClaudeCode,
+        ProviderName::Codex,
+        ProviderName::Pi,
+    ] {
         if fallback != requested && is_available(&fallback) {
             return Ok(ResolvedProvider {
                 provider: fallback.clone(),
@@ -125,6 +129,7 @@ pub fn provider_name_available(provider: &ProviderName) -> bool {
         ProviderName::Fake => true,
         ProviderName::ClaudeCode => is_program_on_path("claude"),
         ProviderName::Codex => is_program_on_path("codex"),
+        ProviderName::Pi => is_program_on_path("pi"),
     }
 }
 
@@ -133,6 +138,7 @@ pub fn provider_type_available(provider: &ProviderType) -> bool {
         ProviderType::Fake => true,
         ProviderType::ClaudeCode => is_program_on_path("claude"),
         ProviderType::Codex => is_program_on_path("codex"),
+        ProviderType::Pi => false,
     }
 }
 
@@ -158,6 +164,7 @@ pub fn provider_name_key(provider: &ProviderName) -> &'static str {
     match provider {
         ProviderName::ClaudeCode => "claude_code",
         ProviderName::Codex => "codex",
+        ProviderName::Pi => "pi",
         ProviderName::Fake => "fake",
     }
 }
@@ -166,6 +173,7 @@ pub fn provider_type_key(provider: &ProviderType) -> &'static str {
     match provider {
         ProviderType::ClaudeCode => "claude_code",
         ProviderType::Codex => "codex",
+        ProviderType::Pi => "pi",
         ProviderType::Fake => "fake",
     }
 }
@@ -174,10 +182,11 @@ fn parse_provider_name(value: &str) -> ApiResult<ProviderName> {
     match value {
         "claude_code" => Ok(ProviderName::ClaudeCode),
         "codex" => Ok(ProviderName::Codex),
+        "pi" => Ok(ProviderName::Pi),
         "fake" => Ok(ProviderName::Fake),
         _ => Err(ApiError::validation(
             "invalid_provider",
-            "provider must be claude_code, codex, or fake",
+            "provider must be claude_code, codex, pi, or fake",
         )),
     }
 }
@@ -212,7 +221,29 @@ fn real_workflow_blocked_api_error() -> ApiError {
         "real_workflow_blocked",
         "real workflow is blocked because no real provider CLI is available",
         json!({
-            "action": "install Claude Code or Codex CLI with npm, then retry"
+            "action": "install Claude Code, Codex, or Pi CLI with npm, then retry"
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_provider_name, parse_provider_type, provider_name_key};
+    use crate::product::models::ProviderName;
+
+    #[test]
+    fn parse_provider_name_accepts_pi() {
+        assert_eq!(parse_provider_name("pi").unwrap(), ProviderName::Pi);
+    }
+
+    #[test]
+    fn provider_name_key_pi() {
+        assert_eq!(provider_name_key(&ProviderName::Pi), "pi");
+    }
+
+    #[test]
+    fn parse_provider_type_still_rejects_pi() {
+        let err = parse_provider_type("pi").unwrap_err();
+        assert!(err.message.contains("pi") || format!("{err:?}").contains("pi"));
+    }
 }

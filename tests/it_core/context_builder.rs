@@ -349,6 +349,11 @@ fn contract_workflow_and_prompt_registries_cover_p4_execution_and_closure_nodes(
     );
 
     let rows = phase1_node_contract_table();
+    assert!(
+        rows.iter()
+            .all(|row| row.provider_type != Some(ProviderType::Pi)),
+        "static Task Runner node contracts must never schedule Pi"
+    );
     assert_eq!(rows.first().expect("first row").node_id, "N13");
     assert_eq!(rows.last().expect("last row").node_id, "N28");
     assert_eq!(rows.len(), 15);

@@ -378,7 +378,7 @@ async fn two_blocked_review_retry_sockets_converge_to_one_retry_run_and_runner()
     assert_eq!(
         runs.iter()
             .filter(|run| run.trigger
-                == crate::product::coding_models::CodingRoleRunTrigger::RetryReview)
+                == crate::product::coding_models::CodingRoleRunTrigger::ManualRetry)
             .count(),
         1
     );
@@ -463,7 +463,7 @@ async fn two_repeated_review_retry_sockets_converge_to_one_current_run_and_runne
     assert_eq!(
         runs.iter()
             .filter(|run| run.trigger
-                == crate::product::coding_models::CodingRoleRunTrigger::RetryReview)
+                == crate::product::coding_models::CodingRoleRunTrigger::ManualRetry)
             .count(),
         2
     );
@@ -658,7 +658,7 @@ async fn production_recovery_lifecycle_rejects_competing_abort_and_context_note(
             .expect("role runs after winner recovery")
             .iter()
             .filter(|run| run.trigger
-                == crate::product::coding_models::CodingRoleRunTrigger::RetryReview)
+                == crate::product::coding_models::CodingRoleRunTrigger::ManualRetry)
             .count(),
         1
     );

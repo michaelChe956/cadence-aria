@@ -21,7 +21,12 @@ function providerEntry(
 ): ProviderHealthEntry {
   return {
     provider,
-    display_name: provider === "claude_code" ? "Claude Code" : "Codex",
+    display_name:
+      provider === "claude_code"
+        ? "Claude Code"
+        : provider === "codex"
+          ? "Codex"
+          : "Pi",
     available,
     version: available ? "1.0.0" : null,
     reason_code: available ? null : "command_missing",
@@ -34,6 +39,7 @@ function providerEntry(
 function setProviderHealth(
   claudeAvailable: boolean,
   codexAvailable: boolean,
+  piAvailable = false,
   overrides: Partial<ProviderHealthResponse> = {},
 ) {
   const snapshot: ProviderHealthResponse = {
@@ -47,6 +53,7 @@ function setProviderHealth(
     providers: [
       providerEntry("claude_code", claudeAvailable),
       providerEntry("codex", codexAvailable),
+      providerEntry("pi", piAvailable),
     ],
     ...overrides,
   };
@@ -555,6 +562,29 @@ describe("CreateRepositoryDialog", () => {
     await fillRequiredFields(user);
     expect(screen.getByRole("button", { name: "添加代码库" })).toBeDisabled();
     expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("仓库初始化不显示 Pi 即使 Pi 可用", async () => {
+    setProviderHealth(true, true, true);
+    const user = userEvent.setup();
+    render(
+      <CreateRepositoryDialog
+        onCreate={vi.fn()}
+        onFetchOperation={vi.fn()}
+        onInitializationCompleted={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const provider = screen.getByLabelText("Provider");
+    expect(
+      within(provider).queryByRole("option", { name: "Pi" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(provider).getByRole("option", { name: "Claude Code" }),
+    ).toBeEnabled();
+    await user.selectOptions(provider, "claude_code");
+    expect(provider).toHaveValue("claude_code");
   });
 
   it("deduplicates submit while preserving the selected default Provider meaning", async () => {

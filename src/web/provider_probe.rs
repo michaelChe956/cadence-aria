@@ -67,6 +67,7 @@ pub fn snapshot_probe_message(snapshot: &ProviderHealthSnapshot, degraded: bool)
         let display = match entry.provider {
             ProviderName::ClaudeCode => "Claude Code",
             ProviderName::Codex => "Codex",
+            ProviderName::Pi => "Pi",
             ProviderName::Fake => continue,
         };
         let reason_code = entry
@@ -129,6 +130,7 @@ mod tests {
             command: match provider {
                 ProviderName::ClaudeCode => "claude --version",
                 ProviderName::Codex => "codex --version",
+                ProviderName::Pi => "pi --version",
                 ProviderName::Fake => "fake",
             }
             .to_string(),

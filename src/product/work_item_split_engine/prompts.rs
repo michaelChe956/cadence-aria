@@ -239,6 +239,35 @@ pub(crate) fn build_outline_prompt(
     .0
 }
 
+/// Renders the semantics of enabled split/test option flags so outline authors
+/// classify `kind` correctly before the strict Final Compile validator enforces
+/// the composition. Returns an empty string when no relevant flag is enabled.
+fn split_option_semantics(request: &GenerateWorkItemsRequest) -> String {
+    let mut rules: Vec<&'static str> = Vec::new();
+    if request.force_frontend_backend_split.unwrap_or(false) {
+        rules.push(
+            "- force_frontend_backend_split=true：本次拆分必须产出至少一个 kind=backend 和至少一个 kind=frontend 的 outline。被拆离页面/演示的纯库函数、共享实现、核心逻辑归 backend；页面、UI、演示内容归 frontend。为满足该前后端拆分要求而产出的 backend/frontend 两方均不得标为 other；额外独立的 docs、infra 等工作仍按实际 kind 标注。",
+        );
+    }
+    if request.include_integration_tests.unwrap_or(false) {
+        rules.push(
+            "- include_integration_tests=true：必须产出至少一个 kind=integration 的 outline。",
+        );
+    }
+    if request.include_e2e_tests.unwrap_or(false) {
+        rules.push("- include_e2e_tests=true：必须产出至少一个 kind=e2e 的 outline。");
+    }
+    if rules.is_empty() {
+        return String::new();
+    }
+    format!(
+        "[user_option_semantics]\n\
+         以下用户选项已开启，outline 的 kind 组成必须满足对应约束（Final Compile 会严格校验，不满足将整体失败）：\n\
+         {}\n\n",
+        rules.join("\n")
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_outline_prompt_with_nonce(
     request: &GenerateWorkItemsRequest,
@@ -282,6 +311,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
          include_e2e_tests: {include_e2e_tests}\n\
          force_frontend_backend_split: {force_frontend_backend_split}\n\
          require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
+         {split_option_semantics}\
          {outline_write_scope_rules}\
          [strict_output_contract]\n\
          只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
@@ -322,6 +352,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
         include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
         force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
         require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        split_option_semantics = split_option_semantics(request),
         outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
         nonce = nonce,
         schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
@@ -330,7 +361,7 @@ pub(crate) fn build_outline_prompt_with_nonce(
 }
 
 pub(crate) fn build_outline_revision_prompt(
-    _request: &GenerateWorkItemsRequest,
+    request: &GenerateWorkItemsRequest,
     issue: &IssueRecord,
     feedback: &str,
 ) -> (String, String) {
@@ -346,6 +377,12 @@ pub(crate) fn build_outline_revision_prompt(
          issue_id: {issue_id}\n\
          title: {title}\n\n\
          [revision_feedback]\n{feedback}\n\n\
+         [user_options]\n\
+         include_integration_tests: {include_integration_tests}\n\
+         include_e2e_tests: {include_e2e_tests}\n\
+         force_frontend_backend_split: {force_frontend_backend_split}\n\
+         require_execution_plan_confirm: {require_execution_plan_confirm}\n\n\
+         {split_option_semantics}\
          {outline_write_scope_rules}\
          [strict_output_contract]\n\
          只能输出 WorkItemPlan Outline，不得输出完整 Work Item。\n\
@@ -372,6 +409,11 @@ pub(crate) fn build_outline_revision_prompt(
         issue_id = issue.id,
         title = issue.title,
         feedback = feedback,
+        include_integration_tests = request.include_integration_tests.unwrap_or(false),
+        include_e2e_tests = request.include_e2e_tests.unwrap_or(false),
+        force_frontend_backend_split = request.force_frontend_backend_split.unwrap_or(false),
+        require_execution_plan_confirm = request.require_execution_plan_confirm.unwrap_or(false),
+        split_option_semantics = split_option_semantics(request),
         outline_write_scope_rules = OUTLINE_WRITE_SCOPE_RULES,
         nonce = nonce,
         schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
@@ -650,9 +692,9 @@ pub(crate) fn build_work_item_draft_prompt(
          - canonical_contract.schema_version: integer literal 1；identity: obj{{logical_work_item_id: str+, title: string, kind: backend|frontend|integration|e2e|docs|infra|other}}；goal: obj{{summary: string}}；non_goals: [string]。\n\
          - input_contracts: [obj{{contract_id: str+, provider_logical_work_item_id: str+, required_capabilities: [string], compatibility_policy: require_all|require_any}}]；output_contracts: [obj{{contract_id: str+, capabilities: [string]}}]。\n\
          - tasks: [obj{{task_id: str+, statement: string, requirement_refs: [string], done_when_refs: [string]}}]；write_policy: obj{{exclusive_scopes: [string], forbidden_scopes: [string]}}。\n\
-         - acceptance_criteria: [obj{{criterion_id: str+, statement: string, required_evidence: [source_diff|non_zero_test_execution|manual_check|handoff_field]}}]。\n\
+         - acceptance_criteria: [obj{{criterion_id: str+, statement: string, required_evidence: [source_diff|non_zero_test_execution|manual_check|handoff_field]（必为数组，单元素也需成数组）}}]。\n\
          - acceptance criterion 的 statement 必须描述从最终代码状态、验证命令输出、人工检查结果或 handoff 字段可观测的结果状态；不得描述开发过程本身。\n\
-         - verification_checks: [obj{{check_id: str+, command: string|null, manual_instruction: string|null, required: boolean, non_zero_test_execution_required: boolean}}]；verification_plan: obj{{checks: 与 verification_checks 完全相同的数组}}。\n\
+         - canonical_contract.verification_checks: [obj{{check_id: str+, command: string|null, manual_instruction: string|null, required: boolean, non_zero_test_execution_required: boolean}}]（canonical_contract 必填字段）；draft.verification_plan: obj{{checks: 与它逐字段同序相等的独立副本}}。两处都必须输出，不得只写一处。\n\
          - handoff_contract: obj{{required_fields: 唯一 str+ 数组, provided_contract_refs: 唯一 str+ 数组（无下游消费者时为空数组）, reviewer_check_refs: 唯一 str+ 数组}}。\n\
          - blocker_rules: [obj{{reason_code: str+, route: coder_rework|verification_retry|plan_repair_current|plan_repair_upstream|subgraph_replan|story_amendment|design_amendment|operational_gate, target_contract_refs: [string]}}]；design_traceability: [obj{{source_type: string, source_id: string, requirement_id: string}}]。\n\n\
          [hard_rules]\n\

@@ -1,4 +1,5 @@
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputState;
 
 pub(crate) struct CodeReviewProviderPayload {
     pub(crate) verdict: ReviewVerdict,
@@ -54,7 +55,7 @@ pub(crate) struct RawReviewFinding {
     pub(crate) related_design_constraints: Vec<String>,
     #[serde(default)]
     pub(crate) related_work_item_tasks: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_review_finding_defect_class")]
     pub(crate) defect_class: Option<crate::product::models::PlanDefectClass>,
     #[serde(default)]
     pub(crate) reason_code: Option<String>,
@@ -62,9 +63,12 @@ pub(crate) struct RawReviewFinding {
     pub(crate) contract_refs: Vec<String>,
     #[serde(default)]
     pub(crate) capability_refs: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_review_finding_repair_target")]
     pub(crate) repair_target: Option<crate::product::models::RepairTarget>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_review_finding_recommended_route"
+    )]
     pub(crate) recommended_route: Option<crate::product::models::PlanDefectRoute>,
     #[serde(default)]
     pub(crate) confidence: Option<crate::product::plan_repair::PlanDefectConfidence>,
@@ -75,6 +79,60 @@ pub(crate) struct RawReviewFinding {
 pub(crate) enum RawReviewEvidence {
     Reference(String),
     Canonical(crate::product::models::PlanDefectEvidence),
+}
+
+fn deserialize_review_finding_defect_class<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::product::models::PlanDefectClass>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "missing_verification_evidence" => Ok(Some(
+            crate::product::models::PlanDefectClass::VerificationIncomplete,
+        )),
+        _ => crate::product::models::PlanDefectClass::deserialize(
+            serde::de::value::StringDeserializer::<D::Error>::new(value),
+        )
+        .map(Some),
+    }
+}
+
+fn deserialize_review_finding_repair_target<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::product::models::RepairTarget>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if value == "VerificationRetry" => Ok(None),
+        Some(value) => Ok(crate::product::models::RepairTarget::deserialize(value).ok()),
+    }
+}
+
+fn deserialize_review_finding_recommended_route<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::product::models::PlanDefectRoute>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "VerificationRetry" => Ok(Some(
+            crate::product::models::PlanDefectRoute::VerificationRetry,
+        )),
+        _ => crate::product::models::PlanDefectRoute::deserialize(
+            serde::de::value::StringDeserializer::<D::Error>::new(value),
+        )
+        .map(Some),
+    }
 }
 
 fn deserialize_review_finding_source_stage<'de, D>(
@@ -112,6 +170,63 @@ where
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GroupReviewParseError {
+    #[error("group_review_parse: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+/// 组级审查专用的严格解析入口。
+///
+/// 普通 review 路径保留 `parse_review_payload` 的 blocked 合成行为；组级路径
+/// 必须把 provider 输出解析失败显式暴露给编排器，以便先做一次受限修复。
+pub(crate) fn parse_group_review_payload(
+    full_output: &str,
+    default_source_stage: CodingExecutionStage,
+) -> Result<CodeReviewProviderPayload, GroupReviewParseError> {
+    let candidates = extract_json_object_candidates(full_output);
+    if candidates.is_empty() {
+        return serde_json::from_str::<RawCodeReviewProviderPayload>(full_output)
+            .map(|raw| raw.into_payload(default_source_stage))
+            .map_err(GroupReviewParseError::Json);
+    }
+    let mut last_error = None;
+    for json in candidates {
+        match serde_json::from_str::<RawCodeReviewProviderPayload>(json) {
+            Ok(raw) => return Ok(raw.into_payload(default_source_stage)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(GroupReviewParseError::Json(
+        last_error.expect("candidates 非空时必然记录过反序列化错误"),
+    ))
+}
+pub(crate) fn parse_code_review_outcome(
+    outcome: &ProviderStreamOutcome,
+) -> CodeReviewProviderPayload {
+    let parse_structured_value = |value: &serde_json::Value| {
+        serde_json::from_value::<RawCodeReviewProviderPayload>(value.clone())
+            .map(|raw| raw.into_payload(CodingExecutionStage::CodeReview))
+    };
+
+    match &outcome.structured_output {
+        StructuredOutputState::Parsed(value) => {
+            parse_structured_value(value).unwrap_or_else(|_| {
+                parse_review_payload(&outcome.full_output, CodingExecutionStage::CodeReview)
+            })
+        }
+        StructuredOutputState::Failed(error) => error
+            .recoverable_value
+            .as_ref()
+            .and_then(|value| parse_structured_value(value).ok())
+            .unwrap_or_else(|| {
+                parse_review_payload(&outcome.full_output, CodingExecutionStage::CodeReview)
+            }),
+        StructuredOutputState::NotRequested => {
+            parse_review_payload(&outcome.full_output, CodingExecutionStage::CodeReview)
+        }
+    }
+}
 pub(crate) fn parse_review_payload(
     full_output: &str,
     default_source_stage: CodingExecutionStage,

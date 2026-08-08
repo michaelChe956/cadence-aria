@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole,
-    CodingRoleRun, CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingRoleRun, CodingRoleRunEventType, CodingRoleRunRetryMetadata, CodingRoleRunStatus,
+    CodingRoleRunTrigger,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -107,7 +108,7 @@ impl super::CodingAttemptStore {
         if retry.attempt_id != journal.attempt_id
             || retry.stage != CodingExecutionStage::CodeReview
             || retry.role != CodingProviderRole::CodeReviewer
-            || retry.trigger != CodingRoleRunTrigger::RetryReview
+            || !is_failed_review_manual_retry(&retry, &journal)
             || retry.supersedes_run_id.as_deref()
                 != Some(journal.expected_stale_role_run_id.as_str())
             || !matches!(
@@ -494,13 +495,18 @@ impl super::CodingAttemptStore {
                 .unwrap_or(0)
                 + 1;
             let run = CodingRoleRun {
-                id,
+                id: id.clone(),
                 attempt_id: attempt.id.clone(),
                 stage: CodingExecutionStage::CodeReview,
                 role: CodingProviderRole::CodeReviewer,
                 run_no,
                 status: CodingRoleRunStatus::Running,
-                trigger: CodingRoleRunTrigger::RetryReview,
+                trigger: CodingRoleRunTrigger::ManualRetry,
+                retry_metadata: Some(CodingRoleRunRetryMetadata {
+                    cycle_id: id,
+                    attempt_no: 1,
+                    prior_run_id: Some(journal.expected_stale_role_run_id.clone()),
+                }),
                 node_id: None,
                 started_at: Utc::now().to_rfc3339(),
                 completed_at: None,
@@ -748,7 +754,7 @@ fn validate_retry_role_run(
         && run.stage == CodingExecutionStage::CodeReview
         && run.role == CodingProviderRole::CodeReviewer
         && run.status == CodingRoleRunStatus::Running
-        && run.trigger == CodingRoleRunTrigger::RetryReview
+        && is_failed_review_manual_retry(run, journal)
         && run.supersedes_run_id.as_deref() == Some(journal.expected_stale_role_run_id.as_str())
     {
         return Ok(());
@@ -782,6 +788,20 @@ fn validate_stale_role_run(
         return Err(recovery_state_changed());
     }
     Ok(())
+}
+
+pub(crate) fn is_failed_review_manual_retry(
+    run: &CodingRoleRun,
+    journal: &FailedCodeReviewRecoveryJournal,
+) -> bool {
+    let has_linked_metadata = run.retry_metadata.as_ref().is_some_and(|retry| {
+        retry.cycle_id == run.id
+            && retry.attempt_no == 1
+            && retry.prior_run_id.as_deref() == Some(journal.expected_stale_role_run_id.as_str())
+    });
+    (run.trigger == CodingRoleRunTrigger::ManualRetry && has_linked_metadata)
+        || (run.trigger == CodingRoleRunTrigger::RetryReview
+            && (run.retry_metadata.is_none() || has_linked_metadata))
 }
 
 fn recovery_state_changed() -> ProductStoreError {

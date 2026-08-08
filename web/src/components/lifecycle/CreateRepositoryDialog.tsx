@@ -73,7 +73,9 @@ export function CreateRepositoryDialog({
   );
   const providerOptions = getProviderOptions(availabilitySnapshot);
   const visibleProviderOptions = providerOptions.filter(
-    (option) => option.visible || option.value === providerMode,
+    (option) =>
+      option.value !== "pi" && // 仓库初始化仅支持 Claude Code（Decision 1：不扩大初始化范围）
+      (option.visible || option.value === providerMode),
   );
   const unavailableProviderOptions = visibleProviderOptions.filter(
     (option) => option.disabled,

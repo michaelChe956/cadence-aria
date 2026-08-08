@@ -1,8 +1,10 @@
 use super::*;
 use crate::product::coding_models::CodingUnitRun;
+use crate::product::coding_workspace_engine::group_review_types::RoutingAuthorityEntry;
 use crate::product::models::{PlanDefectRoute, RepairTargetKind};
 use crate::product::plan_repair::{
-    PlanDefectFinding, PlanDefectSeverity, PlanRepairError, normalize_blocker_route,
+    PlanDefectConfidence, PlanDefectFinding, PlanDefectSeverity, PlanRepairError,
+    normalize_blocker_route,
 };
 use crate::product::work_item_projection::ReviewerWorkItemProjection;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
@@ -14,7 +16,9 @@ pub(crate) struct GroupReviewerProjectionBinding {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct AuthoritativeGroupReviewerBinding {
+    pub(crate) order_index: u32,
     pub(crate) run: CodingUnitRun,
     pub(crate) projection_binding: GroupReviewerProjectionBinding,
 }
@@ -130,6 +134,7 @@ impl CodingWorkspaceEngine {
                 )));
             }
             bindings.push(AuthoritativeGroupReviewerBinding {
+                order_index: unit.order_index,
                 run,
                 projection_binding: GroupReviewerProjectionBinding {
                     logical_work_item_id: unit.logical_work_item_id,
@@ -181,7 +186,7 @@ pub(crate) fn unique_authoritative_group_reviewer_binding(
     Ok(selected)
 }
 
-fn validate_group_reviewer_finding(
+pub(crate) fn validate_group_reviewer_finding(
     finding: &ReviewFinding,
     bindings: &[GroupReviewerProjectionBinding],
 ) -> Result<(), PlanRepairError> {
@@ -208,6 +213,106 @@ fn validate_group_reviewer_finding(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_group_review_finding_against_snapshot_authority(
+    finding: &ReviewFinding,
+    authority: &[RoutingAuthorityEntry],
+    allowed_source_unit_run_ids: Option<&[String]>,
+) -> Result<(), PlanRepairError> {
+    if finding.defect_class == crate::product::models::PlanDefectClass::ImplementationDefect {
+        return validate_plan_defect_finding(finding, &empty_reviewer_projection());
+    }
+
+    let reason_code = finding
+        .reason_code
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            PlanRepairError::InvalidFinding("plan defect reason code is missing".to_string())
+        })?;
+    if !matches!(
+        finding.confidence,
+        Some(PlanDefectConfidence::Medium | PlanDefectConfidence::High)
+    ) || finding
+        .contract_refs
+        .iter()
+        .chain(finding.capability_refs.iter())
+        .chain(finding.evidence.iter())
+        .any(|value| value.trim().is_empty())
+        || finding.plan_defect_evidence.iter().any(|evidence| {
+            evidence.kind.trim().is_empty()
+                || evidence.source_ref.trim().is_empty()
+                || evidence.message.trim().is_empty()
+        })
+    {
+        return Err(PlanRepairError::InvalidFinding(
+            "plan defect confidence or references are invalid".to_string(),
+        ));
+    }
+    let canonical = PlanDefectFinding {
+        finding_id: "group_review_snapshot_authority_validation".to_string(),
+        severity: match finding.severity {
+            FindingSeverity::Error => PlanDefectSeverity::Error,
+            FindingSeverity::Warning => PlanDefectSeverity::Warning,
+            FindingSeverity::Info => {
+                return Err(PlanRepairError::InvalidFinding(
+                    "plan defect severity cannot be info".to_string(),
+                ));
+            }
+        },
+        defect_class: finding.defect_class.clone(),
+        reason_code: reason_code.to_string(),
+        message: finding.message.clone(),
+        evidence: finding.plan_defect_evidence.clone(),
+        contract_refs: finding.contract_refs.clone(),
+        capability_refs: finding.capability_refs.clone(),
+        repair_target: finding.repair_target.clone(),
+        recommended_route: finding.recommended_route.clone(),
+        confidence: finding.confidence.clone().expect("validated confidence"),
+    };
+    canonical.validate()?;
+
+    let target_kind = finding
+        .repair_target
+        .as_ref()
+        .map(|target| target.kind.clone());
+    let mut matches = authority.iter().filter(|entry| {
+        entry.reason_code == reason_code
+            && entry.allowed_route == finding.recommended_route
+            && entry.required_target_kind == target_kind
+            && finding
+                .contract_refs
+                .iter()
+                .all(|reference| entry.target_contract_refs.contains(reference))
+            && allowed_source_unit_run_ids
+                .is_none_or(|allowed| allowed.contains(&entry.source_unit_run_id))
+    });
+    let Some(first) = matches.next() else {
+        return Err(PlanRepairError::InvalidFinding(
+            "group review snapshot routing authority is missing".to_string(),
+        ));
+    };
+    let first_signature = snapshot_authority_signature(first);
+    if matches.any(|entry| snapshot_authority_signature(entry) != first_signature) {
+        return Err(PlanRepairError::InvalidFinding(
+            "group review snapshot routing authority is ambiguous".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn snapshot_authority_signature(
+    entry: &RoutingAuthorityEntry,
+) -> (PlanDefectRoute, Option<RepairTargetKind>, Vec<String>) {
+    let mut contract_refs = entry.target_contract_refs.clone();
+    contract_refs.sort();
+    contract_refs.dedup();
+    (
+        entry.allowed_route.clone(),
+        entry.required_target_kind.clone(),
+        contract_refs,
+    )
 }
 
 fn matching_group_reviewer_bindings<'a>(

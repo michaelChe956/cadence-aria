@@ -165,6 +165,8 @@ pub struct CodeReviewReport {
     pub role_run_id: Option<String>,
     #[serde(default)]
     pub run_no: Option<u32>,
+    #[serde(default)]
+    pub unit_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

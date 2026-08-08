@@ -260,7 +260,7 @@ async fn ordinary_allowed_mutation_finishes_before_retry_reloads_state() {
                         .list_role_runs(&updated.project_id, &updated.issue_id, &updated.id)
                         .expect("context note recovery role runs")
                         .iter()
-                        .filter(|run| run.trigger == CodingRoleRunTrigger::RetryReview)
+                        .filter(|run| run.trigger == CodingRoleRunTrigger::ManualRetry)
                         .count(),
                     1
                 );

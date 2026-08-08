@@ -16,6 +16,7 @@ fn coding_store_with_attempt(
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -53,6 +54,7 @@ fn final_confirm_attempt(
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -109,6 +111,7 @@ fn failed_attempt(
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })

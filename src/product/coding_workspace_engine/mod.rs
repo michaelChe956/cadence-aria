@@ -45,6 +45,7 @@ use crate::product::models::{
     LifecycleWorkItemRecord, ProviderConversationRef, ProviderConversationRole, ProviderName,
     WorkItemStatus,
 };
+use crate::product::workspace_engine::permission_mode_for_provider_type;
 use crate::protocol::contracts::ProviderType;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
 use crate::web::coding_ws_handler::CodingWsOutMessage;
@@ -61,6 +62,17 @@ mod gates;
 mod git_operation;
 mod group;
 mod group_completion;
+mod group_final_readiness;
+mod group_review_budget;
+mod group_review_errors;
+mod group_review_facts;
+mod group_review_failure_handling;
+mod group_review_failure_reports;
+mod group_review_material;
+mod group_review_orchestrator;
+mod group_review_prompts;
+mod group_review_repair;
+mod group_review_types;
 mod handoffs;
 mod internal_pr_review;
 mod lifecycle;
@@ -71,6 +83,7 @@ mod plan_defect_routing;
 mod plan_repair_start;
 mod prompts;
 mod provider_failure;
+mod provider_retry;
 mod provider_stream;
 mod reports;
 mod review_parser;
@@ -202,6 +215,10 @@ pub(crate) use plan_defect_routing::*;
 pub(crate) use prompts::*;
 #[allow(unused_imports)]
 pub(crate) use provider_failure::*;
+#[allow(unused_imports)]
+pub(crate) use provider_retry::*;
+#[allow(unused_imports)]
+pub(crate) use provider_stream::ProviderStreamOutcome;
 #[allow(unused_imports)]
 pub(crate) use reports::*;
 #[allow(unused_imports)]

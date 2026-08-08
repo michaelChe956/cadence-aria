@@ -3,7 +3,7 @@ use crate::product::coding_models::FindingSeverity;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default)]
-struct ReviewerDrivenReworkProvider {
+pub(super) struct ReviewerDrivenReworkProvider {
     input: Arc<Mutex<Option<StreamingProviderInput>>>,
 }
 
@@ -41,7 +41,7 @@ impl StreamingProviderAdapter for NonJsonCodeReviewProvider {
 }
 
 impl ReviewerDrivenReworkProvider {
-    fn recorded_input(&self) -> StreamingProviderInput {
+    pub(super) fn recorded_input(&self) -> StreamingProviderInput {
         self.input
             .lock()
             .expect("input lock")
@@ -469,5 +469,6 @@ pub(super) fn review_report_requesting_changes(
         raw_provider_output_ref: Some("provider-raw/code-review.txt".to_string()),
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     }
 }

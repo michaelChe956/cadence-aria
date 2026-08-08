@@ -41,6 +41,16 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
             label: "重试 Internal Review".to_string(),
             action_type: CodingGateActionType::RetryInternalReview,
         }),
+        "retry_group_review_shard" => Some(CodingGateAction {
+            action_id: "retry_group_review_shard".to_string(),
+            label: "重试组审查分片".to_string(),
+            action_type: CodingGateActionType::RetryGroupReviewShard,
+        }),
+        "retry_group_reduction" => Some(CodingGateAction {
+            action_id: "retry_group_reduction".to_string(),
+            label: "重试组审查归约".to_string(),
+            action_type: CodingGateActionType::RetryGroupReduction,
+        }),
         "abort" => Some(CodingGateAction {
             action_id: "abort".to_string(),
             label: "终止".to_string(),
@@ -316,12 +326,12 @@ impl CodingWorkspaceEngine {
             .collect::<Vec<_>>();
 
         // 写入范围门禁的 changed_files 必须来自 git 事实：每个已完成 unit 的
-        // completion_commit 决定它实际改了哪些文件，从而保住 per-unit 归属判定。
+        // start_commit..completion_commit 决定它实际改了哪些文件，从而保住 per-unit 归属判定。
         // 不得依赖交接摘要字段——那会让门禁随摘要移除而空转、越界写入静默放行。
         if self.schema_v2_group_plan_lineage(attempt)?.is_some() {
             for facts in self.schema_v2_group_completion_gate_facts(attempt)? {
                 let changed_files = self
-                    .changed_files_for_unit_completion_commit(attempt, &facts.handoff.commit_sha)
+                    .changed_files_for_unit_completion_range(attempt, &facts.run)
                     .await?;
                 self.validate_changed_files_for_runtime(
                     &facts.runtime,
@@ -348,13 +358,9 @@ impl CodingWorkspaceEngine {
                     .ok_or_else(|| {
                         CodingWorkspaceEngineError::FinalConfirmNotReady(attempt.id.clone())
                     })?;
-                let Some(completion_commit) = unit.completion_commit.as_deref() else {
-                    return Err(CodingWorkspaceEngineError::CompletionCommitMissing(
-                        format!("{}:{}", attempt.id, unit.id),
-                    ));
-                };
+                let run = self.completed_unit_run_for_group_completion_gate(attempt, unit)?;
                 let changed_files = self
-                    .changed_files_for_unit_completion_commit(attempt, completion_commit)
+                    .changed_files_for_unit_completion_range(attempt, &run)
                     .await?;
                 self.validate_changed_files_for_work_item(
                     work_item,
@@ -460,6 +466,22 @@ impl CodingWorkspaceEngine {
         }
     }
 
+    pub(crate) fn release_issue_shared_worktree_lock_for_attempt(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        if lifecycle
+            .get_issue_shared_worktree(project_id, issue_id)?
+            .is_some()
+        {
+            lifecycle.release_issue_worktree_lock_by_owner(project_id, issue_id, attempt_id)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn release_issue_shared_worktree_lock_if_holder(
         &self,
         project_id: &str,
@@ -475,6 +497,28 @@ impl CodingWorkspaceEngine {
         if shared.current_active_work_item_id.is_some() || shared.current_lock_owner_id.is_some() {
             lifecycle.release_issue_worktree_lock(project_id, issue_id, work_item_id, owner_id)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn validate_attempt_issue_shared_worktree_owner_if_present(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let Some(shared) =
+            lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+        else {
+            return Ok(());
+        };
+        let Some(active_work_item_id) = shared.current_active_work_item_id.as_deref() else {
+            return Ok(());
+        };
+        lifecycle.validate_issue_worktree_lock_owner(
+            &attempt.project_id,
+            &attempt.issue_id,
+            active_work_item_id,
+            &attempt.id,
+        )?;
         Ok(())
     }
 
@@ -613,7 +657,25 @@ impl CodingWorkspaceEngine {
                     &CodingProviderRole::Coder,
                     &coder_provider,
                 )?;
-                self.resume_blocked_attempt_at_stage(&cleared, CodingExecutionStage::Coding)?
+                let resumed =
+                    self.resume_blocked_attempt_at_stage(&cleared, CodingExecutionStage::Coding)?;
+                if let Some(failed) = self.store.latest_role_run(
+                    &resumed.project_id,
+                    &resumed.issue_id,
+                    &resumed.id,
+                    CodingExecutionStage::Coding,
+                    CodingProviderRole::Coder,
+                )? && failed.status == CodingRoleRunStatus::Failed
+                {
+                    self.store.create_manual_retry_role_run(
+                        &resumed,
+                        CodingExecutionStage::Coding,
+                        CodingProviderRole::Coder,
+                        &failed,
+                        gate.reason_code.clone(),
+                    )?;
+                }
+                resumed
             }
             CodingGateActionType::RetryReview => {
                 if gate.stage == Some(CodingExecutionStage::InternalPrReview)
@@ -663,6 +725,11 @@ impl CodingWorkspaceEngine {
                 )?;
                 resumed
             }
+            CodingGateActionType::RetryGroupReviewShard
+            | CodingGateActionType::RetryGroupReduction => self.resume_blocked_attempt_at_stage(
+                &current,
+                CodingExecutionStage::InternalPrReview,
+            )?,
             CodingGateActionType::SendToCoder => {
                 if is_code_review_feedback_gate(&gate) {
                     self.send_code_review_feedback_to_coder(&current, extra_context)?

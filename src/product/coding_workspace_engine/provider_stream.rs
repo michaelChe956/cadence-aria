@@ -1,12 +1,99 @@
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputState;
+use std::sync::{Arc, Mutex};
 
 mod persistence;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderStreamOutcome {
+    pub(crate) full_output: String,
+    pub(crate) structured_output: StructuredOutputState,
+}
+
 impl CodingWorkspaceEngine {
+    /// 供外层重试协调器使用的单次调用入口；stream 层不在此路径创建失败门禁。
+    #[allow(dead_code)]
+    pub(crate) async fn run_provider_stream_invocation(
+        &self,
+        mut run: CodingProviderStreamRun<'_>,
+    ) -> ProviderInvocationOutcome {
+        run.suppress_failure_side_effects = true;
+        let attempt = run.attempt;
+        let role_run = run.role_run;
+        let partial_output_observer = Arc::new(Mutex::new(String::new()));
+        let result = self
+            .run_structured_provider_stream_to_completion_with_partial_output(
+                run,
+                Some(partial_output_observer.clone()),
+            )
+            .await;
+        let partial_output = partial_output_observer
+            .lock()
+            .map(|output| output.clone())
+            .unwrap_or_default();
+        let output_for_persistence = result
+            .as_ref()
+            .map(|outcome| outcome.full_output.as_str())
+            .unwrap_or(partial_output.as_str());
+        if let Some(role_run) = role_run
+            && let Err(error) =
+                self.persist_invocation_partial_output(attempt, role_run, output_for_persistence)
+        {
+            return ProviderInvocationOutcome::NonRetryable {
+                reason_code: "provider_raw_output_persistence".to_string(),
+                error,
+                interaction_wait: false,
+            };
+        }
+        ProviderInvocationOutcome::from_result(result, partial_output)
+    }
+
+    fn persist_invocation_partial_output(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role_run: &CodingRoleRun,
+        partial_output: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let raw_provider_output_ref = self.store.save_provider_raw_output(
+            attempt,
+            role_run.stage.clone(),
+            "provider_stream_attempt",
+            partial_output,
+        )?;
+        self.store.update_role_run_refs(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+            vec![raw_provider_output_ref],
+            Vec::new(),
+        )?;
+        Ok(())
+    }
+
     pub(crate) async fn run_provider_stream_to_completion(
         &self,
         run: CodingProviderStreamRun<'_>,
     ) -> Result<String, CodingWorkspaceEngineError> {
+        Ok(self
+            .run_structured_provider_stream_to_completion(run)
+            .await?
+            .full_output)
+    }
+
+    pub(crate) async fn run_structured_provider_stream_to_completion(
+        &self,
+        run: CodingProviderStreamRun<'_>,
+    ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
+        self.run_structured_provider_stream_to_completion_with_partial_output(run, None)
+            .await
+    }
+
+    async fn run_structured_provider_stream_to_completion_with_partial_output(
+        &self,
+        run: CodingProviderStreamRun<'_>,
+        partial_output_observer: Option<Arc<Mutex<String>>>,
+    ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
         let CodingProviderStreamRun {
             attempt,
             node_id,
@@ -18,15 +105,14 @@ impl CodingWorkspaceEngine {
             provider_role,
             command_rx,
             allow_legacy_stream_fallback,
-            fresh_retry,
             timeout,
             timeout_reason_code,
+            suppress_failure_side_effects,
         } = run;
         self.store.ensure_provider_run_allowed(attempt)?;
-        let mut active_legacy_input = legacy_input.clone();
-        let mut active_input = input;
-        let mut fresh_retry = fresh_retry;
-        'provider_attempt: loop {
+        let active_legacy_input = legacy_input.clone();
+        let active_input = input;
+        {
             let cancel = self.cancellation.child_token();
             self.record_role_run_event(
                 attempt,
@@ -91,7 +177,14 @@ impl CodingWorkspaceEngine {
                         let message = error.to_string();
                         cancel.cancel();
                         drop(session);
-                        return self.fail_provider_stream(attempt, node_id, message).await;
+                        return self
+                            .fail_provider_stream_with_ownership(
+                                attempt,
+                                node_id,
+                                suppress_failure_side_effects,
+                                message,
+                            )
+                            .await;
                     }
                     session
                 }
@@ -108,11 +201,13 @@ impl CodingWorkspaceEngine {
                             &active_legacy_input,
                             provider_name,
                             provider_role,
+                            suppress_failure_side_effects,
+                            partial_output_observer,
                         )
                         .await;
                 }
                 Err(error) if !allow_legacy_stream_fallback => {
-                    let message = error.details;
+                    let message = error.details.clone();
                     self.record_role_run_event(
                         attempt,
                         role_run,
@@ -122,20 +217,25 @@ impl CodingWorkspaceEngine {
                             "message": message.clone()
                         }),
                     );
-                    return Err(CodingWorkspaceEngineError::ProviderStream(message));
+                    return Err(if suppress_failure_side_effects {
+                        CodingWorkspaceEngineError::ProviderAdapter(error)
+                    } else {
+                        CodingWorkspaceEngineError::ProviderStream(message)
+                    });
                 }
                 Err(error) => {
-                    let message = error.details;
-                    self.record_role_run_event(
-                        attempt,
-                        role_run,
-                        CodingRoleRunEventType::ProviderFailed,
-                        json!({
-                            "phase": "provider_start",
-                            "message": message.clone()
-                        }),
-                    );
-                    return self.fail_provider_stream(attempt, node_id, message).await;
+                    let message = error.details.clone();
+                    if suppress_failure_side_effects {
+                        return Err(CodingWorkspaceEngineError::ProviderAdapter(error));
+                    }
+                    return self
+                        .fail_provider_stream_with_ownership(
+                            attempt,
+                            node_id,
+                            suppress_failure_side_effects,
+                            message,
+                        )
+                        .await;
                 }
             };
             let mut commands_open = true;
@@ -156,20 +256,24 @@ impl CodingWorkspaceEngine {
                     }
                     _ = &mut timeout => {
                         cancel.cancel();
+                        let waiting_for_choice = !open_choice_ids.is_empty();
+                        let reason_code = if waiting_for_choice {
+                            "choice_timeout"
+                        } else {
+                            timeout_reason_code.unwrap_or("provider_stream_timeout")
+                        };
                         self.record_role_run_event(
                             attempt,
                             role_run,
                             CodingRoleRunEventType::Timeout,
                             json!({
                                 "phase": "provider_stream",
-                                "reason_code": timeout_reason_code
-                                    .unwrap_or("provider_stream_timeout")
+                                "reason_code": reason_code,
+                                "choice_ids": open_choice_ids
                             }),
                         );
                         return Err(CodingWorkspaceEngineError::ProviderStream(
-                            timeout_reason_code
-                                .unwrap_or("provider_stream_timeout")
-                                .to_string(),
+                            reason_code.to_string(),
                         ));
                     }
                     command = command_rx.recv(), if commands_open => {
@@ -292,11 +396,21 @@ impl CodingWorkspaceEngine {
                                     &open_choice_ids,
                                 ));
                             }
-                            return self.fail_provider_stream_ended(attempt, node_id).await;
+                            return self
+                                .fail_provider_stream_ended_with_ownership(
+                                    attempt,
+                                    node_id,
+                                    suppress_failure_side_effects,
+                                )
+                                .await;
                         };
                         match event {
                             ProviderEvent::TextDelta { content } => {
                                 if !open_choice_ids.is_empty() {
+                                    append_partial_output(
+                                        partial_output_observer.as_ref(),
+                                        &content,
+                                    );
                                     return Err(self.unresolved_provider_choice_error(
                                         attempt,
                                         role_run,
@@ -306,6 +420,10 @@ impl CodingWorkspaceEngine {
                                 }
                                 let content_for_event = content.clone();
                                 full_output.push_str(&content);
+                                append_partial_output(
+                                    partial_output_observer.as_ref(),
+                                    &content_for_event,
+                                );
                                 let _ = self
                                     .event_tx
                                     .send(CodingWsOutMessage::CodingStreamChunk {
@@ -498,6 +616,7 @@ impl CodingWorkspaceEngine {
                                 );
                             }
                             ProviderEvent::Completed(completion) => {
+                                let structured_output = completion.structured_output.clone();
                                 let completed_output = completion.full_output;
                                 let provider_session_id = completion.provider_session_id;
                                 if !open_choice_ids.is_empty() {
@@ -535,39 +654,12 @@ impl CodingWorkspaceEngine {
                                         "output_bytes": output_bytes
                                     }),
                                 );
-                                return Ok(full_output);
+                                return Ok(ProviderStreamOutcome {
+                                    full_output,
+                                    structured_output,
+                                });
                             }
                             ProviderEvent::Failed { message } => {
-                                if provider_role == CodingProviderRole::Coder
-                                    && provider_name == &ProviderName::Codex
-                                    && active_input.resume_provider_session_id.is_some()
-                                    && crate::cross_cutting::codex_provider::is_resume_stall_failure(
-                                        &message,
-                                    )
-                                    && let Some(fresh) = fresh_retry.take()
-                                {
-                                    self.record_role_run_event(
-                                        attempt,
-                                        role_run,
-                                        CodingRoleRunEventType::ProviderFailed,
-                                        json!({
-                                            "code": "codex_resume_stall_fresh_retry",
-                                            "message": message,
-                                            "resume_provider_session_id": active_input
-                                                .resume_provider_session_id
-                                                .clone()
-                                        }),
-                                    );
-                                    cancel.cancel();
-                                    self.clear_attempt_provider_conversation(
-                                        attempt,
-                                        &CodingProviderRole::Coder,
-                                        provider_name,
-                                    )?;
-                                    active_legacy_input = fresh.legacy_input;
-                                    active_input = fresh.input;
-                                    continue 'provider_attempt;
-                                }
                                 self.record_role_run_event(
                                     attempt,
                                     role_run,
@@ -576,7 +668,14 @@ impl CodingWorkspaceEngine {
                                         "message": message.clone()
                                     }),
                                 );
-                                return self.fail_provider_stream(attempt, node_id, message).await;
+                                return self
+                                    .fail_provider_stream_with_ownership(
+                                        attempt,
+                                        node_id,
+                                        suppress_failure_side_effects,
+                                        message,
+                                    )
+                                    .await;
                             }
                             ProviderEvent::ProtocolError {
                                 code,
@@ -593,7 +692,14 @@ impl CodingWorkspaceEngine {
                                         "context": context
                                     }),
                                 );
-                                return self.fail_provider_stream(attempt, node_id, message).await;
+                                return self
+                                    .fail_provider_protocol_with_ownership(
+                                        attempt,
+                                        node_id,
+                                        suppress_failure_side_effects,
+                                        message,
+                                    )
+                                    .await;
                             }
                             ProviderEvent::PermissionTimeout { permission_id } => {
                                 if !open_choice_ids.is_empty() {
@@ -616,7 +722,12 @@ impl CodingWorkspaceEngine {
                                     }),
                                 );
                                 return self
-                                    .fail_provider_stream(attempt, node_id, message)
+                                    .fail_provider_stream_with_ownership(
+                                        attempt,
+                                        node_id,
+                                        suppress_failure_side_effects,
+                                        message,
+                                    )
                                     .await;
                             }
                         }
@@ -636,7 +747,9 @@ impl CodingWorkspaceEngine {
         input: &AdapterInput,
         provider_name: &ProviderName,
         provider_role: CodingProviderRole,
-    ) -> Result<String, CodingWorkspaceEngineError> {
+        suppress_failure_side_effects: bool,
+        partial_output_observer: Option<Arc<Mutex<String>>>,
+    ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
         let cancel = self.cancellation.child_token();
         let mut stream = tokio::select! {
             biased;
@@ -659,7 +772,14 @@ impl CodingWorkspaceEngine {
             let message = error.to_string();
             cancel.cancel();
             drop(stream);
-            return self.fail_provider_stream(attempt, node_id, message).await;
+            return self
+                .fail_provider_stream_with_ownership(
+                    attempt,
+                    node_id,
+                    suppress_failure_side_effects,
+                    message,
+                )
+                .await;
         }
         let mut full_output = String::new();
         loop {
@@ -679,6 +799,7 @@ impl CodingWorkspaceEngine {
                 StreamChunk::Text(content) => {
                     let content_for_event = content.clone();
                     full_output.push_str(&content);
+                    append_partial_output(partial_output_observer.as_ref(), &content_for_event);
                     let _ = self
                         .event_tx
                         .send(CodingWsOutMessage::CodingStreamChunk {
@@ -719,7 +840,10 @@ impl CodingWorkspaceEngine {
                             "output_bytes": output_bytes
                         }),
                     );
-                    return Ok(output);
+                    return Ok(ProviderStreamOutcome {
+                        full_output: output,
+                        structured_output: StructuredOutputState::NotRequested,
+                    });
                 }
                 StreamChunk::Error(message) => {
                     self.record_role_run_event(
@@ -730,11 +854,101 @@ impl CodingWorkspaceEngine {
                             "message": message.clone()
                         }),
                     );
-                    return self.fail_provider_stream(attempt, node_id, message).await;
+                    return self
+                        .fail_provider_stream_with_ownership(
+                            attempt,
+                            node_id,
+                            suppress_failure_side_effects,
+                            message,
+                        )
+                        .await;
                 }
             }
         }
 
-        self.fail_provider_stream_ended(attempt, node_id).await
+        self.fail_provider_stream_ended_with_ownership(
+            attempt,
+            node_id,
+            suppress_failure_side_effects,
+        )
+        .await
+    }
+
+    async fn fail_provider_protocol_with_ownership<T>(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        suppress_failure_side_effects: bool,
+        message: String,
+    ) -> Result<T, CodingWorkspaceEngineError> {
+        if suppress_failure_side_effects {
+            Err(CodingWorkspaceEngineError::ProviderProtocol(message))
+        } else {
+            self.fail_provider_stream(attempt, node_id, message).await
+        }
+    }
+
+    async fn fail_provider_stream_with_ownership<T>(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        suppress_failure_side_effects: bool,
+        message: String,
+    ) -> Result<T, CodingWorkspaceEngineError> {
+        if suppress_failure_side_effects {
+            Err(CodingWorkspaceEngineError::ProviderStream(message))
+        } else {
+            self.fail_provider_stream(attempt, node_id, message).await
+        }
+    }
+
+    async fn fail_provider_stream_ended_with_ownership<T>(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        suppress_failure_side_effects: bool,
+    ) -> Result<T, CodingWorkspaceEngineError> {
+        self.fail_provider_stream_with_ownership(
+            attempt,
+            node_id,
+            suppress_failure_side_effects,
+            "provider stream ended before completion".to_string(),
+        )
+        .await
+    }
+}
+
+fn append_partial_output(observer: Option<&Arc<Mutex<String>>>, content: &str) {
+    if let Some(observer) = observer
+        && let Ok(mut output) = observer.lock()
+    {
+        output.push_str(content);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cross_cutting::structured_output::StructuredOutputState;
+    use serde_json::json;
+
+    #[test]
+    fn provider_stream_outcome_keeps_completion_structured_output() {
+        let outcome = ProviderStreamOutcome {
+            full_output: "可读审查回执".to_string(),
+            structured_output: StructuredOutputState::Parsed(json!({
+                "verdict": "approve",
+                "findings": []
+            })),
+        };
+
+        assert_eq!(outcome.full_output, "可读审查回执");
+        assert_eq!(
+            outcome.structured_output,
+            StructuredOutputState::Parsed(json!({
+                "verdict": "approve",
+                "findings": []
+            }))
+        );
     }
 }

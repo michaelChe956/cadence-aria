@@ -61,9 +61,13 @@ impl ProviderHealthSnapshot {
     }
 
     pub fn real_workflow_blocked(&self) -> bool {
-        [ProviderName::ClaudeCode, ProviderName::Codex]
-            .iter()
-            .all(|provider| !self.entry(provider).is_some_and(|entry| entry.available))
+        [
+            ProviderName::ClaudeCode,
+            ProviderName::Codex,
+            ProviderName::Pi,
+        ]
+        .iter()
+        .all(|provider| !self.entry(provider).is_some_and(|entry| entry.available))
     }
 }
 
@@ -182,21 +186,23 @@ impl ProviderHealthService {
             .expect("default Codex compatibility entry")
             .version_command
             .clone();
+        let pi = pi_version_command();
 
-        let (claude, codex) = tokio::join!(
+        let (claude, codex, pi) = tokio::join!(
             self.probe_provider(
                 ProviderName::ClaudeCode,
                 claude,
                 checked_at,
                 cancellation.clone()
             ),
-            self.probe_provider(ProviderName::Codex, codex, checked_at, cancellation)
+            self.probe_provider(ProviderName::Codex, codex, checked_at, cancellation.clone()),
+            self.probe_provider(ProviderName::Pi, pi, checked_at, cancellation)
         );
         let diagnostic = Arc::new(ProviderHealthSnapshot {
             schema_version: PROVIDER_HEALTH_SCHEMA_VERSION,
             generation,
             checked_at,
-            providers: vec![claude, codex],
+            providers: vec![claude, codex, pi],
         });
 
         {
@@ -259,31 +265,47 @@ impl ProviderHealthService {
     }
 }
 
+fn pi_version_command() -> CommandSpec {
+    CommandSpec::new("pi", vec!["--version".to_string()])
+}
+
 fn uninitialized_snapshot() -> ProviderHealthSnapshot {
     let checked_at = Utc
         .timestamp_opt(0, 0)
         .single()
         .expect("Unix epoch timestamp");
     let matrix = default_compatibility_matrix();
-    let providers = [
-        (ProviderName::ClaudeCode, ProviderType::ClaudeCode),
-        (ProviderName::Codex, ProviderType::Codex),
-    ]
-    .into_iter()
-    .map(|(provider, provider_type)| {
-        let command = &matrix
-            .entry_for(provider_type)
-            .expect("default compatibility entry")
-            .version_command;
-        unavailable_entry(
-            provider,
-            format_command(command),
-            checked_at,
-            ProviderHealthReasonCode::IoError,
-            "provider health has not been refreshed",
-        )
-    })
-    .collect();
+    let commands = [
+        (
+            ProviderName::ClaudeCode,
+            matrix
+                .entry_for(ProviderType::ClaudeCode)
+                .expect("default Claude compatibility entry")
+                .version_command
+                .clone(),
+        ),
+        (
+            ProviderName::Codex,
+            matrix
+                .entry_for(ProviderType::Codex)
+                .expect("default Codex compatibility entry")
+                .version_command
+                .clone(),
+        ),
+        (ProviderName::Pi, pi_version_command()),
+    ];
+    let providers = commands
+        .into_iter()
+        .map(|(provider, command)| {
+            unavailable_entry(
+                provider,
+                format_command(&command),
+                checked_at,
+                ProviderHealthReasonCode::IoError,
+                "provider health has not been refreshed",
+            )
+        })
+        .collect();
     ProviderHealthSnapshot {
         schema_version: PROVIDER_HEALTH_SCHEMA_VERSION,
         generation: 0,
@@ -455,7 +477,7 @@ mod tests {
 
     use super::{
         ProviderHealthClock, ProviderHealthReasonCode, ProviderHealthService,
-        ProviderHealthSnapshot,
+        ProviderHealthSnapshot, pi_version_command,
     };
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::bounded_command_runner::{
@@ -484,11 +506,13 @@ mod tests {
         fn new(
             claude: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
             codex: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
+            pi: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
         ) -> Self {
             Self {
                 responses: Mutex::new(HashMap::from([
                     ("claude".to_string(), claude.into()),
                     ("codex".to_string(), codex.into()),
+                    ("pi".to_string(), pi.into()),
                 ])),
                 active: AtomicUsize::new(0),
                 max_active: AtomicUsize::new(0),
@@ -589,6 +613,13 @@ mod tests {
         )
     }
 
+    #[test]
+    fn pi_version_command_uses_pi_binary() {
+        let command = pi_version_command();
+        assert_eq!(command.program, "pi");
+        assert_eq!(command.args, vec!["--version".to_string()]);
+    }
+
     #[tokio::test]
     async fn provider_health_refresh_probes_both_real_providers_in_parallel() {
         let root = tempfile::tempdir().expect("root");
@@ -596,6 +627,7 @@ mod tests {
             ScriptedRunner::new(
                 vec![success("claude 1.2.3\n", "")],
                 vec![success("", "codex-cli 0.124.0\n")],
+                vec![success("pi 0.83.0\n", "")],
             )
             .with_delay(Duration::from_millis(20)),
         );
@@ -605,11 +637,13 @@ mod tests {
             .await
             .expect("refresh");
         let codex = snapshot.entry(&ProviderName::Codex).unwrap();
+        let pi = snapshot.entry(&ProviderName::Pi).unwrap();
         assert_eq!(snapshot.generation, 1);
-        assert_eq!(runner.max_active(), 2);
-        assert_eq!(snapshot.providers.len(), 2);
+        assert_eq!(runner.max_active(), 3);
+        assert_eq!(snapshot.providers.len(), 3);
         assert!(snapshot.entry(&ProviderName::ClaudeCode).unwrap().available);
         assert_eq!(codex.version.as_deref(), Some("0.124.0"));
+        assert_eq!(pi.version.as_deref(), Some("0.83.0"));
         assert!(!snapshot.real_workflow_blocked());
         assert!(!health.degraded());
     }
@@ -623,6 +657,7 @@ mod tests {
                 details: "not found".to_string(),
             })],
             vec![non_zero("license expired\n")],
+            vec![non_zero("pi unavailable\n")],
         ));
         let health = service(root.path(), runner);
         let snapshot = health
@@ -632,6 +667,7 @@ mod tests {
         let claude = snapshot.entry(&ProviderName::ClaudeCode).unwrap();
         let codex = snapshot.entry(&ProviderName::Codex).unwrap();
         assert!(snapshot.entry(&ProviderName::Fake).is_none());
+        assert!(snapshot.entry(&ProviderName::Pi).is_some());
         assert!(snapshot.real_workflow_blocked());
         assert_eq!(
             claude.reason_code,
@@ -652,6 +688,7 @@ mod tests {
                 details: "not found".to_string(),
             })],
             vec![success("codex 1.0\n", "")],
+            vec![non_zero("pi unavailable\n")],
         ));
         let health = service(root.path(), runner);
         let snapshot = health
@@ -672,6 +709,7 @@ mod tests {
                 "claude 1.2.3\n",
             )],
             vec![success("codex 1.0\n", "")],
+            vec![success("pi 0.83.0\n", "")],
         ));
         let health = service(root.path(), runner);
         let snapshot = health
@@ -693,6 +731,7 @@ mod tests {
                 }),
                 success("codex 1.0\n", ""),
             ],
+            vec![success("pi 0.83.0\n", ""), success("pi 0.83.0\n", "")],
         ));
         let health = service(root.path(), runner);
         let first = health
@@ -727,6 +766,7 @@ mod tests {
         let runner = Arc::new(ScriptedRunner::new(
             vec![success("claude 1.0\n", ""), success("claude 2.0\n", "")],
             vec![success("codex 1.0\n", ""), success("codex 2.0\n", "")],
+            vec![success("pi 0.83.0\n", ""), success("pi 0.84.0\n", "")],
         ));
         let health = service(root.path(), runner);
         health
@@ -763,6 +803,7 @@ mod tests {
         let runner = Arc::new(ScriptedRunner::new(
             vec![success("claude 1.0\n", ""), success("claude 2.0\n", "")],
             vec![success("codex 1.0\n", ""), success("codex 2.0\n", "")],
+            vec![success("pi 0.83.0\n", ""), success("pi 0.84.0\n", "")],
         ));
         let health = service(root.path(), runner);
         let first = health

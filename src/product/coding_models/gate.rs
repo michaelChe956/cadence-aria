@@ -96,6 +96,8 @@ pub enum CodingGateActionType {
     RetryCoding,
     RetryReview,
     RetryInternalReview,
+    RetryGroupReviewShard,
+    RetryGroupReduction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +126,19 @@ pub struct CodingGateRequired {
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub raw_provider_output_ref: Option<String>,
+    #[serde(default)]
+    pub diagnostic: Option<CodingGateDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CodingGateDiagnostic {
+    #[serde(default)]
+    pub actual_value: Option<String>,
+    #[serde(default)]
+    pub limit: Option<String>,
+    pub phase: String,
+    pub run_failure_code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

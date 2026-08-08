@@ -10,6 +10,7 @@ use crate::cross_cutting::bounded_command_runner::{
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::image_client::ImageClient;
+use crate::cross_cutting::pi_provider::PiProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_health::{
@@ -352,6 +353,12 @@ fn default_provider_registry(
         );
         registry.register(
             ProviderName::Codex,
+            Arc::new(TestControlledFakeStreamingProvider::new(
+                test_controls.clone(),
+            )),
+        );
+        registry.register(
+            ProviderName::Pi,
             Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
         );
         return Arc::new(registry);
@@ -369,6 +376,11 @@ fn default_provider_registry(
     registry.register_gated(
         ProviderName::Codex,
         Arc::new(CodexProvider::new(PathBuf::from("codex"))),
+        provider_gate.clone(),
+    );
+    registry.register_gated(
+        ProviderName::Pi,
+        Arc::new(PiProvider::new(PathBuf::from("pi"))),
         provider_gate,
     );
     Arc::new(registry)
@@ -503,6 +515,17 @@ mod tests {
     }
 
     #[test]
+    fn production_default_provider_registry_registers_pi() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner);
+        let gate = Arc::new(ProviderAvailabilityGate::new(health));
+        let registry = default_provider_registry(TestControls::default(), gate, false);
+
+        assert!(registry.get(&ProviderName::Pi).is_some());
+    }
+
+    #[test]
     fn image_create_engine_is_constructed_without_changing_new_signature() {
         let root = tempdir().expect("root");
         let state = WebAppState::new(
@@ -586,7 +609,11 @@ mod tests {
             let _guard = ENV_LOCK.lock().expect("env lock");
             let _provider_mode = ProviderModeGuard::disabled();
             let root = tempdir().expect("root");
-            let runner = Arc::new(ScriptedRunner::new(vec![success("1.0"), success("2.0")]));
+            let runner = Arc::new(ScriptedRunner::new(vec![
+                success("1.0"),
+                success("2.0"),
+                success("0.83.0"),
+            ]));
             let health = provider_health(root.path(), runner.clone());
             let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
             let state = WebAppState::new(

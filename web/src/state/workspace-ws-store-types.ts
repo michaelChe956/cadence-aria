@@ -1,4 +1,6 @@
 import type {
+  ProviderPermissionMode,
+  WorkspaceProviderName,
   HumanPresentationRevision,
   NodeDetail,
   PlanAmendmentManifest,
@@ -16,7 +18,6 @@ import type {
   WorkItemPlanOutlineCandidatePayload,
   WorkItemProjectionBundle,
   WorkItemRevisionHistoryDto,
-  WorkspaceProviderName,
 } from "../api/types";
 import type {
   ChatEntry,
@@ -140,12 +141,20 @@ export interface WsCheckpoint {
 export interface WsProviderConfig {
   author: WorkspaceProviderName;
   reviewer?: WorkspaceProviderName | null;
+  permission_modes?: {
+    author: ProviderPermissionMode;
+    reviewer: ProviderPermissionMode;
+  };
 }
 
 export interface ProviderConfigSnapshot {
   author: WorkspaceProviderName;
   reviewer?: WorkspaceProviderName | null;
   review_rounds: number;
+  permission_modes?: {
+    author: ProviderPermissionMode;
+    reviewer: ProviderPermissionMode;
+  };
 }
 
 export interface TimelineNodeRetryError {
@@ -307,6 +316,10 @@ export interface WorkspaceWsState {
   acknowledgedAbortedNodes: string[];
   reviewerEnabled: boolean;
   reviewRounds: number;
+  permissionModes: {
+    author: ProviderPermissionMode;
+    reviewer: ProviderPermissionMode;
+  };
   pendingReviewDecision: { verdict: string; summary: string } | null;
   pendingReviewerSummary: { verdict: string; points: string[] } | null;
 }
@@ -389,6 +402,10 @@ export interface WorkspaceWsActions {
     payload: { snapshot: ProviderConfigSnapshot; locked_at: string } | null,
   ) => void;
   setProviderSelection: (role: "author" | "reviewer", provider: WorkspaceProviderName) => void;
+  setPermissionMode: (
+    role: "author" | "reviewer",
+    mode: ProviderPermissionMode,
+  ) => void;
   setAcknowledgedAbortedNodes: (nodeIds: string[]) => void;
   reset: () => void;
 }

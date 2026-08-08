@@ -53,6 +53,38 @@ function setProviderHealth(
   });
 }
 
+function piEntry(available: boolean): ProviderHealthEntry {
+  return {
+    provider: "pi",
+    display_name: "Pi",
+    available,
+    version: available ? "0.83.0" : null,
+    reason_code: available ? null : "command_missing",
+    reason: available ? null : "pi 未安装",
+    checked_at: "2026-07-31T00:00:00Z",
+    install_hint: "安装 pi",
+  };
+}
+
+function setHealthWithPi(piAvailable: boolean) {
+  useProviderAvailabilityStore.setState({
+    snapshot: {
+      schema_version: 1,
+      generation: 1,
+      checked_at: "2026-07-31T00:00:00Z",
+      state_status: "ready",
+      state_error: null,
+      real_workflow_blocked: false,
+      test_provider_enabled: false,
+      providers: [
+        providerEntry("claude_code", true),
+        providerEntry("codex", true),
+        piEntry(piAvailable),
+      ],
+    },
+  });
+}
+
 function roleSnapshot(
   overrides: Partial<CodingRoleProviderConfigSnapshot> = {},
 ): CodingRoleProviderConfigSnapshot {
@@ -103,6 +135,78 @@ afterEach(() => {
 });
 
 describe("CodingProviderConfigPanel", () => {
+  it("hides the retired group final reviewer provider", async () => {
+    setHealthWithPi(true);
+    const onSelect = vi.fn();
+    const onPermissionModeSelect = vi.fn();
+    const { rerender } = render(
+      <CodingProviderConfigPanel
+        snapshot={roleSnapshot()}
+        attemptScope="work_item_group"
+        lockedRole={null}
+        configLocked={false}
+        maxAutoRework={2}
+        onSelect={onSelect}
+        onPermissionModeSelect={onPermissionModeSelect}
+        onMaxAutoReworkSelect={vi.fn()}
+      />,
+    );
+
+    for (const label of ["Coder", "Code Reviewer"]) {
+      const role = screen.getByRole("group", { name: `${label} Provider 配置` });
+      expect(
+        within(role).getByRole("button", { name: `将 ${label} 切换为 Pi` }),
+      ).toBeEnabled();
+    }
+
+    const coder = screen.getByRole("group", { name: "Coder Provider 配置" });
+    await userEvent.click(
+      within(coder).getByRole("button", { name: "将 Coder 切换为 Pi" }),
+    );
+    expect(onSelect).toHaveBeenCalledWith("coder", "pi");
+    expect(onPermissionModeSelect).toHaveBeenCalledWith("coder", "auto");
+
+    rerender(
+      <CodingProviderConfigPanel
+        snapshot={roleSnapshot({
+          coder: "pi",
+          code_reviewer: "pi",
+          internal_reviewer: "pi",
+          permission_modes: {
+            coder: "auto",
+            code_reviewer: "auto",
+            internal_reviewer: "auto",
+          },
+        })}
+        attemptScope="work_item_group"
+        lockedRole={null}
+        configLocked={false}
+        maxAutoRework={2}
+        onSelect={onSelect}
+        onPermissionModeSelect={vi.fn()}
+        onMaxAutoReworkSelect={vi.fn()}
+      />,
+    );
+
+    for (const label of ["Coder", "Code Reviewer"]) {
+      const role = screen.getByRole("group", { name: `${label} Provider 配置` });
+      expect(
+        within(role).getByRole("button", { name: `将 ${label} 切换为 Pi` }),
+      ).toBeDisabled();
+      expect(
+        within(role).getByRole("button", {
+          name: `将 ${label} 授权模式切换为 Auto`,
+        }),
+      ).toBeTruthy();
+      expect(
+        within(role).queryByRole("button", {
+          name: `将 ${label} 授权模式切换为 Supervised`,
+        }),
+      ).toBeNull();
+      expect(within(role).getByText("Pi 仅支持 Auto")).toBeInTheDocument();
+    }
+  });
+
   it("uses catalog labels and disabled guidance for ordinary roles", async () => {
     setProviderHealth(false, true);
     const { onSelect } = renderPanel();
@@ -120,23 +224,12 @@ describe("CodingProviderConfigPanel", () => {
     expect(onSelect).toHaveBeenCalledWith("coder", "codex");
   });
 
-  it("uses the same catalog for the work item group final reviewer", () => {
+  it("hides the retired group final reviewer provider", () => {
     setProviderHealth(false, true);
     renderPanel({ attemptScope: "work_item_group" });
-    const groupReviewer = screen.getByRole("group", {
-      name: "GroupFinalReview Provider 配置",
-    });
-
     expect(
-      within(groupReviewer).getByRole("button", {
-        name: "将 GroupFinalReview 切换为 Claude Code CLI",
-      }),
-    ).toBeDisabled();
-    expect(
-      within(groupReviewer).getByRole("button", {
-        name: "将 GroupFinalReview 切换为 Codex CLI",
-      }),
-    ).toBeEnabled();
+      screen.queryByRole("group", { name: "GroupFinalReview Provider 配置" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps an unavailable saved configuration visible without fallback", () => {

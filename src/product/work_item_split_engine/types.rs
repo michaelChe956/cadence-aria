@@ -130,6 +130,7 @@ pub(crate) fn provider_name_to_type(name: &ProviderName) -> ProviderType {
     match name {
         ProviderName::ClaudeCode => ProviderType::ClaudeCode,
         ProviderName::Codex => ProviderType::Codex,
+        ProviderName::Pi => ProviderType::Pi,
         ProviderName::Fake => ProviderType::Fake,
     }
 }
@@ -362,4 +363,16 @@ pub(crate) fn product_store_api_error(
     error: crate::product::json_store::ProductStoreError,
 ) -> crate::web::error::ApiError {
     crate::web::error::ApiError::runtime("product_store_error", error.to_string(), json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_name_to_type;
+    use crate::product::models::ProviderName;
+    use crate::protocol::contracts::ProviderType;
+
+    #[test]
+    fn provider_name_to_type_maps_pi() {
+        assert_eq!(provider_name_to_type(&ProviderName::Pi), ProviderType::Pi);
+    }
 }

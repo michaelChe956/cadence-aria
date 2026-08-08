@@ -55,13 +55,30 @@ impl CodingWorkspaceEngine {
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
-        let role_run = self.store.create_role_run(
-            &attempt,
+        let role_run = match self.store.latest_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
             CodingExecutionStage::Coding,
             CodingProviderRole::Coder,
-            CodingRoleRunTrigger::Initial,
-            Some(node.id.clone()),
-        )?;
+        )? {
+            Some(run) if run.status == CodingRoleRunStatus::Running && run.node_id.is_none() => {
+                self.store.attach_role_run_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &run.id,
+                    node.id.clone(),
+                )?
+            }
+            _ => self.store.create_role_run(
+                &attempt,
+                CodingExecutionStage::Coding,
+                CodingProviderRole::Coder,
+                CodingRoleRunTrigger::Initial,
+                Some(node.id.clone()),
+            )?,
+        };
 
         let coder_provider = self
             .store
@@ -126,17 +143,6 @@ impl CodingWorkspaceEngine {
                 coding_context_notes,
             ),
         };
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(
-                    &node.id,
-                    &coder_provider,
-                    prompt.clone(),
-                    prompt_mode.event_detail(),
-                ),
-            })
-            .await;
         if let Some(instruction) = rework_instruction.as_ref() {
             self.store.mark_rework_instruction_consumed(
                 &attempt.project_id,
@@ -156,78 +162,24 @@ impl CodingWorkspaceEngine {
             )?;
         }
 
-        let legacy_input = AdapterInput {
-            provider_type: provider_type_for_name(&coder_provider),
-            role: AdapterRole::Executor,
-            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(&attempt)),
-            prompt,
-            context_files: Vec::new(),
-            output_schema: "coding_workspace_markdown".to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-            max_retries: 0,
-        };
-        let permission_mode =
-            role_permission_mode_for_attempt(&self.store, &attempt, CodingProviderRole::Coder)?;
-        let input = StreamingProviderInput {
-            provider_type: legacy_input.provider_type.clone(),
-            role: legacy_input.role.clone(),
-            prompt: legacy_input.prompt.clone(),
-            working_dir: worktree_path.clone(),
-            workspace_session_id: Some(attempt.id.clone()),
-            resume_provider_session_id: resume_provider_session_id.clone(),
-            permission_mode,
-            structured_output_contract: None,
-            env_vars: BTreeMap::new(),
-            timeout_secs: legacy_input.timeout,
-        };
-        let fresh_retry = (coder_provider == ProviderName::Codex
-            && resume_provider_session_id.is_some())
-        .then(|| {
-            let fresh_legacy_input = AdapterInput {
-                prompt: full_prompt.clone(),
-                ..legacy_input.clone()
-            };
-            let mut fresh_input = input.clone();
-            fresh_input.prompt = full_prompt;
-            fresh_input.resume_provider_session_id = None;
-            CodingProviderFreshRetry {
-                legacy_input: fresh_legacy_input,
-                input: fresh_input,
-            }
-        });
-        let stream_result = self
-            .run_provider_stream_to_completion(CodingProviderStreamRun {
+        let retry_success = self
+            .run_coder_with_retry_cycle(CoderRetryCycleInput {
                 attempt: &attempt,
-                node_id: &node.id,
-                role_run: Some(&role_run),
+                initial_node: node,
+                initial_role_run: role_run,
                 provider,
-                legacy_input: &legacy_input,
-                input,
                 provider_name: &coder_provider,
-                provider_role: CodingProviderRole::Coder,
+                worktree_path,
+                initial_prompt: prompt,
+                fresh_prompt: full_prompt,
+                initial_prompt_mode: prompt_mode,
+                initial_resume_provider_session_id: resume_provider_session_id,
                 command_rx,
-                allow_legacy_stream_fallback: true,
-                fresh_retry,
-                timeout: None,
-                timeout_reason_code: None,
             })
-            .await;
-        let full_output = match stream_result {
-            Ok(output) => output,
-            Err(error) => {
-                let (status, reason_code) = coder_role_run_failure_status(&error);
-                let _ = self.store.update_role_run_status(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                    &role_run.id,
-                    status,
-                    reason_code,
-                );
-                return Err(error);
-            }
-        };
+            .await?;
+        let full_output = retry_success.outcome.full_output;
+        let role_run = retry_success.role_run;
+        let node = retry_success.node;
         let (plan_defect_report, plan_defect_decision, plan_defect_error) =
             match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
                 Ok(report) if report.findings.is_empty() => (None, None, None),
@@ -381,29 +333,5 @@ fn started_at_or_after(left: &str, right: &str) -> bool {
     ) {
         (Ok(left), Ok(right)) => left >= right,
         _ => left >= right,
-    }
-}
-
-fn coder_role_run_failure_status(
-    error: &CodingWorkspaceEngineError,
-) -> (CodingRoleRunStatus, Option<String>) {
-    match error {
-        CodingWorkspaceEngineError::Aborted => (
-            CodingRoleRunStatus::Aborted,
-            Some("abort_attempt".to_string()),
-        ),
-        CodingWorkspaceEngineError::ProviderStream(message)
-            if message == "provider_choice_unresolved" =>
-        {
-            (
-                CodingRoleRunStatus::Blocked,
-                Some("provider_choice_unresolved".to_string()),
-            )
-        }
-        CodingWorkspaceEngineError::ProviderStream(_) => (
-            CodingRoleRunStatus::Failed,
-            Some("coder_provider_interrupted".to_string()),
-        ),
-        other => (CodingRoleRunStatus::Failed, Some(other.to_string())),
     }
 }

@@ -260,6 +260,39 @@ impl LifecycleStore {
         })
     }
 
+    /// 按 owner 释放锁：只要锁的 owner 是给定的 attempt 就释放，
+    /// 不要求 active work item 匹配。
+    ///
+    /// 删除 attempt 时使用：failed attempt 的 `current_work_item_id` 可能已变或
+    /// 已清空，导致按 work_item_id 匹配的 `release_issue_worktree_lock` 找不到
+    /// 而留下孤儿锁；这里只认 owner，幂等释放。
+    pub fn release_issue_worktree_lock_by_owner(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        owner_id: &str,
+    ) -> Result<IssueSharedWorktree, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(owner_id)?;
+
+        let path = self.issue_shared_worktree_path(project_id, issue_id);
+        with_exclusive_lock(&path, || {
+            let mut record = read_issue_worktree(&path, project_id, issue_id)?;
+            if record.current_lock_owner_id.as_deref() != Some(owner_id) {
+                // 锁不是这个 attempt 持有（可能已释放或属于他人）：幂等返回。
+                return Ok(record);
+            }
+            record.current_active_work_item_id = None;
+            record.current_lock_owner_id = None;
+            record.status = IssueSharedWorktreeStatus::Ready;
+            record.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &record)?;
+
+            Ok(record)
+        })
+    }
+
     pub fn mark_issue_worktree_completed_item(
         &self,
         project_id: &str,

@@ -1,4 +1,4 @@
-export type RealProviderName = "claude_code" | "codex";
+export type RealProviderName = "claude_code" | "codex" | "pi";
 
 export type ProviderHealthStateStatus = "ready" | "degraded";
 

@@ -84,6 +84,7 @@ mod lifecycle;
 mod lifecycle_recovery;
 mod linked_workspace_amendment;
 mod mappings;
+pub(crate) use mappings::permission_mode_for_provider_type;
 mod parsers;
 mod plan_outline;
 mod plan_projection;

@@ -798,8 +798,13 @@ fn realistic_chinese_serial_prompt_stays_within_quality_budget() {
         None,
     )
     .expect("realistic serial prompt must stay invocable");
+    // Slimmed margin target, raised twice for canonical field contract clarity:
+    // 11_741 -> 11_800 spelled out `required_evidence` as an array (+45 bytes);
+    // 11_800 -> 11_900 named both verification check owners (+104 bytes) after Pi
+    // emitted only `verification_plan.checks` and omitted the contract copy.
+    // Runtime limits are untouched (hard backstop 65_536, quality budget 12_000).
     assert!(
-        invocation.prompt.len() < 11_741,
+        invocation.prompt.len() < 11_900,
         "realistic Chinese serial prompt must stay within the slimmed margin target: {} bytes",
         invocation.prompt.len()
     );

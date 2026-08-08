@@ -124,6 +124,7 @@ pub(crate) fn recover_work_item_plan_outline_review_schema_fallback(
             author: session.author_provider.clone(),
             reviewer: session.reviewer_provider.clone(),
             review_rounds: session.review_rounds,
+            permission_modes: session.permission_modes.clone(),
         },
         retry: None,
     });

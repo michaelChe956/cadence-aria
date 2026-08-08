@@ -323,6 +323,19 @@ fn fake_story_provider_uses_daemon_pause_guidance_not_fake_tool_call() {
 }
 
 #[test]
+fn pi_story_context_requires_ask_user_tool() {
+    let guidance = workflow_discipline_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::Pi,
+    ));
+
+    assert!(guidance.contains("当前 author provider 是 Pi"));
+    assert!(guidance.contains("使用 `ask_user` 工具提问并等待回答"));
+    assert!(guidance.contains("禁止输出文本 A/B/C 选择题"));
+    assert!(!guidance.contains("Pi 未声明原生结构化交互能力"));
+}
+
+#[test]
 fn claude_code_story_context_requires_structured_ask_user_question() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
@@ -394,6 +407,7 @@ fn workspace_session_record(
         author_provider,
         reviewer_provider: ProviderName::Codex,
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         superpowers_enabled: true,
         openspec_enabled: true,
         work_item_runtime_binding: None,

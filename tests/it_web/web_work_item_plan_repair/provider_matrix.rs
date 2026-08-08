@@ -31,6 +31,8 @@ async fn work_item_plan_repair_provider_matrix_runs_parses_routes_and_persists()
         assert!(result.author_draft_artifact_persisted);
         assert!(result.plan_review_complete_event_observed);
         assert_eq!(result.coding_role_run_count, 2);
-        assert_eq!(result.coding_raw_output_ref_count, 2);
+        // Each Coder/CodeReviewer invocation persists both its raw stream attempt
+        // and its terminal semantic output reference for auditability.
+        assert_eq!(result.coding_raw_output_ref_count, 4);
     }
 }

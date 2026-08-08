@@ -3,15 +3,16 @@ use std::path::{Path, PathBuf};
 
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, FailedCodeReviewRecoveryJournal,
-    FailedCodeReviewRecoveryPhase,
+    FailedCodeReviewRecoveryPhase, is_failed_review_manual_retry,
 };
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingGateRequired, CodingProviderRole, CodingRoleRunStatus,
-    CodingRoleRunTrigger, CodingTimelineNodeStatus,
+    CodingExecutionUnitStatus, CodingGateRequired, CodingProviderRole, CodingRoleRun,
+    CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNodeStatus,
 };
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
+use super::provider_retry::RetryableProviderFailure;
 use super::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,26 +26,27 @@ pub(crate) fn recoverable_failed_code_review(
     coding_store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
 ) -> Result<Option<FailedCodeReviewRecovery>, CodingWorkspaceEngineError> {
-    if let Some(journal) = coding_store.get_failed_code_review_recovery_journal(
+    let recovery_journal = coding_store.get_failed_code_review_recovery_journal(
         &attempt.project_id,
         &attempt.issue_id,
         &attempt.id,
-    )? {
+    )?;
+    if let Some(journal) = recovery_journal.as_ref() {
         if !journal.is_completed() {
-            if !journal_recovery_prefix_is_valid(coding_store, attempt, &journal)? {
+            if !journal_recovery_prefix_is_valid(coding_store, attempt, journal)? {
                 return Ok(None);
             }
             return Ok(Some(FailedCodeReviewRecovery {
-                gate_id: journal.expected_gate_id,
-                failed_node_id: journal.expected_failed_node_id,
-                stale_role_run_id: journal.expected_stale_role_run_id,
+                gate_id: journal.expected_gate_id.clone(),
+                failed_node_id: journal.expected_failed_node_id.clone(),
+                stale_role_run_id: journal.expected_stale_role_run_id.clone(),
             }));
         }
-        if completed_journal_waits_for_retry_node(coding_store, attempt, &journal)? {
+        if completed_journal_waits_for_retry_node(coding_store, attempt, journal)? {
             return Ok(Some(FailedCodeReviewRecovery {
-                gate_id: journal.expected_gate_id,
-                failed_node_id: journal.expected_failed_node_id,
-                stale_role_run_id: journal.expected_stale_role_run_id,
+                gate_id: journal.expected_gate_id.clone(),
+                failed_node_id: journal.expected_failed_node_id.clone(),
+                stale_role_run_id: journal.expected_stale_role_run_id.clone(),
             }));
         }
     }
@@ -84,16 +86,21 @@ pub(crate) fn recoverable_failed_code_review(
         if !failed_node_matches {
             return Ok(None);
         }
-        let mut failed_runs = coding_store
-            .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-            .into_iter()
-            .filter(|run| {
-                run.stage == CodingExecutionStage::CodeReview
-                    && run.role == CodingProviderRole::CodeReviewer
-                    && run.node_id.as_deref() == Some(failed_node_id.as_str())
-                    && run.status == CodingRoleRunStatus::Failed
-                    && run.reason_code.as_deref() == Some("code_review_provider_interrupted")
-            });
+        let mut recoverable_runs = Vec::new();
+        for run in
+            coding_store.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        {
+            if let Some(run) = recoverable_failed_reviewer_run(
+                coding_store,
+                attempt,
+                recovery_journal.as_ref(),
+                run,
+                &failed_node_id,
+            )? {
+                recoverable_runs.push(run);
+            }
+        }
+        let mut failed_runs = recoverable_runs.into_iter();
         let Some(failed_run) = failed_runs.next() else {
             return Ok(None);
         };
@@ -241,6 +248,54 @@ pub(super) fn is_code_review_provider_interrupted_gate(gate: &CodingGateRequired
         && gate.role == Some(CodingProviderRole::CodeReviewer)
 }
 
+fn recoverable_failed_reviewer_run(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    recovery_journal: Option<&FailedCodeReviewRecoveryJournal>,
+    run: CodingRoleRun,
+    failed_node_id: &str,
+) -> Result<Option<CodingRoleRun>, ProductStoreError> {
+    if run.stage != CodingExecutionStage::CodeReview
+        || run.role != CodingProviderRole::CodeReviewer
+        || run.node_id.as_deref() != Some(failed_node_id)
+        || run.status != CodingRoleRunStatus::Failed
+    {
+        return Ok(None);
+    }
+    let provider_started = coding_store
+        .list_role_run_events(&attempt.project_id, &attempt.issue_id, &attempt.id, &run.id)?
+        .iter()
+        .any(|event| {
+            event.event_type == crate::product::coding_models::CodingRoleRunEventType::ProviderStart
+        });
+    let compensated_recovery_start_failure = recovery_journal.is_some_and(|journal| {
+        journal.is_completed()
+            && journal.retry_role_run_id.as_deref() == Some(run.id.as_str())
+            && run.trigger == CodingRoleRunTrigger::ManualRetry
+    });
+    if run.reason_code.as_deref() == Some("code_review_provider_interrupted")
+        && run.trigger != CodingRoleRunTrigger::AutomaticRetry
+        && !provider_started
+        && (run.raw_provider_output_refs.is_empty() || compensated_recovery_start_failure)
+        && run
+            .retry_metadata
+            .as_ref()
+            .is_none_or(|metadata| metadata.attempt_no == 1)
+    {
+        return Ok(Some(run));
+    }
+    let retryable_exhaustion = run.trigger == CodingRoleRunTrigger::AutomaticRetry
+        && run
+            .retry_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.attempt_no == 3)
+        && run
+            .reason_code
+            .as_deref()
+            .is_some_and(RetryableProviderFailure::is_reason_code);
+    Ok(retryable_exhaustion.then_some(run))
+}
+
 fn failed_review_gate_attempts(
     coding_store: &CodingAttemptStore,
     gate_id: &str,
@@ -311,7 +366,7 @@ fn completed_journal_waits_for_retry_node(
     if retry.stage != CodingExecutionStage::CodeReview
         || retry.role != CodingProviderRole::CodeReviewer
         || retry.status != CodingRoleRunStatus::Running
-        || retry.trigger != CodingRoleRunTrigger::RetryReview
+        || !is_failed_review_manual_retry(&retry, journal)
         || retry.node_id.is_some()
         || retry.supersedes_run_id.as_deref() != Some(journal.expected_stale_role_run_id.as_str())
         || retry.reason_code.as_deref() != Some(journal.recovery_key.as_str())
@@ -393,7 +448,7 @@ fn journal_recovery_prefix_is_valid(
         return Ok(false);
     }
     if let Some(retry) = retry_runs.first() {
-        if retry.trigger != CodingRoleRunTrigger::RetryReview
+        if !is_failed_review_manual_retry(retry, journal)
             || retry.stage != CodingExecutionStage::CodeReview
             || retry.role != CodingProviderRole::CodeReviewer
             || retry.supersedes_run_id.as_deref()

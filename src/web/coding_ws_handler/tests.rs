@@ -1,11 +1,23 @@
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::streaming_provider::{
+    ProviderSession, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
+};
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
+use crate::product::coding_attempt_store::{
+    CodingAttemptStore, CreateBlockedGateInput, CreateCodingAttemptInput,
+};
 use crate::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptScope, CodingAttemptStatus,
-    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, ReviewFinding, ReviewVerdict,
+    CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingProviderPermissionMode,
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
+    CodingTimelineNodeStatus, FindingSeverity, GroupFinalReadinessSnapshot,
+    GroupFinalReadinessStatus, GroupFinalReadinessUnit, ReviewFinding, ReviewVerdict,
 };
 use crate::product::coding_work_item_context::select_work_item_markdown;
+use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+use crate::product::coding_workspace_runner::CodingRunnerCommand;
+use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::product::lifecycle_store::{
     CreateVerificationPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
@@ -18,8 +30,15 @@ use crate::product::models::{
 };
 use crate::product::test_executor::planned_test_commands_from_markdown;
 use crate::product::work_item_plan_store::WorkItemPlanStore;
+use crate::protocol::contracts::AdapterInput;
+use crate::web::runtime::WebRuntime;
+use crate::web::state::WebAppState;
 use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     CodeReviewFlowDecision, CodingExecutionAttempt, CodingWsInMessage, CodingWsOutMessage,
@@ -33,6 +52,165 @@ mod failed_review_recovery;
 mod plan_repair;
 mod runner_cleanup;
 
+#[tokio::test]
+async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() {
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Pi,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("running attempt");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Coding,
+        )
+        .expect("coding stage");
+    store
+        .update_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::Pi,
+                code_reviewer: ProviderName::ClaudeCode,
+                internal_reviewer: ProviderName::ClaudeCode,
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes {
+                    coder: CodingProviderPermissionMode::Supervised,
+                    code_reviewer: CodingProviderPermissionMode::Auto,
+                    internal_reviewer: CodingProviderPermissionMode::Auto,
+                },
+            },
+        )
+        .expect("set Pi role config");
+
+    let pi_starts = Arc::new(AtomicUsize::new(0));
+    let alternate_starts = Arc::new(AtomicUsize::new(0));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Pi,
+        Arc::new(FailingCodingProvider {
+            starts: Arc::clone(&pi_starts),
+        }),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(AlternateCodingProvider {
+            starts: Arc::clone(&alternate_starts),
+        }),
+    );
+    let mut state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        registry,
+    );
+    state.test_provider_enabled = true;
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let engine =
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx.clone());
+    let (command_tx, command_rx) = mpsc::channel(1);
+    command_tx
+        .send(CodingRunnerCommand::StageGateConfirm {
+            stage: CodingExecutionStage::Coding,
+        })
+        .await
+        .expect("confirm coding stage gate");
+
+    let result =
+        super::execute_start_coding_flow(&state, &store, &engine, &event_tx, command_rx, &attempt)
+            .await;
+
+    assert!(
+        result.is_err(),
+        "Pi startup failure must terminate the coding run"
+    );
+    assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi starts once");
+    assert_eq!(
+        alternate_starts.load(Ordering::SeqCst),
+        0,
+        "Pi failure must not fall back to a registered alternate provider"
+    );
+}
+
+struct FailingCodingProvider {
+    starts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for FailingCodingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "Pi start failed",
+            0,
+        ))
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        unreachable!("coding must use start")
+    }
+}
+
+struct AlternateCodingProvider {
+    starts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for AlternateCodingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        unreachable!("Pi failure must not start the alternate provider")
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        unreachable!("coding must use start")
+    }
+}
+
 #[test]
 fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
     let session = WorkspaceSessionRecord {
@@ -45,6 +223,7 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         author_provider: ProviderName::Codex,
         reviewer_provider: ProviderName::ClaudeCode,
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         superpowers_enabled: true,
         openspec_enabled: true,
         work_item_runtime_binding: None,
@@ -151,6 +330,7 @@ fn code_review_report_with(
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     }
 }
 
@@ -348,6 +528,58 @@ fn coding_execution_context_uses_workspace_artifact_when_final_compile_is_missin
 }
 
 #[test]
+fn coding_session_state_includes_group_final_readiness_snapshot() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+    let coding_store = CodingAttemptStore::new(app_paths);
+    coding_store
+        .save_coding_attempt(&attempt)
+        .expect("save coding attempt");
+    let readiness = GroupFinalReadinessSnapshot {
+        attempt_id: attempt.id.clone(),
+        status: GroupFinalReadinessStatus::Complete,
+        units: vec![GroupFinalReadinessUnit {
+            unit_id: "coding_unit_0001".to_string(),
+            logical_work_item_id: attempt.work_item_id.clone(),
+            unit_run_id: Some("coding_unit_run_0001".to_string()),
+            start_commit: Some("BASE".to_string()),
+            completion_commit: Some("C2".to_string()),
+            commit_shas: vec!["C1".to_string(), "C2".to_string()],
+            diff_ref: "diffs/coding_unit_0001.patch".to_string(),
+            empty_observation: false,
+            code_review_report_id: Some("code_review_0001".to_string()),
+            review_verdict: Some(ReviewVerdict::Approve),
+            review_summary: Some("review ok".to_string()),
+            review_findings: Some(Vec::new()),
+            review_raw_provider_output_ref: None,
+            handoff_revision_id: Some("handoff_revision_0001".to_string()),
+            plan_revision_id: Some("plan_revision_0001".to_string()),
+        }],
+        diagnostics: Vec::new(),
+        created_at: "2026-08-07T00:00:00Z".to_string(),
+    };
+    coding_store
+        .write_group_final_readiness_snapshot(&attempt, &readiness)
+        .expect("write group final readiness");
+
+    let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");
+    let CodingWsOutMessage::CodingSessionState {
+        group_final_readiness,
+        ..
+    } = state
+    else {
+        panic!("expected coding session state");
+    };
+
+    let readiness = group_final_readiness
+        .as_ref()
+        .as_ref()
+        .expect("group final readiness must be included");
+    assert_eq!(readiness.attempt_id, "coding_attempt_0001");
+    assert_eq!(readiness.status, GroupFinalReadinessStatus::Complete);
+    assert_eq!(readiness.units[0].commit_shas, vec!["C1", "C2"]);
+}
+
+#[test]
 fn coding_session_state_omits_stale_blocked_gate_for_inactive_stage() {
     let (_tmp, app_paths, mut attempt) = seed_compiled_work_item_fixture();
     attempt.status = CodingAttemptStatus::Running;
@@ -521,6 +753,7 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
             author: ProviderName::Fake,
             reviewer: Some(ProviderName::Fake),
             review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         provider_conversations: Vec::new(),
         rework_count: 2,
@@ -676,6 +909,7 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
             author: ProviderName::Fake,
             reviewer: Some(ProviderName::Fake),
             review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         provider_conversations: Vec::new(),
         rework_count: 0,

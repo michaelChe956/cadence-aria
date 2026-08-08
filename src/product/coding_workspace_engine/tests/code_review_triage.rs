@@ -92,6 +92,39 @@ async fn run_code_review_with_provider_output(
 }
 
 #[tokio::test]
+async fn code_review_accepts_routing_receipt_and_sentinel_payload() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        tx,
+    );
+    let provider =
+        super::provider_execution_context::CapturingProjectionProvider::new_sentinel_payload(
+            "工作流路由：阶段=只读代码审查；Change=本次改动；Plan=work_item_0001；必调 Skill=requesting-code-review。\n\
+         {\"verdict\":\"approve\",\"summary\":\"sentinel review complete\",\"findings\":[]}",
+        );
+    let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+
+    let report = engine
+        .execute_code_review_with_commands(&attempt, &provider, &mut cmd_rx)
+        .await
+        .expect("sentinel payload should produce report");
+
+    assert_eq!(report.verdict, ReviewVerdict::Approve);
+    assert_eq!(report.summary, "sentinel review complete");
+    let input = provider.input();
+    let contract = input
+        .structured_output_contract
+        .expect("code review structured output contract");
+    assert!(input
+        .prompt
+        .ends_with(&format!("</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n- 不得输出 Markdown fence 包裹 JSON；最终结论的 JSON 必须是合法对象。\n", contract.nonce)));
+}
+
+#[tokio::test]
 async fn stop_for_human_triage_lands_blocked_gate_with_review_actions() {
     let (_root, store, attempt) =
         run_code_review_with_provider_output(implementation_finding_with_plan_defect_fields())
@@ -248,6 +281,7 @@ async fn run_group_attempt_through_coding() -> (
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })

@@ -55,7 +55,7 @@ async fn blocked_provider_interrupted_review_retry_enters_the_same_recovery_jour
     assert_eq!(stale.status, CodingRoleRunStatus::Failed);
     let retry = runs
         .iter()
-        .find(|run| run.trigger == CodingRoleRunTrigger::RetryReview)
+        .find(|run| run.trigger == CodingRoleRunTrigger::ManualRetry)
         .expect("single retry reviewer run");
     assert_eq!(
         retry.supersedes_run_id.as_deref(),
@@ -295,7 +295,7 @@ async fn blocked_provider_interrupted_recovery_prefixes_converge_idempotently() 
         assert_eq!(runs.len(), 2, "{prefix:?}: {runs:?}");
         assert_eq!(
             runs.iter()
-                .filter(|run| run.trigger == CodingRoleRunTrigger::RetryReview)
+                .filter(|run| run.trigger == CodingRoleRunTrigger::ManualRetry)
                 .count(),
             1,
             "{prefix:?}"

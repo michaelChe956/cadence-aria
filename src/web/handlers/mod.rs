@@ -25,8 +25,8 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingExecutionUnitStatus, CodingTimelineNode, CodingTimelineNodeStatus, PushStatus,
-    WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
+    CodingExecutionUnitStatus, CodingTimelineNode, CodingTimelineNodeStatus,
+    GroupReviewArtifactRef, PushStatus, WorkItemDependencyHandoffRef, WorkItemExecutionPlan,
 };
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::gate_store::GateStore;
@@ -44,7 +44,7 @@ use crate::product::models::{
     IssueStatus as ProductIssueStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord,
     NodeDetail, ProjectRecord, ProviderName, RepositoryRecord, StorySpecRecord,
     WorkItemExecutionPlanStatus, WorkItemKind, WorkItemStatus, WorkspaceMessageRecord,
-    WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
+    WorkspaceRolePermissionModes, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::models::{
     IssueWorkItemPlan as IssueWorkItemPlanRecord, IssueWorkItemPlanStatus, WorkItemPlanStatus,

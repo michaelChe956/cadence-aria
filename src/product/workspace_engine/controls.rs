@@ -185,10 +185,18 @@ impl WorkspaceEngine {
 
         match role {
             "author" => {
+                self.session.permission_modes.author = permission_mode_for_provider(
+                    &provider,
+                    self.session.permission_modes.author.clone(),
+                );
                 self.session.author_provider = provider;
                 Ok(())
             }
             "reviewer" => {
+                self.session.permission_modes.reviewer = permission_mode_for_provider(
+                    &provider,
+                    self.session.permission_modes.reviewer.clone(),
+                );
                 self.session.reviewer_provider = Some(provider);
                 Ok(())
             }
@@ -208,6 +216,12 @@ impl WorkspaceEngine {
                     reviewer_provider,
                 )
                 .map_err(|error| format!("persist provider selection failed: {error}"))?;
+            store
+                .update_workspace_session_permission_modes(
+                    &self.session.session_id,
+                    self.session.permission_modes.clone(),
+                )
+                .map_err(|error| format!("persist permission mode selection failed: {error}"))?;
         }
 
         Ok(())

@@ -2,6 +2,7 @@ import type {
   AuthorDecision,
   HumanConfirmDecision,
   ProviderConfigSnapshot,
+  ProviderPermissionMode,
   ProviderWorkspaceConfigInput,
   ReviewGate,
   ReviewVerdictType,
@@ -278,6 +279,10 @@ export type WsCheckpoint = {
 export type WsProviderConfig = {
   author: WorkspaceProviderName;
   reviewer?: WorkspaceProviderName | null;
+  permission_modes?: {
+    author: ProviderPermissionMode;
+    reviewer: ProviderPermissionMode;
+  };
 };
 
 export type ProviderDefaults = {

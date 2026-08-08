@@ -142,7 +142,7 @@ fn build_work_item_plan_streaming_input_uses_splitter_role() {
         Some(engine.session().session_id.as_str())
     );
     assert_eq!(input.resume_provider_session_id, None);
-    assert_eq!(input.permission_mode, ProviderPermissionMode::Supervised);
+    assert_eq!(input.permission_mode, ProviderPermissionMode::Auto);
     assert_eq!(input.timeout_secs, DEFAULT_PROVIDER_TIMEOUT_SECS);
 }
 

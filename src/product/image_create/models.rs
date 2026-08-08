@@ -117,6 +117,7 @@ impl From<ProviderName> for ProviderType {
         match value {
             ProviderName::ClaudeCode => Self::ClaudeCode,
             ProviderName::Codex => Self::Codex,
+            ProviderName::Pi => Self::Pi,
             ProviderName::Fake => Self::Fake,
         }
     }

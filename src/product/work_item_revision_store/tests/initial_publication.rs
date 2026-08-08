@@ -656,6 +656,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -813,6 +814,7 @@ fn work_item_workspace_session(
         author_provider: ProviderName::Codex,
         reviewer_provider: ProviderName::ClaudeCode,
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         superpowers_enabled: true,
         openspec_enabled: true,
         work_item_runtime_binding,

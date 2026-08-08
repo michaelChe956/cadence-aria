@@ -412,3 +412,275 @@ fn reviewer_prompts_render_parser_derived_schema_gate() {
         }
     }
 }
+
+#[test]
+fn author_streaming_input_uses_session_permission_mode() {
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_permission_mode");
+    session.permission_modes.author = ProviderPermissionMode::Auto;
+    let engine = WorkspaceEngine::new(store, tx, session);
+
+    let input = engine
+        .build_streaming_input("start", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    assert_eq!(input.permission_mode, ProviderPermissionMode::Auto);
+}
+
+#[tokio::test]
+async fn start_generation_locks_selected_modes_into_store() {
+    let root = tempfile::tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "p1".to_string(),
+            issue_id: "i1".to_string(),
+            entity_id: "e1".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("create session");
+    let session_id = record.id.clone();
+    let checkpoint_store = Arc::new(CheckpointStore::new(
+        paths.issue_lifecycle_root("p1", "i1"),
+    ));
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine = WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle.clone(),
+        tx,
+        WorkspaceSession::from_record(record),
+    );
+    let wire = ProviderConfigSnapshot {
+        author: ProviderName::ClaudeCode,
+        reviewer: Some(ProviderName::Codex),
+        review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes {
+            author: ProviderPermissionMode::Supervised,
+            reviewer: ProviderPermissionMode::Auto,
+        },
+    };
+
+    engine.start_generation(wire, true).await.expect("start generation");
+
+    let reread = lifecycle.get_workspace_session(&session_id).expect("reload");
+    assert_eq!(reread.permission_modes.author, ProviderPermissionMode::Supervised);
+    assert_eq!(reread.permission_modes.reviewer, ProviderPermissionMode::Auto);
+}
+
+#[tokio::test]
+async fn start_generation_normalizes_pi_role_to_auto_and_keeps_disabled_reviewer_mode() {
+    let root = tempfile::tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "p1".to_string(),
+            issue_id: "i1".to_string(),
+            entity_id: "e1".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Pi,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("create session");
+    let session_id = record.id.clone();
+    let checkpoint_store = Arc::new(CheckpointStore::new(
+        paths.issue_lifecycle_root("p1", "i1"),
+    ));
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine = WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle.clone(),
+        tx,
+        WorkspaceSession::from_record(record),
+    );
+    let wire = ProviderConfigSnapshot {
+        author: ProviderName::Pi,
+        reviewer: None,
+        review_rounds: 0,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes {
+            author: ProviderPermissionMode::Supervised,
+            reviewer: ProviderPermissionMode::Supervised,
+        },
+    };
+
+    engine.start_generation(wire, false).await.expect("start generation");
+
+    let reread = lifecycle.get_workspace_session(&session_id).expect("reload");
+    assert_eq!(reread.permission_modes.author, ProviderPermissionMode::Auto);
+    assert_eq!(
+        reread.permission_modes.reviewer,
+        ProviderPermissionMode::Supervised,
+        "disabled reviewer retains its selected future-run mode"
+    );
+}
+
+struct CountingProvider {
+    starts: Arc<std::sync::atomic::AtomicUsize>,
+    seen: Arc<Mutex<Vec<(ProviderType, ProviderPermissionMode)>>>,
+    fail_on_start: bool,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CountingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        use std::sync::atomic::Ordering;
+
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        self.seen
+            .lock()
+            .unwrap()
+            .push((input.provider_type.clone(), input.permission_mode.clone()));
+        if self.fail_on_start {
+            return Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "pi start failed",
+                0,
+            ));
+        }
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let output = complete_story_artifact("生成候选草稿。", "候选草稿可进入审核。");
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: output.clone(),
+                })
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                    output,
+                    Some("sess-1".to_string()),
+                )))
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "unused",
+            0,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn author_run_with_pi_uses_pi_provider_in_auto_mode() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_pi");
+    session.author_provider = ProviderName::Pi;
+    session.permission_modes.author = ProviderPermissionMode::Auto;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+
+    let pi_starts = Arc::new(AtomicUsize::new(0));
+    let pi_seen = Arc::new(Mutex::new(Vec::new()));
+    let provider = CountingProvider {
+        starts: pi_starts.clone(),
+        seen: pi_seen.clone(),
+        fail_on_start: false,
+    };
+
+    engine
+        .handle_user_message("start".to_string(), Arc::new(provider), empty_provider_commands())
+        .await;
+
+    assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 应被调用一次");
+    let seen = pi_seen.lock().unwrap();
+    assert_eq!(seen[0].0, ProviderType::Pi);
+    assert_eq!(seen[0].1, ProviderPermissionMode::Auto, "Pi 仅 Auto");
+}
+
+#[tokio::test]
+async fn pi_author_runs_from_story_design_and_work_item_entries_in_auto_mode() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+    ] {
+        let (_tmp, store) = setup();
+        let (tx, _rx) = mpsc::channel(64);
+        let mut session = make_session(&format!("sess_pi_{workspace_type:?}"));
+        session.workspace_type = workspace_type.clone();
+        session.author_provider = ProviderName::Pi;
+        session.permission_modes.author = ProviderPermissionMode::Supervised;
+        let mut engine = WorkspaceEngine::new(store, tx, session);
+
+        let pi_starts = Arc::new(AtomicUsize::new(0));
+        let pi_seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = CountingProvider {
+            starts: pi_starts.clone(),
+            seen: pi_seen.clone(),
+            fail_on_start: false,
+        };
+
+        engine
+            .handle_user_message("start".to_string(), Arc::new(provider), empty_provider_commands())
+            .await;
+
+        assert_eq!(
+            pi_starts.load(Ordering::SeqCst),
+            1,
+            "Pi must start once from the {workspace_type:?} author entry"
+        );
+        let seen = pi_seen.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            &[(ProviderType::Pi, ProviderPermissionMode::Auto)],
+            "the {workspace_type:?} author entry must select Pi and normalize it to Auto"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pi_start_failure_does_not_retry_selected_provider() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_pi_fail");
+    session.author_provider = ProviderName::Pi;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+
+    let pi_starts = Arc::new(AtomicUsize::new(0));
+    let provider = CountingProvider {
+        starts: pi_starts.clone(),
+        seen: Arc::new(Mutex::new(Vec::new())),
+        fail_on_start: true,
+    };
+
+    engine
+        .handle_user_message("start".to_string(), Arc::new(provider), empty_provider_commands())
+        .await;
+
+    assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 只启动一次，不重试");
+    assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+}

@@ -44,6 +44,7 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
         author: ProviderName::Codex,
         reviewer: Some(ProviderName::Fake),
         review_rounds: 2,
+        permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
     });
 
     assert_eq!(snapshot.coder, ProviderName::Codex);
@@ -60,9 +61,9 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
             "internal_reviewer": "fake",
             "review_rounds": 2,
             "permission_modes": {
-                "coder": "supervised",
-                "code_reviewer": "supervised",
-                "internal_reviewer": "supervised"
+                "coder": "auto",
+                "code_reviewer": "auto",
+                "internal_reviewer": "auto"
             }
         })
     );
@@ -74,6 +75,7 @@ fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_mi
         author: ProviderName::ClaudeCode,
         reviewer: None,
         review_rounds: 1,
+        permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
     });
 
     assert_eq!(snapshot.coder, ProviderName::ClaudeCode);
@@ -178,6 +180,8 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
             author: ProviderName::Fake,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 1,
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(
+            ),
         },
         rework_count: 0,
         max_auto_rework: 2,
@@ -240,6 +244,7 @@ fn review_reports_preserve_backend_evidence() {
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        unit_run_id: None,
     };
     let internal = InternalPrReview {
         id: "internal_review_0001".to_string(),
@@ -325,6 +330,7 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         reason_code: None,
         evidence_refs: Vec::new(),
         raw_provider_output_ref: None,
+        diagnostic: None,
     };
 
     assert_eq!(
@@ -367,6 +373,7 @@ fn review_reports_round_trip_role_run_metadata() {
         raw_provider_output_ref: Some("provider-raw/code_review/code_review_0001.txt".to_string()),
         role_run_id: Some("coding_role_run_0001".to_string()),
         run_no: Some(1),
+        unit_run_id: None,
     };
     let value = serde_json::to_value(&code_review).expect("serialize code review");
     assert_eq!(value["role_run_id"], "coding_role_run_0001");

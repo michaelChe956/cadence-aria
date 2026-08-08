@@ -19,7 +19,9 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::protocol::contracts::AdapterInput;
-use crate::web::coding_ws_handler::spawn_coding_runner_reserved;
+use crate::web::coding_ws_handler::{
+    should_resume_runner_after_gate_response, spawn_coding_runner_reserved,
+};
 use crate::web::runtime::WebRuntime;
 use crate::web::state::{CodingAttemptRunKey, WebAppState};
 
@@ -27,6 +29,26 @@ use crate::web::state::{CodingAttemptRunKey, WebAppState};
 enum ProviderStreamMode {
     Modern,
     Legacy,
+}
+
+#[test]
+fn permission_or_choice_wait_timeout_does_not_enqueue_automatic_retry() {
+    let waiting = CodingAttemptStatus::WaitingForHuman;
+
+    assert!(!should_resume_runner_after_gate_response(
+        "permission_timeout",
+        &CodingExecutionAttempt {
+            status: waiting.clone(),
+            ..plan_repair_fixture_with_dependency(false).attempt
+        },
+    ));
+    assert!(!should_resume_runner_after_gate_response(
+        "choice_timeout",
+        &CodingExecutionAttempt {
+            status: waiting,
+            ..plan_repair_fixture_with_dependency(false).attempt
+        },
+    ));
 }
 
 struct RecoveryReviewerProvider {
@@ -61,7 +83,7 @@ impl RecoveryReviewerProvider {
             .find(|run| {
                 run.role == CodingProviderRole::CodeReviewer
                     && run.status == CodingRoleRunStatus::Running
-                    && run.trigger == CodingRoleRunTrigger::RetryReview
+                    && run.trigger == CodingRoleRunTrigger::ManualRetry
                     && run.node_id.is_some()
             })
             .expect("bound running retry reviewer role run");

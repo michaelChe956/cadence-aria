@@ -2,6 +2,7 @@ import { Settings, X } from "lucide-react";
 import { useState, type ComponentProps } from "react";
 import type {
   RevisionPath,
+  ProviderPermissionMode,
   WorkItemPlanArtifactPayload,
   WorkspaceArtifactVersionResponse,
   WorkspaceProviderName,
@@ -336,14 +337,23 @@ export function providerConfigFor(
   providers: { author: string; reviewer?: string | null } | null,
   reviewerEnabled: boolean,
   reviewRounds: number,
+  permissionModes: {
+    author: ProviderPermissionMode;
+    reviewer: ProviderPermissionMode;
+  } = { author: "auto", reviewer: "auto" },
 ): ProviderConfigSnapshot {
+  const author = providerNameFor(providers?.author, "claude_code");
   const reviewer = reviewerEnabled
     ? providerNameFor(providers?.reviewer, "codex")
     : null;
   return {
-    author: providerNameFor(providers?.author, "claude_code"),
+    author,
     reviewer,
     review_rounds: reviewer ? clampReviewRounds(reviewRounds) : 0,
+    permission_modes: {
+      author: author === "pi" ? "auto" : permissionModes.author,
+      reviewer: reviewer === "pi" ? "auto" : permissionModes.reviewer,
+    },
   };
 }
 
@@ -356,7 +366,7 @@ function providerNameFor(
   value: string | null | undefined,
   fallback: WorkspaceProviderName,
 ): WorkspaceProviderName {
-  if (value === "claude_code" || value === "codex" || value === "fake") {
+  if (value === "claude_code" || value === "codex" || value === "pi" || value === "fake") {
     return value;
   }
   return fallback;

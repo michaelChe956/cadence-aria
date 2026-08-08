@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
 use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
 use super::provider::{ProviderConversationRef, ProviderName};
@@ -28,6 +29,22 @@ pub enum WorkspaceSessionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct WorkspaceRolePermissionModes {
+    pub author: ProviderPermissionMode,
+    pub reviewer: ProviderPermissionMode,
+}
+
+impl Default for WorkspaceRolePermissionModes {
+    fn default() -> Self {
+        Self {
+            author: ProviderPermissionMode::Auto,
+            reviewer: ProviderPermissionMode::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionRecord {
     pub id: String,
     pub project_id: String,
@@ -38,6 +55,8 @@ pub struct WorkspaceSessionRecord {
     pub author_provider: ProviderName,
     pub reviewer_provider: ProviderName,
     pub review_rounds: u32,
+    #[serde(default)]
+    pub permission_modes: WorkspaceRolePermissionModes,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
     #[serde(default)]
@@ -149,4 +168,33 @@ pub struct ProjectProviderDefaultsRecord {
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
     pub updated_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_role_permission_modes_default_is_auto() {
+        let modes = WorkspaceRolePermissionModes::default();
+        assert_eq!(modes.author, ProviderPermissionMode::Auto);
+        assert_eq!(modes.reviewer, ProviderPermissionMode::Auto);
+    }
+
+    #[test]
+    fn old_workspace_session_record_without_permission_modes_deserializes_to_auto() {
+        let json = serde_json::json!({
+            "id": "s1", "project_id": "p1", "issue_id": "i1", "entity_id": "e1",
+            "workspace_type": "story", "status": "open",
+            "author_provider": "claude_code", "reviewer_provider": "codex",
+            "review_rounds": 1, "superpowers_enabled": false, "openspec_enabled": false,
+            "messages": [], "created_at": "", "updated_at": ""
+        });
+        let record: WorkspaceSessionRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(record.permission_modes.author, ProviderPermissionMode::Auto);
+        assert_eq!(
+            record.permission_modes.reviewer,
+            ProviderPermissionMode::Auto
+        );
+    }
 }

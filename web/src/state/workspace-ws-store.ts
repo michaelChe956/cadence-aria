@@ -120,6 +120,7 @@ const initialState: WorkspaceWsState = {
   acknowledgedAbortedNodes: [],
   reviewerEnabled: true,
   reviewRounds: 1,
+  permissionModes: { author: "auto", reviewer: "auto" },
   pendingReviewDecision: null,
   pendingReviewerSummary: null,
 };
@@ -179,6 +180,10 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         humanPresentationRevisions,
         humanPresentationSaveStates: {},
         providers: state.providers,
+        permissionModes: state.providers.permission_modes ?? {
+          author: "auto",
+          reviewer: "auto",
+        },
         streamingContent: "",
         streamBuffers: {},
         activeStreamEntryId: null,
@@ -794,6 +799,10 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   setProviderSelection: (role, provider) =>
     set((prev) => setProviderSelection(prev, role, provider)),
+  setPermissionMode: (role, mode) =>
+    set((prev) => ({
+      permissionModes: { ...prev.permissionModes, [role]: mode },
+    })),
   setAcknowledgedAbortedNodes: (nodeIds) =>
     set({ acknowledgedAbortedNodes: Array.from(new Set(nodeIds)) }),
   reset: () => set(initialState),

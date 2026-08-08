@@ -8,8 +8,10 @@ use crate::product::coding_models::{
     CodingStageGateStatus,
 };
 use crate::product::coding_work_item_context::load_coding_work_item_context;
-use crate::product::coding_workspace_engine::CodingExecutionContext;
-use crate::product::coding_workspace_engine::CodingWorkspaceEngineError;
+use crate::product::coding_workspace_engine::{
+    CodingExecutionContext, CodingWorkspaceEngineError,
+    normalize_coding_permission_mode_for_provider,
+};
 use crate::product::coding_workspace_runner::{
     apply_provider_selection_to_snapshots, coding_provider_role_for_stage,
     parse_coding_provider_role,
@@ -150,6 +152,12 @@ pub(crate) fn update_provider_selection(
     let changed_role =
         apply_provider_selection_to_snapshots(role, provider, &mut snapshot, &mut role_snapshot)
             .map_err(ProductStoreError::Io)?;
+    let role_provider = role_snapshot.provider_for_role(&changed_role).clone();
+    let permission_mode = role_snapshot.permission_mode_for_role(&changed_role);
+    role_snapshot.set_permission_mode_for_role(
+        &changed_role,
+        normalize_coding_permission_mode_for_provider(&role_provider, permission_mode),
+    );
     let updated = coding_store.update_attempt_provider_config_snapshot(
         &attempt.project_id,
         &attempt.issue_id,
@@ -179,7 +187,10 @@ pub(crate) fn update_provider_permission_mode(
         &attempt.id,
     )?;
     let provider = role_snapshot.provider_for_role(&parsed_role).clone();
-    role_snapshot.set_permission_mode_for_role(&parsed_role, permission_mode);
+    role_snapshot.set_permission_mode_for_role(
+        &parsed_role,
+        normalize_coding_permission_mode_for_provider(&provider, permission_mode),
+    );
     coding_store.update_role_provider_config_snapshot(
         &attempt.project_id,
         &attempt.issue_id,

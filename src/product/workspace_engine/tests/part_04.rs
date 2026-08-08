@@ -295,6 +295,7 @@ async fn review_decision_continue_with_work_item_plan_outline_candidate_restarts
             author: ProviderName::ClaudeCode,
             reviewer: Some(ProviderName::Codex),
             review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         },
         retry: None,
     });

@@ -128,12 +128,24 @@ impl CodingWorkspaceEngine {
             )?
         };
         if running.scope == CodingAttemptScope::WorkItemGroup && running.worktree_path.is_some() {
-            let attempt = self.store.update_attempt_stage(
+            let mut attempt = self.store.update_attempt_stage(
                 project_id,
                 issue_id,
                 attempt_id,
                 CodingExecutionStage::Coding,
             )?;
+            if attempt.head_commit.is_none() {
+                let worktree_path = attempt.worktree_path.as_ref().ok_or_else(|| {
+                    CodingWorkspaceEngineError::MissingWorktree(attempt.id.clone())
+                })?;
+                let base_head = self._git_service.git_current_head(worktree_path).await?;
+                attempt = self.store.update_attempt_head_commit(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    Some(base_head),
+                )?;
+            }
             let _ = self
                 .event_tx
                 .send(CodingWsOutMessage::CodingStageChange {

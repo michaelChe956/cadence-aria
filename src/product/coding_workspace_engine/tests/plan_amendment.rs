@@ -524,6 +524,7 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })

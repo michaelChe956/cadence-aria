@@ -1,5 +1,7 @@
 use super::*;
-use crate::product::coding_models::{CodingExecutionUnit, CodingExecutionUnitStatus};
+use crate::product::coding_models::{
+    CodingAttemptScope, CodingExecutionUnit, CodingExecutionUnitStatus,
+};
 use crate::product::models::work_item_revision::HandoffRevision;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
@@ -122,7 +124,6 @@ impl CodingWorkspaceEngine {
                     "projection_bundle_id": binding.run.projection_bundle_id,
                     "projection_compiler_version": binding.run.projection_compiler_version,
                     "reviewer_projection_hash": binding.run.reviewer_projection_hash,
-                    "reviewer_projection": binding.projection_binding.projection,
                     "resolved_handoff_revision_ids": binding.run.resolved_handoff_revision_ids,
                 })
             })
@@ -174,7 +175,7 @@ impl CodingWorkspaceEngine {
     pub(crate) fn build_code_review_report(
         &self,
         attempt: &CodingExecutionAttempt,
-        full_output: &str,
+        outcome: ProviderStreamOutcome,
         raw_provider_output_ref: Option<String>,
         role_run: &CodingRoleRun,
     ) -> Result<CodeReviewReport, ProductStoreError> {
@@ -183,7 +184,7 @@ impl CodingWorkspaceEngine {
             &attempt.issue_id,
             &attempt.id,
         )?;
-        let payload = parse_review_payload(full_output, CodingExecutionStage::CodeReview);
+        let payload = parse_code_review_outcome(&outcome);
         Ok(CodeReviewReport {
             id: next_sequential_id("code_review", existing.len()),
             attempt_id: attempt.id.clone(),
@@ -197,6 +198,11 @@ impl CodingWorkspaceEngine {
             raw_provider_output_ref,
             role_run_id: Some(role_run.id.clone()),
             run_no: Some(role_run.run_no),
+            unit_run_id: if attempt.scope == CodingAttemptScope::WorkItemGroup {
+                Some(self.store.get_active_unit_run(attempt)?.id)
+            } else {
+                None
+            },
         })
     }
 

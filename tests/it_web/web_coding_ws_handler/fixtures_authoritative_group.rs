@@ -1,6 +1,7 @@
 fn seed_authoritative_group_plan_fixture(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
+    compact_routing: bool,
 ) {
     let revision_store = WorkItemRevisionStore::new(store.paths());
     let lineage = WorkItemPlanLineage {
@@ -60,7 +61,11 @@ fn seed_authoritative_group_plan_fixture(
                 provided_contract_refs: Vec::new(),
                 reviewer_check_refs: Vec::new(),
             },
-            blocker_rules: authoritative_group_blocker_rules_fixture(),
+            blocker_rules: if compact_routing {
+                authoritative_group_blocker_rules_fixture()
+            } else {
+                reviewer_triggered_rework_blocker_rules_fixture()
+            },
             design_traceability: Vec::new(),
         };
         let revision = WorkItemRevision {

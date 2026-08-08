@@ -110,11 +110,12 @@ impl WorkspaceEngine {
         )
         .await;
 
-        let retry_context = ArtifactRetryContext {
-            provider: provider.clone(),
-            input: input.clone(),
-            attempted: false,
-        };
+        let retry_context =
+            (self.session.author_provider != ProviderName::Pi).then(|| ArtifactRetryContext {
+                provider: provider.clone(),
+                input: input.clone(),
+                attempted: false,
+            });
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(ProviderSessionDriveInput {
             session,
@@ -122,7 +123,7 @@ impl WorkspaceEngine {
             node_id: Some(generation_node_id),
             agent: Some(self.session.author_provider.clone()),
             role: ProviderConversationRole::Author,
-            artifact_retry: Some(retry_context),
+            artifact_retry: retry_context,
             revision_resume_fallback: None,
         })
         .await;

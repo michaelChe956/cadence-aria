@@ -87,6 +87,7 @@ pub(super) fn create_large_workspace_fixture(
         author: ProviderName::Codex,
         reviewer: Some(ProviderName::ClaudeCode),
         review_rounds: 5,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     };
     let mut nodes = Vec::new();
     for index in 0..45 {
@@ -241,6 +242,7 @@ fn provider_name(provider: &ProviderName) -> &'static str {
     match provider {
         ProviderName::ClaudeCode => "claude_code",
         ProviderName::Codex => "codex",
+        ProviderName::Pi => "pi",
         ProviderName::Fake => "fake",
     }
 }
@@ -327,6 +329,7 @@ fn create_coding_role_run_fixture(
         author: ProviderName::Fake,
         reviewer: Some(ProviderName::Fake),
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     };
     let attempt_index = CODING_FIXTURE_ATTEMPT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let attempt_id = format!("coding_attempt_{attempt_index:04}");

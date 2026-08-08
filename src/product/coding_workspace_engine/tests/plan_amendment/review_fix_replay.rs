@@ -152,6 +152,14 @@ async fn coding_amendment_completed_replay_accepts_group_completion_head_evoluti
         "// completed\n",
     )
     .unwrap();
+    run_test_git(worktree, &["add", "completed_after_amendment.rs"]);
+    run_test_git(
+        worktree,
+        &["commit", "-m", "coder completes amended work item"],
+    );
+    let coder_completion_head = git_stdout(worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
     let review_ready = fixture
         .store
         .update_attempt_stage(
@@ -175,9 +183,9 @@ async fn coding_amendment_completed_replay_accepts_group_completion_head_evoluti
             CodingExecutionStage::Coding,
         )
         .unwrap();
-    assert_ne!(
+    assert_eq!(
         progressed.head_commit.as_deref(),
-        Some(materialization_head.as_str())
+        Some(coder_completion_head.as_str())
     );
 
     let replayed = fixture

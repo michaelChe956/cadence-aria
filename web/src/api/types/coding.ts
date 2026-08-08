@@ -128,6 +128,8 @@ export type CodingRoleRunStatus =
   | "aborted";
 export type CodingRoleRunTrigger =
   | "initial"
+  | "automatic_retry"
+  | "manual_retry"
   | "retry_review"
   | "retry_internal_review";
 
@@ -168,6 +170,12 @@ export type CodingRoleRunEventPreview = {
   artifact_ref?: string | null;
 };
 
+export type CodingRoleRunRetryMetadata = {
+  cycle_id: string;
+  attempt_no: number;
+  prior_run_id?: string | null;
+};
+
 export type CodingRolePermissionModes = {
   coder: CodingProviderPermissionMode;
   code_reviewer: CodingProviderPermissionMode;
@@ -203,6 +211,8 @@ export type CodingRoleRun = {
   run_no: number;
   status: CodingRoleRunStatus;
   trigger: CodingRoleRunTrigger;
+  retry_metadata?: CodingRoleRunRetryMetadata | null;
+  retry_exhausted?: boolean;
   node_id: string | null;
   started_at: string;
   completed_at: string | null;
@@ -289,6 +299,58 @@ export type InternalPrReview = {
   run_no?: number | null;
 };
 
+export type GroupReviewArtifactRef = {
+  id: string;
+  raw_provider_output_refs: string[];
+};
+
+export type GroupReviewArtifactProjection = {
+  shard_reports: GroupReviewArtifactRef[];
+  reduction_reports: GroupReviewArtifactRef[];
+};
+
+export type GroupFinalReadinessStatus = "complete" | "incomplete";
+
+export type GroupFinalReadinessDiagnosticKind =
+  | "unit_run_missing"
+  | "completion_commit_missing"
+  | "code_review_missing"
+  | "handoff_missing"
+  | "plan_binding_mismatch"
+  | "identity_mismatch";
+
+export type GroupFinalReadinessDiagnostic = {
+  kind: GroupFinalReadinessDiagnosticKind;
+  unit_id: string | null;
+  message: string;
+};
+
+export type GroupFinalReadinessUnit = {
+  unit_id: string;
+  logical_work_item_id: string;
+  unit_run_id: string | null;
+  start_commit: string | null;
+  completion_commit: string | null;
+  commit_shas: string[];
+  diff_ref: string;
+  empty_observation: boolean;
+  code_review_report_id: string | null;
+  review_verdict: CodingReviewVerdict | null;
+  review_summary: string | null;
+  review_findings: ReviewFinding[] | null;
+  review_raw_provider_output_ref: string | null;
+  handoff_revision_id: string | null;
+  plan_revision_id: string | null;
+};
+
+export type GroupFinalReadinessSnapshot = {
+  attempt_id: string;
+  status: GroupFinalReadinessStatus;
+  units: GroupFinalReadinessUnit[];
+  diagnostics: GroupFinalReadinessDiagnostic[];
+  created_at: string;
+};
+
 export type CodingEntryType =
   | { type: "user_message" }
   | { type: "assistant_message" }
@@ -320,7 +382,9 @@ export type CodingGateActionType =
   | "manual_continue"
   | "retry_coding"
   | "retry_review"
-  | "retry_internal_review";
+  | "retry_internal_review"
+  | "retry_group_review_shard"
+  | "retry_group_reduction";
 export type CodingGateKind = "permission" | "stage_gate" | "blocked" | "final_confirm";
 
 export type CodingGateAction = {
@@ -342,6 +406,14 @@ export type CodingGateRequired = {
   reason_code?: string | null;
   evidence_refs?: string[];
   raw_provider_output_ref?: string | null;
+  diagnostic?: CodingGateDiagnostic | null;
+};
+
+export type CodingGateDiagnostic = {
+  actual_value?: string | null;
+  limit?: string | null;
+  phase: string;
+  run_failure_code: string;
 };
 
 export type CodingChoiceGateStatus = "open" | "resolved" | "stale" | "cancelled";
@@ -384,6 +456,8 @@ export type CodingAttemptSnapshotResponse = {
   code_review_reports: CodeReviewReport[];
   review_request: ReviewRequest | null;
   internal_pr_review: InternalPrReview | null;
+  group_review_artifacts?: GroupReviewArtifactProjection | null;
+  group_final_readiness?: GroupFinalReadinessSnapshot | null;
   pending_gates: CodingGateRequired[];
   pending_choices: CodingChoiceGate[];
   role_runs?: CodingRoleRun[];
@@ -463,6 +537,7 @@ export type CodingWsOutMessage =
       verification_commands: string[];
       work_item_execution_plan: WorkItemExecutionPlan | null;
       linked_plan_repair: PlanRepairSessionSnapshot | null;
+      group_review_artifacts?: GroupReviewArtifactProjection | null;
       require_execution_plan_confirm: boolean;
     } & Omit<CodingAttemptSnapshotResponse, "attempt">)
   | { type: "coding_stage_change"; stage: CodingExecutionStage }

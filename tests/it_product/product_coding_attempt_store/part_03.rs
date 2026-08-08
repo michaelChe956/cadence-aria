@@ -132,6 +132,7 @@ fn scoped_writes_target_only_exact_legacy_attempt_identity() {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             }),
         )
         .expect("target stage gate");

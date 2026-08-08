@@ -94,7 +94,12 @@ describe("ChatWorkspacePage chat actions", () => {
     await userEvent.click(screen.getByTestId("start-generation"));
 
     expect(api.sendStartGeneration).toHaveBeenCalledWith(
-      { author: "fake", reviewer: "codex", review_rounds: 2 },
+      {
+        author: "fake",
+        reviewer: "codex",
+        review_rounds: 2,
+        permission_modes: { author: "auto", reviewer: "auto" },
+      },
       true,
     );
   });

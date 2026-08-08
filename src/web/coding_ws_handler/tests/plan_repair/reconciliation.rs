@@ -1,6 +1,7 @@
 use super::*;
 use crate::product::coding_models::CodingTimelineNode;
 use crate::product::json_store::write_json;
+use tower::ServiceExt;
 
 #[derive(Debug, Clone, Copy)]
 enum PlanRepairPrefix {
@@ -204,6 +205,82 @@ async fn coding_plan_repair_session_state_recovers_every_pause_prefix_idempotent
         }
         assert_reconciled_plan_repair_prefix(&fixture, &started, &request_id);
     }
+}
+
+#[tokio::test]
+async fn rest_and_ws_snapshots_reconcile_the_same_plan_repair_pause_before_pending_gates() {
+    let fixture = plan_repair_fixture();
+    let report = plan_defect_report(plan_defect_finding("rest_ws_reconcile"));
+    let started = fixture
+        .engine
+        .start_plan_repair_from_review(
+            &fixture.attempt,
+            &report.id,
+            "code_review_report_0001_finding_0001",
+            &report.findings[0],
+            &fixture.projection,
+        )
+        .await
+        .unwrap();
+    reset_plan_repair_prefix(&fixture, &started, PlanRepairPrefix::AnchorOnly);
+    let mut original = fixture
+        .store
+        .get_attempt(&started.project_id, &started.issue_id, &started.id)
+        .unwrap();
+    original.stage = CodingExecutionStage::FinalConfirm;
+    fixture.store.save_coding_attempt(&original).unwrap();
+    fixture
+        .store
+        .create_blocked_gate(
+            &original,
+            CreateBlockedGateInput {
+                attempt_id: original.id.clone(),
+                stage: CodingExecutionStage::FinalConfirm,
+                node_id: None,
+                role: None,
+                title: "Final confirmation blocked".to_string(),
+                description: "must be hidden while plan repair is active".to_string(),
+                reason_code: Some("final_confirm_blocked".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: Vec::new(),
+            },
+        )
+        .unwrap();
+
+    let root = fixture._tmp.path().to_path_buf();
+    let app = crate::web::app::build_web_router(WebAppState::new(
+        root.clone(),
+        WebRuntime::new_fake(root),
+    ));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::GET)
+                .uri(format!(
+                    "/api/projects/{}/issues/{}/coding-attempts/{}",
+                    original.project_id, original.issue_id, original.id
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let rest: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let ws = serde_json::to_value(
+        build_coding_session_state(&fixture.store, original).expect("WS session state"),
+    )
+    .unwrap();
+
+    assert_eq!(rest["attempt"]["status"], "awaiting_plan_amendment");
+    assert_eq!(rest["pending_gates"], ws["pending_gates"]);
+    assert_eq!(rest["pending_gates"], serde_json::json!([]));
 }
 
 fn reset_plan_repair_prefix(

@@ -50,6 +50,71 @@ impl StreamingProviderAdapter for HangingStreamingProvider {
     }
 }
 
+struct PiHangingStreamingProvider {
+    started: Arc<std::sync::atomic::AtomicBool>,
+    abort_observed: Arc<Notify>,
+    seen_inputs: Arc<Mutex<Vec<(cadence_aria::protocol::contracts::ProviderType, cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode)>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for PiHangingStreamingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.seen_inputs
+            .lock()
+            .expect("Pi input recorder")
+            .push((input.provider_type, input.permission_mode));
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        let abort_observed = self.abort_observed.clone();
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: "Pi partial output".to_string(),
+                })
+                .await;
+            cancel.cancelled().await;
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: PI_POST_ABORT_OUTPUT.to_string(),
+                })
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Completed(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        PI_POST_ABORT_OUTPUT.to_string(),
+                        Some("pi-post-abort-session".to_string()),
+                    ),
+                ))
+                .await;
+            abort_observed.notify_one();
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
 struct ChoiceThenHangingStreamingProvider;
 
 #[async_trait::async_trait]
@@ -369,6 +434,22 @@ async fn create_workspace_session_fixture_with_author(
     author_provider: &str,
 ) -> TempDir {
     create_workspace_session_fixture_with_providers(root, author_provider, "fake", 1).await
+}
+
+fn set_workspace_author_permission_mode_to_supervised(root: &TempDir) {
+    let session = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+        .update_workspace_session_permission_modes(
+            "workspace_session_0001",
+            cadence_aria::product::models::WorkspaceRolePermissionModes {
+                author: cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised,
+                reviewer: cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            },
+        )
+        .expect("persist supervised author permission mode");
+    assert_eq!(
+        session.permission_modes.author,
+        cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised
+    );
 }
 
 async fn create_workspace_session_fixture_with_providers(

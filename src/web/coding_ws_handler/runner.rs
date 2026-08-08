@@ -165,7 +165,12 @@ pub(crate) fn should_resume_runner_after_gate_response(
 ) -> bool {
     matches!(
         action_id,
-        "retry_coding" | "send_to_coder" | "retry_review" | "retry_internal_review"
+        "retry_coding"
+            | "send_to_coder"
+            | "retry_review"
+            | "retry_internal_review"
+            | "retry_group_review_shard"
+            | "retry_group_reduction"
     ) && matches!(
         previous_attempt.status,
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
@@ -210,6 +215,9 @@ async fn handle_internal_review_flow_decision(
         .internal_review_flow_decision_for_attempt(current, internal_review)?
     {
         CodeReviewFlowDecision::ContinueAfterApprove => {
+            // Only pre-existing attempts that had already entered InternalPrReview may
+            // reach this compatibility path. Fresh groups bypass it for human
+            // FinalConfirm via `prepare_group_final_confirm_from_readiness`.
             if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
                 engine
                     .complete_group_attempt_after_final_review(current)
@@ -380,6 +388,28 @@ pub(crate) async fn execute_start_coding_flow(
             }
         }
 
+        // Recovery compatibility: historical group attempts may already have entered
+        // InternalPrReview under the former shard/reduction pipeline. They must never
+        // resume a provider-backed review: rebuild only the authoritative readiness
+        // evidence and hand it to the human FinalConfirm surface. Incomplete evidence,
+        // including identity mismatches, stays visible there and `handle_final_confirm`
+        // remains fail-closed.
+        if current.stage == CodingExecutionStage::InternalPrReview
+            && current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
+        {
+            current = engine
+                .prepare_group_final_confirm_from_readiness(&current)
+                .await?;
+            return emit_current_session_state(
+                event_tx,
+                coding_store,
+                &current,
+                engine.cancellation_token(),
+            )
+            .await;
+        }
+
+        // Single-work-item attempts retain the InternalPrReview provider flow.
         if current.stage == CodingExecutionStage::InternalPrReview {
             let Some(next) = await_stage_gate(
                 &mut command_rx,
@@ -697,72 +727,19 @@ pub(crate) async fn execute_start_coding_flow(
             }
         }
 
-        {
-            if handle_pending_runner_commands(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-
-            let Some(next) = await_stage_gate(
-                &mut command_rx,
-                coding_store,
-                engine,
-                event_tx,
-                &current,
-                CodingExecutionStage::InternalPrReview,
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            current = next;
-            let internal_reviewer_provider_name = coding_store
-                .get_role_provider_config_snapshot(
-                    &current.project_id,
-                    &current.issue_id,
-                    &current.id,
-                )?
-                .internal_reviewer;
-            let internal_reviewer_provider = provider_for(
-                state,
-                &internal_reviewer_provider_name,
-                "coding internal reviewer provider",
-            )?;
-            let internal_review = engine
-                .execute_group_final_review_with_commands(
-                    &current,
-                    internal_reviewer_provider.as_ref(),
-                    &mut command_rx,
-                )
+        if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
+            current = engine
+                .prepare_group_final_confirm_from_readiness(&current)
                 .await?;
-            current =
-                coding_store.get_attempt(&current.project_id, &current.issue_id, &current.id)?;
-            if handle_pending_runner_commands(
-                &mut command_rx,
-                coding_store,
-                engine,
+            return emit_current_session_state(
                 event_tx,
-                &current,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            return handle_internal_review_flow_decision(
                 coding_store,
-                engine,
-                event_tx,
                 &current,
-                &internal_review,
+                engine.cancellation_token(),
             )
             .await;
         }
+
+        unreachable!("only work-item and work-item-group coding attempt scopes exist");
     }
 }

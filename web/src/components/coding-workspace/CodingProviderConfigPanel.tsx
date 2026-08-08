@@ -38,14 +38,6 @@ const BASE_ROLES: ProviderConfigRow[] = [
   },
 ];
 
-const GROUP_FINAL_REVIEW_ROLE: ProviderConfigRow = {
-  selectRole: "internal_reviewer",
-  providerKey: "internal_reviewer",
-  modeRole: "internal_reviewer",
-  lockRole: "internal_reviewer",
-  label: "GroupFinalReview",
-};
-
 const PERMISSION_MODE_LABELS: Record<CodingProviderPermissionMode, string> = {
   auto: "Auto",
   supervised: "Supervised",
@@ -83,10 +75,9 @@ export function CodingProviderConfigPanel({
     return null;
   }
   const providerOptions = getProviderOptions(availabilitySnapshot);
-  const roles =
-    attemptScope === "work_item_group"
-      ? [...BASE_ROLES, GROUP_FINAL_REVIEW_ROLE]
-      : BASE_ROLES;
+  const roles = BASE_ROLES.filter(
+    (role) => attemptScope !== "work_item_group" || role.selectRole !== "internal_reviewer",
+  );
 
   return (
     <div
@@ -101,6 +92,7 @@ export function CodingProviderConfigPanel({
         const locked = configLocked || lockedRole === lockRole;
         const options = providerOptionsForValue(providerOptions, current);
         const unavailableOptions = options.filter((option) => option.disabled);
+        const permissionModes = modesForProvider(current);
         return (
           <div
             key={selectRole}
@@ -133,7 +125,12 @@ export function CodingProviderConfigPanel({
                     disabled={
                       locked || provider.disabled || provider.value === current
                     }
-                    onClick={() => onSelect(selectRole, provider.value)}
+                    onClick={() => {
+                      onSelect(selectRole, provider.value);
+                      if (provider.value === "pi" && modeRole) {
+                        onPermissionModeSelect(modeRole, "auto");
+                      }
+                    }}
                     aria-label={`将 ${label} 切换为 ${provider.label}`}
                     aria-pressed={provider.value === current}
                     title={
@@ -165,26 +162,33 @@ export function CodingProviderConfigPanel({
                 </div>
               ) : null}
               {modeRole ? (
-                <div className="flex min-w-0 flex-wrap gap-1">
-                  {(["auto", "supervised"] as const).map((mode) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      disabled={locked || mode === permissionMode}
-                      onClick={() => onPermissionModeSelect(modeRole, mode)}
-                      aria-label={`将 ${label} 授权模式切换为 ${PERMISSION_MODE_LABELS[mode]}`}
-                      aria-pressed={mode === permissionMode}
-                      className={[
-                        "inline-flex h-7 cursor-pointer items-center rounded-md border px-2 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-45",
-                        mode === permissionMode
-                          ? "border-[var(--aria-primary)] bg-white text-[var(--aria-primary)]"
-                          : "border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]",
-                      ].join(" ")}
-                    >
-                      {PERMISSION_MODE_LABELS[mode]}
-                    </button>
-                  ))}
-                </div>
+                <>
+                  <div className="flex min-w-0 flex-wrap gap-1">
+                    {permissionModes.map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        disabled={locked || mode === permissionMode}
+                        onClick={() => onPermissionModeSelect(modeRole, mode)}
+                        aria-label={`将 ${label} 授权模式切换为 ${PERMISSION_MODE_LABELS[mode]}`}
+                        aria-pressed={mode === permissionMode}
+                        className={[
+                          "inline-flex h-7 cursor-pointer items-center rounded-md border px-2 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-45",
+                          mode === permissionMode
+                            ? "border-[var(--aria-primary)] bg-white text-[var(--aria-primary)]"
+                            : "border-[var(--aria-line)] text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)]",
+                        ].join(" ")}
+                      >
+                        {PERMISSION_MODE_LABELS[mode]}
+                      </button>
+                    ))}
+                  </div>
+                  {current === "pi" ? (
+                    <p className="text-[11px] text-[var(--aria-ink-muted)]">
+                      Pi 仅支持 Auto
+                    </p>
+                  ) : null}
+                </>
               ) : null}
             </div>
           </div>
@@ -218,6 +222,12 @@ export function CodingProviderConfigPanel({
       </div>
     </div>
   );
+}
+
+function modesForProvider(
+  provider: WorkspaceProviderName,
+): CodingProviderPermissionMode[] {
+  return provider === "pi" ? ["auto"] : ["auto", "supervised"];
 }
 
 function providerOptionsForValue(

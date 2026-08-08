@@ -245,5 +245,6 @@ pub(crate) fn stage_gate_required(gate: CodingStageGateState) -> CodingGateRequi
         reason_code: None,
         evidence_refs: Vec::new(),
         raw_provider_output_ref: None,
+        diagnostic: None,
     }
 }

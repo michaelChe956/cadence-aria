@@ -1,10 +1,28 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::provider_execution_context::{CapturingProjectionProvider, review_plan_defect_output};
 use super::*;
-use crate::cross_cutting::streaming_provider::ProviderCompletion;
+
+#[test]
+fn permission_wait_timeout_preserves_interaction_without_retry_budget() {
+    let outcome = classify_provider_failure(&CodingWorkspaceEngineError::ProviderStream(
+        "permission timeout".to_string(),
+    ));
+    assert!(outcome.is_interaction_wait());
+    assert!(!outcome.is_retryable());
+
+    let outcome = classify_provider_failure(&CodingWorkspaceEngineError::ProviderStream(
+        "choice timeout".to_string(),
+    ));
+    assert!(outcome.is_interaction_wait());
+    assert!(!outcome.is_retryable());
+}
+use crate::cross_cutting::streaming_provider::{
+    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCompletion,
+};
+use crate::product::coding_models::CodingChoiceGateStatus;
 use crate::product::work_item_projection::ReviewerWorkItemProjection;
 use tokio::sync::Notify;
 
@@ -44,6 +62,19 @@ struct ParentCancellationProbe {
 
 struct ParentCancellationProvider {
     probe: Arc<ParentCancellationProbe>,
+}
+
+struct CompletedInvocationProvider;
+
+struct PartialThenFailedInvocationProvider;
+
+struct ChoiceThenWaitInvocationProvider;
+
+struct ChoiceThenTextInvocationProvider;
+
+#[derive(Default)]
+struct StartIoInvocationProvider {
+    starts: AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -92,6 +123,388 @@ impl StreamingProviderAdapter for ParentCancellationProvider {
             "provider cancelled by parent token",
         ))
     }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for CompletedInvocationProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                    "completed invocation evidence".to_string(),
+                    Some("completed-session".to_string()),
+                )))
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for PartialThenFailedInvocationProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: "partial invocation evidence".to_string(),
+                })
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Failed {
+                    message: "connection reset by peer".to_string(),
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceThenWaitInvocationProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ChoiceRequest(provider_choice_request()))
+                .await;
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = command_rx.recv() => {}
+            }
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceThenTextInvocationProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ChoiceRequest(provider_choice_request()))
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: "must not continue before choice".to_string(),
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for StartIoInvocationProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            "",
+            "Text file busy",
+            0,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn completed_provider_invocation_persists_retrievable_raw_output_ref() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_invocation_completed".to_string()),
+        )
+        .expect("role run");
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let provider = CompletedInvocationProvider;
+    let (legacy_input, input) = provider_invocation_inputs(&attempt);
+    let provider_name = ProviderName::Codex;
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "coding_invocation_completed",
+            role_run: Some(&role_run),
+            provider: &provider,
+            legacy_input: &legacy_input,
+            input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+        })
+        .await;
+
+    assert!(matches!(
+        outcome,
+        ProviderInvocationOutcome::Completed(ProviderStreamOutcome { full_output, .. })
+            if full_output == "completed invocation evidence"
+    ));
+    assert_role_run_raw_output(&store, &attempt, &role_run, "completed invocation evidence");
+}
+
+#[tokio::test]
+async fn failed_provider_invocation_persists_in_memory_partial_output_to_role_run_ref() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_invocation_partial_failure".to_string()),
+        )
+        .expect("role run");
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let provider = PartialThenFailedInvocationProvider;
+    let (legacy_input, input) = provider_invocation_inputs(&attempt);
+    let provider_name = ProviderName::Codex;
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "coding_invocation_partial_failure",
+            role_run: Some(&role_run),
+            provider: &provider,
+            legacy_input: &legacy_input,
+            input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+        })
+        .await;
+
+    assert!(matches!(
+        outcome,
+        ProviderInvocationOutcome::RetryableTransport {
+            failure: RetryableProviderFailure::ConnectionInterrupted,
+            partial_output,
+            ..
+        } if partial_output == "partial invocation evidence"
+    ));
+    assert_role_run_raw_output(&store, &attempt, &role_run, "partial invocation evidence");
+}
+
+#[tokio::test]
+async fn choice_request_then_timeout_stays_non_retryable_with_open_choice_gate() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_invocation_choice_timeout".to_string()),
+        )
+        .expect("role run");
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let provider = ChoiceThenWaitInvocationProvider;
+    let (legacy_input, input) = provider_invocation_inputs(&attempt);
+    let provider_name = ProviderName::Codex;
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let invocation = engine.run_provider_stream_invocation(CodingProviderStreamRun {
+        attempt: &attempt,
+        node_id: "coding_invocation_choice_timeout",
+        role_run: Some(&role_run),
+        provider: &provider,
+        legacy_input: &legacy_input,
+        input,
+        provider_name: &provider_name,
+        provider_role: CodingProviderRole::Coder,
+        command_rx: &mut command_rx,
+        allow_legacy_stream_fallback: false,
+        timeout: Some(Duration::from_secs(1)),
+        timeout_reason_code: None,
+        suppress_failure_side_effects: false,
+    });
+    tokio::pin!(invocation);
+    tokio::select! {
+        biased;
+        () = wait_for_open_provider_choice(&store, &attempt) => {}
+        outcome = &mut invocation => {
+            panic!("provider invocation completed before choice gate opened: {outcome:?}");
+        }
+    }
+    let outcome = invocation.await;
+
+    assert!(matches!(
+        outcome,
+        ProviderInvocationOutcome::NonRetryable {
+            ref reason_code,
+            interaction_wait: true,
+            ..
+        } if reason_code == "choice_timeout"
+    ));
+    assert_open_provider_choice(&store, &attempt);
+    assert_role_run_raw_output(&store, &attempt, &role_run, "");
+}
+
+#[tokio::test]
+async fn unresolved_provider_choice_stays_non_retryable_interaction_wait() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_invocation_choice_unresolved".to_string()),
+        )
+        .expect("role run");
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let provider = ChoiceThenTextInvocationProvider;
+    let (legacy_input, input) = provider_invocation_inputs(&attempt);
+    let provider_name = ProviderName::Codex;
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "coding_invocation_choice_unresolved",
+            role_run: Some(&role_run),
+            provider: &provider,
+            legacy_input: &legacy_input,
+            input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+        })
+        .await;
+
+    assert!(matches!(
+        outcome,
+        ProviderInvocationOutcome::NonRetryable {
+            ref reason_code,
+            interaction_wait: true,
+            ..
+        } if reason_code == "provider_choice_unresolved"
+    ));
+    assert_open_provider_choice(&store, &attempt);
+    assert_role_run_raw_output(
+        &store,
+        &attempt,
+        &role_run,
+        "must not continue before choice",
+    );
+}
+
+#[tokio::test]
+async fn modern_start_io_invocation_keeps_typed_error_and_raw_output_ref() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_invocation_start_io".to_string()),
+        )
+        .expect("role run");
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let provider = StartIoInvocationProvider::default();
+    let (legacy_input, input) = provider_invocation_inputs(&attempt);
+    let provider_name = ProviderName::Codex;
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "coding_invocation_start_io",
+            role_run: Some(&role_run),
+            provider: &provider,
+            legacy_input: &legacy_input,
+            input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+        })
+        .await;
+
+    assert!(matches!(
+        outcome,
+        ProviderInvocationOutcome::RetryableTransport {
+            failure: RetryableProviderFailure::StartIo,
+            ref reason_code,
+            ref message,
+            ref partial_output,
+        } if reason_code == "provider_start_io"
+            && message.contains("ProviderExecutionFailed")
+            && message.contains("Text file busy")
+            && partial_output.is_empty()
+    ));
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    assert_role_run_raw_output(&store, &attempt, &role_run, "");
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -193,6 +606,7 @@ async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -241,6 +655,108 @@ async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture
         attempt,
         reviewer_projection: bundle.reviewer_projection,
     }
+}
+
+fn provider_invocation_inputs(
+    attempt: &CodingExecutionAttempt,
+) -> (AdapterInput, StreamingProviderInput) {
+    let worktree = attempt.worktree_path.clone().expect("worktree path");
+    let legacy_input = AdapterInput {
+        provider_type: ProviderType::Codex,
+        role: AdapterRole::Executor,
+        worktree_path: Some(worktree.to_string_lossy().to_string()),
+        provider_stream_log_dir: None,
+        prompt: "provider invocation evidence".to_string(),
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_markdown".to_string(),
+        timeout: 30,
+        max_retries: 0,
+    };
+    let input = streaming_input_from_adapter(
+        &legacy_input,
+        worktree,
+        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+    );
+    (legacy_input, input)
+}
+
+fn provider_choice_request() -> ChoiceRequestData {
+    ChoiceRequestData {
+        id: "provider_choice_0001".to_string(),
+        prompt: "Choose the next action".to_string(),
+        options: vec![ChoiceOptionData {
+            id: "continue".to_string(),
+            label: "Continue".to_string(),
+            description: None,
+        }],
+        allow_multiple: false,
+        allow_free_text: false,
+        questions: Vec::new(),
+        source: ChoiceRequestSource::ProviderChoice,
+    }
+}
+
+fn assert_open_provider_choice(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
+    let persisted = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("persisted attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::WaitingForHuman);
+    let gates = store
+        .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("open choice gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].choice_id, "provider_choice_0001");
+    assert_eq!(gates[0].status, CodingChoiceGateStatus::Open);
+}
+
+async fn wait_for_open_provider_choice(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    loop {
+        let persisted = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("persisted attempt");
+        let gates = store
+            .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open choice gates");
+        if persisted.status == CodingAttemptStatus::WaitingForHuman
+            && gates.iter().any(|gate| {
+                gate.choice_id == "provider_choice_0001"
+                    && gate.status == CodingChoiceGateStatus::Open
+            })
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+fn assert_role_run_raw_output(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    role_run: &CodingRoleRun,
+    expected: &str,
+) {
+    let persisted = store
+        .get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+        )
+        .expect("persisted role run");
+    assert_eq!(persisted.raw_provider_output_refs.len(), 1);
+    let relative = persisted.raw_provider_output_refs[0]
+        .strip_prefix("provider-raw/")
+        .expect("provider raw output ref");
+    let path = store
+        .provider_raw_output_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .join(relative);
+    assert_eq!(
+        fs::read_to_string(path).expect("raw provider output"),
+        expected
+    );
 }
 
 fn poison_reviewer_event_log(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {

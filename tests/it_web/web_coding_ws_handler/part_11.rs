@@ -44,6 +44,7 @@ async fn legacy_coding_ws_reports_ambiguous_instead_of_not_found() {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -93,6 +94,7 @@ async fn legacy_coding_ws_reports_scope_mismatch_for_unique_corrupt_alias() {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })
@@ -167,6 +169,7 @@ async fn scoped_coding_ws_reports_scope_mismatch_for_corrupt_identity() {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             max_auto_rework: 2,
         })

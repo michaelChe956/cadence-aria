@@ -77,6 +77,7 @@ pub(crate) fn canonical_contract_fixture(logical_work_item_id: &str) -> Canonica
 }
 
 mod dependency;
+mod model;
 mod validation;
 
 fn assert_enum_cases<T>(cases: impl IntoIterator<Item = (T, &'static str)>)

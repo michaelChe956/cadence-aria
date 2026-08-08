@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -342,6 +343,67 @@ impl GitWorkspaceService {
             insertions: total_insertions,
             deletions: total_deletions,
         })
+    }
+
+    /// `start_commit..completion_commit` 区间内改动过的去重文件路径。
+    ///
+    /// 当两个提交相同时，没有观察到该 unit 的新提交，因此返回空集合，且不会
+    /// 回退为读取单提交或其父提交的 diff。
+    pub async fn git_commit_range_changed_files(
+        &self,
+        worktree_path: &Path,
+        start_commit: &str,
+        completion_commit: &str,
+    ) -> Result<Vec<String>, GitWorkspaceError> {
+        if start_commit == completion_commit {
+            return Ok(Vec::new());
+        }
+        self.ensure_git_repo(worktree_path).await?;
+        let commit_range = format!("{start_commit}..{completion_commit}");
+        let output = self
+            .run_git(
+                worktree_path,
+                &["diff", "--name-only", "--no-renames", &commit_range],
+            )
+            .await?;
+        Ok(output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
+
+    /// `start_commit..completion_commit` 区间内按提交拓扑顺序排列的提交 SHA。
+    ///
+    /// 当两个提交相同时，没有观察到该 unit 的新提交，返回空集合。
+    pub async fn git_commit_range_commits(
+        &self,
+        worktree_path: &Path,
+        start_commit: &str,
+        completion_commit: &str,
+    ) -> Result<Vec<String>, GitWorkspaceError> {
+        if start_commit == completion_commit {
+            return Ok(Vec::new());
+        }
+        self.ensure_git_repo(worktree_path).await?;
+        let commit_range = format!("{start_commit}..{completion_commit}");
+        let output = self
+            .run_git(
+                worktree_path,
+                &["rev-list", "--topo-order", "--reverse", &commit_range],
+            )
+            .await?;
+        Ok(output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 
     /// 某个 commit 相对其第一父提交所改动的文件路径清单。

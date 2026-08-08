@@ -616,6 +616,7 @@ fn workspace_artifact_version_binding_recovers_for_story_design_and_work_item() 
                         author: ProviderName::ClaudeCode,
                         reviewer: Some(ProviderName::Codex),
                         review_rounds: 1,
+                        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
                     },
                     retry: None,
                 }],

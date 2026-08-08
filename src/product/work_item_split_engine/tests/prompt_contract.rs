@@ -542,3 +542,63 @@ fn draft_prompt_requires_input_contract_ids_to_reference_upstream_output_contrac
         );
     }
 }
+
+/// Pi once emitted every `required_evidence` as a scalar string because the schema
+/// notation `[source_diff|...]` could be read as "pick one". The field contract must
+/// spell out that the value is an array even for a single element.
+#[test]
+fn single_item_prompt_spells_out_required_evidence_as_array() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    assert!(
+        invocation.prompt.contains(
+            "required_evidence: [source_diff|non_zero_test_execution|manual_check|handoff_field]（必为数组，单元素也需成数组）"
+        ),
+        "draft prompt must spell out required_evidence as an array to prevent scalar output"
+    );
+}
+
+/// Pi omitted `canonical_contract.verification_checks` entirely because the field
+/// contract listed it on the same line as the draft-level `verification_plan`,
+/// reading as one field. The contract must name both owners explicitly and say
+/// both have to be emitted.
+#[test]
+fn single_item_prompt_names_both_verification_check_owners() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+    )
+    .expect("draft invocation");
+
+    for required in [
+        "canonical_contract.verification_checks",
+        "（canonical_contract 必填字段）",
+        "draft.verification_plan",
+        "两处都必须输出，不得只写一处",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "draft prompt must name both verification check owners; missing {required}"
+        );
+    }
+}

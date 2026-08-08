@@ -3,6 +3,7 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderSession, StreamChunk, StreamingProviderInput,
 };
+use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::{
     AuthorDecision, HumanConfirmDecision, ProviderConfigSnapshot, RevisionPath, StructuredFeedback,
 };
@@ -24,6 +25,7 @@ fn provider_config() -> ProviderConfigSnapshot {
         author: ProviderName::ClaudeCode,
         reviewer: None,
         review_rounds: 0,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     }
 }
 
@@ -478,6 +480,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
                 author: ProviderName::ClaudeCode,
                 reviewer: Some(ProviderName::Codex),
                 review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: true,
         },
@@ -625,6 +628,150 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
     assert!(!workflow.contains("requestUserInput"));
 }
 
+#[tokio::test]
+async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervised_mode() {
+    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+    use crate::product::lifecycle_store::{CreateStorySpecInput, CreateWorkspaceSessionInput};
+    use crate::product::models::WorkspaceType;
+    use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+
+    let root = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "Repo".to_string(),
+            path: repo.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+        })
+        .unwrap();
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some(repository.id.clone()),
+            title: "Pi permission bypass".to_string(),
+            description: Some("stale Supervised mode must not reach Pi".to_string()),
+            change_id: None,
+        })
+        .unwrap();
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id,
+            title: "Pi permission Story Spec".to_string(),
+        })
+        .unwrap();
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session_record = lifecycle
+        .update_workspace_session_permission_modes(
+            &session_record.id,
+            crate::product::models::WorkspaceRolePermissionModes {
+                author:
+                    crate::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised,
+                reviewer: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            },
+        )
+        .unwrap();
+    let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+        .expect("initial context");
+
+    let checkpoint_store = Arc::new(CheckpointStore::new(root.path().join("checkpoints")));
+    let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(64);
+    let mut session = WorkspaceSession::from_record(session_record.clone());
+    session.repository_path = Some(repo.path().to_path_buf());
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle,
+        engine_tx,
+        session,
+    )));
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Pi,
+        Arc::new(PromptRecordingProvider { input_tx }),
+    );
+    let current_run = Arc::new(Mutex::new(None));
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let run_context = ProviderRunContext {
+        provider_registry: Arc::new(registry),
+        engine: engine.clone(),
+        current_run: current_run.clone(),
+        workspace_runs: workspace_runs.clone(),
+        session_id: session_record.id.clone(),
+        next_run_id: Arc::new(Mutex::new(0)),
+        app_paths,
+        session_record: session_record.clone(),
+    };
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let inbound_context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
+        engine,
+        run_context,
+        outbound_tx,
+        current_run,
+        workspace_runs,
+        session_id: session_record.id,
+    };
+
+    handle_workspace_inbound_message(
+        inbound_context.clone(),
+        WsInMessage::ProviderSelect {
+            role: "author".to_string(),
+            provider: ProviderName::Pi,
+        },
+    )
+    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), outbound_rx.recv())
+        .await
+        .expect("provider selection state should be sent")
+        .expect("provider selection state");
+
+    handle_workspace_inbound_message(
+        inbound_context,
+        WsInMessage::UserMessage {
+            content: "start with Pi".to_string(),
+        },
+    )
+    .await;
+
+    let input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("Pi provider should receive input")
+        .expect("Pi provider input");
+    assert_eq!(
+        input.permission_mode,
+        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        "ProviderSelect followed by UserMessage must not send stale Supervised mode to Pi"
+    );
+}
+
+#[tokio::test]
+async fn pi_failures_do_not_start_registered_alternate_provider() {
+    for failure_mode in [PiFailureMode::Start, PiFailureMode::Runtime] {
+        assert_pi_failure_does_not_start_alternate(failure_mode).await;
+    }
+}
+
 struct PromptRecordingProvider {
     input_tx: mpsc::UnboundedSender<StreamingProviderInput>,
 }
@@ -676,6 +823,177 @@ impl StreamingProviderAdapter for PromptRecordingProvider {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PiFailureMode {
+    Start,
+    Runtime,
+}
+
+struct PiFailureProvider {
+    mode: PiFailureMode,
+    starts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for PiFailureProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        use std::sync::atomic::Ordering;
+
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        if matches!(self.mode, PiFailureMode::Start) {
+            return Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "Pi start failed",
+                0,
+            ));
+        }
+
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Failed {
+                    message: "Pi runtime failed".to_string(),
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        unreachable!("workspace runs use start")
+    }
+}
+
+struct AlternateStartCountingProvider {
+    starts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for AlternateStartCountingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        use std::sync::atomic::Ordering;
+
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        unreachable!("Pi failure must not switch to this registered alternate provider")
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        unreachable!("workspace runs use start")
+    }
+}
+
+async fn assert_pi_failure_does_not_start_alternate(mode: PiFailureMode) {
+    use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+    use crate::product::models::WorkspaceType;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().unwrap();
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Pi,
+            reviewer_provider: ProviderName::ClaudeCode,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .unwrap();
+    let mut session = WorkspaceSession::from_record(record.clone());
+    // Starting from Running lets the test unambiguously observe failure recovery to PrepareContext.
+    session.stage = WorkspaceStage::Running;
+    let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(8);
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle,
+        engine_tx,
+        session,
+    )));
+    let pi_starts = Arc::new(AtomicUsize::new(0));
+    let alternate_starts = Arc::new(AtomicUsize::new(0));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Pi,
+        Arc::new(PiFailureProvider {
+            mode,
+            starts: pi_starts.clone(),
+        }),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(AlternateStartCountingProvider {
+            starts: alternate_starts.clone(),
+        }),
+    );
+    let current_run = Arc::new(Mutex::new(None));
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let run_context = ProviderRunContext {
+        provider_registry: Arc::new(registry),
+        engine: engine.clone(),
+        current_run: current_run.clone(),
+        workspace_runs: workspace_runs.clone(),
+        session_id: record.id.clone(),
+        next_run_id: Arc::new(Mutex::new(0)),
+        app_paths,
+        session_record: record,
+    };
+    let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(8);
+
+    spawn_provider_run_from_handler(
+        run_context,
+        ProviderRunKind::Author {
+            content: "start".to_string(),
+        },
+        outbound_tx,
+    )
+    .await
+    .expect("Pi run should start");
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if pi_starts.load(Ordering::SeqCst) == 1
+                && engine.lock().await.session().stage == WorkspaceStage::PrepareContext
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Pi failure should return the engine to PrepareContext");
+
+    assert_eq!(
+        alternate_starts.load(Ordering::SeqCst),
+        0,
+        "Pi failure must not start the registered Claude Code alternate"
+    );
+}
+
 #[test]
 fn build_work_item_plan_generate_request_includes_validator_findings_as_revision_feedback() {
     use crate::product::app_paths::ProductAppPaths;
@@ -685,10 +1003,9 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
         CreateWorkspaceSessionInput,
     };
     use crate::product::models::{
-        IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName, WorkItemSplitFinding,
+        IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkItemSplitFinding,
         WorkItemSplitFindingSeverity, WorkspaceType,
     };
-    use std::sync::Arc;
 
     let tmp = tempfile::tempdir().unwrap();
     let lifecycle = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));

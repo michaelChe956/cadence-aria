@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::product::models::ProviderName;
+use crate::product::models::{ProviderName, WorkspaceRolePermissionModes};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +113,8 @@ pub struct ProviderConfigSnapshot {
     pub author: ProviderName,
     pub reviewer: Option<ProviderName>,
     pub review_rounds: u32,
+    #[serde(default)]
+    pub permission_modes: WorkspaceRolePermissionModes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -11,7 +11,9 @@ mod context;
 mod gate;
 mod git_operation;
 mod group;
+mod group_final_readiness;
 mod group_initialization;
+mod group_review_store;
 mod group_terminal;
 mod group_validation;
 mod inputs;
@@ -36,7 +38,9 @@ pub use git_operation::*;
 pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;
-pub(crate) use recovery::FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE;
+pub(crate) use recovery::{
+    FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, is_failed_review_manual_retry,
+};
 pub use recovery::{FailedCodeReviewRecoveryJournal, FailedCodeReviewRecoveryPhase};
 pub(crate) use utils::*;
 

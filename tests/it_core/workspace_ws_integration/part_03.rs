@@ -419,6 +419,7 @@ async fn workspace_ws_test_control_drop_closes_registered_socket() {
 async fn workspace_ws_supervised_permission_allows_real_stream_to_complete() {
     let root = tempdir().expect("root");
     let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
+    set_workspace_author_permission_mode_to_supervised(&root);
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::Fake, Arc::new(FakeStreamingProvider));
     registry.register(

@@ -101,6 +101,7 @@ async fn start_generation_locks_provider_and_creates_node() {
         author: ProviderName::Codex,
         reviewer: Some(ProviderName::ClaudeCode),
         review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     };
 
     let (node, locked) = engine

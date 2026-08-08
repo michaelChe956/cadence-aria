@@ -66,11 +66,15 @@ fn response_from_snapshot(
             .or_else(|| degraded.then(|| "provider health state is degraded".to_string())),
         real_workflow_blocked: degraded || snapshot.real_workflow_blocked(),
         test_provider_enabled: state.test_provider_enabled,
-        providers: [ProviderName::ClaudeCode, ProviderName::Codex]
-            .iter()
-            .filter_map(|provider| snapshot.entry(provider))
-            .map(provider_dto)
-            .collect(),
+        providers: [
+            ProviderName::ClaudeCode,
+            ProviderName::Codex,
+            ProviderName::Pi,
+        ]
+        .iter()
+        .filter_map(|provider| snapshot.entry(provider))
+        .map(provider_dto)
+        .collect(),
     }
 }
 
@@ -85,6 +89,11 @@ fn provider_dto(entry: &ProviderHealthEntry) -> ProviderStatusDto {
             "codex",
             "Codex",
             "Install Codex CLI and ensure `codex` is available on PATH.",
+        ),
+        ProviderName::Pi => (
+            "pi",
+            "Pi",
+            "Install Pi CLI and ensure `pi` is available on PATH.",
         ),
         ProviderName::Fake => unreachable!("Fake provider is not part of real health status"),
     };
@@ -230,21 +239,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn providers_status_includes_pi_when_available() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(
+            vec![success("1.0"), success("2.0"), success("0.83.0")],
+            Duration::ZERO,
+        ));
+        let health = service(root.path(), runner.clone());
+        health
+            .refresh(CancellationToken::new())
+            .await
+            .expect("refresh");
+        let response = response_from_state(&state(root.path(), health, runner));
+
+        assert_eq!(response.providers.len(), 3);
+        let pi = response
+            .providers
+            .iter()
+            .find(|dto| dto.provider == "pi")
+            .expect("status API 应返回 pi 条目");
+        assert_eq!(pi.display_name, "Pi");
+        assert!(pi.available);
+        assert!(pi.install_hint.contains("pi"));
+    }
+
+    #[tokio::test]
     async fn providers_status_maps_all_availability_states_and_complete_fields() {
         for (results, expected_available, expected_blocked) in [
             (
-                vec![success("1.0"), success("2.0")],
-                vec![true, true],
+                vec![success("1.0"), success("2.0"), success("0.83.0")],
+                vec![true, true, true],
                 false,
             ),
             (
-                vec![missing("claude"), success("2.0")],
-                vec![false, true],
+                vec![missing("claude"), success("2.0"), success("0.83.0")],
+                vec![false, true, true],
                 false,
             ),
             (
-                vec![missing("claude"), missing("codex")],
-                vec![false, false],
+                vec![missing("claude"), missing("codex"), missing("pi")],
+                vec![false, false, false],
                 true,
             ),
         ] {
@@ -263,9 +297,10 @@ mod tests {
             assert_eq!(response.state_error, None);
             assert_eq!(response.real_workflow_blocked, expected_blocked);
             assert!(!response.test_provider_enabled);
-            assert_eq!(response.providers.len(), 2);
+            assert_eq!(response.providers.len(), 3);
             assert_eq!(response.providers[0].provider, "claude_code");
             assert_eq!(response.providers[1].provider, "codex");
+            assert_eq!(response.providers[2].provider, "pi");
             assert_eq!(
                 response
                     .providers
@@ -297,7 +332,7 @@ mod tests {
         let blocked_root = root.path().join("not-a-directory");
         std::fs::write(&blocked_root, "blocked").expect("blocked root");
         let runner = Arc::new(ScriptedRunner::new(
-            vec![success("1.0"), success("2.0")],
+            vec![success("1.0"), success("2.0"), success("0.83.0")],
             Duration::ZERO,
         ));
         let health = service(&blocked_root, runner.clone());
@@ -312,7 +347,7 @@ mod tests {
         assert_ne!(state_error, "provider health state is degraded");
         assert!(response.real_workflow_blocked);
         assert_eq!(response.generation, 1);
-        assert_eq!(response.providers.len(), 2);
+        assert_eq!(response.providers.len(), 3);
     }
 
     #[tokio::test]
@@ -326,7 +361,7 @@ mod tests {
         let response = response_from_state(&state);
 
         assert!(response.test_provider_enabled);
-        assert_eq!(response.providers.len(), 2);
+        assert_eq!(response.providers.len(), 3);
         assert!(
             response
                 .providers
@@ -342,8 +377,10 @@ mod tests {
             vec![
                 missing("claude"),
                 missing("codex"),
+                missing("pi"),
                 success("1.0"),
                 success("2.0"),
+                success("0.83.0"),
             ],
             Duration::from_millis(20),
         ));
@@ -364,7 +401,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
-        assert_eq!(runner.max_active(), 2);
+        assert_eq!(runner.max_active(), 3);
         assert!(
             responses[0]
                 .providers
@@ -386,8 +423,10 @@ mod tests {
             vec![
                 success("1.0"),
                 success("2.0"),
+                success("0.83.0"),
                 missing("claude"),
                 missing("codex"),
+                missing("pi"),
             ],
             Duration::ZERO,
         ));

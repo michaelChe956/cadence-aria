@@ -52,7 +52,10 @@ impl WorkspaceEngine {
             working_dir,
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id,
-            permission_mode: ProviderPermissionMode::Supervised,
+            permission_mode: permission_mode_for_provider(
+                &provider,
+                self.session.permission_modes.author.clone(),
+            ),
             structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,

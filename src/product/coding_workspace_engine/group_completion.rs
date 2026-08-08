@@ -64,7 +64,7 @@ impl CodingWorkspaceEngine {
         validate_group_completion_attempt_state(&attempt)?;
         let attempt = match &facts.mode {
             GroupUnitCompletionMode::Running => {
-                self.commit_current_group_unit_changes(&attempt, &facts.active)
+                self.record_current_group_unit_completion_head(&attempt, &facts.active)
                     .await?
             }
             GroupUnitCompletionMode::CompletedRetry { completion_commit } => {
@@ -84,6 +84,21 @@ impl CodingWorkspaceEngine {
         let completion_commit = attempt.head_commit.as_deref().ok_or_else(|| {
             CodingWorkspaceEngineError::CompletionCommitMissing(attempt.id.clone())
         })?;
+        if facts.run.execution_no == 1 && facts.run.start_commit.is_none() {
+            let worktree_path = attempt
+                .worktree_path
+                .as_ref()
+                .ok_or_else(|| CodingWorkspaceEngineError::MissingWorktree(attempt.id.clone()))?;
+            let base_head = self
+                ._git_service
+                .git_ref_head(worktree_path, &attempt.base_branch)
+                .await?;
+            self.store.backfill_coding_unit_run_start_commit(
+                &attempt,
+                &facts.run.id,
+                &base_head,
+            )?;
+        }
         let completed_run =
             self.store
                 .complete_coding_unit_run(&attempt, &facts.run.id, completion_commit)?;
@@ -416,7 +431,7 @@ impl CodingWorkspaceEngine {
         Ok(captured_previous)
     }
 
-    async fn commit_current_group_unit_changes(
+    async fn record_current_group_unit_completion_head(
         &self,
         attempt: &CodingExecutionAttempt,
         active: &CodingExecutionUnit,
@@ -426,24 +441,7 @@ impl CodingWorkspaceEngine {
                 attempt.id.clone(),
             ));
         };
-        self._git_service
-            .git_add_work_item_changes(worktree_path)
-            .await?;
-        let completion_commit = if self
-            ._git_service
-            .git_has_staged_changes(worktree_path)
-            .await?
-        {
-            self._git_service
-                .git_commit(
-                    worktree_path,
-                    &format!("feat: complete {}", active.logical_work_item_id),
-                )
-                .await?
-                .commit_sha
-        } else {
-            self._git_service.git_current_head(worktree_path).await?
-        };
+        let completion_commit = self._git_service.git_current_head(worktree_path).await?;
         self.persist_group_unit_completion_commit(attempt, active, &completion_commit)
     }
 

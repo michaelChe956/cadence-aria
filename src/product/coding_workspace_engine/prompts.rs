@@ -1,6 +1,27 @@
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 use crate::product::coding_models::CodingAttemptScope;
+
+pub(crate) fn code_review_output_contract(nonce: &str) -> String {
+    format!(
+        "\n\
+         输出终端结构化结论契约：\n\
+         - 你可以先输出简短工作流路由回执或可读进度，但这些文本不得包含 {{ 或 }}。\n\
+         - 最终审查结论必须且只能放在以下带 nonce 的终端块内；不要在 JSON 外使用 Markdown fence：\n\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
+         {{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[{{\"severity\":\"error|warning|info\",\"file_path\":\"...\",\"line\":1,\"message\":\"...\",\"required_action\":\"...\",\"source_stage\":\"code_review\"}}]}}\n\
+         </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
+         - 不得输出 Markdown fence 包裹 JSON；最终结论的 JSON 必须是合法对象。\n"
+    )
+}
+
+pub(crate) fn code_review_structured_output_contract(nonce: String) -> StructuredOutputContract {
+    StructuredOutputContract {
+        nonce,
+        schema_name: "coding_workspace_code_review".to_string(),
+    }
+}
 
 impl CodingWorkspaceEngine {
     pub(crate) async fn build_code_review_prompt(
@@ -450,6 +471,7 @@ pub(crate) fn provider_prompt_event(
 pub(crate) fn streaming_input_from_adapter(
     input: &AdapterInput,
     working_dir: PathBuf,
+    permission_mode: ProviderPermissionMode,
 ) -> StreamingProviderInput {
     StreamingProviderInput {
         provider_type: input.provider_type.clone(),
@@ -458,7 +480,7 @@ pub(crate) fn streaming_input_from_adapter(
         working_dir,
         workspace_session_id: None,
         resume_provider_session_id: None,
-        permission_mode: ProviderPermissionMode::Supervised,
+        permission_mode,
         structured_output_contract: None,
         env_vars: BTreeMap::new(),
         timeout_secs: input.timeout,
