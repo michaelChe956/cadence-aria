@@ -9,7 +9,7 @@ use crate::product::models::{
     PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
     PlanDefectClass, PlanDefectEvidence, PlanDefectRoute, PlanProjectionBundle, PlanRepairRequest,
     PlanRepairRequestStatus, PlanRevisionReason, PlanValidationReportArtifact, ProviderName,
-    ProviderSnapshot, RepairTarget, RepairTargetKind, VerificationPlanRevision,
+    ProviderSnapshot, RepairTarget, RepairTargetKind, RepositoryRecord, VerificationPlanRevision,
     WorkItemDraftRevision, WorkItemDraftRevisionState, WorkItemDraftRevisionStatus,
     WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
     WorkItemRevisionReplacement, WorkItemRuntimeBinding, WorkspaceSessionRecord,
@@ -56,6 +56,32 @@ where
     for (variant, expected) in cases {
         assert_eq!(serde_json::to_value(variant).unwrap(), expected);
     }
+}
+
+#[test]
+fn legacy_repository_json_roundtrips_with_identity_defaults() {
+    let legacy = serde_json::json!({
+        "id": "repository_0001",
+        "project_id": "project_0001",
+        "name": "api",
+        "path": "/workspace/api",
+        "repo_hash": "abc123",
+        "runtime_root": "/workspace/api/.aria/runtime",
+        "default_policy_preset": "manual-write",
+        "default_provider_mode": "fake",
+        "created_at": "2026-08-05T00:00:00Z",
+        "updated_at": "2026-08-05T00:00:00Z"
+    });
+
+    let record: RepositoryRecord = serde_json::from_value(legacy).unwrap();
+    assert_eq!(record.id, "repository_0001");
+    assert_eq!(record.logical_repository_id, None);
+    assert_eq!(record.primary_checkout_id, None);
+    assert_eq!(record.identity_schema_version, 0);
+
+    let encoded = serde_json::to_value(&record).unwrap();
+    let decoded: RepositoryRecord = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, record);
 }
 
 #[test]

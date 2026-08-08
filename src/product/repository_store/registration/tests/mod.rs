@@ -128,6 +128,9 @@ impl RepositoryPersistence for RecordingRepositoryPersistence {
                 .unwrap_or_else(|| "fake".to_string()),
             created_at: "2026-07-13T00:00:00Z".to_string(),
             updated_at: "2026-07-13T00:00:00Z".to_string(),
+            logical_repository_id: None,
+            primary_checkout_id: None,
+            identity_schema_version: 0,
         })
     }
 }
@@ -455,6 +458,9 @@ fn repository_record(project_id: &str, path: std::path::PathBuf) -> RepositoryRe
         default_provider_mode: "claude_code".to_string(),
         created_at: "now".to_string(),
         updated_at: "now".to_string(),
+        logical_repository_id: None,
+        primary_checkout_id: None,
+        identity_schema_version: 0,
     }
 }
 

@@ -56,6 +56,9 @@ fn split_prompt_fixture() -> (GenerateWorkItemsRequest, IssueRecord, RepositoryR
         default_provider_mode: "default".to_string(),
         created_at: String::new(),
         updated_at: String::new(),
+        logical_repository_id: None,
+        primary_checkout_id: None,
+        identity_schema_version: 0,
     };
     (request, issue, repository)
 }
@@ -101,6 +104,9 @@ fn build_split_prompt_includes_revision_feedback() {
         default_provider_mode: "default".to_string(),
         created_at: String::new(),
         updated_at: String::new(),
+        logical_repository_id: None,
+        primary_checkout_id: None,
+        identity_schema_version: 0,
     };
 
     let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");

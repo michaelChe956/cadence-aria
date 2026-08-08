@@ -117,6 +117,12 @@ pub struct RepositoryRecord {
     pub default_policy_preset: String,
     pub default_provider_mode: String,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_repository_id: Option<crate::product::logical_codebase::LogicalRepositoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_checkout_id: Option<crate::product::logical_codebase::RepositoryCheckoutId>,
+    #[serde(default)]
+    pub identity_schema_version: u16,
     pub updated_at: String,
 }
 

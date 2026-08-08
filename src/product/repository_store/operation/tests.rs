@@ -77,6 +77,9 @@ fn success_result(project_id: &str) -> RepositoryRegistrationSuccess {
             default_provider_mode: "claude_code".to_string(),
             created_at: COMPLETED_AT.to_string(),
             updated_at: COMPLETED_AT.to_string(),
+            logical_repository_id: None,
+            primary_checkout_id: None,
+            identity_schema_version: 0,
         },
         cadence_skills: CadenceSkillsPreparationSummary {
             source_mode: "cached".to_string(),

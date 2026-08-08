@@ -209,6 +209,9 @@ pub(super) mod create_repository_tests {
                 default_provider_mode: "claude_code".to_string(),
                 created_at: "2026-07-14T00:00:00Z".to_string(),
                 updated_at: "2026-07-14T00:00:00Z".to_string(),
+                logical_repository_id: None,
+                primary_checkout_id: None,
+                identity_schema_version: 0,
             },
             cadence_skills: CadenceSkillsPreparationSummary {
                 source_mode: "offline".to_string(),

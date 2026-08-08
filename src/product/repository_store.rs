@@ -90,6 +90,9 @@ impl RepositoryStore {
                 .unwrap_or_else(|| "fake".to_string()),
             created_at: now.clone(),
             updated_at: now,
+            logical_repository_id: None,
+            primary_checkout_id: None,
+            identity_schema_version: 0,
         };
 
         repositories.push(repository.clone());
