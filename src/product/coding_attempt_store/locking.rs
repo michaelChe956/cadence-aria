@@ -21,6 +21,35 @@ pub(crate) fn with_exclusive_lock<T>(
     operation()
 }
 
+/// Acquires the exact lock file supplied by the caller without deriving another
+/// name. Migration locks are externally specified, so applying the historic
+/// target-derived lock convention would lock a different file.
+pub(crate) fn with_exact_exclusive_lock<T>(
+    lock_path: &Path,
+    operation: impl FnOnce() -> Result<T, ProductStoreError>,
+) -> Result<T, ProductStoreError> {
+    if let Some(parent) = lock_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            ProductStoreError::Io(format!("create {}: {error}", parent.display()))
+        })?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| {
+            ProductStoreError::Io(format!("open lock {}: {error}", lock_path.display()))
+        })?;
+    lock_file_exclusive(&file, lock_path)?;
+    let result = operation();
+    unlock_file(&file);
+    result
+}
+
 pub(crate) struct ExclusiveFileLock {
     file: File,
     canonical_lock_path: PathBuf,

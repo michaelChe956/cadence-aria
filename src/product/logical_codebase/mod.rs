@@ -1,11 +1,13 @@
+pub mod feature;
 pub mod migration;
 pub mod registry;
 pub mod store;
 pub mod types;
 
+pub use feature::LogicalCodebaseFeature;
 pub use migration::{
-    IdentityMigrationJournal, IdentityMigrationJournalStore, IdentityMigrationPhase,
-    RepositoryIdentityMapping,
+    IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
+    IdentityMigrationPhase, MigrationFaultInjector, RepositoryIdentityMapping,
 };
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,

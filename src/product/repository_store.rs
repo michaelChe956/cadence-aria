@@ -6,6 +6,7 @@ use chrono::Utc;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::id::{next_sequential_id, repo_hash_for_path};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::logical_codebase::{IdentityMigrationExecutor, LogicalCodebaseFeature};
 use crate::product::models::RepositoryRecord;
 
 mod initializer;
@@ -42,11 +43,31 @@ pub struct CreateRepositoryInput {
 #[derive(Debug, Clone)]
 pub struct RepositoryStore {
     paths: ProductAppPaths,
+    logical_codebase_feature: LogicalCodebaseFeature,
 }
 
 impl RepositoryStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self::with_logical_codebase_feature(paths, LogicalCodebaseFeature::disabled())
+    }
+
+    pub fn with_logical_codebase_feature(
+        paths: ProductAppPaths,
+        feature: LogicalCodebaseFeature,
+    ) -> Self {
+        Self {
+            paths,
+            logical_codebase_feature: feature,
+        }
+    }
+
+    pub fn ensure_identity_schema(&self, project_id: &str) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        if self.logical_codebase_feature.is_enabled() {
+            IdentityMigrationExecutor::new(self.paths.clone())
+                .ensure_through_authority(project_id)?;
+        }
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -56,6 +77,7 @@ impl RepositoryStore {
 
     pub fn list(&self, project_id: &str) -> Result<Vec<RepositoryRecord>, ProductStoreError> {
         validate_relative_id(project_id)?;
+        self.ensure_identity_schema(project_id)?;
         let path = self.repos_path(project_id);
         if !path.exists() {
             return Ok(Vec::new());
