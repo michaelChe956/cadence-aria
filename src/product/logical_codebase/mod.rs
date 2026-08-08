@@ -1,1 +1,3 @@
-//! 逻辑代码库领域模块；Task 2 起公开身份类型。
+pub mod types;
+
+pub use types::{LogicalRepositoryId, RepositoryCheckoutId};
