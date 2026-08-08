@@ -12,6 +12,11 @@ struct GroupCompletionFixture {
     original_head: String,
 }
 
+struct UnitRunHandoffStart {
+    resolved_handoff_revision_ids: Vec<String>,
+    start_commit: Option<String>,
+}
+
 fn group_completion_fixture(with_dependency: bool, dirty: bool) -> GroupCompletionFixture {
     group_completion_fixture_at_stage(with_dependency, dirty, CodingExecutionStage::ReviewRequest)
 }
@@ -31,7 +36,10 @@ fn create_authoritative_active_run(
         status,
         completion_commit,
         canonical_contract_hash_override,
-        Vec::new(),
+        UnitRunHandoffStart {
+            resolved_handoff_revision_ids: Vec::new(),
+            start_commit: Some(fixture.original_head.clone()),
+        },
     )
 }
 
@@ -42,7 +50,7 @@ fn create_authoritative_active_run_with_handoffs(
     status: CodingUnitRunStatus,
     completion_commit: Option<String>,
     canonical_contract_hash_override: Option<&str>,
-    resolved_handoff_revision_ids: Vec<String>,
+    handoff_start: UnitRunHandoffStart,
 ) -> CodingUnitRun {
     let unit = fixture
         .store
@@ -84,7 +92,7 @@ fn create_authoritative_active_run_with_handoffs(
         unit_id: unit.id,
         execution_no,
         work_item_revision_id: revision.id,
-        resolved_handoff_revision_ids,
+        resolved_handoff_revision_ids: handoff_start.resolved_handoff_revision_ids,
         canonical_contract_hash: canonical_contract_hash_override
             .unwrap_or(&revision.canonical_contract_hash)
             .to_string(),
@@ -107,7 +115,7 @@ fn create_authoritative_active_run_with_handoffs(
         verification_retry_count: 0,
         operational_retry_count: 0,
         plan_repair_count: 0,
-        start_commit: Some(fixture.original_head.clone()),
+        start_commit: handoff_start.start_commit,
         completion_commit,
         created_at: "2026-07-19T00:00:00Z".to_string(),
         updated_at: "2026-07-19T00:00:00Z".to_string(),
@@ -281,6 +289,47 @@ async fn group_completion_records_existing_coder_head_without_staging_or_commit(
     assert_eq!(
         persisted_run.completion_commit.as_deref(),
         Some(coder_head.as_str())
+    );
+}
+
+#[tokio::test]
+async fn group_unit_completion_backfills_first_unit_start_commit_from_base_head() {
+    let fixture = group_completion_fixture(false, false);
+    fs::write(fixture.worktree.join("unit1.txt"), "coder-owned change\n").expect("coder change");
+    run_test_git(&fixture.worktree, &["add", "unit1.txt"]);
+    run_test_git(
+        &fixture.worktree,
+        &["commit", "-m", "coder completes first unit"],
+    );
+    let source_run = create_authoritative_active_run_with_handoffs(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+        UnitRunHandoffStart {
+            resolved_handoff_revision_ids: Vec::new(),
+            start_commit: None,
+        },
+    );
+
+    let updated = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect("complete first group unit");
+    let persisted_run = fixture
+        .store
+        .list_coding_unit_runs(&updated, &source_run.unit_id)
+        .expect("source runs")
+        .into_iter()
+        .find(|run| run.id == source_run.id)
+        .expect("source run");
+
+    assert_eq!(
+        persisted_run.start_commit.as_deref(),
+        Some(fixture.original_head.as_str())
     );
 }
 
@@ -691,7 +740,10 @@ async fn coding_plan_repair_group_completion_rejects_noncanonical_dependency_han
             CodingUnitRunStatus::Running,
             None,
             None,
-            vec![resolved_handoff_id],
+            UnitRunHandoffStart {
+                resolved_handoff_revision_ids: vec![resolved_handoff_id],
+                start_commit: Some(fixture.original_head.clone()),
+            },
         );
 
         assert_completion_preflight_is_zero_write(&fixture, "handoff_binding_mismatch").await;

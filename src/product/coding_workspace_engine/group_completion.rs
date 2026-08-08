@@ -84,6 +84,21 @@ impl CodingWorkspaceEngine {
         let completion_commit = attempt.head_commit.as_deref().ok_or_else(|| {
             CodingWorkspaceEngineError::CompletionCommitMissing(attempt.id.clone())
         })?;
+        if facts.run.execution_no == 1 && facts.run.start_commit.is_none() {
+            let worktree_path = attempt
+                .worktree_path
+                .as_ref()
+                .ok_or_else(|| CodingWorkspaceEngineError::MissingWorktree(attempt.id.clone()))?;
+            let base_head = self
+                ._git_service
+                .git_ref_head(worktree_path, &attempt.base_branch)
+                .await?;
+            self.store.backfill_coding_unit_run_start_commit(
+                &attempt,
+                &facts.run.id,
+                &base_head,
+            )?;
+        }
         let completed_run =
             self.store
                 .complete_coding_unit_run(&attempt, &facts.run.id, completion_commit)?;
