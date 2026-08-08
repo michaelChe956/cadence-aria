@@ -12,6 +12,7 @@ fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "work-item-plan-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())

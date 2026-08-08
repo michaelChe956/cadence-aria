@@ -625,6 +625,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
             path: temp.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "runtime-reader-repository".to_string(),
         })
         .unwrap();
     let issue = IssueStore::new(paths.clone())

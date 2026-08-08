@@ -523,6 +523,7 @@ impl RepositoryRegistrationCoordinator {
                     path: git_root.clone(),
                     default_policy_preset: input.default_policy_preset,
                     default_provider_mode: input.default_provider_mode,
+                    idempotency_key: operation_id.clone(),
                 })
                 .map_err(|error| {
                     let mut mapped = registration_error(

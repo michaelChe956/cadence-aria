@@ -347,6 +347,7 @@ fn claude_code_story_context_requires_structured_ask_user_question() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "claude-code-story-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())

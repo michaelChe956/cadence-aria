@@ -12,6 +12,7 @@ fn story_workspace_context_codex_author_requires_request_user_input() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "codex-author-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())
@@ -69,6 +70,7 @@ fn design_workspace_context_includes_linked_story_markdown() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "linked-story-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())
@@ -223,6 +225,7 @@ fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "linked-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())

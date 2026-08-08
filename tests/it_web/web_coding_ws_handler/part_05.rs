@@ -16,6 +16,7 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part05-internal-review-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -91,6 +92,7 @@ fn app_with_code_review_rework_attempt(
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part05-code-review-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -154,6 +156,7 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part05-attempt-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());

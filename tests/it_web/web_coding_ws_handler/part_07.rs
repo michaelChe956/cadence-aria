@@ -53,6 +53,7 @@ fn app_with_coding_attempt(
             path: repo.clone(),
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part07-hanging-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());

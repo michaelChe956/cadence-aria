@@ -87,6 +87,7 @@ fn creates_project_repository_issue_and_runtime_binding() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "product-index-runtime-binding-repository".to_string(),
         })
         .expect("repository");
 
@@ -171,6 +172,7 @@ fn find_by_repo_and_task_returns_error_for_corrupt_binding_json() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "product-index-corrupt-binding-repository".to_string(),
         })
         .expect("repository");
 

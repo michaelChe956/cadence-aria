@@ -35,6 +35,7 @@ fn app_with_group_full_chain_attempt_fixture(
             path: repo.clone(),
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part08-attempt-repository".to_string(),
         })
         .expect("create repository");
     let issue = IssueStore::new(app_paths.clone())

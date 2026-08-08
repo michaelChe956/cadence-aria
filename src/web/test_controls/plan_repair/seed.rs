@@ -94,6 +94,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
                 path: worktree.clone(),
                 default_policy_preset: Some("manual-write".to_string()),
                 default_provider_mode: Some("fake".to_string()),
+                idempotency_key: "plan-repair-seed-repository".to_string(),
             })
             .map_err(fixture_error)?;
         if repository.id != "repository_0001" {

@@ -443,6 +443,7 @@ fn seed_http_attempt_with_lease() -> (
             path: repository_path,
             default_policy_preset: None,
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "runner-cleanup-repository".to_string(),
         })
         .expect("repository record");
     assert_eq!(repository.id, "repository_0001");

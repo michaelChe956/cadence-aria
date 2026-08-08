@@ -16,6 +16,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             path: repository_path,
             default_policy_preset: None,
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "plan-repair-fixture-repository".to_string(),
         })
         .expect("repository");
     let issue = IssueStore::new(paths.clone())

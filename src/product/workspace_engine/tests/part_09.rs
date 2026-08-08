@@ -349,6 +349,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             path: repository_path,
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "workspace-engine-fixture-repository".to_string(),
         })
         .unwrap();
     let repository_id = repository.id.clone();

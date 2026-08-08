@@ -389,6 +389,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "workspace-ws-guidance-refresh-repository".to_string(),
         })
         .unwrap();
     IssueStore::new(app_paths.clone())
@@ -515,6 +516,7 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "workspace-ws-provider-select-repository".to_string(),
         })
         .unwrap();
     IssueStore::new(app_paths.clone())
@@ -645,6 +647,7 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "workspace-ws-pi-permission-repository".to_string(),
         })
         .unwrap();
     IssueStore::new(app_paths.clone())

@@ -42,6 +42,7 @@ fn app_with_group_attempt(root_path: &std::path::Path) -> axum::Router {
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part09-group-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());

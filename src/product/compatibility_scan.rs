@@ -194,6 +194,7 @@ fn find_or_create_repository(
         path: canonical_path,
         default_policy_preset: None,
         default_provider_mode: None,
+        idempotency_key: format!("compatibility-scan:{project_id}"),
     })
 }
 

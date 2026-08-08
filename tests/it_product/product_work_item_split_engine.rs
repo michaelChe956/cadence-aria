@@ -291,6 +291,7 @@ async fn split_engine_fixture() -> (TempDir, LifecycleStore, IssueRecord, Reposi
             path: repo_path.clone(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "product-work-item-split-engine-repository".to_string(),
         })
         .expect("create repository");
 

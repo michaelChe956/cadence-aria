@@ -54,6 +54,7 @@ pub(super) fn create_large_workspace_fixture(
         path: app_paths.root().to_path_buf(),
         default_policy_preset: Some("manual-write".to_string()),
         default_provider_mode: Some("fake".to_string()),
+        idempotency_key: "large-workspace-fixture-repository".to_string(),
     })?;
     let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
         project_id: project.id.clone(),
@@ -291,6 +292,7 @@ fn create_coding_role_run_fixture(
         path: repo_path.clone(),
         default_policy_preset: Some("manual-write".to_string()),
         default_provider_mode: Some("fake".to_string()),
+        idempotency_key: "coding-role-run-fixture-repository".to_string(),
     })?;
     let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
         project_id: project.id.clone(),

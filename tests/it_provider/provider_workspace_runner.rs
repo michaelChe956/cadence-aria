@@ -32,6 +32,7 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             path: repo_root.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "provider-workspace-runner-repository".to_string(),
         })
         .expect("repository");
     let issue = IssueStore::new(paths.clone())

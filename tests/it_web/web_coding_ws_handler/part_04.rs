@@ -378,6 +378,7 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part04-attempt-repository".to_string(),
         })
         .expect("create repository");
     LifecycleStore::new(app_paths.clone())
@@ -475,6 +476,7 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part04-confirmed-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -574,6 +576,7 @@ fn app_with_full_chain_attempt_and_provider(
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part04-internal-review-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
