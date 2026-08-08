@@ -7,14 +7,14 @@
 ## ADDED Requirements
 
 ### Requirement: 聚合索引建立（REQ-IND-01）
-系统 SHALL 在非 git 聚合根建立一份统一 CodeGraph 索引覆盖全部 manifest 成员仓；主路径不依赖 `includeIgnored`（D3 非 git 父目录自动发现子仓）；CodeGraph 版本钉定且避开已知 `includeIgnored` 回归版本（如 v1.4.1，#1295）。
+系统 SHALL 在非 git 聚合根建立一份统一 CodeGraph 索引（exact version 钉定 v1.5.0）；CodeGraph 按目录递归扫描而非按 git 边界识别成员（spike 2 实测：非 git 目录 `not-a-repo` 同被纳入），主路径不依赖 `includeIgnored`（D3 非 git 父目录）。索引构建成功以「`codegraph files` 成员覆盖 + 代表性跨子仓查询命中 + 非成员/`.worktrees`/`.aria`/构建产物负查询不命中」为验收，而非仅 DB 文件存在。
 
 #### Scenario: 非 git 聚合根建索引
 - **WHEN** 完成成员登记并在非 git 聚合根初始化索引
-- **THEN** 聚合根产生一份 `.codegraph/codegraph.db`，覆盖全部 manifest 成员；索引构建成功以「成员 allowlist 覆盖 + 代表性查询命中」为验收，而非仅 DB 文件存在
+- **THEN** 聚合根产生一份 `.codegraph/codegraph.db`，覆盖全部 manifest 成员；索引构建成功以「成员覆盖 + 代表性查询命中 + 非成员/excluded 负查询不命中」为验收，而非仅 DB 文件存在
 
 ### Requirement: 索引范围与排除（REQ-IND-02）
-系统 SHALL 基于 manifest 成员 allowlist 构造索引范围，排除执行 worktree（`.worktrees/**`）、`.git/**`、`.aria/**`、构建产物与凭据目录；同一源码主 checkout 与 worktree 不重复索引。
+系统 SHALL 由 Cadence 在聚合根生成并维护 `codegraph.json` 的 `exclude`（denylist，根相对 gitignore 模式；spike 2 实测：CLI 无 allowlist 参数，`exclude` 是唯一范围控制机制），至少覆盖：非成员目录、`**/.worktrees/`、`**/.aria/`、构建产物目录与凭据目录；CodeGraph 内建排除 `.git`/`build`/`node_modules`/`dist` 但 `.worktrees`/`.aria` 非内建（spike 2 实测：删子仓 `.gitignore` 后 `.worktrees`/`.aria` 被误索引）。成员增删后 SHALL 原子更新该文件并 sync/全量 index；index 后用 `codegraph files` 与负查询验证边界，发现非成员路径即失败而非静默接受。同一源码主 checkout 与 worktree 不重复索引。
 
 #### Scenario: 排除执行 worktree
 - **WHEN** 成员仓内存在 `.worktrees/**` 或构建产物

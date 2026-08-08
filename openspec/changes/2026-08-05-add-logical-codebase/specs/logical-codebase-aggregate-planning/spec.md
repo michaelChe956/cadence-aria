@@ -2,12 +2,12 @@
 
 ## Purpose
 
-规划类产物（Issue / Story / Design / Work Item 计划）使用聚合上下文：provider 从聚合根只读启动（P1 best-effort），注入成员清单、目标仓 profile、索引摘要与政策 envelope。
+规划类产物（Issue / Story / Design / Work Item 计划）使用聚合上下文：provider 从聚合根只读启动（全量 experimental + supervised，best-effort 只读），注入成员清单、目标仓 profile、索引摘要与政策 envelope。
 
 ## ADDED Requirements
 
 ### Requirement: 聚合规划上下文（REQ-PLN-01）
-系统 SHALL 将规划类 workspace 上下文从单仓库改为逻辑代码库聚合：包含 logical_codebase 引用、成员 inventory（id/alias/path/role/profile 摘要）、focus 成员与索引 revision；prompt 注入紧凑成员清单与预算，不注入全部成员源码；超预算时确定性截断并标记未检索成员。
+系统 SHALL 将规划类 workspace 上下文从单仓库改为逻辑代码库聚合：包含 logical_codebase 引用、成员 inventory（id/alias/path/role/profile 摘要）、focus 成员与索引 revision；prompt 注入紧凑成员清单与预算，不注入全部成员源码；超预算时确定性截断并标记未检索成员。具体 token/byte 阈值由 design.md §7.3 spike 定值,Plan 阶段写入具体数值,不得发明新截断策略。
 
 #### Scenario: 聚合上下文注入
 - **WHEN** 为逻辑代码库下的 Issue 启动 Story/Design/Work Item 计划生成
@@ -50,7 +50,7 @@
 - **THEN** Design SHALL 表达改动顺序（如 公共契约 → provider → consumer），作为 Work Item `depends_on` 依据
 
 ### Requirement: 规划只读边界（REQ-PLN-06）
-P1 规划 provider 会话 SHALL 为只读语义的 best-effort（`best_effort_configured`：Aria-owned 配置 + cwd + pre/post 检测）；仅在固定 provider/OS 越界写 fixture 通过后才可升级为 `production_verified_readonly`；未达到该级别时不得宣称「物理上无法写入」；疑似越权写入需被检测并标记。
+规划 provider 会话 SHALL 为只读语义的 best-effort（`best_effort_configured`：Aria-owned 配置 + cwd + pre/post 检测）；仅在固定 provider/OS 越界写 fixture 通过后才可升级为 `production_verified_readonly`；未达到该级别时不得宣称「物理上无法写入」；疑似越权写入需被检测并标记。
 
 #### Scenario: 规划运行
 - **WHEN** 规划 run 完成

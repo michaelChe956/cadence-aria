@@ -7,7 +7,7 @@
 ## ADDED Requirements
 
 ### Requirement: 逻辑代码库成员登记（REQ-REG-01）
-系统 SHALL 支持将同一非 git 公共父目录下的多个真实 git 仓库登记为 Project（逻辑代码库）成员；每个成员对应一个 `RepositoryRecord`（物理 git 仓）与一个 `CodebaseMemberRecord`（稳定 UUID 逻辑身份）；聚合根绝不注册为 RepositoryRecord。
+系统 SHALL 支持将同一非 git 公共父目录下的多个真实 git 仓库登记为 Project（逻辑代码库）成员；每个成员对应一个 `RepositoryRecord`（物理 git 仓，兼容投影）与一个 `CodebaseMemberRecord`（稳定 UUID 逻辑身份 `LogicalRepositoryId`）与一个 `RepositoryCheckoutRecord`（可用 checkout）；聚合根绝不注册为 RepositoryRecord。三层身份映射：`LogicalRepositoryId` →（member 解析）→ `RepositoryCheckoutId` →（物理定位）→ `RepositoryRecord.id` + canonical_path + git_dir_identity。
 
 #### Scenario: 扫描公共父目录登记成员
 - **WHEN** 用户提供公共父目录并触发登记
@@ -17,8 +17,8 @@
 - **WHEN** 同一仓库以不同路径或别名重复提交
 - **THEN** 系统 SHALL 按 canonical git-dir/source identity 去重，不产生重复成员，并返回重复原因
 
-### Requirement: P0 登记零 Git 副作用（REQ-REG-02）
-P0 登记阶段系统 SHALL NOT 执行任何 `git add`/`git commit`/`git push`，SHALL NOT 操作任何成员主 checkout；该承诺仅适用于 P0 登记阶段（每仓最小指针的受控发布属于 P1，见 session-policy-envelope）。
+### Requirement: 登记零 Git 副作用（REQ-REG-02）
+登记阶段系统 SHALL NOT 执行任何 `git add`/`git commit`/`git push`，SHALL NOT 操作任何成员主 checkout；该承诺适用于登记阶段（每仓最小指针的受控发布属于受控副作用，见 session-policy-envelope REQ-ENV-07）。
 
 #### Scenario: 登记前后仓库无变化
 - **WHEN** 完成 50 仓登记后
@@ -73,4 +73,4 @@ P0 登记阶段系统 SHALL NOT 执行任何 `git add`/`git commit`/`git push`�
 
 #### Scenario: 聚合根准入失败
 - **WHEN** 公共父目录为 git super-repo 或包含非成员目录/凭据/构建产物
-- **THEN** 系统 SHALL 拒绝登记并返回分类错误；索引范围基于 manifest 成员 allowlist 构造，排除 `.worktrees/**`/`.git/**`/`.aria/**`/构建产物/凭据
+- **THEN** 系统 SHALL 拒绝登记并返回分类错误（准入 preflight 范围限于聚合根属性校验；索引范围构造见 REQ-IND-02）

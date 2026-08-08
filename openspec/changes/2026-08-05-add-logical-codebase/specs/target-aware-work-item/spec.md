@@ -7,7 +7,7 @@ Work Item 携带唯一 `target_repository_id`，贯穿拆分/编译/校验/运�
 ## ADDED Requirements
 
 ### Requirement: target 必填与校验集（REQ-TGT-01）
-系统 SHALL 使每个 Work Item 持久化唯一的 `target_repository_id`，且必须属于该 Issue 冻结的 `IssueCodebaseSelection` 有效成员集合（include 且未 exclude、未删除/停用），而不只是 Project 全体成员。
+系统 SHALL 使每个 Work Item 持久化唯一的 `target_repository_id`，其语义类型为 `LogicalRepositoryId`（稳定 UUID 逻辑身份，不可歧义指向 checkout 或物理投影）；target 必须属于该 Issue 冻结的 `IssueCodebaseSelection` 有效成员集合（include 且未 exclude、未删除/停用），而不只是 Project 全体成员。执行时由 member 解析为 `RepositoryCheckoutId`，再定位到 `RepositoryRecord.id` + canonical_path + git_dir_identity。
 
 #### Scenario: 拆分/编译产生 Work Item
 - **WHEN** 拆分或编译产生 Work Item
@@ -21,7 +21,7 @@ Work Item 携带唯一 `target_repository_id`，贯穿拆分/编译/校验/运�
 - **THEN** 该项被标记为 blocker，不生成可执行 Work Item；人工补充合法 target 后重新校验与编译
 
 ### Requirement: target 贯穿编译链路（REQ-TGT-03）
-系统 SHALL 使 `target_repository_id` 贯穿 Outline schema → Draft → compile transaction → `LifecycleWorkItemRecord` → runtime binding；删除「从第一个 Story 推导单一仓库并填充所有 item」的默认路径；多个 Work Item 可共享同一合法 target（同一仓库多个任务），但不得统一回落 primary。
+系统 SHALL 使 `target_repository_id`（语义类型 `LogicalRepositoryId`）贯穿 Outline schema → Draft → compile transaction → `LifecycleWorkItemRecord` → runtime binding；删除「从第一个 Story 推导单一仓库并填充所有 item」的默认路径（当前 `compile_support.rs:25-39,118-123` 的实现须改造）；多个 Work Item 可共享同一合法 target（同一仓库多个任务），但不得统一回落 primary。
 
 #### Scenario: 跨仓 Story 拆分为多工作项
 - **WHEN** 跨仓 Story/Design 被拆分为多个工作项

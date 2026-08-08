@@ -6,14 +6,14 @@
 
 ## MODIFIED Requirements
 
-### Requirement: 删除 coding attempt 必须按条件清理 shared-worktree
+### Requirement: 删除 coding attempt 必须按条件清理 shared-worktree（REQ-DEL-01）
 系统 SHALL 使逻辑代码库场景下删除 coding attempt 时按 `(project, issue, repository)` 判定 shared-worktree 是否仍被同仓库其他 attempt 使用；仅当同仓无其他使用者时才清理，不得因异仓 attempt 存在而误删或误留。
 
 #### Scenario: 按仓库范围判定 shared-worktree 清理
 - **WHEN** 逻辑代码库场景下删除 coding attempt
 - **THEN** 系统 SHALL 按 `(project, issue, repository)` 判定 shared-worktree 是否仍被同仓库其他 attempt 使用，仅同仓无使用者时清理
 
-### Requirement: 删除 coding attempt 不得误伤同 issue 其他数据
+### Requirement: 删除 coding attempt 不得误伤同 issue 其他数据（REQ-DEL-02）
 系统 SHALL 使删除同一 Issue 下某一仓库的 attempt 时保留其他仓库的 shared-worktree、锁与数据，删除范围限定于该 target repository。
 
 #### Scenario: 异仓 attempt 互不影响
