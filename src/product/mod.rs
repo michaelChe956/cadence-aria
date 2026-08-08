@@ -17,6 +17,7 @@ pub mod image_create;
 pub mod issue_store;
 pub mod json_store;
 pub mod lifecycle_store;
+pub mod logical_codebase;
 pub mod models;
 pub mod plan_repair;
 pub mod product_data_schema;

@@ -50,4 +50,33 @@ impl ProductAppPaths {
         self.project_root(project_id)
             .join("repository-initializations")
     }
+
+    pub fn logical_codebase_root(&self, project_id: &str) -> PathBuf {
+        self.project_root(project_id).join("logical-codebase")
+    }
+
+    pub fn identity_migration_lock_path(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join(".identity-migration.lock")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProductAppPaths;
+
+    #[test]
+    fn logical_codebase_paths_are_project_scoped() {
+        let paths = ProductAppPaths::new("/tmp/aria");
+        assert_eq!(
+            paths.logical_codebase_root("project_0001"),
+            std::path::PathBuf::from("/tmp/aria/projects/project_0001/logical-codebase")
+        );
+        assert_eq!(
+            paths.identity_migration_lock_path("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/.identity-migration.lock"
+            )
+        );
+    }
 }
