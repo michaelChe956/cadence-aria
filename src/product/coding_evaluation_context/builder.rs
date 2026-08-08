@@ -201,9 +201,10 @@ fn build_schema_v2_evaluation_context_pack(
         .get(&attempt.project_id, &attempt.issue_id)?;
     let repository_id = issue_selection_logical_repository_id(&lifecycle.app_paths(), attempt)
         .or_else(|error| {
-            if schema_v2_active_unit_runtime(&lifecycle.app_paths(), attempt)?.is_none() {
-                return Err(error);
-            }
+            // Legacy fallback: when the logical selection cannot be resolved (feature
+            // disabled, migration not yet backfilled, or no codebase-selection.json),
+            // fall back to the physical issue.repo_id. This preserves pre-logical-codebase
+            // behavior for existing fixtures and un-migrated projects.
             let issue = IssueStore::new(lifecycle.app_paths())
                 .get(&attempt.project_id, &attempt.issue_id)?;
             let physical_repository_id =
@@ -211,12 +212,14 @@ fn build_schema_v2_evaluation_context_pack(
                     kind: "repository",
                     id: format!("issue:{}:repo_id", attempt.issue_id),
                 })?;
-            RepositoryStore::new(lifecycle.app_paths())
+            match RepositoryStore::new(lifecycle.app_paths())
                 .resolve_legacy_physical_repository_if_dual(
                     &attempt.project_id,
                     &physical_repository_id,
-                )
-                .map(|(_, _, repository)| repository.id)
+                ) {
+                Ok((_, _, repository)) => Ok(repository.id),
+                Err(_) => Ok(physical_repository_id),
+            }
         })?;
     let stories = lifecycle.list_story_specs(&attempt.project_id, &attempt.issue_id)?;
     let designs = lifecycle.list_design_specs(&attempt.project_id, &attempt.issue_id)?;
