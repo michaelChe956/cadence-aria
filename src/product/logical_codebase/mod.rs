@@ -15,7 +15,10 @@ pub use migration::{
 pub use reference_scanner::{
     RepositoryReference, RepositoryReferenceReport, RepositoryReferenceScanner,
 };
-pub use registration::{AttachOnlyRegistrationInput, LogicalCodebaseRegistrationCoordinator};
+pub use registration::{
+    AggregateRootPreflight, AggregateRootPreflightError, AttachOnlyRegistrationInput,
+    CanonicalAggregateRoot, LogicalCodebaseRegistrationCoordinator,
+};
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
 };

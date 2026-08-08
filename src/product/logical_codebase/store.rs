@@ -82,6 +82,52 @@ impl LogicalCodebaseStore {
         Ok(Some(manifest))
     }
 
+    pub fn list_manifests(&self) -> Result<Vec<LogicalCodebaseManifest>, ProductStoreError> {
+        let projects_root = self.paths.projects_root();
+        let entries = match std::fs::read_dir(&projects_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read {}: {error}",
+                    projects_root.display()
+                )));
+            }
+        };
+
+        let mut manifests = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", projects_root.display()))
+            })?;
+            let path = entry.path();
+            if !entry
+                .file_type()
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("stat {}: {error}", path.display()))
+                })?
+                .is_dir()
+            {
+                continue;
+            }
+            let project_id = entry.file_name().into_string().map_err(|value| {
+                ProductStoreError::InvalidRecord {
+                    kind: "logical_codebase_manifest",
+                    reason: format!(
+                        "project directory name is not UTF-8: {}",
+                        PathBuf::from(value).display()
+                    ),
+                }
+            })?;
+            validate_relative_id(&project_id)?;
+            if let Some(manifest) = self.load_manifest(&project_id)? {
+                manifests.push(manifest);
+            }
+        }
+        manifests.sort_by(|left, right| left.project_id.cmp(&right.project_id));
+        Ok(manifests)
+    }
+
     pub fn save_manifest(
         &self,
         project_id: &str,
