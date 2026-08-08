@@ -62,10 +62,107 @@ fn sha256_text(value: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberStatus {
+    #[default]
+    Active,
+    Removed,
+    Tombstoned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckoutKind {
+    Main,
+    IssueWorktree,
+    Imported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckoutAvailability {
+    Available,
+    Missing,
+    #[default]
+    Unresolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryType {
+    Backend,
+    Frontend,
+    #[serde(alias = "lib")]
+    Library,
+    Mixed,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodebaseMemberRecord {
+    pub logical_repository_id: LogicalRepositoryId,
+    pub physical_repository_id: String,
+    pub alias: String,
+    pub role: String,
+    pub ordinal: u32,
+    pub source_identity: RepositorySourceIdentity,
+    #[serde(default)]
+    pub repo_type: RepositoryType,
+    #[serde(default)]
+    pub tech_stack: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_ref: Option<String>,
+    #[serde(default)]
+    pub checkout_ids: Vec<RepositoryCheckoutId>,
+    #[serde(default)]
+    pub status: MemberStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryCheckoutRecord {
+    pub checkout_id: RepositoryCheckoutId,
+    pub logical_repository_id: LogicalRepositoryId,
+    pub physical_repository_id: String,
+    pub kind: CheckoutKind,
+    pub canonical_path: PathBuf,
+    pub checkout_path_hash: String,
+    pub git_dir_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub availability: CheckoutAvailability,
+    pub observed_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LogicalRepositoryId, RepositoryCheckoutId, RepositorySourceIdentity};
+    use super::{
+        CheckoutAvailability, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
+        RepositorySourceIdentity, RepositoryType,
+    };
     use uuid::Uuid;
+
+    #[test]
+    fn member_defaults_and_library_alias_are_serde_compatible() {
+        let repo_type: RepositoryType = serde_json::from_str("\"lib\"").unwrap();
+        assert_eq!(repo_type, RepositoryType::Library);
+        assert_eq!(serde_json::to_string(&repo_type).unwrap(), "\"library\"");
+
+        let availability: CheckoutAvailability = serde_json::from_str("\"unresolved\"").unwrap();
+        assert_eq!(availability, CheckoutAvailability::Unresolved);
+        assert_eq!(RepositoryType::default(), RepositoryType::Unknown);
+        assert_eq!(MemberStatus::default(), MemberStatus::Active);
+    }
 
     #[test]
     fn source_identity_uses_git_dir_and_origin_not_checkout_path_hash() {
