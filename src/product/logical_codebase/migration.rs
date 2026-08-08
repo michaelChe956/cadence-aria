@@ -1509,7 +1509,7 @@ impl IdentityMigrationVerifier {
                 .paths
                 .issue_root(project_id, &issue.id)
                 .join("coding-attempts");
-            for attempt in read_json_records::<CodingExecutionAttempt>(&root)? {
+            for attempt in read_json_records_shallow::<CodingExecutionAttempt>(&root)? {
                 validate_relative_id(&attempt.id)?;
                 if attempt.project_id != project_id || attempt.issue_id != issue.id {
                     return Err(ProductStoreError::IdentityMismatch {
@@ -1677,6 +1677,31 @@ fn read_json_records<T: serde::de::DeserializeOwned>(
         .into_iter()
         .map(|path| read_json(&path))
         .collect()
+}
+
+fn read_json_records_shallow<T: serde::de::DeserializeOwned>(
+    root: &Path,
+) -> Result<Vec<T>, ProductStoreError> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(root)
+        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?
+    {
+        let path = entry
+            .map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
+            })?
+            .path();
+        if path.is_file()
+            && path.extension().and_then(|extension| extension.to_str()) == Some("json")
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.into_iter().map(|path| read_json(&path)).collect()
 }
 
 fn rewrite_json_records<T, F>(root: &Path, mut mutate: F) -> Result<(), ProductStoreError>
@@ -1901,6 +1926,22 @@ mod tests {
     }
 
     #[test]
+    fn verifier_ignores_non_attempt_json_beneath_coding_attempt_directory() {
+        let fixture = migration_fixture_with_one_git_repository();
+        fixture.write_active_legacy_attempt_without_target_snapshot();
+        fixture.mark_attempt_completed();
+        IdentityMigrationExecutor::new(fixture.paths.clone())
+            .ensure_identity_schema("project_0001")
+            .expect("migrate terminal legacy attempt");
+        fixture.write_non_attempt_json_beneath_coding_attempt_directory();
+        fixture.set_journal_read_mode("dual");
+
+        IdentityMigrationVerifier::new(fixture.paths.clone())
+            .verify("project_0001")
+            .expect("attempt verifier must ignore child records");
+    }
+
+    #[test]
     fn authority_write_crash_replays_the_same_mapping_without_duplicate_members() {
         let fixture = migration_fixture_with_one_git_repository();
         let failing = IdentityMigrationExecutor::with_fault_injector(
@@ -2074,6 +2115,28 @@ mod tests {
 
         fn read_attempt(&self) -> crate::product::coding_models::CodingExecutionAttempt {
             read_json(&self.attempt_path()).expect("read migrated attempt")
+        }
+
+        fn write_non_attempt_json_beneath_coding_attempt_directory(&self) {
+            write_json(
+                &self
+                    .paths
+                    .issue_root("project_0001", "issue_0001")
+                    .join("coding-attempts")
+                    .join("coding_attempt_0001")
+                    .join("units")
+                    .join("coding_unit_0001.json"),
+                &serde_json::json!({"kind": "coding_execution_unit"}),
+            )
+            .expect("write non-attempt child record");
+        }
+
+        fn set_journal_read_mode(&self, read_mode: &str) {
+            let mut journal = self.journal();
+            journal.read_mode = Some(read_mode.to_string());
+            IdentityMigrationJournalStore::new(self.paths.clone())
+                .save("project_0001", &journal)
+                .expect("save journal read mode");
         }
 
         fn journal(&self) -> IdentityMigrationJournal {
