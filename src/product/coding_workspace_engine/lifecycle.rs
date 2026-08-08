@@ -249,21 +249,6 @@ impl CodingWorkspaceEngine {
                 &attempt.id,
                 journal.worktree_path.clone(),
             )?;
-            // 记录 base HEAD 作为首个 UnitRun 的 start_commit 证据。
-            // worktree 在此阶段刚创建，before_head 是 base branch 的 HEAD，
-            // 即 group coding 的起始提交；若不记录，首个 unit run 的
-            // start_commit 会是 None（attempt.head_commit 初始为 None），
-            // 导致 readiness 证据链断裂。
-            let updated = if updated.head_commit.is_none() {
-                self.store.update_attempt_head_commit(
-                    &attempt.project_id,
-                    &attempt.issue_id,
-                    &attempt.id,
-                    Some(journal.before_head.clone()),
-                )?
-            } else {
-                updated
-            };
             self.store.advance_coding_git_operation(
                 &updated,
                 &journal,
