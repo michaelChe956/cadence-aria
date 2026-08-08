@@ -65,7 +65,7 @@ impl RepositoryStore {
         validate_relative_id(project_id)?;
         if self.logical_codebase_feature.is_enabled() {
             IdentityMigrationExecutor::new(self.paths.clone())
-                .ensure_through_authority(project_id)?;
+                .ensure_identity_schema(project_id)?;
         }
         Ok(())
     }

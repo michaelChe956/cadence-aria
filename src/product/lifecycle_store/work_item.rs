@@ -38,6 +38,7 @@ impl LifecycleStore {
             project_id: input.project_id,
             issue_id: input.issue_id,
             repository_id: input.repository_id,
+            target_repository_id: None,
             story_spec_ids: input.story_spec_ids,
             design_spec_ids: input.design_spec_ids,
             title: input.title,

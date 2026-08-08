@@ -10,6 +10,7 @@ fn work_item(id: &str, depends_on: Vec<&str>, scope: Vec<&str>) -> LifecycleWork
         project_id: "project_0001".to_string(),
         issue_id: "issue_0001".to_string(),
         repository_id: "repo_0001".to_string(),
+        target_repository_id: None,
         story_spec_ids: vec!["story_spec_0001".to_string()],
         design_spec_ids: vec!["design_spec_0001".to_string()],
         title: id.to_string(),

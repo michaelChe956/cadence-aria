@@ -53,6 +53,7 @@ fn schema_v2_attempt_without_active_unit_binding_fails_closed() {
         provider_conversations: Vec::new(),
         created_at: "2026-07-27T00:00:00Z".to_string(),
         updated_at: "2026-07-27T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
     };
 

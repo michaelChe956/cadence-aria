@@ -120,6 +120,7 @@ impl WorkspaceEngine {
                 project_id: previous_plan.project_id.clone(),
                 issue_id: previous_plan.issue_id.clone(),
                 repository_id: repository_id.to_string(),
+                target_repository_id: None,
                 story_spec_ids: previous_plan.source_story_spec_ids.clone(),
                 design_spec_ids: previous_plan.source_design_spec_ids.clone(),
                 title: candidate

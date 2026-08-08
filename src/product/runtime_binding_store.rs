@@ -88,6 +88,8 @@ impl RuntimeBindingStore {
             task_root,
             status: RuntimeBindingStatus::Created,
             created_at: now.clone(),
+            logical_repository_id: None,
+            checkout_id: None,
             updated_at: now,
         };
 

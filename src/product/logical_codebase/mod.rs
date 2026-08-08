@@ -7,7 +7,8 @@ pub mod types;
 pub use feature::LogicalCodebaseFeature;
 pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
-    IdentityMigrationPhase, MigrationFaultInjector, RepositoryIdentityMapping,
+    IdentityMigrationPhase, IdentityMigrationVerifier, MigrationFaultInjector,
+    RepositoryIdentityMapping,
 };
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,

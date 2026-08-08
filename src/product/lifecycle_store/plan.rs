@@ -527,6 +527,8 @@ impl LifecycleStore {
             project_id: input.project_id,
             issue_id: input.issue_id,
             repository_id: input.repository_id,
+            logical_repository_id: None,
+            membership_revision: 0,
             provider_run_ref: input.provider_run_ref,
             languages: input.languages,
             frameworks: input.frameworks,

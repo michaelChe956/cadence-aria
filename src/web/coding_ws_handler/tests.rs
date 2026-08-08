@@ -766,6 +766,7 @@ fn manual_continue_gate_response_does_not_auto_resume_runner() {
         review_request_id: None,
         created_at: "2026-06-12T00:00:00Z".to_string(),
         updated_at: "2026-06-12T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
     };
 
@@ -922,6 +923,7 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         review_request_id: None,
         created_at: "2026-07-02T00:00:00Z".to_string(),
         updated_at: "2026-07-02T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
     };
 

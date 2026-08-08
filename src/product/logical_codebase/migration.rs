@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -10,6 +10,10 @@ use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
+use crate::product::coding_models::{
+    AttemptTargetSnapshot, CodingAttemptPlanBinding, CodingAttemptScope, CodingExecutionAttempt,
+    CodingExecutionUnit,
+};
 use crate::product::id::repo_hash_for_path;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
@@ -18,7 +22,10 @@ use crate::product::logical_codebase::{
     LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
     RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
 };
-use crate::product::models::RepositoryRecord;
+use crate::product::models::{
+    IssueRecord, IssueRuntimeBindingRecord, IssueSharedWorktree, LifecycleWorkItemRecord,
+    RepositoryProfile, RepositoryRecord, StorySpecRecord,
+};
 
 const IDENTITY_MIGRATION_JOURNAL_FILE: &str = "identity-migration.json";
 
@@ -191,6 +198,34 @@ impl IdentityMigrationExecutor {
             paths,
             fault_injector,
         }
+    }
+
+    /// Runs the complete identity schema migration through the logical-authoritative
+    /// read switch. The switch marker is persisted only after verification succeeds.
+    pub fn ensure_identity_schema(&self, project_id: &str) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        let lock_path = self.paths.identity_migration_lock_path(project_id);
+        with_exact_exclusive_lock(&lock_path, || {
+            let mut journal = self.load_or_begin_scanning(project_id)?;
+            match journal.phase {
+                IdentityMigrationPhase::Scanning => self.scan_legacy_repositories(&mut journal)?,
+                IdentityMigrationPhase::Failed => return self.failed_migration_error(&journal),
+                _ => {}
+            }
+            if journal.phase == IdentityMigrationPhase::Mapping {
+                self.persist_mappings_from_source_identity(&mut journal)?;
+            }
+            if journal.phase == IdentityMigrationPhase::WritingAuthority {
+                self.write_authority_records(&mut journal)?;
+            }
+            if journal.phase == IdentityMigrationPhase::BackfillingCompatibility {
+                self.backfill_compatibility(&mut journal)?;
+            }
+            if journal.phase == IdentityMigrationPhase::DualReadWrite {
+                self.switch_reads(&mut journal)?;
+            }
+            Ok(())
+        })
     }
 
     /// Runs discovery, source mapping, and authority writes. Later migration
@@ -539,6 +574,577 @@ impl IdentityMigrationExecutor {
             .after_authority_write(&journal.project_id, &persisted_mapping)
     }
 
+    fn backfill_compatibility(
+        &self,
+        journal: &mut IdentityMigrationJournal,
+    ) -> Result<(), ProductStoreError> {
+        let mappings = mappings_by_physical_id(journal)?;
+        self.backfill_repository_projections(journal, &mappings)?;
+        for issue in self.legacy_issues(&journal.project_id)? {
+            self.backfill_issue_records(journal, &mappings, &issue)?;
+        }
+        self.backfill_attempt_snapshots(journal, &mappings)?;
+
+        for index in 0..journal.mappings.len() {
+            if journal.mappings[index].compatibility_backfilled {
+                continue;
+            }
+            let physical_repository_id = journal.mappings[index].physical_repository_id.clone();
+            journal.mappings[index].compatibility_backfilled = true;
+            journal.completed_keys.push(format!(
+                "backfill:{}:repository:{physical_repository_id}",
+                journal.migration_id
+            ));
+            touch(journal);
+            self.journals.save(&journal.project_id, journal)?;
+        }
+        journal.phase = IdentityMigrationPhase::DualReadWrite;
+        journal.read_mode = Some("dual".to_string());
+        journal.last_error = None;
+        touch(journal);
+        self.journals.save(&journal.project_id, journal)
+    }
+
+    fn backfill_repository_projections(
+        &self,
+        journal: &IdentityMigrationJournal,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        let path = self
+            .paths
+            .project_root(&journal.project_id)
+            .join("repos.json");
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut repositories: Vec<RepositoryRecord> = read_json(&path)?;
+        let mut changed = false;
+        for repository in &mut repositories {
+            validate_relative_id(&repository.id)?;
+            let mapping = mapping_for_physical(mappings, &repository.id)?;
+            let expected = (
+                Some(mapping.logical_repository_id),
+                Some(mapping.primary_checkout_id),
+                1,
+            );
+            if repository.logical_repository_id.is_some()
+                || repository.primary_checkout_id.is_some()
+                || repository.identity_schema_version != 0
+            {
+                if (
+                    repository.logical_repository_id,
+                    repository.primary_checkout_id,
+                    repository.identity_schema_version,
+                ) != expected
+                {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "repository_projection",
+                        id: repository.id.clone(),
+                    });
+                }
+            } else {
+                repository.logical_repository_id = expected.0;
+                repository.primary_checkout_id = expected.1;
+                repository.identity_schema_version = expected.2;
+                changed = true;
+            }
+        }
+        if changed {
+            write_json(&path, &repositories)?;
+        }
+        Ok(())
+    }
+
+    fn backfill_issue_records(
+        &self,
+        journal: &IdentityMigrationJournal,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+        issue: &IssueRecord,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&issue.id)?;
+        if issue.project_id != journal.project_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "issue",
+                id: issue.id.clone(),
+            });
+        }
+        let issue_root = self.paths.issue_root(&journal.project_id, &issue.id);
+        if let Some(physical_id) = issue.repo_id.as_deref() {
+            validate_relative_id(physical_id)?;
+            self.write_issue_selection(&issue_root, mapping_for_physical(mappings, physical_id)?)?;
+        }
+        self.backfill_bindings(&journal.project_id, &issue.id, mappings)?;
+        self.backfill_stories(&journal.project_id, &issue.id, mappings)?;
+        self.backfill_work_items(&journal.project_id, &issue.id, mappings)?;
+        self.backfill_shared_worktree(&journal.project_id, &issue.id, mappings)?;
+        self.backfill_repository_profiles(&journal.project_id, &issue.id, mappings)
+    }
+
+    fn write_issue_selection(
+        &self,
+        issue_root: &Path,
+        mapping: &RepositoryIdentityMapping,
+    ) -> Result<(), ProductStoreError> {
+        let path = issue_root.join("codebase-selection.json");
+        let expected = IssueCodebaseSelection {
+            included: vec![mapping.logical_repository_id],
+            focus: vec![mapping.logical_repository_id],
+            selection_policy: "explicit".to_string(),
+        };
+        if path.exists() {
+            let existing: IssueCodebaseSelection = read_json(&path)?;
+            if existing != expected {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "issue_codebase_selection",
+                    id: mapping.physical_repository_id.clone(),
+                });
+            }
+            return Ok(());
+        }
+        write_json(&path, &expected)
+    }
+
+    fn backfill_bindings(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let root = self.paths.issue_root(project_id, issue_id).join("bindings");
+        rewrite_json_records::<IssueRuntimeBindingRecord, _>(&root, |binding| {
+            validate_relative_id(&binding.id)?;
+            let mapping = mapping_for_physical(mappings, &binding.repo_id)?;
+            assign_optional_identity(
+                &mut binding.logical_repository_id,
+                mapping.logical_repository_id,
+                "runtime_binding",
+                &binding.id,
+            )?;
+            assign_optional_identity(
+                &mut binding.checkout_id,
+                mapping.primary_checkout_id,
+                "runtime_binding",
+                &binding.id,
+            )
+        })
+    }
+
+    fn backfill_stories(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let root = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("story-specs");
+        let manifest = self.required_manifest(project_id)?;
+        rewrite_json_records::<StorySpecRecord, _>(&root, |story| {
+            validate_relative_id(&story.id)?;
+            let mapping = mapping_for_physical(mappings, &story.repository_id)?;
+            assign_optional_identity(
+                &mut story.logical_codebase_ref,
+                manifest.logical_codebase_id,
+                "story_spec",
+                &story.id,
+            )?;
+            assign_vec_identity(
+                &mut story.involved_repository_ids,
+                vec![mapping.logical_repository_id],
+                "story_spec",
+                &story.id,
+            )?;
+            assign_optional_identity(
+                &mut story.focus_repository_id,
+                mapping.logical_repository_id,
+                "story_spec",
+                &story.id,
+            )
+        })
+    }
+
+    fn backfill_work_items(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let root = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("work-items");
+        rewrite_json_records::<LifecycleWorkItemRecord, _>(&root, |work_item| {
+            validate_relative_id(&work_item.id)?;
+            let mapping = mapping_for_physical(mappings, &work_item.repository_id)?;
+            assign_optional_identity(
+                &mut work_item.target_repository_id,
+                mapping.logical_repository_id,
+                "work_item",
+                &work_item.id,
+            )
+        })
+    }
+
+    fn backfill_shared_worktree(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let path = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("issue-shared-worktree.json");
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut worktree: IssueSharedWorktree = read_json(&path)?;
+        validate_relative_id(&worktree.id)?;
+        let mapping = mapping_for_physical(mappings, &worktree.repository_id)?;
+        assign_optional_identity(
+            &mut worktree.target_repository_id,
+            mapping.logical_repository_id,
+            "issue_shared_worktree",
+            &worktree.id,
+        )?;
+        assign_optional_identity(
+            &mut worktree.checkout_id,
+            mapping.primary_checkout_id,
+            "issue_shared_worktree",
+            &worktree.id,
+        )?;
+        if worktree.path_schema_version == 0 {
+            worktree.path_schema_version = 1;
+        } else if worktree.path_schema_version != 1 {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "issue_shared_worktree",
+                reason: format!("unsupported path_schema_version for {}", worktree.id),
+            });
+        }
+        write_json(&path, &worktree)
+    }
+
+    fn backfill_repository_profiles(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let root = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("repository-profiles");
+        let manifest = self.required_manifest(project_id)?;
+        rewrite_json_records::<RepositoryProfile, _>(&root, |profile| {
+            validate_relative_id(&profile.id)?;
+            let mapping = mapping_for_physical(mappings, &profile.repository_id)?;
+            assign_optional_identity(
+                &mut profile.logical_repository_id,
+                mapping.logical_repository_id,
+                "repository_profile",
+                &profile.id,
+            )?;
+            if profile.membership_revision == 0 {
+                profile.membership_revision = manifest.membership_revision;
+                Ok(())
+            } else if profile.membership_revision == manifest.membership_revision {
+                Ok(())
+            } else {
+                Err(ProductStoreError::IdentityMismatch {
+                    kind: "repository_profile",
+                    id: profile.id.clone(),
+                })
+            }
+        })
+    }
+
+    fn backfill_attempt_snapshots(
+        &self,
+        journal: &IdentityMigrationJournal,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        let manifest = self.required_manifest(&journal.project_id)?;
+        for issue in self.legacy_issues(&journal.project_id)? {
+            let root = self
+                .paths
+                .issue_root(&journal.project_id, &issue.id)
+                .join("coding-attempts");
+            if !root.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&root).map_err(|error| {
+                ProductStoreError::Io(format!("read {}: {error}", root.display()))
+            })? {
+                let path = entry
+                    .map_err(|error| {
+                        ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
+                    })?
+                    .path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                    continue;
+                }
+                let mut attempt: CodingExecutionAttempt = read_json(&path)?;
+                self.backfill_attempt_snapshot(journal, mappings, &manifest, &mut attempt)?;
+                write_json(&path, &attempt)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn backfill_attempt_snapshot(
+        &self,
+        journal: &IdentityMigrationJournal,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+        manifest: &LogicalCodebaseManifest,
+        attempt: &mut CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&attempt.id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        if attempt.project_id != journal.project_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_attempt",
+                id: attempt.id.clone(),
+            });
+        }
+        if attempt.target_snapshot.is_some() {
+            return Ok(());
+        }
+        if attempt.status.is_active() {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "target_snapshot_missing",
+                reason: format!("active legacy attempt {} cannot resume", attempt.id),
+            });
+        }
+        let work_item = self.resolve_attempt_work_item(attempt)?;
+        let mapping = mapping_for_physical(mappings, &work_item.repository_id)?;
+        let checkout = self
+            .authority
+            .load_checkout(&journal.project_id, mapping.primary_checkout_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "repository_checkout",
+                id: mapping.primary_checkout_id.0.to_string(),
+            })?;
+        if checkout.logical_repository_id != mapping.logical_repository_id
+            || checkout.physical_repository_id != mapping.physical_repository_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "repository_checkout",
+                id: checkout.checkout_id.0.to_string(),
+            });
+        }
+        attempt.target_snapshot = Some(AttemptTargetSnapshot {
+            logical_repository_id: mapping.logical_repository_id,
+            checkout_id: mapping.primary_checkout_id,
+            physical_repository_id: mapping.physical_repository_id.clone(),
+            canonical_path: checkout.canonical_path,
+            git_dir_identity: checkout.git_dir_identity,
+            revision: None,
+            policy_digest: manifest.context_policy_digest.clone(),
+            membership_revision: manifest.membership_revision,
+            captured_at: Utc::now().to_rfc3339(),
+            capture_source: "migration_observed".to_string(),
+        });
+        Ok(())
+    }
+
+    fn resolve_attempt_work_item(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<LifecycleWorkItemRecord, ProductStoreError> {
+        let current_work_item_id = match attempt.scope {
+            CodingAttemptScope::WorkItem => attempt
+                .current_work_item_id
+                .as_deref()
+                .unwrap_or(&attempt.work_item_id),
+            CodingAttemptScope::WorkItemGroup => attempt
+                .current_work_item_id
+                .as_deref()
+                .ok_or_else(|| ProductStoreError::InvalidRecord {
+                    kind: "target_snapshot_missing",
+                    reason: format!("group attempt {} has no current_work_item_id", attempt.id),
+                })?,
+        };
+        validate_relative_id(current_work_item_id)?;
+        let current =
+            self.load_work_item(&attempt.project_id, &attempt.issue_id, current_work_item_id)?;
+        if attempt.scope == CodingAttemptScope::WorkItemGroup {
+            self.validate_group_attempt_target(attempt, &current)?;
+        }
+        Ok(current)
+    }
+
+    fn validate_group_attempt_target(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        current: &LifecycleWorkItemRecord,
+    ) -> Result<(), ProductStoreError> {
+        let group_id = attempt.work_item_group_id.as_deref().ok_or_else(|| {
+            ProductStoreError::InvalidRecord {
+                kind: "target_snapshot_missing",
+                reason: format!("group attempt {} has no group id", attempt.id),
+            }
+        })?;
+        validate_relative_id(group_id)?;
+        let root = self
+            .paths
+            .issue_root(&attempt.project_id, &attempt.issue_id)
+            .join("coding-attempts")
+            .join(&attempt.id);
+        let mut work_item_ids = BTreeSet::from([current.id.clone()]);
+        for unit in read_json_records::<CodingExecutionUnit>(&root.join("units"))? {
+            validate_relative_id(&unit.id)?;
+            validate_relative_id(&unit.logical_work_item_id)?;
+            if unit.attempt_id != attempt.id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_execution_unit",
+                    id: unit.id,
+                });
+            }
+            work_item_ids.insert(unit.logical_work_item_id);
+        }
+        let binding_path = root.join("plan-binding.json");
+        if binding_path.exists() {
+            let binding: CodingAttemptPlanBinding = read_json(&binding_path)?;
+            if binding.attempt_id != attempt.id || binding.plan_id != group_id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_attempt_plan_binding",
+                    id: attempt.id.clone(),
+                });
+            }
+        }
+        let initialization_path = self
+            .paths
+            .issue_root(&attempt.project_id, &attempt.issue_id)
+            .join("coding-attempts")
+            .join("group-initializations")
+            .join(format!("{group_id}.json"));
+        if initialization_path.exists() {
+            let initialization: serde_json::Value = read_json(&initialization_path)?;
+            let initialized_attempt_id = initialization
+                .get("attempt")
+                .and_then(|value| value.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ProductStoreError::InvalidRecord {
+                    kind: "target_snapshot_missing",
+                    reason: format!("group initialization for {} is unresolved", attempt.id),
+                })?;
+            let initialized_current = initialization
+                .get("attempt")
+                .and_then(|value| value.get("current_work_item_id"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ProductStoreError::InvalidRecord {
+                    kind: "target_snapshot_missing",
+                    reason: format!("group initialization for {} is unresolved", attempt.id),
+                })?;
+            if initialized_attempt_id != attempt.id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_group_initialization",
+                    id: attempt.id.clone(),
+                });
+            }
+            validate_relative_id(initialized_current)?;
+            work_item_ids.insert(initialized_current.to_string());
+        }
+        for work_item_id in work_item_ids {
+            let candidate =
+                self.load_work_item(&attempt.project_id, &attempt.issue_id, &work_item_id)?;
+            if candidate.repository_id != current.repository_id {
+                return Err(ProductStoreError::InvalidRecord {
+                    kind: "target_snapshot_missing",
+                    reason: format!("group attempt {} has mixed work item targets", attempt.id),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn switch_reads(
+        &self,
+        journal: &mut IdentityMigrationJournal,
+    ) -> Result<(), ProductStoreError> {
+        IdentityMigrationVerifier::new(self.paths.clone()).verify(&journal.project_id)?;
+        let manifest = self.required_manifest(&journal.project_id)?;
+        journal.phase = IdentityMigrationPhase::SwitchingReads;
+        journal.read_mode = Some("logical_authoritative".to_string());
+        journal.completed_keys.push(format!(
+            "switch:{}:{}:{}",
+            journal.migration_id, journal.source_repos_digest, manifest.membership_revision
+        ));
+        journal.last_error = None;
+        touch(journal);
+        // The marker is the last migration write: a pre-marker crash remains dual.
+        self.journals.save(&journal.project_id, journal)
+    }
+
+    fn required_manifest(
+        &self,
+        project_id: &str,
+    ) -> Result<LogicalCodebaseManifest, ProductStoreError> {
+        self.authority
+            .load_manifest(project_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "logical_codebase_manifest",
+                id: project_id.to_string(),
+            })
+    }
+
+    fn legacy_issues(&self, project_id: &str) -> Result<Vec<IssueRecord>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        let root = self.paths.project_root(project_id).join("issues");
+        let mut issues = Vec::new();
+        for path in child_json_paths(&root, Some("issue.json"))? {
+            let issue: IssueRecord = read_json(&path)?;
+            validate_relative_id(&issue.id)?;
+            issues.push(issue);
+        }
+        issues.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(issues)
+    }
+
+    fn load_work_item(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        work_item_id: &str,
+    ) -> Result<LifecycleWorkItemRecord, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(work_item_id)?;
+        let path = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("work-items")
+            .join(format!("{work_item_id}.json"));
+        if !path.exists() {
+            return Err(ProductStoreError::NotFound {
+                kind: "work_item",
+                id: work_item_id.to_string(),
+            });
+        }
+        let work_item: LifecycleWorkItemRecord = read_json(&path)?;
+        if work_item.project_id != project_id
+            || work_item.issue_id != issue_id
+            || work_item.id != work_item_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "work_item",
+                id: work_item_id.to_string(),
+            });
+        }
+        Ok(work_item)
+    }
+
     fn load_scanned_repositories(
         &self,
         journal: &mut IdentityMigrationJournal,
@@ -600,6 +1206,490 @@ struct AuthorityInput {
     source_identity: RepositorySourceIdentity,
     canonical_path: PathBuf,
     ordinal: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IssueCodebaseSelection {
+    included: Vec<LogicalRepositoryId>,
+    focus: Vec<LogicalRepositoryId>,
+    selection_policy: String,
+}
+
+pub struct IdentityMigrationVerifier {
+    paths: ProductAppPaths,
+    authority: LogicalCodebaseStore,
+}
+
+impl IdentityMigrationVerifier {
+    pub fn new(paths: ProductAppPaths) -> Self {
+        Self {
+            authority: LogicalCodebaseStore::new(paths.clone()),
+            paths,
+        }
+    }
+
+    pub fn verify(&self, project_id: &str) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        let journal = IdentityMigrationJournalStore::new(self.paths.clone())
+            .load(project_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "identity_migration_journal",
+                id: project_id.to_string(),
+            })?;
+        if journal.read_mode.as_deref() != Some("dual") {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "identity_migration_verifier",
+                reason: "read_mode must be dual before switching".to_string(),
+            });
+        }
+        if !journal
+            .mappings
+            .iter()
+            .all(|mapping| mapping.authority_written && mapping.compatibility_backfilled)
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "identity_migration_verifier",
+                reason: "migration compatibility backfill is incomplete".to_string(),
+            });
+        }
+        let manifest = self.authority.load_manifest(project_id)?.ok_or_else(|| {
+            ProductStoreError::NotFound {
+                kind: "logical_codebase_manifest",
+                id: project_id.to_string(),
+            }
+        })?;
+        let mappings = mappings_by_physical_id(&journal)?;
+        let mut expected_members = BTreeSet::new();
+        for mapping in mappings.values() {
+            expected_members.insert(mapping.logical_repository_id);
+            let member = self
+                .authority
+                .load_member(project_id, mapping.logical_repository_id)?
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "logical_codebase_member",
+                    id: mapping.logical_repository_id.0.to_string(),
+                })?;
+            let checkout = self
+                .authority
+                .load_checkout(project_id, mapping.primary_checkout_id)?
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "repository_checkout",
+                    id: mapping.primary_checkout_id.0.to_string(),
+                })?;
+            if member.physical_repository_id != mapping.physical_repository_id
+                || !member.checkout_ids.contains(&mapping.primary_checkout_id)
+                || checkout.logical_repository_id != mapping.logical_repository_id
+                || checkout.physical_repository_id != mapping.physical_repository_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "logical_authority",
+                    id: mapping.physical_repository_id.clone(),
+                });
+            }
+        }
+        if manifest.member_ids.iter().copied().collect::<BTreeSet<_>>() != expected_members {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "logical_codebase_manifest",
+                id: project_id.to_string(),
+            });
+        }
+        self.verify_repository_projections(project_id, &mappings)?;
+        self.verify_issue_projections(project_id, &manifest, &mappings)?;
+        self.verify_attempts(project_id, &manifest, &mappings)
+    }
+
+    fn verify_repository_projections(
+        &self,
+        project_id: &str,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        let path = self.paths.project_root(project_id).join("repos.json");
+        if !path.exists() {
+            return Ok(());
+        }
+        let records: Vec<RepositoryRecord> = read_json(&path)?;
+        for record in records {
+            validate_relative_id(&record.id)?;
+            let mapping = mapping_for_physical(mappings, &record.id)?;
+            if record.logical_repository_id != Some(mapping.logical_repository_id)
+                || record.primary_checkout_id != Some(mapping.primary_checkout_id)
+                || record.identity_schema_version != 1
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "repository_projection",
+                    id: record.id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_issue_projections(
+        &self,
+        project_id: &str,
+        manifest: &LogicalCodebaseManifest,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        for issue_path in child_json_paths(
+            &self.paths.project_root(project_id).join("issues"),
+            Some("issue.json"),
+        )? {
+            let issue: IssueRecord = read_json(&issue_path)?;
+            validate_relative_id(&issue.id)?;
+            if issue.project_id != project_id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "issue",
+                    id: issue.id,
+                });
+            }
+            let issue_root = self.paths.issue_root(project_id, &issue.id);
+            if let Some(physical_id) = issue.repo_id.as_deref() {
+                let mapping = mapping_for_physical(mappings, physical_id)?;
+                let selection_path = issue_root.join("codebase-selection.json");
+                let selection: IssueCodebaseSelection = read_json(&selection_path)?;
+                let expected = IssueCodebaseSelection {
+                    included: vec![mapping.logical_repository_id],
+                    focus: vec![mapping.logical_repository_id],
+                    selection_policy: "explicit".to_string(),
+                };
+                if selection != expected {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "issue_codebase_selection",
+                        id: issue.id,
+                    });
+                }
+            }
+            self.verify_bindings(project_id, &issue.id, mappings)?;
+            self.verify_stories(project_id, &issue.id, manifest, mappings)?;
+            self.verify_work_items(project_id, &issue.id, mappings)?;
+            self.verify_shared_worktree(project_id, &issue.id, mappings)?;
+            self.verify_repository_profiles(project_id, &issue.id, manifest, mappings)?;
+        }
+        Ok(())
+    }
+
+    fn verify_bindings(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        let root = self.paths.issue_root(project_id, issue_id).join("bindings");
+        for binding in read_json_records::<IssueRuntimeBindingRecord>(&root)? {
+            validate_relative_id(&binding.id)?;
+            let mapping = mapping_for_physical(mappings, &binding.repo_id)?;
+            if binding.logical_repository_id != Some(mapping.logical_repository_id)
+                || binding.checkout_id != Some(mapping.primary_checkout_id)
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "runtime_binding",
+                    id: binding.id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_stories(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        manifest: &LogicalCodebaseManifest,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        let root = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("story-specs");
+        for story in read_json_records::<StorySpecRecord>(&root)? {
+            validate_relative_id(&story.id)?;
+            let mapping = mapping_for_physical(mappings, &story.repository_id)?;
+            if story.logical_codebase_ref != Some(manifest.logical_codebase_id)
+                || story.involved_repository_ids != vec![mapping.logical_repository_id]
+                || story.focus_repository_id != Some(mapping.logical_repository_id)
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "story_spec",
+                    id: story.id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_work_items(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        let root = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("work-items");
+        for work_item in read_json_records::<LifecycleWorkItemRecord>(&root)? {
+            validate_relative_id(&work_item.id)?;
+            let mapping = mapping_for_physical(mappings, &work_item.repository_id)?;
+            if work_item.target_repository_id != Some(mapping.logical_repository_id) {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "work_item",
+                    id: work_item.id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_shared_worktree(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        let path = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("issue-shared-worktree.json");
+        if !path.exists() {
+            return Ok(());
+        }
+        let worktree: IssueSharedWorktree = read_json(&path)?;
+        validate_relative_id(&worktree.id)?;
+        let mapping = mapping_for_physical(mappings, &worktree.repository_id)?;
+        if worktree.target_repository_id != Some(mapping.logical_repository_id)
+            || worktree.checkout_id != Some(mapping.primary_checkout_id)
+            || worktree.path_schema_version != 1
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "issue_shared_worktree",
+                id: worktree.id,
+            });
+        }
+        Ok(())
+    }
+
+    fn verify_repository_profiles(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        manifest: &LogicalCodebaseManifest,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        let root = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("repository-profiles");
+        for profile in read_json_records::<RepositoryProfile>(&root)? {
+            validate_relative_id(&profile.id)?;
+            let mapping = mapping_for_physical(mappings, &profile.repository_id)?;
+            if profile.logical_repository_id != Some(mapping.logical_repository_id)
+                || profile.membership_revision != manifest.membership_revision
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "repository_profile",
+                    id: profile.id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_attempts(
+        &self,
+        project_id: &str,
+        manifest: &LogicalCodebaseManifest,
+        mappings: &BTreeMap<String, RepositoryIdentityMapping>,
+    ) -> Result<(), ProductStoreError> {
+        for issue_path in child_json_paths(
+            &self.paths.project_root(project_id).join("issues"),
+            Some("issue.json"),
+        )? {
+            let issue: IssueRecord = read_json(&issue_path)?;
+            let root = self
+                .paths
+                .issue_root(project_id, &issue.id)
+                .join("coding-attempts");
+            for attempt in read_json_records::<CodingExecutionAttempt>(&root)? {
+                validate_relative_id(&attempt.id)?;
+                if attempt.project_id != project_id || attempt.issue_id != issue.id {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "coding_attempt",
+                        id: attempt.id,
+                    });
+                }
+                let Some(snapshot) = attempt.target_snapshot.as_ref() else {
+                    return Err(ProductStoreError::InvalidRecord {
+                        kind: "target_snapshot_missing",
+                        reason: format!(
+                            "legacy attempt {} blocks logical-authoritative reads",
+                            attempt.id
+                        ),
+                    });
+                };
+                let mapping = mapping_for_physical(mappings, &snapshot.physical_repository_id)?;
+                let checkout = self
+                    .authority
+                    .load_checkout(project_id, snapshot.checkout_id)?
+                    .ok_or_else(|| ProductStoreError::NotFound {
+                        kind: "repository_checkout",
+                        id: snapshot.checkout_id.0.to_string(),
+                    })?;
+                if snapshot.logical_repository_id != mapping.logical_repository_id
+                    || snapshot.checkout_id != mapping.primary_checkout_id
+                    || checkout.logical_repository_id != snapshot.logical_repository_id
+                    || checkout.physical_repository_id != snapshot.physical_repository_id
+                    || snapshot.membership_revision != manifest.membership_revision
+                {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "attempt_target_snapshot",
+                        id: attempt.id,
+                    });
+                }
+                if attempt.status.is_active() && snapshot.capture_source == "migration_observed" {
+                    return Err(ProductStoreError::InvalidRecord {
+                        kind: "target_snapshot_missing",
+                        reason: format!(
+                            "active migration-observed attempt {} blocks switch",
+                            attempt.id
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn mappings_by_physical_id(
+    journal: &IdentityMigrationJournal,
+) -> Result<BTreeMap<String, RepositoryIdentityMapping>, ProductStoreError> {
+    let mut mappings = BTreeMap::new();
+    for mapping in &journal.mappings {
+        validate_relative_id(&mapping.physical_repository_id)?;
+        if mappings
+            .insert(mapping.physical_repository_id.clone(), mapping.clone())
+            .is_some()
+        {
+            return Err(ProductStoreError::Ambiguous {
+                kind: "identity_migration_mapping",
+                id: mapping.physical_repository_id.clone(),
+            });
+        }
+    }
+    Ok(mappings)
+}
+
+fn mapping_for_physical<'a>(
+    mappings: &'a BTreeMap<String, RepositoryIdentityMapping>,
+    physical_repository_id: &str,
+) -> Result<&'a RepositoryIdentityMapping, ProductStoreError> {
+    validate_relative_id(physical_repository_id)?;
+    mappings
+        .get(physical_repository_id)
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "identity_migration_mapping",
+            id: physical_repository_id.to_string(),
+        })
+}
+
+fn assign_optional_identity<T: Copy + Eq>(
+    slot: &mut Option<T>,
+    expected: T,
+    kind: &'static str,
+    id: &str,
+) -> Result<(), ProductStoreError> {
+    match slot {
+        Some(actual) if *actual != expected => Err(ProductStoreError::IdentityMismatch {
+            kind,
+            id: id.to_string(),
+        }),
+        Some(_) => Ok(()),
+        None => {
+            *slot = Some(expected);
+            Ok(())
+        }
+    }
+}
+
+fn assign_vec_identity<T: Eq>(
+    slot: &mut Vec<T>,
+    expected: Vec<T>,
+    kind: &'static str,
+    id: &str,
+) -> Result<(), ProductStoreError> {
+    if slot.is_empty() {
+        *slot = expected;
+        return Ok(());
+    }
+    if *slot == expected {
+        return Ok(());
+    }
+    Err(ProductStoreError::IdentityMismatch {
+        kind,
+        id: id.to_string(),
+    })
+}
+
+fn child_json_paths(
+    root: &Path,
+    exact_file_name: Option<&str>,
+) -> Result<Vec<PathBuf>, ProductStoreError> {
+    fn collect(
+        root: &Path,
+        exact_file_name: Option<&str>,
+        paths: &mut Vec<PathBuf>,
+    ) -> Result<(), ProductStoreError> {
+        if !root.exists() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(root)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", root.display())))?
+        {
+            let entry = entry.map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", root.display()))
+            })?;
+            let path = entry.path();
+            if let Some(file_name) = exact_file_name {
+                if path.is_dir() {
+                    collect(&path, Some(file_name), paths)?;
+                } else if path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
+                    paths.push(path);
+                }
+            } else if path.is_dir() {
+                collect(&path, None, paths)?;
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+                paths.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut paths = Vec::new();
+    collect(root, exact_file_name, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn read_json_records<T: serde::de::DeserializeOwned>(
+    root: &Path,
+) -> Result<Vec<T>, ProductStoreError> {
+    child_json_paths(root, None)?
+        .into_iter()
+        .map(|path| read_json(&path))
+        .collect()
+}
+
+fn rewrite_json_records<T, F>(root: &Path, mut mutate: F) -> Result<(), ProductStoreError>
+where
+    T: serde::de::DeserializeOwned + Serialize,
+    F: FnMut(&mut T) -> Result<(), ProductStoreError>,
+{
+    for path in child_json_paths(root, None)? {
+        let mut record: T = read_json(&path)?;
+        mutate(&mut record)?;
+        write_json(&path, &record)?;
+    }
+    Ok(())
 }
 
 fn source_repositories_digest(
@@ -786,6 +1876,31 @@ mod tests {
     }
 
     #[test]
+    fn active_legacy_attempt_blocks_switch_but_terminal_attempt_gets_observed_snapshot() {
+        let fixture = migration_fixture_with_one_git_repository();
+        fixture.write_active_legacy_attempt_without_target_snapshot();
+        let executor = IdentityMigrationExecutor::new(fixture.paths.clone());
+
+        let error = executor.ensure_identity_schema("project_0001").unwrap_err();
+        assert!(
+            error.to_string().contains("target_snapshot_missing"),
+            "unexpected migration error: {error}"
+        );
+
+        fixture.mark_attempt_completed();
+        executor.ensure_identity_schema("project_0001").unwrap();
+        let attempt = fixture.read_attempt();
+        assert_eq!(
+            attempt.target_snapshot.unwrap().capture_source,
+            "migration_observed"
+        );
+        assert_eq!(
+            fixture.journal().read_mode.as_deref(),
+            Some("logical_authoritative")
+        );
+    }
+
+    #[test]
     fn authority_write_crash_replays_the_same_mapping_without_duplicate_members() {
         let fixture = migration_fixture_with_one_git_repository();
         let failing = IdentityMigrationExecutor::with_fault_injector(
@@ -863,7 +1978,110 @@ mod tests {
             &vec![record],
         )
         .expect("write legacy repositories");
+        write_json(
+            &paths
+                .issue_root("project_0001", "issue_0001")
+                .join("issue.json"),
+            &serde_json::json!({
+                "id": "issue_0001",
+                "project_id": "project_0001",
+                "repo_id": "repository_0001",
+                "author": null,
+                "title": "legacy issue",
+                "description": null,
+                "change_id": "legacy",
+                "phase": "clarification",
+                "status": "draft",
+                "active_binding_id": null,
+                "created_at": "2026-08-08T00:00:00Z",
+                "updated_at": "2026-08-08T00:00:00Z"
+            }),
+        )
+        .expect("write legacy issue");
         MigrationFixture { _root: root, paths }
+    }
+
+    impl MigrationFixture {
+        fn attempt_path(&self) -> PathBuf {
+            self.paths
+                .issue_root("project_0001", "issue_0001")
+                .join("coding-attempts")
+                .join("coding_attempt_0001.json")
+        }
+
+        fn write_active_legacy_attempt_without_target_snapshot(&self) {
+            write_json(
+                &self
+                    .paths
+                    .issue_root("project_0001", "issue_0001")
+                    .join("work-items")
+                    .join("work_item_0001.json"),
+                &serde_json::json!({
+                    "id": "work_item_0001",
+                    "project_id": "project_0001",
+                    "issue_id": "issue_0001",
+                    "repository_id": "repository_0001",
+                    "story_spec_ids": [],
+                    "design_spec_ids": [],
+                    "title": "legacy work item",
+                    "plan_status": "not_started",
+                    "execution_status": "pending",
+                    "worktree_path": null,
+                    "created_at": "2026-08-08T00:00:00Z",
+                    "updated_at": "2026-08-08T00:00:00Z"
+                }),
+            )
+            .expect("write legacy work item");
+            write_json(
+                &self.attempt_path(),
+                &serde_json::json!({
+                    "id": "coding_attempt_0001",
+                    "project_id": "project_0001",
+                    "issue_id": "issue_0001",
+                    "work_item_id": "work_item_0001",
+                    "attempt_no": 1,
+                    "status": "running",
+                    "stage": "coding",
+                    "base_branch": "main",
+                    "branch_name": "aria/legacy",
+                    "worktree_path": null,
+                    "provider_config_snapshot": {
+                        "author": "fake",
+                        "reviewer": null,
+                        "review_rounds": 0,
+                        "permission_modes": {"author": "auto", "reviewer": "auto"}
+                    },
+                    "rework_count": 0,
+                    "max_auto_rework": 0,
+                    "head_commit": null,
+                    "pushed_remote": null,
+                    "review_request_id": null,
+                    "created_at": "2026-08-08T00:00:00Z",
+                    "updated_at": "2026-08-08T00:00:00Z",
+                    "completed_at": null
+                }),
+            )
+            .expect("write legacy attempt");
+        }
+
+        fn mark_attempt_completed(&self) {
+            let mut value: serde_json::Value =
+                read_json(&self.attempt_path()).expect("read attempt JSON");
+            value["status"] = serde_json::Value::String("completed".to_string());
+            value["completed_at"] = serde_json::Value::String("2026-08-08T00:01:00Z".to_string());
+            write_json(&self.attempt_path(), &value).expect("write completed attempt");
+        }
+
+        fn read_attempt(&self) -> crate::product::coding_models::CodingExecutionAttempt {
+            read_json(&self.attempt_path()).expect("read migrated attempt")
+        }
+
+        fn journal(&self) -> IdentityMigrationJournal {
+            IdentityMigrationJournalStore::new(self.paths.clone())
+                .load("project_0001")
+                .expect("load journal")
+                .expect("journal")
+        }
     }
 
     fn run_git_command(arguments: &[&str]) {

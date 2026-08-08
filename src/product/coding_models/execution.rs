@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
 use crate::product::models::ProviderConversationRef;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -86,6 +87,21 @@ pub enum CodingAttemptScope {
     WorkItemGroup,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptTargetSnapshot {
+    pub logical_repository_id: LogicalRepositoryId,
+    pub checkout_id: RepositoryCheckoutId,
+    pub physical_repository_id: String,
+    pub canonical_path: PathBuf,
+    pub git_dir_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    pub policy_digest: String,
+    pub membership_revision: u64,
+    pub captured_at: String,
+    pub capture_source: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CodingExecutionAttempt {
     pub id: String,
@@ -116,6 +132,8 @@ pub struct CodingExecutionAttempt {
     pub provider_conversations: Vec<ProviderConversationRef>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_snapshot: Option<AttemptTargetSnapshot>,
     pub completed_at: Option<String>,
 }
 
@@ -149,6 +167,8 @@ struct CodingExecutionAttemptSerde {
     provider_conversations: Vec<ProviderConversationRef>,
     created_at: String,
     updated_at: String,
+    #[serde(default)]
+    target_snapshot: Option<AttemptTargetSnapshot>,
     completed_at: Option<String>,
 }
 
@@ -189,6 +209,7 @@ impl<'de> Deserialize<'de> for CodingExecutionAttempt {
             provider_conversations: raw.provider_conversations,
             created_at: raw.created_at,
             updated_at: raw.updated_at,
+            target_snapshot: raw.target_snapshot,
             completed_at: raw.completed_at,
         })
     }

@@ -88,6 +88,7 @@ impl super::CodingAttemptStore {
             provider_conversations: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
+            target_snapshot: None,
             completed_at: None,
         };
 

@@ -194,6 +194,7 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
         provider_conversations: Vec::new(),
         created_at: "2026-05-23T00:00:00Z".to_string(),
         updated_at: "2026-05-23T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
     };
 

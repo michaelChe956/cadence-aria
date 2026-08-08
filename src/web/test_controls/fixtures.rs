@@ -373,6 +373,7 @@ fn create_coding_role_run_fixture(
         provider_conversations: Vec::new(),
         created_at: now.clone(),
         updated_at: now.clone(),
+        target_snapshot: None,
         completed_at: None,
     };
     store.save_coding_attempt(&attempt)?;

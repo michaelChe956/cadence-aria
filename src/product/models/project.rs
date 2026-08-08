@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +157,10 @@ pub struct IssueRuntimeBindingRecord {
     pub task_root: Option<PathBuf>,
     pub status: RuntimeBindingStatus,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_repository_id: Option<LogicalRepositoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_id: Option<RepositoryCheckoutId>,
     pub updated_at: String,
 }
 

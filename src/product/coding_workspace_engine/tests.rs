@@ -906,6 +906,7 @@ fn test_attempt(id: &str) -> CodingExecutionAttempt {
         review_request_id: None,
         created_at: "2026-06-01T00:00:00Z".to_string(),
         updated_at: "2026-06-01T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
     }
 }

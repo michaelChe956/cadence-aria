@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
+use uuid::Uuid;
+
 use serde::{Deserialize, Serialize};
+
+use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
 
 use super::project::{IssueSharedWorktreeStatus, WorkItemStatus};
 
@@ -101,6 +105,12 @@ pub struct StorySpecRecord {
     pub issue_id: String,
     pub repository_id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_codebase_ref: Option<Uuid>,
+    #[serde(default)]
+    pub involved_repository_ids: Vec<LogicalRepositoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_repository_id: Option<LogicalRepositoryId>,
     pub current_version: Option<u32>,
     pub confirmation_status: LifecycleConfirmationStatus,
     pub created_at: String,
@@ -128,6 +138,8 @@ pub struct LifecycleWorkItemRecord {
     pub project_id: String,
     pub issue_id: String,
     pub repository_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_repository_id: Option<LogicalRepositoryId>,
     pub story_spec_ids: Vec<String>,
     pub design_spec_ids: Vec<String>,
     pub title: String,
@@ -195,6 +207,12 @@ pub struct IssueSharedWorktree {
     pub project_id: String,
     pub issue_id: String,
     pub repository_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_repository_id: Option<LogicalRepositoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_id: Option<RepositoryCheckoutId>,
+    #[serde(default)]
+    pub path_schema_version: u16,
     pub branch_name: String,
     pub worktree_path: PathBuf,
     pub base_branch: String,
