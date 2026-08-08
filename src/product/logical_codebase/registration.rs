@@ -2,12 +2,20 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::json_store::{ProductStoreError, validate_relative_id};
+use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
+use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
     CodebaseMemberRecord, IdentityRegistryStore, LogicalCodebaseFeature, LogicalCodebaseStore,
     RepositorySourceIdentity, RepositoryType,
@@ -130,6 +138,321 @@ impl RegistrationPreflightResult {
             .filter(|candidate| candidate.state == state)
             .count()
     }
+}
+
+/// The persisted lifecycle of a confirmed batch registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationBatchStatus {
+    Queued,
+    Running,
+    PartialFailed,
+    Completed,
+    Cancelled,
+}
+
+/// The persisted lifecycle of an individual confirmed candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationItemStatus {
+    Pending,
+    Skipped,
+    Completed,
+    Failed,
+    NeedsAttention,
+}
+
+/// One candidate frozen from an explicitly user-confirmed preflight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrationBatchItem {
+    pub source_digest: String,
+    pub submitted_path: PathBuf,
+    pub canonical_path: PathBuf,
+    pub git_root: PathBuf,
+    pub source_identity: RepositorySourceIdentity,
+    pub preflight_revision: String,
+    pub alias: String,
+    pub role: String,
+    pub repo_type: RepositoryType,
+    pub tech_stack: Vec<String>,
+    pub status: RegistrationItemStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default)]
+    pub retry_count: u32,
+}
+
+/// A durable receipt for a confirmed batch registration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrationBatchRecord {
+    pub id: String,
+    pub project_id: String,
+    pub idempotency_key: String,
+    pub aggregate_root: PathBuf,
+    pub status: RegistrationBatchStatus,
+    pub items: Vec<RegistrationBatchItem>,
+    #[serde(default)]
+    pub retry_count: u32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Caller-owned confirmation of a preflight. `include_needs_attention` is an
+/// explicit user acknowledgement for dirty checkouts; all other non-eligible
+/// candidates are retained as skipped audit entries and are never attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedRegistrationBatchInput {
+    pub project_id: String,
+    pub aggregate_root: CanonicalAggregateRoot,
+    pub candidates: Vec<RegistrationCandidate>,
+    pub include_needs_attention: bool,
+}
+
+impl ConfirmedRegistrationBatchInput {
+    pub fn from_preflight(
+        preflight: &RegistrationPreflightResult,
+        include_needs_attention: bool,
+    ) -> Self {
+        Self {
+            project_id: preflight.project_id.clone(),
+            aggregate_root: preflight.aggregate_root.clone(),
+            candidates: preflight.candidates.clone(),
+            include_needs_attention,
+        }
+    }
+}
+
+/// Stores batch records below the project logical-codebase root. Every
+/// mutation is serialized on the project-scoped lock so simultaneous creates,
+/// resumes and cancels cannot race a record transition.
+#[derive(Debug, Clone)]
+pub struct RegistrationBatchStore {
+    paths: ProductAppPaths,
+}
+
+impl RegistrationBatchStore {
+    pub fn new(paths: ProductAppPaths) -> Self {
+        Self { paths }
+    }
+
+    pub fn create_or_get(
+        &self,
+        batch: RegistrationBatchRecord,
+    ) -> Result<RegistrationBatchRecord, ProductStoreError> {
+        validate_batch_record(&batch)?;
+        let project_id = batch.project_id.clone();
+        self.with_project_lock(&project_id, || {
+            let existing =
+                self.find_by_idempotency_key_unlocked(&project_id, &batch.idempotency_key)?;
+            match existing {
+                Some(existing) => {
+                    validate_batch_record(&existing)?;
+                    if existing.aggregate_root != batch.aggregate_root
+                        || existing.items != batch.items
+                    {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "registration_batch_idempotency_key_reused",
+                            id: batch.idempotency_key.clone(),
+                        });
+                    }
+                    Ok(existing)
+                }
+                None => {
+                    let path = self.batch_path(&project_id, &batch.id)?;
+                    if path.exists() {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "registration_batch_id_collision",
+                            id: batch.id.clone(),
+                        });
+                    }
+                    write_json(&path, &batch)?;
+                    Ok(batch)
+                }
+            }
+        })
+    }
+
+    pub fn load(
+        &self,
+        project_id: &str,
+        batch_id: &str,
+    ) -> Result<RegistrationBatchRecord, ProductStoreError> {
+        let path = self.batch_path(project_id, batch_id)?;
+        if !path.exists() {
+            return Err(ProductStoreError::NotFound {
+                kind: "registration_batch",
+                id: batch_id.to_string(),
+            });
+        }
+        let batch: RegistrationBatchRecord = read_json(&path)?;
+        validate_batch_record_for(&batch, project_id, batch_id)?;
+        Ok(batch)
+    }
+
+    pub fn resume(
+        &self,
+        project_id: &str,
+        batch_id: &str,
+    ) -> Result<RegistrationBatchRecord, ProductStoreError> {
+        self.load(project_id, batch_id)
+    }
+
+    pub fn cancel(
+        &self,
+        project_id: &str,
+        batch_id: &str,
+    ) -> Result<RegistrationBatchRecord, ProductStoreError> {
+        self.with_batch_mutation(project_id, batch_id, |batch| {
+            if batch.status != RegistrationBatchStatus::Completed {
+                batch.status = RegistrationBatchStatus::Cancelled;
+                batch.updated_at = Utc::now().to_rfc3339();
+            }
+            Ok(())
+        })
+        .map(|(batch, ())| batch)
+    }
+
+    fn with_batch_mutation<T>(
+        &self,
+        project_id: &str,
+        batch_id: &str,
+        mutation: impl FnOnce(&mut RegistrationBatchRecord) -> Result<T, ProductStoreError>,
+    ) -> Result<(RegistrationBatchRecord, T), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(batch_id)?;
+        self.with_project_lock(project_id, || {
+            let mut batch = self.load(project_id, batch_id)?;
+            let output = mutation(&mut batch)?;
+            validate_batch_record(&batch)?;
+            write_json(&self.batch_path(project_id, batch_id)?, &batch)?;
+            Ok((batch, output))
+        })
+    }
+
+    fn save_unlocked(&self, batch: &RegistrationBatchRecord) -> Result<(), ProductStoreError> {
+        validate_batch_record(batch)?;
+        write_json(&self.batch_path(&batch.project_id, &batch.id)?, batch)
+    }
+
+    fn with_project_lock<T>(
+        &self,
+        project_id: &str,
+        operation: impl FnOnce() -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        with_exact_exclusive_lock(
+            &self.paths.registration_batches_lock_path(project_id),
+            operation,
+        )
+    }
+
+    fn find_by_idempotency_key_unlocked(
+        &self,
+        project_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<RegistrationBatchRecord>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(idempotency_key)?;
+        let root = self.paths.registration_batches_root(project_id);
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read registration batches {}: {error}",
+                    root.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ProductStoreError::Io(format!("read registration batch entry: {error}"))
+            })?;
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let batch: RegistrationBatchRecord = read_json(&path)?;
+            validate_batch_record(&batch)?;
+            if batch.idempotency_key == idempotency_key {
+                return Ok(Some(batch));
+            }
+        }
+        Ok(None)
+    }
+
+    fn batch_path(&self, project_id: &str, batch_id: &str) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(batch_id)?;
+        Ok(self
+            .paths
+            .registration_batches_root(project_id)
+            .join(format!("{batch_id}.json")))
+    }
+}
+
+fn validate_batch_record(batch: &RegistrationBatchRecord) -> Result<(), ProductStoreError> {
+    validate_batch_record_for(batch, &batch.project_id, &batch.id)
+}
+
+fn validate_batch_record_for(
+    batch: &RegistrationBatchRecord,
+    project_id: &str,
+    batch_id: &str,
+) -> Result<(), ProductStoreError> {
+    validate_relative_id(project_id)?;
+    validate_relative_id(batch_id)?;
+    validate_relative_id(&batch.project_id)?;
+    validate_relative_id(&batch.id)?;
+    validate_relative_id(&batch.idempotency_key)?;
+    if batch.project_id != project_id || batch.id != batch_id || batch.items.is_empty() {
+        return Err(ProductStoreError::IdentityMismatch {
+            kind: "registration_batch",
+            id: batch_id.to_string(),
+        });
+    }
+    let mut source_digests = std::collections::BTreeSet::new();
+    for item in &batch.items {
+        if item.source_digest.is_empty()
+            || !source_digests.insert(item.source_digest.clone())
+            || item.canonical_path.as_os_str().is_empty()
+            || item.git_root.as_os_str().is_empty()
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "registration_batch_item",
+                id: batch_id.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn aggregate_batch_status(items: &[RegistrationBatchItem]) -> RegistrationBatchStatus {
+    if items.iter().all(|item| {
+        matches!(
+            item.status,
+            RegistrationItemStatus::Completed | RegistrationItemStatus::Skipped
+        )
+    }) {
+        RegistrationBatchStatus::Completed
+    } else {
+        RegistrationBatchStatus::PartialFailed
+    }
+}
+
+fn sha256_key(payload: impl AsRef<[u8]>) -> String {
+    format!("sha256:{:x}", Sha256::digest(payload.as_ref()))
+}
+
+fn stable_alias(candidate: &RegistrationCandidate) -> String {
+    candidate
+        .canonical_path
+        .as_deref()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("repository")
+        .to_string()
 }
 
 /// A deterministic admission failure for the aggregate root.
@@ -474,6 +797,8 @@ pub struct LogicalCodebaseRegistrationCoordinator {
     paths: ProductAppPaths,
     repositories: RepositoryStore,
     feature: LogicalCodebaseFeature,
+    #[cfg(test)]
+    failure_after_completed_items: Arc<AtomicUsize>,
 }
 
 impl LogicalCodebaseRegistrationCoordinator {
@@ -486,7 +811,313 @@ impl LogicalCodebaseRegistrationCoordinator {
             paths,
             repositories,
             feature,
+            #[cfg(test)]
+            failure_after_completed_items: Arc::new(AtomicUsize::new(usize::MAX)),
         }
+    }
+
+    /// Persists the caller-confirmed preflight snapshot without attaching any
+    /// member. Call [`Self::resume_batch`] to perform the revalidation and
+    /// attach work; this keeps confirmation and execution separately durable.
+    pub fn submit_confirmed_batch(
+        &self,
+        input: ConfirmedRegistrationBatchInput,
+    ) -> Result<RegistrationBatchRecord, ProductStoreError> {
+        validate_relative_id(&input.project_id)?;
+        if !self.feature.is_enabled() {
+            return Err(ProductStoreError::Conflict {
+                kind: "logical_codebase_feature_disabled",
+                id: input.project_id,
+            });
+        }
+        if input.candidates.is_empty() {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "registration_batch",
+                reason: "confirmed preflight must contain at least one candidate".to_string(),
+            });
+        }
+
+        let mut items = input
+            .candidates
+            .iter()
+            .filter_map(|candidate| {
+                batch_item_from_candidate(candidate, input.include_needs_attention).transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if items.is_empty() {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "registration_batch",
+                reason: "confirmed preflight contains no selected registrable candidates"
+                    .to_string(),
+            });
+        }
+        items.sort_by(|left, right| left.source_digest.cmp(&right.source_digest));
+        if items
+            .windows(2)
+            .any(|pair| pair[0].source_digest == pair[1].source_digest)
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "registration_batch_duplicate_source",
+                id: input.project_id,
+            });
+        }
+
+        let canonical_manifest_digest = canonical_manifest_digest(&input.aggregate_root, &items);
+        let mut revisions = items
+            .iter()
+            .map(|item| item.preflight_revision.as_str())
+            .collect::<Vec<_>>();
+        revisions.sort_unstable();
+        let idempotency_key =
+            batch_idempotency_key(&input.project_id, &canonical_manifest_digest, &revisions);
+        let id = format!("registration_batch_{}", Uuid::new_v4().simple());
+        validate_relative_id(&id)?;
+        let now = Utc::now().to_rfc3339();
+        RegistrationBatchStore::new(self.paths.clone()).create_or_get(RegistrationBatchRecord {
+            id,
+            project_id: input.project_id,
+            idempotency_key,
+            aggregate_root: input.aggregate_root.canonical_path,
+            status: RegistrationBatchStatus::Queued,
+            items,
+            retry_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    pub fn get_batch(
+        &self,
+        project_id: &str,
+        batch_id: &str,
+    ) -> Result<RegistrationBatchRecord, ProductStoreError> {
+        RegistrationBatchStore::new(self.paths.clone()).load(project_id, batch_id)
+    }
+
+    pub fn cancel_batch(
+        &self,
+        project_id: &str,
+        batch_id: &str,
+    ) -> Result<RegistrationBatchRecord, ProductStoreError> {
+        RegistrationBatchStore::new(self.paths.clone()).cancel(project_id, batch_id)
+    }
+
+    /// Revalidates every unfinished item immediately before registration. The
+    /// only operations before `attach_member` are the same read-only probes as
+    /// preflight; changed path, Git root, identity, HEAD or worktree state is
+    /// made visible as `needs_attention` rather than being silently attached.
+    pub fn resume_batch(
+        &self,
+        project_id: &str,
+        batch_id: &str,
+    ) -> Result<RegistrationBatchRecord, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(batch_id)?;
+        let batches = RegistrationBatchStore::new(self.paths.clone());
+        let (batch, ()) = batches.with_batch_mutation(project_id, batch_id, |batch| {
+            if batch.status == RegistrationBatchStatus::Cancelled
+                || batch.status == RegistrationBatchStatus::Completed
+            {
+                return Ok(());
+            }
+            batch.status = RegistrationBatchStatus::Running;
+            batch.updated_at = Utc::now().to_rfc3339();
+            batches.save_unlocked(batch)
+        })?;
+        if matches!(
+            batch.status,
+            RegistrationBatchStatus::Cancelled | RegistrationBatchStatus::Completed
+        ) {
+            return Ok(batch);
+        }
+
+        // `with_batch_mutation` intentionally releases the lock before I/O
+        // that may traverse Git metadata. The running transition arbitrates
+        // concurrent callers; a second resume observes Running and receives a
+        // deterministic conflict below.
+        #[cfg(test)]
+        let mut interrupted_for_test = false;
+        #[cfg(not(test))]
+        let interrupted_for_test = false;
+        for index in 0..batch.items.len() {
+            let mut current = batches.load(project_id, batch_id)?;
+            if current.status == RegistrationBatchStatus::Cancelled {
+                return Ok(current);
+            }
+            if current.status != RegistrationBatchStatus::Running {
+                return Err(ProductStoreError::Conflict {
+                    kind: "registration_batch_not_running",
+                    id: batch_id.to_string(),
+                });
+            }
+            let item = &mut current.items[index];
+            if matches!(
+                item.status,
+                RegistrationItemStatus::Completed
+                    | RegistrationItemStatus::Skipped
+                    | RegistrationItemStatus::NeedsAttention
+            ) {
+                continue;
+            }
+
+            if self.member_already_attached(project_id, item)? {
+                item.status = RegistrationItemStatus::Completed;
+                item.failure_reason = None;
+                item.retry_count = item.retry_count.saturating_add(1);
+                current.updated_at = Utc::now().to_rfc3339();
+                batches.with_batch_mutation(project_id, batch_id, |stored| {
+                    replace_batch_item(stored, item.clone())?;
+                    stored.updated_at = current.updated_at.clone();
+                    Ok(())
+                })?;
+                continue;
+            }
+
+            let revalidated =
+                self.revalidate_batch_item(project_id, &current.aggregate_root, item)?;
+            if revalidated.preflight_revision != item.preflight_revision {
+                item.status = RegistrationItemStatus::NeedsAttention;
+                item.failure_reason = Some("preflight_revision_changed".to_string());
+                item.retry_count = item.retry_count.saturating_add(1);
+                current.updated_at = Utc::now().to_rfc3339();
+                batches.with_batch_mutation(project_id, batch_id, |stored| {
+                    replace_batch_item(stored, item.clone())?;
+                    stored.updated_at = current.updated_at.clone();
+                    Ok(())
+                })?;
+                continue;
+            }
+
+            item.retry_count = item.retry_count.saturating_add(1);
+            let item_key = batch_item_idempotency_key(batch_id, &item.source_digest);
+            match self.attach_member(AttachOnlyRegistrationInput {
+                project_id: project_id.to_string(),
+                alias: item.alias.clone(),
+                role: item.role.clone(),
+                canonical_path: item.canonical_path.clone(),
+                repo_type: item.repo_type.clone(),
+                tech_stack: item.tech_stack.clone(),
+                idempotency_key: item_key,
+            }) {
+                Ok(_) => {
+                    item.status = RegistrationItemStatus::Completed;
+                    item.failure_reason = None;
+                }
+                Err(error) => {
+                    item.status = RegistrationItemStatus::Failed;
+                    item.failure_reason = Some(batch_failure_reason(&error));
+                }
+            }
+            current.updated_at = Utc::now().to_rfc3339();
+            batches.with_batch_mutation(project_id, batch_id, |stored| {
+                replace_batch_item(stored, item.clone())?;
+                stored.updated_at = current.updated_at.clone();
+                Ok(())
+            })?;
+            #[cfg(test)]
+            if item.status == RegistrationItemStatus::Completed
+                && self.should_interrupt_after_completed_item()
+            {
+                interrupted_for_test = true;
+                break;
+            }
+        }
+
+        let (completed, ()) = batches.with_batch_mutation(project_id, batch_id, |stored| {
+            if stored.status != RegistrationBatchStatus::Cancelled {
+                stored.status = if interrupted_for_test {
+                    RegistrationBatchStatus::PartialFailed
+                } else {
+                    aggregate_batch_status(&stored.items)
+                };
+                stored.retry_count = stored.retry_count.saturating_add(1);
+                stored.updated_at = Utc::now().to_rfc3339();
+            }
+            Ok(())
+        })?;
+        Ok(completed)
+    }
+
+    fn member_already_attached(
+        &self,
+        project_id: &str,
+        item: &RegistrationBatchItem,
+    ) -> Result<bool, ProductStoreError> {
+        let registry = IdentityRegistryStore::new(self.paths.clone());
+        let Some(entry) = registry.find_by_source(project_id, &item.source_identity)? else {
+            return Ok(false);
+        };
+        if entry.state != crate::product::logical_codebase::IdentityRegistryState::Active {
+            return Ok(false);
+        }
+        let authority = LogicalCodebaseStore::new(self.paths.clone());
+        let member = authority
+            .load_member(project_id, entry.logical_repository_id)?
+            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                kind: "registration_batch_member_recovery",
+                id: item.source_digest.clone(),
+            })?;
+        if member.physical_repository_id != entry.physical_repository_id
+            || member.source_identity != item.source_identity
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "registration_batch_member_recovery",
+                id: item.source_digest.clone(),
+            });
+        }
+        Ok(true)
+    }
+
+    fn revalidate_batch_item(
+        &self,
+        project_id: &str,
+        aggregate_root: &Path,
+        item: &RegistrationBatchItem,
+    ) -> Result<RegistrationCandidate, ProductStoreError> {
+        let canonical_path = fs::canonicalize(&item.submitted_path).map_err(|error| {
+            ProductStoreError::Io(format!(
+                "canonicalize registration batch item {}: {error}",
+                item.submitted_path.display()
+            ))
+        })?;
+        if !canonical_path.starts_with(aggregate_root) {
+            return Err(ProductStoreError::Conflict {
+                kind: "registration_batch_candidate_outside_root",
+                id: item.source_digest.clone(),
+            });
+        }
+        let (candidate, evidence) = self.classify_git_candidate(
+            project_id,
+            item.submitted_path.clone(),
+            canonical_path,
+            &[],
+        )?;
+        let Some(evidence) = evidence else {
+            return Err(ProductStoreError::Conflict {
+                kind: "registration_batch_candidate_not_git",
+                id: item.source_digest.clone(),
+            });
+        };
+        if candidate.canonical_path.as_deref() != Some(item.canonical_path.as_path())
+            || candidate.git_root.as_deref() != Some(item.git_root.as_path())
+            || candidate.source_identity.as_ref() != Some(&item.source_identity)
+            || evidence.source_key_digest != item.source_identity.key_digest
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "registration_batch_candidate_identity_changed",
+                id: item.source_digest.clone(),
+            });
+        }
+        Ok(candidate)
+    }
+
+    #[cfg(test)]
+    fn should_interrupt_after_completed_item(&self) -> bool {
+        self.failure_after_completed_items
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining != usize::MAX && remaining > 0).then_some(remaining - 1)
+            })
+            .is_ok_and(|previous| previous == 1)
     }
 
     /// Reads a submitted manifest (or discovers child Git directories when the
@@ -714,6 +1345,122 @@ impl LogicalCodebaseRegistrationCoordinator {
     }
 }
 
+fn batch_item_from_candidate(
+    candidate: &RegistrationCandidate,
+    include_needs_attention: bool,
+) -> Result<Option<RegistrationBatchItem>, ProductStoreError> {
+    let selected = match candidate.state {
+        RegistrationCandidateState::Eligible => true,
+        RegistrationCandidateState::NeedsAttention => include_needs_attention,
+        _ => false,
+    };
+    if !selected {
+        return Ok(None);
+    }
+    let canonical_path =
+        candidate
+            .canonical_path
+            .clone()
+            .ok_or_else(|| ProductStoreError::InvalidRecord {
+                kind: "confirmed_registration_candidate",
+                reason: "selected candidate is missing a canonical path".to_string(),
+            })?;
+    let git_root = candidate
+        .git_root
+        .clone()
+        .ok_or_else(|| ProductStoreError::InvalidRecord {
+            kind: "confirmed_registration_candidate",
+            reason: "selected candidate is missing a Git root".to_string(),
+        })?;
+    let source_identity =
+        candidate
+            .source_identity
+            .clone()
+            .ok_or_else(|| ProductStoreError::InvalidRecord {
+                kind: "confirmed_registration_candidate",
+                reason: "selected candidate is missing a source identity".to_string(),
+            })?;
+    Ok(Some(RegistrationBatchItem {
+        source_digest: source_identity.key_digest.clone(),
+        submitted_path: candidate.submitted_path.clone(),
+        canonical_path,
+        git_root,
+        source_identity,
+        preflight_revision: candidate.preflight_revision.clone(),
+        alias: stable_alias(candidate),
+        role: "repository".to_string(),
+        repo_type: RepositoryType::Unknown,
+        tech_stack: Vec::new(),
+        status: RegistrationItemStatus::Pending,
+        failure_reason: None,
+        retry_count: 0,
+    }))
+}
+
+fn canonical_manifest_digest(
+    aggregate_root: &CanonicalAggregateRoot,
+    items: &[RegistrationBatchItem],
+) -> String {
+    let mut sources = items
+        .iter()
+        .map(|item| item.source_digest.as_str())
+        .collect::<Vec<_>>();
+    sources.sort_unstable();
+    sha256_key(format!(
+        "{}\0{}",
+        aggregate_root.canonical_path.to_string_lossy(),
+        sources.join("\0")
+    ))
+}
+
+fn batch_idempotency_key(
+    project_id: &str,
+    canonical_manifest_digest: &str,
+    sorted_revisions: &[&str],
+) -> String {
+    sha256_key(format!(
+        "{}\0{}\0{}",
+        project_id,
+        canonical_manifest_digest,
+        sorted_revisions.join("\0")
+    ))
+}
+
+fn batch_item_idempotency_key(batch_id: &str, source_digest: &str) -> String {
+    format!("batch:{batch_id}:item:{source_digest}")
+}
+
+fn batch_failure_reason(error: &ProductStoreError) -> String {
+    match error {
+        ProductStoreError::Conflict { kind, .. }
+        | ProductStoreError::NotFound { kind, .. }
+        | ProductStoreError::Ambiguous { kind, .. }
+        | ProductStoreError::IdentityMismatch { kind, .. }
+        | ProductStoreError::InvalidRecord { kind, .. } => (*kind).to_string(),
+        ProductStoreError::Io(_) => "product_store_io".to_string(),
+        ProductStoreError::Json(_) => "product_store_json".to_string(),
+        ProductStoreError::PathEscape(_) => "product_store_path_escape".to_string(),
+    }
+}
+
+fn replace_batch_item(
+    batch: &mut RegistrationBatchRecord,
+    replacement: RegistrationBatchItem,
+) -> Result<(), ProductStoreError> {
+    let Some(item) = batch
+        .items
+        .iter_mut()
+        .find(|item| item.source_digest == replacement.source_digest)
+    else {
+        return Err(ProductStoreError::IdentityMismatch {
+            kind: "registration_batch_item",
+            id: replacement.source_digest,
+        });
+    };
+    *item = replacement;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct GitCandidateEvidence {
     git_root: PathBuf,
@@ -862,6 +1609,72 @@ mod tests {
         missing: PathBuf,
         outside: PathBuf,
         coordinator: LogicalCodebaseRegistrationCoordinator,
+    }
+
+    struct BatchFixture {
+        _root: tempfile::TempDir,
+        root: CanonicalAggregateRoot,
+        first: PathBuf,
+        second: PathBuf,
+        coordinator: LogicalCodebaseRegistrationCoordinator,
+    }
+
+    impl BatchFixture {
+        fn preflight(&self) -> RegistrationPreflightResult {
+            self.coordinator
+                .preflight(RegistrationPreflightInput {
+                    project_id: "project_0001".to_string(),
+                    aggregate_root: self.root.clone(),
+                    paths: vec![self.first.clone(), self.second.clone()],
+                })
+                .unwrap()
+        }
+
+        fn fail_after_first_completed_item(&self) {
+            self.coordinator
+                .failure_after_completed_items
+                .store(1, Ordering::SeqCst);
+        }
+
+        fn change_head_of_second_repository(&self) {
+            fs::write(self.second.join("README.md"), "# Second changed\n").unwrap();
+            git(&self.second, &["add", "README.md"]);
+            git(&self.second, &["commit", "--quiet", "-m", "changed"]);
+        }
+    }
+
+    #[test]
+    fn resumed_batch_revalidates_revision_skips_completed_item_and_marks_changed_item_for_reconfirmation()
+     {
+        let fixture = batch_fixture_with_two_git_repositories();
+        let preflight = fixture.preflight();
+        let batch = fixture
+            .coordinator
+            .submit_confirmed_batch(ConfirmedRegistrationBatchInput::from_preflight(
+                &preflight, true,
+            ))
+            .unwrap();
+        fixture.fail_after_first_completed_item();
+        let interrupted = fixture
+            .coordinator
+            .resume_batch("project_0001", &batch.id)
+            .unwrap();
+        assert_eq!(interrupted.status, RegistrationBatchStatus::PartialFailed);
+
+        fixture.change_head_of_second_repository();
+        let resumed = fixture
+            .coordinator
+            .resume_batch("project_0001", &batch.id)
+            .unwrap();
+        assert_eq!(resumed.items[0].status, RegistrationItemStatus::Completed);
+        assert_eq!(
+            resumed.items[1].status,
+            RegistrationItemStatus::NeedsAttention
+        );
+        assert_eq!(
+            resumed.items[1].failure_reason.as_deref(),
+            Some("preflight_revision_changed")
+        );
     }
 
     #[test]
@@ -1304,6 +2117,39 @@ mod tests {
             dirty_git,
             missing,
             outside,
+            coordinator: LogicalCodebaseRegistrationCoordinator::new(
+                paths,
+                repositories,
+                LogicalCodebaseFeature::enabled(),
+            ),
+        }
+    }
+
+    fn batch_fixture_with_two_git_repositories() -> BatchFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join("aria-state"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "project".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let root_path = temp.path().join("aggregate-root");
+        let first = root_path.join("first");
+        let second = root_path.join("second");
+        init_git_repository(&first);
+        init_git_repository(&second);
+        let repositories = RepositoryStore::with_logical_codebase_feature(
+            paths.clone(),
+            LogicalCodebaseFeature::enabled(),
+        );
+        BatchFixture {
+            _root: temp,
+            root: CanonicalAggregateRoot {
+                canonical_path: fs::canonicalize(&root_path).unwrap(),
+            },
+            first,
+            second,
             coordinator: LogicalCodebaseRegistrationCoordinator::new(
                 paths,
                 repositories,

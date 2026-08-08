@@ -55,6 +55,16 @@ impl ProductAppPaths {
         self.project_root(project_id).join("logical-codebase")
     }
 
+    pub fn registration_batches_root(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join("registration-batches")
+    }
+
+    pub fn registration_batches_lock_path(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join(".registration-batches.lock")
+    }
+
     pub fn identity_migration_lock_path(&self, project_id: &str) -> PathBuf {
         self.logical_codebase_root(project_id)
             .join(".identity-migration.lock")
@@ -71,6 +81,18 @@ mod tests {
         assert_eq!(
             paths.logical_codebase_root("project_0001"),
             std::path::PathBuf::from("/tmp/aria/projects/project_0001/logical-codebase")
+        );
+        assert_eq!(
+            paths.registration_batches_root("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/registration-batches"
+            )
+        );
+        assert_eq!(
+            paths.registration_batches_lock_path("project_0001"),
+            std::path::PathBuf::from(
+                "/tmp/aria/projects/project_0001/logical-codebase/.registration-batches.lock"
+            )
         );
         assert_eq!(
             paths.identity_migration_lock_path("project_0001"),
