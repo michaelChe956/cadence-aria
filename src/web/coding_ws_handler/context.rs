@@ -16,6 +16,7 @@ use crate::product::coding_workspace_runner::{
     apply_provider_selection_to_snapshots, coding_provider_role_for_stage,
     parse_coding_provider_role,
 };
+use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 
 use super::active_coding_timeline_node_id;
@@ -103,12 +104,20 @@ pub(crate) fn repository_path_for_attempt(
     attempt: &CodingExecutionAttempt,
 ) -> Result<PathBuf, CodingWorkspaceEngineError> {
     let repository_store = RepositoryStore::new(app_paths.clone());
-    let (_, checkout, _) = if let Some(snapshot) = attempt.target_snapshot.as_ref() {
+    let repository_path = if let Some(snapshot) = attempt.target_snapshot.as_ref() {
         repository_store
             .resolve_logical_repository(&attempt.project_id, snapshot.logical_repository_id)?
+            .1
+            .canonical_path
     } else if is_schema_v2_group_attempt(app_paths, attempt)? {
-        let logical_repository_id = issue_selection_logical_repository_id(app_paths, attempt)?;
-        repository_store.resolve_logical_repository(&attempt.project_id, logical_repository_id)?
+        let repository = issue_selection_logical_repository_id(app_paths, attempt)
+            .and_then(|logical_repository_id| {
+                repository_store
+                    .resolve_logical_repository(&attempt.project_id, logical_repository_id)
+                    .map(|(_, _, repository)| repository)
+            })
+            .or_else(|_| legacy_repository_for_attempt(&repository_store, app_paths, attempt))?;
+        repository.path
     } else {
         let current_work_item_id = current_work_item_id_for_attempt(attempt);
         let work_item = LifecycleStore::new(app_paths.clone())
@@ -119,16 +128,76 @@ pub(crate) fn repository_path_for_attempt(
                 kind: "work_item",
                 id: current_work_item_id.to_string(),
             })?;
-        match work_item.target_repository_id {
+        let repository = match work_item.target_repository_id {
             Some(logical_repository_id) => repository_store
-                .resolve_logical_repository(&attempt.project_id, logical_repository_id)?,
-            None => repository_store.resolve_legacy_physical_repository_if_dual(
-                &attempt.project_id,
-                &work_item.repository_id,
-            )?,
-        }
+                .resolve_logical_repository(&attempt.project_id, logical_repository_id)
+                .map(|(_, _, repository)| repository)
+                .or_else(|_| {
+                    legacy_physical_repository(
+                        &repository_store,
+                        &attempt.project_id,
+                        &work_item.repository_id,
+                    )
+                })?,
+            None => repository_store
+                .resolve_legacy_physical_repository_if_dual(
+                    &attempt.project_id,
+                    &work_item.repository_id,
+                )
+                .map(|(_, _, repository)| repository)
+                .or_else(|_| {
+                    legacy_physical_repository(
+                        &repository_store,
+                        &attempt.project_id,
+                        &work_item.repository_id,
+                    )
+                })?,
+        };
+        repository.path
     };
-    Ok(checkout.canonical_path)
+    Ok(repository_path)
+}
+
+fn legacy_repository_for_attempt(
+    repository_store: &RepositoryStore,
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<crate::product::models::RepositoryRecord, ProductStoreError> {
+    let current_work_item_id = current_work_item_id_for_attempt(attempt);
+    let physical_repository_id = LifecycleStore::new(app_paths.clone())
+        .list_work_items(&attempt.project_id, &attempt.issue_id)?
+        .into_iter()
+        .find(|work_item| work_item.id == current_work_item_id)
+        .map(|work_item| work_item.repository_id)
+        .or_else(|| {
+            IssueStore::new(app_paths.clone())
+                .get(&attempt.project_id, &attempt.issue_id)
+                .ok()
+                .and_then(|issue| issue.repo_id)
+        })
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "work_item",
+            id: current_work_item_id.to_string(),
+        })?;
+    legacy_physical_repository(
+        repository_store,
+        &attempt.project_id,
+        &physical_repository_id,
+    )
+}
+fn legacy_physical_repository(
+    repository_store: &RepositoryStore,
+    project_id: &str,
+    physical_repository_id: &str,
+) -> Result<crate::product::models::RepositoryRecord, ProductStoreError> {
+    repository_store
+        .list(project_id)?
+        .into_iter()
+        .find(|repository| repository.id == physical_repository_id)
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "repository",
+            id: physical_repository_id.to_string(),
+        })
 }
 
 fn issue_selection_logical_repository_id(

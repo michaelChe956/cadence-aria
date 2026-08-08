@@ -272,12 +272,29 @@ fn resolve_work_item_repository(
         Some(logical_repository_id) => store
             .resolve_logical_repository(project_id, logical_repository_id)
             .map(|(_, _, repository)| repository)
+            .or_else(|_| legacy_physical_repository(&store, project_id, &work_item.repository_id))
             .map_err(product_store_api_error),
         None => store
             .resolve_legacy_physical_repository_if_dual(project_id, &work_item.repository_id)
             .map(|(_, _, repository)| repository)
+            .or_else(|_| legacy_physical_repository(&store, project_id, &work_item.repository_id))
             .map_err(product_store_api_error),
     }
+}
+
+fn legacy_physical_repository(
+    store: &RepositoryStore,
+    project_id: &str,
+    physical_repository_id: &str,
+) -> Result<RepositoryRecord, ProductStoreError> {
+    store
+        .list(project_id)?
+        .into_iter()
+        .find(|repository| repository.id == physical_repository_id)
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "repository",
+            id: physical_repository_id.to_string(),
+        })
 }
 
 fn resolve_attempt_repository(

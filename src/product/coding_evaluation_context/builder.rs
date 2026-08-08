@@ -200,7 +200,7 @@ fn build_schema_v2_evaluation_context_pack(
     let _issue = IssueStore::new(lifecycle.app_paths().clone())
         .get(&attempt.project_id, &attempt.issue_id)?;
     let repository_id = issue_selection_logical_repository_id(&lifecycle.app_paths(), attempt)
-        .or_else(|error| {
+        .or_else(|_error| {
             // Legacy fallback: when the logical selection cannot be resolved (feature
             // disabled, migration not yet backfilled, or no codebase-selection.json),
             // fall back to the physical issue.repo_id. This preserves pre-logical-codebase
