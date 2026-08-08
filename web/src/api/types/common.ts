@@ -43,6 +43,15 @@ export type RepositoryListResponse = {
   repositories: Repository[];
 };
 
+export type RepositoryDeletionReceipt = {
+  physical_repository_id: string;
+  logical_repository_id: string | null;
+  checkout_id: string | null;
+  tombstone_operation_id: string | null;
+  deleted_at: string;
+  legacy_delete: boolean;
+};
+
 export type CreateRepositoryRequest = {
   name: string;
   path: string;

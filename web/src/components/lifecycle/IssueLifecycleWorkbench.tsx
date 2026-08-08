@@ -450,7 +450,11 @@ export function IssueLifecycleWorkbench({
     }
 
     setError(null);
-    await deleteRepository(selectedProjectId, repositoryId);
+    await deleteRepository(
+      selectedProjectId,
+      repositoryId,
+      `delete-repository-${crypto.randomUUID()}`,
+    );
     setSelectedCardKey(null);
     await refresh(selectedProjectId);
   }

@@ -21,6 +21,7 @@ import type {
   ProviderHealthResponse,
   Repository,
   RepositoryRegistrationErrorDetails,
+  RepositoryDeletionReceipt,
   RepositoryInitializationOperationSnapshot,
   RepositoryListResponse,
   WorkItemExecutionPlan,
@@ -137,11 +138,13 @@ export function recheckProviders(): Promise<ProviderHealthResponse> {
 export function deleteRepository(
   projectId: string,
   repositoryId: string,
-): Promise<{ status: string }> {
-  return requestJson<{ status: string }>(
+  operationId: string,
+): Promise<RepositoryDeletionReceipt> {
+  return requestJson<RepositoryDeletionReceipt>(
     `/api/projects/${encodeURIComponent(projectId)}/repositories/${encodeURIComponent(repositoryId)}`,
     {
       method: "DELETE",
+      headers: { "Idempotency-Key": operationId },
     },
   );
 }

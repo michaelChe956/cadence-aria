@@ -15,7 +15,7 @@ use crate::product::logical_codebase::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IdentityMigrationExecutor,
     IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseFeature,
     LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
-    RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+    RepositoryCheckoutRecord, RepositoryReferenceScanner, RepositorySourceIdentity, RepositoryType,
 };
 use crate::product::models::RepositoryRecord;
 
@@ -50,6 +50,35 @@ pub struct CreateRepositoryInput {
     pub default_provider_mode: Option<String>,
     /// 调用方持久化的 command/operation ID；用于安全重放创建命令。
     pub idempotency_key: String,
+}
+
+/// A deletion command must always use a caller-owned stable operation id.
+/// `allow_tombstone_reactivation` is deliberately retained as an explicit
+/// rejected input so callers cannot introduce a force-delete side channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRepositoryCommand {
+    pub operation_id: String,
+    pub expected_updated_at: Option<String>,
+    pub allow_tombstone_reactivation: bool,
+}
+
+/// The durable outcome of a repository delete command.
+///
+/// A feature-disabled legacy deletion has no logical identity or tombstone;
+/// those fields are `None` and `legacy_delete` is `true`. Enabled logical
+/// codebase deletes always return all identity fields and `legacy_delete=false`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryDeletionReceipt {
+    pub physical_repository_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_repository_id: Option<LogicalRepositoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_id: Option<RepositoryCheckoutId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tombstone_operation_id: Option<String>,
+    pub deleted_at: String,
+    #[serde(default)]
+    pub legacy_delete: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -532,19 +561,327 @@ impl RepositoryStore {
         }))
     }
 
-    pub fn delete(&self, project_id: &str, repository_id: &str) -> Result<(), ProductStoreError> {
+    pub fn delete(
+        &self,
+        project_id: &str,
+        physical_repository_id: &str,
+        command: DeleteRepositoryCommand,
+    ) -> Result<RepositoryDeletionReceipt, ProductStoreError> {
         validate_relative_id(project_id)?;
-        validate_relative_id(repository_id)?;
-        let mut repositories = self.list(project_id)?;
-        let initial_len = repositories.len();
-        repositories.retain(|record| record.id != repository_id);
-        if repositories.len() == initial_len {
-            return Err(ProductStoreError::NotFound {
+        validate_relative_id(physical_repository_id)?;
+        validate_relative_id(&command.operation_id)?;
+        if command.allow_tombstone_reactivation {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "delete_repository",
+                reason: "delete command cannot bypass references".to_string(),
+            });
+        }
+        let receipts = RepositoryCommandReceiptStore::new(self.paths.clone());
+        if let Some(receipt) = receipts.find_delete(project_id, &command.operation_id)? {
+            receipt.validate_delete_command(project_id, physical_repository_id, &command)?;
+            return self.replay_delete_receipt(project_id, receipt);
+        }
+        if !self.logical_codebase_feature.is_enabled() {
+            return self.delete_legacy(project_id, physical_repository_id, command);
+        }
+
+        self.ensure_identity_schema(project_id)?;
+        let (member, checkout, repository) =
+            self.resolve_logical_by_physical(project_id, physical_repository_id)?;
+        if command
+            .expected_updated_at
+            .as_deref()
+            .is_some_and(|expected| expected != repository.updated_at)
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "repository_updated_at",
+                id: physical_repository_id.to_string(),
+            });
+        }
+        let report = RepositoryReferenceScanner::new(self.paths.clone()).scan(
+            project_id,
+            physical_repository_id,
+            checkout.logical_repository_id,
+        )?;
+        if !report.is_empty() {
+            return Err(ProductStoreError::Conflict {
+                kind: "repository_references",
+                id: physical_repository_id.to_string(),
+            });
+        }
+        self.delete_with_tombstone(project_id, repository, member, checkout, command)
+    }
+
+    fn delete_legacy(
+        &self,
+        project_id: &str,
+        repository_id: &str,
+        command: DeleteRepositoryCommand,
+    ) -> Result<RepositoryDeletionReceipt, ProductStoreError> {
+        let mut repositories = self.list_compatibility_projection(project_id)?;
+        let repository = repositories
+            .iter()
+            .find(|record| record.id == repository_id)
+            .cloned()
+            .ok_or_else(|| ProductStoreError::NotFound {
                 kind: "repository",
+                id: repository_id.to_string(),
+            })?;
+        if command
+            .expected_updated_at
+            .as_deref()
+            .is_some_and(|expected| expected != repository.updated_at)
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "repository_updated_at",
                 id: repository_id.to_string(),
             });
         }
-        write_json(&self.repos_path(project_id), &repositories)
+        let deleted_at = Utc::now().to_rfc3339();
+        let receipt =
+            RepositoryDeleteReceipt::legacy_intent(project_id, &repository, &command, deleted_at);
+        RepositoryCommandReceiptStore::new(self.paths.clone()).save_delete(project_id, &receipt)?;
+        repositories.retain(|record| record.id != repository_id);
+        write_json(&self.repos_path(project_id), &repositories)?;
+        RepositoryCommandReceiptStore::new(self.paths.clone())
+            .mark_delete_completed(project_id, &receipt)
+    }
+
+    fn resolve_logical_by_physical(
+        &self,
+        project_id: &str,
+        physical_repository_id: &str,
+    ) -> Result<
+        (
+            CodebaseMemberRecord,
+            RepositoryCheckoutRecord,
+            RepositoryRecord,
+        ),
+        ProductStoreError,
+    > {
+        validate_relative_id(project_id)?;
+        validate_relative_id(physical_repository_id)?;
+        let repository = self
+            .list_compatibility_projection(project_id)?
+            .into_iter()
+            .find(|record| record.id == physical_repository_id)
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "repository",
+                id: physical_repository_id.to_string(),
+            })?;
+        let logical_repository_id = repository.logical_repository_id.ok_or_else(|| {
+            ProductStoreError::IdentityMismatch {
+                kind: "repository_projection",
+                id: physical_repository_id.to_string(),
+            }
+        })?;
+        let checkout_id =
+            repository
+                .primary_checkout_id
+                .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                    kind: "repository_projection",
+                    id: physical_repository_id.to_string(),
+                })?;
+        if repository.identity_schema_version != 1 {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "repository_projection",
+                id: physical_repository_id.to_string(),
+            });
+        }
+        let authority = LogicalCodebaseStore::new(self.paths.clone());
+        let member = authority
+            .load_member(project_id, logical_repository_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "logical_codebase_member",
+                id: logical_repository_id.0.to_string(),
+            })?;
+        let checkout = authority
+            .load_checkout(project_id, checkout_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "repository_checkout",
+                id: checkout_id.0.to_string(),
+            })?;
+        if member.physical_repository_id != physical_repository_id
+            || member.logical_repository_id != logical_repository_id
+            || !member.checkout_ids.contains(&checkout_id)
+            || checkout.physical_repository_id != physical_repository_id
+            || checkout.logical_repository_id != logical_repository_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "logical_repository_resolution",
+                id: physical_repository_id.to_string(),
+            });
+        }
+        Ok((member, checkout, repository))
+    }
+
+    fn delete_with_tombstone(
+        &self,
+        project_id: &str,
+        repository: RepositoryRecord,
+        mut member: CodebaseMemberRecord,
+        mut checkout: RepositoryCheckoutRecord,
+        command: DeleteRepositoryCommand,
+    ) -> Result<RepositoryDeletionReceipt, ProductStoreError> {
+        let receipts = RepositoryCommandReceiptStore::new(self.paths.clone());
+        debug_assert!(
+            receipts
+                .find_delete(project_id, &command.operation_id)?
+                .is_none()
+        );
+        let deleted_at = Utc::now().to_rfc3339();
+        let receipt = RepositoryDeleteReceipt::intent(
+            project_id,
+            &repository,
+            &member,
+            &checkout,
+            &command,
+            deleted_at,
+        );
+        receipts.save_delete(project_id, &receipt)?;
+        self.apply_delete_tombstone(
+            project_id,
+            &repository.id,
+            &mut member,
+            &mut checkout,
+            &receipt,
+        )?;
+        receipts.mark_delete_completed(project_id, &receipt)
+    }
+
+    fn replay_delete_receipt(
+        &self,
+        project_id: &str,
+        receipt: RepositoryDeleteReceipt,
+    ) -> Result<RepositoryDeletionReceipt, ProductStoreError> {
+        if receipt.completed {
+            return Ok(receipt.into_public());
+        }
+        if receipt.public.legacy_delete {
+            let mut repositories = self.list_compatibility_projection(project_id)?;
+            if repositories
+                .iter()
+                .any(|record| record.id == receipt.command.physical_repository_id)
+            {
+                repositories.retain(|record| record.id != receipt.command.physical_repository_id);
+                write_json(&self.repos_path(project_id), &repositories)?;
+            }
+            return RepositoryCommandReceiptStore::new(self.paths.clone())
+                .mark_delete_completed(project_id, &receipt);
+        }
+        let logical_repository_id = receipt.public.logical_repository_id.ok_or_else(|| {
+            ProductStoreError::IdentityMismatch {
+                kind: "repository_delete_receipt",
+                id: receipt.command.operation_id.clone(),
+            }
+        })?;
+        let checkout_id =
+            receipt
+                .public
+                .checkout_id
+                .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                    kind: "repository_delete_receipt",
+                    id: receipt.command.operation_id.clone(),
+                })?;
+        let authority = LogicalCodebaseStore::new(self.paths.clone());
+        let mut member = authority
+            .load_member(project_id, logical_repository_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "logical_codebase_member",
+                id: logical_repository_id.0.to_string(),
+            })?;
+        let mut checkout = authority
+            .load_checkout(project_id, checkout_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "repository_checkout",
+                id: checkout_id.0.to_string(),
+            })?;
+        self.apply_delete_tombstone(
+            project_id,
+            &receipt.command.physical_repository_id,
+            &mut member,
+            &mut checkout,
+            &receipt,
+        )?;
+        RepositoryCommandReceiptStore::new(self.paths.clone())
+            .mark_delete_completed(project_id, &receipt)
+    }
+
+    fn apply_delete_tombstone(
+        &self,
+        project_id: &str,
+        physical_repository_id: &str,
+        member: &mut CodebaseMemberRecord,
+        checkout: &mut RepositoryCheckoutRecord,
+        receipt: &RepositoryDeleteReceipt,
+    ) -> Result<(), ProductStoreError> {
+        let registry = IdentityRegistryStore::new(self.paths.clone());
+        let entry = registry
+            .find_by_source(project_id, &member.source_identity)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "identity_registry",
+                id: physical_repository_id.to_string(),
+            })?;
+        if entry.physical_repository_id != physical_repository_id
+            || entry.logical_repository_id != member.logical_repository_id
+            || entry.primary_checkout_id != checkout.checkout_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "identity_registry",
+                id: physical_repository_id.to_string(),
+            });
+        }
+        match entry.state {
+            IdentityRegistryState::Active => registry.tombstone(
+                project_id,
+                &member.source_identity,
+                &receipt.command.operation_id,
+                &receipt.public.deleted_at,
+            )?,
+            IdentityRegistryState::Tombstoned => {
+                if entry.delete_operation_id.as_deref()
+                    != Some(receipt.command.operation_id.as_str())
+                    || entry.deleted_at.as_deref() != Some(receipt.public.deleted_at.as_str())
+                {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "repository_source_tombstoned",
+                        id: physical_repository_id.to_string(),
+                    });
+                }
+            }
+        }
+
+        let authority = LogicalCodebaseStore::new(self.paths.clone());
+        if member.status == MemberStatus::Active {
+            member.status = MemberStatus::Tombstoned;
+            member.updated_at = receipt.public.deleted_at.clone();
+            authority.save_member(project_id, member)?;
+        } else if member.status != MemberStatus::Tombstoned {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "logical_codebase_member",
+                id: member.logical_repository_id.0.to_string(),
+            });
+        }
+        if checkout.availability == CheckoutAvailability::Available {
+            checkout.availability = CheckoutAvailability::Unresolved;
+            checkout.updated_at = receipt.public.deleted_at.clone();
+            authority.save_checkout(project_id, checkout)?;
+        } else if checkout.availability != CheckoutAvailability::Unresolved {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "repository_checkout",
+                id: checkout.checkout_id.0.to_string(),
+            });
+        }
+
+        let mut repositories = self.list_compatibility_projection(project_id)?;
+        if repositories
+            .iter()
+            .any(|record| record.id == physical_repository_id)
+        {
+            repositories.retain(|record| record.id != physical_repository_id);
+            write_json(&self.repos_path(project_id), &repositories)?;
+        }
+        Ok(())
     }
 
     fn repos_path(&self, project_id: &str) -> PathBuf {
@@ -653,6 +990,137 @@ impl RepositoryIdentityAllocation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RepositoryDeleteReceipt {
+    project_id: String,
+    command: DeleteRepositoryCommandReceipt,
+    public: RepositoryDeletionReceipt,
+    completed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DeleteRepositoryCommandReceipt {
+    operation_id: String,
+    expected_updated_at: Option<String>,
+    physical_repository_id: String,
+    original_updated_at: String,
+}
+
+impl RepositoryDeleteReceipt {
+    fn intent(
+        project_id: &str,
+        repository: &RepositoryRecord,
+        member: &CodebaseMemberRecord,
+        checkout: &RepositoryCheckoutRecord,
+        command: &DeleteRepositoryCommand,
+        deleted_at: String,
+    ) -> Self {
+        Self {
+            project_id: project_id.to_string(),
+            command: DeleteRepositoryCommandReceipt {
+                operation_id: command.operation_id.clone(),
+                expected_updated_at: command.expected_updated_at.clone(),
+                physical_repository_id: repository.id.clone(),
+                original_updated_at: repository.updated_at.clone(),
+            },
+            public: RepositoryDeletionReceipt {
+                physical_repository_id: repository.id.clone(),
+                logical_repository_id: Some(member.logical_repository_id),
+                checkout_id: Some(checkout.checkout_id),
+                tombstone_operation_id: Some(command.operation_id.clone()),
+                deleted_at,
+                legacy_delete: false,
+            },
+            completed: false,
+        }
+    }
+
+    fn legacy_intent(
+        project_id: &str,
+        repository: &RepositoryRecord,
+        command: &DeleteRepositoryCommand,
+        deleted_at: String,
+    ) -> Self {
+        Self {
+            project_id: project_id.to_string(),
+            command: DeleteRepositoryCommandReceipt {
+                operation_id: command.operation_id.clone(),
+                expected_updated_at: command.expected_updated_at.clone(),
+                physical_repository_id: repository.id.clone(),
+                original_updated_at: repository.updated_at.clone(),
+            },
+            public: RepositoryDeletionReceipt {
+                physical_repository_id: repository.id.clone(),
+                logical_repository_id: None,
+                checkout_id: None,
+                tombstone_operation_id: None,
+                deleted_at,
+                legacy_delete: true,
+            },
+            completed: false,
+        }
+    }
+
+    fn validate_path_identity(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        for id in [
+            self.project_id.as_str(),
+            self.command.operation_id.as_str(),
+            self.command.physical_repository_id.as_str(),
+            self.public.physical_repository_id.as_str(),
+            project_id,
+            operation_id,
+        ] {
+            validate_relative_id(id)?;
+        }
+        let public_identity_is_valid = if self.public.legacy_delete {
+            self.public.logical_repository_id.is_none()
+                && self.public.checkout_id.is_none()
+                && self.public.tombstone_operation_id.is_none()
+        } else {
+            self.public.logical_repository_id.is_some()
+                && self.public.checkout_id.is_some()
+                && self.public.tombstone_operation_id.as_deref() == Some(operation_id)
+        };
+        if self.project_id != project_id
+            || self.command.operation_id != operation_id
+            || self.command.physical_repository_id != self.public.physical_repository_id
+            || !public_identity_is_valid
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "repository_delete_receipt",
+                id: operation_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_delete_command(
+        &self,
+        project_id: &str,
+        physical_repository_id: &str,
+        command: &DeleteRepositoryCommand,
+    ) -> Result<(), ProductStoreError> {
+        self.validate_path_identity(project_id, &command.operation_id)?;
+        if self.command.physical_repository_id != physical_repository_id
+            || self.command.expected_updated_at != command.expected_updated_at
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "idempotency_key_reused",
+                id: command.operation_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn into_public(self) -> RepositoryDeletionReceipt {
+        self.public
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RepositoryCreateReceipt {
     idempotency_key: String,
     input_digest: String,
@@ -733,6 +1201,75 @@ impl RepositoryCommandReceiptStore {
             });
         }
         write_json(&path, receipt)
+    }
+
+    fn find_delete(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<RepositoryDeleteReceipt>, ProductStoreError> {
+        let path = self.delete_receipt_path(project_id, operation_id)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let receipt: RepositoryDeleteReceipt = read_json(&path)?;
+        receipt.validate_path_identity(project_id, operation_id)?;
+        Ok(Some(receipt))
+    }
+
+    fn save_delete(
+        &self,
+        project_id: &str,
+        receipt: &RepositoryDeleteReceipt,
+    ) -> Result<(), ProductStoreError> {
+        receipt.validate_path_identity(project_id, &receipt.command.operation_id)?;
+        let path = self.delete_receipt_path(project_id, &receipt.command.operation_id)?;
+        if path.exists() {
+            let existing: RepositoryDeleteReceipt = read_json(&path)?;
+            if existing == *receipt {
+                return Ok(());
+            }
+            return Err(ProductStoreError::Conflict {
+                kind: "idempotency_key_reused",
+                id: receipt.command.operation_id.clone(),
+            });
+        }
+        write_json(&path, receipt)
+    }
+
+    fn mark_delete_completed(
+        &self,
+        project_id: &str,
+        receipt: &RepositoryDeleteReceipt,
+    ) -> Result<RepositoryDeletionReceipt, ProductStoreError> {
+        let path = self.delete_receipt_path(project_id, &receipt.command.operation_id)?;
+        let mut stored: RepositoryDeleteReceipt = read_json(&path)?;
+        stored.validate_path_identity(project_id, &receipt.command.operation_id)?;
+        if stored != *receipt && !stored.completed {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "repository_delete_receipt",
+                id: receipt.command.operation_id.clone(),
+            });
+        }
+        if !stored.completed {
+            stored.completed = true;
+            write_json(&path, &stored)?;
+        }
+        Ok(stored.into_public())
+    }
+
+    fn delete_receipt_path(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(operation_id)?;
+        Ok(self
+            .paths
+            .logical_codebase_root(project_id)
+            .join("command-receipts")
+            .join(format!("delete-{operation_id}.json")))
     }
 
     fn create_receipt_path(

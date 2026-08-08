@@ -1,5 +1,6 @@
 pub mod feature;
 pub mod migration;
+pub mod reference_scanner;
 pub mod registry;
 pub mod store;
 pub mod types;
@@ -9,6 +10,9 @@ pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
     IdentityMigrationPhase, IdentityMigrationVerifier, MigrationFaultInjector,
     RepositoryIdentityMapping,
+};
+pub use reference_scanner::{
+    RepositoryReference, RepositoryReferenceReport, RepositoryReferenceScanner,
 };
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,

@@ -99,13 +99,28 @@ pub async fn list_repositories(
 
 pub async fn delete_repository(
     State(state): State<WebAppState>,
+    headers: axum::http::HeaderMap,
     Path((project_id, repository_id)): Path<(String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = RepositoryStore::new(product_app_paths(&state));
-    store
-        .delete(&project_id, &repository_id)
-        .map_err(product_store_api_error)?;
-    Ok(Json(json!({"status":"deleted"})))
+) -> ApiResult<Json<RepositoryDeletionReceipt>> {
+    let operation_id = headers
+        .get("Idempotency-Key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::validation("idempotency_key_required", "Idempotency-Key is required")
+        })?;
+    RepositoryStore::new(product_app_paths(&state))
+        .delete(
+            &project_id,
+            &repository_id,
+            DeleteRepositoryCommand {
+                operation_id: operation_id.to_string(),
+                expected_updated_at: None,
+                allow_tombstone_reactivation: false,
+            },
+        )
+        .map(Json)
+        .map_err(product_store_api_error)
 }
 
 pub async fn list_product_issues(

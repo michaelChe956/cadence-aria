@@ -466,7 +466,11 @@ describe("api client", () => {
     );
 
     await deleteProject("project/with space");
-    await deleteRepository("project/with space", "repository/with space");
+    await deleteRepository(
+      "project/with space",
+      "repository/with space",
+      "delete-repository-test-1",
+    );
     await deleteProductIssue("project/with space", "issue/with space");
     await deleteStorySpec(
       "project/with space",
@@ -505,6 +509,9 @@ describe("api client", () => {
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/coding-attempts/attempt%2Fwith%20space",
     ]);
     expect(calls.every((call) => call.init?.method === "DELETE")).toBe(true);
+    expect(calls[1]?.init?.headers).toMatchObject({
+      "Idempotency-Key": "delete-repository-test-1",
+    });
   });
 
   it("handles delete coding attempt 204 response without parsing json", async () => {

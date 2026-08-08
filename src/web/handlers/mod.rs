@@ -53,7 +53,9 @@ use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::provider_workspace_runner::{
     ProviderWorkspaceRunner, WorkspaceProviderRunInput,
 };
-use crate::product::repository_store::RepositoryStore;
+use crate::product::repository_store::{
+    DeleteRepositoryCommand, RepositoryDeletionReceipt, RepositoryStore,
+};
 use crate::product::runtime_binding_store::RuntimeBindingStore;
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::events::WebEventType;
