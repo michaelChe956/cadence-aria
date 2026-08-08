@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { CodingWsOutMessage } from "../api/types";
+import type { CodingExecutionUnit, CodingWsOutMessage } from "../api/types";
 import {
   confirmWorkItemExecutionPlan,
   deleteCodingAttempt,
@@ -799,5 +799,26 @@ describe("CodingWorkspacePage shell and actions", () => {
     await userEvent.click(screen.getByRole("button", { name: "中止 Attempt" }));
 
     expect(api.respondGate).toHaveBeenCalledWith("gate_0001", "abort", undefined);
+  });
+
+  it("shows completion banner when a group attempt is completed", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      attemptScope: "work_item_group",
+      status: "completed",
+      stage: "final_confirm",
+      units: [
+        { unit_id: "coding_unit_0001", status: "completed" },
+        { unit_id: "coding_unit_0002", status: "completed" },
+      ] as CodingExecutionUnit[],
+      headCommit: "abcdef1234567890abcdef1234567890abcdef12",
+    });
+
+    render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />);
+
+    expect(screen.getByText("组级 Coding Workspace 已完成")).toBeInTheDocument();
+    expect(screen.getByText("2 个 Work Item 已完成并确认")).toBeInTheDocument();
+    expect(screen.getByText(/最终提交 abcdef123456/)).toBeInTheDocument();
   });
 });
