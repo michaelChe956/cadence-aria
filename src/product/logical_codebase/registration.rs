@@ -1465,6 +1465,42 @@ fn replace_batch_item(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryGitSnapshot {
+    status_porcelain: Vec<u8>,
+    head: Vec<u8>,
+    refs: Vec<u8>,
+    worktree_list: Vec<u8>,
+    config: Vec<u8>,
+    hooks: Vec<(PathBuf, Vec<u8>)>,
+    index: Option<Vec<u8>>,
+}
+
+impl RepositoryGitSnapshot {
+    pub fn capture(root: &Path) -> Result<Self, ProductStoreError> {
+        Ok(Self {
+            status_porcelain: git_stdout(root, &["status", "--porcelain"])?,
+            head: git_stdout(root, &["rev-parse", "HEAD"])?,
+            refs: git_stdout(root, &["for-each-ref", "--format=%(refname) %(objectname)"])?,
+            worktree_list: git_stdout(root, &["worktree", "list", "--porcelain"])?,
+            config: fs::read(root.join(".git/config")).unwrap_or_default(),
+            hooks: read_tree_bytes(&root.join(".git/hooks"))?,
+            index: fs::read(root.join(".git/index")).ok(),
+        })
+    }
+
+    pub fn assert_unchanged(&self, after: &Self) -> Result<(), ProductStoreError> {
+        if self == after {
+            Ok(())
+        } else {
+            Err(ProductStoreError::IdentityMismatch {
+                kind: "registration_git_side_effect",
+                id: "git_snapshot_changed".into(),
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GitCandidateEvidence {
     git_root: PathBuf,
@@ -1518,13 +1554,25 @@ fn discover_git_directories_recursive(
     Ok(())
 }
 
-/// Runs a Git probe without changing the checkout. A nonzero Git exit is an
-/// expected negative observation (for example, a non-Git directory or a
-/// missing origin) and therefore returns `Ok(None)`.
 fn git_probe(
     repository_path: &Path,
     arguments: &[&str],
 ) -> Result<Option<String>, ProductStoreError> {
+    let allowed = [
+        ["status", "--porcelain"].as_slice(),
+        ["rev-parse", "HEAD"].as_slice(),
+        ["for-each-ref", "--format=%(refname) %(objectname)"].as_slice(),
+        ["worktree", "list", "--porcelain"].as_slice(),
+        ["rev-parse", "--show-toplevel"].as_slice(),
+        ["rev-parse", "--git-dir"].as_slice(),
+        ["config", "--get", "remote.origin.url"].as_slice(),
+    ];
+    if !allowed.iter().any(|candidate| *candidate == arguments) {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: "registration_git_command",
+            reason: format!("Git command is not allowed: {arguments:?}"),
+        });
+    }
     let output = Command::new("git")
         .current_dir(repository_path)
         .args(arguments)
@@ -1538,6 +1586,92 @@ fn git_probe(
     String::from_utf8(output.stdout)
         .map(Some)
         .map_err(|error| ProductStoreError::Io(format!("Git output was not UTF-8: {error}")))
+}
+
+fn git_stdout(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, ProductStoreError> {
+    let allowed = [
+        ["status", "--porcelain"].as_slice(),
+        ["rev-parse", "HEAD"].as_slice(),
+        ["for-each-ref", "--format=%(refname) %(objectname)"].as_slice(),
+        ["worktree", "list", "--porcelain"].as_slice(),
+        ["rev-parse", "--show-toplevel"].as_slice(),
+        ["rev-parse", "--git-dir"].as_slice(),
+        ["config", "--get", "remote.origin.url"].as_slice(),
+    ];
+    if !allowed.iter().any(|candidate| *candidate == arguments) {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: "registration_git_command",
+            reason: format!("Git command is not allowed: {arguments:?}"),
+        });
+    }
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(arguments)
+        .output()
+        .map_err(|error| {
+            ProductStoreError::Io(format!("run git in {}: {error}", root.display()))
+        })?;
+    if !output.status.success() {
+        return Err(ProductStoreError::Io(format!(
+            "git exited {:?} in {}: {}",
+            output.status.code(),
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output.stdout)
+}
+
+fn read_tree_bytes(root: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>, ProductStoreError> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        files: &mut Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<(), ProductStoreError> {
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read Git hooks {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        let mut paths = entries
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ProductStoreError::Io(format!("read Git hooks entry: {error}")))?;
+        paths.sort();
+        for child in paths {
+            let metadata = fs::symlink_metadata(&child).map_err(|error| {
+                ProductStoreError::Io(format!("inspect Git hooks {}: {error}", child.display()))
+            })?;
+            if metadata.is_dir() {
+                visit(root, &child, files)?;
+            } else if metadata.is_file() {
+                let relative = child.strip_prefix(root).map_err(|error| {
+                    ProductStoreError::Io(format!(
+                        "relativize Git hooks {}: {error}",
+                        child.display()
+                    ))
+                })?;
+                files.push((
+                    relative.to_path_buf(),
+                    fs::read(&child).map_err(|error| {
+                        ProductStoreError::Io(format!("read Git hook {}: {error}", child.display()))
+                    })?,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    if root.exists() {
+        visit(root, root, &mut files)?;
+    }
+    Ok(files)
 }
 
 fn git_probe_inconsistent(repository_path: &Path, observation: &str) -> ProductStoreError {
@@ -1623,6 +1757,29 @@ mod tests {
         coordinator: LogicalCodebaseRegistrationCoordinator,
     }
 
+    struct FiftyRepositoryFixture {
+        _root: tempfile::TempDir,
+        root: CanonicalAggregateRoot,
+        repositories: Vec<PathBuf>,
+        coordinator: LogicalCodebaseRegistrationCoordinator,
+    }
+
+    impl FiftyRepositoryFixture {
+        fn confirmed_preflight(&self) -> ConfirmedRegistrationBatchInput {
+            ConfirmedRegistrationBatchInput::from_preflight(
+                &self
+                    .coordinator
+                    .preflight(RegistrationPreflightInput {
+                        project_id: "project_0001".to_string(),
+                        aggregate_root: self.root.clone(),
+                        paths: self.repositories.clone(),
+                    })
+                    .unwrap(),
+                false,
+            )
+        }
+    }
+
     impl BatchFixture {
         fn preflight(&self) -> RegistrationPreflightResult {
             self.coordinator
@@ -1644,6 +1801,33 @@ mod tests {
             fs::write(self.second.join("README.md"), "# Second changed\n").unwrap();
             git(&self.second, &["add", "README.md"]);
             git(&self.second, &["commit", "--quiet", "-m", "changed"]);
+        }
+    }
+
+    #[test]
+    fn registering_fifty_members_preserves_every_git_checkout_byte_for_byte() {
+        let fixture = fifty_repository_fixture();
+        let before: Vec<_> = fixture
+            .repositories
+            .iter()
+            .map(|root| RepositoryGitSnapshot::capture(root).unwrap())
+            .collect();
+        let batch = fixture
+            .coordinator
+            .submit_confirmed_batch(fixture.confirmed_preflight())
+            .unwrap();
+        let completed = fixture
+            .coordinator
+            .resume_batch("project_0001", &batch.id)
+            .unwrap();
+        assert_eq!(completed.status, RegistrationBatchStatus::Completed);
+
+        for (root, snapshot) in fixture.repositories.iter().zip(before.iter()) {
+            snapshot
+                .assert_unchanged(&RepositoryGitSnapshot::capture(root).unwrap())
+                .unwrap();
+            assert!(!root.join(".aria").exists());
+            assert!(!root.join(".codegraph").exists());
         }
     }
 
@@ -2132,6 +2316,41 @@ mod tests {
             coordinator: LogicalCodebaseRegistrationCoordinator::new(
                 paths,
                 repositories,
+                LogicalCodebaseFeature::enabled(),
+            ),
+        }
+    }
+
+    fn fifty_repository_fixture() -> FiftyRepositoryFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join("aria-state"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "project".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let root_path = temp.path().join("aggregate-root");
+        let repositories = (1..=50)
+            .map(|index| {
+                let path = root_path.join(format!("repo_{index:04}"));
+                init_git_repository(&path);
+                path
+            })
+            .collect::<Vec<_>>();
+        let repository_store = RepositoryStore::with_logical_codebase_feature(
+            paths.clone(),
+            LogicalCodebaseFeature::enabled(),
+        );
+        FiftyRepositoryFixture {
+            _root: temp,
+            root: CanonicalAggregateRoot {
+                canonical_path: fs::canonicalize(root_path).unwrap(),
+            },
+            repositories,
+            coordinator: LogicalCodebaseRegistrationCoordinator::new(
+                paths,
+                repository_store,
                 LogicalCodebaseFeature::enabled(),
             ),
         }
