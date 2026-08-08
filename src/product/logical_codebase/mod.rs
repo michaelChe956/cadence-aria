@@ -1,6 +1,7 @@
 pub mod feature;
 pub mod migration;
 pub mod reference_scanner;
+pub mod registration;
 pub mod registry;
 pub mod store;
 pub mod types;
@@ -14,6 +15,7 @@ pub use migration::{
 pub use reference_scanner::{
     RepositoryReference, RepositoryReferenceReport, RepositoryReferenceScanner,
 };
+pub use registration::{AttachOnlyRegistrationInput, LogicalCodebaseRegistrationCoordinator};
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
 };
