@@ -1,4 +1,5 @@
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -18,6 +19,27 @@ pub fn build_web_router(state: WebAppState) -> Router {
         .route("/api/providers/status", get(handlers::providers_status))
         .route("/api/providers/recheck", post(handlers::providers_recheck))
         .route("/api/runtime-info", get(handlers::runtime_info))
+        .route(
+            "/api/image-create/sessions",
+            get(handlers::list_image_create_sessions).post(handlers::create_image_create_session),
+        )
+        .route(
+            "/api/image-create/sessions/{id}",
+            get(handlers::get_image_create_session).delete(handlers::delete_image_create_session),
+        )
+        .route(
+            "/api/image-create/sessions/{id}/chat",
+            get(handlers::image_create_chat_ws),
+        )
+        .route(
+            "/api/image-create/sessions/{id}/generate",
+            post(handlers::generate_image)
+                .layer(DefaultBodyLimit::max(11 * 1024 * 1024)),
+        )
+        .route(
+            "/api/image-create/settings",
+            get(handlers::get_image_create_settings).put(handlers::update_image_create_settings),
+        )
         .route("/api/events", get(handlers::events))
         .route("/api/projection", get(handlers::projection))
         .route(

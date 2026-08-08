@@ -72,6 +72,7 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 mod coding;
 mod dto;
 mod health;
+pub mod image_create;
 mod lifecycle;
 mod product_resources;
 mod providers;
@@ -85,6 +86,12 @@ pub use coding::{create_coding_attempt, create_group_coding_attempt};
 #[rustfmt::skip]
 pub(crate) use coding::{abort_coding_attempt, coding_attempt_artifact_content, coding_attempt_diff, confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt, request_work_item_execution_plan_change};
 pub use health::{health, runtime_info};
+pub use image_create::{
+    create_session as create_image_create_session, delete_session as delete_image_create_session,
+    generate_image, get_session as get_image_create_session,
+    get_settings as get_image_create_settings, image_create_chat_ws,
+    list_sessions as list_image_create_sessions, update_settings as update_image_create_settings,
+};
 pub use providers::{providers_recheck, providers_status};
 #[rustfmt::skip]
 pub use lifecycle::{confirm_gate, delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan, generate_design_specs, generate_story_specs, issue_lifecycle, prepare_work_item_plan, request_gate_change, terminate_gate};

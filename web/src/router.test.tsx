@@ -62,6 +62,14 @@ vi.mock("./pages/LegacyCodingWorkspaceRedirect", () => ({
   ),
 }));
 
+vi.mock("./pages/ImageCreatePage", () => ({
+  ImageCreatePage: ({ sessionId }: { sessionId?: string }) => (
+    <div data-testid="image-create-page" data-session-id={sessionId}>
+      Image Create
+    </div>
+  ),
+}));
+
 const originalActions = {
   load: useProviderAvailabilityStore.getState().load,
   recheck: useProviderAvailabilityStore.getState().recheck,
@@ -240,6 +248,39 @@ describe("router", () => {
       "正在检测 Claude Code 与 Codex",
     );
     expect(screen.queryByTestId("workbench-page")).not.toBeInTheDocument();
+  });
+
+  it("renders image-create routes outside the provider availability guard", async () => {
+    const health = blockedSnapshot();
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+
+    render(<RouterProvider router={memoryRouter("/image-create")} />);
+
+    expect(await screen.findByTestId("image-create-page")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "需要安装或修复 Provider" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("passes the image-create session id from the independent route", async () => {
+    render(
+      <RouterProvider
+        router={memoryRouter("/image-create/session%20with%20spaces")}
+      />,
+    );
+
+    expect(await screen.findByTestId("image-create-page")).toHaveAttribute(
+      "data-session-id",
+      "session with spaces",
+    );
   });
 
   it.each([

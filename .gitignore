@@ -22,3 +22,7 @@ npm/*.tgz
 # 本地开发服务日志
 backend.log
 frontend.log
+
+# pi subagent 运行时产物
+.pi-subagents/
+.superpowers/
