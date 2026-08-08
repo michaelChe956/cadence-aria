@@ -837,7 +837,7 @@ impl LogicalCodebaseRegistrationCoordinator {
             });
         }
 
-        let mut items = input
+        let items = input
             .candidates
             .iter()
             .filter_map(|candidate| {
@@ -851,10 +851,10 @@ impl LogicalCodebaseRegistrationCoordinator {
                     .to_string(),
             });
         }
-        items.sort_by(|left, right| left.source_digest.cmp(&right.source_digest));
+        let mut source_digests = std::collections::BTreeSet::new();
         if items
-            .windows(2)
-            .any(|pair| pair[0].source_digest == pair[1].source_digest)
+            .iter()
+            .any(|item| !source_digests.insert(item.source_digest.clone()))
         {
             return Err(ProductStoreError::Conflict {
                 kind: "registration_batch_duplicate_source",
@@ -1115,7 +1115,11 @@ impl LogicalCodebaseRegistrationCoordinator {
     fn should_interrupt_after_completed_item(&self) -> bool {
         self.failure_after_completed_items
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                (remaining != usize::MAX && remaining > 0).then_some(remaining - 1)
+                if remaining == usize::MAX || remaining == 0 {
+                    None
+                } else {
+                    Some(remaining.saturating_sub(1))
+                }
             })
             .is_ok_and(|previous| previous == 1)
     }
@@ -1662,17 +1666,25 @@ mod tests {
         assert_eq!(interrupted.status, RegistrationBatchStatus::PartialFailed);
 
         fixture.change_head_of_second_repository();
+
         let resumed = fixture
             .coordinator
             .resume_batch("project_0001", &batch.id)
             .unwrap();
-        assert_eq!(resumed.items[0].status, RegistrationItemStatus::Completed);
+        let first = resumed
+            .items
+            .iter()
+            .find(|item| item.canonical_path == fixture.first)
+            .expect("first repository batch item");
+        let second = resumed
+            .items
+            .iter()
+            .find(|item| item.canonical_path == fixture.second)
+            .expect("second repository batch item");
+        assert_eq!(first.status, RegistrationItemStatus::Completed);
+        assert_eq!(second.status, RegistrationItemStatus::NeedsAttention);
         assert_eq!(
-            resumed.items[1].status,
-            RegistrationItemStatus::NeedsAttention
-        );
-        assert_eq!(
-            resumed.items[1].failure_reason.as_deref(),
+            second.failure_reason.as_deref(),
             Some("preflight_revision_changed")
         );
     }
