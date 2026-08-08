@@ -606,10 +606,14 @@ fn group_final_review_evaluation_context_omits_projection_body_but_keeps_hash() 
 }
 
 #[tokio::test]
-async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node() {
+async fn group_attempt_records_base_head_as_first_unit_start_commit() {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("shared-worktree");
     std::fs::create_dir_all(&worktree).expect("worktree dir");
+    init_test_git_repo(&worktree);
+    let base_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -617,7 +621,7 @@ async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node(
             issue_id: "issue_0001".to_string(),
             plan_id: "work_item_plan_0001".to_string(),
             current_work_item_id: "work_item_0001".to_string(),
-            base_branch: "HEAD".to_string(),
+            base_branch: base_head.clone(),
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: Some(worktree.clone()),
             provider_config_snapshot: ProviderConfigSnapshot {
@@ -642,6 +646,7 @@ async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node(
     assert_eq!(updated.status, CodingAttemptStatus::Running);
     assert_eq!(updated.stage, CodingExecutionStage::Coding);
     assert_eq!(updated.worktree_path.as_deref(), Some(worktree.as_path()));
+    assert_eq!(updated.head_commit.as_deref(), Some(base_head.as_str()));
     assert!(
         store
             .get_timeline_nodes("project_0001", "issue_0001", &attempt.id)
@@ -655,6 +660,19 @@ async fn group_start_attempt_with_existing_worktree_skips_worktree_prepare_node(
         }
     );
     assert!(rx.try_recv().is_err());
+
+    engine
+        .render_coder_unit_run_context(&updated, &ProviderName::Codex, None)
+        .expect("create first unit run");
+    let first_unit_run = store.get_active_unit_run(&updated).expect("first unit run");
+    assert_eq!(
+        first_unit_run.start_commit.as_deref(),
+        Some(base_head.as_str())
+    );
+    let persisted = store
+        .get_attempt("project_0001", "issue_0001", &attempt.id)
+        .expect("persisted attempt");
+    assert_eq!(persisted.head_commit.as_deref(), Some(base_head.as_str()));
 }
 
 #[tokio::test]
