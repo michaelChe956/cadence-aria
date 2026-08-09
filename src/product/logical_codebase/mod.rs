@@ -3,6 +3,7 @@ pub mod aggregate_initialization;
 pub mod aggregate_initialization_coordinator;
 pub mod aggregate_initialization_store;
 pub mod feature;
+pub mod issue_selection;
 pub mod migration;
 pub mod policy;
 pub mod provider_gateway;
@@ -30,6 +31,9 @@ pub use aggregate_initialization_coordinator::{
 };
 pub use aggregate_initialization_store::AggregateInitializationOperationStore;
 pub use feature::LogicalCodebaseFeature;
+pub use issue_selection::{
+    EffectiveMemberResolution, IssueCodebaseSelection, IssueCodebaseSelectionStore, SelectionPolicy,
+};
 pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
     IdentityMigrationPhase, IdentityMigrationVerifier, MigrationFaultInjector,

@@ -89,6 +89,11 @@ impl ProductAppPaths {
         self.logical_codebase_root(project_id)
             .join("aggregate-initializations")
     }
+
+    pub fn codebase_selection_path(&self, project_id: &str, issue_id: &str) -> PathBuf {
+        self.issue_root(project_id, issue_id)
+            .join("codebase-selection.json")
+    }
 }
 
 #[cfg(test)]
