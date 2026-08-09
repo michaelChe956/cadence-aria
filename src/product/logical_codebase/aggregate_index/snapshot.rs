@@ -22,6 +22,7 @@ const GIT_TIMEOUT_SECS: u64 = AggregateIndexBudget::INCREMENTAL.fail_secs;
 const GIT_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 
 /// Collects immutable Git revision and working-tree evidence for aggregate members.
+#[derive(Clone)]
 pub struct AggregateIndexSnapshotCollector {
     logical: LogicalCodebaseStore,
     runner: Arc<dyn BoundedCommandRunner>,

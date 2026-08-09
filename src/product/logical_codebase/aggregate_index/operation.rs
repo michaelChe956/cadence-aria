@@ -127,6 +127,22 @@ impl AggregateIndexOperation {
         }
     }
 
+    /// Clones the logical-codebase store handle for sibling services such as
+    /// the freshness service that need independent read access.
+    pub fn logical_clone(&self) -> LogicalCodebaseStore {
+        self.logical.clone()
+    }
+
+    /// Clones the aggregate-index store handle.
+    pub fn store_clone(&self) -> AggregateIndexStore {
+        self.store.clone()
+    }
+
+    /// Clones the snapshot collector handle.
+    pub fn snapshots_clone(&self) -> AggregateIndexSnapshotCollector {
+        self.snapshots.clone()
+    }
+
     pub fn build(
         &self,
         project_id: &str,
@@ -147,21 +163,81 @@ impl AggregateIndexOperation {
             });
         }
 
+        self.apply_index(project_id, &manifest, IndexApplicationMode::Initialize)
+    }
+
+    /// Refreshes an existing active index after freshness detected a drift.
+    ///
+    /// The caller (freshness service) supplies the previously-active record so
+    /// that on success we supersede it with a freshly verified record. On any
+    /// failure the prior record is marked degraded/stale with the error and the
+    /// original error is propagated; we never fabricate an update.
+    pub fn sync_and_verify(
+        &self,
+        project_id: &str,
+        prior: AggregateIndexRecord,
+    ) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        validate_relative_id(project_id)?;
+        let manifest = self
+            .logical
+            .load_manifest(project_id)?
+            .ok_or_else(|| missing_manifest(project_id))?;
+
+        match self.apply_index(project_id, &manifest, IndexApplicationMode::Sync) {
+            Ok(record) => Ok(record),
+            Err(AggregateIndexError::Degraded { code, message }) => {
+                self.store.mark_status(
+                    project_id,
+                    &prior.aggregate_index_id,
+                    AggregateIndexStatus::Degraded,
+                    Some(format!("{code}: {message}")),
+                )?;
+                Err(AggregateIndexError::Degraded { code, message })
+            }
+            Err(AggregateIndexError::Failed { code, message }) => {
+                self.store.mark_status(
+                    project_id,
+                    &prior.aggregate_index_id,
+                    AggregateIndexStatus::Stale,
+                    Some(format!("{code}: {message}")),
+                )?;
+                Err(AggregateIndexError::Failed { code, message })
+            }
+        }
+    }
+
+    /// Shared body that regenerates the CodeGraph configuration, executes the
+    /// index command (`init` for fresh builds, `sync` for incremental refresh),
+    /// re-runs member-coverage and negative-query acceptance, captures fresh
+    /// member snapshots, and publishes a new active record superseding any prior.
+    fn apply_index(
+        &self,
+        project_id: &str,
+        manifest: &LogicalCodebaseManifest,
+        mode: IndexApplicationMode,
+    ) -> Result<AggregateIndexRecord, AggregateIndexError> {
         self.cli.verify_v1_5_0()?;
         let members = self.logical.list_members(project_id)?;
         let checkouts = self.logical.list_checkouts(project_id)?;
-        let included = included_main_checkouts(&manifest, &members, &checkouts)?;
-        let snapshots = self.snapshots.capture_included(project_id, &manifest)?;
+        let included = included_main_checkouts(manifest, &members, &checkouts)?;
+        let snapshots = self.snapshots.capture_included(project_id, manifest)?;
         let member_names = included
             .iter()
             .map(|(_, checkout)| checkout_root_name(&manifest.provider_context_root, checkout))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let config = self.excludes.generate(&manifest, &members, &checkouts)?;
+        let config = self.excludes.generate(manifest, &members, &checkouts)?;
         let config_digest = self
             .excludes
             .write_atomically(&manifest.provider_context_root, &config)?;
-        self.cli.init(&manifest.provider_context_root)?;
+        match mode {
+            IndexApplicationMode::Initialize => {
+                self.cli.init(&manifest.provider_context_root)?;
+            }
+            IndexApplicationMode::Sync => {
+                self.cli.sync(&manifest.provider_context_root)?;
+            }
+        }
         let acceptance = AggregateIndexAcceptance::verify(
             &self.cli,
             &manifest.provider_context_root,
@@ -177,12 +253,18 @@ impl AggregateIndexOperation {
             now.clone(),
         );
         record.status = AggregateIndexStatus::Active;
-        record.codegraph_root = manifest.provider_context_root;
+        record.codegraph_root = manifest.provider_context_root.clone();
         record.config_digest = config_digest;
         record.warning = acceptance.soft_warning();
         record.updated_at = now;
         self.store.replace_active(project_id, record)
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndexApplicationMode {
+    Initialize,
+    Sync,
 }
 
 fn included_main_checkouts<'a>(
