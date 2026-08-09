@@ -19,7 +19,9 @@ use crate::product::logical_codebase::planning_context_set::{
     render_compact_inventory,
 };
 use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
-use crate::product::logical_codebase::{LogicalCodebaseStore, LogicalRepositoryId};
+use crate::product::logical_codebase::{
+    InvalidationRecord, LogicalCodebaseStore, LogicalRepositoryId,
+};
 
 /// 规划只读 best-effort 状态。当前唯一取值为 `BestEffortConfigured`：已配置目标 +
 /// cwd + pre/post 检测，但未达 `production_verified_readonly`，因此不宣称「物理上
@@ -51,6 +53,8 @@ pub struct ResolvedPlanningContext {
     pub best_effort_readonly_status: BestEffortReadonlyStatus,
     /// 参与仓库集合解析结果（含 invalid 成员与 manifest 成员修订号）。
     pub context_resolution: RepositoryContextResolution,
+    /// 失效标记（REQ-PLN-02）：规划后成员删除/停用后为 Some；消费方应展示失效警告。
+    pub invalidation: Option<InvalidationRecord>,
 }
 
 impl ResolvedPlanningContext {
@@ -217,11 +221,23 @@ impl PlanningContextResolver {
             index_revision: index.membership_revision,
             policy_digest: policy.digest.clone(),
             access_fingerprint: String::new(),
+            invalidation: None,
             captured_at: chrono::Utc::now().to_rfc3339(),
         };
         // 返回的快照携带冻结指纹（与落盘一致），保证 `ResolvedPlanningContext.snapshot`
         // 是 context 的唯一事实来源（Task 11 resume 校验依赖该字段）。
         snapshot.access_fingerprint = snapshot.access_fingerprint_value();
+        // REQ-PLN-02：存在失效成员时标记 snapshot 失效并在结果中附失效警告；
+        // 失效是显式标记，不删除既有 JSON，resume 据此强制 StaleContext 重建。
+        let invalidation = if resolution.invalid_member_ids.is_empty() {
+            None
+        } else {
+            Some(InvalidationRecord {
+                reason: "member_removed".to_string(),
+                invalidated_at: snapshot.captured_at.clone(),
+            })
+        };
+        snapshot.invalidation = invalidation.clone();
 
         Ok(ResolvedPlanningContext {
             cwd,
@@ -230,6 +246,7 @@ impl PlanningContextResolver {
             policy_digest: policy.digest,
             best_effort_readonly_status: BestEffortReadonlyStatus::BestEffortConfigured,
             context_resolution: resolution,
+            invalidation,
             snapshot,
         })
     }
@@ -278,6 +295,22 @@ impl PlanningContextResolver {
                 )?));
             }
         };
+        // REQ-PLN-02：规划后成员删除/停用 → snapshot 已标记失效 → 强制 StaleContext 重建，
+        // 绝不沿用可能已失效的旧上下文（即使指纹未漂移）。
+        if previous.invalidation.is_some() {
+            let current = self.resolve_context(project_id, issue_id, &[])?;
+            return Ok(ResumeDecision::StaleContext {
+                reason: format!(
+                    "invalidated:{}",
+                    previous
+                        .invalidation
+                        .as_ref()
+                        .map(|record| record.reason.as_str())
+                        .unwrap_or("member_removed")
+                ),
+                rebuilt: current,
+            });
+        }
         // 先加载既有 snapshot（`load` 只读、不写），再复算当前指纹（`resolve_context`
         // 不落盘）比较。禁止先写后比（B1/TOCTOU）：否则漂移首次拒绝后，重连会因
         // snapshot 已被 build 更新而误判 `SameContext`，继续沿用旧会话 prompt。
@@ -477,6 +510,64 @@ mod tests {
             IssueCodebaseSelectionStore::new(self.paths.clone())
                 .save(&selection)
                 .unwrap();
+        }
+
+        /// 两成员场景：api（active，在 manifest.member_ids）+ web（status=Removed，不在
+        /// manifest.member_ids）。selection 显式 include 两者 → api 有效、web 失效，
+        /// 触发 selection/snapshot 失效标记（REQ-PLN-02）。active aggregate index 与政策
+        /// artifact 覆盖 resolver 其余必读依赖。
+        fn write_active_manifest_index_and_policy_with_removed_member(&mut self) {
+            let web = LogicalRepositoryId(stable_uuid(0x0002));
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.aggregate_root(),
+                vec![self.api_member_id],
+            );
+            store.save_manifest("project_0001", &manifest).unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(self.api_member_id, "api", MemberStatus::Active),
+                )
+                .unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(web, "web", MemberStatus::Removed),
+                )
+                .unwrap();
+            store
+                .save_checkout("project_0001", &self.api_checkout())
+                .unwrap();
+
+            let selection = IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![self.api_member_id, web],
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            IssueCodebaseSelectionStore::new(self.paths.clone())
+                .save(&selection)
+                .unwrap();
+
+            // active aggregate index：成员快照仅含 api（有效成员），web 为失效成员。
+            let index = active_index_record("project_0001", self.api_member_id);
+            AggregateIndexStore::new(self.paths.clone())
+                .create("project_0001", index.clone())
+                .unwrap();
+            let mut activated = index.clone();
+            activated.status = AggregateIndexStatus::Active;
+            AggregateIndexStore::new(self.paths.clone())
+                .replace_active("project_0001", activated)
+                .unwrap();
+
+            let policy = AggregatePolicyArtifactStore::new(self.paths.clone())
+                .ensure_bootstrap(&manifest)
+                .unwrap();
+            self.cached_policy_digest = Some(policy.digest);
         }
 
         /// 模拟成员变更：manifest membership_revision 1 → 2 并同步推进 active aggregate
@@ -736,5 +827,47 @@ mod tests {
             .resume("project_0001", "issue_0001")
             .unwrap();
         assert!(matches!(stale, ResumeDecision::StaleContext { .. }));
+    }
+
+    #[test]
+    fn removed_member_marks_snapshot_invalidated_and_resume_forces_stale_rebuild() {
+        // REQ-PLN-02：规划后成员删除/停用 → build 结果附失效警告，落盘快照标记失效；
+        // resume 强制 StaleContext 重建，绝不沿用可能已失效的旧上下文。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy_with_removed_member();
+
+        let resolved = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        assert!(resolved.invalidation.is_some());
+        assert_eq!(
+            resolved
+                .invalidation
+                .as_ref()
+                .map(|record| record.reason.as_str()),
+            Some("member_removed")
+        );
+        assert_eq!(resolved.context_resolution.invalid_member_ids.len(), 1);
+        assert_eq!(resolved.context_resolution.set.len(), 1);
+
+        // build 已落盘失效快照 → resume 走 invalidated 分支强制 StaleContext。
+        let decision = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(
+            decision,
+            ResumeDecision::StaleContext { reason, .. }
+                if reason.starts_with("invalidated:")
+        ));
+
+        // selection 失效标记也已自动写入。
+        let selection_store = IssueCodebaseSelectionStore::new(fixture.paths.clone());
+        assert!(
+            selection_store
+                .is_invalidated("project_0001", "issue_0001")
+                .unwrap()
+        );
     }
 }

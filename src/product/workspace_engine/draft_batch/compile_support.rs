@@ -1,6 +1,7 @@
 use super::*;
 use crate::product::logical_codebase::{
     IssueCodebaseSelectionStore, LogicalCodebaseFeature, LogicalCodebaseStore, LogicalRepositoryId,
+    MemberStatus,
 };
 use crate::product::repository_store::RepositoryStore;
 
@@ -31,56 +32,86 @@ impl WorkspaceEngine {
         lifecycle: &LifecycleStore,
         plan: &IssueWorkItemPlan,
     ) -> Result<Option<std::collections::BTreeMap<LogicalRepositoryId, String>>, String> {
-        let paths = lifecycle.app_paths();
-        let logical_store = LogicalCodebaseStore::new(paths.clone());
-        let selection_store = IssueCodebaseSelectionStore::new(paths.clone());
-        let manifest = logical_store
-            .load_manifest(&plan.project_id)
-            .map_err(|error| format!("load logical codebase manifest failed: {error}"))?;
-        let selection = selection_store
-            .load(&plan.project_id, &plan.issue_id)
-            .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
-        let (manifest, _selection) = match (manifest, selection) {
-            (None, None) => return Ok(None),
-            (Some(manifest), Some(selection)) => (manifest, selection),
-            _ => {
-                return Err(
-                    "work_item_target_missing: logical codebase manifest and issue selection must both exist"
-                        .to_string(),
-                );
-            }
-        };
-        let resolution = selection_store
-            .resolve_effective_members(&plan.project_id, &plan.issue_id, &manifest.member_ids)
-            .map_err(|error| format!("resolve issue codebase selection failed: {error}"))?;
-        if !resolution.invalid_member_ids.is_empty() {
-            return Err(format!(
-                "work_item_target_missing: issue codebase selection has invalid members: {:?}",
-                resolution.invalid_member_ids
-            ));
-        }
+        resolve_logical_work_item_plan_repository_targets(lifecycle, plan)
+    }
+}
 
-        let repository_store = RepositoryStore::with_logical_codebase_feature(
-            paths,
-            LogicalCodebaseFeature::enabled(),
-        );
-        resolution
-            .effective_member_ids
-            .into_iter()
-            .map(|target_repository_id| {
-                repository_store
-                    .resolve_logical_repository(&plan.project_id, target_repository_id)
-                    .map(|(_, _, repository)| (target_repository_id, repository.id))
-                    .map_err(|error| {
-                        format!(
-                            "work_item_target_missing: cannot resolve target repository `{target_repository_id:?}`: {error}"
-                        )
-                    })
-            })
-            .collect::<Result<_, _>>()
-            .map(Some)
+/// 解析 issue 的 logical work item plan 仓库 target 映射（REQ-PLN-02 消费点）。
+/// 独立为自由函数以便无 engine 的单元测试直接验证 target 有效性校验。
+pub(crate) fn resolve_logical_work_item_plan_repository_targets(
+    lifecycle: &LifecycleStore,
+    plan: &IssueWorkItemPlan,
+) -> Result<Option<std::collections::BTreeMap<LogicalRepositoryId, String>>, String> {
+    let paths = lifecycle.app_paths();
+    let logical_store = LogicalCodebaseStore::new(paths.clone());
+    let selection_store = IssueCodebaseSelectionStore::new(paths.clone());
+    let manifest = logical_store
+        .load_manifest(&plan.project_id)
+        .map_err(|error| format!("load logical codebase manifest failed: {error}"))?;
+    let selection = selection_store
+        .load(&plan.project_id, &plan.issue_id)
+        .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
+    let (manifest, _selection) = match (manifest, selection) {
+        (None, None) => return Ok(None),
+        (Some(manifest), Some(selection)) => (manifest, selection),
+        _ => {
+            return Err(
+                "work_item_target_missing: logical codebase manifest and issue selection must both exist"
+                    .to_string(),
+            );
+        }
+    };
+    let resolution = selection_store
+        .resolve_effective_members(&plan.project_id, &plan.issue_id, &manifest.member_ids)
+        .map_err(|error| format!("resolve issue codebase selection failed: {error}"))?;
+    // REQ-PLN-02：目标指向已删除/停用成员（on-disk 存在且 status != Active）时 blocker，
+    // 阻断指向已删除成员的新工作项。失效成员有 on-disk 记录且 status != Active 判定为删除。
+    let removed_targets: Vec<LogicalRepositoryId> = resolution
+        .effective_member_ids
+        .iter()
+        .chain(resolution.invalid_member_ids.iter())
+        .copied()
+        .filter(|id| {
+            logical_store
+                .load_member(&plan.project_id, *id)
+                .ok()
+                .flatten()
+                .is_some_and(|member| member.status != MemberStatus::Active)
+        })
+        .collect();
+    if !removed_targets.is_empty() {
+        return Err(format!(
+            "work_item_target_missing: target_member_removed: {:?}",
+            removed_targets
+        ));
+    }
+    if !resolution.invalid_member_ids.is_empty() {
+        return Err(format!(
+            "work_item_target_missing: issue codebase selection has invalid members: {:?}",
+            resolution.invalid_member_ids
+        ));
     }
 
+    let repository_store =
+        RepositoryStore::with_logical_codebase_feature(paths, LogicalCodebaseFeature::enabled());
+    resolution
+        .effective_member_ids
+        .into_iter()
+        .map(|target_repository_id| {
+            repository_store
+                .resolve_logical_repository(&plan.project_id, target_repository_id)
+                .map(|(_, _, repository)| (target_repository_id, repository.id))
+                .map_err(|error| {
+                    format!(
+                        "work_item_target_missing: cannot resolve target repository `{target_repository_id:?}`: {error}"
+                    )
+                })
+        })
+        .collect::<Result<_, _>>()
+        .map(Some)
+}
+
+impl WorkspaceEngine {
     pub(crate) fn work_item_plan_repository_id(
         &self,
         lifecycle: &LifecycleStore,
@@ -289,5 +320,174 @@ impl WorkspaceEngine {
         compiled_plan.validator_findings = Vec::new();
         compiled_plan.updated_at = now.to_string();
         Ok((compiled_plan, work_items, verification_plans))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::logical_codebase::{
+        CodebaseMemberRecord, IssueCodebaseSelection, LogicalCodebaseManifest, MemberStatus,
+        RepositoryCheckoutId, RepositorySourceIdentity, RepositoryType,
+    };
+    use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus};
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    /// 稳定 UUID：禁止运行时随机，保证测试可复现。
+    const fn stable_uuid(seed: u16) -> Uuid {
+        let mut bytes = [0u8; 16];
+        bytes[14] = (seed >> 8) as u8;
+        bytes[15] = seed as u8;
+        // version 7 + variant 10xx，满足 Uuid::from_bytes 的合法构造。
+        bytes[6] = 0x70;
+        bytes[8] = 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    struct CompileInvalidationFixture {
+        _temp: TempDir,
+        lifecycle: LifecycleStore,
+    }
+
+    impl CompileInvalidationFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let lifecycle = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+            Self {
+                _temp: temp,
+                lifecycle,
+            }
+        }
+
+        fn aggregate_root(&self) -> std::path::PathBuf {
+            self._temp.path().join("aggregate-root")
+        }
+
+        /// 写入含单个 active 成员的 manifest + selection（include 该成员）。
+        fn write_selection_with_member(&self, member_id: LogicalRepositoryId, alias: &str) {
+            let store = LogicalCodebaseStore::new(self.lifecycle.app_paths());
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.aggregate_root(),
+                vec![member_id],
+            );
+            store.save_manifest("project_0001", &manifest).unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(member_id, alias, MemberStatus::Active),
+                )
+                .unwrap();
+            let selection = IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![member_id],
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            IssueCodebaseSelectionStore::new(self.lifecycle.app_paths())
+                .save(&selection)
+                .unwrap();
+        }
+
+        /// 删除成员（tombstone 语义）：从 manifest.member_ids 移除并推进 revision，
+        /// member record 保留但 status=Removed。
+        fn delete_member(&self, member_id: LogicalRepositoryId, alias: &str) {
+            let store = LogicalCodebaseStore::new(self.lifecycle.app_paths());
+            let mut manifest = store.load_manifest("project_0001").unwrap().unwrap();
+            manifest.member_ids.retain(|id| *id != member_id);
+            manifest.membership_revision += 1;
+            store.save_manifest("project_0001", &manifest).unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(member_id, alias, MemberStatus::Removed),
+                )
+                .unwrap();
+        }
+
+        fn member_record(
+            &self,
+            id: LogicalRepositoryId,
+            alias: &str,
+            status: MemberStatus,
+        ) -> CodebaseMemberRecord {
+            let now = "2026-08-10T00:00:00Z".to_string();
+            let checkout_path = self.aggregate_root().join(alias);
+            CodebaseMemberRecord {
+                logical_repository_id: id,
+                physical_repository_id: format!("repository_{alias}"),
+                alias: alias.to_string(),
+                role: "service".to_string(),
+                ordinal: 1,
+                source_identity: RepositorySourceIdentity::from_git_parts(
+                    &checkout_path,
+                    checkout_path.join(".git"),
+                    Some(format!("ssh://git@example.test/acme/{alias}.git")),
+                ),
+                repo_type: RepositoryType::Backend,
+                tech_stack: vec!["rust".to_string()],
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![RepositoryCheckoutId(Uuid::nil())],
+                status,
+                created_at: now.clone(),
+                updated_at: now,
+            }
+        }
+
+        fn plan(&self) -> IssueWorkItemPlan {
+            IssueWorkItemPlan {
+                id: "issue_work_item_plan_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                options: IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: IssueWorkItemPlanStatus::Draft,
+                work_item_ids: Vec::new(),
+                repository_profile_ref: None,
+                verification_plan_ids: Vec::new(),
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+                review_summary: None,
+                created_at: "2026-08-10T00:00:00Z".to_string(),
+                updated_at: "2026-08-10T00:00:00Z".to_string(),
+            }
+        }
+    }
+
+    #[test]
+    fn compile_blocks_new_work_item_targeting_deleted_member() {
+        let fixture = CompileInvalidationFixture::new();
+        let api = LogicalRepositoryId(stable_uuid(0x0001));
+        fixture.write_selection_with_member(api, "api");
+        fixture.delete_member(api, "api");
+
+        // compile 校验触发 resolve_effective_members，阻断指向已删除成员的新工作项。
+        let compile =
+            resolve_logical_work_item_plan_repository_targets(&fixture.lifecycle, &fixture.plan());
+        assert!(matches!(
+            compile,
+            Err(ref reason) if reason.contains("target_member_removed")
+        ));
+
+        // resolve 过程中 selection 失效标记已自动写入（REQ-PLN-02）。
+        let selection_store = IssueCodebaseSelectionStore::new(fixture.lifecycle.app_paths());
+        assert!(
+            selection_store
+                .is_invalidated("project_0001", "issue_0001")
+                .unwrap()
+        );
     }
 }

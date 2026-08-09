@@ -1,7 +1,9 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::json_store::{read_json, validate_relative_id, write_json};
-use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
+use crate::product::logical_codebase::{
+    InvalidationRecord, LogicalRepositoryId, RepositoryCheckoutId,
+};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -27,6 +29,9 @@ pub struct PlanningContextSnapshot {
     /// 冻结后由 access_fingerprint_value() 写入；serde 允许缺失以便旧文件读取后补齐。
     #[serde(default)]
     pub access_fingerprint: String,
+    /// 失效标记（REQ-PLN-02）：规划后成员删除/停用时标记，resume 强制 StaleContext 重建。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalidation: Option<InvalidationRecord>,
     pub captured_at: String,
 }
 
@@ -104,6 +109,37 @@ impl PlanningContextSnapshotStore {
             .load(project_id, issue_id)?
             .map(|snapshot| snapshot.access_fingerprint))
     }
+
+    /// 显式标记 snapshot 失效（成员删除/停用等）；只写标记，不删除既有 JSON。
+    pub fn mark_invalidated(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        reason: &str,
+    ) -> Result<(), ProductStoreError> {
+        let mut snapshot =
+            self.load(project_id, issue_id)?
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "planning_context_snapshot",
+                    id: format!("{project_id}/{issue_id}"),
+                })?;
+        snapshot.invalidation = Some(InvalidationRecord {
+            reason: reason.to_string(),
+            invalidated_at: chrono::Utc::now().to_rfc3339(),
+        });
+        self.save(&snapshot)
+    }
+
+    /// snapshot 是否已标记失效。
+    pub fn is_invalidated(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<bool, ProductStoreError> {
+        Ok(self
+            .load(project_id, issue_id)?
+            .is_some_and(|snapshot| snapshot.invalidation.is_some()))
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +170,7 @@ mod tests {
             index_revision: 3,
             policy_digest: "sha256:policy".into(),
             access_fingerprint: String::new(),
+            invalidation: None,
             captured_at: "2026-08-10T00:00:00Z".into(),
         };
         let expected = snapshot.access_fingerprint_value();
@@ -146,5 +183,53 @@ mod tests {
         let loaded = store.load("project_0001", "issue_0001").unwrap().unwrap();
         assert_eq!(loaded, snapshot);
         assert_eq!(loaded.access_fingerprint, expected);
+    }
+
+    #[test]
+    fn snapshot_mark_invalidated_roundtrip_keeps_fingerprint() {
+        let member = LogicalRepositoryId(Uuid::new_v4());
+        let checkout = RepositoryCheckoutId(Uuid::new_v4());
+        let mut snapshot = PlanningContextSnapshot {
+            schema_version: 1,
+            project_id: "project_0001".into(),
+            issue_id: "issue_0001".into(),
+            membership_revision: 7,
+            effective_member_ids: vec![member],
+            member_fingerprints: vec![MemberCheckoutFingerprint {
+                logical_repository_id: member,
+                checkout_id: checkout,
+                revision: "0123456789012345678901234567890123456789".into(),
+                dirty: false,
+                available: true,
+            }],
+            aggregate_index_id: "aggregate_index_0001".into(),
+            index_revision: 3,
+            policy_digest: "sha256:policy".into(),
+            access_fingerprint: String::new(),
+            invalidation: None,
+            captured_at: "2026-08-10T00:00:00Z".into(),
+        };
+        snapshot.access_fingerprint = snapshot.access_fingerprint_value();
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = PlanningContextSnapshotStore::new(ProductAppPaths::new(temp.path()));
+        store.save(&snapshot).unwrap();
+        assert!(!store.is_invalidated("project_0001", "issue_0001").unwrap());
+
+        store
+            .mark_invalidated("project_0001", "issue_0001", "member_removed")
+            .unwrap();
+        assert!(store.is_invalidated("project_0001", "issue_0001").unwrap());
+
+        // 失效标记不改变指纹（指纹只覆盖 membership/index/policy/checkout），旧文件仍可读。
+        let loaded = store.load("project_0001", "issue_0001").unwrap().unwrap();
+        assert_eq!(
+            loaded
+                .invalidation
+                .as_ref()
+                .map(|record| record.reason.as_str()),
+            Some("member_removed")
+        );
+        assert_eq!(loaded.access_fingerprint, snapshot.access_fingerprint);
     }
 }
