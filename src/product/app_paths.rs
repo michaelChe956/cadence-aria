@@ -69,6 +69,16 @@ impl ProductAppPaths {
         self.logical_codebase_root(project_id)
             .join(".identity-migration.lock")
     }
+
+    pub fn aggregate_indexes_root(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join("aggregate-indexes")
+    }
+
+    pub fn aggregate_index_lock_path(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join(".aggregate-index.lock")
+    }
 }
 
 #[cfg(test)]

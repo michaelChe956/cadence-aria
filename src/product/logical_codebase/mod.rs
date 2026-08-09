@@ -1,3 +1,4 @@
+pub mod aggregate_index;
 pub mod feature;
 pub mod migration;
 pub mod reference_scanner;
