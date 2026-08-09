@@ -125,6 +125,16 @@ pub struct DesignSpecRecord {
     pub issue_id: String,
     pub story_spec_ids: Vec<String>,
     pub title: String,
+    /// 聚合代码库视野：逻辑代码库 manifest 引用。`None` 表示传统单仓 issue（向后兼容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_codebase_ref: Option<Uuid>,
+    /// AI 明确声明的涉及仓库（聚合视野，必须 ⊆ effective_member_ids）。
+    #[serde(default)]
+    pub involved_repository_ids: Vec<LogicalRepositoryId>,
+    /// AI 显式给出的改动顺序图（执行顺序，非服务调用图，REQ-TGT-04）。缺失不强制
+    /// blocker；WorkItem 编译时若 Design 有 change_order 则作为 depends_on 依据（Task 9）。
+    #[serde(default)]
+    pub change_order: Vec<LogicalRepositoryId>,
     pub current_version: Option<u32>,
     pub confirmation_status: LifecycleConfirmationStatus,
     pub created_at: String,

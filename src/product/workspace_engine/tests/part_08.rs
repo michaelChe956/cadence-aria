@@ -108,6 +108,7 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
             issue_id: issue_id.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
 

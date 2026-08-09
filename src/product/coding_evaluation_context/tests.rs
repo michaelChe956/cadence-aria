@@ -181,6 +181,7 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             issue_id: ISSUE_ID.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     lifecycle

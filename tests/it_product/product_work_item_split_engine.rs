@@ -334,6 +334,7 @@ async fn split_engine_fixture() -> (TempDir, LifecycleStore, IssueRecord, Reposi
             issue_id: issue.id.clone(),
             story_spec_ids: vec!["story_spec_0001".to_string()],
             title: "会话过期后端设计".to_string(),
+            aggregate_codebase: None,
         })
         .expect("create design spec");
     lifecycle

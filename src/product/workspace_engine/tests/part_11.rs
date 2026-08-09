@@ -35,6 +35,7 @@ async fn complete_work_item_plan_author_errors_trigger_auto_revision_then_human_
             issue_id: issue_id.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
 

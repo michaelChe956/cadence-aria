@@ -57,6 +57,7 @@ fn plan_repair_parent_engine(
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design 0001".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
     assert_eq!(design.id, "design_spec_0001");

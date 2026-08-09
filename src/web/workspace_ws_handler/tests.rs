@@ -1031,6 +1031,7 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
 

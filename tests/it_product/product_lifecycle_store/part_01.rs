@@ -64,6 +64,7 @@ fn creates_story_design_work_item_and_versions_with_source_links() {
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "会话过期前端设计".to_string(),
+        aggregate_codebase: None,
         })
         .expect("design");
     assert_eq!(design.story_spec_ids, vec![story.id.clone()]);

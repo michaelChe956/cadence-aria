@@ -119,6 +119,7 @@ fn design_workspace_context_includes_linked_story_markdown() {
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "爬楼梯问题 Design Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("design");
     let session = lifecycle
@@ -275,6 +276,7 @@ fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id],
             title: "爬楼梯问题 Design Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("design");
     let session = lifecycle

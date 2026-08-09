@@ -37,12 +37,34 @@ pub struct CreateStorySpecInput {
     pub aggregate_codebase: Option<AggregateStorySpecScope>,
 }
 
+/// 聚合代码库 Design 视野范围。由 Design 生成/修订入口在逻辑代码库分支构造：
+/// `logical_codebase_ref` 取 manifest.logical_codebase_id；`effective_member_ids` 来自
+/// `PlanningContextSnapshot.effective_member_ids`（权威）；`involved_repository_ids` 来自 AI
+/// 输出且必须 ⊆ effective_member_ids；`change_order` 为 AI 显式给出的改动顺序图（执行顺序，
+/// 非服务调用图，REQ-TGT-04），缺失不强制 blocker。
+///
+/// AI 未明确涉及仓库（空 involved）或涉及不在有效集合的仓库 → blocker；Design 不再读取
+/// `issue.repo_id` 填充任何字段（REQ-PLN-08）。`change_order` 若给出，其全部 id 必须 ∈
+/// involved_repository_ids 且不得重复（执行顺序图不得重复顶点）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateDesignSpecScope {
+    pub logical_codebase_ref: uuid::Uuid,
+    pub effective_member_ids: Vec<LogicalRepositoryId>,
+    /// AI 明确声明的涉及仓库；空表示未确定 → blocker（不回落 issue.repo_id）。
+    pub involved_repository_ids: Vec<LogicalRepositoryId>,
+    /// AI 显式给出的改动顺序图（执行顺序）。可空；若给出则全部 id 必须 ∈ involved 且不重复。
+    pub change_order: Vec<LogicalRepositoryId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateDesignSpecInput {
     pub project_id: String,
     pub issue_id: String,
     pub story_spec_ids: Vec<String>,
     pub title: String,
+    /// 聚合代码库视野。`None` 表示传统单仓 issue；`Some` 进入逻辑代码库分支以聚合字段为权威，
+    /// 并按 effective_member_ids 校验。Design 不再读取 issue.repo_id 填充任何字段。
+    pub aggregate_codebase: Option<AggregateDesignSpecScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

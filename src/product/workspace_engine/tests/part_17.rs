@@ -39,6 +39,7 @@ fn persistent_engine_accepts_complete_revision_artifact_misclassified_as_text_fa
                     issue_id: "issue_0001".to_string(),
                     story_spec_ids: vec![story.id.clone()],
                     title: "Design".to_string(),
+                aggregate_codebase: None,
                 })
                 .expect("design spec")
                 .id,

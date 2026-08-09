@@ -5,15 +5,15 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::product::models::{
     AgentRole, AmendmentResumeMode, AmendmentResumeTarget, ArtifactRef, DependencyGraphRevision,
-    HandoffRevision, HumanPresentationRevision, LogicalWorkItem, NodeDetail, PermissionEvent,
-    PlanAmendmentManifest, PlanAmendmentPublicationJournal, PlanAmendmentPublicationPhase,
-    PlanDefectClass, PlanDefectEvidence, PlanDefectRoute, PlanProjectionBundle, PlanRepairRequest,
-    PlanRepairRequestStatus, PlanRevisionReason, PlanValidationReportArtifact, ProviderName,
-    ProviderSnapshot, RepairTarget, RepairTargetKind, RepositoryRecord, VerificationPlanRevision,
-    WorkItemDraftRevision, WorkItemDraftRevisionState, WorkItemDraftRevisionStatus,
-    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
-    WorkItemRevisionReplacement, WorkItemRuntimeBinding, WorkspaceSessionRecord,
-    WorkspaceSessionStatus, WorkspaceType,
+    DesignSpecRecord, HandoffRevision, HumanPresentationRevision, LogicalWorkItem, NodeDetail,
+    PermissionEvent, PlanAmendmentManifest, PlanAmendmentPublicationJournal,
+    PlanAmendmentPublicationPhase, PlanDefectClass, PlanDefectEvidence, PlanDefectRoute,
+    PlanProjectionBundle, PlanRepairRequest, PlanRepairRequestStatus, PlanRevisionReason,
+    PlanValidationReportArtifact, ProviderName, ProviderSnapshot, RepairTarget, RepairTargetKind,
+    RepositoryRecord, VerificationPlanRevision, WorkItemDraftRevision, WorkItemDraftRevisionState,
+    WorkItemDraftRevisionStatus, WorkItemPlanLineage, WorkItemPlanRevision,
+    WorkItemProjectionBundle, WorkItemRevision, WorkItemRevisionReplacement,
+    WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_contract::{
     ContractValidationReport, build_dependency_contract_graph, canonical_contract_fixture,
@@ -727,4 +727,26 @@ fn work_item_revision_models_reject_missing_required_fields() {
             field,
         );
     }
+}
+
+// === 聚合视野：DesignSpec serde 向后兼容（Task 8）===
+// 旧 DesignSpec JSON 不含 logical_codebase_ref / involved_repository_ids / change_order，
+// 经 #[serde(default)] 必须可读且默认空，保证历史产物向后兼容（REQ-PLN-08）。
+#[test]
+fn legacy_design_spec_roundtrips_with_aggregate_defaults() {
+    let legacy = serde_json::json!({
+        "id": "design_0001", "project_id": "project_0001", "issue_id": "issue_0001",
+        "story_spec_ids": ["story_0001"], "title": "t",
+        "current_version": null, "confirmation_status": "draft",
+        "created_at": "2026-08-10T00:00:00Z", "updated_at": "2026-08-10T00:00:00Z"
+    });
+    let record: DesignSpecRecord = serde_json::from_value(legacy).unwrap();
+    assert_eq!(record.logical_codebase_ref, None);
+    assert!(record.involved_repository_ids.is_empty());
+    assert!(record.change_order.is_empty());
+    let encoded = serde_json::to_value(&record).unwrap();
+    assert_eq!(
+        serde_json::from_value::<DesignSpecRecord>(encoded).unwrap(),
+        record
+    );
 }

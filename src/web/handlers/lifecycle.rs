@@ -366,6 +366,7 @@ pub async fn generate_design_specs(
             issue_id: issue_id.clone(),
             story_spec_ids: request.story_spec_ids,
             title: request.title,
+            aggregate_codebase: None,
         })
         .map_err(product_store_api_error)?;
     let session = lifecycle

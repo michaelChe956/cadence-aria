@@ -135,6 +135,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             issue_id: ISSUE_ID.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Plan Repair fixture design".to_string(),
+            aggregate_codebase: None,
         })
         .map_err(fixture_error)?;
     if story.id != "story_spec_0001" || design.id != "design_spec_0001" {

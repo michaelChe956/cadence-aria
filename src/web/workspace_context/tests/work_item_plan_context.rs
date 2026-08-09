@@ -60,6 +60,7 @@ fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "爬楼梯问题 Design Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("design");
     lifecycle

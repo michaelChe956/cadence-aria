@@ -9,10 +9,10 @@ use crate::product::models::{
 };
 
 use super::{
-    AggregateStorySpecScope, AppendSpecVersionInput, CreateDesignSpecInput,
-    CreateProjectProviderDefaultsInput, CreateStorySpecInput, LifecycleStore, count_json_files,
-    delete_required_file, ensure_target_absent, list_json_records, path_is_regular_file,
-    remove_dir_all_if_exists, validate_relative_ids,
+    AggregateDesignSpecScope, AggregateStorySpecScope, AppendSpecVersionInput,
+    CreateDesignSpecInput, CreateProjectProviderDefaultsInput, CreateStorySpecInput,
+    LifecycleStore, count_json_files, delete_required_file, ensure_target_absent,
+    list_json_records, path_is_regular_file, remove_dir_all_if_exists, validate_relative_ids,
 };
 
 pub(crate) enum ExistingSpecRecord {
@@ -121,12 +121,33 @@ impl LifecycleStore {
         let root = self.design_specs_root(&input.project_id, &input.issue_id);
         let id = next_sequential_id("design_spec", count_json_files(&root)?);
         let now = Utc::now().to_rfc3339();
+
+        // 逻辑代码库分支：以聚合视野字段为权威。AI 未明确涉及仓库或涉及不在有效集合的
+        // 仓库 → blocker，不回落 issue.repo_id（REQ-PLN-08）。change_order 缺失不强制
+        // blocker，但若给出则全部 id 必须 ∈ involved 且不重复。传统单仓 issue
+        // （scope = None）聚合字段保持空/None。
+        let (logical_codebase_ref, involved_repository_ids, change_order) =
+            match &input.aggregate_codebase {
+                Some(scope) => {
+                    validate_aggregate_design_scope(scope)?;
+                    (
+                        Some(scope.logical_codebase_ref),
+                        scope.involved_repository_ids.clone(),
+                        scope.change_order.clone(),
+                    )
+                }
+                None => (None, Vec::new(), Vec::new()),
+            };
+
         let design = DesignSpecRecord {
             id: id.clone(),
             project_id: input.project_id,
             issue_id: input.issue_id,
             story_spec_ids: input.story_spec_ids,
             title: input.title,
+            logical_codebase_ref,
+            involved_repository_ids,
+            change_order,
             current_version: None,
             confirmation_status: LifecycleConfirmationStatus::Draft,
             created_at: now.clone(),
@@ -397,6 +418,66 @@ fn validate_aggregate_story_scope(
                 "focus_repository_not_involved: {focus:?} 不在 involved_repository_ids"
             ),
         });
+    }
+
+    Ok(())
+}
+
+/// 校验聚合代码库 Design 视野（REQ-PLN-08）。fail-closed，不回落 issue.repo_id：
+/// 1. `involved_repository_ids` 空 → AI 未明确涉及仓库 → blocker
+///    `involved_repositories_undetermined`。
+/// 2. 任一 involved id ∉ `effective_member_ids` → 越界成员 → blocker
+///    `involved_repository_not_effective`。
+/// 3. `change_order` 若给出，任一 id ∉ involved_repository_ids → blocker
+///    `change_order_repository_not_involved`（执行顺序图必须覆盖全部涉及仓库）。
+/// 4. `change_order` 若给出，出现重复顶点 → blocker `change_order_duplicate_repository`
+///    （执行顺序图不得重复顶点）。
+///
+/// `change_order` 缺失（空）不强制 blocker：AI 可不给改动顺序；WorkItem 编译时若 Design 有
+/// change_order 才作 depends_on 依据（Task 9 消费）。Design 不再读取 issue.repo_id 填充任何字段。
+fn validate_aggregate_design_scope(
+    scope: &AggregateDesignSpecScope,
+) -> Result<(), ProductStoreError> {
+    if scope.involved_repository_ids.is_empty() {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: "design_aggregate_scope",
+            reason: "involved_repositories_undetermined: AI 未明确涉及仓库，不回落 issue.repo_id"
+                .to_string(),
+        });
+    }
+
+    for involved in &scope.involved_repository_ids {
+        if !scope.effective_member_ids.contains(involved) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "design_aggregate_scope",
+                reason: format!(
+                    "involved_repository_not_effective: {involved:?} 不在 effective_member_ids"
+                ),
+            });
+        }
+    }
+
+    for order_member in &scope.change_order {
+        if !scope.involved_repository_ids.contains(order_member) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "design_aggregate_scope",
+                reason: format!(
+                    "change_order_repository_not_involved: {order_member:?} 不在 involved_repository_ids"
+                ),
+            });
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for order_member in &scope.change_order {
+        if !seen.insert(*order_member) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "design_aggregate_scope",
+                reason: format!(
+                    "change_order_duplicate_repository: {order_member:?} 在 change_order 中重复"
+                ),
+            });
+        }
     }
 
     Ok(())

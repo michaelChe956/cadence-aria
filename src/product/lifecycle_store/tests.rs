@@ -4,10 +4,10 @@ use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::{ProductStoreError, read_json, write_json};
-use crate::product::lifecycle_store::AggregateStorySpecScope;
+use crate::product::lifecycle_store::{AggregateDesignSpecScope, AggregateStorySpecScope};
 use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
-    ProviderName, StorySpecRecord, WorkItemRuntimeBinding, WorkspaceType,
+    DesignSpecRecord, ProviderName, StorySpecRecord, WorkItemRuntimeBinding, WorkspaceType,
 };
 
 use super::*;
@@ -247,6 +247,7 @@ fn delete_design_spec_removes_record_versions_session_and_timeline() {
             issue_id: ISSUE_ID.to_string(),
             story_spec_ids: vec!["story_spec_0001".to_string()],
             title: "Frontend design".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     store
@@ -587,4 +588,233 @@ fn story_without_aggregate_scope_keeps_single_repository_path() {
     assert_eq!(story.logical_codebase_ref, None);
     assert!(story.involved_repository_ids.is_empty());
     assert_eq!(story.focus_repository_id, None);
+}
+
+// === 聚合视野：DesignSpec 校验与改动顺序持久化（Task 8）===
+// 复用 Task 7 稳定 UUID 常量；Design 不回落 issue.repo_id，involved_repository_ids 必须
+// ⊆ effective_member_ids；change_order 由 AI 显式给出（执行顺序图，非服务调用图）。
+fn two_effective_members_design_scope() -> AggregateDesignSpecScope {
+    AggregateDesignSpecScope {
+        logical_codebase_ref: CODEBASE_REF,
+        effective_member_ids: vec![API_MEMBER, WEB_MEMBER],
+        involved_repository_ids: Vec::new(),
+        change_order: Vec::new(),
+    }
+}
+
+fn design_spec_dto_path(store: &LifecycleStore, design_id: &str) -> std::path::PathBuf {
+    store
+        .design_specs_root(PROJECT_ID, ISSUE_ID)
+        .join(format!("{design_id}.json"))
+}
+
+/// AI 未明确涉及任何仓库（involved_repository_ids 为空）→ blocker，不持久化 DesignSpec，
+/// 不回落 issue.repo_id（REQ-PLN-08）。
+#[test]
+fn design_without_involved_repositories_becomes_blocker_not_repo_id() {
+    let (_tmp, store) = setup();
+    let error = store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "aggregate design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                involved_repository_ids: Vec::new(),
+                change_order: Vec::new(),
+                ..two_effective_members_design_scope()
+            }),
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+            if reason.contains("involved_repositories_undetermined")),
+        "空 involved_repository_ids 应 fail-closed 为 blocker，错误: {error:?}"
+    );
+    assert_eq!(
+        store.list_design_specs(PROJECT_ID, ISSUE_ID).unwrap().len(),
+        0,
+        "blocker 时不应持久化 DesignSpec"
+    );
+}
+
+/// AI 输出不在有效集合内的仓库 → blocker，不持久化 DesignSpec，不回落 issue.repo_id。
+#[test]
+fn design_with_involved_outside_effective_becomes_blocker() {
+    let (_tmp, store) = setup();
+    let error = store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "aggregate design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                involved_repository_ids: vec![API_MEMBER, UNKNOWN_MEMBER],
+                change_order: vec![API_MEMBER, WEB_MEMBER],
+                ..two_effective_members_design_scope()
+            }),
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+            if reason.contains("involved_repository_not_effective")),
+        "越界 involved_repository_ids 应 fail-closed 为 blocker，错误: {error:?}"
+    );
+    assert_eq!(
+        store.list_design_specs(PROJECT_ID, ISSUE_ID).unwrap().len(),
+        0,
+        "blocker 时不应持久化 DesignSpec"
+    );
+}
+
+/// change_order 的任一 id ∉ involved_repository_ids → blocker（改动顺序必须覆盖全部涉及仓库）。
+#[test]
+fn design_change_order_outside_involved_becomes_blocker() {
+    let (_tmp, store) = setup();
+    let error = store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "aggregate design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                involved_repository_ids: vec![API_MEMBER],
+                change_order: vec![API_MEMBER, WEB_MEMBER],
+                ..two_effective_members_design_scope()
+            }),
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+            if reason.contains("change_order_repository_not_involved")),
+        "change_order 越界应 fail-closed 为 blocker，错误: {error:?}"
+    );
+    assert_eq!(
+        store.list_design_specs(PROJECT_ID, ISSUE_ID).unwrap().len(),
+        0,
+        "blocker 时不应持久化 DesignSpec"
+    );
+}
+
+/// change_order 出现重复 involved 仓库 → blocker（执行顺序图不得重复顶点）。
+#[test]
+fn design_change_order_with_duplicate_repository_becomes_blocker() {
+    let (_tmp, store) = setup();
+    let error = store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "aggregate design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                involved_repository_ids: vec![API_MEMBER, WEB_MEMBER],
+                change_order: vec![API_MEMBER, WEB_MEMBER, API_MEMBER],
+                ..two_effective_members_design_scope()
+            }),
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+            if reason.contains("change_order_duplicate_repository")),
+        "change_order 重复顶点应 fail-closed 为 blocker，错误: {error:?}"
+    );
+}
+
+/// change_order 缺失（空）→ 非 blocker（AI 可不给改动顺序）；仅当 WorkItem 编译时若有才作
+/// depends_on 依据（Task 9 消费）。involved 有效即持久化，聚合字段填充，磁盘一致。
+/// Design 不回落 issue.repo_id：involved_repository_ids 全部 ∈ effective_member_ids，
+/// 且 DesignSpecRecord 无 repository_id 字段（conceptual repository_id_or_none() == None）。
+#[test]
+fn design_change_order_optional_but_involved_valid_persists_aggregate_scope() {
+    let (_tmp, store) = setup();
+    let design = store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "aggregate design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                involved_repository_ids: vec![API_MEMBER, WEB_MEMBER],
+                change_order: Vec::new(),
+                ..two_effective_members_design_scope()
+            }),
+        })
+        .unwrap();
+
+    // involved_repository_ids ⊆ effective_member_ids，且不回落 issue.repo_id。
+    assert_eq!(design.logical_codebase_ref, Some(CODEBASE_REF));
+    assert_eq!(design.involved_repository_ids, vec![API_MEMBER, WEB_MEMBER]);
+    assert!(design.change_order.is_empty());
+
+    // 磁盘持久化一致。
+    let persisted: DesignSpecRecord = read_json(&design_spec_dto_path(&store, &design.id)).unwrap();
+    assert_eq!(persisted.logical_codebase_ref, Some(CODEBASE_REF));
+    assert_eq!(
+        persisted.involved_repository_ids,
+        vec![API_MEMBER, WEB_MEMBER]
+    );
+    assert!(persisted.change_order.is_empty());
+}
+
+/// change_order 由 AI 显式给出（例：公共契约 → provider → consumer）→ 持久化为执行顺序图，
+/// involved_repository_ids 全部 ∈ effective_member_ids。Design 不回落 issue.repo_id。
+#[test]
+fn design_change_order_drives_persisted_order_and_does_not_fallback_to_repo_id() {
+    let (_tmp, store) = setup();
+    let design = store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "aggregate design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                involved_repository_ids: vec![API_MEMBER, WEB_MEMBER],
+                change_order: vec![API_MEMBER, WEB_MEMBER],
+                ..two_effective_members_design_scope()
+            }),
+        })
+        .unwrap();
+
+    // change_order 被持久化、顺序保留；involved 全部 ∈ effective_member_ids。
+    assert_eq!(design.change_order.len(), 2);
+    assert_eq!(design.change_order, vec![API_MEMBER, WEB_MEMBER]);
+    assert!(
+        design
+            .involved_repository_ids
+            .iter()
+            .all(|id| [API_MEMBER, WEB_MEMBER].contains(id))
+    );
+    // DesignSpecRecord 无 repository_id 字段，即 conceptual repository_id_or_none() == None。
+    let encoded = serde_json::to_value(&design).unwrap();
+    assert!(
+        encoded.get("repository_id").is_none(),
+        "Design 不应回落 issue.repo_id：encoded={encoded}"
+    );
+
+    // 磁盘持久化一致。
+    let persisted: DesignSpecRecord = read_json(&design_spec_dto_path(&store, &design.id)).unwrap();
+    assert_eq!(persisted.change_order, vec![API_MEMBER, WEB_MEMBER]);
+}
+
+/// 传统单仓 issue（aggregate_codebase = None）仍走原 DesignSpec 单值路径，聚合视野字段空。
+#[test]
+fn design_without_aggregate_scope_keeps_single_repository_path() {
+    let (_tmp, store) = setup();
+    let design = store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "single repo design".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+
+    assert_eq!(design.logical_codebase_ref, None);
+    assert!(design.involved_repository_ids.is_empty());
+    assert!(design.change_order.is_empty());
 }
