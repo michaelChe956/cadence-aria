@@ -771,3 +771,27 @@ impl BoundedCommandRunner for ScriptedGitRunner {
         Ok(result)
     }
 }
+
+/// Task 16 回归门:聚合初始化与单仓 registration/GitFinalize 调用图隔离。
+///
+/// 聚合初始化走独立的 `AggregateInitializationCoordinator` +
+/// `GatewayBackedAggregateProviderTurnDriver`,不构造也不调用
+/// `RepositoryRegistrationCoordinator`、`ClaudeRepositoryInitializer` 或
+/// `git_finalize`。主隔离断言在 `aggregate_initialization_coordinator::tests::
+/// aggregate_coordinator_isolation_locked_against_single_repository_persistence_and_git_finalize`
+/// 中以源码扫描锁定;本测试补充类型层面证明:聚合 coordinator 不驻留于
+/// `repository_store` 模块树(单仓 registration/git finalize 的归属地)。
+#[test]
+fn aggregate_initialization_is_isolated_from_single_repository_registration_and_git_finalize() {
+    use crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateInitializationCoordinator;
+
+    let coordinator_type = std::any::type_name::<AggregateInitializationCoordinator>();
+    assert!(
+        !coordinator_type.contains("repository_store"),
+        "aggregate initialization coordinator must not live under repository_store"
+    );
+    assert!(
+        coordinator_type.contains("aggregate_initialization_coordinator"),
+        "aggregate initialization coordinator must live under its own module"
+    );
+}

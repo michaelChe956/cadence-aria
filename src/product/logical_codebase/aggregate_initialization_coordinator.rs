@@ -678,6 +678,202 @@ fn serialise_status(status: AggregateInitializationOperationStatus) -> &'static 
     }
 }
 
+/// 默认托管配置 artifact 引用,经 gateway envelope 的 config_digest 复验。
+const AGGREGATE_CONFIG_ARTIFACT_REF: &str = "sha256:aggregate-initialization-managed-config";
+
+/// 聚合根在 envelope target 中使用的稳定逻辑标识。聚合 provider turn 的 cwd
+/// 是 canonical non-Git aggregate root(聚合根本身,非任何成员 checkout);此处用
+/// 一个 `aggregate-root` 占位标识表示「整个聚合根」,而非单个成员仓库。
+const AGGREGATE_ROOT_LOGICAL_REPO: &str = "aggregate-root";
+const AGGREGATE_ROOT_CHECKOUT: &str = "aggregate-root";
+
+/// Task 16:gateway-backed provider turn 驱动。
+///
+/// 三个 provider turn(`pre_check`/`rule_and_mcp_config`/`openspec_and_examples`)
+/// 经 [`LogicalCodebaseProviderGateway::start_streaming`] 启动(feature gate):
+/// 当注入此驱动作为 coordinator 的 `AggregateProviderTurnDriver` 时,每个 turn
+/// 都会在共享的 [`GatewayRunAudit`] 累加一次 `stream_launches()` 记录,使「聚合
+/// provider turn 唯一经 gateway 启动」成为可审计事实而非仅靠代码审查。
+///
+/// 聚合根是 canonical non-Git aggregate root(聚合初始化 envelope 配置);三个
+/// turn 的 cwd 均为该根,配置来自托管配置 artifact。该驱动绝不依赖单仓持久化
+/// 层、单仓注册协调器或单仓 git 终结点,故聚合模式不会进入成员仓 git 调用图。
+/// 该隔离契约由 `aggregate_coordinator_isolation` 测试在编译期锁定。
+pub struct GatewayBackedAggregateProviderTurnDriver {
+    gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
+    provider: crate::product::logical_codebase::ProviderRef,
+}
+
+impl GatewayBackedAggregateProviderTurnDriver {
+    /// 用 Claude Code dialect 与给定 capability snapshot ref 构造驱动。聚合
+    /// 初始化当前固定使用 Claude Code 作为唯一逻辑 provider(Codex 在
+    /// `danger-full-access` 下被 gateway 路由级阻断)。
+    pub fn claude_code(
+        gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
+        capability_snapshot_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            gateway,
+            provider: crate::product::logical_codebase::ProviderRef::claude_code(
+                capability_snapshot_ref,
+            ),
+        }
+    }
+
+    /// 把单个 provider turn 组装成经 gateway 启动的 streaming 请求。read-only
+    /// planning action(聚合根不写成员仓),target 锚定聚合根本身。
+    fn launch_request(
+        &self,
+        project_id: &str,
+        aggregate_root: &std::path::Path,
+    ) -> crate::product::logical_codebase::SessionLaunchRequest {
+        use crate::product::logical_codebase::{PolicyTarget, SessionPolicyAction};
+        let target = PolicyTarget::checkout(
+            AGGREGATE_ROOT_LOGICAL_REPO,
+            AGGREGATE_ROOT_CHECKOUT,
+            aggregate_root.to_path_buf(),
+        );
+        crate::product::logical_codebase::SessionLaunchRequest {
+            project_id: project_id.to_string(),
+            provider: self.provider.clone(),
+            action: SessionPolicyAction::PlanningReadOnly,
+            target,
+            readable_roots: vec![aggregate_root.to_path_buf()],
+            writable_roots: Vec::new(),
+            config_artifact_ref: AGGREGATE_CONFIG_ARTIFACT_REF.to_string(),
+        }
+    }
+
+    fn streaming_input(
+        &self,
+        step: AggregateInitializationStepKind,
+        aggregate_root: &std::path::Path,
+    ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        use crate::cross_cutting::streaming_provider::{
+            ProviderPermissionMode, StreamingProviderInput,
+        };
+        use crate::protocol::contracts::{AdapterRole, ProviderType};
+        StreamingProviderInput {
+            provider_type: ProviderType::ClaudeCode,
+            role: AdapterRole::Executor,
+            prompt: format!("aggregate initialization turn: {}", step.as_str()),
+            working_dir: aggregate_root.to_path_buf(),
+            workspace_session_id: None,
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: std::collections::BTreeMap::new(),
+            timeout_secs: 1,
+        }
+    }
+}
+
+#[async_trait]
+impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
+    async fn run_turn(
+        &self,
+        project_id: &str,
+        _operation_id: &str,
+        step: AggregateInitializationStepKind,
+        preflight: &AggregatePreflightSnapshot,
+        cancellation: CancellationToken,
+    ) -> Result<String, AggregateInitializationError> {
+        use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+        let aggregate_root = std::path::PathBuf::from(&preflight.aggregate_root);
+        let request = self.launch_request(project_id, &aggregate_root);
+        let validated = self.gateway.validate(request).map_err(|error| {
+            AggregateInitializationError::ProviderTurn {
+                step,
+                reason: format!("gateway validate failed: {error}"),
+                retryable: true,
+            }
+        })?;
+        let input = self.streaming_input(step, &aggregate_root);
+        let launch = ValidatedStreamingProviderInput::new(input, validated);
+        self.gateway
+            .start_streaming(launch, cancellation)
+            .await
+            .map_err(|error| AggregateInitializationError::ProviderTurn {
+                step,
+                reason: format!("gateway start_streaming failed: {error}"),
+                retryable: true,
+            })?;
+        Ok(format!("{} via gateway", step.as_str()))
+    }
+}
+
+/// Task 16:聚合 asset 发布器。三个 provider turn 产出的聚合 artifact 只允许发布到
+/// `.aria/aggregate/**`,禁止任何成员仓路径,使「聚合模式不进成员仓 git」成为可
+/// 验证契约。发布的相对路径以正斜杠分隔;`published_paths()` 返回发布顺序供审计。
+#[derive(Debug, Default)]
+pub struct AggregateAssetPublisher {
+    published: std::sync::Mutex<Vec<String>>,
+}
+
+impl AggregateAssetPublisher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 发布一个聚合 asset 的相对路径。只允许 `.aria/aggregate/**`;其余路径
+    /// (成员仓、父目录逃逸、绝对路径)一律 fail-closed。
+    pub fn publish(
+        &self,
+        operation_id: &str,
+        relative_path: &str,
+    ) -> Result<(), AggregateInitializationError> {
+        validate_relative_id(operation_id).map_err(|error| {
+            AggregateInitializationError::state(
+                operation_id,
+                format!("invalid operation id: {error}"),
+            )
+        })?;
+        if !Self::is_aggregate_asset_path(relative_path) {
+            return Err(AggregateInitializationError::state(
+                operation_id,
+                format!("aggregate asset publisher rejects non-aggregate path: {relative_path}"),
+            ));
+        }
+        self.published
+            .lock()
+            .expect("aggregate asset publisher mutex poisoned")
+            .push(relative_path.to_string());
+        Ok(())
+    }
+
+    /// 已发布的聚合 asset 相对路径,按发布顺序。
+    pub fn published_paths(&self) -> Vec<String> {
+        self.published
+            .lock()
+            .expect("aggregate asset publisher mutex poisoned")
+            .clone()
+    }
+
+    /// 判定相对路径是否落在 `.aria/aggregate/**` 内。必须以 `.aria/aggregate/` 起
+    /// 头,禁止空、禁止 `..` 段、禁止绝对路径前缀。
+    fn is_aggregate_asset_path(relative_path: &str) -> bool {
+        if relative_path.is_empty() {
+            return false;
+        }
+        let normalized = std::path::Path::new(relative_path);
+        if normalized.is_absolute() {
+            return false;
+        }
+        if normalized.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        }) {
+            return false;
+        }
+        let mut components = normalized.components();
+        matches!(components.next(), Some(std::path::Component::Normal(a)) if a == ".aria")
+            && matches!(components.next(), Some(std::path::Component::Normal(b)) if b == "aggregate")
+            && components.next().is_some()
+    }
+}
+
 /// Deterministic aggregate preflight implementation backed by the on-disk
 /// logical codebase state. Validates the manifest, canonical non-Git aggregate
 /// root, member main checkouts and that the aggregate index excludes assets.
@@ -816,8 +1012,18 @@ fn manifest_digest(manifest: &LogicalCodebaseManifest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperationInput;
+    use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
+    use crate::product::logical_codebase::{
+        GatewayRunAudit, LogicalCodebaseProviderGateway, LogicalCodebaseStore, PolicyTarget,
+        PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderDialect,
+        ProviderGatewayError, ProviderRef, ProviderRefType, SessionLaunchRequest,
+        SessionPolicyAction,
+    };
+    use crate::product::models::ProviderName;
     use std::sync::Mutex;
 
     const CREATED_AT: &str = "2026-08-09T00:00:00Z";
@@ -1242,5 +1448,378 @@ mod tests {
             ),
             "cancelled execution must leave a terminal record"
         );
+    }
+
+    // ---- Task 16: provider step 经 gateway 启动 + GitFinalize 调用图切断 ----
+
+    /// 测试用 capability source:固定 Claude Code capability,version 与 resume
+    /// 能力可调,用于 gateway 复验。聚合 provider turn 固定 Claude Code(Codex
+    /// danger-full-access 被 gateway 路由级阻断)。
+    struct StaticCapabilitySource {
+        version: Mutex<String>,
+        resume: Mutex<ResumeEvidenceState>,
+    }
+
+    impl StaticCapabilitySource {
+        fn new(version: &str) -> Self {
+            Self {
+                version: Mutex::new(version.to_string()),
+                resume: Mutex::new(ResumeEvidenceState::Confirmed),
+            }
+        }
+    }
+
+    impl ProviderCapabilitySource for StaticCapabilitySource {
+        fn require_supported(
+            &self,
+            provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Ok(ProviderCapability {
+                provider_type: provider.provider_type,
+                version: self.version.lock().unwrap().clone(),
+                adapter_dialect: match provider.provider_type {
+                    ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
+                    ProviderRefType::Codex => ProviderDialect::CodexCliV1,
+                },
+                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+                resume_evidence: *self.resume.lock().unwrap(),
+            })
+        }
+    }
+
+    /// 测试用 target resolver:直接返回请求中的 target(聚合根路径已由 fixture
+    /// 真实创建)。spawn 前 canonical 复验由 gateway 内部完成。
+    struct PassthroughTargetResolver;
+
+    impl PolicyTargetResolver for PassthroughTargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            request: &SessionLaunchRequest,
+        ) -> Result<PolicyTarget, ProviderGatewayError> {
+            Ok(request.target.clone())
+        }
+    }
+
+    /// 测试用 streaming adapter:记录 start 调用次数并立即完成会话。
+    struct CountingStreamingAdapter {
+        start_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingStreamingAdapter {
+        fn new() -> Self {
+            Self {
+                start_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn start_count(&self) -> usize {
+            self.start_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
+        for CountingStreamingAdapter
+    {
+        async fn start(
+            &self,
+            _input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<
+            crate::cross_cutting::streaming_provider::ProviderSession,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            self.start_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (_event_tx, events) = tokio::sync::mpsc::channel(1);
+            let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
+            Ok(crate::cross_cutting::streaming_provider::ProviderSession { events, commands })
+        }
+    }
+
+    struct StubSyncAdapter;
+
+    impl crate::cross_cutting::provider_adapter::ProviderAdapter for StubSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<
+            crate::protocol::contracts::AdapterOutput,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            use crate::protocol::contracts::TimeoutStatus;
+            Ok(crate::protocol::contracts::AdapterOutput {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
+        use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
+        use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+        use chrono::Utc;
+
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [ProviderName::ClaudeCode, ProviderName::Codex]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+            snapshot,
+        ))))
+    }
+
+    /// gateway-backed 聚合初始化 fixture:把 `GatewayBackedAggregateProviderTurnDriver`
+    /// 注入 coordinator,使三个 provider turn 唯一经 gateway 启动。共享
+    /// `GatewayRunAudit` 与 `CountingStreamingAdapter` 供断言。
+    struct GatewayAggregateFixture {
+        _temp: tempfile::TempDir,
+        audit: Arc<GatewayRunAudit>,
+        streaming_adapter: Arc<CountingStreamingAdapter>,
+        coordinator: AggregateInitializationCoordinator,
+    }
+
+    impl GatewayAggregateFixture {
+        fn coordinator(&self) -> &AggregateInitializationCoordinator {
+            &self.coordinator
+        }
+
+        fn gateway_audit(&self) -> Arc<GatewayRunAudit> {
+            self.audit.clone()
+        }
+
+        fn streaming_start_count(&self) -> usize {
+            self.streaming_adapter.start_count()
+        }
+    }
+
+    fn gateway_aggregate_fixture() -> GatewayAggregateFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let store = AggregateInitializationOperationStore::new(paths.clone());
+
+        // 聚合根是真实目录(aggregate_preflight + gateway spawn 前 canonicalize 需要它存在且非 git)。
+        let aggregate_root = temp.path().join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), Vec::new());
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest("project_0001", &manifest)
+            .unwrap();
+
+        // 安装 bootstrap policy(gateway validate 需要 policy artifact)。
+        crate::product::logical_codebase::provider_gateway::ensure_bootstrap_policy(
+            &paths, &manifest,
+        )
+        .unwrap();
+
+        let audit = Arc::new(GatewayRunAudit::new());
+        let streaming_adapter = Arc::new(CountingStreamingAdapter::new());
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, streaming_adapter.clone());
+        let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
+            crate::product::logical_codebase::AggregatePolicyArtifactStore::new(paths.clone()),
+            Arc::new(StaticCapabilitySource::new("1.4.0")),
+            Arc::new(PassthroughTargetResolver),
+            Arc::new(registry),
+            Arc::new(StubSyncAdapter),
+            always_available_gate(),
+            audit.clone(),
+        ));
+
+        let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        // 用真实 `DeterministicAggregatePreflightService` 以产出可 canonicalize 的聚合根快照,
+        // 使 gateway spawn 前 cwd 复验能通过。
+        let preflight: Arc<dyn AggregatePreflightService> =
+            Arc::new(DeterministicAggregatePreflightService::new(paths.clone()));
+        let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(
+            GatewayBackedAggregateProviderTurnDriver::claude_code(gateway, "cap_claude_code_1_4_0"),
+        );
+        let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
+        let coordinator = AggregateInitializationCoordinator::new(
+            paths.clone(),
+            store.clone(),
+            skills,
+            preflight,
+            provider,
+            clock,
+        );
+
+        let input = AggregateInitializationOperationInput {
+            idempotency_key: "0001".to_string(),
+            manifest_revision: manifest.membership_revision,
+            policy_digest: "sha256:policy".to_string(),
+            profile_evidence_digest: Some("sha256:profile".to_string()),
+            provider_context_root: manifest.provider_context_root.clone(),
+            provider: "claude_code".to_string(),
+        };
+        coordinator
+            .begin(
+                "aggregate_initialization_0001".to_string(),
+                "project_0001",
+                input,
+            )
+            .unwrap();
+
+        GatewayAggregateFixture {
+            _temp: temp,
+            audit,
+            streaming_adapter,
+            coordinator,
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_steps_use_gateway_to_launch_three_streaming_turns() {
+        let fixture = gateway_aggregate_fixture();
+        fixture
+            .coordinator()
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        // 三个 provider turn(pre_check/rule_and_mcp_config/openspec_and_examples)
+        // 唯一经 gateway 启动,故 stream_launches()==3。machine_skills 与
+        // aggregate_preflight 是确定性 Cadence 代码,不产生 gateway 启动。
+        assert_eq!(fixture.gateway_audit().stream_launches(), 3);
+        assert_eq!(fixture.streaming_start_count(), 3);
+        assert!(fixture.gateway_audit().all_have_policy_digest());
+    }
+
+    #[test]
+    fn aggregate_coordinator_isolation_locked_against_single_repository_persistence_and_git_finalize()
+     {
+        // 隔离回归门:coordinator 生产代码(非测试、非 doc comment)不得引用
+        // 单仓持久化层或单仓 git 终结点,保证聚合模式不进入成员仓 git 调用图。
+        // 本测试排除 `#[cfg(test)]` 模块与 doc comment 行后再扫描,避免自指。
+        let source = include_str!("aggregate_initialization_coordinator.rs");
+        let forbidden = [
+            "RepositoryPersistence",
+            "git_finalize",
+            "RepositoryRegistrationCoordinator",
+        ];
+        let mut in_test_module = false;
+        for line in source.lines() {
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                in_test_module = true;
+            }
+            if in_test_module {
+                continue;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for token in forbidden {
+                assert!(
+                    !line.contains(token),
+                    "aggregate coordinator production code must not reference {token}: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_asset_publisher_only_accepts_aria_aggregate_paths() {
+        let publisher = AggregateAssetPublisher::new();
+        publisher
+            .publish("aggregate_initialization_0001", ".aria/aggregate/CLAUDE.md")
+            .unwrap();
+        publisher
+            .publish("aggregate_initialization_0001", ".aria/aggregate/mcp.json")
+            .unwrap();
+        publisher
+            .publish(
+                "aggregate_initialization_0001",
+                ".aria/aggregate/openspec-examples.json",
+            )
+            .unwrap();
+        assert_eq!(
+            publisher.published_paths(),
+            vec![
+                ".aria/aggregate/CLAUDE.md",
+                ".aria/aggregate/mcp.json",
+                ".aria/aggregate/openspec-examples.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregate_asset_publisher_rejects_member_repository_and_escape_paths() {
+        let publisher = AggregateAssetPublisher::new();
+        // 成员仓路径:fail-closed。
+        assert!(
+            publisher
+                .publish(
+                    "aggregate_initialization_0001",
+                    "members/repo_0001/CLAUDE.md"
+                )
+                .is_err()
+        );
+        // 父目录逃逸:fail-closed。
+        assert!(
+            publisher
+                .publish(
+                    "aggregate_initialization_0001",
+                    ".aria/aggregate/../../../etc/passwd"
+                )
+                .is_err()
+        );
+        // 绝对路径:fail-closed。
+        assert!(
+            publisher
+                .publish("aggregate_initialization_0001", "/etc/passwd")
+                .is_err()
+        );
+        // 仅 `.aria/aggregate` 目录本身(无子项)不算 asset:fail-closed。
+        assert!(
+            publisher
+                .publish("aggregate_initialization_0001", ".aria/aggregate")
+                .is_err()
+        );
+        // 非 aggregate 子树:fail-closed。
+        assert!(
+            publisher
+                .publish("aggregate_initialization_0001", ".aria/other/config.json")
+                .is_err()
+        );
+        assert!(publisher.published_paths().is_empty());
     }
 }

@@ -1,3 +1,15 @@
+//! 单仓 repository 初始化 provider 驱动。
+//!
+//! `ClaudeRepositoryInitializer` 仅供**单仓** registration 路径
+//! (`RepositoryRegistrationCoordinator`)使用,在单个成员仓 git root 下运行
+//! Claude Code 初始化命令。聚合初始化(`AggregateInitializationCoordinator`)
+//! 走独立的 `GatewayBackedAggregateProviderTurnDriver` + `AggregateAssetPublisher`,
+//! **不**复用本初始化器,也不调用单仓 `git_finalize` 切点——聚合 provider turn
+//! 经 `LogicalCodebaseProviderGateway` 启动,产出只发布到 `.aria/aggregate/**`。
+//! 该隔离由 `aggregate_initialization_coordinator::tests::
+//! aggregate_coordinator_isolation_locked_against_single_repository_persistence_and_git_finalize`
+//! 锁定回归。
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
