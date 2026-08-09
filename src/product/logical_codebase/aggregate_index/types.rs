@@ -53,6 +53,8 @@ pub struct AggregateIndexRecord {
     pub member_snapshots: Vec<AggregateIndexMemberSnapshot>,
     pub codegraph_version: String,
     pub codegraph_root: PathBuf,
+    #[serde(default)]
+    pub config_digest: String,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,6 +79,7 @@ impl AggregateIndexRecord {
             member_snapshots,
             codegraph_version: "1.5.0".into(),
             codegraph_root: PathBuf::new(),
+            config_digest: String::new(),
             updated_at: created_at.clone(),
             created_at,
             supersedes_aggregate_index_id: None,

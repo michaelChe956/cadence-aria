@@ -1,5 +1,7 @@
 pub mod codegraph_cli;
 pub mod exclude;
+pub mod operation;
+pub mod store;
 pub mod types;
 
 pub use codegraph_cli::{
@@ -7,6 +9,8 @@ pub use codegraph_cli::{
     CodeGraphStatus,
 };
 pub use exclude::{CodeGraphConfig, CodeGraphExcludeGenerator};
+pub use operation::{AggregateIndexAcceptance, AggregateIndexOperation};
+pub use store::AggregateIndexStore;
 pub use types::{
     AggregateIndexBudget, AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
 };
