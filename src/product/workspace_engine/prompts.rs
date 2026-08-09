@@ -358,9 +358,55 @@ pub fn aggregate_story_scope_prompt(
     prompt
 }
 
+/// 逻辑代码库分支的 Design prompt 注入片段（Task 8 修复）。
+///
+/// 附在 Design 生成/修订 prompt 末尾：渲染紧凑成员 inventory 清单，并附加「必须列出涉及仓库
+/// 与改动顺序，不确定即 blocker」指令。`inventory_injection.rendered` 来自
+/// `render_compact_inventory`（已按预算截断），`effective_member_ids` 来自
+/// `PlanningContextSnapshot.effective_member_ids`（权威），用于在指令中明示可选仓库范围。
+///
+/// 与 `aggregate_story_scope_prompt` 同模式：`involved_repository_ids` 只能取成员清单中的
+/// logical_repository_id；`change_order` 作为 WorkItem `depends_on` 依据（Task 9 消费），
+/// 顺序为执行顺序图（如「先改公共契约 → 再改 provider → 最后改 consumer」），必须恰好覆盖
+/// 全部 involved 仓库且不重复；AI 不确定涉及仓库或顺序时必须进入 blocker，禁止猜测、
+/// 禁止默认全部成员、禁止回落到任意单一 primary 仓库。
+///
+/// 接入点：由 Web Design 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
+/// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取 inventory_injection
+/// 后注入）。本 task 已实现并单测，Web 接入在本计划后续 task。
+#[allow(dead_code)]
+pub fn aggregate_design_scope_prompt(
+    inventory_rendered: &str,
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("\n\n## 聚合代码库成员清单（involved repositories 必须从此集合中选取）：\n");
+    prompt.push_str(inventory_rendered);
+    prompt.push_str("\n## 聚合视野要求\n");
+    prompt.push_str(
+        "本次 Design 位于聚合代码库。你必须在 artifact 中明确列出涉及的逻辑仓库 \n\
+         (`involved_repository_ids`，只能取上述成员清单中的 logical_repository_id)。\n\
+         若无法确定具体涉及仓库，必须明确声明并进入 blocker，禁止猜测、禁止默认全部成员、\n\
+         禁止回落到任意单一 primary 仓库。\n\n",
+    );
+    prompt.push_str(
+        "改动顺序（change_order）是执行顺序图而非服务调用图，将作为后续 Work Item 的 \n\
+         depends_on 依据。change_order 必须恰好覆盖全部 involved_repository_ids 且不重复；\n\
+         顺序按契约依赖推进，例如「先改公共契约 → 再改 provider → 最后改 consumer」。\n\
+         若无法确定涉及仓库或改动顺序，必须明确声明并进入 blocker，禁止猜测。",
+    );
+    if !effective_member_ids.is_empty() {
+        prompt.push_str("\n可选仓库范围（logical_repository_id）：");
+        for member in effective_member_ids {
+            prompt.push_str(&format!("\n- {member:?}"));
+        }
+    }
+    prompt
+}
+
 #[cfg(test)]
 mod aggregate_scope_prompt_tests {
-    use super::aggregate_story_scope_prompt;
+    use super::{aggregate_design_scope_prompt, aggregate_story_scope_prompt};
     use crate::product::logical_codebase::LogicalRepositoryId;
     use uuid::Uuid;
 
@@ -393,6 +439,51 @@ mod aggregate_scope_prompt_tests {
         assert!(
             prompt.contains("禁止回落到任意单一 primary 仓库"),
             "缺禁止 primary 回落指令：{prompt}"
+        );
+        // 有效成员 ID 列出以限定 involved 取值范围。
+        assert!(prompt.contains("00000000-0000-7000-8000-000000000001"));
+        assert!(prompt.contains("00000000-0000-7000-8000-000000000002"));
+    }
+
+    #[test]
+    fn aggregate_design_scope_prompt_lists_inventory_involved_change_order_and_blocker() {
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let prompt = aggregate_design_scope_prompt(inventory, &[API, WEB]);
+
+        assert!(
+            prompt.contains("聚合代码库成员清单"),
+            "缺成员清单标题：{prompt}"
+        );
+        assert!(prompt.contains("api/ | service"), "缺成员行：{prompt}");
+        assert!(
+            prompt.contains("involved_repository_ids"),
+            "缺 involved_repository_ids 指令：{prompt}"
+        );
+        assert!(
+            prompt.contains("禁止回落到任意单一 primary 仓库"),
+            "缺禁止 primary 回落指令：{prompt}"
+        );
+        // change_order 作为 WorkItem depends_on 依据，且必须恰好覆盖全部 involved 仓库。
+        assert!(
+            prompt.contains("change_order"),
+            "缺 change_order 指令：{prompt}"
+        );
+        assert!(
+            prompt.contains("depends_on"),
+            "缺 depends_on 依据说明：{prompt}"
+        );
+        assert!(
+            prompt.contains("先改公共契约") && prompt.contains("最后改 consumer"),
+            "缺改动顺序示例（公共契约 → provider → consumer）：{prompt}"
+        );
+        assert!(
+            prompt.contains("恰好覆盖全部 involved_repository_ids"),
+            "缺 change_order 覆盖 involved 指令：{prompt}"
+        );
+        // 不确定涉及仓库或改动顺序 → blocker，禁止猜测。
+        assert!(
+            prompt.contains("进入 blocker，禁止猜测"),
+            "缺 blocker 指令：{prompt}"
         );
         // 有效成员 ID 列出以限定 involved 取值范围。
         assert!(prompt.contains("00000000-0000-7000-8000-000000000001"));
