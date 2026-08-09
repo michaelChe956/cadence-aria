@@ -17,14 +17,16 @@ pub use aggregate_initialization::{
     AggregateCancellationRecord, AggregateInitializationErrorRecord,
     AggregateInitializationIdempotencyIdentity, AggregateInitializationOperation,
     AggregateInitializationOperationInput, AggregateInitializationOperationStatus,
-    AggregateInitializationStepKind, AggregateInitializationStepRecord,
-    AggregateInitializationStepStatus,
+    AggregateInitializationProfile, AggregateInitializationStepKind,
+    AggregateInitializationStepRecord, AggregateInitializationStepStatus, RepositoryTypeEvidence,
 };
 pub use aggregate_initialization_coordinator::{
     AggregateInitializationCoordinator, AggregateInitializationError,
     AggregatePreflightMemberProjection, AggregatePreflightService, AggregatePreflightSnapshot,
     AggregateProviderTurnDriver, AggregateSkillsPreparation,
-    DeterministicAggregatePreflightService, MachineSkillsPreparation,
+    DeterministicAggregatePreflightService, DeterministicRepositoryTypeDetector,
+    MachineSkillsPreparation, RepositoryTypeDetector, profile_preflight_commands,
+    resolve_aggregate_profile,
 };
 pub use aggregate_initialization_store::AggregateInitializationOperationStore;
 pub use feature::LogicalCodebaseFeature;

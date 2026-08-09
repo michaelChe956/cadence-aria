@@ -42,6 +42,31 @@ mod tests {
         assert_eq!(parsed, RepositoryType::Library);
     }
 
+    #[test]
+    fn java_maven_and_gradle_profiles_are_detected_as_backend() {
+        let fixture = tempfile::tempdir().unwrap();
+        let maven = fixture.path().join("api");
+        let gradle = fixture.path().join("worker");
+        fs::create_dir_all(&maven).unwrap();
+        fs::create_dir_all(&gradle).unwrap();
+        fs::write(
+            maven.join("pom.xml"),
+            "<project><modelVersion>4.0.0</modelVersion></project>",
+        )
+        .unwrap();
+        fs::write(gradle.join("build.gradle.kts"), "plugins {}").unwrap();
+
+        let maven_profile = RepositoryProfileDetector::detect(&maven).unwrap();
+        let gradle_profile = RepositoryProfileDetector::detect(&gradle).unwrap();
+        assert_eq!(maven_profile.repo_type, RepositoryType::Backend);
+        assert!(maven_profile.tech_stack.contains(&"maven".to_string()));
+        assert_eq!(gradle_profile.repo_type, RepositoryType::Backend);
+        assert!(gradle_profile.tech_stack.contains(&"gradle".to_string()));
+        // Backend detection never runs initialization commands.
+        assert!(maven_profile.initialization_commands.is_empty());
+        assert!(gradle_profile.initialization_commands.is_empty());
+    }
+
     struct AttachFixture {
         _root: tempfile::TempDir,
         paths: ProductAppPaths,

@@ -79,6 +79,18 @@ pub fn build_web_router(state: WebAppState) -> Router {
             get(handlers::get_repository_initialization),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebase/initializations",
+            post(handlers::create_aggregate_initialization),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebase/initializations/{operation_id}",
+            get(handlers::get_aggregate_initialization),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebase/initializations/{operation_id}/cancel",
+            post(handlers::cancel_aggregate_initialization),
+        )
+        .route(
             "/api/projects/{project_id}/issues",
             get(handlers::list_product_issues).post(handlers::create_product_issue),
         )

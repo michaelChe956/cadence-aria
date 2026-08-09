@@ -14,6 +14,45 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Aggregate initialization profile resolved from read-only member-checkout
+/// signals. Drives template/precheck selection but never changes the five
+/// stable step IDs in [`AggregateInitializationStepKind::V1`].
+///
+/// `JavaBackend` uses the Maven/Gradle-aware template, `FrontendPnpmVite`
+/// uses the pnpm/Vite precheck and never applies Java commands, and `Mixed`
+/// composes a namespaced template spanning both. `Unknown` or an
+/// in-request profile inconsistency fails preflight closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateInitializationProfile {
+    JavaBackend,
+    FrontendPnpmVite,
+    Mixed,
+}
+
+impl AggregateInitializationProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::JavaBackend => "java_backend",
+            Self::FrontendPnpmVite => "frontend_pnpm_vite",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+/// Read-only evidence captured for one member checkout root by a
+/// [`crate::product::logical_codebase::aggregate_initialization_coordinator::RepositoryTypeDetector`].
+/// Never executes package scripts, `pnpm install`, Node or Java.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryTypeEvidence {
+    pub logical_repository_id: String,
+    pub repo_type: crate::product::logical_codebase::types::RepositoryType,
+    #[serde(default)]
+    pub tech_stack: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_digest: Option<String>,
+}
+
 /// Stable, durable step identifier for the aggregate initialization flow.
 ///
 /// The serialized string form (`as_str`) is the wire protocol and must not

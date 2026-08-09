@@ -118,6 +118,8 @@ pub struct WebAppState {
     pub provider_gate: Arc<ProviderAvailabilityGate>,
     pub command_runner: Arc<dyn BoundedCommandRunner>,
     repository_registration_dependencies: Option<RepositoryRegistrationDependencies>,
+    aggregate_initialization_dependencies:
+        Option<crate::web::handlers::AggregateInitializationDependencies>,
     pub test_provider_enabled: bool,
     provider_health_error: Arc<StdMutex<Option<String>>>,
     pub test_controls: TestControls,
@@ -178,6 +180,7 @@ impl WebAppState {
             provider_gate,
             command_runner,
             repository_registration_dependencies: None,
+            aggregate_initialization_dependencies: None,
             test_provider_enabled,
             provider_health_error: Arc::new(StdMutex::new(None)),
             test_controls,
@@ -280,6 +283,20 @@ impl WebAppState {
         &self,
     ) -> Option<RepositoryRegistrationDependencies> {
         self.repository_registration_dependencies.clone()
+    }
+
+    pub fn with_aggregate_initialization_dependencies(
+        mut self,
+        dependencies: crate::web::handlers::AggregateInitializationDependencies,
+    ) -> Self {
+        self.aggregate_initialization_dependencies = Some(dependencies);
+        self
+    }
+
+    pub(crate) fn aggregate_initialization_dependencies(
+        &self,
+    ) -> Option<crate::web::handlers::AggregateInitializationDependencies> {
+        self.aggregate_initialization_dependencies.clone()
     }
 
     pub async fn refresh_provider_health(&self) -> Arc<ProviderHealthSnapshot> {

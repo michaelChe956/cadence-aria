@@ -101,6 +101,9 @@ pub(crate) fn repository_dto(record: RepositoryRecord) -> RepositoryDto {
 mod repository_initialization;
 pub(crate) use repository_initialization::repository_initialization_operation_dto;
 
+mod aggregate_initialization;
+pub(crate) use aggregate_initialization::aggregate_initialization_dto;
+
 pub(crate) fn repository_initialization_result_dto(
     success: &crate::product::repository_store::RepositoryRegistrationSuccess,
 ) -> RepositoryInitializationResultDto {

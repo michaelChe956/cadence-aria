@@ -323,6 +323,13 @@ pub use repository_initialization::{
     RepositoryInitializationStepDto, RepositoryRegistrationInitializationDto,
 };
 
+mod aggregate_initialization;
+pub use aggregate_initialization::{
+    AggregateCancellationDto, AggregateInitializationOperationDto, AggregateInitializationStepDto,
+    AggregateMemberProjectionDto, CancelAggregateInitializationRequest,
+    CreateAggregateInitializationRequest,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateRepositoryRequest {

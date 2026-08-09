@@ -39,7 +39,8 @@ use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::logical_codebase::aggregate_initialization::{
     AggregateCancellationRecord, AggregateInitializationErrorRecord,
     AggregateInitializationOperation, AggregateInitializationOperationInput,
-    AggregateInitializationOperationStatus, AggregateInitializationStepKind,
+    AggregateInitializationOperationStatus, AggregateInitializationProfile,
+    AggregateInitializationStepKind, RepositoryTypeEvidence,
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
 use crate::product::logical_codebase::store::{LogicalCodebaseManifest, LogicalCodebaseStore};
@@ -165,6 +166,18 @@ pub struct MachineSkillsPreparation {
     pub warnings: Vec<String>,
 }
 
+/// Detects the repository type for one member checkout root without invoking
+/// package managers, build tools, package scripts, `pnpm install`, Node or
+/// Java. The detector only reads the member main checkout root (no recursion,
+/// no symlink following outside the root).
+pub trait RepositoryTypeDetector: Send + Sync {
+    fn detect(
+        &self,
+        checkout_root: &std::path::Path,
+        logical_repository_id: &str,
+    ) -> Result<RepositoryTypeEvidence, AggregateInitializationError>;
+}
+
 /// Drives `aggregate_preflight`: deterministic Cadence code that inspects the
 /// manifest, canonical non-Git aggregate root, member main checkouts and the
 /// aggregate index exclusion of assets, then returns the immutable snapshot.
@@ -227,6 +240,7 @@ pub struct AggregateInitializationCoordinator {
     skills: Arc<dyn AggregateSkillsPreparation>,
     preflight: Arc<dyn AggregatePreflightService>,
     provider: Arc<dyn AggregateProviderTurnDriver>,
+    detector: Arc<dyn RepositoryTypeDetector>,
     clock: Arc<Clock>,
 }
 
@@ -239,12 +253,36 @@ impl AggregateInitializationCoordinator {
         provider: Arc<dyn AggregateProviderTurnDriver>,
         clock: Arc<Clock>,
     ) -> Self {
+        Self::with_detector(
+            paths,
+            operations,
+            skills,
+            preflight,
+            provider,
+            Arc::new(DeterministicRepositoryTypeDetector::new()),
+            clock,
+        )
+    }
+
+    /// Construct a coordinator with an explicit repository-type detector,
+    /// allowing tests and future integrations to override profile detection
+    /// while keeping the five stable step IDs unchanged.
+    pub fn with_detector(
+        paths: ProductAppPaths,
+        operations: AggregateInitializationOperationStore,
+        skills: Arc<dyn AggregateSkillsPreparation>,
+        preflight: Arc<dyn AggregatePreflightService>,
+        provider: Arc<dyn AggregateProviderTurnDriver>,
+        detector: Arc<dyn RepositoryTypeDetector>,
+        clock: Arc<Clock>,
+    ) -> Self {
         Self {
             paths,
             operations,
             skills,
             preflight,
             provider,
+            detector,
             clock,
         }
     }
@@ -409,6 +447,72 @@ impl AggregateInitializationCoordinator {
                 }
                 other => AggregateInitializationError::Store(other),
             })
+    }
+
+    /// Resolve the aggregate initialization profile from read-only member
+    /// checkout signals. The detector only reads each member's main checkout
+    /// root; it never recurses, follows symlinks outside the root, executes
+    /// package scripts, runs `pnpm install`, Node or Java. The five stable
+    /// step IDs are unaffected — only the template/precheck selection changes.
+    pub fn preflight_profile(
+        &self,
+        project_id: &str,
+    ) -> Result<AggregateInitializationProfile, AggregateInitializationError> {
+        validate_relative_id(project_id).map_err(|error| {
+            AggregateInitializationError::state(project_id, format!("invalid project id: {error}"))
+        })?;
+        let _manifest = LogicalCodebaseStore::new(self.paths.clone())
+            .load_manifest(project_id)
+            .map_err(|error| AggregateInitializationError::Preflight {
+                reason: format!("manifest could not be loaded: {error}"),
+                retryable: true,
+            })?
+            .ok_or_else(|| AggregateInitializationError::Preflight {
+                reason: "logical codebase manifest is missing; register members first".to_string(),
+                retryable: false,
+            })?;
+        let store = LogicalCodebaseStore::new(self.paths.clone());
+        let members = store.list_members(project_id).map_err(|error| {
+            AggregateInitializationError::Preflight {
+                reason: format!("members could not be loaded: {error}"),
+                retryable: true,
+            }
+        })?;
+        let checkouts = store.list_checkouts(project_id).map_err(|error| {
+            AggregateInitializationError::Preflight {
+                reason: format!("checkouts could not be loaded: {error}"),
+                retryable: true,
+            }
+        })?;
+        let mut evidence = Vec::with_capacity(members.len());
+        for member in &members {
+            let main = checkouts
+                .iter()
+                .find(|checkout| checkout.logical_repository_id == member.logical_repository_id)
+                .ok_or_else(|| AggregateInitializationError::Preflight {
+                    reason: format!(
+                        "member {} has no recorded checkout",
+                        member.logical_repository_id.0
+                    ),
+                    retryable: false,
+                })?;
+            let detected = self.detector.detect(
+                &main.canonical_path,
+                &member.logical_repository_id.0.to_string(),
+            )?;
+            evidence.push(detected);
+        }
+        resolve_aggregate_profile(&evidence)
+    }
+
+    /// Profile-specific preflight command templates for the resolved profile.
+    /// Frontend pnpm/Vite never includes Maven/Gradle commands.
+    pub fn preflight_commands(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<String>, AggregateInitializationError> {
+        let profile = self.preflight_profile(project_id)?;
+        Ok(profile_preflight_commands(profile))
     }
 
     async fn run_machine_skills(
@@ -1009,6 +1113,129 @@ fn manifest_digest(manifest: &LogicalCodebaseManifest) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+/// Deterministic repository-type detector backed by
+/// [`crate::product::logical_codebase::RepositoryProfileDetector`]. Only reads
+/// the member main checkout root: it never recurses, follows symlinks outside
+/// the root, executes package scripts, runs `pnpm install`, Node or Java. The
+/// evidence digest makes the observation byte-stable for the preflight record.
+#[derive(Debug, Clone)]
+pub struct DeterministicRepositoryTypeDetector;
+
+impl DeterministicRepositoryTypeDetector {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for DeterministicRepositoryTypeDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RepositoryTypeDetector for DeterministicRepositoryTypeDetector {
+    fn detect(
+        &self,
+        checkout_root: &std::path::Path,
+        logical_repository_id: &str,
+    ) -> Result<RepositoryTypeEvidence, AggregateInitializationError> {
+        let profile =
+            crate::product::logical_codebase::RepositoryProfileDetector::detect(checkout_root)
+                .map_err(|error| AggregateInitializationError::Preflight {
+                    reason: format!(
+                        "repository type detection failed for {}: {error}",
+                        checkout_root.display()
+                    ),
+                    retryable: true,
+                })?;
+        let profile_digest = evidence_digest(logical_repository_id, &profile.tech_stack);
+        Ok(RepositoryTypeEvidence {
+            logical_repository_id: logical_repository_id.to_string(),
+            repo_type: profile.repo_type,
+            tech_stack: profile.tech_stack,
+            profile_digest: Some(profile_digest),
+        })
+    }
+}
+
+fn evidence_digest(logical_repository_id: &str, tech_stack: &[String]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(logical_repository_id.as_bytes());
+    hasher.update(tech_stack.join(",").as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Resolve the aggregate initialization profile from the per-member evidence.
+///
+/// - All members `Backend` (Java/Maven/Gradle) → `JavaBackend`.
+/// - All members `Frontend` (pnpm/Vite) → `FrontendPnpmVite`.
+/// - A mix of both (or `Mixed`) → `Mixed`.
+/// - Any `Unknown` member, or a profile that cannot be classified within the
+///   requested scope, fails preflight closed.
+pub fn resolve_aggregate_profile(
+    evidence: &[RepositoryTypeEvidence],
+) -> Result<AggregateInitializationProfile, AggregateInitializationError> {
+    use crate::product::logical_codebase::types::RepositoryType;
+    if evidence.is_empty() {
+        return Err(AggregateInitializationError::Preflight {
+            reason: "aggregate profile cannot be resolved without any members".to_string(),
+            retryable: false,
+        });
+    }
+    let mut any_backend = false;
+    let mut any_frontend = false;
+    for item in evidence {
+        match item.repo_type {
+            RepositoryType::Backend => any_backend = true,
+            RepositoryType::Frontend => any_frontend = true,
+            RepositoryType::Mixed => {
+                any_backend = true;
+                any_frontend = true;
+            }
+            RepositoryType::Library => {
+                // A pure library member does not by itself force a profile; it
+                // stays neutral and lets the backend/frontend members decide.
+            }
+            RepositoryType::Unknown => {
+                return Err(AggregateInitializationError::Preflight {
+                    reason: format!(
+                        "member {} has an unknown repository type; profile cannot be classified",
+                        item.logical_repository_id
+                    ),
+                    retryable: false,
+                });
+            }
+        }
+    }
+    Ok(match (any_backend, any_frontend) {
+        (true, false) => AggregateInitializationProfile::JavaBackend,
+        (false, true) => AggregateInitializationProfile::FrontendPnpmVite,
+        (false, false) => AggregateInitializationProfile::FrontendPnpmVite,
+        (true, true) => AggregateInitializationProfile::Mixed,
+    })
+}
+
+/// Profile-specific preflight command templates. Frontend pnpm/Vite never
+/// includes Maven/Gradle commands; the Java/Mixed templates carry the Java
+/// build commands. The five stable step IDs are unaffected.
+pub fn profile_preflight_commands(profile: AggregateInitializationProfile) -> Vec<String> {
+    match profile {
+        AggregateInitializationProfile::FrontendPnpmVite => vec![
+            "pnpm --version".to_string(),
+            "pnpm exec vite --version".to_string(),
+        ],
+        AggregateInitializationProfile::JavaBackend => vec![
+            "mvn -v".to_string(),
+            "git rev-parse --show-toplevel".to_string(),
+        ],
+        AggregateInitializationProfile::Mixed => vec![
+            "pnpm --version".to_string(),
+            "mvn -v".to_string(),
+            "git rev-parse --show-toplevel".to_string(),
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,14 +1244,18 @@ mod tests {
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperationInput;
     use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
+    use crate::product::logical_codebase::types::LogicalRepositoryId;
     use crate::product::logical_codebase::{
-        GatewayRunAudit, LogicalCodebaseProviderGateway, LogicalCodebaseStore, PolicyTarget,
-        PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderDialect,
-        ProviderGatewayError, ProviderRef, ProviderRefType, SessionLaunchRequest,
-        SessionPolicyAction,
+        CodebaseMemberRecord, GatewayRunAudit, LogicalCodebaseProviderGateway,
+        LogicalCodebaseStore, PolicyTarget, PolicyTargetResolver, ProviderCapability,
+        ProviderCapabilitySource, ProviderDialect, ProviderGatewayError, ProviderRef,
+        ProviderRefType, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
+        SessionLaunchRequest, SessionPolicyAction,
     };
     use crate::product::models::ProviderName;
+    use std::path::Path;
     use std::sync::Mutex;
+    use uuid::Uuid;
 
     const CREATED_AT: &str = "2026-08-09T00:00:00Z";
 
@@ -1821,5 +2052,242 @@ mod tests {
                 .is_err()
         );
         assert!(publisher.published_paths().is_empty());
+    }
+
+    // ---- Task 17: profile 预检与 frontend pnpm/Vite 选择 ----
+
+    /// 为 profile 预检构建一个真实的 logical codebase coordinator fixture:
+    /// 在 temp 目录创建 aggregate root、member main checkout 目录,并持久化
+    /// manifest + member + checkout。`member_root(name)` 返回该 member 的
+    /// main checkout 根,使测试可以在里面写 package.json / vite.config.ts。
+    struct ProfileFixture {
+        _temp: tempfile::TempDir,
+        _paths: ProductAppPaths,
+        member_roots: std::collections::HashMap<String, PathBuf>,
+        coordinator: AggregateInitializationCoordinator,
+    }
+
+    impl ProfileFixture {
+        /// 返回指定别名 member 的 main checkout 根,供测试写入 profile 信号。
+        fn member_root(&self, alias: &str) -> &Path {
+            self.member_roots
+                .get(alias)
+                .unwrap_or_else(|| panic!("unknown member alias {alias}"))
+        }
+
+        fn preflight_profile(
+            &self,
+        ) -> Result<AggregateInitializationProfile, AggregateInitializationError> {
+            self.coordinator.preflight_profile("project_0001")
+        }
+
+        fn preflight_commands(&self) -> Vec<String> {
+            self.coordinator.preflight_commands("project_0001").unwrap()
+        }
+    }
+
+    fn profile_fixture(member_aliases: &[&str]) -> ProfileFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let store = AggregateInitializationOperationStore::new(paths.clone());
+
+        let aggregate_root = temp.path().join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+
+        let mut member_roots = std::collections::HashMap::new();
+        let mut member_ids = Vec::new();
+        let lc_store = LogicalCodebaseStore::new(paths.clone());
+        for (ordinal, alias) in member_aliases.iter().enumerate() {
+            let member_dir = aggregate_root.join(alias);
+            std::fs::create_dir_all(&member_dir).unwrap();
+            let member_id = LogicalRepositoryId(Uuid::new_v4());
+            let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+            member_ids.push(member_id);
+            member_roots.insert((*alias).to_string(), member_dir.clone());
+            let now = CREATED_AT.to_string();
+            let member = CodebaseMemberRecord {
+                logical_repository_id: member_id,
+                physical_repository_id: format!("repository_{alias}"),
+                alias: (*alias).to_string(),
+                role: "service".to_string(),
+                ordinal: ordinal as u32,
+                source_identity: RepositorySourceIdentity::from_git_parts(
+                    &member_dir,
+                    member_dir.join(".git"),
+                    Some(format!("ssh://git@example.test/acme/{alias}.git")),
+                ),
+                repo_type: Default::default(),
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![checkout_id],
+                status: Default::default(),
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            lc_store.save_member("project_0001", &member).unwrap();
+            let now = CREATED_AT.to_string();
+            let checkout = RepositoryCheckoutRecord {
+                checkout_id,
+                logical_repository_id: member_id,
+                physical_repository_id: format!("repository_{alias}"),
+                kind: crate::product::logical_codebase::CheckoutKind::Main,
+                canonical_path: member_dir.clone(),
+                checkout_path_hash: "sha256:checkout".to_string(),
+                git_dir_identity: "sha256:git-dir".to_string(),
+                revision: Some("abc123".to_string()),
+                availability: crate::product::logical_codebase::CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            lc_store.save_checkout("project_0001", &checkout).unwrap();
+        }
+
+        let manifest = LogicalCodebaseManifest::new("project_0001", aggregate_root, member_ids);
+        lc_store.save_manifest("project_0001", &manifest).unwrap();
+
+        let skills_calls = Arc::new(Mutex::new(Vec::new()));
+        let preflight_calls = Arc::new(Mutex::new(Vec::new()));
+        let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
+            calls: skills_calls,
+        });
+        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService {
+            calls: preflight_calls,
+        });
+        let provider = Arc::new(FakeProviderTurnDriver::new());
+        let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
+        let coordinator = AggregateInitializationCoordinator::new(
+            paths.clone(),
+            store,
+            skills,
+            preflight,
+            provider,
+            clock,
+        );
+
+        ProfileFixture {
+            _temp: temp,
+            _paths: paths.clone(),
+            member_roots,
+            coordinator,
+        }
+    }
+
+    #[test]
+    fn frontend_pnpm_vite_profile_changes_templates_not_stable_step_layout() {
+        let fixture = profile_fixture(&["web"]);
+        std::fs::write(
+            fixture.member_root("web").join("package.json"),
+            r#"{"packageManager":"pnpm@9","devDependencies":{"vite":"1"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.member_root("web").join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.member_root("web").join("vite.config.ts"),
+            "export default {}",
+        )
+        .unwrap();
+
+        let profile = fixture.preflight_profile().unwrap();
+        assert_eq!(profile, AggregateInitializationProfile::FrontendPnpmVite);
+        assert_eq!(AggregateInitializationStepKind::V1.len(), 5);
+        assert!(
+            !fixture
+                .preflight_commands()
+                .iter()
+                .any(|command| command.contains("mvn") || command.contains("gradle"))
+        );
+    }
+
+    #[test]
+    fn java_backend_profile_resolves_when_all_members_are_backend() {
+        let fixture = profile_fixture(&["api"]);
+        std::fs::write(
+            fixture.member_root("api").join("pom.xml"),
+            "<project><modelVersion>4.0.0</modelVersion></project>",
+        )
+        .unwrap();
+
+        let profile = fixture.preflight_profile().unwrap();
+        assert_eq!(profile, AggregateInitializationProfile::JavaBackend);
+        assert!(
+            fixture
+                .preflight_commands()
+                .iter()
+                .any(|command| command.contains("mvn"))
+        );
+    }
+
+    #[test]
+    fn mixed_profile_resolves_when_backend_and_frontend_members_coexist() {
+        let fixture = profile_fixture(&["api", "web"]);
+        std::fs::write(
+            fixture.member_root("api").join("pom.xml"),
+            "<project><modelVersion>4.0.0</modelVersion></project>",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.member_root("web").join("package.json"),
+            r#"{"packageManager":"pnpm@9"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.member_root("web").join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.member_root("web").join("vite.config.ts"),
+            "export default {}",
+        )
+        .unwrap();
+
+        let profile = fixture.preflight_profile().unwrap();
+        assert_eq!(profile, AggregateInitializationProfile::Mixed);
+    }
+
+    #[test]
+    fn unknown_profile_fails_preflight_closed() {
+        let fixture = profile_fixture(&["stray"]);
+        // No recognizable signals -> detect returns Unknown -> preflight fails closed.
+        let error = fixture.preflight_profile().unwrap_err();
+        assert!(matches!(
+            error,
+            AggregateInitializationError::Preflight { .. }
+        ));
+    }
+
+    #[test]
+    fn profile_preflight_commands_are_profile_specific_and_keep_five_step_layout() {
+        // Frontend pnpm/Vite precheck never includes Maven/Gradle commands.
+        let frontend = profile_preflight_commands(AggregateInitializationProfile::FrontendPnpmVite);
+        assert!(frontend.iter().any(|command| command.contains("pnpm")));
+        assert!(
+            !frontend
+                .iter()
+                .any(|command| command.contains("mvn") || command.contains("gradle"))
+        );
+
+        // Java backend includes Maven.
+        let java = profile_preflight_commands(AggregateInitializationProfile::JavaBackend);
+        assert!(java.iter().any(|command| command.contains("mvn")));
+
+        // Mixed composes both namespaced command sets.
+        let mixed = profile_preflight_commands(AggregateInitializationProfile::Mixed);
+        assert!(mixed.iter().any(|command| command.contains("mvn")));
+        assert!(mixed.iter().any(|command| command.contains("pnpm")));
+
+        // The five stable step IDs never change regardless of profile.
+        assert_eq!(
+            AggregateInitializationStepKind::V1.len(),
+            5,
+            "profile selection must not change the stable step layout"
+        );
     }
 }
