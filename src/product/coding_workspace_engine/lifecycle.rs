@@ -1,5 +1,6 @@
 use super::*;
 use crate::product::coding_models::CodingAttemptScope;
+use std::sync::Arc;
 
 impl CodingWorkspaceEngine {
     pub fn new(
@@ -13,7 +14,19 @@ impl CodingWorkspaceEngine {
             _git_service: git_service,
             event_tx: CancellableCodingEventSender::new(event_tx, cancellation.clone()),
             cancellation,
+            logical_provider_gateway: None,
         }
+    }
+
+    /// 注入逻辑代码库 provider gateway。Task 11:Web 接入 task 为逻辑代码库 issue
+    /// 构造 gateway 后调用此方法,使 provider stream 经 gateway 启动;未调用时
+    /// 引擎保留直接 `provider.start` 路径。
+    pub fn with_logical_provider_gateway(
+        mut self,
+        gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
+    ) -> Self {
+        self.logical_provider_gateway = Some(gateway);
+        self
     }
 
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {

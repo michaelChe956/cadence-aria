@@ -251,6 +251,7 @@ impl CodingWorkspaceEngine {
                     timeout: None,
                     timeout_reason_code: None,
                     suppress_failure_side_effects: true,
+                    validated_input: None,
                 })
                 .await;
             if let Some(outcome) = self
@@ -383,6 +384,7 @@ impl CodingWorkspaceEngine {
                     timeout: None,
                     timeout_reason_code: None,
                     suppress_failure_side_effects: true,
+                    validated_input: None,
                 })
                 .await;
             if let Some(outcome) = self

@@ -299,20 +299,88 @@ pub trait ProviderCapabilitySource: Send + Sync {
     ) -> Result<ProviderCapability, ProviderGatewayError>;
 }
 
+/// gateway 成功启动的审计条目。Task 11 把同步/流式 provider 全入口接线到
+/// gateway,每条成功启动(sync 或 stream)都留下一份可核对的 policy digest,
+/// 使「逻辑代码库真实 provider 调用是否经 gateway」可被断言,而非仅靠代码审查。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayRunAuditEntry {
+    /// 启动栈:`Sync` 为同步 adapter run(work item split),`Stream` 为流式
+    /// provider start(planning/coding/review/aggregate initialization)。
+    pub stack: GatewayRunStack,
+    /// 该次启动冻结的 envelope policy digest(`SessionPolicyEnvelope::policy_digest`)。
+    pub policy_digest: String,
+}
+
+/// 审计记录的启动栈类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayRunStack {
+    Sync,
+    Stream,
+}
+
+/// gateway 启动审计。线程安全,供 fixture 与未来生产侧观测在 gateway 之外检查
+/// 启动计数与 policy digest 完整性。
+#[derive(Debug, Default)]
+pub struct GatewayRunAudit {
+    entries: std::sync::Mutex<Vec<GatewayRunAuditEntry>>,
+}
+
+impl GatewayRunAudit {
+    /// 构造一个空的审计记录。gateway 构造时默认注入一个独立实例;测试 fixture
+    /// 通过 `shared()` 共享同一份审计,跨多次 gateway 构造累计。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn record(&self, stack: GatewayRunStack, policy_digest: String) {
+        let mut entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        entries.push(GatewayRunAuditEntry {
+            stack,
+            policy_digest,
+        });
+    }
+
+    /// 同步栈成功启动次数。
+    pub fn sync_launches(&self) -> usize {
+        let entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        entries
+            .iter()
+            .filter(|entry| entry.stack == GatewayRunStack::Sync)
+            .count()
+    }
+
+    /// 流式栈成功启动次数。
+    pub fn stream_launches(&self) -> usize {
+        let entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        entries
+            .iter()
+            .filter(|entry| entry.stack == GatewayRunStack::Stream)
+            .count()
+    }
+
+    /// 全部成功启动是否都携带非空 policy digest。空审计返回 false。
+    pub fn all_have_policy_digest(&self) -> bool {
+        let entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        !entries.is_empty() && entries.iter().all(|entry| !entry.policy_digest.is_empty())
+    }
+}
+
 /// 逻辑代码库真实 provider 的唯一建造与启动入口。
 ///
 /// 构造时注入 policy store、capability source、target resolver、真实 provider
 /// registry 与 availability gate。`validate` 产出 opaque
 /// `ValidatedSessionLaunchPolicy`,后者只能经此方法取得;`start_streaming`/
 /// `run_sync` 只接受绑定该 policy 的 validated input,并在 spawn 前重新复验
-/// canonical cwd/git-dir/worktree identity 与 provider 可用性。
+/// canonical cwd/git-dir/worktree identity 与 provider 可用性。每次成功启动都
+/// 写入 `audit`(Task 11),使逻辑代码库真实 provider 调用经 gateway 这一事实可审计。
 pub struct LogicalCodebaseProviderGateway {
     policies: AggregatePolicyArtifactStore,
     capabilities: Arc<dyn ProviderCapabilitySource>,
     targets: Arc<dyn PolicyTargetResolver>,
     registry: Arc<ProviderRegistry>,
-    sync_adapter: Arc<dyn crate::cross_cutting::provider_adapter::ProviderAdapter>,
+    sync_adapter: Arc<dyn crate::cross_cutting::provider_adapter::ProviderAdapter + Send + Sync>,
     availability_gate: Arc<ProviderAvailabilityGate>,
+    audit: Arc<GatewayRunAudit>,
 }
 
 impl LogicalCodebaseProviderGateway {
@@ -321,7 +389,9 @@ impl LogicalCodebaseProviderGateway {
         capabilities: Arc<dyn ProviderCapabilitySource>,
         targets: Arc<dyn PolicyTargetResolver>,
         registry: Arc<ProviderRegistry>,
-        sync_adapter: Arc<dyn crate::cross_cutting::provider_adapter::ProviderAdapter>,
+        sync_adapter: Arc<
+            dyn crate::cross_cutting::provider_adapter::ProviderAdapter + Send + Sync,
+        >,
         availability_gate: Arc<ProviderAvailabilityGate>,
     ) -> Self {
         Self {
@@ -331,7 +401,38 @@ impl LogicalCodebaseProviderGateway {
             registry,
             sync_adapter,
             availability_gate,
+            audit: Arc::new(GatewayRunAudit::new()),
         }
+    }
+
+    /// 共享同一份启动审计构造 gateway。测试 fixture 用同一 `Arc<GatewayRunAudit>`
+    /// 跨多次 `gateway()` 构造累计启动记录;生产侧未来可注入跨实例审计。
+    pub fn with_audit(
+        policies: AggregatePolicyArtifactStore,
+        capabilities: Arc<dyn ProviderCapabilitySource>,
+        targets: Arc<dyn PolicyTargetResolver>,
+        registry: Arc<ProviderRegistry>,
+        sync_adapter: Arc<
+            dyn crate::cross_cutting::provider_adapter::ProviderAdapter + Send + Sync,
+        >,
+        availability_gate: Arc<ProviderAvailabilityGate>,
+        audit: Arc<GatewayRunAudit>,
+    ) -> Self {
+        Self {
+            policies,
+            capabilities,
+            targets,
+            registry,
+            sync_adapter,
+            availability_gate,
+            audit,
+        }
+    }
+
+    /// 返回启动审计的共享句柄。供外部(测试 fixture、未来生产侧)观测启动计数与
+    /// policy digest 完整性。
+    pub fn audit(&self) -> Arc<GatewayRunAudit> {
+        self.audit.clone()
     }
 
     /// 校验启动请求并产出不可缺省的 validated policy。fail-closed:缺失政策返回
@@ -397,10 +498,13 @@ impl LogicalCodebaseProviderGateway {
         let is_resume = input.resume_provider_session_id.is_some();
         self.revalidate_before_spawn(&validated, &input.working_dir, is_resume)?;
         let adapter = self.lookup_real_streaming_adapter(&validated)?;
-        adapter
+        let policy_digest = validated.envelope().policy_digest.clone();
+        let session = adapter
             .start(input, cancel)
             .await
-            .map_err(ProviderGatewayError::Adapter)
+            .map_err(ProviderGatewayError::Adapter)?;
+        self.audit.record(GatewayRunStack::Stream, policy_digest);
+        Ok(session)
     }
 
     /// 同步运行 adapter。只接受绑定 validated policy 的 input;spawn 前基于
@@ -419,9 +523,13 @@ impl LogicalCodebaseProviderGateway {
             .ok_or(ProviderGatewayError::MissingCwd)?;
         // 同步 adapter input 不携带 resume session id;同步路径默认非 resume。
         self.revalidate_before_spawn(&validated, cwd, false)?;
-        self.sync_adapter
+        let policy_digest = validated.envelope().policy_digest.clone();
+        let output = self
+            .sync_adapter
             .run(&input)
-            .map_err(ProviderGatewayError::Adapter)
+            .map_err(ProviderGatewayError::Adapter)?;
+        self.audit.record(GatewayRunStack::Sync, policy_digest);
+        Ok(output)
     }
 
     /// spawn 前完整复验(B-1)。逐维度比对 envelope 冻结值与 spawn 时点的真实值:
@@ -575,675 +683,5 @@ pub fn ensure_bootstrap_policy(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::product::app_paths::ProductAppPaths;
-    use crate::product::logical_codebase::policy::PolicyTarget;
-    use crate::product::logical_codebase::store::LogicalCodebaseManifest;
-
-    /// 验证 bootstrap 政策在 gateway 能校验首次启动前被持久化。
-    ///
-    /// 缺失政策时 fail-closed 为 `PolicyMissing`;`ensure_bootstrap` 写出 revision 1
-    /// 的 bootstrap artifact 后,gateway 可校验 planning 只读启动并冻结 envelope。
-    #[test]
-    fn bootstrap_policy_is_persisted_before_gateway_can_validate_a_launch() {
-        let fixture = gateway_fixture();
-        assert!(matches!(
-            fixture.gateway().validate(fixture.planning_request()),
-            Err(ProviderGatewayError::PolicyMissing(_))
-        ));
-
-        fixture.install_bootstrap_policy();
-        let validated = fixture
-            .gateway()
-            .validate(fixture.planning_request())
-            .unwrap();
-        assert_eq!(validated.envelope().policy_revision, 1);
-        assert_eq!(
-            validated.envelope().action,
-            SessionPolicyAction::PlanningReadOnly,
-        );
-    }
-
-    /// validated policy 的字段对外不可直接构造:没有 public constructor,getter 是
-    /// 唯一访问方式。编译期保证只能由 gateway 产出。
-    #[test]
-    fn validated_policy_only_exposes_getters_and_cannot_be_constructed_outside_module() {
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-        let validated = fixture
-            .gateway()
-            .validate(fixture.planning_request())
-            .unwrap();
-
-        // getter 返回冻结的引用;外部无法修改字段或凭空重建 validated policy。
-        assert_eq!(validated.envelope().policy_revision, 1);
-        assert!(validated.fingerprint().digest.starts_with("sha256:"));
-    }
-
-    /// fingerprint 随 provider exact version 与 capability snapshot 变化:任一漂移
-    /// 都应产生不同 digest,保证 resume 复验能检测 provider 侧变更。
-    #[test]
-    fn resume_fingerprint_changes_when_provider_version_or_snapshot_drifts() {
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-
-        let baseline = fixture
-            .gateway()
-            .validate(fixture.planning_request())
-            .unwrap();
-        let baseline_digest = baseline.fingerprint().digest.clone();
-
-        fixture.capabilities.set_version("1.4.1");
-        let drifted = fixture
-            .gateway()
-            .validate(fixture.planning_request())
-            .unwrap();
-        assert_ne!(drifted.fingerprint().digest, baseline_digest);
-    }
-
-    /// 直接构造 `ValidatedSessionLaunchPolicy { envelope, fingerprint }` 在本模块外
-    /// 不可行(struct literal 构造需要字段可见)。此处用 doctest-like 断言:gateway
-    /// 返回值只能经 getter 访问,确认 opaque 边界由 privacy 保护。
-    #[test]
-    fn opaque_policy_blocks_struct_literal_construction_outside_module() {
-        // 编译期约束:ValidatedSessionLaunchPolicy 的字段是 private,本测试模块虽在
-        // 同一文件但通过公开 API 访问,模拟外部调用方。外部 crate 无法构造该 struct。
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-        let validated = fixture
-            .gateway()
-            .validate(fixture.planning_request())
-            .unwrap();
-        // 只能读 getter,无法读字段或重建。
-        let _envelope = validated.envelope();
-        let _fingerprint = validated.fingerprint();
-    }
-
-    /// spawn 前 canonical 复验:validate 阶段 target resolver 检测到 git_dir 在
-    /// request 构造后被篡改(TOCTOU),返回 `TargetMismatch { field: "git_dir" }`,
-    /// 且复验失败发生在 registry lookup/真实 adapter start 之前(start_count == 0)。
-    #[test]
-    fn gateway_revalidates_canonical_target_git_dir_and_managed_config_before_spawn() {
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-        let request = fixture.coding_request("/work/api/.worktrees/aria-issues/issue_1");
-        fixture
-            .targets()
-            .change_git_dir_after_request("/work/api/.git-replaced");
-
-        let error = fixture.gateway().validate(request).unwrap_err();
-        assert!(
-            matches!(error, ProviderGatewayError::TargetMismatch { ref field } if field == "git_dir")
-        );
-        assert_eq!(fixture.registry_start_count(), 0);
-    }
-
-    /// read-only action(planning/review)没有 write root;coding action 恰好一个
-    /// 等于 canonical target worktree 的 write root。envelope 在 validate 时冻结该约束。
-    #[test]
-    fn planning_and_review_have_no_write_root_while_coding_has_exactly_target_root() {
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-        assert!(
-            fixture
-                .gateway()
-                .validate(fixture.planning_request())
-                .unwrap()
-                .envelope()
-                .writable_roots
-                .is_empty()
-        );
-        assert_eq!(
-            fixture
-                .gateway()
-                .validate(fixture.coding_request("/work/api/.worktrees/aria-issues/issue_1"))
-                .unwrap()
-                .envelope()
-                .writable_roots,
-            vec![PathBuf::from("/work/api/.worktrees/aria-issues/issue_1")]
-        );
-    }
-
-    /// spawn 前复验(B-1):validate 后、start_streaming 前政策被升级(revision+digest
-    /// 变化),spawn 必须以 `PolicyDrift { dimension: "policy_revision" }` fail-closed,
-    /// 且不触达 registry(start_count == 0)。
-    #[test]
-    fn start_streaming_fails_closed_when_policy_upgraded_between_validate_and_spawn() {
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-        let worktree = fixture.real_worktree();
-        let launch = fixture.validated_planning_streaming_input(worktree);
-
-        // validate→spawn 之间政策被升级到 revision 2。
-        fixture.upgrade_policy();
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let result = runtime.block_on(
-            fixture
-                .gateway()
-                .start_streaming(launch, CancellationToken::new()),
-        );
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("expected PolicyDrift, got a session"),
-        };
-        assert!(
-            matches!(error, ProviderGatewayError::PolicyDrift { ref dimension } if dimension == "policy_revision")
-        );
-        assert_eq!(fixture.registry_start_count(), 0);
-    }
-
-    /// spawn 前复验(B-1):validate 后、start_streaming 前 provider version 被改
-    /// (capability source 返回不同 version),spawn 必须以
-    /// `PolicyDrift { dimension: "provider_version" }` fail-closed,不触达 registry。
-    #[test]
-    fn start_streaming_rejects_provider_version_change_before_spawn() {
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-        let worktree = fixture.real_worktree();
-        let launch = fixture.validated_planning_streaming_input(worktree);
-
-        fixture.capabilities().set_version("1.4.1");
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let result = runtime.block_on(
-            fixture
-                .gateway()
-                .start_streaming(launch, CancellationToken::new()),
-        );
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("expected PolicyDrift, got a session"),
-        };
-        assert!(
-            matches!(error, ProviderGatewayError::PolicyDrift { ref dimension } if dimension == "provider_version")
-        );
-        assert_eq!(fixture.registry_start_count(), 0);
-    }
-
-    /// spawn 前复验(B-1):validate 后、run_sync 前政策被升级,同步路径同样 fail-closed
-    /// 为 `PolicyDrift`,不触达真实 sync adapter(此处表现为返回错误而非成功)。
-    #[test]
-    fn run_sync_fails_closed_when_policy_upgraded_between_validate_and_spawn() {
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-        let worktree = fixture.real_worktree();
-        let request = SessionLaunchRequest::planning(
-            fixture.manifest().project_id,
-            ProviderRef::claude_code("cap_claude_code_1_4_0"),
-            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
-            vec![fixture.paths.root().to_path_buf()],
-            "sha256:managed-config-artifact",
-        );
-        let validated = fixture.gateway().validate(request).unwrap();
-        let input = crate::protocol::contracts::AdapterInput {
-            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
-            role: crate::protocol::contracts::AdapterRole::Executor,
-            worktree_path: Some(worktree.to_string_lossy().to_string()),
-            provider_stream_log_dir: None,
-            prompt: "probe".to_string(),
-            context_files: Vec::new(),
-            output_schema: String::new(),
-            timeout: 1,
-            max_retries: 0,
-        };
-        let launch = ValidatedAdapterInput::new(input, validated);
-
-        fixture.upgrade_policy();
-
-        let error = fixture.gateway().run_sync(launch).unwrap_err();
-        assert!(
-            matches!(error, ProviderGatewayError::PolicyDrift { ref dimension } if dimension == "policy_revision")
-        );
-    }
-
-    /// resume 能力 fail-closed(B-2 消费者):resume 启动时 provider 的
-    /// `resume_evidence` 不是 `Confirmed` → spawn 拒绝(`ResumeNotSupported`),不触达
-    /// registry。这使 `resume_evidence` 三态成为有消费者的 fail-closed 门禁,而非
-    /// dead field。
-    #[test]
-    fn start_streaming_resume_is_rejected_when_resume_evidence_not_confirmed() {
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-        let worktree = fixture.real_worktree();
-        // resume 启动:streaming input 携带 resume_provider_session_id。
-        let validated = fixture
-            .gateway()
-            .validate(fixture.planning_request())
-            .unwrap();
-        let input = fixture.streaming_input(worktree, Some("sess_resume_0001".to_string()));
-        let launch = ValidatedStreamingProviderInput::new(input, validated);
-
-        // provider 标记 resume 不支持(三态 Unknown/Denied 在 gateway 侧归为 Unsupported)。
-        fixture
-            .capabilities()
-            .set_resume_evidence(ResumeEvidenceState::Unsupported);
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let result = runtime.block_on(
-            fixture
-                .gateway()
-                .start_streaming(launch, CancellationToken::new()),
-        );
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("expected ResumeNotSupported, got a session"),
-        };
-        assert!(matches!(error, ProviderGatewayError::ResumeNotSupported));
-        assert_eq!(fixture.registry_start_count(), 0);
-    }
-
-    /// resume 能力放行路径(B-2):`resume_evidence` 为 `Confirmed` 时 resume 启动通过复验
-    /// 并触达 registry(start_count == 1),确认消费者只在非 Confirmed 时阻断。
-    #[tokio::test]
-    async fn start_streaming_resume_passes_when_resume_evidence_confirmed() {
-        let fixture = gateway_fixture();
-        fixture.install_bootstrap_policy();
-        let worktree = fixture.real_worktree();
-        // planning 请求的 target worktree 必须等于真实 worktree,使 cwd 复验通过。
-        let request = SessionLaunchRequest::planning(
-            fixture.manifest().project_id,
-            ProviderRef::claude_code("cap_claude_code_1_4_0"),
-            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
-            vec![fixture.paths.root().to_path_buf()],
-            "sha256:managed-config-artifact",
-        );
-        let validated = fixture.gateway().validate(request).unwrap();
-        let input = fixture.streaming_input(worktree, Some("sess_resume_0001".to_string()));
-        let launch = ValidatedStreamingProviderInput::new(input, validated);
-
-        fixture
-            .capabilities()
-            .set_resume_evidence(ResumeEvidenceState::Confirmed);
-
-        let _session = fixture
-            .gateway()
-            .start_streaming(launch, CancellationToken::new())
-            .await
-            .expect("resume launch passes when evidence confirmed");
-        assert_eq!(fixture.registry_start_count(), 1);
-    }
-
-    /// 可变 target resolver:模拟 spawn 前 git_dir TOCTOU。初始 current 与
-    /// expected 一致(resolve 通过);`change_git_dir_after_request` 后 current
-    /// 偏离 expected,resolve 返回 `TargetMismatch { field: "git_dir" }`。
-    struct MutableTargetResolver {
-        expected_git_dir: PathBuf,
-        current_git_dir: std::sync::Mutex<PathBuf>,
-    }
-
-    impl MutableTargetResolver {
-        fn new(git_dir: PathBuf) -> Self {
-            let current = git_dir.clone();
-            Self {
-                expected_git_dir: git_dir,
-                current_git_dir: std::sync::Mutex::new(current),
-            }
-        }
-
-        fn change_git_dir_after_request(&self, git_dir: impl Into<PathBuf>) {
-            *self.current_git_dir.lock().unwrap() = git_dir.into();
-        }
-    }
-
-    impl PolicyTargetResolver for MutableTargetResolver {
-        fn resolve_and_revalidate(
-            &self,
-            request: &SessionLaunchRequest,
-        ) -> Result<PolicyTarget, ProviderGatewayError> {
-            let current = self.current_git_dir.lock().unwrap().clone();
-            if current != self.expected_git_dir {
-                return Err(ProviderGatewayError::TargetMismatch {
-                    field: "git_dir".to_string(),
-                });
-            }
-            Ok(request.target.clone())
-        }
-    }
-
-    /// 测试用 capability source:返回固定 capability,version 可调以驱动 fingerprint 漂移。
-    /// 测试用 capability source:version 与 resume 能力可调,以驱动 spawn 前
-    /// 复验指纹漂移与 resume fail-closed。
-    struct StaticCapabilitySource {
-        version: std::sync::Mutex<String>,
-        resume_evidence: std::sync::Mutex<ResumeEvidenceState>,
-    }
-
-    impl StaticCapabilitySource {
-        fn new(version: &str) -> Self {
-            Self {
-                version: std::sync::Mutex::new(version.to_string()),
-                resume_evidence: std::sync::Mutex::new(ResumeEvidenceState::Confirmed),
-            }
-        }
-
-        fn set_version(&self, version: &str) {
-            *self.version.lock().unwrap() = version.to_string();
-        }
-
-        fn set_resume_evidence(&self, state: ResumeEvidenceState) {
-            *self.resume_evidence.lock().unwrap() = state;
-        }
-    }
-
-    impl ProviderCapabilitySource for StaticCapabilitySource {
-        fn require_supported(
-            &self,
-            provider: &ProviderRef,
-            _action: SessionPolicyAction,
-        ) -> Result<ProviderCapability, ProviderGatewayError> {
-            let version = self.version.lock().unwrap().clone();
-            let resume_evidence = *self.resume_evidence.lock().unwrap();
-            let adapter_dialect = match provider.provider_type {
-                ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
-                ProviderRefType::Codex => ProviderDialect::CodexCliV1,
-            };
-            Ok(ProviderCapability {
-                provider_type: provider.provider_type,
-                version,
-                adapter_dialect,
-                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
-                resume_evidence,
-            })
-        }
-    }
-
-    /// 测试用 streaming adapter:记录 start 调用次数,供断言「复验失败不触达 registry」。
-    struct CountingStreamingAdapter {
-        start_count: std::sync::atomic::AtomicUsize,
-    }
-
-    impl CountingStreamingAdapter {
-        fn new() -> Self {
-            Self {
-                start_count: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
-
-        fn start_count(&self) -> usize {
-            self.start_count.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
-        for CountingStreamingAdapter
-    {
-        async fn start(
-            &self,
-            _input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
-            _cancel: tokio_util::sync::CancellationToken,
-        ) -> Result<
-            crate::cross_cutting::streaming_provider::ProviderSession,
-            crate::cross_cutting::provider_adapter::ProviderAdapterError,
-        > {
-            self.start_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let (_event_tx, events) = tokio::sync::mpsc::channel(1);
-            let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
-            Ok(crate::cross_cutting::streaming_provider::ProviderSession { events, commands })
-        }
-    }
-
-    /// 测试用同步 adapter stub:run 返回最小成功输出。
-    struct StubSyncAdapter;
-
-    impl crate::cross_cutting::provider_adapter::ProviderAdapter for StubSyncAdapter {
-        fn run(
-            &self,
-            _input: &crate::protocol::contracts::AdapterInput,
-        ) -> Result<
-            crate::protocol::contracts::AdapterOutput,
-            crate::cross_cutting::provider_adapter::ProviderAdapterError,
-        > {
-            use crate::protocol::contracts::TimeoutStatus;
-            Ok(crate::protocol::contracts::AdapterOutput {
-                exit_code: Some(0),
-                stdout: "ok".to_string(),
-                stderr: String::new(),
-                structured_output: None,
-                files_modified: Vec::new(),
-                duration_ms: 0,
-                timeout_status: TimeoutStatus::NotTimedOut,
-            })
-        }
-    }
-
-    /// 始终可用的 availability gate fixture:health snapshot 标记所有真实 provider 可用。
-    fn always_available_gate()
-    -> Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
-        use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
-        use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
-        use crate::product::models::ProviderName;
-        use chrono::Utc;
-
-        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
-        impl ProviderHealthSource for AlwaysHealthy {
-            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
-                self.0.clone()
-            }
-            fn degraded(&self) -> bool {
-                false
-            }
-        }
-
-        let checked_at = Utc::now();
-        let snapshot = Arc::new(ProviderHealthSnapshot {
-            schema_version: 1,
-            generation: 1,
-            checked_at,
-            providers: [ProviderName::ClaudeCode, ProviderName::Codex]
-                .into_iter()
-                .map(|provider| ProviderHealthEntry {
-                    provider,
-                    command: "stub".to_string(),
-                    available: true,
-                    version: Some("1.0".to_string()),
-                    reason_code: None,
-                    reason: None,
-                    checked_at,
-                })
-                .collect(),
-        });
-        Arc::new(
-            crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::new(
-                Arc::new(AlwaysHealthy(snapshot)),
-            ),
-        )
-    }
-
-    struct GatewayFixture {
-        _root: tempfile::TempDir,
-        paths: ProductAppPaths,
-        capabilities: Arc<StaticCapabilitySource>,
-        targets: Arc<MutableTargetResolver>,
-        streaming_adapter: Arc<CountingStreamingAdapter>,
-        sync_adapter: Arc<StubSyncAdapter>,
-        gate: Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate>,
-    }
-
-    fn gateway_fixture() -> GatewayFixture {
-        let root = tempfile::tempdir().expect("temporary product root");
-        let paths = ProductAppPaths::new(root.path());
-        let baseline_git_dir = paths.root().join("baseline.git");
-        GatewayFixture {
-            _root: root,
-            paths,
-            capabilities: Arc::new(StaticCapabilitySource::new("1.4.0")),
-            targets: Arc::new(MutableTargetResolver::new(baseline_git_dir)),
-            streaming_adapter: Arc::new(CountingStreamingAdapter::new()),
-            sync_adapter: Arc::new(StubSyncAdapter),
-            gate: always_available_gate(),
-        }
-    }
-
-    impl GatewayFixture {
-        fn manifest(&self) -> LogicalCodebaseManifest {
-            LogicalCodebaseManifest::new("project_0001", self.paths.root().to_path_buf(), vec![])
-        }
-
-        fn policy_store(&self) -> AggregatePolicyArtifactStore {
-            AggregatePolicyArtifactStore::new(self.paths.clone())
-        }
-
-        fn install_bootstrap_policy(&self) {
-            let manifest = self.manifest();
-            self.policy_store().ensure_bootstrap(&manifest).unwrap();
-        }
-
-        fn gateway(&self) -> LogicalCodebaseProviderGateway {
-            let mut registry = ProviderRegistry::new();
-            registry.register(ProviderName::ClaudeCode, self.streaming_adapter.clone());
-            registry.register(ProviderName::Codex, self.streaming_adapter.clone());
-            LogicalCodebaseProviderGateway::new(
-                self.policy_store(),
-                self.capabilities.clone(),
-                self.targets.clone(),
-                Arc::new(registry),
-                self.sync_adapter.clone(),
-                self.gate.clone(),
-            )
-        }
-
-        fn targets(&self) -> Arc<MutableTargetResolver> {
-            self.targets.clone()
-        }
-
-        fn capabilities(&self) -> Arc<StaticCapabilitySource> {
-            self.capabilities.clone()
-        }
-
-        fn registry_start_count(&self) -> usize {
-            self.streaming_adapter.start_count()
-        }
-
-        /// 将 store 中的 policy artifact 升级到 revision 2(新 policy_text + 新 digest),
-        /// 模拟 validate→spawn 之间政策被升级(TOCTOU)。
-        fn upgrade_policy(&self) {
-            let manifest = self.manifest();
-            let store = self.policy_store();
-            let current = store.get(&manifest.project_id).unwrap().unwrap();
-            let revised = current.with_revised_policy(
-                "# Aggregate policy (revision 2)\n\nTighter supervised scope.\n",
-                manifest.updated_at.clone(),
-            );
-            store.save(&manifest.project_id, &revised).unwrap();
-        }
-
-        /// 创建一个真实存在的 worktree 目录(用于 spawn 前 canonicalize 复验)。
-        fn real_worktree(&self) -> PathBuf {
-            let worktree = self.paths.root().join("worktree");
-            std::fs::create_dir_all(&worktree).unwrap();
-            worktree
-        }
-
-        /// 无参便利方法:返回 planning 只读请求(内部用 manifest())。
-        fn planning_request(&self) -> SessionLaunchRequest {
-            self.planning_request_for_manifest(&self.manifest())
-        }
-
-        fn planning_request_for_manifest(
-            &self,
-            manifest: &LogicalCodebaseManifest,
-        ) -> SessionLaunchRequest {
-            let target = PolicyTarget::checkout(
-                "logical_repo_0001",
-                "checkout_0001",
-                self.paths.root().join("worktree"),
-            );
-            SessionLaunchRequest::planning(
-                &manifest.project_id,
-                ProviderRef::claude_code("cap_claude_code_1_4_0"),
-                target,
-                vec![self.paths.root().to_path_buf()],
-                "sha256:managed-config-artifact",
-            )
-        }
-
-        /// coding 请求:恰好一个等于 canonical target worktree 的 write root。
-        fn coding_request(&self, worktree: impl Into<PathBuf>) -> SessionLaunchRequest {
-            let manifest = self.manifest();
-            let worktree = worktree.into();
-            let target =
-                PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone());
-            SessionLaunchRequest {
-                project_id: manifest.project_id,
-                provider: ProviderRef::claude_code("cap_claude_code_1_4_0"),
-                action: SessionPolicyAction::CodingTargetWrite,
-                target,
-                readable_roots: vec![self.paths.root().to_path_buf()],
-                writable_roots: vec![worktree],
-                config_artifact_ref: "sha256:managed-config-artifact".to_string(),
-            }
-        }
-
-        /// 针对真实 worktree 目录构造一个 planning 只读 validated streaming input。
-        /// worktree 必须真实存在(spawn 前 canonicalize 复验需要)。
-        fn validated_planning_streaming_input(
-            self: &GatewayFixture,
-            worktree: PathBuf,
-        ) -> ValidatedStreamingProviderInput {
-            let request = SessionLaunchRequest::planning(
-                self.manifest().project_id,
-                ProviderRef::claude_code("cap_claude_code_1_4_0"),
-                PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
-                vec![self.paths.root().to_path_buf()],
-                "sha256:managed-config-artifact",
-            );
-            let validated = self.gateway().validate(request).unwrap();
-            ValidatedStreamingProviderInput::new(self.streaming_input(worktree, None), validated)
-        }
-
-        /// 构造一个 streaming input;resume 设 `resume_provider_session_id`。
-        fn streaming_input(
-            &self,
-            working_dir: PathBuf,
-            resume_id: Option<String>,
-        ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
-            use crate::cross_cutting::streaming_provider::{
-                ProviderPermissionMode, StreamingProviderInput,
-            };
-            use crate::protocol::contracts::{AdapterRole, ProviderType};
-            StreamingProviderInput {
-                provider_type: ProviderType::ClaudeCode,
-                role: AdapterRole::Executor,
-                prompt: "probe".to_string(),
-                working_dir,
-                workspace_session_id: None,
-                resume_provider_session_id: resume_id,
-                permission_mode: ProviderPermissionMode::Auto,
-                structured_output_contract: None,
-                env_vars: Default::default(),
-                timeout_secs: 1,
-            }
-        }
-    }
-
-    /// bridge 映射(B-2):`cross_cutting::ProviderCapabilityEvidence` 三态经
-    /// `ResumeEvidenceState::from_cross_cutting_evidence` 进入 gateway 消费路径。
-    /// 仅 `Confirmed` 放行;`Denied`/`Unknown` 归为 `Unsupported`(fail-closed),
-    /// 使该三态字段不再是无消费者的 dead field。
-    #[test]
-    fn resume_evidence_bridge_maps_cross_cutting_three_states_to_gateway_state() {
-        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
-        assert!(
-            ResumeEvidenceState::from_cross_cutting_evidence(
-                &ProviderCapabilityEvidence::Confirmed
-            )
-            .allows_resume()
-        );
-        assert!(
-            !ResumeEvidenceState::from_cross_cutting_evidence(
-                &ProviderCapabilityEvidence::Denied {
-                    reason: "probe says no".to_string(),
-                }
-            )
-            .allows_resume()
-        );
-        assert!(
-            !ResumeEvidenceState::from_cross_cutting_evidence(&ProviderCapabilityEvidence::Unknown)
-                .allows_resume()
-        );
-    }
-}
+#[path = "provider_gateway_tests.rs"]
+mod tests;

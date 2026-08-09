@@ -129,6 +129,52 @@ impl WorkspaceEngine {
         .await;
     }
 
+    /// Task 11:逻辑代码库 planning 栈入口。与 `handle_author_message_with_prompt_mode`
+    /// 对称,但 provider 会话改由 `LogicalCodebaseProviderGateway::start_streaming` 启动,
+    /// 使真实启动唯一由 gateway 产出并留 audit。
+    ///
+    /// 调用方(Web 接入 task)在确认 issue 属于逻辑代码库后,构造
+    /// `SessionLaunchRequest`、经 `gateway.validate` 产出 validated policy,再组装
+    /// `ValidatedStreamingProviderInput` 传入;本方法仅消费 validated input 启动并驱动。
+    /// 传统单仓/非逻辑 issue 仍走 `handle_user_message`/`handle_author_message_with_prompt_mode`
+    /// 的直接 `provider.start` 路径。
+    #[allow(dead_code)]
+    pub(crate) async fn drive_author_provider_session_via_gateway(
+        &mut self,
+        validated_input: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        command_rx: mpsc::Receiver<ProviderCommand>,
+        generation_node_id: String,
+    ) {
+        let gateway = self
+            .logical_provider_gateway
+            .clone()
+            .expect("logical provider gateway must be injected before driving via gateway");
+        let session = gateway
+            .start_streaming(validated_input, self.cancel.clone())
+            .await
+            .map_err(
+                |error| crate::cross_cutting::provider_adapter::ProviderAdapterError {
+                    code: crate::protocol::provider_errors::ProviderErrorCode::ProviderUnavailable,
+                    details: error.to_string(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+                    duration_ms: 0,
+                },
+            );
+        self.drive_provider_session(ProviderSessionDriveInput {
+            session,
+            command_rx,
+            node_id: Some(generation_node_id),
+            agent: Some(self.session.author_provider.clone()),
+            role: ProviderConversationRole::Author,
+            artifact_retry: None,
+            revision_resume_fallback: None,
+        })
+        .await;
+    }
+
     pub(crate) fn should_retry_missing_workspace_artifact(&self, full_content: &str) -> bool {
         if !self.workspace_requires_artifact_gate() || full_content.trim().is_empty() {
             return false;

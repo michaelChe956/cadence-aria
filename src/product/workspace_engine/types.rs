@@ -381,6 +381,12 @@ pub struct WorkspaceEngine {
     pub(crate) outline_revision_crash_after: Option<OutlineRevisionCrashPoint>,
     pub(crate) plan_repair_crash_after: Option<PlanRepairCrashPoint>,
     pub(crate) plan_repair_snapshot: Option<PlanRepairSessionSnapshotDto>,
+    /// Task 11:逻辑代码库真实 provider 启动的唯一入口。非空时,planning author stream
+    /// 经 `LogicalCodebaseProviderGateway::start_streaming` 启动并留 audit;为 `None`
+    /// 时(传统单仓/非逻辑 issue)保留直接 `provider.start` 路径。Web 接入 task 为
+    /// 逻辑代码库 issue 注入真实 gateway。
+    pub(crate) logical_provider_gateway:
+        Option<Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>>,
 }
 
 #[derive(Debug, Clone)]

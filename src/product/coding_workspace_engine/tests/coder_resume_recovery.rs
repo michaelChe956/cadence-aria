@@ -133,6 +133,7 @@ async fn coder_resume_stall_maps_to_retryable_transport_without_same_role_run_re
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
+            validated_input: None,
         })
         .await;
 

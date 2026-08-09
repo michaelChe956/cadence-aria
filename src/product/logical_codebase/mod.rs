@@ -20,9 +20,10 @@ pub use policy::{
     SessionPolicyAction, SessionPolicyEnvelope,
 };
 pub use provider_gateway::{
-    LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderCapability,
-    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
-    SessionLaunchRequest, SessionResumeFingerprint, ValidatedSessionLaunchPolicy,
+    GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LogicalCodebaseProviderGateway,
+    PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderGatewayError,
+    ProviderRef, ProviderRefType, SessionLaunchRequest, SessionResumeFingerprint,
+    ValidatedSessionLaunchPolicy,
 };
 pub use reference_scanner::{
     RepositoryReference, RepositoryReferenceReport, RepositoryReferenceScanner,

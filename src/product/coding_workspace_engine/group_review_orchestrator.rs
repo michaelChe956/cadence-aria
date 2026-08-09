@@ -966,6 +966,7 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
                 timeout: None,
                 timeout_reason_code: None,
                 suppress_failure_side_effects: true,
+                validated_input: None,
             })
             .await
             .map_err(map_group_review_engine_error)?;

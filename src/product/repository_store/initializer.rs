@@ -22,6 +22,12 @@ pub struct ClaudeRepositoryInitializer {
     gate: Arc<ProviderAvailabilityGate>,
     registry: Arc<ProviderRegistry>,
     output_limit: usize,
+    /// Task 11:逻辑代码库 aggregate 初始化 provider turn 的唯一启动入口。非空时,
+    /// 初始化命令的 streaming provider 启动改由 `LogicalCodebaseProviderGateway::
+    /// start_streaming` 完成;为 `None` 时保留既有直接 `adapter.start` 路径。
+    /// aggregate provider turn 在 Task 16 通过同一准备方法进入 gateway。
+    logical_provider_gateway:
+        Option<Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>>,
 }
 
 impl ClaudeRepositoryInitializer {
@@ -34,7 +40,19 @@ impl ClaudeRepositoryInitializer {
             gate,
             registry,
             output_limit,
+            logical_provider_gateway: None,
         }
+    }
+
+    /// 注入逻辑代码库 provider gateway(Task 11)。Web 接入 task 在聚合初始化路径
+    /// 构造 gateway 后调用此方法,使初始化 provider turn 经 gateway 启动并留 audit;
+    /// 未调用时保留直接 `adapter.start` 路径。
+    pub fn with_logical_provider_gateway(
+        mut self,
+        gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
+    ) -> Self {
+        self.logical_provider_gateway = Some(gateway);
+        self
     }
 
     pub async fn initialize(
@@ -137,6 +155,47 @@ impl ClaudeRepositoryInitializer {
             })?,
         };
 
+        let remaining = command_timeout.saturating_sub(started.elapsed());
+        self.consume_session(session, command_index, command, remaining, cancellation)
+            .await
+    }
+
+    /// Task 11:逻辑代码库 aggregate 初始化 provider turn 经 gateway 启动。与
+    /// `run_turn` 对称,但 session 改由 `LogicalCodebaseProviderGateway::start_streaming`
+    /// 产出,使初始化命令的真实 provider 启动唯一由 gateway 完成并留 audit。
+    ///
+    /// 调用方(Task 16/Web 接入)在构造 gateway 后,经 `gateway.validate` +
+    /// `ValidatedStreamingProviderInput::new` 组装 validated input 传入。传统/非
+    /// 逻辑初始化仍走 `run_turn` 的直接 `adapter.start` 路径。
+    #[allow(dead_code)]
+    async fn run_turn_via_gateway(
+        &self,
+        validated_input: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        command_index: usize,
+        command: &str,
+        command_timeout: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<RepositoryInitializationCommandSummary, RepositoryRegistrationError> {
+        let gateway = self
+            .logical_provider_gateway
+            .clone()
+            .expect("logical provider gateway must be injected before gateway turn");
+        let started = Instant::now();
+        let start = gateway.start_streaming(validated_input, cancellation.clone());
+        tokio::pin!(start);
+        let timeout = tokio::time::sleep(command_timeout);
+        tokio::pin!(timeout);
+        let session = tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(command_failure(command_index, command, "initialization cancelled", true, self.output_limit));
+            }
+            _ = &mut timeout => {
+                return Err(command_failure(command_index, command, "initialization timed out before session start", true, self.output_limit));
+            }
+            result = &mut start => result.map_err(|error| {
+                command_failure(command_index, command, &error.to_string(), true, self.output_limit)
+            })?,
+        };
         let remaining = command_timeout.saturating_sub(started.elapsed());
         self.consume_session(session, command_index, command, remaining, cancellation)
             .await

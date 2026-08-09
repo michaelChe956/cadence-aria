@@ -216,6 +216,7 @@ impl WorkspaceEngine {
             outline_revision_crash_after: None,
             plan_repair_crash_after: None,
             plan_repair_snapshot: None,
+            logical_provider_gateway: None,
         }
     }
 
@@ -355,11 +356,23 @@ impl WorkspaceEngine {
             outline_revision_crash_after: None,
             plan_repair_crash_after: None,
             plan_repair_snapshot,
+            logical_provider_gateway: None,
         }
     }
 
     pub(crate) fn outline_revision_recovery_error(&self) -> Option<&str> {
         self.outline_revision_recovery_error.as_deref()
+    }
+
+    /// 注入逻辑代码库 provider gateway(Task 11)。Web 接入 task 为逻辑代码库 issue 构造
+    /// gateway 后调用此方法,使 planning author stream 经 gateway 启动;未调用时引擎
+    /// 保留直接 `provider.start` 路径。
+    pub fn with_logical_provider_gateway(
+        mut self,
+        gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
+    ) -> Self {
+        self.logical_provider_gateway = Some(gateway);
+        self
     }
 
     pub fn session(&self) -> &WorkspaceSession {

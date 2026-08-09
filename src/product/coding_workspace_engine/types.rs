@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 pub(crate) const REWORK_CONTEXT_NOTE_CHAR_LIMIT: usize = 10_000;
 
@@ -82,6 +83,11 @@ pub(crate) struct CodingProviderStreamRun<'a> {
     /// 组级审查拥有失败状态收口权时，stream 层只返回 transport 错误，不直接
     /// 修改 attempt、role run 或 timeline 状态。
     pub(crate) suppress_failure_side_effects: bool,
+    /// Task 11:逻辑代码库真实 provider 启动的绑定 validated policy input。
+    /// 非空时,`provider_stream` 经 `LogicalCodebaseProviderGateway::start_streaming`
+    /// 启动,而非直接 `provider.start`;传统/非逻辑路径为 `None`,保留既有行为。
+    pub(crate) validated_input:
+        Option<crate::cross_cutting::session_launch::ValidatedStreamingProviderInput>,
 }
 
 pub(crate) fn run_timeout_sleep(
@@ -258,6 +264,12 @@ pub struct CodingWorkspaceEngine {
     pub(crate) _git_service: GitWorkspaceService,
     pub(crate) event_tx: CancellableCodingEventSender,
     pub(crate) cancellation: CancellationToken,
+    /// Task 11:逻辑代码库真实 provider 启动的唯一入口。非空时,provider stream
+    /// 经 `start_streaming` 启动并留 audit;为 `None` 时(传统单仓/非逻辑 issue)
+    /// 保留直接 `provider.start` 路径,防止本工作包扩大旧 API 行为。Web 接入 task
+    /// 为逻辑代码库 issue 注入真实 gateway。
+    pub(crate) logical_provider_gateway:
+        Option<Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>>,
 }
 
 impl CodingWorkspaceEngine {

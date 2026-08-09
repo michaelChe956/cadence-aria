@@ -279,6 +279,7 @@ async fn completed_provider_invocation_persists_retrievable_raw_output_ref() {
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
+            validated_input: None,
         })
         .await;
 
@@ -324,6 +325,7 @@ async fn failed_provider_invocation_persists_in_memory_partial_output_to_role_ru
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
+            validated_input: None,
         })
         .await;
 
@@ -371,6 +373,7 @@ async fn choice_request_then_timeout_stays_non_retryable_with_open_choice_gate()
         timeout: Some(Duration::from_secs(1)),
         timeout_reason_code: None,
         suppress_failure_side_effects: false,
+        validated_input: None,
     });
     tokio::pin!(invocation);
     tokio::select! {
@@ -428,6 +431,7 @@ async fn unresolved_provider_choice_stays_non_retryable_interaction_wait() {
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
+            validated_input: None,
         })
         .await;
 
@@ -482,6 +486,7 @@ async fn modern_start_io_invocation_keeps_typed_error_and_raw_output_ref() {
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
+            validated_input: None,
         })
         .await;
 
