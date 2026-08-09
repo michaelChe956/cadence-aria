@@ -17,6 +17,8 @@ mod interrupted_run_recovery;
 mod linked_amendment;
 #[path = "tests/plan_repair_activation.rs"]
 mod plan_repair_activation;
+#[path = "tests/planning_resume.rs"]
+mod planning_resume;
 #[path = "tests/projection_artifact_batch.rs"]
 mod projection_artifact_batch;
 

@@ -70,4 +70,4 @@ pub(crate) use run::*;
 pub(crate) use socket::{OutboundControl, send_json_outbound};
 
 #[cfg(test)]
-pub(crate) use socket::spawn_idle_timeout_task;
+pub(crate) use socket::{planning_resume_decision, spawn_idle_timeout_task};

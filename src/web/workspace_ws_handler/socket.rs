@@ -1,4 +1,7 @@
 use super::*;
+use crate::product::logical_codebase::{
+    IssueCodebaseSelectionStore, LogicalCodebaseStore, PlanningContextResolver, ResumeDecision,
+};
 
 pub async fn workspace_ws(
     ws: WebSocketUpgrade,
@@ -53,6 +56,36 @@ pub(crate) fn spawn_idle_timeout_task(
             }
         }
     })
+}
+
+/// 逻辑代码库分支的规划会话 resume 校验入口（Task 11 / REQ-PLN-03）。
+///
+/// 在 provider 启动前校验 planning snapshot 指纹：
+/// - 传统单仓路径（无 logical manifest 或 issue 无 selection）→ `Ok(None)`，不受影响。
+/// - 指纹一致 → `SameContext`：沿用现有 session 审计与 prompt 上下文。
+/// - 指纹漂移 → `StaleContext`：不得沿用可能过时/越权的 prompt/cwd/policy，调用方应
+///   拒绝续跑并提示启动新会话（重新 build 上下文）。
+pub(crate) fn planning_resume_decision(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> Result<Option<ResumeDecision>, String> {
+    let logical = LogicalCodebaseStore::new(app_paths.clone());
+    let selection_store = IssueCodebaseSelectionStore::new(app_paths.clone());
+    let manifest = logical
+        .load_manifest(project_id)
+        .map_err(|error| format!("load logical codebase manifest failed: {error}"))?;
+    let selection = selection_store
+        .load(project_id, issue_id)
+        .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
+    // 传统单仓路径：无 manifest 或 issue 无 selection 时不校验，行为完全不变。
+    if manifest.is_none() || selection.is_none() {
+        return Ok(None);
+    }
+    let decision = PlanningContextResolver::new(app_paths.clone())
+        .resume(project_id, issue_id)
+        .map_err(|error| format!("planning context resume failed: {error}"))?;
+    Ok(Some(decision))
 }
 
 pub(crate) async fn handle_workspace_socket(
@@ -301,12 +334,42 @@ pub(crate) async fn handle_workspace_socket(
     };
     match outline_resume_kind {
         Ok(Some(run_kind)) if state.workspace_runs.run(&session_id).await.is_none() => {
-            if let Err(message) =
-                spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx.clone())
+            // 逻辑代码库分支：resume 校验在 provider 启动前完成（REQ-PLN-03）。
+            // - None（传统单仓）/ SameContext（指纹一致）：沿用现有 session 审计与
+            //   prompt 上下文，照常续跑。
+            // - StaleContext（指纹漂移）/ 校验失败（fail-closed）：拒绝续跑可能过时/越权
+            //   的 prompt/cwd/policy，提示客户端启动新会话重建上下文。
+            match planning_resume_decision(
+                &app_paths,
+                &session_record.project_id,
+                &session_record.issue_id,
+            ) {
+                Ok(None) | Ok(Some(ResumeDecision::SameContext(_))) => {
+                    if let Err(message) = spawn_provider_run_from_handler(
+                        run_context.clone(),
+                        run_kind,
+                        outbound_tx.clone(),
+                    )
                     .await
-            {
-                let err = WsOutMessage::Error { message };
-                let _ = send_json_outbound(&outbound_tx, &err).await;
+                    {
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx, &err).await;
+                    }
+                }
+                Ok(Some(ResumeDecision::StaleContext { reason, .. })) => {
+                    let err = WsOutMessage::Error {
+                        message: format!(
+                            "planning context stale, refusing to resume stale run: {reason}; start a new planning session to rebuild context"
+                        ),
+                    };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                }
+                Err(message) => {
+                    let err = WsOutMessage::Error {
+                        message: format!("planning resume check failed: {message}"),
+                    };
+                    let _ = send_json_outbound(&outbound_tx, &err).await;
+                }
             }
         }
         Err(message) => {

@@ -35,7 +35,7 @@ pub enum BestEffortReadonlyStatus {
 
 /// `PlanningContextResolver::build` 的返回值。Story/Design/WorkItemPlan 的
 /// context/cwd/prompt/session audit 全部由该返回值派生，禁止旁路重建 context。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPlanningContext {
     /// 冻结后的唯一上下文快照；context/prompt/session audit 的唯一事实来源。
     pub snapshot: PlanningContextSnapshot,
@@ -187,7 +187,7 @@ impl PlanningContextResolver {
 
         let member_fingerprints = build_member_fingerprints(&index.member_snapshots, &resolution);
 
-        let snapshot = PlanningContextSnapshot {
+        let mut snapshot = PlanningContextSnapshot {
             schema_version: 1,
             project_id: project_id.into(),
             issue_id: issue_id.into(),
@@ -204,6 +204,9 @@ impl PlanningContextResolver {
             access_fingerprint: String::new(),
             captured_at: chrono::Utc::now().to_rfc3339(),
         };
+        // 返回的快照携带冻结指纹（与落盘一致），保证 `ResolvedPlanningContext.snapshot`
+        // 是 context 的唯一事实来源（Task 11 resume 校验依赖该字段）。
+        snapshot.access_fingerprint = snapshot.access_fingerprint_value();
         self.snapshots.save(&snapshot)?;
 
         Ok(ResolvedPlanningContext {
@@ -215,6 +218,56 @@ impl PlanningContextResolver {
             context_resolution: resolution,
             snapshot,
         })
+    }
+}
+
+/// resume/续接规划会话的校验决策（REQ-PLN-03）。指纹一致沿用现有 session 审计与
+/// prompt 上下文；指纹漂移启动新会话重建上下文，不沿用可能过时/越权的内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeDecision {
+    /// 快照指纹与当前 membership/index/checkout 一致：沿用现有上下文继续。
+    SameContext(ResolvedPlanningContext),
+    /// 快照指纹漂移：不得沿用旧上下文，必须启动新会话并重建。`reason` 携带旧的
+    /// access_fingerprint 供审计，`rebuilt` 为重新 `build` 的权威上下文。
+    StaleContext {
+        reason: String,
+        rebuilt: ResolvedPlanningContext,
+    },
+}
+
+impl PlanningContextResolver {
+    /// resume/续接校验：加载既有 planning snapshot 并复算当前指纹。指纹一致返回
+    /// `SameContext`（沿用现有 session 审计与 prompt 上下文）；指纹漂移返回
+    /// `StaleContext`（拒绝沿用可能过时/越权的 prompt/cwd/policy，携带重建上下文）。
+    /// 无既有快照时视为首次构建，直接 `SameContext`（无旧上下文可沿用）。
+    ///
+    /// resume 校验在 provider 启动前完成；envelope 的 resume fingerprint（Plan 2）与
+    /// planning snapshot 指纹互补——envelope 校验 policy/target/version 一致，snapshot
+    /// 校验 membership/index/checkout 一致。两者均须通过才允许 resume。
+    pub fn resume(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<ResumeDecision, ProductStoreError> {
+        let previous = match self.snapshots.load(project_id, issue_id)? {
+            Some(previous) => previous,
+            None => {
+                return Ok(ResumeDecision::SameContext(self.build(
+                    project_id,
+                    issue_id,
+                    &[],
+                )?));
+            }
+        };
+        let current = self.build(project_id, issue_id, &[])?;
+        if current.snapshot.access_fingerprint_value() == previous.access_fingerprint {
+            Ok(ResumeDecision::SameContext(current))
+        } else {
+            Ok(ResumeDecision::StaleContext {
+                reason: format!("fingerprint_changed:{}", previous.access_fingerprint),
+                rebuilt: current,
+            })
+        }
     }
 }
 
@@ -402,6 +455,26 @@ mod tests {
                 .unwrap();
         }
 
+        /// 模拟成员变更：manifest membership_revision 1 → 2 并同步推进 active aggregate
+        /// index 的 membership_revision 与成员 checkout revision，使 planning snapshot
+        /// 指纹漂移（membership/index/checkout 任一变化都会改变 access_fingerprint）。
+        /// 与 `write_active_manifest_index_and_policy` 保持同一项目数据，供 resume 测试使用。
+        fn change_membership_revision(&self) {
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+            let mut manifest = store.load_manifest("project_0001").unwrap().unwrap();
+            manifest.membership_revision = 2;
+            store.save_manifest("project_0001", &manifest).unwrap();
+
+            let index_store = AggregateIndexStore::new(self.paths.clone());
+            let mut index = index_store.active("project_0001").unwrap().unwrap();
+            index.membership_revision = 2;
+            for snapshot in &mut index.member_snapshots {
+                snapshot.revision = "def456".to_string();
+            }
+            index.updated_at = "2026-08-10T01:00:00Z".to_string();
+            index_store.replace_active("project_0001", index).unwrap();
+        }
+
         fn member_record(
             &self,
             id: LogicalRepositoryId,
@@ -538,5 +611,34 @@ mod tests {
             .build("project_0001", "issue_empty", &[])
             .unwrap_err();
         assert!(error.to_string().contains("effective_member_empty"));
+    }
+
+    #[test]
+    fn resume_with_matching_fingerprint_reuses_context_and_mismatch_rebuilds() {
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        let first = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        let persisted_fingerprint = first.snapshot.access_fingerprint.clone();
+        // build 返回的 snapshot 携带冻结指纹，与落盘一致（Task 11 一致性修正）。
+        assert!(!persisted_fingerprint.is_empty());
+
+        let same = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(same, ResumeDecision::SameContext(_)));
+
+        fixture.change_membership_revision(); // 模拟成员变更，指纹漂移
+        let stale = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(
+            stale,
+            ResumeDecision::StaleContext { reason, .. } if reason != persisted_fingerprint
+        ));
     }
 }

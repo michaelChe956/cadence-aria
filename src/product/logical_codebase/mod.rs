@@ -46,7 +46,7 @@ pub use planning_context::{
     MemberCheckoutFingerprint, PlanningContextSnapshot, PlanningContextSnapshotStore,
 };
 pub use planning_context_resolver::{
-    BestEffortReadonlyStatus, PlanningContextResolver, ResolvedPlanningContext,
+    BestEffortReadonlyStatus, PlanningContextResolver, ResolvedPlanningContext, ResumeDecision,
 };
 pub use planning_context_set::{
     InventoryInjection, InventoryInjectionBudget, PlanningContextSetResolver,
