@@ -278,54 +278,57 @@ pub async fn issue_lifecycle(
     // alias 优先取 planning context 的 RepositoryContextSet.alias，缺失时回落到
     // resolve_logical_repository 的物理投影名。Plan 3 范围：schema-v2 规划投影 item
     // 尚未落库（Plan 4 贯通 publish 链路），分组视图当前反映已持久化记录。
-    let mut work_item_repository_groups = Vec::new();
-    if let Ok(persisted_work_items) = lifecycle.list_work_items(&project_id, &issue_id) {
-        let mut member_index: BTreeMap<LogicalRepositoryId, String> = BTreeMap::new();
-        if let Ok(resolution) =
-            PlanningContextSetResolver::new(app_paths.clone()).resolve(&project_id, &issue_id)
-        {
-            for member in &resolution.set {
-                member_index.insert(member.member_id, member.alias.clone());
-            }
+    // list_work_items 是分组视图的主数据源：失败必须传播，禁止静默跳过（避免与扁平
+    // work_items 不一致的空分组）。alias 增强（planning context / 物理投影名）保持
+    // best-effort：规划上下文缺失时跳过 alias 增强是合理的。
+    let persisted_work_items = lifecycle
+        .list_work_items(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let mut member_index: BTreeMap<LogicalRepositoryId, String> = BTreeMap::new();
+    if let Ok(resolution) =
+        PlanningContextSetResolver::new(app_paths.clone()).resolve(&project_id, &issue_id)
+    {
+        for member in &resolution.set {
+            member_index.insert(member.member_id, member.alias.clone());
         }
-        let repository_store = RepositoryStore::new(app_paths.clone());
-        for record in &persisted_work_items {
-            if let Some(target) = record.target_repository_id {
-                if member_index.contains_key(&target) {
-                    continue;
-                }
-                if let Ok((_, _, repository)) =
-                    repository_store.resolve_logical_repository(&project_id, target)
-                {
-                    member_index.insert(target, repository.name.clone());
-                }
-            }
-        }
-        let groups = group_work_items_by_target(&persisted_work_items, &member_index)
-            .map_err(product_store_api_error)?;
-        work_item_repository_groups = groups
-            .into_iter()
-            .map(|group| {
-                work_item_repository_group_dto(group, |record| {
-                    let attempts = coding_store
-                        .list_attempts_for_work_item(&project_id, &issue_id, &record.id)
-                        .map_err(product_store_api_error)?;
-                    let latest_attempt = attempts.last().map(coding_attempt_dto);
-                    let session = workspace_session_for_entity(
-                        &workspace_sessions,
-                        &record.id,
-                        &WorkspaceType::WorkItem,
-                    );
-                    lifecycle_work_item_dto(
-                        &lifecycle,
-                        record,
-                        latest_attempt,
-                        session.map(|session| session.id.as_str()),
-                    )
-                })
-            })
-            .collect::<ApiResult<Vec<_>>>()?;
     }
+    let repository_store = RepositoryStore::new(app_paths.clone());
+    for record in &persisted_work_items {
+        if let Some(target) = record.target_repository_id {
+            if member_index.contains_key(&target) {
+                continue;
+            }
+            if let Ok((_, _, repository)) =
+                repository_store.resolve_logical_repository(&project_id, target)
+            {
+                member_index.insert(target, repository.name.clone());
+            }
+        }
+    }
+    let groups = group_work_items_by_target(&persisted_work_items, &member_index)
+        .map_err(product_store_api_error)?;
+    let work_item_repository_groups = groups
+        .into_iter()
+        .map(|group| {
+            work_item_repository_group_dto(group, |record| {
+                let attempts = coding_store
+                    .list_attempts_for_work_item(&project_id, &issue_id, &record.id)
+                    .map_err(product_store_api_error)?;
+                let latest_attempt = attempts.last().map(coding_attempt_dto);
+                let session = workspace_session_for_entity(
+                    &workspace_sessions,
+                    &record.id,
+                    &WorkspaceType::WorkItem,
+                );
+                lifecycle_work_item_dto(
+                    &lifecycle,
+                    record,
+                    latest_attempt,
+                    session.map(|session| session.id.as_str()),
+                )
+            })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
 
     let workspace_sessions = workspace_sessions
         .iter()
@@ -821,5 +824,219 @@ pub(crate) fn confirm_workspace_entity(
             "confirm is not yet supported for work item plan sessions",
             json!({}),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::issue_store::CreateProductIssueInput;
+    use crate::product::lifecycle_store::CreateWorkItemInput;
+    use crate::product::logical_codebase::LogicalRepositoryId;
+    use crate::product::models::WorkItemPlanLineage;
+    use crate::product::work_item_revision_store::WorkItemRevisionStore;
+    use crate::web::app::build_web_router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    const PROJECT_ID: &str = "project_0001";
+    const ISSUE_ID: &str = "issue_0001";
+    const REPOSITORY_ID: &str = "repo-1";
+
+    /// 建 issue + 3 个 work item：wi-a/wi-b 带不同 target_repository_id，wi-c 无 target。
+    fn seed_issue_and_work_items(lifecycle: &LifecycleStore, paths: &ProductAppPaths) {
+        let issue = IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some(REPOSITORY_ID.to_string()),
+                title: "分组视图测试".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        assert_eq!(issue.id, ISSUE_ID);
+
+        for (index, (id, target)) in [
+            ("wi-a", Some(Uuid::new_v4())),
+            ("wi-b", Some(Uuid::new_v4())),
+            ("wi-c", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let work_item = lifecycle
+                .create_work_item(CreateWorkItemInput {
+                    id: Some(id.to_string()),
+                    project_id: PROJECT_ID.to_string(),
+                    issue_id: ISSUE_ID.to_string(),
+                    repository_id: REPOSITORY_ID.to_string(),
+                    title: format!("工作项 {index}"),
+                    kind: WorkItemKind::Backend,
+                    plan_status: WorkItemPlanStatus::Confirmed,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(work_item.id, id);
+            set_target_repository_id(lifecycle, id, target.map(LogicalRepositoryId));
+        }
+    }
+
+    /// create_work_item 恒置 target_repository_id=None，测试直接改写落盘 JSON。
+    fn set_target_repository_id(
+        lifecycle: &LifecycleStore,
+        work_item_id: &str,
+        target: Option<LogicalRepositoryId>,
+    ) {
+        let path = lifecycle
+            .work_items_root(PROJECT_ID, ISSUE_ID)
+            .join(format!("{work_item_id}.json"));
+        let mut record: LifecycleWorkItemRecord =
+            crate::product::json_store::read_json(&path).unwrap();
+        record.target_repository_id = target;
+        crate::product::json_store::write_json(&path, &record).unwrap();
+    }
+
+    fn build_test_router(root: &std::path::Path) -> axum::Router {
+        build_web_router(WebAppState::new(
+            root.to_path_buf(),
+            WebRuntime::new_fake(root.to_path_buf()),
+        ))
+    }
+
+    async fn get_issue_lifecycle(app: &axum::Router) -> axum::http::Response<Body> {
+        let uri = format!("/api/issues/{ISSUE_ID}/lifecycle?project_id={PROJECT_ID}");
+        app.clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn grouped_view_returns_work_item_repository_groups_with_dto_shape() {
+        let temp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        seed_issue_and_work_items(&lifecycle, &paths);
+        let app = build_test_router(temp.path());
+
+        let response = get_issue_lifecycle(&app).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // 扁平 work_items 与分组视图同源（都来自已持久化记录）。
+        let flat = value["work_items"].as_array().expect("work_items");
+        assert_eq!(flat.len(), 3);
+        let groups = value["work_item_repository_groups"]
+            .as_array()
+            .expect("work_item_repository_groups");
+        assert_eq!(groups.len(), 3, "target A / target B / 未指定仓库 三组");
+
+        // 分组 DTO 形状：target_repository_id / alias / status / compatibility_projection / items。
+        for group in groups {
+            let obj = group.as_object().expect("group object");
+            for field in [
+                "target_repository_id",
+                "alias",
+                "status",
+                "compatibility_projection",
+                "items",
+            ] {
+                assert!(obj.contains_key(field), "分组缺少字段 {field}");
+            }
+            let items = obj["items"].as_array().expect("items array");
+            assert!(!items.is_empty(), "分组 items 不应为空");
+            for item in items {
+                assert!(item.get("work_item_id").is_some(), "item 缺 work_item_id");
+                assert!(item.get("title").is_some(), "item 缺 title");
+            }
+        }
+
+        // 未指定仓库组 compatibility_projection = true 且恒置末。
+        let unassigned = groups.last().expect("unassigned group");
+        assert!(
+            unassigned["compatibility_projection"]
+                .as_bool()
+                .expect("compatibility_projection")
+        );
+        assert!(unassigned["target_repository_id"].is_null());
+
+        // 指定仓库组：target_repository_id 为 UUID 字符串，alias 回落到物理投影名 repo-1。
+        let assigned: Vec<_> = groups
+            .iter()
+            .filter(|g| !g["compatibility_projection"].as_bool().unwrap())
+            .collect();
+        assert_eq!(assigned.len(), 2);
+        for group in assigned {
+            assert!(group["target_repository_id"].is_string());
+            assert_eq!(group["alias"].as_str(), Some(REPOSITORY_ID));
+        }
+    }
+
+    #[tokio::test]
+    async fn grouped_view_propagates_list_work_items_error_instead_of_silent_empty_groups() {
+        let temp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        seed_issue_and_work_items(&lifecycle, &paths);
+
+        // 构造 schema-v2 plan lineage：让 legacy 路径跳过 list_work_items，
+        // 从而使分组视图成为唯一调用 list_work_items 的地方——失败必须传播为 handler 错误，
+        // 而不是静默返回空 work_item_repository_groups（回归 Task10 fix）。
+        let plan = lifecycle
+            .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+                id: Some("plan-1".to_string()),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                options: crate::product::models::IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: IssueWorkItemPlanStatus::Draft,
+                work_item_ids: vec!["wi-a".to_string()],
+                repository_profile_ref: None,
+                verification_plan_ids: Vec::new(),
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+            })
+            .unwrap();
+        let revision_store = WorkItemRevisionStore::new(paths.clone());
+        revision_store
+            .put_plan_lineage(&WorkItemPlanLineage {
+                id: plan.id.clone(),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                story_spec_refs: Vec::new(),
+                design_spec_refs: Vec::new(),
+                active_revision_id: None,
+                active_amendment_id: None,
+                created_at: "2026-08-09T00:00:00Z".to_string(),
+                updated_at: "2026-08-09T00:00:00Z".to_string(),
+            })
+            .unwrap();
+
+        // 破坏 work_items 数据文件：list_work_items（分组路径）必然失败。
+        let corrupt_path = lifecycle
+            .work_items_root(PROJECT_ID, ISSUE_ID)
+            .join("wi-a.json");
+        std::fs::write(&corrupt_path, "{ not valid json").unwrap();
+
+        let app = build_test_router(temp.path());
+        let response = get_issue_lifecycle(&app).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "list_work_items 失败必须传播为 500，而不是静默返回空分组"
+        );
     }
 }
