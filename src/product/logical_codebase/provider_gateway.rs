@@ -224,6 +224,141 @@ impl SessionResumeFingerprint {
     }
 }
 
+/// resume 启动请求(Task 13):携带当前 launch 请求与旧会话冻结的 fingerprint
+/// 及其 session id。gateway 据此在 `resume_or_start` 中判定 resume 还是 supersede。
+#[derive(Debug, Clone)]
+pub struct ResumeSessionLaunchRequest {
+    /// 当前会话的 launch 请求(与 `validate` 入参同型)。
+    pub launch: SessionLaunchRequest,
+    /// 旧会话冻结时的 fingerprint,用于全维度比对。
+    pub previous_fingerprint: SessionResumeFingerprint,
+    /// 旧会话 id;supersede 时透传给调用方以清理旧会话状态。
+    pub previous_session_id: String,
+}
+
+/// `resume_or_start` 的返回决策(Task 13)。
+///
+/// - `Resume`:fingerprint 全维度相等,旧会话可安全 resume,返回新的 validated
+///   policy 供 spawn。
+/// - `StartNew`:fingerprint 漂移(policy digest/target/version/dialect/capability
+///   任一不一致),旧会话被 supersede(审计),返回新 validated policy 与被
+///   supersede 的旧 session id。
+#[derive(Debug)]
+pub enum GatewaySessionDisposition {
+    Resume(ValidatedSessionLaunchPolicy),
+    StartNew {
+        validated: ValidatedSessionLaunchPolicy,
+        superseded_session_id: String,
+    },
+}
+
+/// 配置来源类别(Task 13)。区分 Aria-owned(可注入)与非 Aria-owned(managed
+/// settings 等需标注的已知 gap)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSourceKind {
+    /// Aria-owned bundle:user/project/local settings 或 Aria 管理的 MCP,可注入。
+    AriaOwnedBundle,
+    /// 非 Aria-owned:如 provider 自带 managed settings,需标注为 gap。
+    NonAriaOwned,
+}
+
+/// 配置来源 provenance(Task 13):记录 provider 实际加载的配置来源构成。解析
+/// provider `/status` 中 `Setting sources` 时填充,作为 `ConfigSourceAudit` 的
+/// 一部分入审计。`managed_settings_active` 绝不假装已覆盖——它只标注「检测到」
+/// 并携带警告,是否放行由 policy(`enforce_config_source_policy`)决定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSourceProvenance {
+    pub user_settings: bool,
+    pub project_settings: bool,
+    pub local_settings: bool,
+    pub env_overrides: bool,
+    pub managed_settings_active: bool,
+    pub managed_settings_warning: Option<String>,
+    pub mcp_sources: Vec<ConfigSourceKind>,
+}
+
+impl ConfigSourceProvenance {
+    /// 据 provider `/status` 上报的 `Setting sources` 列表检测 provenance。
+    /// `Managed` 源(非 Aria-owned)触发 `managed_settings_active=true` 与警告;
+    /// 警告明确说明「检测到 managed settings」且「不假装已覆盖」。
+    ///
+    /// 仅识别已知来源 token(User/Project/Local/Env/Managed);未知 token 视为
+    /// `NonAriaOwned` 的潜在 gap,但当前不额外触发 managed_settings_active
+    /// (避免误报);调用方可后续扩展。
+    pub fn detect_from_setting_sources(sources: &[&str]) -> Self {
+        let lowercased: Vec<String> = sources
+            .iter()
+            .map(|source| source.trim().to_lowercase())
+            .collect();
+        let contains = |key: &str| lowercased.iter().any(|source| source == key);
+        let managed_settings_active = contains("managed");
+        let managed_settings_warning = if managed_settings_active {
+            // 明确不使用 "overridden/覆盖" 字样:绝不假装已覆盖 managed settings。
+            // 仅陈述「检测到」与「无法保证这些被压制」,是否放行由 policy 决定。
+            Some(
+                "detected non-Aria-owned managed settings active; \
+                 gateway cannot guarantee these are suppressed; \
+                 known gap, policy may reject startup"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        Self {
+            user_settings: contains("user"),
+            project_settings: contains("project"),
+            local_settings: contains("local"),
+            env_overrides: contains("env") || contains("environment"),
+            managed_settings_active,
+            managed_settings_warning,
+            mcp_sources: Vec::new(),
+        }
+    }
+
+    /// 是否仅由 Aria-owned 来源构成(user/project/local/env 与所有 MCP 来源都是
+    /// Aria-owned)。存在 managed settings 或非 Aria MCP 来源时返回 false。
+    pub fn is_aria_owned_only(&self) -> bool {
+        !self.managed_settings_active
+            && self
+                .mcp_sources
+                .iter()
+                .all(|source| *source == ConfigSourceKind::AriaOwnedBundle)
+    }
+}
+
+/// 配置来源审计条目(Task 13):冻结启动时点 provider 实际加载的配置来源构成、
+/// 最终 argv 与 config digest。与 envelope 的 config_digest 互补:envelope 保证
+/// 托管配置 artifact 未被篡改,本审计记录 provider 实际生效的来源与命令行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSourceAudit {
+    /// 最终传递给 provider 的 argv(命令 + 参数)。
+    pub argv: Vec<String>,
+    /// config artifact ref 的 canonical SHA-256(与 envelope.config_digest 同型)。
+    pub config_digest: String,
+    /// provider 实际加载的配置来源 provenance。
+    pub provenance: ConfigSourceProvenance,
+}
+
+impl ConfigSourceAudit {
+    /// 据 argv、config artifact ref 与 provenance 构造审计条目。config_digest
+    /// 由 `config_artifact_ref` 计算(与 envelope 冻结值一致),禁止外部传任意
+    /// digest。
+    pub fn from_launch(
+        argv: &[String],
+        config_artifact_ref: &str,
+        provenance: ConfigSourceProvenance,
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(config_artifact_ref.as_bytes());
+        let config_digest = format!("sha256:{:x}", hasher.finalize());
+        Self {
+            argv: argv.to_vec(),
+            config_digest,
+            provenance,
+        }
+    }
+}
+
 /// gateway 拒绝启动的错误。fail-closed:任一校验失败都返回相应 variant,
 /// 绝不退化到无政策 fallback。
 #[derive(Debug, thiserror::Error)]
@@ -263,6 +398,11 @@ pub enum ProviderGatewayError {
     /// fail-closed:`Denied`/`Unknown` 一律拒绝 resume。
     #[error("provider_gateway_resume_not_supported")]
     ResumeNotSupported,
+    /// 配置来源审计发现 provider 实际加载了 managed settings(非 Aria-owned),
+    /// 且当前 policy 配置为拒绝此类启动。fail-closed:绝不假装已覆盖 managed
+    /// settings;该已知 gap 仍可被 policy 配置为放行,但默认拒绝。
+    #[error("provider_gateway_managed_settings_active")]
+    ManagedSettingsActive,
     /// 真实 adapter 启动/运行失败。
     #[error("provider_gateway_adapter: {0}")]
     Adapter(#[from] ProviderAdapterError),
@@ -323,6 +463,17 @@ pub enum GatewayRunStack {
 #[derive(Debug, Default)]
 pub struct GatewayRunAudit {
     entries: std::sync::Mutex<Vec<GatewayRunAuditEntry>>,
+    /// resume 一致性审计(Task 13):记录被 supersede 的旧会话 id 与原因
+    /// (如 `resume_fingerprint_mismatch`)。供外部断言 resume 漂移是否被正确
+    /// 记录为 supersede 而非静默 resume。
+    supersedes: std::sync::Mutex<Vec<GatewaySupersedeEntry>>,
+}
+
+/// resume 一致性审计条目:旧会话被 supersede 的记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewaySupersedeEntry {
+    pub superseded_session_id: String,
+    pub reason: String,
 }
 
 impl GatewayRunAudit {
@@ -362,6 +513,42 @@ impl GatewayRunAudit {
     pub fn all_have_policy_digest(&self) -> bool {
         let entries = self.entries.lock().expect("gateway audit mutex poisoned");
         !entries.is_empty() && entries.iter().all(|entry| !entry.policy_digest.is_empty())
+    }
+
+    /// 记录一次 resume 一致性 supersede(Task 13):旧会话因 fingerprint 漂移
+    /// 被 supersede。供 `resume_or_start` 在 mismatch 路径调用。
+    fn supersede(
+        &self,
+        superseded_session_id: &str,
+        reason: &str,
+    ) -> Result<(), ProviderGatewayError> {
+        let mut supersedes = self
+            .supersedes
+            .lock()
+            .expect("gateway audit mutex poisoned");
+        supersedes.push(GatewaySupersedeEntry {
+            superseded_session_id: superseded_session_id.to_string(),
+            reason: reason.to_string(),
+        });
+        Ok(())
+    }
+
+    /// resume 一致性 supersede 计数。
+    pub fn supersede_count(&self) -> usize {
+        let supersedes = self
+            .supersedes
+            .lock()
+            .expect("gateway audit mutex poisoned");
+        supersedes.len()
+    }
+
+    /// 最近一次 supersede 的原因,无则 `None`。供 fixture 断言漂移维度。
+    pub fn last_supersede_reason(&self) -> Option<String> {
+        let supersedes = self
+            .supersedes
+            .lock()
+            .expect("gateway audit mutex poisoned");
+        supersedes.last().map(|entry| entry.reason.clone())
     }
 }
 
@@ -452,6 +639,11 @@ impl LogicalCodebaseProviderGateway {
             .capabilities
             .require_supported(&request.provider, request.action)?;
 
+        // 路由级硬门(Task 13):Codex danger-full-access 在 gateway 路由级阻断,
+        // 不论 UI 是否选择该 provider。该阻断发生在 envelope 冻结之前,使 Codex
+        // 无法进入逻辑 route。
+        self.enforce_route_policy(&capability)?;
+
         let now = chrono::Utc::now().to_rfc3339();
         let envelope = SessionPolicyEnvelope::new(
             &artifact,
@@ -481,6 +673,74 @@ impl LogicalCodebaseProviderGateway {
             version: capability.version,
             capability_snapshot_ref: capability.capability_snapshot_ref,
         })
+    }
+
+    /// 路由级硬门(Task 13):对解析出的 provider capability 施加 gateway-owned
+    /// 路由阻断。当前唯一规则:Codex 在 `danger-full-access` sandbox 下不支持。
+    ///
+    /// 该检查是 gateway-owned 的,不依赖注入的 `ProviderCapabilitySource` 实现
+    /// (测试 double 可各自实现业务能力校验,但路由级危险模式阻断不可被绕过)。
+    /// 阻断发生在 envelope 冻结与 registry lookup 之前,使危险 provider 无法
+    /// 进入逻辑 route。路由级 fail-closed 不等于 OS 级隔离:本门是 experimental
+    /// +supervised 场景下的政策门,不宣称物理不可写。
+    fn enforce_route_policy(
+        &self,
+        capability: &ProviderCapability,
+    ) -> Result<(), ProviderGatewayError> {
+        if capability.provider_type == ProviderRefType::Codex
+            && CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE
+                == crate::cross_cutting::codex_provider::CODEX_DEFAULT_SANDBOX_MODE
+        {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                CODEX_DANGER_FULL_ACCESS_UNSUPPORTED.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// resume 启动判定(Task 13):据旧会话冻结的 fingerprint 与当前 validate
+    /// 产出的 validated policy 全维度比对。只有 policy digest、target、provider
+    /// exact version、dialect 与 capability snapshot 全一致(fingerprint 相等)
+    /// 才 `Resume`;任一维度漂移则 supersede 旧会话(写审计)并 `StartNew`,
+    /// 旧 session id 透传给调用方以清理旧会话状态。
+    ///
+    /// resume 判定在路由级硬门之后:Codex danger-full-access 等被路由阻断的
+    /// provider 在进入 resume 决策前即被拒绝。
+    pub fn resume_or_start(
+        &self,
+        request: ResumeSessionLaunchRequest,
+    ) -> Result<GatewaySessionDisposition, ProviderGatewayError> {
+        let validated = self.validate(request.launch)?;
+        if validated.fingerprint() == &request.previous_fingerprint {
+            Ok(GatewaySessionDisposition::Resume(validated))
+        } else {
+            self.audit
+                .supersede(&request.previous_session_id, "resume_fingerprint_mismatch")?;
+            Ok(GatewaySessionDisposition::StartNew {
+                validated,
+                superseded_session_id: request.previous_session_id,
+            })
+        }
+    }
+
+    /// 配置来源审计 policy 门禁(Task 13):据 `ConfigSourceAudit` 标注的 provenance
+    /// 决定是否放行启动。当前 policy 默认对 `managed_settings_active=true` 的
+    /// 启动 fail-closed(绝不假装已覆盖 managed settings)。该门禁独立于
+    /// envelope/config digest 复验:envelope 保证托管配置未被篡改,本门禁保证
+    /// provider 实际加载的配置来源可审计且不混入非 Aria-owned 的 managed
+    /// settings(除非 policy 显式放行,当前默认拒绝)。
+    ///
+    /// fail-closed:`managed_settings_active` 且无 policy 放行证据 →
+    /// `ManagedSettingsActive`。
+    pub fn enforce_config_source_policy(
+        &self,
+        _validated: &ValidatedSessionLaunchPolicy,
+        audit: &ConfigSourceAudit,
+    ) -> Result<(), ProviderGatewayError> {
+        if audit.provenance.managed_settings_active {
+            return Err(ProviderGatewayError::ManagedSettingsActive);
+        }
+        Ok(())
     }
 
     /// 启动 streaming provider 会话。只接受绑定 validated policy 的 input;
@@ -580,6 +840,9 @@ impl LogicalCodebaseProviderGateway {
         let capability = self
             .capabilities
             .require_supported(&validated.provider, validated.action)?;
+        // 路由级硬门在 spawn 前复验中同样施加:防 validate→spawn 间 capability
+        // source 被替换为 Codex(防 TOCTOU)。
+        self.enforce_route_policy(&capability)?;
         if capability.version != validated.version {
             return Err(ProviderGatewayError::PolicyDrift {
                 dimension: "provider_version".to_string(),
@@ -667,6 +930,19 @@ fn provider_name_for_dialect(dialect: ProviderDialect) -> ProviderName {
         ProviderDialect::CodexCliV1 => ProviderName::Codex,
     }
 }
+
+/// Codex 当前唯一配置的 sandbox 模式即 `danger-full-access`。受限写(restricted-
+/// write)sandbox 尚未就绪,故 gateway 在路由级对 Codex 启动 fail-closed:不论
+/// UI 是否隐藏该 provider,validate 阶段直接拒绝。这与「UI 隐藏」不同——路由级
+/// 阻断无法被 CLI/脚本等 UI 外路径绕过。
+///
+/// 该常量与 `cross_cutting::codex_provider::CODEX_DEFAULT_SANDBOX_MODE` 对齐,作为
+/// gateway 侧的路由门基准。当受限写 sandbox 配置可用后,此常量与 guard 逻辑应
+/// 一并演进以放行受限写模式。
+pub const CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE: &str = "danger-full-access";
+
+/// gateway 路由阻断码:Codex 在 danger-full-access sandbox 下不被支持。
+pub const CODEX_DANGER_FULL_ACCESS_UNSUPPORTED: &str = "codex_danger_full_access_unsupported";
 
 /// gateway 对 `ensure_bootstrap` 的桥接:暴露给需要在 gateway 之外触发 bootstrap
 /// 的调用方(如 migration)。实际实现复用 `AggregatePolicyArtifactStore::ensure_bootstrap`。

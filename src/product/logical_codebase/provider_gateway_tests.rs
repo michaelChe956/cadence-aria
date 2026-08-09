@@ -804,3 +804,312 @@ mod coverage_tests {
         assert!(fixture.gateway_audit().all_have_policy_digest());
     }
 }
+
+/// Task 13: Codex `danger-full-access` 路由级阻断、resume 一致性与配置来源审计。
+///
+/// 三个验收维度:
+/// 1. Codex 在受限写配置(danger-full-access)下经 gateway 路由级阻断——不论 UI
+///    是否选择该 provider,validate 即拒绝,不触达 registry。这与「UI 隐藏」
+///    不同:路由级阻断无法被绕过。
+/// 2. resume 一致性:`resume_or_start` 只有当 policy digest、target、provider exact
+///    version、dialect 与 capability snapshot 全一致(fingerprint 相等)才 resume;
+///    任一漂移则 supersede 旧会话并新建。
+/// 3. 配置来源审计:`ConfigSourceAudit` 记录 user/project/local/env/子仓 MCP 来源
+///    与最终 argv/config digest;发现 managed settings 时标注
+///    `managed_settings_active=true` 并发警告,绝不假装已覆盖;policy 可据此拒绝启动。
+mod task13_gateway_hardening {
+    use super::*;
+    use crate::cross_cutting::codex_provider::CODEX_DEFAULT_SANDBOX_MODE;
+
+    /// 用 Codex provider ref 构造一个 coding 写请求(worktree 必须等于 target)。
+    fn codex_coding_request(fixture: &GatewayFixture) -> SessionLaunchRequest {
+        let manifest = fixture.manifest();
+        let worktree = fixture.paths.root().join("codex-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let target = PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone());
+        SessionLaunchRequest {
+            project_id: manifest.project_id,
+            provider: ProviderRef::codex("cap_codex_1_0_0"),
+            action: SessionPolicyAction::CodingTargetWrite,
+            target,
+            readable_roots: vec![fixture.paths.root().to_path_buf()],
+            writable_roots: vec![worktree],
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        }
+    }
+
+    /// Codex danger-full-access 在 gateway 路由级被阻断:即使请求显式选择 Codex
+    /// provider(模拟 UI 外的路径,如 CLI/脚本直接构造请求),validate 也返回
+    /// `UnsupportedCapability`,且不触达 registry(start_count == 0)。
+    #[test]
+    fn codex_danger_full_access_is_blocked_at_gateway_route_even_outside_ui() {
+        // 契约断言:当前唯一的 Codex sandbox 配置就是 danger-full-access,即受限写
+        // 尚未配置,故 Codex 路由必须被阻断。
+        assert_eq!(CODEX_DEFAULT_SANDBOX_MODE, "danger-full-access");
+
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let request = codex_coding_request(&fixture);
+
+        let error = fixture.gateway().validate(request).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ProviderGatewayError::UnsupportedCapability(ref code)
+                    if code == "codex_danger_full_access_unsupported"
+            ),
+            "expected codex_danger_full_access_unsupported, got {error:?}"
+        );
+        assert_eq!(fixture.registry_start_count(), 0);
+    }
+
+    /// 同一 provider type 但 ClaudeCode 不受 danger-full-access 阻断:确认阻断
+    /// 精确针对 Codex+danger-full-access,而非误伤所有 provider。
+    #[test]
+    fn claude_code_is_not_blocked_by_codex_danger_full_access_guard() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = SessionLaunchRequest::planning(
+            fixture.manifest().project_id,
+            ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree),
+            vec![fixture.paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+
+        let validated = fixture.gateway().validate(request);
+        assert!(
+            validated.is_ok(),
+            "ClaudeCode must not be blocked: {validated:?}"
+        );
+    }
+
+    /// resume 一致性:fingerprint 全相等 → `GatewaySessionDisposition::Resume`,
+    /// 旧会话不被 supersede。
+    #[test]
+    fn resume_or_start_resumes_when_fingerprint_matches_exactly() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = SessionLaunchRequest::planning(
+            fixture.manifest().project_id,
+            ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree),
+            vec![fixture.paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+
+        // 先 validate 一次取基线 fingerprint,模拟旧会话冻结的指纹。
+        let previous = fixture.gateway().validate(request.clone()).unwrap();
+        let resume_request = ResumeSessionLaunchRequest {
+            launch: request,
+            previous_fingerprint: previous.fingerprint().clone(),
+            previous_session_id: "sess_old_0001".to_string(),
+        };
+
+        let disposition = fixture.gateway().resume_or_start(resume_request).unwrap();
+        assert!(matches!(disposition, GatewaySessionDisposition::Resume(_)));
+        // 无 supersede 审计记录。
+        assert_eq!(fixture.gateway_audit().supersede_count(), 0);
+    }
+
+    /// resume 一致性:provider version 漂移(旧会话指纹记录 1.4.0,当前 1.4.1)→
+    /// fingerprint 不一致 → supersede 旧会话并 `StartNew`,旧 session id 被透传。
+    #[test]
+    fn resume_or_start_supersedes_when_provider_version_drifts() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = || {
+            SessionLaunchRequest::planning(
+                fixture.manifest().project_id,
+                ProviderRef::claude_code("cap_claude_code_1_4_0"),
+                PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
+                vec![fixture.paths.root().to_path_buf()],
+                "sha256:managed-config-artifact",
+            )
+        };
+
+        // 旧会话指纹在 version=1.4.0 时冻结。
+        let previous = fixture.gateway().validate(request()).unwrap();
+        let stale_fingerprint = previous.fingerprint().clone();
+
+        // resume 前当前 capability version 漂移到 1.4.1。
+        fixture.capabilities().set_version("1.4.1");
+        let resume_request = ResumeSessionLaunchRequest {
+            launch: request(),
+            previous_fingerprint: stale_fingerprint,
+            previous_session_id: "sess_old_0002".to_string(),
+        };
+
+        let disposition = fixture.gateway().resume_or_start(resume_request).unwrap();
+        match disposition {
+            GatewaySessionDisposition::StartNew {
+                superseded_session_id,
+                ..
+            } => {
+                assert_eq!(superseded_session_id, "sess_old_0002");
+            }
+            other => panic!("expected StartNew, got {other:?}"),
+        }
+        // supersede 审计记录一次,原因标记为 fingerprint mismatch。
+        assert_eq!(fixture.gateway_audit().supersede_count(), 1);
+        assert!(
+            fixture
+                .gateway_audit()
+                .last_supersede_reason()
+                .is_some_and(|reason| reason == "resume_fingerprint_mismatch")
+        );
+    }
+
+    /// resume 一致性:policy digest 漂移(政策在旧会话后被升级)→ supersede 旧会话。
+    /// 证明 fingerprint 覆盖 policy digest 维度,不只 provider version。
+    #[test]
+    fn resume_or_start_supersedes_when_policy_digest_drifts() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = || {
+            SessionLaunchRequest::planning(
+                fixture.manifest().project_id,
+                ProviderRef::claude_code("cap_claude_code_1_4_0"),
+                PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
+                vec![fixture.paths.root().to_path_buf()],
+                "sha256:managed-config-artifact",
+            )
+        };
+
+        let previous = fixture.gateway().validate(request()).unwrap();
+        let stale_fingerprint = previous.fingerprint().clone();
+
+        // 政策在旧会话后被升级(revision 2,新 digest)。
+        fixture.upgrade_policy();
+        let resume_request = ResumeSessionLaunchRequest {
+            launch: request(),
+            previous_fingerprint: stale_fingerprint,
+            previous_session_id: "sess_old_0003".to_string(),
+        };
+
+        let disposition = fixture.gateway().resume_or_start(resume_request).unwrap();
+        assert!(matches!(
+            disposition,
+            GatewaySessionDisposition::StartNew { .. }
+        ));
+        assert_eq!(fixture.gateway_audit().supersede_count(), 1);
+    }
+
+    /// resume 一致性:当 Codex 被路由级阻断时,resume_or_start 对 Codex 请求也
+    /// 返回 `UnsupportedCapability`(阻断发生在 resume 判定之前)。
+    #[test]
+    fn resume_or_start_blocks_codex_danger_full_access_before_resume_decision() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let request = codex_coding_request(&fixture);
+
+        let resume_request = ResumeSessionLaunchRequest {
+            launch: request,
+            previous_fingerprint: SessionResumeFingerprint {
+                digest: "sha256:stale".to_string(),
+            },
+            previous_session_id: "sess_codex_old".to_string(),
+        };
+
+        let error = fixture
+            .gateway()
+            .resume_or_start(resume_request)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ProviderGatewayError::UnsupportedCapability(ref code)
+                    if code == "codex_danger_full_access_unsupported"
+            ),
+            "expected route block before resume decision, got {error:?}"
+        );
+    }
+
+    /// 配置来源审计:`ConfigSourceAudit` 记录最终 argv 与 config digest,且
+    /// argv 非空、config digest 与 envelope 冻结值一致。仅 Aria-owned
+    /// (user/project/local/env/mcp)来源被标注;非 Aria 来源(如 managed settings)
+    /// 被标注为 `managed_settings_active=true` 并携带警告,绝不假装已覆盖。
+    #[test]
+    fn config_source_audit_records_argv_config_digest_and_provenance() {
+        let audit = ConfigSourceAudit::from_launch(
+            &[
+                "claude".to_string(),
+                "--permission-prompt-tool=stdio".to_string(),
+            ],
+            "sha256:managed-config-artifact",
+            ConfigSourceProvenance {
+                user_settings: true,
+                project_settings: true,
+                local_settings: false,
+                env_overrides: true,
+                managed_settings_active: false,
+                managed_settings_warning: None,
+                mcp_sources: vec![ConfigSourceKind::AriaOwnedBundle],
+            },
+        );
+
+        assert_eq!(audit.argv, vec!["claude", "--permission-prompt-tool=stdio"]);
+        assert!(audit.config_digest.starts_with("sha256:"));
+        assert!(!audit.provenance.managed_settings_active);
+        assert!(audit.provenance.is_aria_owned_only());
+    }
+
+    /// 配置来源审计:解析 provider `/status` 的 `Setting sources` 时发现 managed
+    /// settings(非 Aria-owned),标注 `managed_settings_active=true` + 警告,且
+    /// `is_aria_owned_only()` 返回 false(绝不假装已覆盖)。该已知 gap 仍可被
+    /// policy 配置为拒绝启动(`ManagedSettingsActive` 错误)。
+    #[test]
+    fn config_source_audit_flags_managed_settings_without_pretending_override() {
+        let provenance =
+            ConfigSourceProvenance::detect_from_setting_sources(&["User", "Project", "Managed"]);
+        assert!(provenance.managed_settings_active);
+        assert!(
+            provenance
+                .managed_settings_warning
+                .as_ref()
+                .is_some_and(|warning| warning.contains("managed settings")
+                    && !warning.contains("overridden")
+                    && !warning.contains("覆盖")),
+            "warning must not claim override: {:?}",
+            provenance.managed_settings_warning
+        );
+        assert!(!provenance.is_aria_owned_only());
+    }
+
+    /// 配置来源审计:policy 可据 managed settings 拒绝启动。
+    /// `enforce_config_source_policy` 在发现 managed settings active 且 policy
+    /// 配置为拒绝时返回 `ManagedSettingsActive`(fail-closed)。
+    #[test]
+    fn gateway_rejects_launch_when_managed_settings_active_and_policy_forbids() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = SessionLaunchRequest::planning(
+            fixture.manifest().project_id,
+            ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree),
+            vec![fixture.paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+        let validated = fixture.gateway().validate(request).unwrap();
+
+        let provenance = ConfigSourceProvenance::detect_from_setting_sources(&["User", "Managed"]);
+        let audit = ConfigSourceAudit::from_launch(
+            &["claude".to_string()],
+            "sha256:managed-config-artifact",
+            provenance,
+        );
+        let error = fixture
+            .gateway()
+            .enforce_config_source_policy(&validated, &audit)
+            .unwrap_err();
+        assert!(
+            matches!(error, ProviderGatewayError::ManagedSettingsActive),
+            "expected ManagedSettingsActive, got {error:?}"
+        );
+    }
+}

@@ -28,7 +28,11 @@ pub(crate) use response::*;
 pub(crate) use support::*;
 
 pub(crate) const CODEX_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-pub(crate) const CODEX_DEFAULT_SANDBOX_MODE: &str = "danger-full-access";
+/// Codex app-server 默认 sandbox 模式。当前唯一支持的是 `danger-full-access`,
+/// 这是受限写尚未就绪的已知 gap。gateway 据此在路由级阻断 Codex 启动(见
+/// `provider_gateway::CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE`),直到受限写
+/// sandbox 配置可用。
+pub const CODEX_DEFAULT_SANDBOX_MODE: &str = "danger-full-access";
 pub(crate) const CODEX_RESUME_STALL_ERROR: &str = "Codex resume stalled before provider progress";
 
 pub(crate) fn is_resume_stall_failure(message: &str) -> bool {
