@@ -1,6 +1,7 @@
 pub mod aggregate_index;
 pub mod feature;
 pub mod migration;
+pub mod policy;
 pub mod reference_scanner;
 pub mod registration;
 pub mod registry;
@@ -12,6 +13,10 @@ pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
     IdentityMigrationPhase, IdentityMigrationVerifier, MigrationFaultInjector,
     RepositoryIdentityMapping,
+};
+pub use policy::{
+    AggregatePolicyArtifact, AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect,
+    SessionPolicyAction, SessionPolicyEnvelope,
 };
 pub use reference_scanner::{
     RepositoryReference, RepositoryReferenceReport, RepositoryReferenceScanner,

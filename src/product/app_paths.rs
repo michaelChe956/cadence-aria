@@ -79,6 +79,11 @@ impl ProductAppPaths {
         self.logical_codebase_root(project_id)
             .join(".aggregate-index.lock")
     }
+
+    pub fn aggregate_policy_artifact_path(&self, project_id: &str) -> PathBuf {
+        self.logical_codebase_root(project_id)
+            .join("aggregate-policy.json")
+    }
 }
 
 #[cfg(test)]
