@@ -273,7 +273,7 @@ impl AggregateInitializationOperationStore {
         cancellation: AggregateCancellationRecord,
         updated_at: String,
     ) -> Result<AggregateInitializationOperation, ProductStoreError> {
-        self.update(project_id, operation_id, |operation| {
+        let operation = self.update(project_id, operation_id, |operation| {
             if !matches!(
                 operation.status,
                 AggregateInitializationOperationStatus::Created
@@ -302,7 +302,21 @@ impl AggregateInitializationOperationStore {
             operation.updated_at = updated_at.clone();
             operation.completed_at = Some(updated_at);
             Ok(())
-        })
+        })?;
+
+        // Persisted cancellation is the source of truth. Drop any
+        // operation-owned staging so a later explicit resume starts clean;
+        // already-atomic-published digests are never guessed-rolled-back.
+        let staging_root = self.staging_path(project_id, operation_id)?;
+        if staging_root.exists() {
+            std::fs::remove_dir_all(&staging_root).map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "cancel could not delete staging {}: {error}",
+                    staging_root.display()
+                ))
+            })?;
+        }
+        Ok(operation)
     }
 
     pub fn recover_interrupted(
@@ -311,7 +325,7 @@ impl AggregateInitializationOperationStore {
         operation_id: &str,
         completed_at: String,
     ) -> Result<AggregateInitializationOperation, ProductStoreError> {
-        self.update(project_id, operation_id, |operation| {
+        let operation = self.update(project_id, operation_id, |operation| {
             if matches!(
                 operation.status,
                 AggregateInitializationOperationStatus::Completed
@@ -338,7 +352,23 @@ impl AggregateInitializationOperationStore {
             operation.updated_at = completed_at.clone();
             operation.completed_at = Some(completed_at);
             Ok(())
-        })
+        })?;
+
+        // Recovery never auto-restarts the provider. Any operation-owned
+        // staging left behind by the interrupted step is deleted so a later
+        // explicit resume starts from a clean slate; the persisted record
+        // above is the only source of truth. A missing staging directory is
+        // not an error (the step may not have written any yet).
+        let staging_root = self.staging_path(project_id, operation_id)?;
+        if staging_root.exists() {
+            std::fs::remove_dir_all(&staging_root).map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "recover_interrupted could not delete staging {}: {error}",
+                    staging_root.display()
+                ))
+            })?;
+        }
+        Ok(operation)
     }
 
     fn operation_path(
@@ -352,6 +382,24 @@ impl AggregateInitializationOperationStore {
             .paths
             .aggregate_initializations_root(project_id)
             .join(format!("{operation_id}.json")))
+    }
+
+    /// The operation-owned staging directory used by an in-flight step to
+    /// buffer partial output before it is checkpointed. It lives next to the
+    /// operation record under the aggregate-initializations root and is
+    /// deleted on cancel/recover so a later explicit resume starts clean.
+    fn staging_path(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(operation_id)?;
+        Ok(self
+            .paths
+            .aggregate_initializations_root(project_id)
+            .join(operation_id)
+            .join("staging"))
     }
 
     fn update(
@@ -599,11 +647,78 @@ mod tests {
         _temp: tempfile::TempDir,
         paths: ProductAppPaths,
         store: AggregateInitializationOperationStore,
+        provider_turns: std::sync::Mutex<u32>,
+        operation_id: String,
     }
 
     impl AggregateInitFixture {
         fn store(&self) -> &AggregateInitializationOperationStore {
             &self.store
+        }
+
+        fn now(&self) -> String {
+            STEP_AT.to_string()
+        }
+
+        /// A counter that the coordinator would increment on every provider
+        /// turn. The store's recovery path must never touch a provider, so
+        /// `turn_count()` staying at 0 after `recover_interrupted` proves no
+        /// auto-restart happened.
+        fn provider(&self) -> ProviderTurnProbe<'_> {
+            ProviderTurnProbe {
+                turns: &self.provider_turns,
+            }
+        }
+
+        /// The operation-owned staging directory, mirroring the private
+        /// `AggregateInitializationOperationStore::staging_path` layout so the
+        /// test can seed and assert against the exact path the store cleans.
+        fn staging_root(&self) -> PathBuf {
+            self.paths
+                .aggregate_initializations_root("project_0001")
+                .join(&self.operation_id)
+                .join("staging")
+        }
+
+        /// Write a partial staging artifact as an interrupted provider turn
+        /// would, then leave the operation persisted as `Running` at `step`.
+        fn persist_running_at(&self, step: AggregateInitializationStepKind) {
+            let operation = self
+                .store()
+                .create_idempotent(self.new_operation("0001"))
+                .unwrap();
+            self.store()
+                .mark_running("project_0001", &operation.operation_id, RUNNING_AT.into())
+                .unwrap();
+            for preceding in AggregateInitializationStepKind::V1 {
+                if preceding == step {
+                    break;
+                }
+                self.run_step(&operation.operation_id, preceding);
+            }
+            self.store()
+                .mark_step_running(
+                    "project_0001",
+                    &operation.operation_id,
+                    step,
+                    format!(
+                        "aggregate-init:project_0001:{}:{}:input",
+                        operation.operation_id,
+                        step.as_str()
+                    ),
+                    STEP_AT.to_string(),
+                )
+                .unwrap();
+        }
+
+        /// Seed a partial staging file inside the operation-owned staging
+        /// directory, simulating an interrupted provider turn that wrote
+        /// partial output before being killed.
+        fn write_staging(&self, relative: &str) {
+            let path = self.staging_root().join(relative);
+            std::fs::create_dir_all(path.parent().expect("staging relative path has parent"))
+                .unwrap();
+            std::fs::write(&path, b"partial").unwrap();
         }
 
         fn new_operation(&self, idempotency_key: &str) -> AggregateInitializationOperation {
@@ -676,6 +791,22 @@ mod tests {
         }
     }
 
+    /// Lightweight probe over the fixture's provider-turn counter. The store's
+    /// recovery path never invokes a provider; `turn_count()` staying at 0 is
+    /// the proof that `recover_interrupted` does not auto-restart.
+    struct ProviderTurnProbe<'a> {
+        turns: &'a std::sync::Mutex<u32>,
+    }
+
+    impl ProviderTurnProbe<'_> {
+        fn turn_count(&self) -> u32 {
+            *self
+                .turns
+                .lock()
+                .expect("provider turn probe mutex poisoned")
+        }
+    }
+
     fn aggregate_init_fixture() -> AggregateInitFixture {
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path().join(".aria"));
@@ -684,6 +815,8 @@ mod tests {
             _temp: temp,
             paths,
             store,
+            provider_turns: std::sync::Mutex::new(0),
+            operation_id: "aggregate_initialization_0001".to_string(),
         }
     }
 
@@ -948,5 +1081,33 @@ mod tests {
                 profile_evidence_digest: Some("sha256:profile".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn interrupted_provider_step_cleans_staging_and_marks_failed_without_auto_restart() {
+        let fixture = aggregate_init_fixture();
+        fixture.persist_running_at(AggregateInitializationStepKind::RuleAndMcpConfig);
+        fixture.write_staging("rule-and-mcp/partial.json");
+        assert!(fixture.staging_root().exists());
+
+        let operation = fixture
+            .store()
+            .recover_interrupted(
+                "project_0001",
+                "aggregate_initialization_0001",
+                fixture.now(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            operation.status,
+            AggregateInitializationOperationStatus::Failed
+        );
+        assert_eq!(
+            operation.failed_step,
+            Some(AggregateInitializationStepKind::RuleAndMcpConfig)
+        );
+        assert!(!fixture.staging_root().exists());
+        assert_eq!(fixture.provider().turn_count(), 0);
     }
 }
