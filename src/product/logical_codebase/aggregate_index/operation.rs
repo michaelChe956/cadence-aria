@@ -6,7 +6,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::json_store::validate_relative_id;
+use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
+use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::logical_codebase::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalCodebaseManifest,
     LogicalCodebaseStore, MemberStatus, RepositoryCheckoutRecord,
@@ -166,6 +167,78 @@ impl AggregateIndexOperation {
         self.apply_index(project_id, &manifest, IndexApplicationMode::Initialize)
     }
 
+    /// Rebuilds the aggregate index under the single-writer lock, preserving the
+    /// last-known-good generation on failure.
+    ///
+    /// On success the freshly verified record supersedes the prior active record
+    /// via [`AggregateIndexStore::replace_active`]. On failure the original
+    /// error is propagated unchanged *after* the still-readable active record is
+    /// marked [`AggregateIndexStatus::Degraded`] with the failure reason, so a
+    /// transient rebuild outage never drops the planner into a no-index state.
+    /// The active pointer is never switched on the failure path: only its status
+    /// and warning mutate.
+    pub fn rebuild(&self, project_id: &str) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        self.with_single_writer(project_id, || {
+            let revision = self
+                .logical
+                .load_manifest(project_id)?
+                .ok_or_else(|| missing_manifest(project_id))?
+                .membership_revision;
+            match self.build(project_id, revision) {
+                Ok(next) => Ok(next),
+                Err(error) => {
+                    self.store
+                        .degrade_last_known_good(project_id, error.to_string())?;
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    /// Serializes `operation` against concurrent rebuild/sync writers for the
+    /// project by holding an exclusive flock on the project-scoped aggregate
+    /// index lock file. Half-written indexes and racing active-pointer flips
+    /// are thereby impossible: only one writer mutates the index generation at a
+    /// time.
+    ///
+    /// The original [`AggregateIndexError`] from `operation` is preserved
+    /// verbatim (including its `&'static str` code); only lock-acquisition
+    /// failures are mapped to a distinct `aggregate_index_lock_error` code.
+    pub fn with_single_writer<T>(
+        &self,
+        project_id: &str,
+        operation: impl FnOnce() -> Result<T, AggregateIndexError>,
+    ) -> Result<T, AggregateIndexError> {
+        validate_relative_id(project_id)?;
+        let path = self.store.lock_path(project_id)?;
+        // Capture the domain error produced inside the locked section so its
+        // `&'static str` code survives the lock boundary; lock-acquisition
+        // errors fall through to a distinct code below.
+        let mut captured: Option<AggregateIndexError> = None;
+        let result = with_exact_exclusive_lock(&path, || match operation() {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                captured = Some(error.clone());
+                Err(ProductStoreError::Io(error.to_string()))
+            }
+        });
+        match result {
+            Ok(value) => Ok(value),
+            Err(_) => {
+                if let Some(error) = captured {
+                    Err(error)
+                } else {
+                    Err(AggregateIndexError::Failed {
+                        code: "aggregate_index_lock_error",
+                        message: format!(
+                            "acquire aggregate-index single-writer lock for {project_id} failed"
+                        ),
+                    })
+                }
+            }
+        }
+    }
+
     /// Refreshes an existing active index after freshness detected a drift.
     ///
     /// The caller (freshness service) supplies the previously-active record so
@@ -178,32 +251,34 @@ impl AggregateIndexOperation {
         prior: AggregateIndexRecord,
     ) -> Result<AggregateIndexRecord, AggregateIndexError> {
         validate_relative_id(project_id)?;
-        let manifest = self
-            .logical
-            .load_manifest(project_id)?
-            .ok_or_else(|| missing_manifest(project_id))?;
+        self.with_single_writer(project_id, || {
+            let manifest = self
+                .logical
+                .load_manifest(project_id)?
+                .ok_or_else(|| missing_manifest(project_id))?;
 
-        match self.apply_index(project_id, &manifest, IndexApplicationMode::Sync) {
-            Ok(record) => Ok(record),
-            Err(AggregateIndexError::Degraded { code, message }) => {
-                self.store.mark_status(
-                    project_id,
-                    &prior.aggregate_index_id,
-                    AggregateIndexStatus::Degraded,
-                    Some(format!("{code}: {message}")),
-                )?;
-                Err(AggregateIndexError::Degraded { code, message })
+            match self.apply_index(project_id, &manifest, IndexApplicationMode::Sync) {
+                Ok(record) => Ok(record),
+                Err(AggregateIndexError::Degraded { code, message }) => {
+                    self.store.mark_status(
+                        project_id,
+                        &prior.aggregate_index_id,
+                        AggregateIndexStatus::Degraded,
+                        Some(format!("{code}: {message}")),
+                    )?;
+                    Err(AggregateIndexError::Degraded { code, message })
+                }
+                Err(AggregateIndexError::Failed { code, message }) => {
+                    self.store.mark_status(
+                        project_id,
+                        &prior.aggregate_index_id,
+                        AggregateIndexStatus::Stale,
+                        Some(format!("{code}: {message}")),
+                    )?;
+                    Err(AggregateIndexError::Failed { code, message })
+                }
             }
-            Err(AggregateIndexError::Failed { code, message }) => {
-                self.store.mark_status(
-                    project_id,
-                    &prior.aggregate_index_id,
-                    AggregateIndexStatus::Stale,
-                    Some(format!("{code}: {message}")),
-                )?;
-                Err(AggregateIndexError::Failed { code, message })
-            }
-        }
+        })
     }
 
     /// Shared body that regenerates the CodeGraph configuration, executes the
@@ -623,6 +698,154 @@ mod tests {
         assert_eq!(requests[0].argv, ["--version"]);
     }
 
+    #[test]
+    fn failed_rebuild_keeps_last_known_good_readable_and_marks_it_degraded() {
+        let fixture = aggregate_index_fixture();
+        let active = fixture.persist_active_index();
+        fixture.cli.fail_next_init("parser crashed");
+
+        let error = fixture.operation().rebuild("project_0001").unwrap_err();
+        assert!(
+            matches!(error, AggregateIndexError::Failed { code, .. } if code == "codegraph_init_failed")
+        );
+        let preserved = fixture.store().active_required("project_0001").unwrap();
+        assert_eq!(preserved.aggregate_index_id, active.aggregate_index_id);
+        assert_eq!(preserved.status, AggregateIndexStatus::Degraded);
+        assert!(fixture.read_only_planner_can_read("project_0001"));
+    }
+
+    #[test]
+    fn rebuild_succeeds_and_supersedes_the_prior_active_record() {
+        let fixture = aggregate_index_fixture();
+        let first = fixture.persist_active_index();
+
+        // The single-writer rebuild path publishes a new active record that
+        // supersedes the prior one; the old generation becomes superseded.
+        let rebuilt = fixture.operation().rebuild("project_0001").unwrap();
+        assert_eq!(rebuilt.status, AggregateIndexStatus::Active);
+        assert_ne!(rebuilt.aggregate_index_id, first.aggregate_index_id);
+        assert_eq!(
+            rebuilt.supersedes_aggregate_index_id.as_deref(),
+            Some(first.aggregate_index_id.as_str())
+        );
+        let prior = fixture
+            .store()
+            .get("project_0001", &first.aggregate_index_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prior.status, AggregateIndexStatus::Superseded);
+    }
+
+    #[test]
+    fn rebuild_rejects_invalid_project_id_before_acquiring_the_single_writer_lock() {
+        let fixture = aggregate_index_fixture();
+
+        assert!(matches!(
+            fixture.operation().rebuild("../project_0001"),
+            Err(AggregateIndexError::Failed { code, .. }) if code == "aggregate_index_store_error"
+        ));
+        // The lock path validation happens before any CodeGraph request.
+        assert!(fixture.cli.requests().is_empty());
+    }
+
+    #[test]
+    fn concurrent_rebuilds_are_serialized_under_the_single_writer_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Condvar, Mutex};
+
+        let fixture = aggregate_index_fixture();
+        fixture.persist_active_index();
+
+        // Hold the single-writer lock on the exact path the rebuild uses so the
+        // in-flight rebuild must wait for it to release rather than racing the
+        // active pointer. `with_exact_exclusive_lock` locks the path verbatim
+        // (unlike the target-derived `ExclusiveFileLock`), so the holder must
+        // use the same primitive to actually contend on the same flock.
+        use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
+        let lock_path = fixture.store().lock_path("project_0001").unwrap();
+
+        // Synchronization pair so the holder signals once it holds the flock
+        // and the main thread signals back when it may release.
+        let held = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+
+        let holder_held = Arc::clone(&held);
+        let holder_release = Arc::clone(&release);
+        let holder_path = lock_path.clone();
+        let holder = std::thread::spawn(move || {
+            with_exact_exclusive_lock(&holder_path, || {
+                let (lock, cvar) = &*holder_held;
+                *lock.lock().unwrap() = true;
+                cvar.notify_one();
+                // Wait for the main thread to confirm the rebuild is blocked.
+                let (rlock, rcvar) = &*holder_release;
+                let mut released = rlock.lock().unwrap();
+                while !*released {
+                    released = rcvar.wait(released).unwrap();
+                }
+                Ok::<(), ProductStoreError>(())
+            })
+            .unwrap();
+        });
+
+        // Wait until the holder reports it holds the flock.
+        {
+            let (lock, cvar) = &*held;
+            let mut held_flag = lock.lock().unwrap();
+            while !*held_flag {
+                held_flag = cvar.wait(held_flag).unwrap();
+            }
+        }
+
+        let rebuild_done = Arc::new(AtomicBool::new(false));
+        let fixture_cli = fixture.cli.clone();
+        let fixture_store = fixture.store.clone();
+        let fixture_logical = fixture.logical.clone();
+        let snapshot_logical = fixture.logical.clone();
+        let snapshot_runner = fixture.cli.clone();
+        let cli_executable = "codegraph".to_string();
+        let done_flag = Arc::clone(&rebuild_done);
+        std::thread::spawn(move || {
+            let operation = AggregateIndexOperation::with_snapshot_dependencies(
+                fixture_logical,
+                fixture_store,
+                CodeGraphCli::new(fixture_cli, cli_executable),
+                CodeGraphExcludeGenerator,
+                AggregateIndexSnapshotCollector::with_dependencies(
+                    snapshot_logical,
+                    snapshot_runner,
+                ),
+            );
+            let _ = operation.rebuild("project_0001");
+            done_flag.store(true, Ordering::SeqCst);
+        });
+
+        // The rebuild cannot complete while the sibling thread holds the lock.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            !rebuild_done.load(Ordering::SeqCst),
+            "rebuild completed while the single-writer lock was held elsewhere"
+        );
+
+        // Release the holder; the rebuild proceeds and reports completion.
+        {
+            let (lock, cvar) = &*release;
+            *lock.lock().unwrap() = true;
+            cvar.notify_one();
+        }
+        for _ in 0..40 {
+            if rebuild_done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            rebuild_done.load(Ordering::SeqCst),
+            "rebuild never completed after the single-writer lock was released"
+        );
+        holder.join().unwrap();
+    }
+
     struct Fixture {
         _temp: tempfile::TempDir,
         logical: LogicalCodebaseStore,
@@ -661,6 +884,37 @@ mod tests {
                 "sha256:{:x}",
                 sha2::Sha256::digest(serde_json::to_vec_pretty(&config).unwrap())
             )
+        }
+
+        /// Handle to the durable store for direct assertions in failure-recovery tests.
+        fn store(&self) -> &AggregateIndexStore {
+            &self.store
+        }
+
+        /// Publishes a verified active record so a subsequent failing rebuild has a
+        /// last-known-good generation to preserve.
+        fn persist_active_index(&self) -> AggregateIndexRecord {
+            self.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
+            self.cli.query_returns(
+                "crossRepoGreeting",
+                serde_json::json!([{"file":"api/src/A.java"}, {"file":"web/src/B.ts"}]),
+            );
+            self.cli
+                .query_returns("SHOULD_NOT_INDEX_NONMEMBER", serde_json::json!([]));
+            self.cli
+                .query_returns("SHOULD_NOT_INDEX_WORKTREE", serde_json::json!([]));
+            self.cli
+                .query_returns("SHOULD_NOT_INDEX_ARIA", serde_json::json!([]));
+            self.cli
+                .query_returns("SHOULD_NOT_INDEX_BUILD", serde_json::json!([]));
+            self.operation().build("project_0001", 3).unwrap()
+        }
+
+        /// Mirrors the read-only planner entry point: a degraded/stale last-known-good
+        /// remains readable (with its warning) while building/failed/superseded
+        /// generations are never served.
+        fn read_only_planner_can_read(&self, project_id: &str) -> bool {
+            self.store().active_required(project_id).is_ok()
         }
     }
 
@@ -755,6 +1009,9 @@ mod tests {
         files: Vec<PathBuf>,
         queries: BTreeMap<String, Value>,
         requests: Vec<BoundedCommandRequest>,
+        /// When set, the next `init` invocation fails with this stderr and a
+        /// non-zero exit, simulating a CodeGraph parser crash mid-rebuild.
+        fail_next_init: Option<String>,
     }
 
     impl FakeCodeGraphRunner {
@@ -777,6 +1034,10 @@ mod tests {
                 .insert(query.to_string(), value);
         }
 
+        fn fail_next_init(&self, stderr: &str) {
+            self.state.lock().unwrap().fail_next_init = Some(stderr.to_string());
+        }
+
         fn requests(&self) -> Vec<BoundedCommandRequest> {
             std::mem::take(&mut self.state.lock().unwrap().requests)
         }
@@ -788,42 +1049,58 @@ mod tests {
             &self,
             request: BoundedCommandRequest,
         ) -> Result<BoundedCommandResult, BoundedCommandError> {
-            let stdout = {
-                let mut state = self.state.lock().unwrap();
-                state.requests.push(request.clone());
-                match request.argv.as_slice() {
-                    [version] if version == "--version" => "1.5.0\n".to_string(),
-                    [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD" => {
-                        match request
-                            .working_dir
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                        {
-                            Some("api") => "a".repeat(40),
-                            Some("web") => "b".repeat(40),
-                            name => panic!("unexpected fake Git checkout: {name:?}"),
-                        }
+            let mut state = self.state.lock().unwrap();
+            state.requests.push(request.clone());
+            // A scripted init failure short-circuits before any other argv match
+            // so the rebuild path observes a non-zero `codegraph init` exit.
+            if let [init, dot] = request.argv.as_slice()
+                && init == "init"
+                && dot == "."
+                && let Some(stderr) = state.fail_next_init.take()
+            {
+                return Ok(BoundedCommandResult {
+                    exit_code: Some(2),
+                    stdout: String::new(),
+                    stderr,
+                    timed_out: false,
+                    cancelled: false,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                    duration_ms: 1,
+                });
+            }
+            let stdout = match request.argv.as_slice() {
+                [version] if version == "--version" => "1.5.0\n".to_string(),
+                [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD" => {
+                    match request
+                        .working_dir
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                    {
+                        Some("api") => "a".repeat(40),
+                        Some("web") => "b".repeat(40),
+                        name => panic!("unexpected fake Git checkout: {name:?}"),
                     }
-                    [status, porcelain] if status == "status" && porcelain == "--porcelain=v1" => {
-                        String::new()
-                    }
-                    [init, dot] if init == "init" && dot == "." => "Indexed 2 files\n".to_string(),
-                    [files, json] if files == "files" && json == "--json" => serde_json::to_string(
-                        &state
-                            .files
-                            .iter()
-                            .map(|path| serde_json::json!({"path": path}))
-                            .collect::<Vec<_>>(),
-                    )
-                    .unwrap(),
-                    [query, symbol, json] if query == "query" && json == "--json" => state
-                        .queries
-                        .get(symbol)
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!([]))
-                        .to_string(),
-                    argv => panic!("unexpected fake CodeGraph argv: {argv:?}"),
                 }
+                [status, porcelain] if status == "status" && porcelain == "--porcelain=v1" => {
+                    String::new()
+                }
+                [init, dot] if init == "init" && dot == "." => "Indexed 2 files\n".to_string(),
+                [files, json] if files == "files" && json == "--json" => serde_json::to_string(
+                    &state
+                        .files
+                        .iter()
+                        .map(|path| serde_json::json!({"path": path}))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                [query, symbol, json] if query == "query" && json == "--json" => state
+                    .queries
+                    .get(symbol)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]))
+                    .to_string(),
+                argv => panic!("unexpected fake CodeGraph argv: {argv:?}"),
             };
             Ok(BoundedCommandResult {
                 exit_code: Some(0),

@@ -16,6 +16,14 @@ impl AggregateIndexStore {
         Self { paths }
     }
 
+    /// Returns the project-scoped single-writer lock path used to serialize
+    /// concurrent rebuild/sync operations so a half-written index cannot
+    /// corrupt a readable generation.
+    pub fn lock_path(&self, project_id: &str) -> Result<std::path::PathBuf, AggregateIndexError> {
+        validate_relative_id(project_id)?;
+        Ok(self.paths.aggregate_index_lock_path(project_id))
+    }
+
     pub fn create(
         &self,
         project_id: &str,
@@ -86,9 +94,74 @@ impl AggregateIndexStore {
         }
     }
 
-    /// Replaces the active record only after the caller has completed build and
-    /// acceptance. Task 7 will refine replacement ordering for last-known-good
-    /// recovery; this initial store deliberately persists the transition.
+    /// Returns the single active record, or an error when there is none or more
+    /// than one. Read-only planning must prefer [`Self::active_required`] which
+    /// still surfaces a `degraded`/`stale` last-known-good when rebuild failed,
+    /// so a transient rebuild outage never blocks the planner.
+    pub fn active_required(
+        &self,
+        project_id: &str,
+    ) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        validate_relative_id(project_id)?;
+        let records = self.records(project_id)?;
+        for status in [
+            AggregateIndexStatus::Active,
+            AggregateIndexStatus::Degraded,
+            AggregateIndexStatus::Stale,
+        ] {
+            let matching = records
+                .iter()
+                .filter(|record| record.status == status)
+                .collect::<Vec<_>>();
+            match matching.as_slice() {
+                [] => continue,
+                [record] => return Ok((**record).clone()),
+                _ => {
+                    return Err(AggregateIndexError::Failed {
+                        code: "aggregate_index_active_ambiguous",
+                        message: format!(
+                            "project {project_id} has multiple {status:?} aggregate indexes"
+                        ),
+                    });
+                }
+            }
+        }
+        Err(AggregateIndexError::Failed {
+            code: "aggregate_index_active_missing",
+            message: format!("project {project_id} has no readable aggregate index"),
+        })
+    }
+
+    /// Marks the current active record `degraded` with the supplied warning and
+    /// returns the updated record. Used by the rebuild failure path so a failed
+    /// rebuild keeps the last-known-good index readable (with a warning) rather
+    /// than dropping the planner into a no-index state. When there is no active
+    /// record the operation is a no-op and returns `Ok(None)`; a rebuild that
+    /// fails before publishing any index has nothing to degrade.
+    pub fn degrade_last_known_good(
+        &self,
+        project_id: &str,
+        reason: String,
+    ) -> Result<Option<AggregateIndexRecord>, AggregateIndexError> {
+        validate_relative_id(project_id)?;
+        let Some(mut record) = self.active(project_id)? else {
+            return Ok(None);
+        };
+        record.status = AggregateIndexStatus::Degraded;
+        record.warning = Some(reason);
+        record.updated_at = Utc::now().to_rfc3339();
+        self.save(project_id, &record)?;
+        Ok(Some(record))
+    }
+
+    /// Replaces the active record with a freshly accepted successor. The caller
+    /// persists the new record as `building` first (via [`Self::create`]), and
+    /// only after indexing and acceptance succeeds hands the now-`active`
+    /// successor here. `replace_active` atomically flips the old active record
+    /// to `superseded`, records the succession link on the successor, and
+    /// persists the successor as the new active record. The failure path never
+    /// calls this method, so a failed rebuild cannot leave a half-written or
+    /// superseded active pointer.
     pub fn replace_active(
         &self,
         project_id: &str,
@@ -306,6 +379,63 @@ mod tests {
         assert!(matches!(
             store.active("project_0001"),
             Err(AggregateIndexError::Failed { code, .. }) if code == "aggregate_index_identity_mismatch"
+        ));
+    }
+
+    #[test]
+    fn degrade_last_known_good_keeps_record_readable_with_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AggregateIndexStore::new(ProductAppPaths::new(temp.path()));
+        store
+            .replace_active("project_0001", record("aggregate_index_first"))
+            .unwrap();
+
+        let degraded = store
+            .degrade_last_known_good(
+                "project_0001",
+                "codegraph_init_failed: parser crashed".to_string(),
+            )
+            .unwrap()
+            .expect("active record was degraded");
+        assert_eq!(degraded.aggregate_index_id, "aggregate_index_first");
+        assert_eq!(degraded.status, AggregateIndexStatus::Degraded);
+        assert_eq!(
+            degraded.warning.as_deref(),
+            Some("codegraph_init_failed: parser crashed")
+        );
+
+        // The degraded record is no longer `active` but stays readable for planning.
+        assert!(store.active("project_0001").unwrap().is_none());
+        let readable = store.active_required("project_0001").unwrap();
+        assert_eq!(readable.aggregate_index_id, "aggregate_index_first");
+        assert_eq!(readable.status, AggregateIndexStatus::Degraded);
+    }
+
+    #[test]
+    fn degrade_last_known_good_is_a_noop_without_an_active_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AggregateIndexStore::new(ProductAppPaths::new(temp.path()));
+
+        assert!(
+            store
+                .degrade_last_known_good("project_0001", "noop".to_string())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn readable_for_planning_never_serves_building_or_superseded_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AggregateIndexStore::new(ProductAppPaths::new(temp.path()));
+        // A superseded record alone must not be served.
+        let mut superseded = record("aggregate_index_first");
+        superseded.status = AggregateIndexStatus::Superseded;
+        store.create("project_0001", superseded).unwrap();
+
+        assert!(matches!(
+            store.active_required("project_0001"),
+            Err(AggregateIndexError::Failed { code, .. }) if code == "aggregate_index_active_missing"
         ));
     }
 
