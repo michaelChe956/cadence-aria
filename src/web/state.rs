@@ -44,7 +44,10 @@ pub use coding_run_registry::{CodingAttemptRunKey, CodingRunRegistry, CodingRunR
 mod coding_socket_registry;
 pub use coding_socket_registry::CodingSocketRegistry;
 mod repository_initialization_run_registry;
-pub use repository_initialization_run_registry::RepositoryInitializationRunRegistry;
+pub use repository_initialization_run_registry::{
+    InitializationOperationKind, InitializationRunKey, InitializationRunRegistry,
+    RepositoryInitializationRunRegistry,
+};
 
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {

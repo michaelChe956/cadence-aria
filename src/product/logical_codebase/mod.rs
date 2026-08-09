@@ -1,4 +1,6 @@
 pub mod aggregate_index;
+pub mod aggregate_initialization;
+pub mod aggregate_initialization_store;
 pub mod feature;
 pub mod migration;
 pub mod policy;
@@ -9,6 +11,15 @@ pub mod registry;
 pub mod store;
 pub mod types;
 
+pub use aggregate_initialization::{
+    AGGREGATE_INITIALIZATION_LAYOUT_VERSION, AGGREGATE_INITIALIZATION_OPERATION_KIND,
+    AggregateCancellationRecord, AggregateInitializationErrorRecord,
+    AggregateInitializationIdempotencyIdentity, AggregateInitializationOperation,
+    AggregateInitializationOperationInput, AggregateInitializationOperationStatus,
+    AggregateInitializationStepKind, AggregateInitializationStepRecord,
+    AggregateInitializationStepStatus,
+};
+pub use aggregate_initialization_store::AggregateInitializationOperationStore;
 pub use feature::LogicalCodebaseFeature;
 pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
