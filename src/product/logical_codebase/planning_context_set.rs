@@ -448,7 +448,7 @@ mod tests {
         fn new(count: usize) -> Self {
             let mut members = Vec::with_capacity(count);
             for index in 0..count {
-                let seed = (0x0100 + index as u16) as u16;
+                let seed = 0x0100 + index as u16;
                 members.push(RepositoryContextSet {
                     member_id: LogicalRepositoryId(stable_uuid(seed)),
                     alias: format!("member_{index:03}_alias_padding_xxxxxxxxxxxxx"),
