@@ -6,6 +6,7 @@ pub mod feature;
 pub mod issue_selection;
 pub mod migration;
 pub mod planning_context;
+pub mod planning_context_resolver;
 pub mod planning_context_set;
 pub mod policy;
 pub mod provider_gateway;
@@ -43,6 +44,9 @@ pub use migration::{
 };
 pub use planning_context::{
     MemberCheckoutFingerprint, PlanningContextSnapshot, PlanningContextSnapshotStore,
+};
+pub use planning_context_resolver::{
+    BestEffortReadonlyStatus, PlanningContextResolver, ResolvedPlanningContext,
 };
 pub use planning_context_set::{
     InventoryInjection, InventoryInjectionBudget, PlanningContextSetResolver,
