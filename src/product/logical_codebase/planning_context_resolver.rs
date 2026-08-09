@@ -53,6 +53,75 @@ pub struct ResolvedPlanningContext {
     pub context_resolution: RepositoryContextResolution,
 }
 
+impl ResolvedPlanningContext {
+    /// 构造 planning 只读启动请求。action 恒为 `PlanningReadOnly`,writable_roots
+    /// 为空,readable_roots 与 target.worktree 均为聚合根 cwd
+    /// (`provider_context_root`)。target 用 `PolicyTarget::aggregate_root`,
+    /// 不绑定具体 logical member(logical_repository_id/checkout_id 为空串)。
+    ///
+    /// 返回的 `SessionLaunchRequest` 需经 `LogicalCodebaseProviderGateway::validate`
+    /// 冻结为 validated policy 后才能进入真实 provider 启动;本方法只构造请求,
+    /// 不越权校验政策。
+    pub fn launch_request(
+        &self,
+        provider: crate::product::logical_codebase::provider_gateway::ProviderRef,
+        config_artifact_ref: impl Into<String>,
+    ) -> crate::product::logical_codebase::provider_gateway::SessionLaunchRequest {
+        crate::product::logical_codebase::provider_gateway::SessionLaunchRequest::planning(
+            self.snapshot.project_id.clone(),
+            provider,
+            crate::product::logical_codebase::policy::PolicyTarget::aggregate_root(
+                self.cwd.clone(),
+            ),
+            vec![self.cwd.clone()],
+            config_artifact_ref,
+        )
+    }
+
+    /// 经 gateway `validate` 产出 validated policy,再组装为
+    /// `ValidatedStreamingProviderInput`。本方法是 planning 启动经 gateway 的唯一
+    /// 组装点:cwd/policy/action 全部来自本 context 的快照与 envelope,不旁路重建。
+    ///
+    /// `provider_type` 由 validated envelope 冻结的 `provider_dialect` 派生
+    /// (ClaudeCodeCliV1 → ClaudeCode,CodexCliV1 → Codex),与 gateway 路由级
+    /// 解析的 dialect 一致。本 task 不实现硬只读 PreToolUse deny,只读语义由
+    /// envelope 的 `PlanningReadOnly` action(空 writable_roots)+ prompt 层
+    /// 「只读」指令表达(best_effort_configured,design §5.2),permission_mode
+    /// 取 `Supervised`。
+    pub fn validated_planning_input(
+        &self,
+        gateway: &crate::product::logical_codebase::provider_gateway::LogicalCodebaseProviderGateway,
+        provider: crate::product::logical_codebase::provider_gateway::ProviderRef,
+        config_artifact_ref: impl Into<String>,
+        prompt: String,
+    ) -> Result<
+        crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+    > {
+        let request = self.launch_request(provider, config_artifact_ref);
+        let validated = gateway.validate(request)?;
+        let provider_type = provider_type_for_dialect(validated.envelope().provider_dialect);
+        let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            provider_type,
+            role: crate::protocol::contracts::AdapterRole::Orchestrator,
+            prompt,
+            working_dir: self.cwd.clone(),
+            workspace_session_id: None,
+            resume_provider_session_id: None,
+            permission_mode:
+                crate::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised,
+            structured_output_contract: None,
+            env_vars: std::collections::BTreeMap::new(),
+            timeout_secs: 0,
+        };
+        Ok(
+            crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
+                input, validated,
+            ),
+        )
+    }
+}
+
 /// 唯一规划上下文 resolver。组合 `PlanningContextSetResolver`（参与仓库集合）、
 /// `AggregateIndexStore::active_required`（索引快照）、
 /// `AggregatePolicyArtifactStore`（政策 digest）与
@@ -179,6 +248,19 @@ fn map_index_error(error: AggregateIndexError) -> ProductStoreError {
     ProductStoreError::Io(format!("aggregate_index_unavailable: {error}"))
 }
 
+/// 据 validated envelope 冻结的 provider dialect 映射到 streaming input 的
+/// `ProviderType`。dialect 与 provider 类型一一对应,与 gateway 路由级解析一致。
+/// Fake/测试 provider 不经 gateway,故此处只映射两种真实 dialect。
+fn provider_type_for_dialect(
+    dialect: crate::product::logical_codebase::policy::ProviderDialect,
+) -> crate::protocol::contracts::ProviderType {
+    use crate::product::logical_codebase::policy::ProviderDialect;
+    match dialect {
+        ProviderDialect::ClaudeCodeCliV1 => crate::protocol::contracts::ProviderType::ClaudeCode,
+        ProviderDialect::CodexCliV1 => crate::protocol::contracts::ProviderType::Codex,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,7 +268,9 @@ mod tests {
         AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
     };
     use crate::product::logical_codebase::planning_context_set::InventoryInjectionBudget;
-    use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+    use crate::product::logical_codebase::policy::{
+        AggregatePolicyArtifactStore, PolicyTarget, SessionPolicyAction,
+    };
     use crate::product::logical_codebase::{
         CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
         IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore, MemberStatus,
@@ -226,6 +310,19 @@ mod tests {
 
         fn aggregate_root(&self) -> PathBuf {
             self.temp.path().join("aggregate-root")
+        }
+
+        /// planning 只读启动使用的 provider ref。与 gateway `ProviderRef` 对齐,
+        /// planning 走 ClaudeCode(Codex danger-full-access 在 gateway 路由级被阻断)。
+        fn provider_ref(&self) -> crate::product::logical_codebase::provider_gateway::ProviderRef {
+            crate::product::logical_codebase::provider_gateway::ProviderRef::claude_code(
+                "cap_claude_code_1_4_0",
+            )
+        }
+
+        /// planning 启动携带的托管配置 artifact 引用(envelope 冻结其 digest)。
+        fn config_artifact_ref(&self) -> String {
+            "sha256:managed-config-artifact".to_string()
         }
 
         fn membership_revision(&self) -> u64 {
@@ -407,6 +504,26 @@ mod tests {
         assert_eq!(
             resolved.best_effort_readonly_status,
             BestEffortReadonlyStatus::BestEffortConfigured
+        );
+    }
+
+    #[test]
+    fn planning_launch_has_no_write_roots_and_cwd_is_aggregate_root() {
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        let resolved = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+
+        let request =
+            resolved.launch_request(fixture.provider_ref(), fixture.config_artifact_ref());
+        assert_eq!(request.action, SessionPolicyAction::PlanningReadOnly);
+        assert!(request.writable_roots.is_empty());
+        assert_eq!(request.readable_roots, vec![fixture.aggregate_root()]);
+        assert_eq!(
+            request.target,
+            PolicyTarget::aggregate_root(fixture.aggregate_root())
         );
     }
 

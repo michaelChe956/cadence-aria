@@ -156,6 +156,22 @@ impl PolicyTarget {
             worktree: worktree.into(),
         }
     }
+
+    /// 聚合根 planning 只读 target。planning 只读 action 不绑定具体 logical
+    /// member(checkout_id 为空串、logical_repository_id 为空串),worktree 取
+    /// 聚合根 cwd(`provider_context_root`)。read-only action 经
+    /// `requires_empty_writable_roots` 强制空 writable_roots,本构造函数只负责
+    /// target 维度。
+    ///
+    /// 路由级 fail-closed 不等于 OS 级隔离:本 target 是 supervised 场景下的
+    /// 政策门,不宣称物理不可写。
+    pub fn aggregate_root(working_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            logical_repository_id: String::new(),
+            checkout_id: String::new(),
+            worktree: working_dir.into(),
+        }
+    }
 }
 
 /// 每次 provider run 的不可变政策快照。
