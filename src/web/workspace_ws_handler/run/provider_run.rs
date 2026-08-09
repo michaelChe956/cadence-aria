@@ -31,6 +31,7 @@ pub(crate) async fn spawn_provider_run_from_handler(
                 .unwrap_or(ProviderName::Codex),
             ProviderRunKind::WorkItemPlanAuthor
             | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
+            | ProviderRunKind::WorkItemPlanOutlineRebuild { .. }
             | ProviderRunKind::WorkItemPlanDraft { .. }
             | ProviderRunKind::WorkItemPlanBatch
             | ProviderRunKind::WorkItemPlanRevision { .. } => {
@@ -86,6 +87,12 @@ pub(crate) async fn spawn_provider_run_from_handler(
     tokio::spawn(async move {
         let mut engine = engine_for_run.lock().await;
         engine.use_run_token(run_cancel.clone());
+        // B3：StaleContext 重建携带的 rebuilt planning context（provider run 构造新会话
+        // 使用：cwd/inventory/policy digest）。在 `match run_kind` 前提取，供共享 arm 使用。
+        let rebuild_context = match &run_kind {
+            ProviderRunKind::WorkItemPlanOutlineRebuild { rebuilt } => Some((**rebuilt).clone()),
+            _ => None,
+        };
         match run_kind {
             ProviderRunKind::Author { content } => {
                 engine
@@ -112,7 +119,9 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     .await;
             }
             ProviderRunKind::WorkItemPlanAuthor
-            | ProviderRunKind::WorkItemPlanOutlineRevision { .. } => {
+            | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
+            | ProviderRunKind::WorkItemPlanOutlineRebuild { .. } => {
+                let rebuilt = rebuild_context.as_ref();
                 let lifecycle_for_run = LifecycleStore::new(run_context_clone.app_paths.clone());
                 let app_paths_for_run = run_context_clone.app_paths.clone();
                 let session_record_for_run = run_context_clone.session_record.clone();
@@ -230,10 +239,27 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     }
                 };
 
-                let node_id = if engine.active_node_type()
+                // B3：StaleContext 重建 —— 用 rebuilt planning context 构造新 run：
+                // 聚合根 cwd（provider_context_root）作为 worktree，注入
+                // inventory/effective members 到 prompt（不沿用旧会话内容）。
+                if let Some(rebuilt) = rebuilt {
+                    invocation.worktree_path = rebuilt.cwd.to_string_lossy().to_string();
+                    invocation.prompt.push_str(
+                        &crate::product::workspace_engine::aggregate_work_item_target_scope_prompt(
+                            &rebuilt.inventory_injection.rendered,
+                            &rebuilt.snapshot.effective_member_ids,
+                        ),
+                    );
+                }
+
+                let node_id = if rebuilt.is_some() {
+                    // B3：重建 run 不沿用中断会话的 OutlineRun 节点，新建节点。
+                    engine.begin_work_item_plan_outline_run().await
+                } else if engine.active_node_type()
                     == Some(
                         crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun,
-                    ) {
+                    )
+                {
                     match engine.active_timeline_node_id() {
                         Some(node_id) => node_id,
                         None => {
@@ -270,6 +296,15 @@ pub(crate) async fn spawn_provider_run_from_handler(
                 let provider_session = provider_for_run
                     .start(provider_input, run_cancel.clone())
                     .await;
+                // 新 BLOCKER 修复：rebuilt snapshot 仅在 provider 成功启动后 commit。
+                // provider 启动失败不落盘 —— 重连仍判 StaleContext（避免再次 TOCTOU）。
+                if let Some(rebuilt) = rebuilt {
+                    commit_rebuilt_snapshot_after_provider_start(
+                        &app_paths_for_run,
+                        rebuilt,
+                        &provider_session,
+                    );
+                }
                 let full_output = match engine
                     .drive_work_item_plan_provider_session_to_output(
                         provider_session,

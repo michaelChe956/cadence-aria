@@ -1,4 +1,7 @@
 use super::*;
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::streaming_provider::ProviderSession;
+use crate::product::logical_codebase::{PlanningContextSnapshotStore, ResolvedPlanningContext};
 use crate::product::workspace_engine::WorkItemDraftAuthorOutcome;
 
 #[macro_use]
@@ -28,15 +31,53 @@ pub(crate) struct ProviderRunContext {
 }
 
 pub(crate) enum ProviderRunKind {
-    Author { content: String },
-    AuthorChoiceFollowup { content: String },
+    Author {
+        content: String,
+    },
+    AuthorChoiceFollowup {
+        content: String,
+    },
     Revision,
     ReviewOnly,
     WorkItemPlanAuthor,
-    WorkItemPlanOutlineRevision { feedback: Option<String> },
-    WorkItemPlanDraft { feedback: Option<String> },
+    WorkItemPlanOutlineRevision {
+        feedback: Option<String>,
+    },
+    /// StaleContext 重建：携带 rebuilt 的规划上下文，启动**全新** outline run（新建节点、
+    /// 使用 rebuilt cwd/inventory/policy，不沿用中断会话的 OutlineRun 节点）。
+    WorkItemPlanOutlineRebuild {
+        rebuilt: Box<ResolvedPlanningContext>,
+    },
+    WorkItemPlanDraft {
+        feedback: Option<String>,
+    },
     WorkItemPlanBatch,
-    WorkItemPlanRevision { feedback: Option<String> },
+    WorkItemPlanRevision {
+        feedback: Option<String>,
+    },
+}
+
+/// 新 BLOCKER 修复：rebuilt snapshot 仅在 **provider 成功启动后** 才 commit（延迟落盘）。
+///
+/// provider `start` 失败（`Err`）时**不落盘** —— 确保 provider 不可用/启动前置失败时
+/// snapshot 不被提前更新，同一会话重连仍判 `StaleContext`（避免再次 TOCTOU：若在
+/// provider 启动前无条件落盘，失败后重连会因 snapshot 已被更新而误判 `SameContext`，
+/// 重新沿用原中断会话）。返回是否已落盘。
+pub(crate) fn commit_rebuilt_snapshot_after_provider_start(
+    app_paths: &ProductAppPaths,
+    rebuilt: &ResolvedPlanningContext,
+    provider_started: &Result<ProviderSession, ProviderAdapterError>,
+) -> bool {
+    if provider_started.is_err() {
+        return false;
+    }
+    match PlanningContextSnapshotStore::new(app_paths.clone()).save(&rebuilt.snapshot) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, "commit rebuilt planning snapshot after provider start failed");
+            false
+        }
+    }
 }
 
 pub(crate) fn parse_work_item_split_structured_output(

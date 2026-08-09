@@ -1,7 +1,6 @@
 use super::*;
 use crate::product::logical_codebase::{
-    IssueCodebaseSelectionStore, LogicalCodebaseStore, PlanningContextResolver,
-    PlanningContextSnapshotStore, ResolvedPlanningContext, ResumeDecision,
+    IssueCodebaseSelectionStore, LogicalCodebaseStore, PlanningContextResolver, ResumeDecision,
 };
 
 pub async fn workspace_ws(
@@ -92,27 +91,21 @@ pub(crate) fn planning_resume_decision(
 /// 依据 planning resume 决策决定实际启动的 run kind（B3 修复）。
 ///
 /// - `None`（传统单仓）/ `SameContext`：沿用 `fallback` run kind 续跑原中断 run。
-/// - `StaleContext`：重建 —— 强制全新 `WorkItemPlanAuthor` 全量生成（新会话），不使用
-///   可能复用旧 provider 会话/prompt 内容的 revision run kind，确保不沿用旧内容。
+/// - `StaleContext`：重建 —— 强制全新 `WorkItemPlanOutlineRebuild`（携带 rebuilt 规划
+///   上下文：新建 OutlineRun 节点、使用 rebuilt cwd/inventory/policy），不使用可能复用
+///   旧 provider 会话/prompt 内容的 revision run kind，也不沿用中断 OutlineRun 节点。
 pub(crate) fn planning_resume_run_kind(
     decision: &Option<ResumeDecision>,
     fallback: ProviderRunKind,
 ) -> ProviderRunKind {
     match decision {
         None | Some(ResumeDecision::SameContext(_)) => fallback,
-        Some(ResumeDecision::StaleContext { .. }) => ProviderRunKind::WorkItemPlanAuthor,
+        Some(ResumeDecision::StaleContext { rebuilt, .. }) => {
+            ProviderRunKind::WorkItemPlanOutlineRebuild {
+                rebuilt: Box::new(rebuilt.clone()),
+            }
+        }
     }
-}
-
-/// StaleContext 的实际重建动作（B3 修复）：把 `rebuilt` 的 planning snapshot 落盘
-/// （重建后写新 snapshot），使新会话基于重建上下文；后续 resume 以该快照为准。
-pub(crate) fn persist_rebuilt_planning_context(
-    app_paths: &ProductAppPaths,
-    rebuilt: &ResolvedPlanningContext,
-) -> Result<(), String> {
-    PlanningContextSnapshotStore::new(app_paths.clone())
-        .save(&rebuilt.snapshot)
-        .map_err(|error| format!("persist rebuilt planning snapshot failed: {error}"))
 }
 
 pub(crate) async fn handle_workspace_socket(
@@ -364,10 +357,11 @@ pub(crate) async fn handle_workspace_socket(
             // 逻辑代码库分支：resume 校验在 provider 启动前完成（REQ-PLN-03）。
             // - None（传统单仓）/ SameContext（指纹一致）：沿用现有 session 审计与
             //   prompt 上下文，照常续跑。
-            // - StaleContext（指纹漂移）：实际启动新会话并重建上下文 —— 先落盘
-            //   rebuilt 快照（重建后写新 snapshot），再以全新 `WorkItemPlanAuthor`
-            //   全量生成启动（不沿用可能过时/越权的 prompt/cwd/policy，也不使用
-            //   复用旧 provider 会话的 revision run kind）。
+            // - StaleContext（指纹漂移）：以 `WorkItemPlanOutlineRebuild` 真正启动全新
+            //   run —— 使用 rebuilt cwd/inventory/policy、新建 OutlineRun 节点，不沿用
+            //   中断会话节点/旧内容。rebuilt snapshot 不在启动前落盘，而是由 run 在
+            //   provider 成功启动后才 commit（新 BLOCKER 修复：provider 失败不落盘，
+            //   重连仍 StaleContext）。
             // - 校验失败：fail-closed 拒绝续跑。
             match planning_resume_decision(
                 &app_paths,
@@ -375,24 +369,16 @@ pub(crate) async fn handle_workspace_socket(
                 &session_record.issue_id,
             ) {
                 Ok(decision) => {
-                    // B3：StaleContext 先落盘 rebuilt 快照，失败则 fail-closed 不启动。
-                    if let Some(ResumeDecision::StaleContext { rebuilt, .. }) = &decision
-                        && let Err(message) = persist_rebuilt_planning_context(&app_paths, rebuilt)
+                    let run_kind = planning_resume_run_kind(&decision, run_kind);
+                    if let Err(message) = spawn_provider_run_from_handler(
+                        run_context.clone(),
+                        run_kind,
+                        outbound_tx.clone(),
+                    )
+                    .await
                     {
                         let err = WsOutMessage::Error { message };
                         let _ = send_json_outbound(&outbound_tx, &err).await;
-                    } else {
-                        let run_kind = planning_resume_run_kind(&decision, run_kind);
-                        if let Err(message) = spawn_provider_run_from_handler(
-                            run_context.clone(),
-                            run_kind,
-                            outbound_tx.clone(),
-                        )
-                        .await
-                        {
-                            let err = WsOutMessage::Error { message };
-                            let _ = send_json_outbound(&outbound_tx, &err).await;
-                        }
                     }
                 }
                 Err(message) => {
