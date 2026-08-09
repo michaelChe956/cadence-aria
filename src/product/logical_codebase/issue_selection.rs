@@ -249,9 +249,10 @@ mod tests {
 
     #[test]
     fn focus_must_be_within_include_and_exclude_overrides_include() {
-        let a = LogicalRepositoryId(Uuid::new_v4());
-        let b = LogicalRepositoryId(Uuid::new_v4());
-        let c = LogicalRepositoryId(Uuid::new_v4());
+        // 稳定 UUID：禁止运行时随机，保证测试可复现（与仓库其他测试一致）。
+        let a = LogicalRepositoryId(stable_uuid(0x0001));
+        let b = LogicalRepositoryId(stable_uuid(0x0002));
+        let c = LogicalRepositoryId(stable_uuid(0x0003));
 
         let explicit = IssueCodebaseSelection::explicit(
             "project_0001",

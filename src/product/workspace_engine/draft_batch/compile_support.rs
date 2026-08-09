@@ -51,18 +51,28 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
     let selection = selection_store
         .load(&plan.project_id, &plan.issue_id)
         .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
-    let (manifest, _selection) = match (manifest, selection) {
+    match (manifest, selection) {
         (None, None) => return Ok(None),
-        (Some(manifest), Some(selection)) => (manifest, selection),
+        (Some(_), Some(_)) => {}
         _ => {
             return Err(
                 "work_item_target_missing: logical codebase manifest and issue selection must both exist"
                     .to_string(),
             );
         }
-    };
+    }
+    // REQ-PLN-02：active 集合按 MemberStatus::Active 过滤（apply_delete_tombstone 只置
+    // Tombstoned、不改 manifest.member_ids），删除/停用成员不进入有效成员集合并触发
+    // selection 自动失效；下方 on-disk 状态检查再兜底阻断指向已删除成员的新工作项。
+    let active_member_ids: Vec<LogicalRepositoryId> = logical_store
+        .list_members(&plan.project_id)
+        .map_err(|error| format!("list logical codebase members failed: {error}"))?
+        .into_iter()
+        .filter(|member| member.status == MemberStatus::Active)
+        .map(|member| member.logical_repository_id)
+        .collect();
     let resolution = selection_store
-        .resolve_effective_members(&plan.project_id, &plan.issue_id, &manifest.member_ids)
+        .resolve_effective_members(&plan.project_id, &plan.issue_id, &active_member_ids)
         .map_err(|error| format!("resolve issue codebase selection failed: {error}"))?;
     // REQ-PLN-02：目标指向已删除/停用成员（on-disk 存在且 status != Active）时 blocker，
     // 阻断指向已删除成员的新工作项。失效成员有 on-disk 记录且 status != Active 判定为删除。
@@ -409,6 +419,52 @@ mod tests {
                 .unwrap();
         }
 
+        /// 写入含多个 active 成员的 manifest + selection（include 全部成员）。
+        fn write_selection_with_members(
+            &self,
+            member_ids: &[LogicalRepositoryId],
+            aliases: &[&str],
+        ) {
+            let store = LogicalCodebaseStore::new(self.lifecycle.app_paths());
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.aggregate_root(),
+                member_ids.to_vec(),
+            );
+            store.save_manifest("project_0001", &manifest).unwrap();
+            for (id, alias) in member_ids.iter().zip(aliases) {
+                store
+                    .save_member(
+                        "project_0001",
+                        &self.member_record(*id, alias, MemberStatus::Active),
+                    )
+                    .unwrap();
+            }
+            let selection = IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                member_ids.to_vec(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            IssueCodebaseSelectionStore::new(self.lifecycle.app_paths())
+                .save(&selection)
+                .unwrap();
+        }
+
+        /// 真实 tombstone 语义（Plan 1 `apply_delete_tombstone`）：manifest.member_ids
+        /// 不变，仅 member.status → Tombstoned。
+        fn tombstone_member(&self, member_id: LogicalRepositoryId, alias: &str) {
+            let store = LogicalCodebaseStore::new(self.lifecycle.app_paths());
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(member_id, alias, MemberStatus::Tombstoned),
+                )
+                .unwrap();
+        }
+
         fn member_record(
             &self,
             id: LogicalRepositoryId,
@@ -475,6 +531,35 @@ mod tests {
         fixture.delete_member(api, "api");
 
         // compile 校验触发 resolve_effective_members，阻断指向已删除成员的新工作项。
+        let compile =
+            resolve_logical_work_item_plan_repository_targets(&fixture.lifecycle, &fixture.plan());
+        assert!(matches!(
+            compile,
+            Err(ref reason) if reason.contains("target_member_removed")
+        ));
+
+        // resolve 过程中 selection 失效标记已自动写入（REQ-PLN-02）。
+        let selection_store = IssueCodebaseSelectionStore::new(fixture.lifecycle.app_paths());
+        assert!(
+            selection_store
+                .is_invalidated("project_0001", "issue_0001")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn compile_blocks_work_item_targeting_tombstoned_member_still_in_manifest() {
+        // REQ-PLN-02 fix round 1：真实 tombstone 语义（apply_delete_tombstone 只置
+        // status=Tombstoned、不改 manifest.member_ids）→ 仍被 target_member_removed 阻塞，
+        // 且 selection 自动失效。
+        let fixture = CompileInvalidationFixture::new();
+        let api = LogicalRepositoryId(stable_uuid(0x0001));
+        let web = LogicalRepositoryId(stable_uuid(0x0002));
+        fixture.write_selection_with_members(&[api, web], &["api", "web"]);
+        // tombstone web：manifest 仍含 web，仅 status → Tombstoned。
+        fixture.tombstone_member(web, "web");
+
+        // compile 校验触发 resolve_effective_members（active 集合），阻断指向已删除成员的新工作项。
         let compile =
             resolve_logical_work_item_plan_repository_targets(&fixture.lifecycle, &fixture.plan());
         assert!(matches!(

@@ -151,8 +151,9 @@ mod tests {
 
     #[test]
     fn snapshot_freezes_membership_index_policy_and_per_checkout_fingerprint() {
-        let member = LogicalRepositoryId(Uuid::new_v4());
-        let checkout = RepositoryCheckoutId(Uuid::new_v4());
+        // 稳定 UUID：禁止运行时随机，保证测试可复现（与仓库其他测试一致）。
+        let member = LogicalRepositoryId(Uuid::from_u128(1));
+        let checkout = RepositoryCheckoutId(Uuid::from_u128(2));
         let mut snapshot = PlanningContextSnapshot {
             schema_version: 1,
             project_id: "project_0001".into(),
@@ -187,8 +188,9 @@ mod tests {
 
     #[test]
     fn snapshot_mark_invalidated_roundtrip_keeps_fingerprint() {
-        let member = LogicalRepositoryId(Uuid::new_v4());
-        let checkout = RepositoryCheckoutId(Uuid::new_v4());
+        // 稳定 UUID：禁止运行时随机，保证测试可复现（与仓库其他测试一致）。
+        let member = LogicalRepositoryId(Uuid::from_u128(1));
+        let checkout = RepositoryCheckoutId(Uuid::from_u128(2));
         let mut snapshot = PlanningContextSnapshot {
             schema_version: 1,
             project_id: "project_0001".into(),

@@ -5,7 +5,7 @@ use crate::product::logical_codebase::aggregate_index::{
 };
 use crate::product::logical_codebase::{
     CodebaseMemberRecord, IssueCodebaseSelectionStore, LogicalCodebaseStore, LogicalRepositoryId,
-    RepositoryCheckoutRecord, RepositoryType,
+    MemberStatus, RepositoryCheckoutRecord, RepositoryType,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -56,17 +56,43 @@ impl PlanningContextSetResolver {
                     kind: "logical_codebase_manifest",
                     id: project_id.to_string(),
                 })?;
-        let resolution = self.selections.resolve_effective_members(
-            project_id,
-            issue_id,
-            &manifest.member_ids,
-        )?;
-        let members: BTreeMap<_, _> = self
-            .logical
-            .list_members(project_id)?
+        let listed_members = self.logical.list_members(project_id)?;
+        // REQ-PLN-02：active 集合从成员记录状态推导（apply_delete_tombstone 只置
+        // MemberStatus::Tombstoned、不改 manifest.member_ids），删除/停用成员不进入
+        // 有效成员集合，selection 据此自动失效。
+        let active_member_ids: Vec<LogicalRepositoryId> = listed_members
+            .iter()
+            .filter(|member| member.status == MemberStatus::Active)
+            .map(|member| member.logical_repository_id)
+            .collect();
+        let resolution =
+            self.selections
+                .resolve_effective_members(project_id, issue_id, &active_member_ids)?;
+        let members: BTreeMap<_, _> = listed_members
             .into_iter()
             .map(|member| (member.logical_repository_id, member))
             .collect();
+        // REQ-PLN-02：manifest.member_ids 与 active 集合不一致（成员被 tombstone 但
+        // manifest 未移除）→ 显式标记 selection 失效。resolve_effective_members 仅在
+        // selection 引用失效成员时自动标记，manifest 层面不一致需此处兜底。
+        let active_set: BTreeSet<LogicalRepositoryId> = active_member_ids.iter().copied().collect();
+        let stale_manifest_members: Vec<LogicalRepositoryId> = manifest
+            .member_ids
+            .iter()
+            .copied()
+            .filter(|id| !active_set.contains(id))
+            .collect();
+        if !stale_manifest_members.is_empty() && resolution.selection.invalidation.is_none() {
+            self.selections
+                .mark_invalidated(project_id, issue_id, "member_removed")?;
+        }
+        // 合并 selection 失效成员与 manifest 层面失效成员，供 snapshot 失效传播。
+        let mut invalid_member_ids = resolution.invalid_member_ids;
+        for id in stale_manifest_members {
+            if !invalid_member_ids.contains(&id) {
+                invalid_member_ids.push(id);
+            }
+        }
         let checkouts = self.logical.list_checkouts(project_id)?;
         let paths_by_member =
             member_root_relative_paths(&manifest.provider_context_root, &checkouts);
@@ -95,7 +121,7 @@ impl PlanningContextSetResolver {
         }
         Ok(RepositoryContextResolution {
             set,
-            invalid_member_ids: resolution.invalid_member_ids,
+            invalid_member_ids,
             membership_revision: manifest.membership_revision,
         })
     }
@@ -349,6 +375,52 @@ mod tests {
                 .unwrap();
         }
 
+        /// 真实 tombstone 语义（Plan 1 `apply_delete_tombstone`）：member.status →
+        /// Tombstoned，但 manifest.member_ids 不变（仍含删除成员）。selection 只 include
+        /// api（active）。resolver 必须按 Active 过滤，删除成员仍留在 manifest 时
+        /// selection/snapshot 也要标记失效。
+        fn write_manifest_with_tombstoned_member_still_included(&self) {
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+
+            // manifest 仍含 removed 成员（tombstone 不修改 manifest.member_ids）。
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.provider_context_root(),
+                vec![self.api_member_id, self.removed_member_id],
+            );
+            store.save_manifest("project_0001", &manifest).unwrap();
+
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(self.api_member_id, "api", MemberStatus::Active),
+                )
+                .unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(self.removed_member_id, "web", MemberStatus::Tombstoned),
+                )
+                .unwrap();
+
+            store
+                .save_checkout("project_0001", &self.api_checkout())
+                .unwrap();
+
+            // selection 不含删除成员：失效需由 manifest 不一致兜底触发。
+            let selection = IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![self.api_member_id],
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            IssueCodebaseSelectionStore::new(self.paths.clone())
+                .save(&selection)
+                .unwrap();
+        }
+
         fn member_record(
             &self,
             id: LogicalRepositoryId,
@@ -421,6 +493,47 @@ mod tests {
         assert_eq!(resolution.set.len(), 1);
         assert_eq!(resolution.set[0].alias, "api");
         assert_eq!(resolution.invalid_member_ids.len(), 1);
+    }
+
+    #[test]
+    fn tombstoned_member_still_in_manifest_marks_selection_invalid_and_excludes_from_set() {
+        // REQ-PLN-02 fix round 1：apply_delete_tombstone 只置 member.status=Tombstoned、
+        // 不改 manifest.member_ids。resolver 按 Active 过滤后删除成员仍留在 manifest →
+        // selection 被标记失效、删除成员从参与集合排除并进入 invalid（供 snapshot 失效）。
+        let fixture = context_set_fixture();
+        fixture.write_manifest_with_tombstoned_member_still_included();
+
+        let resolution = fixture
+            .resolver()
+            .resolve("project_0001", "issue_0001")
+            .unwrap();
+        // set 只含 api（Tombstoned 成员被排除）。
+        assert_eq!(resolution.set.len(), 1);
+        assert_eq!(resolution.set[0].alias, "api");
+        // 删除成员虽在 manifest.member_ids，但 status=Tombstoned → invalid（snapshot 失效）。
+        assert!(
+            resolution
+                .invalid_member_ids
+                .contains(&fixture.removed_member_id)
+        );
+
+        // selection 已被标记失效（manifest 不一致兜底，selection 自身不含删除成员）。
+        let selection_store = IssueCodebaseSelectionStore::new(fixture.paths.clone());
+        assert!(
+            selection_store
+                .is_invalidated("project_0001", "issue_0001")
+                .unwrap()
+        );
+        // 失效是显式标记：既有 JSON 保留。
+        let loaded = selection_store
+            .load("project_0001", "issue_0001")
+            .unwrap()
+            .unwrap();
+        assert!(
+            loaded
+                .included_repository_ids
+                .contains(&fixture.api_member_id)
+        );
     }
 
     #[test]

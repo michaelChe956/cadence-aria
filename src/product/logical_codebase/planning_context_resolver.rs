@@ -570,6 +570,66 @@ mod tests {
             self.cached_policy_digest = Some(policy.digest);
         }
 
+        /// 真实 tombstone 语义（Plan 1 `apply_delete_tombstone`）：web 仍留在
+        /// manifest.member_ids 但 status=Tombstoned；selection 只 include api。resolver
+        /// 必须按 Active 过滤使 web 进入 invalid → selection/snapshot 失效 → resume
+        /// 强制 StaleContext。
+        fn write_active_manifest_index_and_policy_with_tombstoned_member_in_manifest(&mut self) {
+            let web = LogicalRepositoryId(stable_uuid(0x0002));
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.aggregate_root(),
+                // web 仍在 manifest（tombstone 不修改 manifest.member_ids）。
+                vec![self.api_member_id, web],
+            );
+            store.save_manifest("project_0001", &manifest).unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(self.api_member_id, "api", MemberStatus::Active),
+                )
+                .unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(web, "web", MemberStatus::Tombstoned),
+                )
+                .unwrap();
+            store
+                .save_checkout("project_0001", &self.api_checkout())
+                .unwrap();
+
+            // selection 不含删除成员：失效由 manifest 不一致兑底触发。
+            let selection = IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![self.api_member_id],
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            IssueCodebaseSelectionStore::new(self.paths.clone())
+                .save(&selection)
+                .unwrap();
+
+            // active aggregate index：成员快照仅含 api（有效成员），web 为失效成员。
+            let index = active_index_record("project_0001", self.api_member_id);
+            AggregateIndexStore::new(self.paths.clone())
+                .create("project_0001", index.clone())
+                .unwrap();
+            let mut activated = index.clone();
+            activated.status = AggregateIndexStatus::Active;
+            AggregateIndexStore::new(self.paths.clone())
+                .replace_active("project_0001", activated)
+                .unwrap();
+
+            let policy = AggregatePolicyArtifactStore::new(self.paths.clone())
+                .ensure_bootstrap(&manifest)
+                .unwrap();
+            self.cached_policy_digest = Some(policy.digest);
+        }
+
         /// 模拟成员变更：manifest membership_revision 1 → 2 并同步推进 active aggregate
         /// index 的 membership_revision 与成员 checkout revision，使 planning snapshot
         /// 指纹漂移（membership/index/checkout 任一变化都会改变 access_fingerprint）。
@@ -863,6 +923,58 @@ mod tests {
         ));
 
         // selection 失效标记也已自动写入。
+        let selection_store = IssueCodebaseSelectionStore::new(fixture.paths.clone());
+        assert!(
+            selection_store
+                .is_invalidated("project_0001", "issue_0001")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn tombstoned_member_in_manifest_invalidates_snapshot_and_forces_stale_rebuild() {
+        // REQ-PLN-02 fix round 1：真实 tombstone（status=Tombstoned 但仍留在
+        // manifest.member_ids）→ resolver 按 Active 过滤 → snapshot 失效 + resume 强制
+        // StaleContext；selection 由 manifest 不一致兑底标记失效。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy_with_tombstoned_member_in_manifest();
+
+        let resolved = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        assert!(resolved.invalidation.is_some());
+        assert_eq!(
+            resolved
+                .invalidation
+                .as_ref()
+                .map(|record| record.reason.as_str()),
+            Some("member_removed")
+        );
+        // set 只含 api（Tombstoned 成员被排除）。
+        assert_eq!(resolved.context_resolution.set.len(), 1);
+        assert_eq!(resolved.context_resolution.set[0].alias, "api");
+        // manifest.member_ids 含 web 但 status=Tombstoned → invalid_member_ids 含 web。
+        let web = LogicalRepositoryId(stable_uuid(0x0002));
+        assert!(
+            resolved
+                .context_resolution
+                .invalid_member_ids
+                .contains(&web)
+        );
+
+        // build 已落盘失效快照 → resume 走 invalidated 分支强制 StaleContext。
+        let decision = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(
+            decision,
+            ResumeDecision::StaleContext { reason, .. }
+                if reason.starts_with("invalidated:")
+        ));
+
+        // selection 失效标记也已写入（manifest 不一致兑底，selection 自身不含删除成员）。
         let selection_store = IssueCodebaseSelectionStore::new(fixture.paths.clone());
         assert!(
             selection_store
