@@ -198,6 +198,33 @@ impl AggregateInitializationOperationStore {
         })
     }
 
+    /// Mark the operation completed once every step is `Completed`. Requires
+    /// the operation to be `Running` with no active step, failure or
+    /// cancellation.
+    pub fn finish_completed(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        completed_at: String,
+    ) -> Result<AggregateInitializationOperation, ProductStoreError> {
+        self.update(project_id, operation_id, |operation| {
+            if operation.status != AggregateInitializationOperationStatus::Running
+                || operation.current_step.is_some()
+                || operation.failed_step.is_some()
+                || operation.cancellation.is_some()
+                || operation.error.is_some()
+                || operation.completed_at.is_some()
+                || !operation.steps.iter().all(is_completed_step)
+            {
+                return Err(identity_mismatch(operation_id));
+            }
+            operation.status = AggregateInitializationOperationStatus::Completed;
+            operation.updated_at = completed_at.clone();
+            operation.completed_at = Some(completed_at);
+            Ok(())
+        })
+    }
+
     pub fn finish_failed(
         &self,
         project_id: &str,
@@ -658,6 +685,46 @@ mod tests {
             paths,
             store,
         }
+    }
+
+    #[test]
+    fn aggregate_layout_is_exactly_five_steps_and_rejects_jump_or_reorder() {
+        let fixture = aggregate_init_fixture();
+        let operation = fixture
+            .store()
+            .create_idempotent(fixture.new_operation("request-a"))
+            .unwrap();
+        assert_eq!(
+            operation
+                .steps
+                .iter()
+                .map(|step| step.step_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "machine_skills",
+                "aggregate_preflight",
+                "pre_check",
+                "rule_and_mcp_config",
+                "openspec_and_examples",
+            ]
+        );
+        fixture
+            .store()
+            .mark_running("project_0001", &operation.operation_id, RUNNING_AT.into())
+            .unwrap();
+        // No preceding step has run, so jumping to RuleAndMcpConfig must be rejected.
+        assert!(
+            fixture
+                .store()
+                .mark_step_running(
+                    "project_0001",
+                    &operation.operation_id,
+                    AggregateInitializationStepKind::RuleAndMcpConfig,
+                    "key".to_string(),
+                    STEP_AT.into(),
+                )
+                .is_err()
+        );
     }
 
     #[test]

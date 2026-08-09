@@ -1,5 +1,6 @@
 pub mod aggregate_index;
 pub mod aggregate_initialization;
+pub mod aggregate_initialization_coordinator;
 pub mod aggregate_initialization_store;
 pub mod feature;
 pub mod migration;
@@ -18,6 +19,12 @@ pub use aggregate_initialization::{
     AggregateInitializationOperationInput, AggregateInitializationOperationStatus,
     AggregateInitializationStepKind, AggregateInitializationStepRecord,
     AggregateInitializationStepStatus,
+};
+pub use aggregate_initialization_coordinator::{
+    AggregateInitializationCoordinator, AggregateInitializationError,
+    AggregatePreflightMemberProjection, AggregatePreflightService, AggregatePreflightSnapshot,
+    AggregateProviderTurnDriver, AggregateSkillsPreparation,
+    DeterministicAggregatePreflightService, MachineSkillsPreparation,
 };
 pub use aggregate_initialization_store::AggregateInitializationOperationStore;
 pub use feature::LogicalCodebaseFeature;

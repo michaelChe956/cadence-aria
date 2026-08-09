@@ -98,6 +98,17 @@ pub struct AggregateInitializationStepRecord {
     pub output_artifact_ref: Option<String>,
 }
 
+impl AggregateInitializationStepStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AggregateInitializationOperationStatus {
