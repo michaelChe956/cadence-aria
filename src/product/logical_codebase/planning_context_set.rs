@@ -1,10 +1,13 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
+use crate::product::logical_codebase::aggregate_index::{
+    COMPACT_INVENTORY_HARD_BUDGET_BYTES, COMPACT_INVENTORY_SOFT_BUDGET_BYTES,
+};
 use crate::product::logical_codebase::{
     CodebaseMemberRecord, IssueCodebaseSelectionStore, LogicalCodebaseStore, LogicalRepositoryId,
     RepositoryCheckoutRecord, RepositoryType,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// 单个参与仓库的 inventory 摘要条目。Task 4 inventory 渲染与 Task 5 resolver 只消费该集合，
@@ -95,6 +98,148 @@ impl PlanningContextSetResolver {
             invalid_member_ids: resolution.invalid_member_ids,
             membership_revision: manifest.membership_revision,
         })
+    }
+}
+
+/// Inventory 注入预算。`DEFAULT` 与 Plan 2 `CompactMemberInventory` 的紧凑清单阈值一致
+///（spike 4：默认 4 KiB / ~1,400 token；上限 8 KiB / ~2,700 token）。soft 超限先裁剪
+/// 非目标成员 profile，hard 超限只保留目标成员 + omitted 计数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InventoryInjectionBudget {
+    pub soft_bytes: usize,
+    pub hard_bytes: usize,
+    pub soft_tokens: usize,
+    pub hard_tokens: usize,
+}
+
+impl InventoryInjectionBudget {
+    /// spike 4 实测：默认最多 4 KiB / ~1,400 token；上限 8 KiB / ~2,700 token。
+    /// 引用 `CompactMemberInventory` 已有的紧凑清单常量，保证两处一致。
+    pub const DEFAULT: Self = Self {
+        soft_bytes: COMPACT_INVENTORY_SOFT_BUDGET_BYTES,
+        hard_bytes: COMPACT_INVENTORY_HARD_BUDGET_BYTES,
+        soft_tokens: 1_400,
+        hard_tokens: 2_700,
+    };
+}
+
+/// `render_compact_inventory` 的渲染结果。Task 5 与 6 只注入该结果，禁止重新枚举 manifest。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryInjection {
+    pub rendered: String,
+    pub omitted_member_ids: Vec<LogicalRepositoryId>,
+    pub truncated: bool,
+    pub budget: InventoryInjectionBudget,
+}
+
+/// 渲染紧凑 inventory 清单并施加预算截断。
+///
+/// 渲染顺序：目标成员在前（保持 `target_member_ids` 顺序），其余成员按 alias 序。
+/// 全量渲染（含 profile）≤ soft 预算时返回未截断结果；超过 soft 预算先裁剪非目标成员
+/// profile；仍超 soft 则只保留目标成员并标记 `omitted_member_ids`、`truncated=true`，
+/// 并在末行输出 `omitted_member_count`；绝不超 hard 预算。
+///
+/// 紧凑行格式与 Plan 2 `CompactMemberInventory::render` 对齐（每行投影
+/// id | alias | path | role | profile）。
+pub fn render_compact_inventory(
+    resolution: &RepositoryContextResolution,
+    target_member_ids: &[LogicalRepositoryId],
+) -> Result<InventoryInjection, ProductStoreError> {
+    let budget = InventoryInjectionBudget::DEFAULT;
+    let target_set: BTreeSet<LogicalRepositoryId> = target_member_ids.iter().copied().collect();
+
+    // 目标成员在前（保持 target_member_ids 顺序），其余成员按 alias 序排在后。
+    let mut ordered: Vec<&RepositoryContextSet> = resolution.set.iter().collect();
+    ordered.sort_by(|left, right| {
+        let left_is_target = target_set.contains(&left.member_id);
+        let right_is_target = target_set.contains(&right.member_id);
+        match (left_is_target, right_is_target) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => left.alias.cmp(&right.alias),
+        }
+    });
+
+    // 1) 全量（含 profile）。≤ soft 预算直接返回。
+    let full = render_inventory_lines(&ordered, true, 0);
+    if full.len() <= budget.soft_bytes {
+        return Ok(InventoryInjection {
+            rendered: full,
+            omitted_member_ids: Vec::new(),
+            truncated: false,
+            budget,
+        });
+    }
+
+    // 2) 裁剪非目标成员 profile（保留全部成员行）。≤ soft 仍未截断成员。
+    let trimmed = render_inventory_lines(&ordered, false, 0);
+    if trimmed.len() <= budget.soft_bytes {
+        return Ok(InventoryInjection {
+            rendered: trimmed,
+            omitted_member_ids: Vec::new(),
+            truncated: false,
+            budget,
+        });
+    }
+
+    // 3) 只保留目标成员 + omitted 计数；truncated=true。
+    let kept: Vec<&RepositoryContextSet> = ordered
+        .iter()
+        .copied()
+        .filter(|member| target_set.contains(&member.member_id))
+        .collect();
+    let omitted: Vec<LogicalRepositoryId> = ordered
+        .iter()
+        .map(|member| member.member_id)
+        .filter(|id| !target_set.contains(id))
+        .collect();
+    let omitted_count = omitted.len();
+    let mut minimal = render_inventory_lines(&kept, true, omitted_count);
+    if minimal.len() > budget.hard_bytes {
+        minimal.truncate(budget.hard_bytes);
+    }
+    Ok(InventoryInjection {
+        rendered: minimal,
+        omitted_member_ids: omitted,
+        truncated: true,
+        budget,
+    })
+}
+
+/// 渲染紧凑清单行：每行 `id | alias | path | role | profile`（`include_profile=false`
+/// 时省略 profile）。`omitted_count > 0` 时末行附 `omitted_member_count=N`。
+fn render_inventory_lines(
+    members: &[&RepositoryContextSet],
+    include_profile: bool,
+    omitted_count: usize,
+) -> String {
+    let mut out = String::new();
+    for member in members {
+        out.push_str(&format!(
+            "{} | {} | {} | {}",
+            member.member_id.0, member.alias, member.root_relative_path, member.role
+        ));
+        if include_profile {
+            let profile = profile_summary(member);
+            if !profile.is_empty() {
+                out.push_str(&format!(" | {profile}"));
+            }
+        }
+        out.push('\n');
+    }
+    if omitted_count > 0 {
+        out.push_str(&format!("omitted_member_count={omitted_count}\n"));
+    }
+    out
+}
+
+/// 投影成员 profile 摘要：`RepositoryContextSet` 仅携带 tech_stack，不含 tags/owner
+///（后者在 freshness 的 CompactMemberInventory 全量渲染中存在）。
+fn profile_summary(member: &RepositoryContextSet) -> String {
+    if member.tech_stack.is_empty() {
+        String::new()
+    } else {
+        format!("tech_stack=[{}]", member.tech_stack.join(","))
     }
 }
 
@@ -289,5 +434,73 @@ mod tests {
                 .err(),
             Some(ProductStoreError::NotFound { .. })
         ));
+    }
+
+    // --- Task 4: inventory 注入预算截断 ---
+
+    /// 纯内存 fixture：直接构造 RepositoryContextResolution，避免落盘依赖；
+    /// `count` 个成员，每个成员的 alias/path 足够长以触发预算阈值。
+    struct InventoryFixture {
+        members: Vec<RepositoryContextSet>,
+    }
+
+    impl InventoryFixture {
+        fn new(count: usize) -> Self {
+            let mut members = Vec::with_capacity(count);
+            for index in 0..count {
+                let seed = (0x0100 + index as u16) as u16;
+                members.push(RepositoryContextSet {
+                    member_id: LogicalRepositoryId(stable_uuid(seed)),
+                    alias: format!("member_{index:03}_alias_padding_xxxxxxxxxxxxx"),
+                    root_relative_path: format!(
+                        "services/member_{index:03}/src/path_padding_yyyyyyyyyyyyy"
+                    ),
+                    role: "service".to_string(),
+                    repo_type: RepositoryType::Backend,
+                    tech_stack: vec!["rust".to_string()],
+                });
+            }
+            Self { members }
+        }
+
+        fn resolution(&self) -> RepositoryContextResolution {
+            RepositoryContextResolution {
+                set: self.members.clone(),
+                invalid_member_ids: Vec::new(),
+                membership_revision: 1,
+            }
+        }
+
+        /// 取前三个成员作为 target，保持输入顺序。
+        fn first_three_targets(&self) -> Vec<LogicalRepositoryId> {
+            self.members
+                .iter()
+                .take(3)
+                .map(|member| member.member_id)
+                .collect()
+        }
+    }
+
+    #[test]
+    fn inventory_over_soft_budget_truncates_non_targets_and_marks_omitted() {
+        let fixture = InventoryFixture::new(50);
+        let injection =
+            render_compact_inventory(&fixture.resolution(), &fixture.first_three_targets())
+                .unwrap();
+
+        assert!(injection.rendered.len() <= InventoryInjectionBudget::DEFAULT.hard_bytes);
+        assert!(injection.truncated);
+        assert!(!injection.omitted_member_ids.is_empty());
+        assert!(injection.rendered.contains("omitted_member_count"));
+    }
+
+    #[test]
+    fn inventory_under_soft_budget_is_not_truncated() {
+        let fixture = InventoryFixture::new(2);
+        let injection =
+            render_compact_inventory(&fixture.resolution(), &fixture.first_three_targets())
+                .unwrap();
+        assert!(!injection.truncated);
+        assert!(injection.omitted_member_ids.is_empty());
     }
 }

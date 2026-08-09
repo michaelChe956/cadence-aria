@@ -45,7 +45,8 @@ pub use planning_context::{
     MemberCheckoutFingerprint, PlanningContextSnapshot, PlanningContextSnapshotStore,
 };
 pub use planning_context_set::{
-    PlanningContextSetResolver, RepositoryContextResolution, RepositoryContextSet,
+    InventoryInjection, InventoryInjectionBudget, PlanningContextSetResolver,
+    RepositoryContextResolution, RepositoryContextSet, render_compact_inventory,
 };
 pub use policy::{
     AggregatePolicyArtifact, AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect,
