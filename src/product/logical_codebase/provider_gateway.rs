@@ -42,10 +42,20 @@ use crate::protocol::contracts::AdapterOutput;
 /// 字段为 module-private 且无 public constructor:只能由
 /// `LogicalCodebaseProviderGateway::validate` 构造。这使「真实 provider 必须持有一个
 /// validated policy 才能启动」成为编译期约束,而非运行时 `if provider != Fake` 分支。
+///
+/// 除 envelope/fingerprint 外,还冻结 spawn 前复验所需的最小引用(project_id、
+/// provider ref、action、冻结的 version 与 capability snapshot),使
+/// `revalidate_before_spawn` 能在 spawn 时点重新加载 store/capability source 并逐维
+/// 比对(防 validate→spawn 之间政策升级/篡改)。
 #[derive(Debug, Clone)]
 pub struct ValidatedSessionLaunchPolicy {
     envelope: SessionPolicyEnvelope,
     fingerprint: SessionResumeFingerprint,
+    project_id: String,
+    provider: ProviderRef,
+    action: SessionPolicyAction,
+    version: String,
+    capability_snapshot_ref: String,
 }
 
 impl ValidatedSessionLaunchPolicy {
@@ -125,15 +135,61 @@ pub enum ProviderRefType {
     Codex,
 }
 
-/// gateway 解析出的 provider capability 快照。冻结 exact version 与 adapter dialect,
-/// 供 envelope 与 fingerprint 复验。Task 10 会把它与既有
-/// `cross_cutting::ProviderCapability` 桥接。
+/// resume 能力的可审计三态,与 `cross_cutting::provider_capabilities::
+/// ProviderCapabilityEvidence` 对齐。gateway 在 resume 启动时只放行 `Confirmed`;
+/// `Denied`/`Unknown` 一律 fail-closed。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeEvidenceState {
+    /// 探测确认该 provider 支持 resume。
+    Confirmed,
+    /// 探测确认该 provider 不支持 resume(`Denied`/`Unknown` 在 gateway 侧等价:不放行)。
+    Unsupported,
+}
+
+impl ResumeEvidenceState {
+    /// 仅 `true` 映射为 `Confirmed`;`false`/未知映射为 `Unsupported`。
+    /// fail-closed:探测结果不可靠时按不支持处理。
+    pub fn from_supports_resume(supports_resume: bool) -> Self {
+        if supports_resume {
+            Self::Confirmed
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    /// 从 `cross_cutting::ProviderCapabilityEvidence` 三态桥接到 gateway 侧状态。
+    /// 仅 `Confirmed` 放行 resume;`Denied`/`Unknown` 归为 `Unsupported`(fail-closed)。
+    /// 这是 `cross_cutting::ProviderCapability.resume_evidence` 进入 gateway 消费路径
+    /// 的唯一映射点,使该三态字段不再是无消费者的 dead field(B-2)。
+    pub fn from_cross_cutting_evidence(
+        evidence: &crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence,
+    ) -> Self {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        match evidence {
+            ProviderCapabilityEvidence::Confirmed => Self::Confirmed,
+            ProviderCapabilityEvidence::Denied { .. } | ProviderCapabilityEvidence::Unknown => {
+                Self::Unsupported
+            }
+        }
+    }
+
+    /// 该状态是否允许 resume 启动。仅 `Confirmed` 为真。
+    pub fn allows_resume(self) -> bool {
+        matches!(self, Self::Confirmed)
+    }
+}
+
+/// gateway 解析出的 provider capability 快照。冻结 exact version、adapter dialect
+/// 与 resume 能力,供 envelope 与 fingerprint 复验。Task 10 把它与既有
+/// `cross_cutting::ProviderCapability` 桥接(含 `resume_evidence` 三态)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCapability {
     pub provider_type: ProviderRefType,
     pub version: String,
     pub adapter_dialect: ProviderDialect,
     pub capability_snapshot_ref: String,
+    /// resume 能力三态。spawn 前 resume 启动据此 fail-closed(B-2)。
+    pub resume_evidence: ResumeEvidenceState,
 }
 
 /// resume 复验指纹:覆盖 policy digest、target、provider exact version、dialect 与
@@ -198,6 +254,15 @@ pub enum ProviderGatewayError {
     /// registry 中未找到该 provider 的真实 adapter。
     #[error("provider_gateway_registry_lookup: {0}")]
     RegistryLookup(String),
+    /// spawn 前复验发现 validate→spawn 之间政策被升级/篡改(TOCTOU):
+    /// policy revision/digest、provider version/dialect/capability snapshot 或
+    /// config digest 与 envelope 冻结值不一致。`dimension` 标记漂移维度便于审计。
+    #[error("provider_gateway_policy_drift: {dimension}")]
+    PolicyDrift { dimension: String },
+    /// resume 启动但 provider 的 `resume_evidence` 未 `Confirmed`(B-2 消费者)。
+    /// fail-closed:`Denied`/`Unknown` 一律拒绝 resume。
+    #[error("provider_gateway_resume_not_supported")]
+    ResumeNotSupported,
     /// 真实 adapter 启动/运行失败。
     #[error("provider_gateway_adapter: {0}")]
     Adapter(#[from] ProviderAdapterError),
@@ -309,20 +374,28 @@ impl LogicalCodebaseProviderGateway {
         Ok(ValidatedSessionLaunchPolicy {
             envelope,
             fingerprint,
+            project_id: request.project_id,
+            provider: request.provider,
+            action: request.action,
+            version: capability.version,
+            capability_snapshot_ref: capability.capability_snapshot_ref,
         })
     }
 
     /// 启动 streaming provider 会话。只接受绑定 validated policy 的 input;
-    /// spawn 前基于 validated policy 与 `input.working_dir` 重新复验 canonical
-    /// cwd/git-dir/worktree identity 与 provider 可用性。任一复验失败都发生在
-    /// registry lookup/真实 adapter start 之前(fail-closed)。
+    /// spawn 前基于 validated policy 与 `input.working_dir` 重新复验政策指纹
+    /// (policy revision/digest、provider version/dialect/capability snapshot、
+    /// config digest)、canonical cwd/git-dir/worktree identity、provider 可用性
+    /// 与 resume 能力。任一复验失败都发生在 registry lookup/真实 adapter start
+    /// 之前(fail-closed)。
     pub async fn start_streaming(
         &self,
         launch: ValidatedStreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderGatewayError> {
         let (input, validated) = launch.into_parts();
-        self.revalidate_before_spawn(&validated, &input.working_dir)?;
+        let is_resume = input.resume_provider_session_id.is_some();
+        self.revalidate_before_spawn(&validated, &input.working_dir, is_resume)?;
         let adapter = self.lookup_real_streaming_adapter(&validated)?;
         adapter
             .start(input, cancel)
@@ -331,9 +404,9 @@ impl LogicalCodebaseProviderGateway {
     }
 
     /// 同步运行 adapter。只接受绑定 validated policy 的 input;spawn 前基于
-    /// validated policy 与 `input.worktree_path` 重新复验 canonical
-    /// cwd/git-dir/worktree identity 与 provider 可用性。任一复验失败都发生在
-    /// 真实 adapter run 之前(fail-closed)。
+    /// validated policy 与 `input.worktree_path` 重新复验政策指纹、canonical
+    /// cwd/git-dir/worktree identity、provider 可用性与 resume 能力。任一复验
+    /// 失败都发生在真实 adapter run 之前(fail-closed)。
     pub fn run_sync(
         &self,
         launch: ValidatedAdapterInput,
@@ -344,25 +417,104 @@ impl LogicalCodebaseProviderGateway {
             .as_deref()
             .map(Path::new)
             .ok_or(ProviderGatewayError::MissingCwd)?;
-        self.revalidate_before_spawn(&validated, cwd)?;
+        // 同步 adapter input 不携带 resume session id;同步路径默认非 resume。
+        self.revalidate_before_spawn(&validated, cwd, false)?;
         self.sync_adapter
             .run(&input)
             .map_err(ProviderGatewayError::Adapter)
     }
 
-    /// spawn 前 canonical 复验:重新 canonicalize cwd,读取 worktree/git-dir
-    /// identity,与 envelope 冻结的 target 比对;调用 availability gate。任一
-    /// 维度漂移都返回 `TargetMismatch`/`ProviderUnavailable`,且发生在 registry
-    /// lookup 之前。
+    /// spawn 前完整复验(B-1)。逐维度比对 envelope 冻结值与 spawn 时点的真实值:
     ///
-    /// 路由级 fail-closed 不等于 OS 级隔离:本复验是 supervised 场景下的
-    /// TOCTOU 门禁,不宣称物理不可写。
+    /// 1. **policy 指纹**:重新加载 store 中的 `AggregatePolicyArtifact`,比对
+    ///    `policy_revision` 与 `policy_digest`(防 validate→spawn 间政策被升级)。
+    /// 2. **provider 能力指纹**:重新查询 capability source,比对 `version`、
+    ///    `adapter_dialect` 与 `capability_snapshot_ref`,并据当前 artifact+capability
+    ///    重算 `SessionResumeFingerprint` 与冻结值逐字一致(防 provider 被替换)。
+    /// 3. **config digest**:据 envelope 的 `config_artifact_ref` 重算 digest,
+    ///    与 envelope 冻结的 `config_digest` 一致(防托管配置被篡改)。
+    /// 4. **resume 能力**(B-2):若启动为 resume,provider 的 `resume_evidence` 必须
+    ///    `Confirmed`,否则 fail-closed 为 `ResumeNotSupported`。
+    /// 5. **canonical cwd/worktree identity**:重新 canonicalize cwd 与 target
+    ///    worktree,不一致返回 `TargetMismatch { field: "cwd" }`。
+    /// 6. **availability**:调用 availability gate,不可用返回 `ProviderUnavailable`。
+    ///
+    /// 任一维度漂移都发生在 registry lookup 之前。路由级 fail-closed 不等于 OS
+    /// 级隔离:本复验是 supervised 场景下的 TOCTOU 门禁,不宣称物理不可写。
     fn revalidate_before_spawn(
         &self,
         validated: &ValidatedSessionLaunchPolicy,
         cwd: &Path,
+        is_resume: bool,
     ) -> Result<(), ProviderGatewayError> {
         let envelope = validated.envelope();
+
+        // 1. 重新加载政策 artifact,比对 revision/digest。
+        let artifact = self
+            .policies
+            .get(&validated.project_id)
+            .map_err(ProviderGatewayError::policy)?
+            .ok_or_else(|| ProviderGatewayError::PolicyDrift {
+                dimension: "policy_missing_at_spawn".to_string(),
+            })?;
+        if artifact.revision != envelope.policy_revision {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "policy_revision".to_string(),
+            });
+        }
+        if artifact.digest != envelope.policy_digest {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "policy_digest".to_string(),
+            });
+        }
+
+        // 2. 重新查询能力,比对 version/dialect/snapshot,并重算指纹。
+        let capability = self
+            .capabilities
+            .require_supported(&validated.provider, validated.action)?;
+        if capability.version != validated.version {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "provider_version".to_string(),
+            });
+        }
+        if capability.adapter_dialect != envelope.provider_dialect {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "provider_dialect".to_string(),
+            });
+        }
+        if capability.capability_snapshot_ref != validated.capability_snapshot_ref {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "capability_snapshot_ref".to_string(),
+            });
+        }
+        let current_fingerprint = SessionResumeFingerprint::from_envelope(
+            envelope,
+            &capability.version,
+            capability.adapter_dialect,
+            &capability.capability_snapshot_ref,
+        );
+        if current_fingerprint.digest != validated.fingerprint.digest {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "resume_fingerprint".to_string(),
+            });
+        }
+
+        // 4. resume 能力 fail-closed(B-2 消费者)。
+        if is_resume && !capability.resume_evidence.allows_resume() {
+            return Err(ProviderGatewayError::ResumeNotSupported);
+        }
+
+        // 3. config digest 重算(防托管配置被篡改)。
+        let current_config_digest =
+            SessionPolicyEnvelope::recompute_config_digest(&envelope.config_artifact_ref)
+                .map_err(ProviderGatewayError::policy)?;
+        if current_config_digest != envelope.config_digest {
+            return Err(ProviderGatewayError::PolicyDrift {
+                dimension: "config_digest".to_string(),
+            });
+        }
+
+        // 5. canonical cwd/worktree identity。
         let canonical_cwd = cwd.canonicalize().map_err(|error| {
             ProviderGatewayError::Target(format!("canonicalize cwd {}: {error}", cwd.display()))
         })?;
@@ -378,8 +530,7 @@ impl LogicalCodebaseProviderGateway {
             });
         }
 
-        // git-dir/worktree identity 复验交由 target resolver 在 validate 阶段完成;
-        // 此处额外检查 availability gate,确保 provider 在 spawn 时点仍可用。
+        // 6. availability gate。
         let provider_name = provider_name_for_dialect(envelope.provider_dialect);
         self.availability_gate
             .ensure_available(&provider_name)
@@ -554,6 +705,166 @@ mod tests {
         );
     }
 
+    /// spawn 前复验(B-1):validate 后、start_streaming 前政策被升级(revision+digest
+    /// 变化),spawn 必须以 `PolicyDrift { dimension: "policy_revision" }` fail-closed,
+    /// 且不触达 registry(start_count == 0)。
+    #[test]
+    fn start_streaming_fails_closed_when_policy_upgraded_between_validate_and_spawn() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let launch = fixture.validated_planning_streaming_input(worktree);
+
+        // validate→spawn 之间政策被升级到 revision 2。
+        fixture.upgrade_policy();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(
+            fixture
+                .gateway()
+                .start_streaming(launch, CancellationToken::new()),
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected PolicyDrift, got a session"),
+        };
+        assert!(
+            matches!(error, ProviderGatewayError::PolicyDrift { ref dimension } if dimension == "policy_revision")
+        );
+        assert_eq!(fixture.registry_start_count(), 0);
+    }
+
+    /// spawn 前复验(B-1):validate 后、start_streaming 前 provider version 被改
+    /// (capability source 返回不同 version),spawn 必须以
+    /// `PolicyDrift { dimension: "provider_version" }` fail-closed,不触达 registry。
+    #[test]
+    fn start_streaming_rejects_provider_version_change_before_spawn() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let launch = fixture.validated_planning_streaming_input(worktree);
+
+        fixture.capabilities().set_version("1.4.1");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(
+            fixture
+                .gateway()
+                .start_streaming(launch, CancellationToken::new()),
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected PolicyDrift, got a session"),
+        };
+        assert!(
+            matches!(error, ProviderGatewayError::PolicyDrift { ref dimension } if dimension == "provider_version")
+        );
+        assert_eq!(fixture.registry_start_count(), 0);
+    }
+
+    /// spawn 前复验(B-1):validate 后、run_sync 前政策被升级,同步路径同样 fail-closed
+    /// 为 `PolicyDrift`,不触达真实 sync adapter(此处表现为返回错误而非成功)。
+    #[test]
+    fn run_sync_fails_closed_when_policy_upgraded_between_validate_and_spawn() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let request = SessionLaunchRequest::planning(
+            fixture.manifest().project_id,
+            ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
+            vec![fixture.paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+        let validated = fixture.gateway().validate(request).unwrap();
+        let input = crate::protocol::contracts::AdapterInput {
+            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+            role: crate::protocol::contracts::AdapterRole::Executor,
+            worktree_path: Some(worktree.to_string_lossy().to_string()),
+            provider_stream_log_dir: None,
+            prompt: "probe".to_string(),
+            context_files: Vec::new(),
+            output_schema: String::new(),
+            timeout: 1,
+            max_retries: 0,
+        };
+        let launch = ValidatedAdapterInput::new(input, validated);
+
+        fixture.upgrade_policy();
+
+        let error = fixture.gateway().run_sync(launch).unwrap_err();
+        assert!(
+            matches!(error, ProviderGatewayError::PolicyDrift { ref dimension } if dimension == "policy_revision")
+        );
+    }
+
+    /// resume 能力 fail-closed(B-2 消费者):resume 启动时 provider 的
+    /// `resume_evidence` 不是 `Confirmed` → spawn 拒绝(`ResumeNotSupported`),不触达
+    /// registry。这使 `resume_evidence` 三态成为有消费者的 fail-closed 门禁,而非
+    /// dead field。
+    #[test]
+    fn start_streaming_resume_is_rejected_when_resume_evidence_not_confirmed() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        // resume 启动:streaming input 携带 resume_provider_session_id。
+        let validated = fixture
+            .gateway()
+            .validate(fixture.planning_request())
+            .unwrap();
+        let input = fixture.streaming_input(worktree, Some("sess_resume_0001".to_string()));
+        let launch = ValidatedStreamingProviderInput::new(input, validated);
+
+        // provider 标记 resume 不支持(三态 Unknown/Denied 在 gateway 侧归为 Unsupported)。
+        fixture
+            .capabilities()
+            .set_resume_evidence(ResumeEvidenceState::Unsupported);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(
+            fixture
+                .gateway()
+                .start_streaming(launch, CancellationToken::new()),
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected ResumeNotSupported, got a session"),
+        };
+        assert!(matches!(error, ProviderGatewayError::ResumeNotSupported));
+        assert_eq!(fixture.registry_start_count(), 0);
+    }
+
+    /// resume 能力放行路径(B-2):`resume_evidence` 为 `Confirmed` 时 resume 启动通过复验
+    /// 并触达 registry(start_count == 1),确认消费者只在非 Confirmed 时阻断。
+    #[tokio::test]
+    async fn start_streaming_resume_passes_when_resume_evidence_confirmed() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        // planning 请求的 target worktree 必须等于真实 worktree,使 cwd 复验通过。
+        let request = SessionLaunchRequest::planning(
+            fixture.manifest().project_id,
+            ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
+            vec![fixture.paths.root().to_path_buf()],
+            "sha256:managed-config-artifact",
+        );
+        let validated = fixture.gateway().validate(request).unwrap();
+        let input = fixture.streaming_input(worktree, Some("sess_resume_0001".to_string()));
+        let launch = ValidatedStreamingProviderInput::new(input, validated);
+
+        fixture
+            .capabilities()
+            .set_resume_evidence(ResumeEvidenceState::Confirmed);
+
+        let _session = fixture
+            .gateway()
+            .start_streaming(launch, CancellationToken::new())
+            .await
+            .expect("resume launch passes when evidence confirmed");
+        assert_eq!(fixture.registry_start_count(), 1);
+    }
+
     /// 可变 target resolver:模拟 spawn 前 git_dir TOCTOU。初始 current 与
     /// expected 一致(resolve 通过);`change_git_dir_after_request` 后 current
     /// 偏离 expected,resolve 返回 `TargetMismatch { field: "git_dir" }`。
@@ -592,19 +903,27 @@ mod tests {
     }
 
     /// 测试用 capability source:返回固定 capability,version 可调以驱动 fingerprint 漂移。
+    /// 测试用 capability source:version 与 resume 能力可调,以驱动 spawn 前
+    /// 复验指纹漂移与 resume fail-closed。
     struct StaticCapabilitySource {
         version: std::sync::Mutex<String>,
+        resume_evidence: std::sync::Mutex<ResumeEvidenceState>,
     }
 
     impl StaticCapabilitySource {
         fn new(version: &str) -> Self {
             Self {
                 version: std::sync::Mutex::new(version.to_string()),
+                resume_evidence: std::sync::Mutex::new(ResumeEvidenceState::Confirmed),
             }
         }
 
         fn set_version(&self, version: &str) {
             *self.version.lock().unwrap() = version.to_string();
+        }
+
+        fn set_resume_evidence(&self, state: ResumeEvidenceState) {
+            *self.resume_evidence.lock().unwrap() = state;
         }
     }
 
@@ -615,6 +934,7 @@ mod tests {
             _action: SessionPolicyAction,
         ) -> Result<ProviderCapability, ProviderGatewayError> {
             let version = self.version.lock().unwrap().clone();
+            let resume_evidence = *self.resume_evidence.lock().unwrap();
             let adapter_dialect = match provider.provider_type {
                 ProviderRefType::ClaudeCode => ProviderDialect::ClaudeCodeCliV1,
                 ProviderRefType::Codex => ProviderDialect::CodexCliV1,
@@ -624,6 +944,7 @@ mod tests {
                 version,
                 adapter_dialect,
                 capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+                resume_evidence,
             })
         }
     }
@@ -789,8 +1110,32 @@ mod tests {
             self.targets.clone()
         }
 
+        fn capabilities(&self) -> Arc<StaticCapabilitySource> {
+            self.capabilities.clone()
+        }
+
         fn registry_start_count(&self) -> usize {
             self.streaming_adapter.start_count()
+        }
+
+        /// 将 store 中的 policy artifact 升级到 revision 2(新 policy_text + 新 digest),
+        /// 模拟 validate→spawn 之间政策被升级(TOCTOU)。
+        fn upgrade_policy(&self) {
+            let manifest = self.manifest();
+            let store = self.policy_store();
+            let current = store.get(&manifest.project_id).unwrap().unwrap();
+            let revised = current.with_revised_policy(
+                "# Aggregate policy (revision 2)\n\nTighter supervised scope.\n",
+                manifest.updated_at.clone(),
+            );
+            store.save(&manifest.project_id, &revised).unwrap();
+        }
+
+        /// 创建一个真实存在的 worktree 目录(用于 spawn 前 canonicalize 复验)。
+        fn real_worktree(&self) -> PathBuf {
+            let worktree = self.paths.root().join("worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            worktree
         }
 
         /// 无参便利方法:返回 planning 只读请求(内部用 manifest())。
@@ -832,5 +1177,73 @@ mod tests {
                 config_artifact_ref: "sha256:managed-config-artifact".to_string(),
             }
         }
+
+        /// 针对真实 worktree 目录构造一个 planning 只读 validated streaming input。
+        /// worktree 必须真实存在(spawn 前 canonicalize 复验需要)。
+        fn validated_planning_streaming_input(
+            self: &GatewayFixture,
+            worktree: PathBuf,
+        ) -> ValidatedStreamingProviderInput {
+            let request = SessionLaunchRequest::planning(
+                self.manifest().project_id,
+                ProviderRef::claude_code("cap_claude_code_1_4_0"),
+                PolicyTarget::checkout("logical_repo_0001", "checkout_0001", worktree.clone()),
+                vec![self.paths.root().to_path_buf()],
+                "sha256:managed-config-artifact",
+            );
+            let validated = self.gateway().validate(request).unwrap();
+            ValidatedStreamingProviderInput::new(self.streaming_input(worktree, None), validated)
+        }
+
+        /// 构造一个 streaming input;resume 设 `resume_provider_session_id`。
+        fn streaming_input(
+            &self,
+            working_dir: PathBuf,
+            resume_id: Option<String>,
+        ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            use crate::cross_cutting::streaming_provider::{
+                ProviderPermissionMode, StreamingProviderInput,
+            };
+            use crate::protocol::contracts::{AdapterRole, ProviderType};
+            StreamingProviderInput {
+                provider_type: ProviderType::ClaudeCode,
+                role: AdapterRole::Executor,
+                prompt: "probe".to_string(),
+                working_dir,
+                workspace_session_id: None,
+                resume_provider_session_id: resume_id,
+                permission_mode: ProviderPermissionMode::Auto,
+                structured_output_contract: None,
+                env_vars: Default::default(),
+                timeout_secs: 1,
+            }
+        }
+    }
+
+    /// bridge 映射(B-2):`cross_cutting::ProviderCapabilityEvidence` 三态经
+    /// `ResumeEvidenceState::from_cross_cutting_evidence` 进入 gateway 消费路径。
+    /// 仅 `Confirmed` 放行;`Denied`/`Unknown` 归为 `Unsupported`(fail-closed),
+    /// 使该三态字段不再是无消费者的 dead field。
+    #[test]
+    fn resume_evidence_bridge_maps_cross_cutting_three_states_to_gateway_state() {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        assert!(
+            ResumeEvidenceState::from_cross_cutting_evidence(
+                &ProviderCapabilityEvidence::Confirmed
+            )
+            .allows_resume()
+        );
+        assert!(
+            !ResumeEvidenceState::from_cross_cutting_evidence(
+                &ProviderCapabilityEvidence::Denied {
+                    reason: "probe says no".to_string(),
+                }
+            )
+            .allows_resume()
+        );
+        assert!(
+            !ResumeEvidenceState::from_cross_cutting_evidence(&ProviderCapabilityEvidence::Unknown)
+                .allows_resume()
+        );
     }
 }

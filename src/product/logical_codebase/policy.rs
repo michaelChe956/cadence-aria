@@ -59,6 +59,32 @@ impl AggregatePolicyArtifact {
         }
     }
 
+    /// 构造一个升级后的 policy artifact:以当前为基,提升 `revision`、替换
+    /// `policy_text` 与 `created_at`,并重算 canonical digest 与 `policy_id`。
+    /// digest 不接受外部传入。供 policy 升级路径与 spawn 前复验测试使用。
+    pub fn with_revised_policy(
+        &self,
+        policy_text: impl Into<String>,
+        created_at: impl Into<String>,
+    ) -> Self {
+        let policy_text = policy_text.into();
+        let revision = self.revision + 1;
+        let policy_id = format!(
+            "policy/{}/{}/{}",
+            self.project_id, self.logical_codebase_id, revision
+        );
+        let digest = Self::compute_digest(&policy_text);
+        Self {
+            policy_id,
+            project_id: self.project_id.clone(),
+            logical_codebase_id: self.logical_codebase_id.clone(),
+            revision,
+            digest,
+            policy_text,
+            created_at: created_at.into(),
+        }
+    }
+
     /// 对政策正文计算 canonical SHA-256 digest。
     fn compute_digest(policy_text: &str) -> String {
         format!("sha256:{:x}", Sha256::digest(policy_text.as_bytes()))
@@ -228,6 +254,13 @@ impl SessionPolicyEnvelope {
             kind: "session_policy_envelope",
             reason: format!("{}: {reason}", POLICY_ENVELOPE_INVALID_ROOTS),
         }
+    }
+
+    /// 据 `config_artifact_ref` 重算 config digest,供 gateway spawn 前复验
+    /// 托管配置未被篡改(TOCTOU)。与 `new` 内部使用的 digest 算法一致。
+    /// 空 ref 复用 envelope 的 fail-closed 错误。
+    pub fn recompute_config_digest(config_artifact_ref: &str) -> Result<String, ProductStoreError> {
+        config_digest_value(config_artifact_ref)
     }
 }
 
@@ -614,5 +647,50 @@ mod tests {
             store.ensure_bootstrap(&other),
             Err(ProductStoreError::IdentityMismatch { .. })
         ));
+    }
+
+    /// `with_revised_policy` 提升 revision、重算 canonical digest 与 policy_id,
+    /// 且可作为合法 successor 被保存(gateway spawn 前复验测试依赖此路径)。
+    #[test]
+    fn with_revised_policy_advances_revision_and_recomputes_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AggregatePolicyArtifactStore::new(ProductAppPaths::new(temp.path()));
+        let manifest =
+            LogicalCodebaseManifest::new("project_0001", temp.path().to_path_buf(), vec![]);
+        let bootstrap = store.ensure_bootstrap(&manifest).unwrap();
+
+        let revised =
+            bootstrap.with_revised_policy("# revision 2 policy text\n", "2026-08-10T00:00:00Z");
+        assert_eq!(revised.revision, 2);
+        assert_ne!(revised.digest, bootstrap.digest);
+        assert!(revised.policy_id.ends_with("/2"));
+        // digest 是新 policy_text 的 canonical sha256
+        let expected = format!("sha256:{:x}", Sha256::digest(b"# revision 2 policy text\n"));
+        assert_eq!(revised.digest, expected);
+        // 可作为 successor 保存
+        store.save("project_0001", &revised).unwrap();
+        let reloaded = store.get("project_0001").unwrap().unwrap();
+        assert_eq!(reloaded, revised);
+    }
+
+    /// `recompute_config_digest` 与 `new` 内部冻结的 config_digest 算法一致,
+    /// 供 gateway spawn 前复验托管配置未被篡改。
+    #[test]
+    fn recompute_config_digest_matches_envelope_frozen_value() {
+        let artifact = AggregatePolicyArtifact::bootstrap("p1", "l1", "now".into());
+        let envelope = SessionPolicyEnvelope::new(
+            &artifact,
+            SessionPolicyAction::PlanningReadOnly,
+            PolicyTarget::checkout("repo", "co", "/work/repo"),
+            vec![],
+            vec![],
+            ProviderDialect::ClaudeCodeCliV1,
+            "sha256:managed-config".into(),
+            "now".into(),
+        )
+        .unwrap();
+        let recomputed =
+            SessionPolicyEnvelope::recompute_config_digest("sha256:managed-config").unwrap();
+        assert_eq!(recomputed, envelope.config_digest);
     }
 }
