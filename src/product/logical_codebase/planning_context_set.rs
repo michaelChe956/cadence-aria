@@ -58,16 +58,25 @@ impl PlanningContextSetResolver {
                 })?;
         let listed_members = self.logical.list_members(project_id)?;
         // REQ-PLN-02：active 集合从成员记录状态推导（apply_delete_tombstone 只置
-        // MemberStatus::Tombstoned、不改 manifest.member_ids），删除/停用成员不进入
-        // 有效成员集合，selection 据此自动失效。
-        let active_member_ids: Vec<LogicalRepositoryId> = listed_members
+        // MemberStatus::Tombstoned、不改 manifest.member_ids）；有效成员 =
+        // manifest.member_ids ∩ active_member_ids（manifest 外的 active member 不算
+        // 逻辑代码库成员），删除/停用成员不进入有效成员集合，selection 据此自动失效。
+        let active_set: BTreeSet<LogicalRepositoryId> = listed_members
             .iter()
             .filter(|member| member.status == MemberStatus::Active)
             .map(|member| member.logical_repository_id)
             .collect();
-        let resolution =
-            self.selections
-                .resolve_effective_members(project_id, issue_id, &active_member_ids)?;
+        let effective_active_member_ids: Vec<LogicalRepositoryId> = manifest
+            .member_ids
+            .iter()
+            .copied()
+            .filter(|id| active_set.contains(id))
+            .collect();
+        let resolution = self.selections.resolve_effective_members(
+            project_id,
+            issue_id,
+            &effective_active_member_ids,
+        )?;
         let members: BTreeMap<_, _> = listed_members
             .into_iter()
             .map(|member| (member.logical_repository_id, member))
@@ -75,7 +84,6 @@ impl PlanningContextSetResolver {
         // REQ-PLN-02：manifest.member_ids 与 active 集合不一致（成员被 tombstone 但
         // manifest 未移除）→ 显式标记 selection 失效。resolve_effective_members 仅在
         // selection 引用失效成员时自动标记，manifest 层面不一致需此处兜底。
-        let active_set: BTreeSet<LogicalRepositoryId> = active_member_ids.iter().copied().collect();
         let stale_manifest_members: Vec<LogicalRepositoryId> = manifest
             .member_ids
             .iter()
@@ -534,6 +542,51 @@ mod tests {
                 .included_repository_ids
                 .contains(&fixture.api_member_id)
         );
+    }
+
+    #[test]
+    fn active_member_outside_manifest_is_not_included_as_logical_member() {
+        // REQ-PLN-02 fix round 2：有效成员 = manifest.member_ids ∩ active_member_ids；
+        // manifest 外的 active member 不算逻辑代码库成员，不进入参与集合。
+        let fixture = context_set_fixture();
+        let orphan = LogicalRepositoryId(stable_uuid(0x0003));
+        let store = LogicalCodebaseStore::new(fixture.paths.clone());
+        // manifest 只含 api；orphan 为 manifest 外的 active member。
+        let manifest = LogicalCodebaseManifest::new(
+            "project_0001",
+            fixture.provider_context_root(),
+            vec![fixture.api_member_id],
+        );
+        store.save_manifest("project_0001", &manifest).unwrap();
+        store
+            .save_member(
+                "project_0001",
+                &fixture.member_record(fixture.api_member_id, "api", MemberStatus::Active),
+            )
+            .unwrap();
+        store
+            .save_member(
+                "project_0001",
+                &fixture.member_record(orphan, "orphan", MemberStatus::Active),
+            )
+            .unwrap();
+        store
+            .save_checkout("project_0001", &fixture.api_checkout())
+            .unwrap();
+        // AllMembers selection：候选 = manifest ∩ active = [api]，orphan 不得纳入。
+        let selection = IssueCodebaseSelection::all_members("project_0001", "issue_0001", None);
+        IssueCodebaseSelectionStore::new(fixture.paths.clone())
+            .save(&selection)
+            .unwrap();
+
+        let resolution = fixture
+            .resolver()
+            .resolve("project_0001", "issue_0001")
+            .unwrap();
+        assert_eq!(resolution.set.len(), 1);
+        assert_eq!(resolution.set[0].alias, "api");
+        // orphan 不在 manifest → 不纳入也不判失效。
+        assert!(!resolution.invalid_member_ids.contains(&orphan));
     }
 
     #[test]

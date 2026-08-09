@@ -51,32 +51,58 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
     let selection = selection_store
         .load(&plan.project_id, &plan.issue_id)
         .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
-    match (manifest, selection) {
+    let (manifest, _selection) = match (manifest, selection) {
         (None, None) => return Ok(None),
-        (Some(_), Some(_)) => {}
+        (Some(manifest), Some(selection)) => (manifest, selection),
         _ => {
             return Err(
                 "work_item_target_missing: logical codebase manifest and issue selection must both exist"
                     .to_string(),
             );
         }
-    }
-    // REQ-PLN-02：active 集合按 MemberStatus::Active 过滤（apply_delete_tombstone 只置
-    // Tombstoned、不改 manifest.member_ids），删除/停用成员不进入有效成员集合并触发
-    // selection 自动失效；下方 on-disk 状态检查再兜底阻断指向已删除成员的新工作项。
-    let active_member_ids: Vec<LogicalRepositoryId> = logical_store
+    };
+    // REQ-PLN-02：有效成员 = manifest.member_ids ∩ active_member_ids（manifest 外的
+    // active member 不算逻辑代码库成员）；manifest 中非 active 成员（删除/停用）进入
+    // 失效集合，selection 据此失效并阻断指向它们的新工作项。
+    let active_set: std::collections::BTreeSet<LogicalRepositoryId> = logical_store
         .list_members(&plan.project_id)
         .map_err(|error| format!("list logical codebase members failed: {error}"))?
         .into_iter()
         .filter(|member| member.status == MemberStatus::Active)
         .map(|member| member.logical_repository_id)
         .collect();
+    let effective_active_member_ids: Vec<LogicalRepositoryId> = manifest
+        .member_ids
+        .iter()
+        .copied()
+        .filter(|id| active_set.contains(id))
+        .collect();
+    let stale_manifest_members: Vec<LogicalRepositoryId> = manifest
+        .member_ids
+        .iter()
+        .copied()
+        .filter(|id| !active_set.contains(id))
+        .collect();
     let resolution = selection_store
-        .resolve_effective_members(&plan.project_id, &plan.issue_id, &active_member_ids)
+        .resolve_effective_members(
+            &plan.project_id,
+            &plan.issue_id,
+            &effective_active_member_ids,
+        )
         .map_err(|error| format!("resolve issue codebase selection failed: {error}"))?;
-    // REQ-PLN-02：目标指向已删除/停用成员（on-disk 存在且 status != Active）时 blocker，
-    // 阻断指向已删除成员的新工作项。失效成员有 on-disk 记录且 status != Active 判定为删除。
-    let removed_targets: Vec<LogicalRepositoryId> = resolution
+    // REQ-PLN-02：manifest 不一致（删除成员仍留在 manifest.member_ids）→ 显式标记
+    // selection 失效（resolve_effective_members 仅在 selection 引用失效成员时自动标记）。
+    if !stale_manifest_members.is_empty() && resolution.selection.invalidation.is_none() {
+        selection_store
+            .mark_invalidated(&plan.project_id, &plan.issue_id, "member_removed")
+            .map_err(|error| {
+                format!("mark issue codebase selection invalidated failed: {error}")
+            })?;
+    }
+    // REQ-PLN-02：目标指向已删除/停用成员时 blocker。manifest 中非 active 成员直接
+    // 判定为删除；selection 引用的失效成员若 on-disk 非 Active 也判为删除。
+    let mut removed_targets = stale_manifest_members;
+    let on_disk_removed: Vec<LogicalRepositoryId> = resolution
         .effective_member_ids
         .iter()
         .chain(resolution.invalid_member_ids.iter())
@@ -89,6 +115,11 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
                 .is_some_and(|member| member.status != MemberStatus::Active)
         })
         .collect();
+    for id in on_disk_removed {
+        if !removed_targets.contains(&id) {
+            removed_targets.push(id);
+        }
+    }
     if !removed_targets.is_empty() {
         return Err(format!(
             "work_item_target_missing: target_member_removed: {:?}",
@@ -419,8 +450,8 @@ mod tests {
                 .unwrap();
         }
 
-        /// 写入含多个 active 成员的 manifest + selection（include 全部成员）。
-        fn write_selection_with_members(
+        /// 写入含多个 active 成员的 manifest + member records（不写 selection）。
+        fn write_manifest_with_members(
             &self,
             member_ids: &[LogicalRepositoryId],
             aliases: &[&str],
@@ -440,6 +471,15 @@ mod tests {
                     )
                     .unwrap();
             }
+        }
+
+        /// 写入含多个 active 成员的 manifest + selection（include 全部成员）。
+        fn write_selection_with_members(
+            &self,
+            member_ids: &[LogicalRepositoryId],
+            aliases: &[&str],
+        ) {
+            self.write_manifest_with_members(member_ids, aliases);
             let selection = IssueCodebaseSelection::explicit(
                 "project_0001",
                 "issue_0001",
@@ -568,6 +608,74 @@ mod tests {
         ));
 
         // resolve 过程中 selection 失效标记已自动写入（REQ-PLN-02）。
+        let selection_store = IssueCodebaseSelectionStore::new(fixture.lifecycle.app_paths());
+        assert!(
+            selection_store
+                .is_invalidated("project_0001", "issue_0001")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn compile_blocks_and_invalidates_all_members_selection_when_member_tombstoned() {
+        // REQ-PLN-02 fix round 2：AllMembers selection 不含已删除成员，compile 仍须
+        // 返回 target_member_removed 且 selection 被标记失效（manifest 不一致兑底）。
+        let fixture = CompileInvalidationFixture::new();
+        let api = LogicalRepositoryId(stable_uuid(0x0001));
+        let web = LogicalRepositoryId(stable_uuid(0x0002));
+        fixture.write_manifest_with_members(&[api, web], &["api", "web"]);
+        let selection = IssueCodebaseSelection::all_members("project_0001", "issue_0001", None);
+        IssueCodebaseSelectionStore::new(fixture.lifecycle.app_paths())
+            .save(&selection)
+            .unwrap();
+        fixture.tombstone_member(web, "web");
+
+        let compile =
+            resolve_logical_work_item_plan_repository_targets(&fixture.lifecycle, &fixture.plan());
+        assert!(matches!(
+            compile,
+            Err(ref reason) if reason.contains("target_member_removed")
+        ));
+
+        // selection 已被标记失效（manifest 不一致兑底，selection 自身不含删除成员）。
+        let selection_store = IssueCodebaseSelectionStore::new(fixture.lifecycle.app_paths());
+        assert!(
+            selection_store
+                .is_invalidated("project_0001", "issue_0001")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn compile_blocks_and_invalidates_when_deleted_member_absent_from_explicit_selection() {
+        // REQ-PLN-02 fix round 2：selection 未包含已删除成员，compile 仍须返回
+        // target_member_removed 且 selection 被标记失效（manifest 不一致兑底）。
+        let fixture = CompileInvalidationFixture::new();
+        let api = LogicalRepositoryId(stable_uuid(0x0001));
+        let web = LogicalRepositoryId(stable_uuid(0x0002));
+        fixture.write_manifest_with_members(&[api, web], &["api", "web"]);
+        // selection 只 include api（不含已删除的 web）。
+        let selection = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![api],
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        IssueCodebaseSelectionStore::new(fixture.lifecycle.app_paths())
+            .save(&selection)
+            .unwrap();
+        fixture.tombstone_member(web, "web");
+
+        let compile =
+            resolve_logical_work_item_plan_repository_targets(&fixture.lifecycle, &fixture.plan());
+        assert!(matches!(
+            compile,
+            Err(ref reason) if reason.contains("target_member_removed")
+        ));
+
+        // selection 已被标记失效（manifest 不一致兑底，selection 自身不含删除成员）。
         let selection_store = IssueCodebaseSelectionStore::new(fixture.lifecycle.app_paths());
         assert!(
             selection_store
