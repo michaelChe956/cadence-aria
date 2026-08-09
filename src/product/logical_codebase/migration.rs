@@ -17,10 +17,10 @@ use crate::product::coding_models::{
 use crate::product::id::repo_hash_for_path;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IdentityRegistryEntry,
-    IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseLayout, LogicalCodebaseManifest,
-    LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
-    RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+    AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
+    IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseLayout,
+    LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId, MemberStatus,
+    RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
 };
 use crate::product::models::{
     IssueRecord, IssueRuntimeBindingRecord, IssueSharedWorktree, LifecycleWorkItemRecord,

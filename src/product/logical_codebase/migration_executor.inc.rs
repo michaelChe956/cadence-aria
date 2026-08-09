@@ -250,6 +250,13 @@ impl IdentityMigrationExecutor {
             self.ensure_authority_for_mapping(journal, input)?;
         }
 
+        // WP0 bootstrap 政策闭环:在 authority 写出后、切换读路径前,确保存在
+        // bootstrap AggregatePolicyArtifact。消除「WP2 provider 启动需 envelope、
+        // envelope 需 policy artifact」的 bootstrap 环。ensure_bootstrap 幂等,
+        // 相同 identity 无副作用;identity 不匹配返回 IdentityMismatch 不覆盖。
+        let manifest = self.required_manifest(&journal.project_id)?;
+        AggregatePolicyArtifactStore::new(self.paths.clone()).ensure_bootstrap(&manifest)?;
+
         journal.phase = IdentityMigrationPhase::BackfillingCompatibility;
         journal.last_error = None;
         touch(journal);

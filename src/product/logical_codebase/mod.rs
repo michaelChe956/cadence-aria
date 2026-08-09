@@ -2,6 +2,7 @@ pub mod aggregate_index;
 pub mod feature;
 pub mod migration;
 pub mod policy;
+pub mod provider_gateway;
 pub mod reference_scanner;
 pub mod registration;
 pub mod registry;
@@ -17,6 +18,11 @@ pub use migration::{
 pub use policy::{
     AggregatePolicyArtifact, AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect,
     SessionPolicyAction, SessionPolicyEnvelope,
+};
+pub use provider_gateway::{
+    LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
+    SessionLaunchRequest, SessionResumeFingerprint, ValidatedSessionLaunchPolicy,
 };
 pub use reference_scanner::{
     RepositoryReference, RepositoryReferenceReport, RepositoryReferenceScanner,

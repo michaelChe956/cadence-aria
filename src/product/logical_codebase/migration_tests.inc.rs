@@ -287,6 +287,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn migration_persists_bootstrap_policy_artifact_after_authority_write() {
+        let fixture = migration_fixture_with_one_git_repository();
+        IdentityMigrationExecutor::new(fixture.paths.clone())
+            .ensure_through_authority("project_0001")
+            .expect("migrate through authority");
+
+        // WP0 bootstrap 闭环:authority 写出后应存在 revision 1 的 bootstrap 政策
+        // artifact,供首次真实 provider launch 校验。
+        let policy_store = AggregatePolicyArtifactStore::new(fixture.paths.clone());
+        let artifact = policy_store
+            .get("project_0001")
+            .expect("read bootstrap policy artifact")
+            .expect("bootstrap policy artifact persisted by migration");
+        assert_eq!(artifact.revision, 1);
+        assert_eq!(artifact.project_id, "project_0001");
+
+        let manifest = LogicalCodebaseStore::new(fixture.paths.clone())
+            .load_manifest("project_0001")
+            .expect("load manifest")
+            .expect("manifest");
+        assert_eq!(artifact.logical_codebase_id, manifest.logical_codebase_id.to_string());
+
+        // 幂等:重跑 migration 不产生副作用,也不升级 revision。
+        IdentityMigrationExecutor::new(fixture.paths.clone())
+            .ensure_through_authority("project_0001")
+            .expect("re-run migration is idempotent");
+        let replayed = policy_store
+            .get("project_0001")
+            .expect("read bootstrap policy artifact after replay")
+            .expect("bootstrap policy artifact persisted after replay");
+        assert_eq!(replayed, artifact);
+    }
+
     fn run_git_command(arguments: &[&str]) {
         let status = Command::new("git")
             .args(arguments)
