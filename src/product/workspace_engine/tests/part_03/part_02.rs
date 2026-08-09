@@ -651,6 +651,7 @@ fn test_work_item_draft_record(
             contract.verification_checks[0].command =
                 Some(format!("cargo test --locked --lib {outline_id}"));
             WorkItemDraftCandidate {
+                target_repository_id: None,
                 outline_id: outline_id.to_string(),
                 logical_work_item_id,
                 verification_plan:

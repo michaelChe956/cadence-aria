@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::work_item_contract::{CanonicalWorkItemContract, VerificationCheck};
 
 use super::lifecycle::{IssueWorkItemPlan, WorkItemKind, WorkItemSplitFinding};
@@ -75,6 +76,8 @@ impl WorkItemPlanOutline {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemOutline {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_repository_id: Option<LogicalRepositoryId>,
     pub outline_id: String,
     pub logical_work_item_id: String,
     pub title: String,
@@ -129,6 +132,8 @@ pub struct WorkItemDraftVerificationPlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct WorkItemDraftCandidate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_repository_id: Option<LogicalRepositoryId>,
     pub outline_id: String,
     pub logical_work_item_id: String,
     pub canonical_contract_candidate: CanonicalWorkItemContract,

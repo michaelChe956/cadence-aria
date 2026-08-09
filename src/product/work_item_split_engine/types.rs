@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
     IssueWorkItemDependencyEdge, IssueWorkItemPlan, LifecycleWorkItemRecord,
     OutlineContextBlockerResolution, ProviderName, RepositoryProfile, RepositoryProfileConfidence,
@@ -65,6 +66,8 @@ impl ProviderWorkItemDraftInput {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProviderWorkItemDraftCandidate {
+    #[serde(default)]
+    pub(crate) target_repository_id: Option<LogicalRepositoryId>,
     pub(crate) outline_id: String,
     pub(crate) logical_work_item_id: String,
     pub(crate) canonical_contract: CanonicalWorkItemContract,
@@ -74,6 +77,7 @@ pub(crate) struct ProviderWorkItemDraftCandidate {
 impl From<ProviderWorkItemDraftCandidate> for WorkItemDraftCandidate {
     fn from(provider: ProviderWorkItemDraftCandidate) -> Self {
         Self {
+            target_repository_id: provider.target_repository_id,
             outline_id: provider.outline_id,
             logical_work_item_id: provider.logical_work_item_id,
             canonical_contract_candidate: provider.canonical_contract,

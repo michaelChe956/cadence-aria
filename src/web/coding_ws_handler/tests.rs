@@ -385,6 +385,7 @@ fn coding_execution_context_supplements_source_draft_when_final_compile_context_
                 contract.write_policy.forbidden_scopes = vec!["forbidden/draft/path".to_string()];
                 contract.verification_checks[0].command = Some("cargo check --locked".to_string());
                 WorkItemDraftCandidate {
+                    target_repository_id: None,
                     outline_id: "outline_sparse_backend".to_string(),
                     logical_work_item_id: "wi_sparse_backend".to_string(),
                     verification_plan: crate::product::models::WorkItemDraftVerificationPlan {

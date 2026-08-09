@@ -357,6 +357,12 @@ pub(crate) struct WorkItemPlanCompileProjectionContext<'a> {
     pub(crate) outline_to_work_item_id: &'a BTreeMap<String, String>,
     pub(crate) outline_to_verification_plan_id: &'a BTreeMap<String, String>,
     pub(crate) repository_id: &'a str,
+    pub(crate) logical_targets: Option<
+        &'a std::collections::BTreeMap<
+            crate::product::logical_codebase::LogicalRepositoryId,
+            String,
+        >,
+    >,
     pub(crate) now: &'a str,
 }
 

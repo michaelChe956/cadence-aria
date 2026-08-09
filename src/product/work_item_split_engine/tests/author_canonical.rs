@@ -6,6 +6,7 @@ fn canonical_author_output(outline_id: &str, logical_work_item_id: &str) -> serd
         "draft": {
             "outline_id": outline_id,
             "logical_work_item_id": logical_work_item_id,
+            "target_repository_id": null,
             "canonical_contract": contract,
             "verification_plan": {
                 "checks": verification_checks

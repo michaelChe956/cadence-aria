@@ -544,6 +544,7 @@ fn valid_outline() -> WorkItemPlanOutline {
         strategy_summary: "后端先行，前端随后接入".to_string(),
         work_item_outlines: vec![
             WorkItemOutline {
+                target_repository_id: None,
                 outline_id: "outline_backend".to_string(),
                 logical_work_item_id: "wi_backend".to_string(),
                 title: "后端 API".to_string(),
@@ -568,6 +569,7 @@ fn valid_outline() -> WorkItemPlanOutline {
                 handoff_notes: "提供 API contract".to_string(),
             },
             WorkItemOutline {
+                target_repository_id: None,
                 outline_id: "outline_frontend".to_string(),
                 logical_work_item_id: "wi_frontend".to_string(),
                 title: "前端 UI".to_string(),
@@ -626,6 +628,7 @@ fn canonical_draft_candidate(outline: &WorkItemOutline) -> WorkItemDraftCandidat
         });
 
     WorkItemDraftCandidate {
+        target_repository_id: None,
         outline_id: outline.outline_id.clone(),
         logical_work_item_id: outline.logical_work_item_id.clone(),
         verification_plan: crate::product::models::WorkItemDraftVerificationPlan {

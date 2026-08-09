@@ -1,4 +1,8 @@
 use super::*;
+use crate::product::logical_codebase::{
+    IssueCodebaseSelectionStore, LogicalCodebaseFeature, LogicalCodebaseStore, LogicalRepositoryId,
+};
+use crate::product::repository_store::RepositoryStore;
 
 impl WorkspaceEngine {
     pub(crate) fn is_current_work_item_plan_batch_mode(&self) -> bool {
@@ -20,6 +24,61 @@ impl WorkspaceEngine {
                 })
             })
             .unwrap_or(false)
+    }
+
+    pub(crate) fn logical_work_item_plan_repository_targets(
+        &self,
+        lifecycle: &LifecycleStore,
+        plan: &IssueWorkItemPlan,
+    ) -> Result<Option<std::collections::BTreeMap<LogicalRepositoryId, String>>, String> {
+        let paths = lifecycle.app_paths();
+        let logical_store = LogicalCodebaseStore::new(paths.clone());
+        let selection_store = IssueCodebaseSelectionStore::new(paths.clone());
+        let manifest = logical_store
+            .load_manifest(&plan.project_id)
+            .map_err(|error| format!("load logical codebase manifest failed: {error}"))?;
+        let selection = selection_store
+            .load(&plan.project_id, &plan.issue_id)
+            .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
+        let (manifest, _selection) = match (manifest, selection) {
+            (None, None) => return Ok(None),
+            (Some(manifest), Some(selection)) => (manifest, selection),
+            _ => {
+                return Err(
+                    "work_item_target_missing: logical codebase manifest and issue selection must both exist"
+                        .to_string(),
+                );
+            }
+        };
+        let resolution = selection_store
+            .resolve_effective_members(&plan.project_id, &plan.issue_id, &manifest.member_ids)
+            .map_err(|error| format!("resolve issue codebase selection failed: {error}"))?;
+        if !resolution.invalid_member_ids.is_empty() {
+            return Err(format!(
+                "work_item_target_missing: issue codebase selection has invalid members: {:?}",
+                resolution.invalid_member_ids
+            ));
+        }
+
+        let repository_store = RepositoryStore::with_logical_codebase_feature(
+            paths,
+            LogicalCodebaseFeature::enabled(),
+        );
+        resolution
+            .effective_member_ids
+            .into_iter()
+            .map(|target_repository_id| {
+                repository_store
+                    .resolve_logical_repository(&plan.project_id, target_repository_id)
+                    .map(|(_, _, repository)| (target_repository_id, repository.id))
+                    .map_err(|error| {
+                        format!(
+                            "work_item_target_missing: cannot resolve target repository `{target_repository_id:?}`: {error}"
+                        )
+                    })
+            })
+            .collect::<Result<_, _>>()
+            .map(Some)
     }
 
     pub(crate) fn work_item_plan_repository_id(
@@ -54,7 +113,7 @@ impl WorkspaceEngine {
         let outline_order = context.outline_order;
         let outline_to_work_item_id = context.outline_to_work_item_id;
         let outline_to_verification_plan_id = context.outline_to_verification_plan_id;
-        let repository_id = context.repository_id;
+        let logical_targets = context.logical_targets;
         let now = context.now;
         let draft_by_outline: HashMap<&str, &WorkItemDraftRecord> = draft_records
             .iter()
@@ -77,6 +136,23 @@ impl WorkspaceEngine {
         }
         let mut work_items = Vec::with_capacity(outline_order.len());
         let mut verification_plans = Vec::with_capacity(outline_order.len());
+        if let Some(logical_targets) = logical_targets {
+            for outline_id in outline_order {
+                let record = draft_by_outline
+                    .get(outline_id.as_str())
+                    .ok_or_else(|| format!("accepted draft for outline `{outline_id}` missing"))?;
+                let target_repository_id = record.candidate.target_repository_id.ok_or_else(|| {
+                    format!(
+                        "work_item_target_missing: target_repository_id_missing for outline `{outline_id}`"
+                    )
+                })?;
+                if !logical_targets.contains_key(&target_repository_id) {
+                    return Err(format!(
+                        "work_item_target_missing: target_repository_id_not_effective for outline `{outline_id}`"
+                    ));
+                }
+            }
+        }
         for (index, outline_id) in outline_order.iter().enumerate() {
             let record = draft_by_outline
                 .get(outline_id.as_str())
@@ -92,6 +168,18 @@ impl WorkspaceEngine {
                 .ok_or_else(|| {
                     format!("verification plan id for outline `{outline_id}` missing")
                 })?;
+            let (repository_id, target_repository_id) = match logical_targets {
+                Some(logical_targets) => {
+                    let target_repository_id = candidate.target_repository_id.expect(
+                        "logical target prevalidation must ensure target_repository_id is present",
+                    );
+                    let repository_id = logical_targets.get(&target_repository_id).expect(
+                        "logical target prevalidation must ensure target_repository_id is effective",
+                    );
+                    (repository_id.as_str(), Some(target_repository_id))
+                }
+                None => (context.repository_id, None),
+            };
             let depends_on = candidate
                 .canonical_contract_candidate
                 .input_contracts
@@ -120,7 +208,7 @@ impl WorkspaceEngine {
                 project_id: previous_plan.project_id.clone(),
                 issue_id: previous_plan.issue_id.clone(),
                 repository_id: repository_id.to_string(),
-                target_repository_id: None,
+                target_repository_id,
                 story_spec_ids: previous_plan.source_story_spec_ids.clone(),
                 design_spec_ids: previous_plan.source_design_spec_ids.clone(),
                 title: candidate

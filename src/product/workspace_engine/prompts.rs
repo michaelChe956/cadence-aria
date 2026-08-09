@@ -404,6 +404,53 @@ pub fn aggregate_design_scope_prompt(
     prompt
 }
 
+/// 逻辑代码库分支的 WorkItem Outline prompt 注入片段（Task 9）。
+///
+/// Outline 的每一个 item 都必须声明目标逻辑仓库。候选 Draft 将逐字继承该 target，
+/// Final Compile 只接受 `IssueCodebaseSelection` 的有效成员，绝不猜测 primary。
+#[allow(dead_code)] // 定义后由后续 Web 接入 task 接线（与 Task 7/8 的 aggregate prompt 一致）
+pub fn aggregate_work_item_target_scope_prompt(
+    inventory_rendered: &str,
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("\n\n## 聚合代码库成员清单（WorkItem target 必须从此集合中选取）：\n");
+    prompt.push_str(inventory_rendered);
+    prompt.push_str("\n## WorkItem 目标仓库要求\n");
+    prompt.push_str(
+        "本次 WorkItem Plan 位于聚合代码库。work_item_outlines[] 的每一项必须提供 \\\n         target_repository_id，且只能取上述成员清单中的 logical_repository_id。\\n\
+         target_repository_id 不确定、缺失或不在有效成员中时必须进入 blocker；禁止猜测、\\n\
+         禁止回落到任意 primary 仓库。多个 WorkItem 可以使用同一 target_repository_id。",
+    );
+    if !effective_member_ids.is_empty() {
+        prompt.push_str("\n可选目标仓库范围（logical_repository_id）：");
+        for member in effective_member_ids {
+            prompt.push_str(&format!("\n- {member:?}"));
+        }
+    }
+    prompt
+}
+
+#[cfg(test)]
+mod aggregate_work_item_target_scope_prompt_tests {
+    use super::aggregate_work_item_target_scope_prompt;
+    use crate::product::logical_codebase::LogicalRepositoryId;
+    use uuid::Uuid;
+
+    #[test]
+    fn aggregate_work_item_target_scope_prompt_requires_member_target_and_blocker() {
+        let api = LogicalRepositoryId(Uuid::from_u128(1));
+        let web = LogicalRepositoryId(Uuid::from_u128(2));
+        let prompt = aggregate_work_item_target_scope_prompt("api | service", &[api, web]);
+
+        assert!(prompt.contains("target_repository_id"));
+        assert!(prompt.contains("只能取上述成员清单"));
+        assert!(prompt.contains("禁止回落到任意 primary 仓库"));
+        assert!(prompt.contains("00000000-0000-0000-0000-000000000001"));
+        assert!(prompt.contains("00000000-0000-0000-0000-000000000002"));
+    }
+}
+
 #[cfg(test)]
 mod aggregate_scope_prompt_tests {
     use super::{aggregate_design_scope_prompt, aggregate_story_scope_prompt};

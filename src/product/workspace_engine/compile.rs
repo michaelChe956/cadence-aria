@@ -278,7 +278,13 @@ impl WorkspaceEngine {
             .put_compile_transaction(&tx)
             .map_err(|error| format!("save compile transaction failed: {error}"))?;
 
-        let repository_id = self.work_item_plan_repository_id(&lifecycle, &previous_plan)?;
+        let logical_targets =
+            self.logical_work_item_plan_repository_targets(&lifecycle, &previous_plan)?;
+        let repository_id = if logical_targets.is_none() {
+            self.work_item_plan_repository_id(&lifecycle, &previous_plan)?
+        } else {
+            String::new()
+        };
         let (compiled_plan, work_items, verification_plans) = self
             .project_work_item_plan_drafts_for_compile(
                 &previous_plan,
@@ -288,6 +294,7 @@ impl WorkspaceEngine {
                     outline_to_work_item_id: &outline_to_work_item_id,
                     outline_to_verification_plan_id: &outline_to_verification_plan_id,
                     repository_id: &repository_id,
+                    logical_targets: logical_targets.as_ref(),
                     now: &now,
                 },
             )?;

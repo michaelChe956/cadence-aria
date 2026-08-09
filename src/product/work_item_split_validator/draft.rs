@@ -83,6 +83,22 @@ pub(crate) fn validate_draft_identity_and_find_outline<'a>(
         ));
     }
 
+    if current.target_repository_id != current_outline.target_repository_id {
+        findings.push(error(
+            "draft_target_repository_mismatch",
+            format!(
+                "draft target_repository_id {:?} does not match outline {} target {:?}",
+                current.target_repository_id,
+                current_outline.outline_id,
+                current_outline.target_repository_id
+            ),
+            vec![
+                current.outline_id.clone(),
+                current.logical_work_item_id.clone(),
+            ],
+        ));
+    }
+
     if canonical_identity.title != current_outline.title
         || canonical_identity.kind != current_outline.kind.as_str()
     {

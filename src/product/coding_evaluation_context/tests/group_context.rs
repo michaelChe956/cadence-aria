@@ -329,6 +329,7 @@ fn draft_record(
             contract.write_policy.exclusive_scopes.clear();
             contract.write_policy.forbidden_scopes.clear();
             WorkItemDraftCandidate {
+                target_repository_id: None,
                 outline_id: outline_id.to_string(),
                 logical_work_item_id,
                 verification_plan: crate::product::models::WorkItemDraftVerificationPlan {

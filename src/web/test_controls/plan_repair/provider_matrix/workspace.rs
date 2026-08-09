@@ -181,6 +181,7 @@ fn outline_artifact(contract: &CanonicalWorkItemContract) -> ArtifactPayload {
                 source_design_spec_ids: vec!["design_spec_0001".to_string()],
                 strategy_summary: "validate production provider runners".to_string(),
                 work_item_outlines: vec![WorkItemOutline {
+                    target_repository_id: None,
                     outline_id: "outline_core".to_string(),
                     logical_work_item_id: contract.identity.logical_work_item_id.clone(),
                     title: contract.identity.title.clone(),

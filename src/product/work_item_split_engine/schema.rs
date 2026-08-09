@@ -115,6 +115,10 @@ pub const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
       "properties": {
         "outline_id": { "type": "string" },
         "logical_work_item_id": { "type": "string", "minLength": 1 },
+        "target_repository_id": {
+          "type": ["string", "null"],
+          "format": "uuid"
+        },
         "canonical_contract": {
           "type": "object",
           "properties": {
@@ -395,7 +399,13 @@ pub const WORK_ITEM_DRAFT_OUTPUT_SCHEMA: &str = r#"{
           "additionalProperties": false
         }
       },
-      "required": ["outline_id", "logical_work_item_id", "canonical_contract", "verification_plan"],
+      "required": [
+        "outline_id",
+        "logical_work_item_id",
+        "target_repository_id",
+        "canonical_contract",
+        "verification_plan"
+      ],
       "additionalProperties": false
     }
   },
@@ -428,6 +438,10 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
             "properties": {
               "outline_id": { "type": "string" },
               "logical_work_item_id": { "type": "string" },
+              "target_repository_id": {
+                "type": ["string", "null"],
+                "format": "uuid"
+              },
               "title": { "type": "string" },
               "kind": {
                 "type": "string",
@@ -495,6 +509,7 @@ pub(crate) const WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA: &str = r#"{
             "required": [
               "outline_id",
               "logical_work_item_id",
+              "target_repository_id",
               "title",
               "kind",
               "goal",

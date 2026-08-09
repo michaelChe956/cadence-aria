@@ -688,7 +688,8 @@ pub(crate) fn build_work_item_draft_prompt(
          输出前把每个 input_contracts 的 contract_id 与 required_capabilities 元素在 [直接依赖的可消费交接合同] 中做字面量查找，找不到即为错误。\n\n\
          [canonical_field_contract]\n\
          封闭类型契约（非示例）：记号 str+=非空 string，[T]=T 数组，obj=object；每个 obj 必须且只能含所列字段，所列字段全部必填，数组可空但元素不得缺/加字段。\n\
-         - draft: obj{{outline_id: str+, logical_work_item_id: str+, canonical_contract: obj, verification_plan: obj}}。\n\
+         - draft: obj{{outline_id: str+, logical_work_item_id: str+, {target_schema_field}canonical_contract: obj, verification_plan: obj}}。\n\
+{target_retain_instruction}\
          - canonical_contract.schema_version: integer literal 1；identity: obj{{logical_work_item_id: str+, title: string, kind: backend|frontend|integration|e2e|docs|infra|other}}；goal: obj{{summary: string}}；non_goals: [string]。\n\
          - input_contracts: [obj{{contract_id: str+, provider_logical_work_item_id: str+, required_capabilities: [string], compatibility_policy: require_all|require_any}}]；output_contracts: [obj{{contract_id: str+, capabilities: [string]}}]。\n\
          - tasks: [obj{{task_id: str+, statement: string, requirement_refs: [string], done_when_refs: [string]}}]；write_policy: obj{{exclusive_scopes: [string], forbidden_scopes: [string]}}。\n\
@@ -700,7 +701,7 @@ pub(crate) fn build_work_item_draft_prompt(
          [hard_rules]\n\
          - 当前仅处于 human-confirmation 之前的候选阶段：必须读取并遵守 writing-plans 的拆分、TDD、验证与交接质量纪律；只将这些纪律体现在本候选中。\n\
          - 不得创建 cadence/plans/ 或任何 workspace 文件；不得提前执行 writing-plans 的落盘步骤；canonical writeback 与正式 Plan 落盘由 human-confirmation gate 与 daemon 负责，不得声称已完成。\n\
-         - 仅在最后一个 nonce sentinel block 返回唯一 Canonical Contract Candidate JSON（不用 Markdown code fence），其 outline_id/logical_work_item_id 对应当前 `{outline_id}`/`{logical_work_item_id}`；draft 只含 [canonical_field_contract] 所列字段。\n\
+         - 仅在最后一个 nonce sentinel block 返回唯一 Canonical Contract Candidate JSON（不用 Markdown code fence），其 outline_id/logical_work_item_id{target_refs} 对应当前 `{outline_id}`/`{logical_work_item_id}`{target_outline_note}；draft 只含 [canonical_field_contract] 所列字段。\n\
          - 不得修改、新增、删除或重命名 Outline；不得输出 work_item_id、draft_id、status 等后端状态字段；logical_work_item_id 必须与其 identity 一致。\n\
          - handoff_contract 是 Canonical singleton；required_fields、reviewer_check_refs 非空且不重复；provided_contract_refs 元素唯一且非空白，仅列出被下游 WorkItem input_contracts 消费的契约 ref，无下游消费者（链路末端）时必须为空数组。\n\
          - verification command 必须来自目标仓库的可信证据，不得根据 WorkItemKind 推导；证据不足进入 manual/repair/blocker，绝不使用 Aria 当前仓库命令兜底。\n\
@@ -708,10 +709,35 @@ pub(crate) fn build_work_item_draft_prompt(
          - 不得输出面向 Coder 的长篇 implementation_context；不要提前生成或渲染 Coder Projection 或 Reviewer Projection。\n\n\
          [output]\n\
          使用 nonce `{nonce}` 包裹唯一 JSON：开始标签 `<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`，结束标签 `</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">`。\n\
-         JSON 顶层必须是 `draft`；draft 只能包含 outline_id、logical_work_item_id、canonical_contract、verification_plan。",
+         JSON 顶层必须是 `draft`；draft 只能包含 outline_id、logical_work_item_id{target_output_fields}、canonical_contract、verification_plan。",
         outline_id = current_outline.outline_id,
         logical_work_item_id = current_outline.logical_work_item_id,
         runtime_contract = runtime_contract,
         trusted_command_catalog = trusted_command_catalog,
+        target_schema_field = if current_outline.target_repository_id.is_some() {
+            "target_repository_id: uuid, "
+        } else {
+            ""
+        },
+        target_retain_instruction = if current_outline.target_repository_id.is_some() {
+            "        - 当前 Draft 的 target_repository_id 必须逐字保留 [current_work_item_outline] 的 target_repository_id；逻辑代码库规划中该值为必填 UUID，缺失或不确定时停止并报告 blocker，绝不猜测或回落 primary。\n"
+        } else {
+            ""
+        },
+        target_refs = if current_outline.target_repository_id.is_some() {
+            "/target_repository_id"
+        } else {
+            ""
+        },
+        target_outline_note = if current_outline.target_repository_id.is_some() {
+            " Outline"
+        } else {
+            ""
+        },
+        target_output_fields = if current_outline.target_repository_id.is_some() {
+            "、target_repository_id"
+        } else {
+            ""
+        },
     )
 }

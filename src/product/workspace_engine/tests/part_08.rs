@@ -612,6 +612,7 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
         source_design_spec_ids: vec!["design_spec_0001".to_string()],
         strategy_summary: "serial backend split".to_string(),
         work_item_outlines: vec![WorkItemOutline {
+            target_repository_id: None,
             outline_id: outline_id.to_string(),
             logical_work_item_id: "wi_backend".to_string(),
             title: "Backend".to_string(),
@@ -682,6 +683,7 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
                 contract.write_policy.exclusive_scopes = vec!["src/backend.rs".to_string()];
                 contract.write_policy.forbidden_scopes.clear();
                 WorkItemDraftCandidate {
+                    target_repository_id: None,
                     outline_id: outline_id.to_string(),
                     logical_work_item_id: "wi_backend".to_string(),
                     verification_plan:

@@ -48,6 +48,7 @@ fn work_item_plan_models_roundtrip() {
             verification_intent: vec!["cargo test --locked --test it_product".to_string()],
             trusted_verification_commands: Vec::new(),
             handoff_notes: "生成给后续 item 的摘要".to_string(),
+            target_repository_id: None,
         }],
         dependency_graph: vec![WorkItemOutlineDependencyEdge {
             from_outline_id: "outline_001".to_string(),
@@ -688,6 +689,7 @@ fn sample_draft_candidate(outline_id: &str) -> WorkItemDraftCandidate {
     }))
     .expect("canonical draft fixture");
     WorkItemDraftCandidate {
+        target_repository_id: None,
         outline_id: outline_id.to_string(),
         logical_work_item_id,
         verification_plan: WorkItemDraftVerificationPlan {
@@ -728,6 +730,7 @@ fn sample_dependency_outline() -> WorkItemPlanOutline {
 
 fn sample_outline(outline_id: &str, kind: WorkItemKind) -> WorkItemOutline {
     WorkItemOutline {
+        target_repository_id: None,
         outline_id: outline_id.to_string(),
         logical_work_item_id: format!("wi_{outline_id}"),
         title: format!("item {outline_id}"),
