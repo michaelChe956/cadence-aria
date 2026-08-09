@@ -13,8 +13,8 @@ use crate::product::logical_codebase::{
 };
 
 use super::{
-    AggregateIndexError, AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
-    AggregateIndexStore, CodeGraphCli, CodeGraphExcludeGenerator,
+    AggregateIndexError, AggregateIndexRecord, AggregateIndexSnapshotCollector,
+    AggregateIndexStatus, AggregateIndexStore, CodeGraphCli, CodeGraphExcludeGenerator,
 };
 
 const REPRESENTATIVE_QUERY: &str = "crossRepoGreeting";
@@ -73,6 +73,7 @@ pub struct AggregateIndexOperation {
     store: AggregateIndexStore,
     excludes: CodeGraphExcludeGenerator,
     cli: CodeGraphCli,
+    snapshots: AggregateIndexSnapshotCollector,
 }
 
 impl AggregateIndexOperation {
@@ -81,11 +82,12 @@ impl AggregateIndexOperation {
         cli: CodeGraphCli,
         excludes: CodeGraphExcludeGenerator,
     ) -> Self {
-        Self::with_dependencies(
+        Self::with_snapshot_dependencies(
             LogicalCodebaseStore::new(paths.clone()),
-            AggregateIndexStore::new(paths),
+            AggregateIndexStore::new(paths.clone()),
             cli,
             excludes,
+            AggregateIndexSnapshotCollector::for_paths(paths),
         )
     }
 
@@ -95,11 +97,33 @@ impl AggregateIndexOperation {
         cli: CodeGraphCli,
         excludes: CodeGraphExcludeGenerator,
     ) -> Self {
+        Self::with_snapshot_dependencies(
+            logical.clone(),
+            store,
+            cli,
+            excludes,
+            AggregateIndexSnapshotCollector::with_dependencies(
+                logical,
+                std::sync::Arc::new(
+                    crate::cross_cutting::bounded_command_runner::TokioBoundedCommandRunner,
+                ),
+            ),
+        )
+    }
+
+    pub fn with_snapshot_dependencies(
+        logical: LogicalCodebaseStore,
+        store: AggregateIndexStore,
+        cli: CodeGraphCli,
+        excludes: CodeGraphExcludeGenerator,
+        snapshots: AggregateIndexSnapshotCollector,
+    ) -> Self {
         Self {
             logical,
             store,
             excludes,
             cli,
+            snapshots,
         }
     }
 
@@ -127,7 +151,7 @@ impl AggregateIndexOperation {
         let members = self.logical.list_members(project_id)?;
         let checkouts = self.logical.list_checkouts(project_id)?;
         let included = included_main_checkouts(&manifest, &members, &checkouts)?;
-        let snapshots = registered_snapshots(&included)?;
+        let snapshots = self.snapshots.capture_included(project_id, &manifest)?;
         let member_names = included
             .iter()
             .map(|(_, checkout)| checkout_root_name(&manifest.provider_context_root, checkout))
@@ -225,38 +249,6 @@ fn included_main_checkouts<'a>(
         included.push((member, *checkout));
     }
     Ok(included)
-}
-
-/// Task 5 replaces this temporary authority-record projection with Git HEAD and
-/// porcelain collection. Until then, persisted registration revisions retain an
-/// auditable index build record without making Task 4 depend on Task 5.
-fn registered_snapshots(
-    included: &[(&CodebaseMemberRecord, &RepositoryCheckoutRecord)],
-) -> Result<Vec<AggregateIndexMemberSnapshot>, AggregateIndexError> {
-    let indexed_at = Utc::now().to_rfc3339();
-    included
-        .iter()
-        .map(|(member, checkout)| {
-            let revision = checkout
-                .revision
-                .clone()
-                .filter(|revision| !revision.is_empty())
-                .ok_or_else(|| AggregateIndexError::Failed {
-                    code: "aggregate_index_member_invalid",
-                    message: format!(
-                        "available main checkout {} for member {} has no registered revision",
-                        checkout.checkout_id.0, member.logical_repository_id.0
-                    ),
-                })?;
-            Ok(AggregateIndexMemberSnapshot::indexed(
-                member.logical_repository_id,
-                checkout.checkout_id,
-                revision,
-                false,
-                indexed_at.clone(),
-            ))
-        })
-        .collect()
 }
 
 fn checkout_root_name(
@@ -527,14 +519,14 @@ mod tests {
     }
 
     #[test]
-    fn build_requires_an_available_main_checkout_with_a_registered_revision() {
+    fn build_requires_an_available_main_checkout() {
         let fixture = aggregate_index_fixture();
         let mut checkout = fixture
             .logical
             .list_checkouts("project_0001")
             .unwrap()
             .remove(0);
-        checkout.revision = None;
+        checkout.availability = CheckoutAvailability::Missing;
         fixture
             .logical
             .save_checkout("project_0001", &checkout)
@@ -558,11 +550,15 @@ mod tests {
 
     impl Fixture {
         fn operation(&self) -> AggregateIndexOperation {
-            AggregateIndexOperation::with_dependencies(
+            AggregateIndexOperation::with_snapshot_dependencies(
                 self.logical.clone(),
                 self.store.clone(),
                 CodeGraphCli::new(self.cli.clone(), "codegraph".to_string()),
                 CodeGraphExcludeGenerator,
+                AggregateIndexSnapshotCollector::with_dependencies(
+                    self.logical.clone(),
+                    self.cli.clone(),
+                ),
             )
         }
 
@@ -715,6 +711,20 @@ mod tests {
                 state.requests.push(request.clone());
                 match request.argv.as_slice() {
                     [version] if version == "--version" => "1.5.0\n".to_string(),
+                    [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD" => {
+                        match request
+                            .working_dir
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                        {
+                            Some("api") => "a".repeat(40),
+                            Some("web") => "b".repeat(40),
+                            name => panic!("unexpected fake Git checkout: {name:?}"),
+                        }
+                    }
+                    [status, porcelain] if status == "status" && porcelain == "--porcelain=v1" => {
+                        String::new()
+                    }
                     [init, dot] if init == "init" && dot == "." => "Indexed 2 files\n".to_string(),
                     [files, json] if files == "files" && json == "--json" => serde_json::to_string(
                         &state
