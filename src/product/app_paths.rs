@@ -94,6 +94,11 @@ impl ProductAppPaths {
         self.issue_root(project_id, issue_id)
             .join("codebase-selection.json")
     }
+
+    pub fn planning_context_snapshot_path(&self, project_id: &str, issue_id: &str) -> PathBuf {
+        self.issue_root(project_id, issue_id)
+            .join("planning-context-snapshot.json")
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ pub mod aggregate_initialization_store;
 pub mod feature;
 pub mod issue_selection;
 pub mod migration;
+pub mod planning_context;
 pub mod policy;
 pub mod provider_gateway;
 pub mod reference_scanner;
@@ -38,6 +39,9 @@ pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
     IdentityMigrationPhase, IdentityMigrationVerifier, MigrationFaultInjector,
     RepositoryIdentityMapping,
+};
+pub use planning_context::{
+    MemberCheckoutFingerprint, PlanningContextSnapshot, PlanningContextSnapshotStore,
 };
 pub use policy::{
     AggregatePolicyArtifact, AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect,
