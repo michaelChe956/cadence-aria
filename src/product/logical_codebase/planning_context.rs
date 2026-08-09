@@ -32,6 +32,9 @@ pub struct PlanningContextSnapshot {
 
 impl PlanningContextSnapshot {
     /// 确定性指纹：membership/index revision + policy digest + 成员指纹 canonical 序列化。
+    /// 每个成员的哈希输入包含 `logical_repository_id`、`checkout_id`、`revision`、`dirty`
+    /// 与 `available`（B2 修复：checkout identity 更换也必须触发漂移，不能仅靠
+    /// revision/dirty/availability 不变而绕过）。
     pub fn access_fingerprint_value(&self) -> String {
         let mut members: Vec<_> = self.member_fingerprints.iter().collect();
         members.sort_by_key(|fingerprint| fingerprint.logical_repository_id);
@@ -44,6 +47,9 @@ impl PlanningContextSnapshot {
         for fingerprint in members {
             hasher.update(b"\0");
             hasher.update(fingerprint.logical_repository_id.0.to_string().as_bytes());
+            hasher.update(b"\0");
+            hasher.update(fingerprint.checkout_id.0.to_string().as_bytes());
+            hasher.update(b"\0");
             hasher.update(fingerprint.revision.as_bytes());
             hasher.update([fingerprint.dirty as u8, fingerprint.available as u8]);
         }

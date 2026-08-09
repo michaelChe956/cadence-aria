@@ -153,6 +153,21 @@ impl PlanningContextResolver {
         issue_id: &str,
         targets: &[LogicalRepositoryId],
     ) -> Result<ResolvedPlanningContext, ProductStoreError> {
+        let resolved = self.resolve_context(project_id, issue_id, targets)?;
+        self.snapshots.save(&resolved.snapshot)?;
+        Ok(resolved)
+    }
+
+    /// 计算当前规划上下文但**不落盘**。`resume` 指纹比对专用：先加载既有 snapshot
+    /// （`load` 只读、不写）并复算当前指纹（不写盘）再比较，禁止先写后比（B1/TOCTOU：
+    /// 若先 `build` 写新 snapshot，漂移首次拒绝后重连会因 snapshot 已被更新而误判
+    /// `SameContext`，继续沿用旧会话 prompt）。`build` 在其基础上落盘快照。
+    fn resolve_context(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        targets: &[LogicalRepositoryId],
+    ) -> Result<ResolvedPlanningContext, ProductStoreError> {
         let resolution = self.sets.resolve(project_id, issue_id)?;
         if resolution.set.is_empty() {
             return Err(ProductStoreError::InvalidRecord {
@@ -207,7 +222,6 @@ impl PlanningContextResolver {
         // 返回的快照携带冻结指纹（与落盘一致），保证 `ResolvedPlanningContext.snapshot`
         // 是 context 的唯一事实来源（Task 11 resume 校验依赖该字段）。
         snapshot.access_fingerprint = snapshot.access_fingerprint_value();
-        self.snapshots.save(&snapshot)?;
 
         Ok(ResolvedPlanningContext {
             cwd,
@@ -236,10 +250,15 @@ pub enum ResumeDecision {
 }
 
 impl PlanningContextResolver {
-    /// resume/续接校验：加载既有 planning snapshot 并复算当前指纹。指纹一致返回
-    /// `SameContext`（沿用现有 session 审计与 prompt 上下文）；指纹漂移返回
-    /// `StaleContext`（拒绝沿用可能过时/越权的 prompt/cwd/policy，携带重建上下文）。
-    /// 无既有快照时视为首次构建，直接 `SameContext`（无旧上下文可沿用）。
+    /// resume/续接校验：**先加载**既有 planning snapshot（`load` 只读、不写），**再**复算
+    /// 当前指纹（不落盘）比较。指纹一致返回 `SameContext`（沿用现有 session 审计与
+    /// prompt 上下文）；指纹漂移返回 `StaleContext`（拒绝沿用可能过时/越权的
+    /// prompt/cwd/policy，携带重建上下文）。无既有快照时视为首次构建，直接
+    /// `SameContext`（无旧上下文可沿用）。
+    ///
+    /// 本方法只读判定、不落盘（B1/TOCTOU 修复：禁止先写后比）；「重建后写新 snapshot」
+    /// 属于消费方启动新会话时的动作（Web 层 StaleContext 分支）。因此同一会话重连
+    /// （未启动新会话）持续返回 `StaleContext`，不会因 snapshot 被提前更新而误判。
     ///
     /// resume 校验在 provider 启动前完成；envelope 的 resume fingerprint（Plan 2）与
     /// planning snapshot 指纹互补——envelope 校验 policy/target/version 一致，snapshot
@@ -259,7 +278,12 @@ impl PlanningContextResolver {
                 )?));
             }
         };
-        let current = self.build(project_id, issue_id, &[])?;
+        // 先加载既有 snapshot（`load` 只读、不写），再复算当前指纹（`resolve_context`
+        // 不落盘）比较。禁止先写后比（B1/TOCTOU）：否则漂移首次拒绝后，重连会因
+        // snapshot 已被 build 更新而误判 `SameContext`，继续沿用旧会话 prompt。
+        // 落盘 rebuilt 快照属于消费方「启动新会话并重建」动作（Web 层 B3），本方法
+        // 保持只读判定，重连（未启动新会话）持续返回 `StaleContext`。
+        let current = self.resolve_context(project_id, issue_id, &[])?;
         if current.snapshot.access_fingerprint_value() == previous.access_fingerprint {
             Ok(ResumeDecision::SameContext(current))
         } else {
@@ -475,6 +499,19 @@ mod tests {
             index_store.replace_active("project_0001", index).unwrap();
         }
 
+        /// 模拟 checkout identity 更换：仅变更 active aggregate index 成员的
+        /// checkout_id（revision/dirty/availability/membership 均不变）。B2 验证
+        /// checkout_id 参与指纹哈希，避免 checkout 更换被漂移检测绕过。
+        fn change_checkout_id(&self) {
+            let index_store = AggregateIndexStore::new(self.paths.clone());
+            let mut index = index_store.active("project_0001").unwrap().unwrap();
+            for snapshot in &mut index.member_snapshots {
+                snapshot.checkout_id = RepositoryCheckoutId(stable_uuid(0x0002));
+            }
+            index.updated_at = "2026-08-10T02:00:00Z".to_string();
+            index_store.replace_active("project_0001", index).unwrap();
+        }
+
         fn member_record(
             &self,
             id: LogicalRepositoryId,
@@ -640,5 +677,64 @@ mod tests {
             stale,
             ResumeDecision::StaleContext { reason, .. } if reason != persisted_fingerprint
         ));
+    }
+
+    #[test]
+    fn resume_is_readonly_and_rejected_reconnect_stays_stale() {
+        // B1/TOCTOU 修复：resume 先加载既有 snapshot（load 只读、不写）再比较，禁止
+        // 先写后比。因此漂移首次拒绝后，同一会话重连（未启动新会话）仍是 StaleContext，
+        // 绝不因 snapshot 被 build 提前更新而误判 SameContext。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        let first = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        let persisted_fingerprint = first.snapshot.access_fingerprint.clone();
+
+        fixture.change_membership_revision(); // 指纹漂移
+
+        let stale = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(stale, ResumeDecision::StaleContext { .. }));
+
+        // resume 不落盘：拒绝后落盘快照仍为旧指纹（未被 build 更新）。
+        let store = PlanningContextSnapshotStore::new(fixture.paths.clone());
+        let persisted = store.load("project_0001", "issue_0001").unwrap().unwrap();
+        assert_eq!(persisted.access_fingerprint, persisted_fingerprint);
+
+        // 重连（未启动新会话）仍是 StaleContext。
+        let again = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(again, ResumeDecision::StaleContext { .. }));
+    }
+
+    #[test]
+    fn checkout_identity_change_triggers_fingerprint_drift() {
+        // B2 修复：access_fingerprint_value 哈希 checkout_id。checkout identity 更换而
+        // revision/dirty/availability 不变时，也必须触发漂移（StaleContext）。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+
+        let same = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(same, ResumeDecision::SameContext(_)));
+
+        fixture.change_checkout_id(); // 仅更换 checkout identity
+        let stale = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(stale, ResumeDecision::StaleContext { .. }));
     }
 }

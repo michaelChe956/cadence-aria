@@ -1,6 +1,7 @@
 use super::*;
 use crate::product::logical_codebase::{
-    IssueCodebaseSelectionStore, LogicalCodebaseStore, PlanningContextResolver, ResumeDecision,
+    IssueCodebaseSelectionStore, LogicalCodebaseStore, PlanningContextResolver,
+    PlanningContextSnapshotStore, ResolvedPlanningContext, ResumeDecision,
 };
 
 pub async fn workspace_ws(
@@ -64,7 +65,7 @@ pub(crate) fn spawn_idle_timeout_task(
 /// - 传统单仓路径（无 logical manifest 或 issue 无 selection）→ `Ok(None)`，不受影响。
 /// - 指纹一致 → `SameContext`：沿用现有 session 审计与 prompt 上下文。
 /// - 指纹漂移 → `StaleContext`：不得沿用可能过时/越权的 prompt/cwd/policy，调用方应
-///   拒绝续跑并提示启动新会话（重新 build 上下文）。
+///   启动新会话并重建上下文（重新 build）。
 pub(crate) fn planning_resume_decision(
     app_paths: &ProductAppPaths,
     project_id: &str,
@@ -86,6 +87,32 @@ pub(crate) fn planning_resume_decision(
         .resume(project_id, issue_id)
         .map_err(|error| format!("planning context resume failed: {error}"))?;
     Ok(Some(decision))
+}
+
+/// 依据 planning resume 决策决定实际启动的 run kind（B3 修复）。
+///
+/// - `None`（传统单仓）/ `SameContext`：沿用 `fallback` run kind 续跑原中断 run。
+/// - `StaleContext`：重建 —— 强制全新 `WorkItemPlanAuthor` 全量生成（新会话），不使用
+///   可能复用旧 provider 会话/prompt 内容的 revision run kind，确保不沿用旧内容。
+pub(crate) fn planning_resume_run_kind(
+    decision: &Option<ResumeDecision>,
+    fallback: ProviderRunKind,
+) -> ProviderRunKind {
+    match decision {
+        None | Some(ResumeDecision::SameContext(_)) => fallback,
+        Some(ResumeDecision::StaleContext { .. }) => ProviderRunKind::WorkItemPlanAuthor,
+    }
+}
+
+/// StaleContext 的实际重建动作（B3 修复）：把 `rebuilt` 的 planning snapshot 落盘
+/// （重建后写新 snapshot），使新会话基于重建上下文；后续 resume 以该快照为准。
+pub(crate) fn persist_rebuilt_planning_context(
+    app_paths: &ProductAppPaths,
+    rebuilt: &ResolvedPlanningContext,
+) -> Result<(), String> {
+    PlanningContextSnapshotStore::new(app_paths.clone())
+        .save(&rebuilt.snapshot)
+        .map_err(|error| format!("persist rebuilt planning snapshot failed: {error}"))
 }
 
 pub(crate) async fn handle_workspace_socket(
@@ -337,32 +364,36 @@ pub(crate) async fn handle_workspace_socket(
             // 逻辑代码库分支：resume 校验在 provider 启动前完成（REQ-PLN-03）。
             // - None（传统单仓）/ SameContext（指纹一致）：沿用现有 session 审计与
             //   prompt 上下文，照常续跑。
-            // - StaleContext（指纹漂移）/ 校验失败（fail-closed）：拒绝续跑可能过时/越权
-            //   的 prompt/cwd/policy，提示客户端启动新会话重建上下文。
+            // - StaleContext（指纹漂移）：实际启动新会话并重建上下文 —— 先落盘
+            //   rebuilt 快照（重建后写新 snapshot），再以全新 `WorkItemPlanAuthor`
+            //   全量生成启动（不沿用可能过时/越权的 prompt/cwd/policy，也不使用
+            //   复用旧 provider 会话的 revision run kind）。
+            // - 校验失败：fail-closed 拒绝续跑。
             match planning_resume_decision(
                 &app_paths,
                 &session_record.project_id,
                 &session_record.issue_id,
             ) {
-                Ok(None) | Ok(Some(ResumeDecision::SameContext(_))) => {
-                    if let Err(message) = spawn_provider_run_from_handler(
-                        run_context.clone(),
-                        run_kind,
-                        outbound_tx.clone(),
-                    )
-                    .await
+                Ok(decision) => {
+                    // B3：StaleContext 先落盘 rebuilt 快照，失败则 fail-closed 不启动。
+                    if let Some(ResumeDecision::StaleContext { rebuilt, .. }) = &decision
+                        && let Err(message) = persist_rebuilt_planning_context(&app_paths, rebuilt)
                     {
                         let err = WsOutMessage::Error { message };
                         let _ = send_json_outbound(&outbound_tx, &err).await;
+                    } else {
+                        let run_kind = planning_resume_run_kind(&decision, run_kind);
+                        if let Err(message) = spawn_provider_run_from_handler(
+                            run_context.clone(),
+                            run_kind,
+                            outbound_tx.clone(),
+                        )
+                        .await
+                        {
+                            let err = WsOutMessage::Error { message };
+                            let _ = send_json_outbound(&outbound_tx, &err).await;
+                        }
                     }
-                }
-                Ok(Some(ResumeDecision::StaleContext { reason, .. })) => {
-                    let err = WsOutMessage::Error {
-                        message: format!(
-                            "planning context stale, refusing to resume stale run: {reason}; start a new planning session to rebuild context"
-                        ),
-                    };
-                    let _ = send_json_outbound(&outbound_tx, &err).await;
                 }
                 Err(message) => {
                     let err = WsOutMessage::Error {

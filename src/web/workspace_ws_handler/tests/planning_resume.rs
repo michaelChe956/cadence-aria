@@ -222,3 +222,65 @@ fn planning_resume_decision_returns_stale_when_membership_drifted() {
         .expect("logical codebase branch must produce a decision");
     assert!(matches!(decision, ResumeDecision::StaleContext { .. }));
 }
+
+#[test]
+fn planning_resume_run_kind_rebuilds_on_stale_context_and_resumes_on_same() {
+    // B3 修复：StaleContext 时 Web 分支实际启动新会话（全新 WorkItemPlanAuthor 全量
+    // 生成），而不是沿用可能复用旧 provider 会话内容的 revision run kind；
+    // None（传统单仓）/ SameContext 沿用 fallback run kind 续跑。
+    let fixture = PlanningResumeFixture::new();
+    fixture.write_logical_codebase();
+    let resolver = fixture.resolver();
+    resolver.build("project_0001", "issue_0001", &[]).unwrap();
+
+    let same = resolver.resume("project_0001", "issue_0001").unwrap();
+    let kind = planning_resume_run_kind(
+        &Some(same),
+        ProviderRunKind::WorkItemPlanOutlineRevision { feedback: None },
+    );
+    assert!(matches!(
+        kind,
+        ProviderRunKind::WorkItemPlanOutlineRevision { .. }
+    ));
+
+    fixture.change_membership_revision();
+    let stale = resolver.resume("project_0001", "issue_0001").unwrap();
+    let kind = planning_resume_run_kind(
+        &Some(stale),
+        ProviderRunKind::WorkItemPlanOutlineRevision { feedback: None },
+    );
+    assert!(matches!(kind, ProviderRunKind::WorkItemPlanAuthor));
+
+    let kind = planning_resume_run_kind(
+        &None,
+        ProviderRunKind::WorkItemPlanOutlineRevision { feedback: None },
+    );
+    assert!(matches!(
+        kind,
+        ProviderRunKind::WorkItemPlanOutlineRevision { .. }
+    ));
+}
+
+#[test]
+fn stale_context_rebuild_persists_rebuilt_snapshot_for_new_session() {
+    // B3 修复：StaleContext 时 Web 分支实际重建 —— 把 rebuilt 的 planning snapshot
+    // 落盘（重建后写新 snapshot），使新会话基于重建上下文；重建后后续 resume 恢复
+    // SameContext（不再重复拒绝）。
+    let fixture = PlanningResumeFixture::new();
+    fixture.write_logical_codebase();
+    let resolver = fixture.resolver();
+    resolver.build("project_0001", "issue_0001", &[]).unwrap();
+
+    fixture.change_membership_revision();
+    let stale = resolver.resume("project_0001", "issue_0001").unwrap();
+    let ResumeDecision::StaleContext { rebuilt, .. } = stale else {
+        panic!("expected StaleContext");
+    };
+
+    // Web 层重建动作：落盘 rebuilt 快照。
+    persist_rebuilt_planning_context(&fixture.paths, &rebuilt).unwrap();
+
+    // 新会话/后续重连基于重建快照 → 指纹一致，恢复 SameContext。
+    let resumed = resolver.resume("project_0001", "issue_0001").unwrap();
+    assert!(matches!(resumed, ResumeDecision::SameContext(_)));
+}
