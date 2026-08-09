@@ -170,6 +170,43 @@ impl WorkspaceEngine {
     ) -> StreamingProviderInput {
         let resume_provider_session_id =
             self.provider_resume_session_id(ProviderConversationRole::Author, &author_provider);
+        self.build_work_item_plan_streaming_input_with_session(
+            provider_type,
+            prompt,
+            worktree_path,
+            author_provider,
+            resume_provider_session_id,
+        )
+    }
+
+    /// StaleContext 重建（B3 round3）专用：provider **全新启动**，不携带
+    /// `provider_resume_session_id`（不读取旧 Author conversation），避免以 `--resume`
+    /// 复用旧 provider 原生会话而沿用旧会话内容。legacy 正常 resume 仍走
+    /// `build_work_item_plan_streaming_input`（携带会话 id，行为不变）。
+    pub fn build_work_item_plan_streaming_input_fresh(
+        &self,
+        provider_type: ProviderType,
+        prompt: String,
+        worktree_path: String,
+        author_provider: ProviderName,
+    ) -> StreamingProviderInput {
+        self.build_work_item_plan_streaming_input_with_session(
+            provider_type,
+            prompt,
+            worktree_path,
+            author_provider,
+            None,
+        )
+    }
+
+    fn build_work_item_plan_streaming_input_with_session(
+        &self,
+        provider_type: ProviderType,
+        prompt: String,
+        worktree_path: String,
+        author_provider: ProviderName,
+        resume_provider_session_id: Option<String>,
+    ) -> StreamingProviderInput {
         StreamingProviderInput {
             provider_type,
             role: AdapterRole::WorkItemSplitter,

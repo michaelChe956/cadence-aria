@@ -547,6 +547,12 @@ async fn stale_context_rebuild_starts_new_outline_run_with_rebuilt_context() {
     // B3：注入 rebuilt inventory/effective members 到 prompt（不沿用旧内容）。
     assert!(input.prompt.contains("聚合代码库成员清单"));
     assert!(input.prompt.contains("target_repository_id"));
+    // B3 round3：rebuild run 的 provider 全新启动 —— 不携带 provider_resume_session_id
+    // （不 --resume 旧 Author provider 会话，真正隔离的全新规划会话）。
+    assert_eq!(
+        input.resume_provider_session_id, None,
+        "rebuild run must not resume the old author provider session"
+    );
 
     // 新 BLOCKER 修复：provider 成功启动后 rebuilt snapshot 已 commit。
     let store = PlanningContextSnapshotStore::new(app_paths.clone());

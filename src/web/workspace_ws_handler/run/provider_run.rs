@@ -287,12 +287,25 @@ pub(crate) async fn spawn_provider_run_from_handler(
                         Some(invocation.author_provider.clone()),
                     )
                     .await;
-                let provider_input = engine.build_work_item_plan_streaming_input(
-                    invocation.provider_type.clone(),
-                    invocation.prompt.clone(),
-                    invocation.worktree_path.clone(),
-                    invocation.author_provider.clone(),
-                );
+                // B3 round3：StaleContext 重建 run 的 provider **全新启动** —— 不携带
+                // provider_resume_session_id（不读取旧 Author conversation，避免以 --resume
+                // 复用旧 provider 原生会话）；legacy 正常 resume（SameContext/传统单仓）
+                // 保持现有行为（携带会话 id）。
+                let provider_input = if rebuilt.is_some() {
+                    engine.build_work_item_plan_streaming_input_fresh(
+                        invocation.provider_type.clone(),
+                        invocation.prompt.clone(),
+                        invocation.worktree_path.clone(),
+                        invocation.author_provider.clone(),
+                    )
+                } else {
+                    engine.build_work_item_plan_streaming_input(
+                        invocation.provider_type.clone(),
+                        invocation.prompt.clone(),
+                        invocation.worktree_path.clone(),
+                        invocation.author_provider.clone(),
+                    )
+                };
                 let provider_session = provider_for_run
                     .start(provider_input, run_cancel.clone())
                     .await;

@@ -173,6 +173,46 @@ fn build_work_item_plan_streaming_input_reuses_author_provider_session() {
 }
 
 #[test]
+fn build_work_item_plan_streaming_input_fresh_never_resumes_old_author_session() {
+    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_fresh_author");
+    // 模拟旧 Author provider 会话（SameContext 正常 resume 会复用，rebuild 必须忽略）。
+    engine.session.provider_conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "author-session-1".to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        last_node_id: Some("node-1".to_string()),
+    }];
+
+    // legacy 正常 resume：仍携带旧会话 id（行为不变）。
+    let resumed = engine.build_work_item_plan_streaming_input(
+        ProviderType::ClaudeCode,
+        "split prompt".to_string(),
+        "/tmp/worktree".to_string(),
+        ProviderName::ClaudeCode,
+    );
+    assert_eq!(
+        resumed.resume_provider_session_id,
+        Some("author-session-1".to_string()),
+        "legacy resume must keep carrying the author provider session id"
+    );
+
+    // StaleContext rebuild：provider 全新启动，不携带任何 resume id（不 --resume 旧会话）。
+    let fresh = engine.build_work_item_plan_streaming_input_fresh(
+        ProviderType::ClaudeCode,
+        "split prompt".to_string(),
+        "/tmp/worktree".to_string(),
+        ProviderName::ClaudeCode,
+    );
+    assert_eq!(
+        fresh.resume_provider_session_id,
+        None,
+        "rebuild run must not resume the old author provider session"
+    );
+}
+
+#[test]
 fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
     let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_feedback");
