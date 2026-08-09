@@ -8,6 +8,7 @@ use crate::product::coding_models::{
     CodingTimelineNode, GroupFinalReadinessSnapshot, GroupReviewArtifactRef, InternalPrReview,
     ReviewRequest, WorkItemExecutionPlan,
 };
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +394,9 @@ pub struct IssueLifecycleResponse {
     pub design_specs: Vec<DesignSpecDto>,
     pub work_item_plans: Vec<IssueWorkItemPlanDetailDto>,
     pub work_items: Vec<LifecycleWorkItemDto>,
+    /// REQ-TGT-05：WorkItem 按 `target_repository_id` 分组的聚合视图（向后兼容，
+    /// 保留扁平 `work_items` 不变）。
+    pub work_item_repository_groups: Vec<WorkItemRepositoryGroupDto>,
     pub workspace_sessions: Vec<WorkspaceSessionSummaryDto>,
     pub coding_attempts: Vec<CodingAttemptDto>,
 }
@@ -465,6 +469,18 @@ pub struct LifecycleWorkItemDto {
     pub execution_plan_status: String,
     pub completion_commit: Option<String>,
     pub completion_diff_summary_ref: Option<String>,
+}
+
+/// REQ-TGT-05：单个仓库分组。`target_repository_id == None` 表示遗留/未指定仓库，
+/// `compatibility_projection` 置 true。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemRepositoryGroupDto {
+    pub target_repository_id: Option<LogicalRepositoryId>,
+    pub alias: String,
+    pub status: String,
+    pub compatibility_projection: bool,
+    pub items: Vec<LifecycleWorkItemDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

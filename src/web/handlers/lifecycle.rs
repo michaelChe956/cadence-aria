@@ -1,9 +1,11 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
+use crate::product::logical_codebase::{LogicalRepositoryId, PlanningContextSetResolver};
 use crate::product::models::WorkItemRuntimeBinding;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
+use crate::product::workspace_engine::group_work_items_by_target;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod deletion;
@@ -270,6 +272,61 @@ pub async fn issue_lifecycle(
         })
         .collect::<ApiResult<Vec<_>>>()?;
     work_items.extend(legacy_work_items);
+
+    // REQ-TGT-05：按 target_repository_id 分组的聚合视图（向后兼容，保留扁平 work_items）。
+    // 数据源为 Issue 下已持久化的 LifecycleWorkItemRecord（含 target_repository_id）；
+    // alias 优先取 planning context 的 RepositoryContextSet.alias，缺失时回落到
+    // resolve_logical_repository 的物理投影名。Plan 3 范围：schema-v2 规划投影 item
+    // 尚未落库（Plan 4 贯通 publish 链路），分组视图当前反映已持久化记录。
+    let mut work_item_repository_groups = Vec::new();
+    if let Ok(persisted_work_items) = lifecycle.list_work_items(&project_id, &issue_id) {
+        let mut member_index: BTreeMap<LogicalRepositoryId, String> = BTreeMap::new();
+        if let Ok(resolution) =
+            PlanningContextSetResolver::new(app_paths.clone()).resolve(&project_id, &issue_id)
+        {
+            for member in &resolution.set {
+                member_index.insert(member.member_id, member.alias.clone());
+            }
+        }
+        let repository_store = RepositoryStore::new(app_paths.clone());
+        for record in &persisted_work_items {
+            if let Some(target) = record.target_repository_id {
+                if member_index.contains_key(&target) {
+                    continue;
+                }
+                if let Ok((_, _, repository)) =
+                    repository_store.resolve_logical_repository(&project_id, target)
+                {
+                    member_index.insert(target, repository.name.clone());
+                }
+            }
+        }
+        let groups = group_work_items_by_target(&persisted_work_items, &member_index)
+            .map_err(product_store_api_error)?;
+        work_item_repository_groups = groups
+            .into_iter()
+            .map(|group| {
+                work_item_repository_group_dto(group, |record| {
+                    let attempts = coding_store
+                        .list_attempts_for_work_item(&project_id, &issue_id, &record.id)
+                        .map_err(product_store_api_error)?;
+                    let latest_attempt = attempts.last().map(coding_attempt_dto);
+                    let session = workspace_session_for_entity(
+                        &workspace_sessions,
+                        &record.id,
+                        &WorkspaceType::WorkItem,
+                    );
+                    lifecycle_work_item_dto(
+                        &lifecycle,
+                        record,
+                        latest_attempt,
+                        session.map(|session| session.id.as_str()),
+                    )
+                })
+            })
+            .collect::<ApiResult<Vec<_>>>()?;
+    }
+
     let workspace_sessions = workspace_sessions
         .iter()
         .map(workspace_session_summary_dto)
@@ -281,6 +338,7 @@ pub async fn issue_lifecycle(
         design_specs,
         work_item_plans,
         work_items,
+        work_item_repository_groups,
         workspace_sessions,
         coding_attempts,
     }))

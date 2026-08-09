@@ -1,6 +1,7 @@
 use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
 use crate::product::models::WorkspaceSessionSummaryRecord;
+use crate::product::workspace_engine::WorkItemRepositoryGroup;
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
 ) -> IssueWorkItemPlanDetailDto {
@@ -386,6 +387,27 @@ mod work_item_runtime;
 pub(crate) use work_item_runtime::{
     LifecycleWorkItemRuntimeDtoInput, lifecycle_work_item_runtime_dto,
 };
+
+/// REQ-TGT-05：将 `WorkItemRepositoryGroup`（核心分组视图）转换为 Web DTO。
+/// `convert_item` 负责把组内 `LifecycleWorkItemRecord` 转为 `LifecycleWorkItemDto`
+///（复用既有单 item 字段，不改动单 item 结构）。
+pub(crate) fn work_item_repository_group_dto(
+    group: WorkItemRepositoryGroup,
+    convert_item: impl Fn(LifecycleWorkItemRecord) -> ApiResult<LifecycleWorkItemDto>,
+) -> ApiResult<WorkItemRepositoryGroupDto> {
+    let items = group
+        .items
+        .into_iter()
+        .map(convert_item)
+        .collect::<ApiResult<Vec<_>>>()?;
+    Ok(WorkItemRepositoryGroupDto {
+        target_repository_id: group.target_repository_id,
+        alias: group.alias,
+        status: group.status,
+        compatibility_projection: group.compatibility_projection,
+        items,
+    })
+}
 
 pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {
     CodingAttemptDto {
