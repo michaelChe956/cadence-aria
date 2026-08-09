@@ -11,6 +11,39 @@ use crate::cross_cutting::structured_output::{
 };
 use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 
+/// Test-only fake provider launch input wrapper.
+///
+/// `FakeStreamingProviderInput` 把 `StreamingProviderInput` 包裹起来,使其只能在
+/// 测试中通过 `for_test` 构造,且必须声明 `ProviderType::Fake`。这是「Fake 经过
+/// registry/编译期隔离」契约在 type 层的体现:逻辑代码库真实 provider 启动路径
+/// (`LogicalCodebaseProviderGateway`/`ValidatedStreamingProviderInput`)不接受
+/// 裸 `StreamingProviderInput`,而测试侧的 Fake 启动用此 wrapper 明确标记为隔离,
+/// 而非通过 `if provider != Fake` 的运行时例外放行真实 provider。
+///
+/// 生产代码不构造本类型;`for_test` 在 `#[cfg(test)]` 下可用。
+#[cfg(test)]
+pub(crate) struct FakeStreamingProviderInput(StreamingProviderInput);
+
+#[cfg(test)]
+impl FakeStreamingProviderInput {
+    /// 构造一个测试用 fake launch input。`provider_type` 必须 `ProviderType::Fake`,
+    /// 否则 panic——这是「Fake 不可伪装成真实 provider」的编译/构造期断言。
+    #[cfg(test)]
+    pub fn for_test(provider_type: ProviderType, prompt: &str) -> Self {
+        assert_eq!(
+            provider_type,
+            ProviderType::Fake,
+            "FakeStreamingProviderInput::for_test 仅接受 ProviderType::Fake"
+        );
+        Self(StreamingProviderInput::fake_for_test(prompt))
+    }
+
+    /// 返回内部 `StreamingProviderInput` 的 provider type,供测试断言隔离。
+    pub fn provider_type(&self) -> &ProviderType {
+        &self.0.provider_type
+    }
+}
+
 pub mod fake;
 
 #[cfg(test)]
@@ -51,6 +84,27 @@ pub struct StreamingProviderInput {
     pub structured_output_contract: Option<StructuredOutputContract>,
     pub env_vars: BTreeMap<String, String>,
     pub timeout_secs: u64,
+}
+
+impl StreamingProviderInput {
+    /// 测试专用构造函数:产出一个 `ProviderType::Fake` 的隔离 input。生产代码不得
+    /// 调用本方法;它仅供 `FakeStreamingProviderInput::for_test` 复用,使 Fake
+    /// 启动路径与真实 provider 启动路径在构造上完全分离。
+    #[cfg(test)]
+    fn fake_for_test(prompt: &str) -> Self {
+        Self {
+            provider_type: ProviderType::Fake,
+            role: AdapterRole::Orchestrator,
+            prompt: prompt.to_string(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            workspace_session_id: None,
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: BTreeMap::new(),
+            timeout_secs: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +349,12 @@ pub trait StreamingProviderAdapter: Send + Sync {
         ))
     }
 
+    /// **Legacy bridge**:`run_streaming` 把同步 `AdapterInput` 适配为流式 session,
+    /// 仅供未携带逻辑代码库 target(`attempt.target_snapshot.is_none()`)的历史调用
+    /// 使用。逻辑代码库真实 provider 启动必须经 `LogicalCodebaseProviderGateway`,
+    /// 不得回落到本 bridge——这是 Task 12「关闭逻辑代码库裸输入与 legacy streaming
+    /// fallback」的边界。逻辑目标的 `allow_legacy_stream_fallback` 被强制为 `false`,
+    /// 因此 `provider_stream` 不会在 `start` 未实现时调用本方法。
     async fn run_streaming(
         &self,
         input: &AdapterInput,

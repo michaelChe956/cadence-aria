@@ -247,7 +247,9 @@ impl CodingWorkspaceEngine {
                     provider_name,
                     provider_role: CodingProviderRole::Coder,
                     command_rx: &mut *command_rx,
-                    allow_legacy_stream_fallback: true,
+                    // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge;
+                    // 传统/非逻辑路径保留 `true` 以兼容未实现 `start` 的历史 adapter。
+                    allow_legacy_stream_fallback: invocation_attempt.target_snapshot.is_none(),
                     timeout: None,
                     timeout_reason_code: None,
                     suppress_failure_side_effects: true,
@@ -380,7 +382,9 @@ impl CodingWorkspaceEngine {
                     provider_name: reviewer,
                     provider_role: CodingProviderRole::CodeReviewer,
                     command_rx: &mut *command_rx,
-                    allow_legacy_stream_fallback: true,
+                    // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge;
+                    // 传统/非逻辑路径保留 `true`。
+                    allow_legacy_stream_fallback: invocation_attempt.target_snapshot.is_none(),
                     timeout: None,
                     timeout_reason_code: None,
                     suppress_failure_side_effects: true,

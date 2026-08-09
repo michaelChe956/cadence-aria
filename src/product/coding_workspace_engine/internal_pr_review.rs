@@ -307,7 +307,8 @@ impl CodingWorkspaceEngine {
                 provider_name: &reviewer,
                 provider_role: CodingProviderRole::InternalReviewer,
                 command_rx,
-                allow_legacy_stream_fallback: true,
+                // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge。
+                allow_legacy_stream_fallback: attempt.target_snapshot.is_none(),
                 timeout: None,
                 timeout_reason_code: None,
                 suppress_failure_side_effects: false,

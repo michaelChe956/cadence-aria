@@ -9,9 +9,9 @@ use serde_json::json;
 use crate::cross_cutting::structured_output::{StructuredOutputContract, StructuredOutputState};
 
 use super::{
-    ChoiceRequestData, ChoiceRequestSource, FakeStreamingProvider, ProviderCommand,
-    ProviderCompletion, ProviderEvent, ProviderPermissionMode, ProviderSession, ProviderToolCall,
-    ProviderToolResult, StreamingProviderAdapter, StreamingProviderInput,
+    ChoiceRequestData, ChoiceRequestSource, FakeStreamingProvider, FakeStreamingProviderInput,
+    ProviderCommand, ProviderCompletion, ProviderEvent, ProviderPermissionMode, ProviderSession,
+    ProviderToolCall, ProviderToolResult, StreamingProviderAdapter, StreamingProviderInput,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(1);
@@ -459,5 +459,32 @@ async fn run_streaming_declines_choice_request_instead_of_hanging() {
     assert!(
         matches!(chunk, super::StreamChunk::Error(ref msg) if msg.contains("choice")),
         "expected error chunk, got {chunk:?}"
+    );
+}
+
+#[test]
+fn fake_launch_is_constructible_only_through_fake_registry_path() {
+    // Task 12:Fake launch input 必须经 `FakeStreamingProviderInput::for_test` 构造,
+    // 且强制 `ProviderType::Fake`。这是「Fake 经过 registry/编译期隔离」的 type-level
+    // 断言:逻辑代码库真实 provider 启动路径不接受裸 StreamingProviderInput,而
+    // Fake 用此 wrapper 明确标记为测试隔离,而非通过运行时 `if provider != Fake`
+    // 例外放行真实 provider。
+    let launch = FakeStreamingProviderInput::for_test(
+        crate::protocol::contracts::ProviderType::Fake,
+        "fixture",
+    );
+    assert_eq!(
+        launch.provider_type(),
+        &crate::protocol::contracts::ProviderType::Fake
+    );
+}
+
+#[test]
+#[should_panic(expected = "仅接受 ProviderType::Fake")]
+fn fake_launch_for_test_panics_on_non_fake_provider_type() {
+    // 非真实 provider 类型不得伪装成 Fake launch input。
+    FakeStreamingProviderInput::for_test(
+        crate::protocol::contracts::ProviderType::Codex,
+        "disguised",
     );
 }

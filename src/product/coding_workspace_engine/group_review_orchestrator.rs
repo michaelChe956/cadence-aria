@@ -962,7 +962,8 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
                 provider_name: &self.provider_name,
                 provider_role: CodingProviderRole::InternalReviewer,
                 command_rx: &mut command_rx,
-                allow_legacy_stream_fallback: true,
+                // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge。
+                allow_legacy_stream_fallback: self.attempt.target_snapshot.is_none(),
                 timeout: None,
                 timeout_reason_code: None,
                 suppress_failure_side_effects: true,
