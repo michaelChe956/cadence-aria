@@ -47,6 +47,7 @@ fn plan_repair_parent_engine(
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Story 0001".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
     assert_eq!(story.id, "story_spec_0001");

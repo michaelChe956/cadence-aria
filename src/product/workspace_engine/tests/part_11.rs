@@ -26,6 +26,7 @@ async fn complete_work_item_plan_author_errors_trigger_auto_revision_then_human_
             issue_id: issue_id.to_string(),
             repository_id: repository_id.to_string(),
             title: "Story".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
     let design = lifecycle_store

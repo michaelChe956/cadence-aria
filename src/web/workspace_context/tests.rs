@@ -367,6 +367,7 @@ fn claude_code_story_context_requires_structured_ask_user_question() {
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id,
             title: "爬楼梯问题 Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story");
     let session = lifecycle

@@ -51,6 +51,7 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             issue_id: issue.id.clone(),
             repository_id: repository.id.clone(),
             title: "会话过期提示".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story");
     let session = store

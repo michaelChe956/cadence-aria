@@ -28,6 +28,7 @@ fn persistent_engine_accepts_complete_revision_artifact_misclassified_as_text_fa
                 issue_id: "issue_0001".to_string(),
                 repository_id: "repository_0001".to_string(),
                 title: "Story".to_string(),
+            aggregate_codebase: None,
             })
             .expect("story spec");
         let entity_id = match &workspace_type {

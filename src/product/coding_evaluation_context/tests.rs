@@ -147,6 +147,7 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             issue_id: ISSUE_ID.to_string(),
             repository_id: REPOSITORY_ID.to_string(),
             title: "Story".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     lifecycle

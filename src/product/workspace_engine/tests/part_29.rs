@@ -587,6 +587,7 @@ async fn linked_workspace_restore_rejects_missing_target_record_and_inactive_pla
                     issue_id: "issue_0001".to_string(),
                     repository_id: "repository_0001".to_string(),
                     title: "Story 0002".to_string(),
+                aggregate_codebase: None,
                 })
                 .unwrap()
                 .id

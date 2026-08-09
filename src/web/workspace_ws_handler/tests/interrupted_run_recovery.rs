@@ -89,6 +89,7 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Interrupted review".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story spec");
     let session_record: WorkspaceSessionRecord = lifecycle

@@ -69,6 +69,7 @@ pub(super) fn create_large_workspace_fixture(
         issue_id: issue.id.clone(),
         repository_id: repository.id,
         title: "Large Workspace Memory Story".to_string(),
+        aggregate_codebase: None,
     })?;
     let session = lifecycle.create_workspace_session(CreateWorkspaceSessionInput {
         project_id: project.id,
@@ -308,6 +309,7 @@ fn create_coding_role_run_fixture(
         issue_id: issue.id.clone(),
         repository_id: repository.id.clone(),
         title: "Fixture Story".to_string(),
+        aggregate_codebase: None,
     })?;
     let work_item =
         lifecycle.create_work_item(crate::product::lifecycle_store::CreateWorkItemInput {

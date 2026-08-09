@@ -315,6 +315,7 @@ pub async fn generate_story_specs(
             issue_id: issue_id.clone(),
             repository_id,
             title: request.title,
+            aggregate_codebase: None,
         })
         .map_err(product_store_api_error)?;
     let session = lifecycle

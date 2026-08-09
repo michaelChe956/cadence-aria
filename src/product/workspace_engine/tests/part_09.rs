@@ -381,6 +381,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             issue_id: issue_id.to_string(),
             repository_id: repository_id.to_string(),
             title: "Story".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
     let design = lifecycle

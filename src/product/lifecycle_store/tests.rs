@@ -1,7 +1,11 @@
 use tempfile::TempDir;
 
+use uuid::Uuid;
+
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::{ProductStoreError, read_json, write_json};
+use crate::product::lifecycle_store::AggregateStorySpecScope;
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
     ProviderName, StorySpecRecord, WorkItemRuntimeBinding, WorkspaceType,
 };
@@ -136,6 +140,7 @@ fn ensure_version_repairs_current_version_without_appending_duplicate() {
             issue_id: ISSUE_ID.to_string(),
             repository_id: REPOSITORY_ID.to_string(),
             title: "Recover current version".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let input = AppendSpecVersionInput {
@@ -186,6 +191,7 @@ fn delete_story_spec_removes_record_versions_session_and_timeline() {
             issue_id: ISSUE_ID.to_string(),
             repository_id: REPOSITORY_ID.to_string(),
             title: "Session expired story".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     store
@@ -401,4 +407,184 @@ fn delete_issue_shared_worktree_succeeds_when_absent() {
     store
         .delete_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
         .unwrap();
+}
+
+// === 聚合视野：StorySpec 校验（Task 7）===
+// 稳定 UUID：禁止运行时随机，保证测试可复现；ID 组成磁盘路径前经 validate_relative_id
+// 约束（本测试使用 project_0001 / issue_0001 等稳定 id）。
+const fn stable_member_uuid(seed: u16) -> Uuid {
+    let mut bytes = [0u8; 16];
+    bytes[14] = (seed >> 8) as u8;
+    bytes[15] = seed as u8;
+    // version 7 + variant 10xx，满足 Uuid::from_bytes 的合法构造。
+    bytes[6] = 0x70;
+    bytes[8] = 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+const CODEBASE_REF: Uuid = stable_member_uuid(0x0100);
+const API_MEMBER: LogicalRepositoryId = LogicalRepositoryId(stable_member_uuid(0x0001));
+const WEB_MEMBER: LogicalRepositoryId = LogicalRepositoryId(stable_member_uuid(0x0002));
+const UNKNOWN_MEMBER: LogicalRepositoryId = LogicalRepositoryId(stable_member_uuid(0x00ff));
+
+/// 构造聚合 StorySpec scope：effective 成员 = {api, web}。`involved_repository_ids`
+/// 与 `focus_repository_id` 留空，由各测试用例用 `..` 语法覆盖。
+fn two_effective_members_scope() -> AggregateStorySpecScope {
+    AggregateStorySpecScope {
+        logical_codebase_ref: CODEBASE_REF,
+        effective_member_ids: vec![API_MEMBER, WEB_MEMBER],
+        involved_repository_ids: Vec::new(),
+        focus_repository_id: None,
+    }
+}
+
+fn story_spec_dto_path(store: &LifecycleStore, story_id: &str) -> std::path::PathBuf {
+    store
+        .story_specs_root(PROJECT_ID, ISSUE_ID)
+        .join(format!("{story_id}.json"))
+}
+
+/// AI 未明确涉及任何仓库（involved_repository_ids 为空）→ blocker，不持久化 StorySpec。
+#[test]
+fn story_without_involved_repositories_becomes_blocker_not_primary() {
+    let (_tmp, store) = setup();
+    let error = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "aggregate story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                involved_repository_ids: Vec::new(),
+                focus_repository_id: None,
+                ..two_effective_members_scope()
+            }),
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+            if reason.contains("involved_repositories_undetermined")),
+        "空 involved_repository_ids 应 fail-closed 为 blocker，错误: {error:?}"
+    );
+    assert_eq!(
+        store.list_story_specs(PROJECT_ID, ISSUE_ID).unwrap().len(),
+        0,
+        "blocker 时不应持久化 StorySpec"
+    );
+}
+
+/// AI 输出不在有效集合内的仓库 → blocker，不持久化 StorySpec，不回落 primary。
+#[test]
+fn story_with_involved_outside_effective_becomes_blocker() {
+    let (_tmp, store) = setup();
+    let error = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "aggregate story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                involved_repository_ids: vec![API_MEMBER, UNKNOWN_MEMBER],
+                focus_repository_id: Some(API_MEMBER),
+                ..two_effective_members_scope()
+            }),
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+            if reason.contains("involved_repository_not_effective")),
+        "越界 involved_repository_ids 应 fail-closed 为 blocker，错误: {error:?}"
+    );
+    assert_eq!(
+        store.list_story_specs(PROJECT_ID, ISSUE_ID).unwrap().len(),
+        0,
+        "blocker 时不应持久化 StorySpec"
+    );
+}
+
+/// 校验通过 → 持久化 StorySpec，填充聚合视野字段。
+#[test]
+fn story_with_involved_within_effective_persists_aggregate_scope() {
+    let (_tmp, store) = setup();
+    let story = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "aggregate story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                involved_repository_ids: vec![WEB_MEMBER, API_MEMBER],
+                focus_repository_id: Some(API_MEMBER),
+                ..two_effective_members_scope()
+            }),
+        })
+        .unwrap();
+
+    assert_eq!(story.logical_codebase_ref, Some(CODEBASE_REF));
+    assert_eq!(story.involved_repository_ids, vec![WEB_MEMBER, API_MEMBER]);
+    assert_eq!(story.focus_repository_id, Some(API_MEMBER));
+    // 迁移期 repository_id 仅作 primary 投影，保持传入值。
+    assert_eq!(story.repository_id, REPOSITORY_ID);
+
+    // 磁盘持久化一致。
+    let persisted: StorySpecRecord = read_json(&story_spec_dto_path(&store, &story.id)).unwrap();
+    assert_eq!(persisted.logical_codebase_ref, Some(CODEBASE_REF));
+    assert_eq!(
+        persisted.involved_repository_ids,
+        vec![WEB_MEMBER, API_MEMBER]
+    );
+    assert_eq!(persisted.focus_repository_id, Some(API_MEMBER));
+}
+
+/// focus_repository_id ∈ involved_repository_ids 但不在 involved 列表中 → blocker。
+#[test]
+fn story_focus_repository_must_be_within_involved() {
+    let (_tmp, store) = setup();
+    let error = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "aggregate story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                involved_repository_ids: vec![API_MEMBER],
+                focus_repository_id: Some(WEB_MEMBER),
+                ..two_effective_members_scope()
+            }),
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+            if reason.contains("focus_repository_not_involved")),
+        "focus 必须在 involved 集合内，错误: {error:?}"
+    );
+    assert_eq!(
+        store.list_story_specs(PROJECT_ID, ISSUE_ID).unwrap().len(),
+        0,
+        "blocker 时不应持久化 StorySpec"
+    );
+}
+
+/// 传统单仓 issue（aggregate_codebase = None）仍走原 repository_id 单值路径，
+/// 聚合视野字段保持空/None。
+#[test]
+fn story_without_aggregate_scope_keeps_single_repository_path() {
+    let (_tmp, store) = setup();
+    let story = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "single repo story".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+
+    assert_eq!(story.repository_id, REPOSITORY_ID);
+    assert_eq!(story.logical_codebase_ref, None);
+    assert!(story.involved_repository_ids.is_empty());
+    assert_eq!(story.focus_repository_id, None);
 }

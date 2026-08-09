@@ -36,6 +36,7 @@ fn creates_story_design_work_item_and_versions_with_source_links() {
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "登录用户看到会话过期提示".to_string(),
+        aggregate_codebase: None,
         })
         .expect("story");
     assert_eq!(story.id, "story_spec_0001");
@@ -409,6 +410,7 @@ fn append_version_uses_max_existing_version_without_overwriting_after_gap() {
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Story with version gap".to_string(),
+        aggregate_codebase: None,
         })
         .expect("story");
 
@@ -512,6 +514,7 @@ fn list_helpers_ignore_json_directories() {
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Real story".to_string(),
+        aggregate_codebase: None,
         })
         .expect("story");
 
@@ -533,6 +536,7 @@ fn list_helpers_ignore_json_directories() {
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Next real story".to_string(),
+        aggregate_codebase: None,
         })
         .expect("next story");
     assert_eq!(next_story.id, "story_spec_0002");

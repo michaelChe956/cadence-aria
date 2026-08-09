@@ -32,6 +32,7 @@ fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id.clone(),
             title: "爬楼梯问题 Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story");
     lifecycle

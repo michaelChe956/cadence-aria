@@ -323,3 +323,79 @@ fn structured_interaction_artifact_decision_contract(
         }
     }
 }
+
+/// 逻辑代码库分支的 Story prompt 注入片段（Task 7）。
+///
+/// 附在 Story 生成/修订 prompt 末尾：渲染紧凑成员 inventory 清单，并附加「必须列出涉及仓库，
+/// 不确定即 blocker」指令。`inventory_injection.rendered` 来自
+/// `render_compact_inventory`（已按预算截断），`effective_member_ids` 来自
+/// `PlanningContextSnapshot.effective_member_ids`（权威），用于在指令中明示可选仓库范围。
+///
+/// 接入点：由 Web Story 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
+/// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取 inventory_injection
+/// 后注入）。本 task 已实现并单测，Web 接入在本计划后续 task。
+#[allow(dead_code)]
+pub fn aggregate_story_scope_prompt(
+    inventory_rendered: &str,
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("\n\n## 聚合代码库成员清单（involved repositories 必须从此集合中选取）：\n");
+    prompt.push_str(inventory_rendered);
+    prompt.push_str("\n## 聚合视野要求\n");
+    prompt.push_str(
+        "本次 Story 位于聚合代码库。你必须在 artifact 中明确列出涉及的逻辑仓库 \n\
+         (`involved_repository_ids`，只能取上述成员清单中的 logical_repository_id)。\n\
+         若无法确定具体涉及仓库，必须明确声明并进入 blocker，禁止猜测、禁止默认全部成员、\n\
+         禁止回落到任意单一 primary 仓库。",
+    );
+    if !effective_member_ids.is_empty() {
+        prompt.push_str("\n可选仓库范围（logical_repository_id）：");
+        for member in effective_member_ids {
+            prompt.push_str(&format!("\n- {member:?}"));
+        }
+    }
+    prompt
+}
+
+#[cfg(test)]
+mod aggregate_scope_prompt_tests {
+    use super::aggregate_story_scope_prompt;
+    use crate::product::logical_codebase::LogicalRepositoryId;
+    use uuid::Uuid;
+
+    const fn stable_uuid(seed: u16) -> Uuid {
+        let mut bytes = [0u8; 16];
+        bytes[14] = (seed >> 8) as u8;
+        bytes[15] = seed as u8;
+        bytes[6] = 0x70;
+        bytes[8] = 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    const API: LogicalRepositoryId = LogicalRepositoryId(stable_uuid(0x0001));
+    const WEB: LogicalRepositoryId = LogicalRepositoryId(stable_uuid(0x0002));
+
+    #[test]
+    fn aggregate_story_scope_prompt_lists_inventory_and_blocker_directive() {
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let prompt = aggregate_story_scope_prompt(inventory, &[API, WEB]);
+
+        assert!(
+            prompt.contains("聚合代码库成员清单"),
+            "缺成员清单标题：{prompt}"
+        );
+        assert!(prompt.contains("api/ | service"), "缺成员行：{prompt}");
+        assert!(
+            prompt.contains("involved_repository_ids"),
+            "缺 involved_repository_ids 指令：{prompt}"
+        );
+        assert!(
+            prompt.contains("禁止回落到任意单一 primary 仓库"),
+            "缺禁止 primary 回落指令：{prompt}"
+        );
+        // 有效成员 ID 列出以限定 involved 取值范围。
+        assert!(prompt.contains("00000000-0000-7000-8000-000000000001"));
+        assert!(prompt.contains("00000000-0000-7000-8000-000000000002"));
+    }
+}

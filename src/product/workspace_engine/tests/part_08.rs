@@ -99,6 +99,7 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
             issue_id: issue_id.to_string(),
             repository_id: repository_id.to_string(),
             title: "Story".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
     let design = lifecycle_store

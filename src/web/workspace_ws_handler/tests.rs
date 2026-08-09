@@ -408,6 +408,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id.clone(),
             title: "Provider guidance Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let session_record = lifecycle
@@ -537,6 +538,7 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id,
             title: "Provider guidance Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let session_record = lifecycle
@@ -666,6 +668,7 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id,
             title: "Pi permission Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let session_record = lifecycle
@@ -1019,6 +1022,7 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
             issue_id: "issue_0001".to_string(),
             repository_id: "repo_0001".to_string(),
             title: "Story".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let design = lifecycle

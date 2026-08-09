@@ -9,10 +9,10 @@ use crate::product::models::{
 };
 
 use super::{
-    AppendSpecVersionInput, CreateDesignSpecInput, CreateProjectProviderDefaultsInput,
-    CreateStorySpecInput, LifecycleStore, count_json_files, delete_required_file,
-    ensure_target_absent, list_json_records, path_is_regular_file, remove_dir_all_if_exists,
-    validate_relative_ids,
+    AggregateStorySpecScope, AppendSpecVersionInput, CreateDesignSpecInput,
+    CreateProjectProviderDefaultsInput, CreateStorySpecInput, LifecycleStore, count_json_files,
+    delete_required_file, ensure_target_absent, list_json_records, path_is_regular_file,
+    remove_dir_all_if_exists, validate_relative_ids,
 };
 
 pub(crate) enum ExistingSpecRecord {
@@ -38,15 +38,32 @@ impl LifecycleStore {
         let root = self.story_specs_root(&input.project_id, &input.issue_id);
         let id = next_sequential_id("story_spec", count_json_files(&root)?);
         let now = Utc::now().to_rfc3339();
+
+        // 逻辑代码库分支：以聚合视野字段为权威。AI 未明确涉及仓库或涉及不在有效集合的
+        // 仓库 → blocker，不塞 primary（REQ-PLN-07）。传统单仓 issue（scope = None）走原
+        // repository_id 单值路径，聚合字段保持空/None。
+        let (logical_codebase_ref, involved_repository_ids, focus_repository_id) =
+            match &input.aggregate_codebase {
+                Some(scope) => {
+                    validate_aggregate_story_scope(scope)?;
+                    (
+                        Some(scope.logical_codebase_ref),
+                        scope.involved_repository_ids.clone(),
+                        scope.focus_repository_id,
+                    )
+                }
+                None => (None, Vec::new(), None),
+            };
+
         let story = StorySpecRecord {
             id: id.clone(),
             project_id: input.project_id,
             issue_id: input.issue_id,
             repository_id: input.repository_id,
             title: input.title,
-            logical_codebase_ref: None,
-            involved_repository_ids: Vec::new(),
-            focus_repository_id: None,
+            logical_codebase_ref,
+            involved_repository_ids,
+            focus_repository_id,
             current_version: None,
             confirmation_status: LifecycleConfirmationStatus::Draft,
             created_at: now.clone(),
@@ -341,4 +358,46 @@ impl LifecycleStore {
             }
         }
     }
+}
+
+/// 校验聚合代码库 Story 视野（REQ-PLN-07）。fail-closed，不回落单仓 primary：
+/// 1. `involved_repository_ids` 空 → AI 未明确涉及仓库 → blocker
+///    `involved_repositories_undetermined`。
+/// 2. 任一 involved id ∉ `effective_member_ids` → 越界成员 → blocker
+///    `involved_repository_not_effective`。
+/// 3. `focus_repository_id` 若给出但 ∉ involved → blocker `focus_repository_not_involved`。
+fn validate_aggregate_story_scope(
+    scope: &AggregateStorySpecScope,
+) -> Result<(), ProductStoreError> {
+    if scope.involved_repository_ids.is_empty() {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: "story_aggregate_scope",
+            reason: "involved_repositories_undetermined: AI 未明确涉及仓库，不回落 primary"
+                .to_string(),
+        });
+    }
+
+    for involved in &scope.involved_repository_ids {
+        if !scope.effective_member_ids.contains(involved) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "story_aggregate_scope",
+                reason: format!(
+                    "involved_repository_not_effective: {involved:?} 不在 effective_member_ids"
+                ),
+            });
+        }
+    }
+
+    if let Some(focus) = scope.focus_repository_id
+        && !scope.involved_repository_ids.contains(&focus)
+    {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: "story_aggregate_scope",
+            reason: format!(
+                "focus_repository_not_involved: {focus:?} 不在 involved_repository_ids"
+            ),
+        });
+    }
+
+    Ok(())
 }

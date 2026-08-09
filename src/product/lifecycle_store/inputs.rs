@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
     IssueWorkItemDependencyEdge, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName,
     RepositoryProfileConfidence, VerificationCommand, VerificationFallbackPolicy,
@@ -7,12 +8,33 @@ use crate::product::models::{
     WorkItemPlanStatus, WorkItemSplitFinding, WorkspaceType,
 };
 
+/// 聚合代码库 Story 视野范围。由 Story 生成/修订入口在逻辑代码库分支构造：
+/// `logical_codebase_ref` 取 manifest.logical_codebase_id；`effective_member_ids` 来自
+/// `PlanningContextSnapshot.effective_member_ids`（权威）；`involved_repository_ids` 来自 AI
+/// 输出且必须 ⊆ effective_member_ids；`focus_repository_id` 可空，若给出必须 ∈ involved。
+///
+/// AI 未明确涉及仓库（空 involved）或涉及不在有效集合的仓库 → blocker，不塞 primary
+/// （REQ-PLN-07）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateStorySpecScope {
+    pub logical_codebase_ref: uuid::Uuid,
+    pub effective_member_ids: Vec<LogicalRepositoryId>,
+    /// AI 明确声明的涉及仓库；空表示未确定 → blocker（不回落 primary）。
+    pub involved_repository_ids: Vec<LogicalRepositoryId>,
+    /// 迁移期 focus/primary 投影；可空，若给出必须 ∈ involved_repository_ids。
+    pub focus_repository_id: Option<LogicalRepositoryId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateStorySpecInput {
     pub project_id: String,
     pub issue_id: String,
     pub repository_id: String,
     pub title: String,
+    /// 聚合代码库视野。`None` 表示传统单仓 issue，走原 `repository_id` 单值路径；
+    /// `Some` 表示逻辑代码库分支，以 `involved_repository_ids` 等聚合字段为权威，
+    /// 并按 effective_member_ids 校验。
+    pub aggregate_codebase: Option<AggregateStorySpecScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

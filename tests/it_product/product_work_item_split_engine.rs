@@ -313,6 +313,7 @@ async fn split_engine_fixture() -> (TempDir, LifecycleStore, IssueRecord, Reposi
             issue_id: issue.id.clone(),
             repository_id: repository.id.clone(),
             title: "登录用户看到会话过期提示".to_string(),
+            aggregate_codebase: None,
         })
         .expect("create story spec");
     lifecycle
