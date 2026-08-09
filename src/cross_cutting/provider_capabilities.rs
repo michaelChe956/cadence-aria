@@ -4,8 +4,48 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::protocol::contracts::ProviderType;
 use crate::protocol::enums::ProviderCapabilityId;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// provider capability 的可审计三态证据。
+///
+/// 区分「探测确认支持」「探测确认不支持」与「未探测/未知」,避免只以
+/// `supports_resume: bool` 单一维度判定能力——单布尔无法表达「未知」,
+/// 会把「未探测」与「确认不支持」混为一谈。三态可持久化/审计,供 envelope
+/// 与 fingerprint 复验 provider 真实能力。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum ProviderCapabilityEvidence {
+    /// 探测确认该能力可用。
+    Confirmed,
+    /// 探测确认该能力不可用。
+    Denied { reason: String },
+    /// 未探测或探测结果不可靠,不能据此放行受保护操作。
+    Unknown,
+}
+
+impl ProviderCapabilityEvidence {
+    pub fn confirmed() -> Self {
+        Self::Confirmed
+    }
+
+    pub fn denied(reason: impl Into<String>) -> Self {
+        Self::Denied {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn unknown() -> Self {
+        Self::Unknown
+    }
+}
+
+/// provider adapter 的已知 dialect 字符串,与
+/// `product::logical_codebase::policy::ProviderDialect` 对应。gateway 在复验时
+/// 比对该字符串,确保 envelope 冻结的 dialect 与实际 adapter 一致。
+pub const ADAPTER_DIALECT_CLAUDE_CODE_CLI_V1: &str = "claude_code_cli_v1";
+pub const ADAPTER_DIALECT_CODEX_CLI_V1: &str = "codex_cli_v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCapability {
     pub provider_capability_ref: ProviderCapabilityId,
     pub provider_type: ProviderType,
@@ -14,6 +54,12 @@ pub struct ProviderCapability {
     pub supported_output_modes: Vec<String>,
     pub supports_session: bool,
     pub supports_resume: bool,
+    /// adapter dialect 字符串(见 `ADAPTER_DIALECT_*` 常量)。envelope 与
+    /// fingerprint 据此复验 adapter 与 provider 类型一致。
+    pub adapter_dialect: String,
+    /// `supports_resume` 的可审计三态证据。仅当 `Confirmed` 时才允许 resume;
+    /// `Unknown`/`Denied` 时 gateway 对 resume fail-closed。
+    pub resume_evidence: ProviderCapabilityEvidence,
     pub probed_at: String,
     pub install_source: String,
 }
@@ -60,6 +106,12 @@ impl ProviderCapabilityProbe {
             supported_output_modes: vec!["sentinel_json".to_string()],
             supports_session: self.compatibility.supports_session,
             supports_resume: self.compatibility.supports_resume,
+            adapter_dialect: adapter_dialect_for(&self.compatibility.provider_type).to_string(),
+            resume_evidence: if self.compatibility.supports_resume {
+                ProviderCapabilityEvidence::confirmed()
+            } else {
+                ProviderCapabilityEvidence::denied("compatibility table marks resume unsupported")
+            },
             probed_at: Utc::now().to_rfc3339(),
             install_source: "user_local_cli".to_string(),
         })
@@ -129,5 +181,15 @@ fn provider_type_key(provider_type: &ProviderType) -> &'static str {
         ProviderType::Codex => "codex",
         ProviderType::Pi => unreachable!("provider capability probe has no pi compatibility entry"),
         ProviderType::Fake => "fake",
+    }
+}
+
+/// 返回 provider 类型对应的 adapter dialect 字符串。Fake/Pi 不经此 probe 路径,
+/// 返回占位 dialect 仅供序列化占位。
+fn adapter_dialect_for(provider_type: &ProviderType) -> &'static str {
+    match provider_type {
+        ProviderType::ClaudeCode => ADAPTER_DIALECT_CLAUDE_CODE_CLI_V1,
+        ProviderType::Codex => ADAPTER_DIALECT_CODEX_CLI_V1,
+        ProviderType::Pi | ProviderType::Fake => "unknown",
     }
 }

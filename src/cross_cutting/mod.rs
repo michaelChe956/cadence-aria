@@ -30,6 +30,7 @@ pub mod provider_registry;
 pub mod provider_router;
 pub mod provider_run;
 pub mod runtime_event_log;
+pub mod session_launch;
 pub mod streaming_provider;
 pub mod structured_output;
 pub mod traceability;
