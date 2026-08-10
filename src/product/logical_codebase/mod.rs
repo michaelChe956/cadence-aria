@@ -14,6 +14,7 @@ pub mod reference_scanner;
 pub mod registration;
 pub mod registry;
 pub mod repository_routing;
+pub mod snapshot_validator;
 pub mod store;
 pub mod types;
 
