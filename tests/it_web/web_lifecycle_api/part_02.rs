@@ -508,6 +508,30 @@ async fn request_json(
     (status, value)
 }
 
+async fn delete_repository_with_idempotency_key(
+    app: axum::Router,
+    project_id: &str,
+    repository_id: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(Method::DELETE)
+        .uri(format!("/api/projects/{project_id}/repositories/{repository_id}"))
+        .header("content-type", "application/json")
+        .header("Idempotency-Key", "test-delete-repo-lifecycle-0001")
+        .body(Body::from("{}".to_string()))
+        .expect("delete repository request");
+    let response = app
+        .oneshot(request)
+        .await
+        .expect("delete repository response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("delete repository body");
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
 fn git_repo() -> tempfile::TempDir {
     let dir = tempdir().expect("repo");
     let status = Command::new("git")

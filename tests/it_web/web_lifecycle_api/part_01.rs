@@ -512,11 +512,10 @@ async fn generating_story_specs_returns_404_when_bound_repository_was_deleted() 
         }),
     )
     .await;
-    request_json(
+    delete_repository_with_idempotency_key(
         app.clone(),
-        Method::DELETE,
-        "/api/projects/project_0001/repositories/repository_0001",
-        json!({}),
+        "project_0001",
+        "repository_0001",
     )
     .await;
 

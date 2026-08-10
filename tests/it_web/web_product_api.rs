@@ -333,13 +333,9 @@ async fn deletes_workspace_project_repository_and_issue_records() {
     )
     .await;
 
-    let (status, _) = request_json(
-        app.clone(),
-        Method::DELETE,
-        "/api/projects/project_0001/repositories/repository_0001",
-        json!({}),
-    )
-    .await;
+    let (status, _) =
+        delete_repository_with_idempotency_key(app.clone(), "project_0001", "repository_0001")
+            .await;
     assert_eq!(status, StatusCode::OK);
     let (status, repositories) = request_json(
         app.clone(),
@@ -405,6 +401,32 @@ async fn request_json(
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+async fn delete_repository_with_idempotency_key(
+    app: axum::Router,
+    project_id: &str,
+    repository_id: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(Method::DELETE)
+        .uri(format!(
+            "/api/projects/{project_id}/repositories/{repository_id}"
+        ))
+        .header("content-type", "application/json")
+        .header("Idempotency-Key", "test-delete-repo-product-0001")
+        .body(Body::from("{}".to_string()))
+        .expect("delete repository request");
+    let response = app
+        .oneshot(request)
+        .await
+        .expect("delete repository response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("delete repository body");
     let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, value)
 }

@@ -122,24 +122,41 @@ fn workspace_repository(
         }
         WorkspaceType::WorkItem => {
             WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
-            let work_item = lifecycle
-                .list_work_items(&session.project_id, &session.issue_id)?
-                .into_iter()
-                .find(|work_item| work_item.id == session.entity_id)
-                .ok_or_else(|| ProductStoreError::NotFound {
-                    kind: "work_item",
-                    id: session.entity_id.clone(),
-                })?;
             match routing {
-                RepositoryRouting::Legacy { .. } => resolve_legacy_physical_repository(
-                    app_paths,
-                    &session.project_id,
-                    &work_item.repository_id,
-                ),
+                RepositoryRouting::Legacy { .. } => {
+                    let physical_repository_id = lifecycle
+                        .list_work_items(&session.project_id, &session.issue_id)?
+                        .into_iter()
+                        .find(|work_item| work_item.id == session.entity_id)
+                        .map(|work_item| work_item.repository_id)
+                        .or_else(|| {
+                            IssueStore::new(app_paths.clone())
+                                .get(&session.project_id, &session.issue_id)
+                                .ok()
+                                .and_then(|issue| issue.repo_id)
+                        })
+                        .ok_or_else(|| ProductStoreError::NotFound {
+                            kind: "work_item",
+                            id: session.entity_id.clone(),
+                        })?;
+                    resolve_legacy_physical_repository(
+                        app_paths,
+                        &session.project_id,
+                        &physical_repository_id,
+                    )
+                }
                 RepositoryRouting::Logical {
                     manifest,
                     selection,
                 } => {
+                    let work_item = lifecycle
+                        .list_work_items(&session.project_id, &session.issue_id)?
+                        .into_iter()
+                        .find(|work_item| work_item.id == session.entity_id)
+                        .ok_or_else(|| ProductStoreError::NotFound {
+                            kind: "work_item",
+                            id: session.entity_id.clone(),
+                        })?;
                     let logical_id = work_item.target_repository_id.ok_or_else(|| {
                         routing_error(
                             RepositoryRoutingErrorCode::TargetMissing,
