@@ -8,6 +8,7 @@ use crate::product::coding_work_item_context::load_coding_work_item_context;
 use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::logical_codebase::{RepositoryRouting, RepositoryRoutingErrorCode};
 use crate::product::models::{
     IssueWorkItemPlan, LifecycleWorkItemRecord, WorkItemDraftRecord, WorkItemPlanCompileStatus,
     WorkspaceType,
@@ -199,28 +200,11 @@ fn build_schema_v2_evaluation_context_pack(
     let mut context_warnings = Vec::new();
     let _issue = IssueStore::new(lifecycle.app_paths().clone())
         .get(&attempt.project_id, &attempt.issue_id)?;
-    let repository_id = issue_selection_logical_repository_id(&lifecycle.app_paths(), attempt)
-        .or_else(|_error| {
-            // Legacy fallback: when the logical selection cannot be resolved (feature
-            // disabled, migration not yet backfilled, or no codebase-selection.json),
-            // fall back to the physical issue.repo_id. This preserves pre-logical-codebase
-            // behavior for existing fixtures and un-migrated projects.
-            let issue = IssueStore::new(lifecycle.app_paths())
-                .get(&attempt.project_id, &attempt.issue_id)?;
-            let physical_repository_id =
-                issue.repo_id.ok_or_else(|| ProductStoreError::NotFound {
-                    kind: "repository",
-                    id: format!("issue:{}:repo_id", attempt.issue_id),
-                })?;
-            match RepositoryStore::new(lifecycle.app_paths())
-                .resolve_legacy_physical_repository_if_dual(
-                    &attempt.project_id,
-                    &physical_repository_id,
-                ) {
-                Ok((_, _, repository)) => Ok(repository.id),
-                Err(_) => Ok(physical_repository_id),
-            }
-        })?;
+    let repository_id = schema_v2_evaluation_context_repository_id(
+        &lifecycle.app_paths(),
+        &attempt.project_id,
+        &attempt.issue_id,
+    )?;
     let stories = lifecycle.list_story_specs(&attempt.project_id, &attempt.issue_id)?;
     let designs = lifecycle.list_design_specs(&attempt.project_id, &attempt.issue_id)?;
     let story_specs = contexts_for_story_specs(
@@ -305,26 +289,108 @@ fn build_schema_v2_evaluation_context_pack(
     })
 }
 
-fn issue_selection_logical_repository_id(
+fn schema_v2_evaluation_context_repository_id(
     paths: &ProductAppPaths,
-    attempt: &CodingExecutionAttempt,
+    project_id: &str,
+    issue_id: &str,
 ) -> Result<String, ProductStoreError> {
-    let selection =
-        crate::product::logical_codebase::IssueCodebaseSelectionStore::new(paths.clone())
-            .load(&attempt.project_id, &attempt.issue_id)?
-            .ok_or_else(|| ProductStoreError::NotFound {
-                kind: "issue_codebase_selection",
-                id: attempt.issue_id.clone(),
-            })?;
-    let [logical_repository_id] = selection.focus_repository_ids.as_slice() else {
-        return Err(ProductStoreError::Ambiguous {
-            kind: "issue_codebase_selection",
-            id: attempt.issue_id.clone(),
-        });
+    let store = RepositoryStore::new(paths.clone());
+    match RepositoryRouting::load_for_issue(paths, project_id, issue_id)? {
+        RepositoryRouting::Legacy { .. } => {
+            let issue = IssueStore::new(paths.clone()).get(project_id, issue_id)?;
+            let physical_repository_id =
+                issue.repo_id.ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "repository",
+                    id: format!("issue:{issue_id}:repo_id"),
+                })?;
+            match store
+                .resolve_legacy_physical_repository_if_dual(project_id, &physical_repository_id)
+            {
+                Ok((_, _, repository)) => Ok(repository.id),
+                Err(_) => Ok(physical_repository_id),
+            }
+        }
+        RepositoryRouting::Logical {
+            manifest,
+            selection,
+        } => {
+            validate_logical_evaluation_selection(paths, project_id, &manifest, &selection)?;
+            let logical_repository_id = match selection.focus_repository_ids.as_slice() {
+                [] => {
+                    return Err(routing_error(
+                        RepositoryRoutingErrorCode::TargetMissing,
+                        "issue codebase selection has no focus repository",
+                    ));
+                }
+                [logical_repository_id] => *logical_repository_id,
+                _ => {
+                    return Err(routing_error(
+                        RepositoryRoutingErrorCode::TargetAmbiguous,
+                        "issue codebase selection has multiple focus repositories",
+                    ));
+                }
+            };
+            store
+                .resolve_logical_repository_strict(project_id, logical_repository_id)
+                .map(|(_, _, repository)| repository.id)
+        }
+        RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
+    }
+}
+
+fn validate_logical_evaluation_selection(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
+    selection: &crate::product::logical_codebase::IssueCodebaseSelection,
+) -> Result<(), ProductStoreError> {
+    if selection.invalidation.is_some() {
+        return Err(routing_error(
+            RepositoryRoutingErrorCode::SelectionInvalidated,
+            "issue codebase selection has been invalidated",
+        ));
+    }
+    let active_members: std::collections::BTreeSet<_> =
+        crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
+            .list_members(project_id)?
+            .into_iter()
+            .filter(|member| {
+                member.status == crate::product::logical_codebase::MemberStatus::Active
+            })
+            .map(|member| member.logical_repository_id)
+            .collect();
+    if manifest
+        .member_ids
+        .iter()
+        .any(|id| !active_members.contains(id))
+    {
+        return Err(routing_error(
+            RepositoryRoutingErrorCode::MemberRemoved,
+            "logical codebase manifest references a missing or inactive member",
+        ));
+    }
+    selection.validate_focus_subset().map_err(|error| {
+        routing_error(
+            RepositoryRoutingErrorCode::Inconsistent,
+            format!("invalid issue codebase selection: {error}"),
+        )
+    })
+}
+
+fn routing_error(code: RepositoryRoutingErrorCode, reason: impl Into<String>) -> ProductStoreError {
+    let stable_code = match code {
+        RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
+        RepositoryRoutingErrorCode::OrphanedSelection
+        | RepositoryRoutingErrorCode::Inconsistent
+        | RepositoryRoutingErrorCode::MemberRemoved
+        | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
+        RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
+        RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
     };
-    let (_, _, repository) = RepositoryStore::new(paths.clone())
-        .resolve_logical_repository(&attempt.project_id, *logical_repository_id)?;
-    Ok(repository.id)
+    ProductStoreError::InvalidRecord {
+        kind: "repository_routing",
+        reason: format!("{stable_code}: {}", reason.into()),
+    }
 }
 
 pub(super) fn schema_v2_active_unit_runtime(
@@ -581,4 +647,89 @@ fn matches_draft_for_outline(
     record.generation_round_id == generation_round_id
         && record.draft_id == draft_id
         && record.outline_id == outline_id
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+    use crate::product::logical_codebase::{
+        InvalidationRecord, IssueCodebaseSelection, IssueCodebaseSelectionStore,
+        LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
+    };
+    use crate::product::models::RepositoryRecord;
+    use uuid::Uuid;
+
+    #[test]
+    fn evaluation_context_logical_state_fail_closed_not_issue_repo() {
+        // 有 manifest、selection 已失效 → fail-closed，不得回退 issue.repo_id。
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                title: "评估上下文 fail-closed".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap();
+        let logical_repository_id =
+            LogicalRepositoryId(Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap());
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest(
+                "project_0001",
+                &LogicalCodebaseManifest::new(
+                    "project_0001",
+                    root.path().join("aggregate-root"),
+                    vec![logical_repository_id],
+                ),
+            )
+            .unwrap();
+        let mut selection = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![logical_repository_id],
+            Vec::new(),
+            vec![logical_repository_id],
+            None,
+        );
+        selection.invalidation = Some(InvalidationRecord {
+            reason: "member_removed".to_string(),
+            invalidated_at: "2026-08-11T00:00:00Z".to_string(),
+        });
+        IssueCodebaseSelectionStore::new(paths.clone())
+            .save(&selection)
+            .unwrap();
+        write_physical_repository_fixture(&paths, root.path());
+
+        let result =
+            schema_v2_evaluation_context_repository_id(&paths, "project_0001", "issue_0001");
+
+        assert!(result.is_err());
+    }
+
+    fn write_physical_repository_fixture(paths: &ProductAppPaths, root: &Path) {
+        crate::product::json_store::write_json(
+            &paths.project_root("project_0001").join("repos.json"),
+            &[RepositoryRecord {
+                id: "repository_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                name: "物理仓库".to_string(),
+                path: root.join("repository_0001"),
+                repo_hash: "sha256:repository".to_string(),
+                runtime_root: root.join("repository_0001/.aria/runtime"),
+                default_policy_preset: "manual-write".to_string(),
+                default_provider_mode: "fake".to_string(),
+                created_at: "2026-08-11T00:00:00Z".to_string(),
+                logical_repository_id: None,
+                primary_checkout_id: None,
+                identity_schema_version: 1,
+                updated_at: "2026-08-11T00:00:00Z".to_string(),
+            }],
+        )
+        .unwrap();
+    }
 }

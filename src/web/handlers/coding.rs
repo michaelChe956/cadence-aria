@@ -6,6 +6,7 @@ use crate::product::coding_attempt_repository::{
 };
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_models::CodingAttemptScope;
+use crate::product::logical_codebase::{RepositoryRouting, RepositoryRoutingErrorCode};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapshots};
 use crate::web::state::CodingAttemptRunKey;
@@ -271,17 +272,54 @@ fn resolve_work_item_repository(
     work_item: &LifecycleWorkItemRecord,
 ) -> ApiResult<RepositoryRecord> {
     let store = RepositoryStore::new(app_paths.clone());
-    match work_item.target_repository_id {
-        Some(logical_repository_id) => store
-            .resolve_logical_repository(project_id, logical_repository_id)
-            .map(|(_, _, repository)| repository)
-            .or_else(|_| legacy_physical_repository(&store, project_id, &work_item.repository_id))
-            .map_err(product_store_api_error),
-        None => store
+    match RepositoryRouting::load_for_issue(app_paths, project_id, &work_item.issue_id)
+        .map_err(product_store_api_error)?
+    {
+        RepositoryRouting::Legacy { .. } => store
             .resolve_legacy_physical_repository_if_dual(project_id, &work_item.repository_id)
             .map(|(_, _, repository)| repository)
             .or_else(|_| legacy_physical_repository(&store, project_id, &work_item.repository_id))
             .map_err(product_store_api_error),
+        RepositoryRouting::Logical { manifest, .. } => {
+            let logical_repository_id = work_item.target_repository_id.ok_or_else(|| {
+                product_store_api_error(routing_error(
+                    RepositoryRoutingErrorCode::TargetMissing,
+                    format!("work item {} has no target repository", work_item.id),
+                ))
+            })?;
+            if !manifest.member_ids.contains(&logical_repository_id) {
+                return Err(product_store_api_error(routing_error(
+                    RepositoryRoutingErrorCode::TargetUnknown,
+                    format!(
+                        "work item {} target repository is absent from the manifest",
+                        work_item.id
+                    ),
+                )));
+            }
+            store
+                .resolve_logical_repository_strict(project_id, logical_repository_id)
+                .map(|(_, _, repository)| repository)
+                .map_err(product_store_api_error)
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            Err(product_store_api_error(routing_error(code, reason)))
+        }
+    }
+}
+
+fn routing_error(code: RepositoryRoutingErrorCode, reason: impl Into<String>) -> ProductStoreError {
+    let stable_code = match code {
+        RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
+        RepositoryRoutingErrorCode::OrphanedSelection
+        | RepositoryRoutingErrorCode::Inconsistent
+        | RepositoryRoutingErrorCode::MemberRemoved
+        | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
+        RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
+        RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
+    };
+    ProductStoreError::InvalidRecord {
+        kind: "repository_routing",
+        reason: format!("{stable_code}: {}", reason.into()),
     }
 }
 
@@ -951,4 +989,99 @@ pub(crate) async fn coding_attempt_artifact_content(
         content_type: "text/plain".to_string(),
         content,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::logical_codebase::{LogicalCodebaseManifest, LogicalCodebaseStore};
+    use crate::product::models::{
+        RepositoryRecord, WorkItemContextBudget, WorkItemExecutionPlanStatus, WorkItemKind,
+        WorkItemPlanStatus, WorkItemStatus,
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn resolve_work_item_repository_manifest_with_bad_target_is_fail_closed() {
+        // 有 manifest、work_item target 指向不存在成员 → blocker，不回退物理仓库。
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        write_physical_repository_fixture(&paths, root.path());
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest(
+                "project_0001",
+                &LogicalCodebaseManifest::new(
+                    "project_0001",
+                    root.path().join("aggregate-root"),
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+        let work_item =
+            lifecycle_work_item_with_target_fixture("00000000-0000-0000-0000-000000000000");
+
+        let result = resolve_work_item_repository(&paths, "project_0001", &work_item);
+
+        assert!(result.is_err());
+    }
+
+    fn write_physical_repository_fixture(paths: &ProductAppPaths, root: &std::path::Path) {
+        crate::product::json_store::write_json(
+            &paths.project_root("project_0001").join("repos.json"),
+            &[RepositoryRecord {
+                id: "repository_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                name: "物理仓库".to_string(),
+                path: root.join("repository_0001"),
+                repo_hash: "sha256:repository".to_string(),
+                runtime_root: root.join("repository_0001/.aria/runtime"),
+                default_policy_preset: "manual-write".to_string(),
+                default_provider_mode: "fake".to_string(),
+                created_at: "2026-08-11T00:00:00Z".to_string(),
+                logical_repository_id: None,
+                primary_checkout_id: None,
+                identity_schema_version: 1,
+                updated_at: "2026-08-11T00:00:00Z".to_string(),
+            }],
+        )
+        .unwrap();
+    }
+
+    fn lifecycle_work_item_with_target_fixture(
+        target_repository_id: &str,
+    ) -> LifecycleWorkItemRecord {
+        LifecycleWorkItemRecord {
+            id: "work_item_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            target_repository_id: Some(crate::product::logical_codebase::LogicalRepositoryId(
+                Uuid::parse_str(target_repository_id).unwrap(),
+            )),
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "工作项".to_string(),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            execution_status: WorkItemStatus::Pending,
+            worktree_path: None,
+            work_item_set_id: None,
+            source_work_item_plan_id: None,
+            source_outline_id: None,
+            source_draft_id: None,
+            planned_implementation_context: None,
+            kind: WorkItemKind::default(),
+            sequence_hint: None,
+            depends_on: Vec::new(),
+            exclusive_write_scopes: Vec::new(),
+            forbidden_write_scopes: Vec::new(),
+            context_budget: WorkItemContextBudget::default(),
+            verification_plan_ref: None,
+            require_execution_plan_confirm: false,
+            execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
+            completion_commit: None,
+            completion_diff_summary_ref: None,
+            created_at: "2026-08-11T00:00:00Z".to_string(),
+            updated_at: "2026-08-11T00:00:00Z".to_string(),
+        }
+    }
 }
