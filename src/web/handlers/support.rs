@@ -250,40 +250,35 @@ fn repository_routing_api_error(
     ApiError::runtime(code, message, details)
 }
 
-fn routing_error_code_from_reason(reason: &str) -> Option<&'static str> {
-    let code = [
-        "repository_routing_target_missing",
-        "repository_routing_inconsistent",
-        "repository_routing_target_unknown",
-        "repository_routing_ambiguous",
-    ]
-    .into_iter()
-    .find(|code| reason.contains(code));
-    if code.is_some() {
-        return code;
+fn routing_error_code_from_reason(kind: &str, reason: &str) -> Option<&'static str> {
+    if kind == "repository_routing" {
+        return [
+            "repository_routing_target_missing",
+            "repository_routing_inconsistent",
+            "repository_routing_target_unknown",
+            "repository_routing_ambiguous",
+        ]
+        .into_iter()
+        .find(|code| {
+            reason == *code
+                || reason
+                    .strip_prefix(code)
+                    .is_some_and(|suffix| suffix.starts_with(": "))
+        });
     }
 
-    if reason.contains("target_member_removed")
-        || reason.contains("member_removed")
-        || reason.contains("selection_invalidated")
-        || reason.contains("orphaned_issue_selection")
-        || reason.contains("no effective member")
-    {
-        return Some("repository_routing_inconsistent");
+    match (kind, reason) {
+        ("effective_member_empty", reason)
+            if reason.ends_with(": no effective member; primary fallback forbidden") =>
+        {
+            Some("repository_routing_inconsistent")
+        }
+        ("issue_codebase_selection", "member_removed") => Some("repository_routing_inconsistent"),
+        ("issue_codebase_selection", "selection_invalidated") => {
+            Some("repository_routing_inconsistent")
+        }
+        _ => None,
     }
-    if reason.contains("target_repository_id_not_effective")
-        || reason.contains("target_unknown")
-        || reason.contains("target does not belong")
-    {
-        return Some("repository_routing_target_unknown");
-    }
-    if reason.contains("work_item_target_missing")
-        || reason.contains("target_repository_id_missing")
-        || reason.contains("target is missing")
-    {
-        return Some("repository_routing_target_missing");
-    }
-    None
 }
 
 pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
@@ -300,20 +295,20 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             json!({"kind": "issue_codebase_selection", "id": id}),
         ),
         ProductStoreError::NotFound {
-            kind: "logical_repository",
+            kind: kind @ ("logical_repository" | "identity_resolution_missing"),
             id,
         } => repository_routing_api_error(
             "repository_routing_target_unknown",
             "repository routing target is unknown",
-            json!({"kind": "logical_repository", "id": id}),
+            json!({"kind": kind, "id": id}),
         ),
         ProductStoreError::NotFound {
-            kind: "logical_repository_manifest" | "logical_codebase_manifest",
+            kind: kind @ ("logical_repository_manifest" | "logical_codebase_manifest"),
             id,
         } => repository_routing_api_error(
             "repository_routing_inconsistent",
             "repository routing authority is inconsistent",
-            json!({"kind": "logical_codebase_manifest", "id": id}),
+            json!({"kind": kind, "id": id}),
         ),
         ProductStoreError::NotFound {
             kind: kind @ ("logical_codebase_member" | "repository_checkout"),
@@ -324,7 +319,10 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             json!({"kind": kind, "id": id}),
         ),
         ProductStoreError::Ambiguous {
-            kind: kind @ ("issue_codebase_selection" | "logical_repository"),
+            kind:
+                kind @ ("issue_codebase_selection"
+                | "logical_repository"
+                | "identity_resolution_ambiguous"),
             id,
         } => repository_routing_api_error(
             "repository_routing_ambiguous",
@@ -349,7 +347,7 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             json!({"kind": kind, "id": id}),
         ),
         ProductStoreError::InvalidRecord { kind, reason } => {
-            if let Some(code) = routing_error_code_from_reason(&reason) {
+            if let Some(code) = routing_error_code_from_reason(kind, &reason) {
                 repository_routing_api_error(
                     code,
                     "repository routing failed closed",
@@ -818,6 +816,70 @@ mod tests {
     }
 
     #[test]
+    fn product_store_api_error_maps_actual_identity_resolution_kinds_to_stable_codes() {
+        // RepositoryStore::identity_resolution_error 发出的真实 kind 必须保持 4xx，
+        // 不得退回 product_store_error（500）。
+        let cases = [
+            (
+                ProductStoreError::NotFound {
+                    kind: "identity_resolution_missing",
+                    id: "logical_0001".to_string(),
+                },
+                "repository_routing_target_unknown",
+                StatusCode::NOT_FOUND,
+                "identity_resolution_missing",
+            ),
+            (
+                ProductStoreError::Ambiguous {
+                    kind: "identity_resolution_ambiguous",
+                    id: "logical_0001".to_string(),
+                },
+                "repository_routing_ambiguous",
+                StatusCode::CONFLICT,
+                "identity_resolution_ambiguous",
+            ),
+        ];
+
+        for (store_error, expected_code, expected_status, expected_kind) in cases {
+            let error = product_store_api_error(store_error);
+            assert_eq!(error.code, expected_code);
+            assert_eq!(error.details["kind"], expected_kind);
+            assert_eq!(error.details["id"], "logical_0001");
+            assert_eq!(error.into_response().status(), expected_status);
+        }
+    }
+
+    #[test]
+    fn product_store_api_error_preserves_routing_kind_and_scopes_invalid_record_mapping() {
+        let manifest_error = product_store_api_error(ProductStoreError::NotFound {
+            kind: "logical_repository_manifest",
+            id: "project_0001".to_string(),
+        });
+        assert_eq!(manifest_error.code, "repository_routing_inconsistent");
+        assert_eq!(
+            manifest_error.details["kind"],
+            "logical_repository_manifest"
+        );
+
+        // 非 routing kind 即使带有 routing 词汇，也不得被重写为 routing 稳定码。
+        let unrelated_error = product_store_api_error(ProductStoreError::InvalidRecord {
+            kind: "unrelated_record",
+            reason: "member_removed: unrelated record repair failed".to_string(),
+        });
+        assert_eq!(unrelated_error.code, "product_store_error");
+        assert_eq!(unrelated_error.details["kind"], "unrelated_record");
+        assert_eq!(
+            unrelated_error.details["reason"],
+            "member_removed: unrelated record repair failed"
+        );
+
+        let malformed_routing_error = product_store_api_error(ProductStoreError::InvalidRecord {
+            kind: "repository_routing",
+            reason: "repository_routing_target_missingness".to_string(),
+        });
+        assert_eq!(malformed_routing_error.code, "product_store_error");
+    }
+    #[test]
     fn product_store_api_error_maps_explicit_routing_invalid_record_reasons() {
         let error = product_store_api_error(ProductStoreError::InvalidRecord {
             kind: "repository_routing",
@@ -835,6 +897,7 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
     }
+
     #[test]
     fn active_coding_attempt_conflict_uses_stable_http_contract() {
         let error = product_store_api_error(ProductStoreError::Conflict {
