@@ -129,17 +129,23 @@ impl IdentityMigrationVerifier {
             if let Some(physical_id) = issue.repo_id.as_deref() {
                 let mapping = mapping_for_physical(mappings, physical_id)?;
                 let selection_path = issue_root.join("codebase-selection.json");
-                let selection: IssueCodebaseSelection = read_json(&selection_path)?;
-                let expected = IssueCodebaseSelection {
-                    included: vec![mapping.logical_repository_id],
-                    focus: vec![mapping.logical_repository_id],
-                    selection_policy: "explicit".to_string(),
-                };
-                if selection != expected {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "issue_codebase_selection",
-                        id: issue.id,
-                    });
+                let selection: serde_json::Value = read_json(&selection_path)?;
+                if selection.get("schema_version").is_none()
+                    || selection.get("focus_repository_ids").is_none()
+                {
+                    let selection: IssueCodebaseSelection = serde_json::from_value(selection)
+                        .map_err(|error| ProductStoreError::Json(error.to_string()))?;
+                    let expected = IssueCodebaseSelection {
+                        included: vec![mapping.logical_repository_id],
+                        focus: vec![mapping.logical_repository_id],
+                        selection_policy: "explicit".to_string(),
+                    };
+                    if selection != expected {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "issue_codebase_selection",
+                            id: issue.id,
+                        });
+                    }
                 }
             }
             self.verify_bindings(project_id, &issue.id, mappings)?;

@@ -288,6 +288,42 @@ mod tests {
     }
 
     #[test]
+    fn migration_recovers_through_switch_reads_after_selection_is_rewritten_to_authoritative_schema() {
+        let fixture = migration_fixture_with_one_git_repository();
+        let executor = IdentityMigrationExecutor::new(fixture.paths.clone());
+        executor
+            .ensure_through_authority("project_0001")
+            .expect("migrate through authority");
+
+        let mut journal = fixture.journal();
+        executor
+            .backfill_compatibility(&mut journal)
+            .expect("write legacy compatibility projections");
+
+        let selection_path = fixture
+            .paths
+            .codebase_selection_path("project_0001", "issue_0001");
+        let legacy_raw = std::fs::read_to_string(&selection_path).expect("read legacy selection");
+        assert!(legacy_raw.contains("\"focus\":"));
+
+        crate::product::logical_codebase::IssueCodebaseSelectionStore::new(fixture.paths.clone())
+            .load("project_0001", "issue_0001")
+            .expect("rewrite legacy selection")
+            .expect("selection exists");
+        let rewritten_raw = std::fs::read_to_string(&selection_path).expect("read rewritten selection");
+        assert!(rewritten_raw.contains("\"schema_version\""));
+        assert!(rewritten_raw.contains("\"focus_repository_ids\""));
+        assert!(!rewritten_raw.contains("\"focus\":"));
+
+        IdentityMigrationExecutor::new(fixture.paths.clone())
+            .ensure_identity_schema("project_0001")
+            .expect("recover through switch reads after selection rewrite");
+        let recovered = fixture.journal();
+        assert_eq!(recovered.phase, IdentityMigrationPhase::SwitchingReads);
+        assert_eq!(recovered.read_mode.as_deref(), Some("logical_authoritative"));
+    }
+
+    #[test]
     fn migration_executor_write_issue_selection_tolerates_new_format() {
         let fixture = migration_fixture_with_one_git_repository();
         let executor = IdentityMigrationExecutor::new(fixture.paths.clone());
