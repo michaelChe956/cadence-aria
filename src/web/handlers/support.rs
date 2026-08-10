@@ -242,11 +242,127 @@ pub(crate) fn provider_workspace_config(
         openspec_enabled: openspec_enabled.unwrap_or(true),
     })
 }
+fn repository_routing_api_error(
+    code: &'static str,
+    message: &'static str,
+    details: serde_json::Value,
+) -> ApiError {
+    ApiError::runtime(code, message, details)
+}
+
+fn routing_error_code_from_reason(reason: &str) -> Option<&'static str> {
+    let code = [
+        "repository_routing_target_missing",
+        "repository_routing_inconsistent",
+        "repository_routing_target_unknown",
+        "repository_routing_ambiguous",
+    ]
+    .into_iter()
+    .find(|code| reason.contains(code));
+    if code.is_some() {
+        return code;
+    }
+
+    if reason.contains("target_member_removed")
+        || reason.contains("member_removed")
+        || reason.contains("selection_invalidated")
+        || reason.contains("orphaned_issue_selection")
+        || reason.contains("no effective member")
+    {
+        return Some("repository_routing_inconsistent");
+    }
+    if reason.contains("target_repository_id_not_effective")
+        || reason.contains("target_unknown")
+        || reason.contains("target does not belong")
+    {
+        return Some("repository_routing_target_unknown");
+    }
+    if reason.contains("work_item_target_missing")
+        || reason.contains("target_repository_id_missing")
+        || reason.contains("target is missing")
+    {
+        return Some("repository_routing_target_missing");
+    }
+    None
+}
+
 pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
     match error {
         ProductStoreError::NotFound {
             kind: "project", ..
         } => ApiError::runtime("project_not_found", "project not found", json!({})),
+        ProductStoreError::NotFound {
+            kind: "issue_codebase_selection",
+            id,
+        } => repository_routing_api_error(
+            "repository_routing_target_missing",
+            "issue codebase selection is required for repository routing",
+            json!({"kind": "issue_codebase_selection", "id": id}),
+        ),
+        ProductStoreError::NotFound {
+            kind: "logical_repository",
+            id,
+        } => repository_routing_api_error(
+            "repository_routing_target_unknown",
+            "repository routing target is unknown",
+            json!({"kind": "logical_repository", "id": id}),
+        ),
+        ProductStoreError::NotFound {
+            kind: "logical_repository_manifest" | "logical_codebase_manifest",
+            id,
+        } => repository_routing_api_error(
+            "repository_routing_inconsistent",
+            "repository routing authority is inconsistent",
+            json!({"kind": "logical_codebase_manifest", "id": id}),
+        ),
+        ProductStoreError::NotFound {
+            kind: kind @ ("logical_codebase_member" | "repository_checkout"),
+            id,
+        } => repository_routing_api_error(
+            "repository_routing_target_unknown",
+            "repository routing target is unknown",
+            json!({"kind": kind, "id": id}),
+        ),
+        ProductStoreError::Ambiguous {
+            kind: kind @ ("issue_codebase_selection" | "logical_repository"),
+            id,
+        } => repository_routing_api_error(
+            "repository_routing_ambiguous",
+            "repository routing target is ambiguous",
+            json!({"kind": kind, "id": id}),
+        ),
+        ProductStoreError::Conflict {
+            kind: kind @ ("issue_codebase_selection" | "logical_repository"),
+            id,
+        }
+        | ProductStoreError::IdentityMismatch {
+            kind:
+                kind @ ("issue_codebase_selection"
+                | "logical_repository"
+                | "logical_repository_resolution"
+                | "logical_codebase_manifest"
+                | "repository_projection"),
+            id,
+        } => repository_routing_api_error(
+            "repository_routing_inconsistent",
+            "repository routing authority is inconsistent",
+            json!({"kind": kind, "id": id}),
+        ),
+        ProductStoreError::InvalidRecord { kind, reason } => {
+            if let Some(code) = routing_error_code_from_reason(&reason) {
+                repository_routing_api_error(
+                    code,
+                    "repository routing failed closed",
+                    json!({"kind": kind, "reason": reason}),
+                )
+            } else {
+                ApiError::runtime(
+                    "product_store_error",
+                    "product store operation failed",
+                    json!({"kind": kind, "reason": reason}),
+                )
+            }
+        }
         ProductStoreError::NotFound {
             kind: "repository", ..
         } => ApiError::runtime("repository_not_found", "repository not found", json!({})),
@@ -623,6 +739,102 @@ mod tests {
         assert_eq!(config.reviewer_status_code, "provider_available");
     }
 
+    #[test]
+    fn product_store_api_error_maps_routing_kinds_to_stable_codes() {
+        // B3：routing 相关 ProductStoreError → 稳定错误码 + 4xx。
+        let error = product_store_api_error(ProductStoreError::Ambiguous {
+            kind: "issue_codebase_selection",
+            id: "issue_0001".to_string(),
+        });
+
+        assert_eq!(error.code, "repository_routing_ambiguous");
+        assert_eq!(error.details["kind"], "issue_codebase_selection");
+        assert_eq!(error.details["id"], "issue_0001");
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn product_store_api_error_maps_routing_store_kinds_with_diagnostic_details() {
+        let cases = [
+            (
+                ProductStoreError::NotFound {
+                    kind: "issue_codebase_selection",
+                    id: "issue_0001".to_string(),
+                },
+                "repository_routing_target_missing",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "issue_codebase_selection",
+                "issue_0001",
+            ),
+            (
+                ProductStoreError::NotFound {
+                    kind: "logical_repository",
+                    id: "logical_0001".to_string(),
+                },
+                "repository_routing_target_unknown",
+                StatusCode::NOT_FOUND,
+                "logical_repository",
+                "logical_0001",
+            ),
+            (
+                ProductStoreError::Ambiguous {
+                    kind: "logical_repository",
+                    id: "logical_0001".to_string(),
+                },
+                "repository_routing_ambiguous",
+                StatusCode::CONFLICT,
+                "logical_repository",
+                "logical_0001",
+            ),
+            (
+                ProductStoreError::Conflict {
+                    kind: "logical_repository",
+                    id: "logical_0001".to_string(),
+                },
+                "repository_routing_inconsistent",
+                StatusCode::CONFLICT,
+                "logical_repository",
+                "logical_0001",
+            ),
+            (
+                ProductStoreError::IdentityMismatch {
+                    kind: "logical_repository",
+                    id: "logical_0001".to_string(),
+                },
+                "repository_routing_inconsistent",
+                StatusCode::CONFLICT,
+                "logical_repository",
+                "logical_0001",
+            ),
+        ];
+
+        for (store_error, expected_code, expected_status, kind, id) in cases {
+            let error = product_store_api_error(store_error);
+            assert_eq!(error.code, expected_code);
+            assert_eq!(error.details["kind"], kind);
+            assert_eq!(error.details["id"], id);
+            assert_eq!(error.into_response().status(), expected_status);
+        }
+    }
+
+    #[test]
+    fn product_store_api_error_maps_explicit_routing_invalid_record_reasons() {
+        let error = product_store_api_error(ProductStoreError::InvalidRecord {
+            kind: "repository_routing",
+            reason: "repository_routing_target_missing: issue selection is required".to_string(),
+        });
+
+        assert_eq!(error.code, "repository_routing_target_missing");
+        assert_eq!(error.details["kind"], "repository_routing");
+        assert_eq!(
+            error.details["reason"],
+            "repository_routing_target_missing: issue selection is required"
+        );
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
     #[test]
     fn active_coding_attempt_conflict_uses_stable_http_contract() {
         let error = product_store_api_error(ProductStoreError::Conflict {

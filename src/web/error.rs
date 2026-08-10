@@ -72,7 +72,13 @@ impl IntoResponse for ApiError {
             | "work_item_not_found"
             | "task_workspace_not_found"
             | "workspace_session_not_found" => StatusCode::NOT_FOUND,
-            "repository_project_not_found" => StatusCode::NOT_FOUND,
+            "repository_project_not_found" | "repository_routing_target_unknown" => {
+                StatusCode::NOT_FOUND
+            }
+            "repository_routing_target_missing" => StatusCode::UNPROCESSABLE_ENTITY,
+            "repository_routing_inconsistent" | "repository_routing_ambiguous" => {
+                StatusCode::CONFLICT
+            }
             "gate_ambiguous"
             | "invalid_execution_record_id"
             | "invalid_artifact_id"
@@ -325,6 +331,25 @@ mod tests {
     use super::*;
     use crate::product::repository_store::RepositoryRegistrationError;
 
+    #[test]
+    fn repository_routing_error_codes_map_to_4xx() {
+        // B3：稳定错误码必须 4xx 业务阻断，不是 500
+        let cases = [
+            (
+                "repository_routing_target_missing",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("repository_routing_inconsistent", StatusCode::CONFLICT),
+            ("repository_routing_target_unknown", StatusCode::NOT_FOUND),
+            ("repository_routing_ambiguous", StatusCode::CONFLICT),
+        ];
+
+        for (code, expected_status) in cases {
+            let response = ApiError::validation(code, "routing fail-closed").into_response();
+            assert_eq!(response.status(), expected_status, "{code} status mapping");
+            assert!(response.status().is_client_error(), "{code} must be 4xx");
+        }
+    }
     #[test]
     fn work_item_group_empty_is_bad_request() {
         let response = ApiError::validation(
