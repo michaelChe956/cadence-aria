@@ -6,6 +6,16 @@ use std::process::Command;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::logical_codebase::{
+    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
+    LogicalCodebaseStore, LogicalRepositoryId, CodebaseMemberRecord, MemberStatus,
+    RepositorySourceIdentity, RepositoryType,
+};
+use cadence_aria::product::models::{
+    WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus,
+    WorkItemDraftVerificationPlan, WorkItemGenerationMode,
+};
+use cadence_aria::product::work_item_plan_store::WorkItemPlanStore;
 use cadence_aria::product::coding_attempt_store::{
     CodingAttemptStore, CodingGitOperationKind, CodingGitOperationPhase, CreateChoiceGateInput,
     CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
@@ -247,6 +257,30 @@ async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "issue_worktree_active");
 }
+#[tokio::test]
+async fn create_group_attempt_multi_target_non_unique_is_ambiguous_4xx() {
+    // B2：多个权威 unit target 时必须拒绝，不能选择首个 target 或猜测 focus。
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    seed_logical_fixture_multi_target(&app).await;
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert!(status.is_client_error(), "response: {body}");
+    assert_eq!(body["code"], "repository_routing_ambiguous");
+}
+
 #[tokio::test]
 async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     let root = tempdir().expect("root");
@@ -1069,6 +1103,119 @@ async fn delete_coding_attempt_without_handoff_does_not_touch_lineage() {
             .expect("list handoffs work_item_0001 after delete")
             .is_empty()
     );
+}
+
+async fn seed_logical_fixture_multi_target(app: &axum::Router) {
+    let app_paths = ProductAppPaths::new(workspace_root_from_app(app.clone()).await.join(".aria"));
+    let target_one = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    let target_two = LogicalRepositoryId(uuid::Uuid::from_u128(2));
+    let logical_store = LogicalCodebaseStore::new(app_paths.clone());
+    let aggregate_root = app_paths.root().join("aggregate-root");
+    logical_store
+        .save_manifest(
+            "project_0001",
+            &LogicalCodebaseManifest::new(
+                "project_0001",
+                aggregate_root.clone(),
+                vec![target_one, target_two],
+            ),
+        )
+        .expect("logical manifest");
+    for (logical_repository_id, physical_repository_id, alias) in [
+        (target_one, "repository_0001", "backend"),
+        (target_two, "repository_0002", "frontend"),
+    ] {
+        let checkout_path = aggregate_root.join(alias);
+        logical_store
+            .save_member(
+                "project_0001",
+                &CodebaseMemberRecord {
+                    logical_repository_id,
+                    physical_repository_id: physical_repository_id.to_string(),
+                    alias: alias.to_string(),
+                    role: "service".to_string(),
+                    ordinal: 1,
+                    source_identity: RepositorySourceIdentity::from_git_parts(
+                        &checkout_path,
+                        checkout_path.join(".git"),
+                        None,
+                    ),
+                    repo_type: RepositoryType::Backend,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: Vec::new(),
+                    status: MemberStatus::Active,
+                    created_at: "2026-08-11T00:00:00Z".to_string(),
+                    updated_at: "2026-08-11T00:00:00Z".to_string(),
+                },
+            )
+            .expect("logical member");
+    }
+    IssueCodebaseSelectionStore::new(app_paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![target_one, target_two],
+            Vec::new(),
+            vec![target_one],
+            None,
+        ))
+        .expect("issue selection");
+
+    let draft_store = WorkItemPlanStore::new(app_paths);
+    for (draft_id, outline_id, logical_work_item_id, target_repository_id, title) in [
+        (
+            "draft_work_item_revision_0001",
+            "outline_0001",
+            "work_item_0001",
+            target_one,
+            "实现爬楼梯",
+        ),
+        (
+            "draft_work_item_revision_0002",
+            "outline_0002",
+            "work_item_0002",
+            target_two,
+            "实现爬楼梯 part 2",
+        ),
+    ] {
+        draft_store
+            .put_draft_record(&WorkItemDraftRecord {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                draft_id: draft_id.to_string(),
+                outline_id: outline_id.to_string(),
+                generation_round_id: "round_0001".to_string(),
+                batch_id: None,
+                attempt_index: 1,
+                outline_version_ref: "outline_version_0001".to_string(),
+                generation_mode: WorkItemGenerationMode::Serial,
+                generation_diagnostics: None,
+                candidate: WorkItemDraftCandidate {
+                    target_repository_id: Some(target_repository_id),
+                    outline_id: outline_id.to_string(),
+                    logical_work_item_id: logical_work_item_id.to_string(),
+                    canonical_contract_candidate: group_canonical_contract(logical_work_item_id, title),
+                    verification_plan: WorkItemDraftVerificationPlan { checks: Vec::new() },
+                },
+                status: WorkItemDraftStatus::Accepted,
+                active: true,
+                superseded_by_draft_id: None,
+                supersede_reason: None,
+                copied_from_draft_id: None,
+                review_node_id: None,
+                review_verdict_ref: None,
+                generated_from_node_id: "timeline_node_0001".to_string(),
+                accepted_at: Some("2026-08-11T00:00:00Z".to_string()),
+                superseded_at: None,
+                created_at: "2026-08-11T00:00:00Z".to_string(),
+                updated_at: "2026-08-11T00:00:00Z".to_string(),
+            })
+            .expect("authority draft");
+    }
 }
 
 #[tokio::test]

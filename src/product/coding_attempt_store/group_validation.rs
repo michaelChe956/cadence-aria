@@ -5,6 +5,8 @@ use crate::product::coding_models::{
     CodingExecutionUnitStatus,
 };
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
+use crate::product::logical_codebase::LogicalRepositoryId;
+use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +15,7 @@ pub struct AuthoritativeCodingUnitBinding {
     pub work_item_revision_id: String,
     pub verification_plan_revision_id: String,
     pub projection_bundle_id: String,
+    pub target_repository_id: Option<LogicalRepositoryId>,
     pub dependency_logical_work_item_ids: Vec<String>,
 }
 
@@ -132,6 +135,11 @@ impl super::CodingAttemptStore {
             values.sort();
         }
 
+        let mut draft_targets = WorkItemPlanStore::new(self.paths())
+            .list_draft_records(project_id, issue_id, plan_id)?
+            .into_iter()
+            .map(|draft| (draft.draft_id.clone(), draft))
+            .collect::<BTreeMap<_, _>>();
         let mut units = Vec::with_capacity(ordered_ids.len());
         let mut projection_bundle_ids = BTreeSet::new();
         for logical_id in ordered_ids {
@@ -174,12 +182,17 @@ impl super::CodingAttemptStore {
                     "work item revision dependencies do not match the bound logical work item",
                 ));
             }
+            let target_repository_id = draft_targets
+                .remove(&work_item_revision.source_draft_revision_id)
+                .filter(|draft| draft.candidate.logical_work_item_id == logical_id)
+                .and_then(|draft| draft.candidate.target_repository_id);
             projection_bundle_ids.insert(projection.id.clone());
             units.push(AuthoritativeCodingUnitBinding {
                 logical_work_item_id: logical_id.clone(),
                 work_item_revision_id: revision_id,
                 verification_plan_revision_id: verification.id,
                 projection_bundle_id: projection.id,
+                target_repository_id,
                 dependency_logical_work_item_ids: dependencies
                     .remove(&logical_id)
                     .expect("known logical work item"),
