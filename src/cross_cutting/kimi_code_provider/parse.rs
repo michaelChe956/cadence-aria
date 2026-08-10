@@ -1,5 +1,9 @@
 use serde_json::{Value, json};
 
+use crate::cross_cutting::streaming_provider::{
+    ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KimiSessionUpdate {
     AgentThoughtChunk {
@@ -32,11 +36,11 @@ pub(crate) enum KimiSessionUpdate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KimiPermissionRequest {
-    pub request_id: Value,
-    pub tool_call_id: String,
-    pub title: String,
-    pub options: Vec<KimiPermissionOption>,
-    pub content_text: String,
+    pub(crate) request_id: Value,
+    pub(crate) tool_call_id: String,
+    pub(crate) title: String,
+    pub(crate) options: Vec<KimiPermissionOption>,
+    pub(crate) content_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +64,36 @@ pub(crate) enum Parsed {
     Unknown(String),
 }
 
+pub(crate) fn ask_user_question_choice_request(
+    request: &KimiPermissionRequest,
+) -> ChoiceRequestData {
+    ChoiceRequestData {
+        id: rpc_id_string(&request.request_id),
+        prompt: request.content_text.clone(),
+        options: request
+            .options
+            .iter()
+            .map(|option| ChoiceOptionData {
+                id: option.option_id.clone(),
+                label: option.name.clone(),
+                description: None,
+            })
+            .collect(),
+        allow_multiple: false,
+        allow_free_text: true,
+        questions: Vec::new(),
+        source: ChoiceRequestSource::AskUserQuestion,
+    }
+}
+
+fn rpc_id_string(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .or_else(|| value.as_i64().map(|id| id.to_string()))
+        .or_else(|| value.as_u64().map(|id| id.to_string()))
+        .unwrap_or_default()
+}
 pub(crate) fn parse_message(v: &Value) -> Parsed {
     if v.get("method").and_then(Value::as_str) == Some("session/update") {
         let update = v.pointer("/params/update").unwrap_or(&Value::Null);

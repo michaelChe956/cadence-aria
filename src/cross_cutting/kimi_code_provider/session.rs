@@ -5,14 +5,17 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderCommand, ProviderCompletion, ProviderEvent, ProviderStatus, ProviderToolCall,
-    ProviderToolResult, StreamingProviderInput,
+    ProviderToolResult, RiskLevel, StreamingProviderInput,
 };
 
-use super::parse::{KimiPromptResult, KimiSessionUpdate, Parsed, parse_message};
+use super::parse::{
+    KimiPermissionOption, KimiPromptResult, KimiSessionUpdate, Parsed, parse_message,
+};
 
 const KIMI_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const KIMI_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
@@ -22,10 +25,20 @@ const KIMI_RESUME_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const KIMI_RESUME_STALL_TIMEOUT: Duration = Duration::from_millis(100);
 pub(crate) const KIMI_SESSION_ABORTED: &str = "Kimi provider session aborted";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum IncomingDisposition {
     Progress,
     NotProgress,
+    RestartPrompt(String),
+    Abort,
+}
+
+struct CommandRelayGuard(CancellationToken);
+
+impl Drop for CommandRelayGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 pub(crate) async fn run_kimi_session<W>(
@@ -51,6 +64,36 @@ async fn run_kimi_session_inner<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let bridge = ApprovalBridge::new(input.permission_mode.clone(), event_tx.clone());
+    let bridge_commands = bridge.command_sender();
+    let command_abort = CancellationToken::new();
+    let relay_abort = command_abort.clone();
+    let relay_cancel = CancellationToken::new();
+    let relay_stop = relay_cancel.clone();
+    let _relay_guard = CommandRelayGuard(relay_cancel);
+    tokio::spawn(async move {
+        loop {
+            let command = tokio::select! {
+                _ = relay_stop.cancelled() => break,
+                command = command_rx.recv() => command,
+            };
+            let Some(command) = command else {
+                break;
+            };
+            let is_abort = matches!(
+                command,
+                crate::cross_cutting::streaming_provider::ProviderCommand::Abort
+            );
+            if bridge_commands.send(command).await.is_err() {
+                break;
+            }
+            if is_abort {
+                relay_abort.cancel();
+                break;
+            }
+        }
+    });
+
     let timeout_secs = input.timeout_secs.max(1);
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
@@ -125,11 +168,9 @@ where
             ))
         })?;
 
+    let mut next_prompt_id = 4_u64;
     let prompt = peer.request_with_timeout(
-        json!({
-            "jsonrpc":"2.0", "id":3, "method":"session/prompt",
-            "params":{"sessionId":session_id,"prompt":[{"type":"text","text":input.prompt}]}
-        }),
+        session_prompt_request(&session_id, &input.prompt, 3),
         KIMI_RPC_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
     );
     tokio::pin!(prompt);
@@ -153,15 +194,13 @@ where
         tokio::pin!(idle_timer);
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => {
+            _ = command_abort.cancelled() => {
                 abort_kimi_session(&peer, &session_id, &event_tx).await;
                 return Err(aborted_session_error());
             }
-            command = command_rx.recv() => {
-                if matches!(command, Some(ProviderCommand::Abort) | None) {
-                    abort_kimi_session(&peer, &session_id, &event_tx).await;
-                    return Err(aborted_session_error());
-                }
+            _ = cancel.cancelled() => {
+                abort_kimi_session(&peer, &session_id, &event_tx).await;
+                return Err(aborted_session_error());
             }
             _ = &mut idle_timer => {
                 abort_kimi_session(&peer, &session_id, &event_tx).await;
@@ -171,11 +210,33 @@ where
                 let Some(incoming) = incoming else {
                     return Err(provider_error("Kimi ACP stream ended before prompt completion"));
                 };
-                let disposition = handle_incoming(
-                    &peer, incoming, &event_tx, &mut full_output, &mut tool_outputs, &mut completed_tools,
-                ).await?;
-                if disposition == IncomingDisposition::Progress {
-                    idle_deadline = Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                match handle_incoming(
+                    &peer,
+                    incoming,
+                    &bridge,
+                    &event_tx,
+                    &cancel,
+                    &command_abort,
+                    &mut full_output,
+                    &mut tool_outputs,
+                    &mut completed_tools,
+                ).await? {
+                    IncomingDisposition::Progress => {
+                        idle_deadline = Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                    }
+                    IncomingDisposition::NotProgress => {}
+                    IncomingDisposition::RestartPrompt(free_text) => {
+                        prompt.set(peer.request_with_timeout(
+                            session_prompt_request(&session_id, &free_text, next_prompt_id),
+                            KIMI_RPC_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+                        ));
+                        next_prompt_id += 1;
+                        idle_deadline = Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                    }
+                    IncomingDisposition::Abort => {
+                        abort_kimi_session(&peer, &session_id, &event_tx).await;
+                        return Err(aborted_session_error());
+                    }
                 }
             }
             response = &mut prompt => {
@@ -185,7 +246,15 @@ where
                 // session/update notifications buffered. Drain those updates before terminality.
                 while let Some(incoming) = peer.try_next_incoming().await {
                     let _ = handle_incoming(
-                        &peer, incoming, &event_tx, &mut full_output, &mut tool_outputs, &mut completed_tools,
+                        &peer,
+                        incoming,
+                        &bridge,
+                        &event_tx,
+                        &cancel,
+                        &command_abort,
+                        &mut full_output,
+                        &mut tool_outputs,
+                        &mut completed_tools,
                     ).await?;
                 }
                 match parse_message(&json!({"jsonrpc":"2.0","id":3,"result":response})) {
@@ -206,10 +275,14 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_incoming<W>(
     peer: &JsonRpcPeer<W>,
     incoming: Value,
+    bridge: &ApprovalBridge,
     event_tx: &mpsc::Sender<ProviderEvent>,
+    cancel: &CancellationToken,
+    command_abort: &CancellationToken,
     full_output: &mut String,
     tool_outputs: &mut HashMap<String, String>,
     completed_tools: &mut HashSet<String>,
@@ -280,24 +353,94 @@ where
             Ok(IncomingDisposition::Progress)
         }
         Parsed::RequestPermission(request) => {
-            // TODO(Task3): ApprovalBridge/ChoiceRequest ACP response handling.
-            if request.options.iter().any(|option| {
-                !matches!(
-                    option.kind.as_str(),
-                    "allow_once" | "allow_always" | "reject_once"
-                )
-            }) {
-                let _ = peer
-                    .send(json!({
+            if request.title == "AskUserQuestion" {
+                let choice_request = super::parse::ask_user_question_choice_request(&request);
+                let decision = match bridge.request_choice(choice_request, cancel.clone()).await {
+                    Ok(decision) => decision,
+                    Err(_error) if command_abort.is_cancelled() || cancel.is_cancelled() => {
+                        return Ok(IncomingDisposition::Abort);
+                    }
+                    Err(error) => return Err(error),
+                };
+                if let Some(free_text) = decision
+                    .free_text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    peer.send(json!({
                         "jsonrpc":"2.0", "id":request.request_id,
                         "result":{"outcome":"cancelled"}
                     }))
-                    .await;
+                    .await?;
+                    return Ok(IncomingDisposition::RestartPrompt(free_text.to_string()));
+                }
+                let Some(selected_option_id) = decision.selected_option_ids.first() else {
+                    peer.send(json!({
+                        "jsonrpc":"2.0", "id":request.request_id,
+                        "result":{"outcome":"cancelled"}
+                    }))
+                    .await?;
+                    return Ok(IncomingDisposition::Progress);
+                };
+                peer.send(selected_option_response(
+                    request.request_id,
+                    selected_option_id,
+                ))
+                .await?;
+                Ok(IncomingDisposition::Progress)
+            } else {
+                if !has_supported_permission_option(&request.options) {
+                    peer.send(json!({
+                        "jsonrpc":"2.0", "id":request.request_id,
+                        "result":{"outcome":"cancelled"}
+                    }))
+                    .await?;
+                    return Err(provider_error(format!(
+                        "Kimi ACP request_permission has no supported options (title: {})",
+                        request.title
+                    )));
+                }
+                let decision = match bridge
+                    .request_tool(
+                        &request.title,
+                        &request.content_text,
+                        RiskLevel::High,
+                        cancel.clone(),
+                    )
+                    .await
+                {
+                    Ok(decision) => decision,
+                    Err(_error) if command_abort.is_cancelled() || cancel.is_cancelled() => {
+                        return Ok(IncomingDisposition::Abort);
+                    }
+                    Err(error) => return Err(error),
+                };
+                let Some(option) =
+                    permission_option_for_request(&request.options, decision.approved)
+                else {
+                    peer.send(json!({
+                        "jsonrpc":"2.0", "id":request.request_id,
+                        "result":{"outcome":"cancelled"}
+                    }))
+                    .await?;
+                    return Err(provider_error(format!(
+                        "Kimi ACP request_permission has no {} option (title: {})",
+                        if decision.approved {
+                            "allow_once"
+                        } else {
+                            "reject_once"
+                        },
+                        request.title
+                    )));
+                };
+                peer.send(selected_option_response(
+                    request.request_id,
+                    &option.option_id,
+                ))
+                .await?;
+                Ok(IncomingDisposition::Progress)
             }
-            Err(provider_error(format!(
-                "request_permission handling not configured until Task 3 (title: {})",
-                request.title
-            )))
         }
         Parsed::Unknown(method) => {
             if incoming.get("id").is_some() && incoming.get("method").is_some() {
@@ -309,6 +452,48 @@ where
         }
         Parsed::PromptResult(_) => Ok(IncomingDisposition::NotProgress),
     }
+}
+
+fn session_prompt_request(session_id: &str, text: &str, id: u64) -> Value {
+    json!({
+        "jsonrpc":"2.0", "id":id, "method":"session/prompt",
+        "params":{"sessionId":session_id,"prompt":[{"type":"text","text":text}]}
+    })
+}
+
+fn selected_option_response(request_id: Value, option_id: &str) -> Value {
+    json!({
+        "jsonrpc":"2.0", "id":request_id,
+        "result":{"options":[{"optionId":option_id,"outcome":"selected"}]}
+    })
+}
+
+fn has_supported_permission_option(options: &[KimiPermissionOption]) -> bool {
+    options.iter().any(|option| {
+        matches!(
+            option.kind.as_str(),
+            "allow_once" | "reject_once" | "reject"
+        )
+    })
+}
+
+fn permission_option_for_request(
+    options: &[KimiPermissionOption],
+    approved: bool,
+) -> Option<&KimiPermissionOption> {
+    let kind = if approved {
+        "allow_once"
+    } else {
+        "reject_once"
+    };
+    options
+        .iter()
+        .find(|option| option.kind == kind)
+        .or_else(|| {
+            (!approved)
+                .then(|| options.iter().find(|option| option.kind == "reject"))
+                .flatten()
+        })
 }
 
 fn kimi_idle_timeout(timeout_secs: u64, resuming: bool) -> Duration {

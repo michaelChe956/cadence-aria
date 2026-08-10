@@ -1,4 +1,8 @@
 #[cfg(unix)]
+#[path = "approval_tests.rs"]
+mod approval_tests;
+
+#[cfg(unix)]
 mod session_tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
