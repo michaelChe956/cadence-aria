@@ -1,4 +1,7 @@
 use super::*;
+use crate::product::logical_codebase::repository_routing::{
+    RepositoryRouting, RepositoryRoutingErrorCode,
+};
 use crate::product::logical_codebase::{
     IssueCodebaseSelectionStore, LogicalCodebaseFeature, LogicalCodebaseStore, LogicalRepositoryId,
     MemberStatus,
@@ -38,6 +41,9 @@ impl WorkspaceEngine {
 
 /// 解析 issue 的 logical work item plan 仓库 target 映射（REQ-PLN-02 消费点）。
 /// 独立为自由函数以便无 engine 的单元测试直接验证 target 有效性校验。
+/// 成对判定复用 RepositoryRouting（Task 11），避免与 resume 入口漂移：
+/// Legacy → Ok(None)；Logical → 既有 target map 构建逻辑；
+/// FailClosed → Err 带稳定错误码（repository_routing_*，B3）供 HTTP 映射识别。
 pub(crate) fn resolve_logical_work_item_plan_repository_targets(
     lifecycle: &LifecycleStore,
     plan: &IssueWorkItemPlan,
@@ -51,14 +57,20 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
     let selection = selection_store
         .load(&plan.project_id, &plan.issue_id)
         .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
-    let (manifest, _selection) = match (manifest, selection) {
-        (None, None) => return Ok(None),
-        (Some(manifest), Some(selection)) => (manifest, selection),
-        _ => {
-            return Err(
-                "work_item_target_missing: logical codebase manifest and issue selection must both exist"
-                    .to_string(),
-            );
+    let (manifest, _selection) = match RepositoryRouting::classify(manifest, selection) {
+        // (None, None)：无 manifest 且无 selection → 传统单仓，target map 为空。
+        RepositoryRouting::Legacy { .. } => return Ok(None),
+        // (Some, Some)：逻辑代码库 → 继续按既有 target map 构建逻辑。
+        RepositoryRouting::Logical {
+            manifest,
+            selection,
+        } => (manifest, *selection),
+        // 其余不成对状态 → fail-closed，稳定错误码（B3），绝不静默回退物理仓库。
+        RepositoryRouting::FailClosed { code, .. } => {
+            return Err(format!(
+                "{}: logical codebase manifest and issue selection must both exist",
+                stable_repository_routing_code(code)
+            ));
         }
     };
     // REQ-PLN-02：有效成员 = manifest.member_ids ∩ active_member_ids（manifest 外的
@@ -150,6 +162,21 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
         })
         .collect::<Result<_, _>>()
         .map(Some)
+}
+
+/// RepositoryRoutingErrorCode → 稳定错误码字符串（B3），compile fail-closed 文案使用。
+/// 与 workspace_repository.rs / workspace_ws_handler/socket.rs 等消费点保持一致，
+/// 避免各入口间错误码漂移。
+fn stable_repository_routing_code(code: RepositoryRoutingErrorCode) -> &'static str {
+    match code {
+        RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
+        RepositoryRoutingErrorCode::OrphanedSelection
+        | RepositoryRoutingErrorCode::Inconsistent
+        | RepositoryRoutingErrorCode::MemberRemoved
+        | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
+        RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
+        RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
+    }
 }
 
 impl WorkspaceEngine {
@@ -682,5 +709,38 @@ mod tests {
                 .is_invalidated("project_0001", "issue_0001")
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn compile_unpaired_state_uses_repository_routing_stable_error() {
+        // 评审 Warning：Task 11 必须 TDD——先断言 compile 的不成对错误是稳定错误码
+        // （repository_routing_target_missing）。当前 compile 返回自由字符串
+        // "work_item_target_missing: ..."，无稳定错误码 → 本测试 FAIL。
+        let fixture = CompileInvalidationFixture::new();
+        let api = LogicalRepositoryId(stable_uuid(0x0001));
+        // 只写 manifest + member record，不写 selection → (Some, None) 不成对状态。
+        fixture.write_manifest_with_members(&[api], &["api"]);
+        let result =
+            resolve_logical_work_item_plan_repository_targets(&fixture.lifecycle, &fixture.plan());
+        let err = result.expect_err("(Some, None) must fail-closed");
+        assert!(
+            err.contains("repository_routing_target_missing"),
+            "compile unpaired error must carry stable error code, got: {err}"
+        );
+
+        // 与 RepositoryRouting 判定一致（防漂移契约）
+        let logical_store = LogicalCodebaseStore::new(fixture.lifecycle.app_paths());
+        let manifest = logical_store
+            .load_manifest("project_0001")
+            .unwrap()
+            .unwrap();
+        let routing = RepositoryRouting::classify(Some(manifest), None);
+        assert!(matches!(
+            routing,
+            RepositoryRouting::FailClosed {
+                code: RepositoryRoutingErrorCode::TargetMissing,
+                ..
+            }
+        ));
     }
 }
