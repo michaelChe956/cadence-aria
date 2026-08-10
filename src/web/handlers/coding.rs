@@ -1,8 +1,16 @@
+use std::collections::BTreeSet;
+
 use super::dto::*;
 use super::support::*;
 use super::*;
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_models::CodingAttemptScope;
+use crate::product::issue_store::IssueStore;
+use crate::product::logical_codebase::snapshot_validator::validate_snapshot_fields;
+use crate::product::logical_codebase::{
+    IssueCodebaseSelection, LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
+    MemberStatus, RepositoryRouting, RepositoryRoutingErrorCode, SelectionPolicy,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapshots};
 use crate::web::state::CodingAttemptRunKey;
@@ -303,59 +311,291 @@ fn resolve_attempt_repository(
     attempt: &CodingExecutionAttempt,
 ) -> ApiResult<RepositoryRecord> {
     let store = RepositoryStore::new(app_paths.clone());
+    let routing =
+        RepositoryRouting::load_for_issue(app_paths, &attempt.project_id, &attempt.issue_id)
+            .map_err(product_store_api_error)?;
+
     if let Some(snapshot) = attempt.target_snapshot.as_ref() {
-        return store
-            .resolve_logical_repository(&attempt.project_id, snapshot.logical_repository_id)
-            .map(|(_, _, repository)| repository)
-            .map_err(product_store_api_error);
-    }
-    if is_schema_v2_group_attempt(app_paths, attempt).map_err(product_store_api_error)? {
-        return resolve_issue_selection_repository(app_paths, attempt);
-    }
-    let current_work_item_id = attempt
-        .current_work_item_id
-        .as_deref()
-        .unwrap_or(&attempt.work_item_id);
-    let work_item = lifecycle
-        .list_work_items(&attempt.project_id, &attempt.issue_id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .find(|work_item| work_item.id == current_work_item_id)
-        .ok_or_else(|| {
-            product_store_api_error(ProductStoreError::NotFound {
-                kind: "work_item",
-                id: current_work_item_id.to_string(),
-            })
+        let (manifest, selection) = match routing {
+            RepositoryRouting::Logical {
+                manifest,
+                selection,
+            } => (manifest, selection),
+            RepositoryRouting::Legacy { .. } => {
+                return Err(product_store_api_error(routing_error(
+                    RepositoryRoutingErrorCode::Inconsistent,
+                    "target snapshot has no logical codebase authority",
+                )));
+            }
+            RepositoryRouting::FailClosed { code, reason } => {
+                return Err(product_store_api_error(routing_error(code, reason)));
+            }
+        };
+        let selected_ids = validate_logical_attempt_selection(
+            app_paths,
+            &attempt.project_id,
+            &attempt.issue_id,
+            &manifest,
+            &selection,
+        )
+        .map_err(product_store_api_error)?;
+        if !selected_ids.contains(&snapshot.logical_repository_id) {
+            return Err(product_store_api_error(routing_error(
+                RepositoryRoutingErrorCode::TargetUnknown,
+                "target snapshot repository is not in the effective selection",
+            )));
+        }
+        validate_snapshot_fields(app_paths, attempt).map_err(|code| {
+            product_store_api_error(routing_error(
+                code,
+                "target snapshot does not match logical codebase authority",
+            ))
         })?;
-    resolve_work_item_repository(app_paths, &attempt.project_id, &work_item)
+        return resolve_logical_attempt_repository(
+            &store,
+            &attempt.project_id,
+            snapshot.logical_repository_id,
+        );
+    }
+
+    match routing {
+        RepositoryRouting::Legacy { .. } => {
+            legacy_repository_for_attempt(&store, lifecycle, app_paths, attempt)
+                .map_err(product_store_api_error)
+        }
+        RepositoryRouting::Logical {
+            manifest,
+            selection,
+        } => {
+            let selected_ids = validate_logical_attempt_selection(
+                app_paths,
+                &attempt.project_id,
+                &attempt.issue_id,
+                &manifest,
+                &selection,
+            )
+            .map_err(product_store_api_error)?;
+            let logical_repository_id = if is_schema_v2_group_attempt(app_paths, attempt)
+                .map_err(product_store_api_error)?
+            {
+                logical_repository_for_group_attempt(app_paths, attempt, &selection)
+                    .map_err(product_store_api_error)?
+            } else {
+                let current_work_item_id = current_work_item_id_for_attempt(attempt);
+                lifecycle
+                    .list_work_items(&attempt.project_id, &attempt.issue_id)
+                    .map_err(product_store_api_error)?
+                    .into_iter()
+                    .find(|work_item| work_item.id == current_work_item_id)
+                    .and_then(|work_item| work_item.target_repository_id)
+                    .ok_or_else(|| {
+                        product_store_api_error(routing_error(
+                            RepositoryRoutingErrorCode::TargetMissing,
+                            format!("work item {current_work_item_id} has no target repository"),
+                        ))
+                    })?
+            };
+            if !selected_ids.contains(&logical_repository_id) {
+                return Err(product_store_api_error(routing_error(
+                    RepositoryRoutingErrorCode::TargetUnknown,
+                    "logical repository target is not in the effective selection",
+                )));
+            }
+            resolve_logical_attempt_repository(&store, &attempt.project_id, logical_repository_id)
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            Err(product_store_api_error(routing_error(code, reason)))
+        }
+    }
 }
 
-fn resolve_issue_selection_repository(
+fn resolve_logical_attempt_repository(
+    store: &RepositoryStore,
+    project_id: &str,
+    logical_repository_id: LogicalRepositoryId,
+) -> ApiResult<RepositoryRecord> {
+    store
+        .resolve_logical_repository_strict(project_id, logical_repository_id)
+        .map(|(_, _, repository)| repository)
+        .map_err(|_| {
+            product_store_api_error(routing_error(
+                RepositoryRoutingErrorCode::Inconsistent,
+                "logical repository target cannot be resolved from authority",
+            ))
+        })
+}
+
+fn legacy_repository_for_attempt(
+    store: &RepositoryStore,
+    lifecycle: &LifecycleStore,
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
-) -> ApiResult<RepositoryRecord> {
-    let selection = crate::product::logical_codebase::load_selection(
-        app_paths,
-        &attempt.project_id,
-        &attempt.issue_id,
-    )
-    .map_err(product_store_api_error)?
-    .ok_or_else(|| {
-        product_store_api_error(ProductStoreError::NotFound {
-            kind: "issue_codebase_selection",
-            id: attempt.issue_id.clone(),
+) -> Result<RepositoryRecord, ProductStoreError> {
+    let current_work_item_id = current_work_item_id_for_attempt(attempt);
+    let physical_repository_id = lifecycle
+        .list_work_items(&attempt.project_id, &attempt.issue_id)?
+        .into_iter()
+        .find(|work_item| work_item.id == current_work_item_id)
+        .map(|work_item| work_item.repository_id)
+        .or_else(|| {
+            IssueStore::new(app_paths.clone())
+                .get(&attempt.project_id, &attempt.issue_id)
+                .ok()
+                .and_then(|issue| issue.repo_id)
         })
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "work_item",
+            id: current_work_item_id.to_string(),
+        })?;
+    legacy_physical_repository(store, &attempt.project_id, &physical_repository_id)
+}
+
+fn current_work_item_id_for_attempt(attempt: &CodingExecutionAttempt) -> &str {
+    attempt
+        .current_work_item_id
+        .as_deref()
+        .unwrap_or(&attempt.work_item_id)
+}
+
+fn logical_repository_for_group_attempt(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+    selection: &IssueCodebaseSelection,
+) -> Result<LogicalRepositoryId, ProductStoreError> {
+    let plan_id = attempt.work_item_group_id.as_deref().ok_or_else(|| {
+        routing_error(
+            RepositoryRoutingErrorCode::Inconsistent,
+            "schema-v2 group attempt has no plan ID",
+        )
     })?;
-    let [logical_repository_id] = selection.focus_repository_ids.as_slice() else {
-        return Err(product_store_api_error(ProductStoreError::Ambiguous {
-            kind: "issue_codebase_selection",
-            id: attempt.issue_id.clone(),
-        }));
+    let authoritative = CodingAttemptStore::new(app_paths.clone())
+        .resolve_authoritative_group_plan_binding(&attempt.project_id, &attempt.issue_id, plan_id)
+        .map_err(|_| {
+            routing_error(
+                RepositoryRoutingErrorCode::Inconsistent,
+                "schema-v2 group target cannot be resolved from the authoritative plan",
+            )
+        })?;
+    if let Some(reason) = authoritative
+        .units
+        .iter()
+        .find_map(|unit| unit.source_draft_error.as_deref())
+    {
+        return Err(routing_error(
+            RepositoryRoutingErrorCode::Inconsistent,
+            reason,
+        ));
+    }
+    let target_ids: BTreeSet<LogicalRepositoryId> = authoritative
+        .units
+        .iter()
+        .filter_map(|unit| unit.target_repository_id)
+        .collect();
+    match target_ids.len() {
+        1 => Ok(*target_ids.first().expect("one group target exists")),
+        0 => {
+            let [focus_repository_id] = selection.focus_repository_ids.as_slice() else {
+                return Err(routing_error(
+                    RepositoryRoutingErrorCode::TargetMissing,
+                    "group has no unique target repository and selection focus is not unique",
+                ));
+            };
+            Ok(*focus_repository_id)
+        }
+        _ => Err(routing_error(
+            RepositoryRoutingErrorCode::TargetAmbiguous,
+            "group has multiple target repositories",
+        )),
+    }
+}
+
+fn validate_logical_attempt_selection(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    manifest: &LogicalCodebaseManifest,
+    selection: &IssueCodebaseSelection,
+) -> Result<BTreeSet<LogicalRepositoryId>, ProductStoreError> {
+    if selection.project_id != project_id || selection.issue_id != issue_id {
+        return Err(routing_error(
+            RepositoryRoutingErrorCode::Inconsistent,
+            "issue codebase selection identity does not match the attempt",
+        ));
+    }
+    if selection.invalidation.is_some() {
+        return Err(routing_error(
+            RepositoryRoutingErrorCode::SelectionInvalidated,
+            "issue codebase selection has been invalidated",
+        ));
+    }
+    let active_members: BTreeSet<LogicalRepositoryId> =
+        LogicalCodebaseStore::new(app_paths.clone())
+            .list_members(project_id)?
+            .into_iter()
+            .filter(|member| member.status == MemberStatus::Active)
+            .map(|member| member.logical_repository_id)
+            .collect();
+    if manifest
+        .member_ids
+        .iter()
+        .any(|id| !active_members.contains(id))
+    {
+        return Err(routing_error(
+            RepositoryRoutingErrorCode::MemberRemoved,
+            "logical codebase manifest references a missing or inactive member",
+        ));
+    }
+    match selection.selection_policy {
+        SelectionPolicy::AllMembers => {
+            if selection
+                .focus_repository_ids
+                .iter()
+                .any(|id| !manifest.member_ids.contains(id))
+            {
+                return Err(routing_error(
+                    RepositoryRoutingErrorCode::Inconsistent,
+                    "issue codebase selection focus is outside the manifest",
+                ));
+            }
+            Ok(manifest.member_ids.iter().copied().collect())
+        }
+        SelectionPolicy::Explicit => {
+            selection.validate_focus_subset().map_err(|error| {
+                routing_error(
+                    RepositoryRoutingErrorCode::Inconsistent,
+                    format!("invalid issue codebase selection: {error}"),
+                )
+            })?;
+            let selected_ids: BTreeSet<LogicalRepositoryId> =
+                selection.resolve_effective_members().into_iter().collect();
+            if selected_ids
+                .iter()
+                .any(|id| !manifest.member_ids.contains(id))
+            {
+                return Err(routing_error(
+                    RepositoryRoutingErrorCode::Inconsistent,
+                    "issue codebase selection references a member absent from the manifest",
+                ));
+            }
+            Ok(selected_ids)
+        }
+    }
+}
+
+fn routing_error(code: RepositoryRoutingErrorCode, reason: impl Into<String>) -> ProductStoreError {
+    let stable_code = match code {
+        RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
+        RepositoryRoutingErrorCode::OrphanedSelection
+        | RepositoryRoutingErrorCode::Inconsistent
+        | RepositoryRoutingErrorCode::MemberRemoved
+        | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
+        RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
+        RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
     };
-    RepositoryStore::new(app_paths.clone())
-        .resolve_logical_repository(&attempt.project_id, *logical_repository_id)
-        .map(|(_, _, repository)| repository)
-        .map_err(product_store_api_error)
+    ProductStoreError::InvalidRecord {
+        kind: "repository_routing",
+        reason: format!("{stable_code}: {}", reason.into()),
+    }
 }
 
 pub(crate) fn save_work_item_execution_plan_for_attempt(

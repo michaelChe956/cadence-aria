@@ -318,6 +318,38 @@ async fn rejects_group_attempt_when_authoritative_source_draft_is_missing() {
 }
 
 #[tokio::test]
+async fn delete_schema_v2_group_attempt_without_selection_routes_legacy() {
+    // 单仓（无 manifest、无 selection）删除 schema-v2 group attempt → 204，不强制 selection。
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "response: {body}");
+    let attempt_id = assert_global_attempt_id(&body);
+
+    let (status, body) = request_json(
+        app,
+        Method::DELETE,
+        &scoped_attempt_uri(&attempt_id, ""),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT, "response: {body}");
+}
+
+#[tokio::test]
 async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     let root = tempdir().expect("root");
     let repo = git_repo();
