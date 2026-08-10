@@ -25,6 +25,22 @@ pub enum RepositoryRoutingErrorCode {
     SelectionInvalidated,
 }
 
+impl RepositoryRoutingErrorCode {
+    /// 稳定错误码字符串（B3）：各 Web 入口 fail-closed 的机器可读分类，
+    /// 用于 HTTP 响应 `code` 字段。所有入口必须经此方法，避免字面量重复导致漂移。
+    pub fn stable_code(&self) -> &'static str {
+        match self {
+            RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
+            RepositoryRoutingErrorCode::OrphanedSelection
+            | RepositoryRoutingErrorCode::Inconsistent
+            | RepositoryRoutingErrorCode::MemberRemoved
+            | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
+            RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
+            RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
+        }
+    }
+}
+
 /// Web 运行时统一 repository 分流判定（REQ-ROUTE-01）。
 /// 以 (manifest, selection) 成对状态为唯一权威信号，返回显式三态。
 pub enum RepositoryRouting {

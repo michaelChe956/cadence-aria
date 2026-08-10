@@ -424,15 +424,7 @@ fn validate_logical_group_selection(
 }
 
 fn routing_api_error(code: RepositoryRoutingErrorCode, reason: &str) -> ApiError {
-    let stable_code = match code {
-        RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
-        RepositoryRoutingErrorCode::OrphanedSelection
-        | RepositoryRoutingErrorCode::Inconsistent
-        | RepositoryRoutingErrorCode::MemberRemoved
-        | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
-        RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
-        RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
-    };
+    let stable_code = code.stable_code();
     ApiError::runtime(
         stable_code,
         "repository routing failed closed",

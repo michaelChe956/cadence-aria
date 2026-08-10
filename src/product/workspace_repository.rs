@@ -279,15 +279,7 @@ fn routing_error_for_target_error(reason: &str) -> ProductStoreError {
 }
 
 fn routing_error(code: RepositoryRoutingErrorCode, reason: impl Into<String>) -> ProductStoreError {
-    let stable_code = match code {
-        RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
-        RepositoryRoutingErrorCode::OrphanedSelection
-        | RepositoryRoutingErrorCode::Inconsistent
-        | RepositoryRoutingErrorCode::MemberRemoved
-        | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
-        RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
-        RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
-    };
+    let stable_code = code.stable_code();
     ProductStoreError::InvalidRecord {
         kind: "repository_routing",
         reason: format!("{stable_code}: {}", reason.into()),
