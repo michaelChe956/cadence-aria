@@ -14,7 +14,7 @@ Kimi Code CLI 通过 `kimi acp` 子命令提供基于 stdin/stdout 的 ACP（Age
 - 仓库初始化仅 Claude Code 可用，Kimi（同 Pi）被显式过滤，不展示或不允许用于初始化。
 - Task Runner（task-run）及其 CLI/API、专用协议、旧的 Fake Provider Workspace Runner 的可调度 Provider 范围与运行行为不变；为满足流式链路共享类型约束，`ProviderType` 与 `ProviderName` 增加 `KimiCode` 变体，但 Kimi 在 task-run 所有入口被显式拒绝，返回稳定错误（不使用 `unreachable!`，不引入新的 panic 风险）。
 - structured-output repair / review repair 第一阶段排除 Kimi（不实证 Kimi resume 稳定性，留作后续 enhancement）。
-- Kimi 第一阶段**不支持需求歧义结构化提问**（`ChoiceRequest` 等价物）。Phase 0 Spike 跨 yolo 与 default 两种模式验证：ACP 协议下 Kimi 仅有工具审批（`session/request_permission`），无独立的开方式提问/选择方法；agent 遇到歧义时把问题写进正文（`agent_message_chunk`）并以 `end_turn` 收尾，把控制权交回用户——两种模式下均如此，yolo 不会因全自动藏掉提问。因此 Kimi 不复用 Pi 的 `aria-ask.ts` 提问扩展，需求歧义走「文本提问 + end_turn + 同 sessionId 下一轮续接」。
+- Kimi 第一阶段**支持需求歧义结构化提问**（与 Claude Code 对齐）。Phase 0 Spike 实证：Kimi 有 `AskUserQuestion` 工具（与 Claude 同名同 schema，参数为 `{questions:[{question,header,options:[{label,description}]}]}`），且 Kimi 把提问选项统一收敛到 ACP `session/request_permission`（提问正文=toolCall.content，选项=options，含 `*_skip`=Skip）。用户选选项 → 回 `Selected(optionId)`（标准 ACP）；自由文本补充 → ACP 无标准 free-text 通道，走下一轮 `session/prompt`（同 sessionId 续接）。UI 呈现为「选项按钮 + 始终可编辑文本框」的融合卡片（方案 D）：选选项走标准回传同轮继续；选项都不合适时用户在文本框打字，作为下一轮 prompt 注入。两路均走标准 ACP 机制，零非标准解析、不坏菜。
 
 ## Capabilities
 

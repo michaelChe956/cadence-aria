@@ -97,24 +97,28 @@
 - **THEN** Provider 选项不包含 Kimi
 - **AND THEN** 过滤逻辑以 capability policy 注释说明
 
-### Requirement: Kimi 不产生需求歧义结构化提问（以文本提问 + end_turn 收尾）
+### Requirement: Kimi 支持 AskUserQuestion 结构化提问
 
-Phase 0 Spike 已跨 yolo 与 default（Supervised 等价）两种模式实证：ACP 协议下 Kimi 仅有工具审批（`session/request_permission`），无独立的开方式提问/选择方法。因此系统 SHALL 不为 Kimi 产生 `ChoiceRequest` 事件；Kimi 遇到需求歧义时把问题写进 `agent_message_chunk`（正文），并以 `end_turn` 终止当前轮，把控制权交回用户。系统 SHALL 不为 Kimi 复用 Pi 的 `aria-ask.ts` 提问扩展。两种模式下行为一致——yolo 模式不会因全自动而跳过或藏掉提问（实测 yolo 模式下 tool_call=0、end_turn 停下、正文明示“回答前不做任何操作”）。
+Phase 0 Spike 实证：Kimi 有 `AskUserQuestion` 工具（与 Claude Code 同名同 schema），并把提问选项统一收敛到 ACP `session/request_permission`。系统 SHALL 识别 `session/request_permission` 中 `toolCall.title == "AskUserQuestion"` 并映射为既有 `ProviderEvent::ChoiceRequest`（source=`AskUserQuestion`，options 来自 request_permission.options，`allow_free_text=true`）；其他 title 映射为 `PermissionRequest`。系统 SHALL 不为 Kimi 复用 Pi 的 `aria-ask.ts` 扩展。
 
-#### Scenario: Kimi 遇到歧义时以文本提问并停下等用户
+#### Scenario: 用户选择提问选项
 
-- **WHEN** Kimi 在生成角色产物时发现需要用户决策的歧义
-- **THEN** Kimi 以纯文本（`agent_message_chunk`）提问
-- **AND THEN** 当前轮以 `stopReason: end_turn` 结束（系统上报一次正常 Completed，full_output 含提问正文）
-- **AND THEN** 系统不产生 `ChoiceRequest` 事件
-- **AND THEN** 不加载或调用任何 `aria-ask.ts` 扩展
-- **AND THEN** 用户下一轮回复时，系统复用同一 Kimi sessionId 续接，上下文完整
+- **WHEN** Kimi 调用 AskUserQuestion 工具发起提问，用户选择某选项
+- **THEN** 适配器把所选 optionId 以 ACP `Selected(optionId)` 回传
+- **AND THEN** Kimi 在同一会话轮内继续
 
-#### Scenario: yolo 模式不藏掉提问
+#### Scenario: 选项都不合适时用户自由输入
 
-- **WHEN** Kimi 以 Auto（yolo）模式运行且遇到需要用户决策的歧义
-- **THEN** Kimi 不自动跳过提问、不自顾执行
-- **AND THEN** Kimi 以文本提问并以 end_turn 停下，等用户下一轮输入
+- **WHEN** AskUserQuestion 提问的选项都不符合用户意图，用户在自由文本框输入自己的回答
+- **THEN** 适配器不以 `Other` 扩展字段回传（避免非标准用法）
+- **AND THEN** 适配器收尾当前轮，用户文本作为下一轮 `session/prompt` 注入同一 Kimi sessionId
+- **AND THEN** Kimi 上下文完整续接
+
+#### Scenario: UI 呈现选项与自由文本框并存
+
+- **WHEN** Kimi 发起 AskUserQuestion 提问
+- **THEN** 卡片同时展示选项按钮与始终可编辑的自由文本框
+- **AND THEN** 用户可选择选项或填自由文本（方案 D）
 
 ### Requirement: image-create 支持 Kimi
 

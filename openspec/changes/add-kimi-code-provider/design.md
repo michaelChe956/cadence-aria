@@ -137,17 +137,25 @@ ProviderPermissionMode::Supervised → session/new permissionMode: "default"
 ```
 Auto 模式不发 request_permission；Supervised 模式正常走 ApprovalBridge。
 
-### 3.4a 提问能力边界（spike 实证，跨两种模式验证）
+### 3.4a 提问能力（spike 实证，与 Claude Code 对齐）
 
-Phase 0 Spike 分别在 **yolo** 与 **default（Supervised 等价）** 两种模式下，给 Kimi 故意歧义、强制要求提问的任务，实测结论一致：
+Phase 0 Spike 强触发实测：Kimi **有 `AskUserQuestion` 工具**（与 Claude Code 同名同 schema：参数为 `{questions:[{question,header,options:[{label,description}]}]}`）。Kimi 把提问统一收敛到 ACP `session/request_permission` 机制：
 
-- ACP 协议下 Kimi **只有** `session/request_permission`（工具审批），**无** 独立的开方式提问/选择方法（无 question/choice/input 事件）。
-- 遇到需求歧义时，Kimi 把问题写进 `agent_message_chunk`（正文），并以 `stopReason: "end_turn"` **终止当前轮**，等用户下一轮 `session/prompt`（同一 sessionId）再继续——**两种模式下均如此，yolo 不会因为全自动而「跳过/藏掉」提问**。实测 yolo 模式下 tool_call=0、6 秒后 end_turn 停下，正文写明“在你回答前不会做任何操作”。
+- 提问正文 = `session/request_permission` 的 `toolCall.content` text。
+- 选项 = `options` 数组，每项 `{optionId, name(显示文本), kind}`；Kimi 会自动补一个 `*_skip`（kind=reject_once）作为跳过。
+- 用户选某选项 → 客户端回 `session/request_permission` result `{options:[{optionId, outcome:"selected"}]}`（标准 ACP `Selected`，可靠）。
+- **自由文本补充**：ACP `session/request_permission` 的 result 只支持 `Cancelled`/`Selected`/`Other`，其中 `Other` 协议明确「非为用户输入文本设计」。故自由文本不走 request_permission，而走**下一轮 `session/prompt`**（同 sessionId 续接）。
+
+**方案 D 的映射（选项 + 始终可编辑文本框的融合卡片）**：
+- 适配器识别 `session/request_permission` 中 `toolCall.title == "AskUserQuestion"` → 映射为既有 `ProviderEvent::ChoiceRequest`（source=`AskUserQuestion`，options 来自 request_permission.options，`allow_free_text=true`，UI 同时展示选项按钮 + 自由文本框）。
+- 其他 title 的 request_permission → 映射为既有 `ProviderEvent::PermissionRequest`（工具审批）。
+- **用户选选项** → `ChoiceResponse(selected_option_ids=[对应 optionId])` → 适配器回 ACP `Selected(optionId)`，同轮继续。
+- **用户填自由文本（选项都不合适）** → 不回 request_permission，适配器以“用户自主输入”结束当前轮（Failed/Cancelled 语义或正常收尾），用户文本作为**下一轮 `session/prompt`** 注入同 sessionId，上下文完整。
 
 因此：
 - Kimi **不复用** Pi 的 `aria-ask.ts` 扩展（那是 Pi 私有 RPC 的产物）。
-- Kimi **不产生** `ProviderEvent::ChoiceRequest`；需求歧义走**文本提问 + end_turn 收尾**——Aria 侧表现为一次正常 `Completed`（full_output 含提问正文），用户在下一轮以新 prompt 回复，Aria 用同一 Kimi sessionId 续接。这不是「藏掉问题」，而是以 `end_turn` 明确把控制权交回用户。
-- **会话续接前提**：Aria 持有 Kimi sessionId，用户下一轮提问时复用同一 session（`session/load` 或新建 session 时携带上下文）；若 Aria 侧不复用 session，则每轮提问独立、上下文丢失——实施时须保证同一 role 的多轮交互复用同一 sessionId。
+- Kimi 复用 Claude Code 的 `AskUserQuestion → ChoiceRequest` 映射思路（同一工具名/schema）。
+- 两路均走标准 ACP 机制（Selected / session-prompt），零非标准解析、不坏菜。
 
 ### 3.5 终态判定（spike 实证）
 `session/prompt` 的 id 响应即终态：result `{stopReason:"end_turn"}` → Completed；result error / 非 end_turn → Failed；进程异常退出（未收到 prompt 响应）→ Failed。退出码：0 成功 / 1 不可重试 / 75 可重试（映射到 Failed 文案区分）。
@@ -222,7 +230,7 @@ provider-options.test（catalog/order/可用禁用）/ ProviderConfigPanel.test�
 - 同 provider 内部重试（artifact retry / resume retry）。
 - Kimi `plan` 模式暴露。
 - thought chunk 展示给用户（仅写入 provider 流式日志，与 Claude Code thinking 一致）。
-- **需求歧义结构化提问（`ChoiceRequest`）**：Phase 0 Spike 已实证 ACP 无此能力，Kimi 走文本 fallback，不复用 Pi 的 `aria-ask.ts`。
+- **自由文本走 ACP `Other` 扩展字段**：协议明确非为用户输入设计，不采用；自由文本统一走下一轮 `session/prompt`。
 - Pi 现有 `unreachable!` 的清理（不动 Pi）。
 
 ## 7. 兜底策略
