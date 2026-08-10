@@ -15,6 +15,84 @@ impl RepositoryStore {
             .map(|(member, checkout, repository, _)| (member, checkout, repository))
     }
 
+    /// Resolves a logical repository exclusively from logical-codebase authority.
+    ///
+    /// This is for callers that have already entered the logical routing state:
+    /// any absent or inconsistent authority record fails closed and must never
+    /// fall back to the dual-read legacy projection.
+    pub fn resolve_logical_repository_strict(
+        &self,
+        project_id: &str,
+        logical_id: LogicalRepositoryId,
+    ) -> Result<
+        (
+            CodebaseMemberRecord,
+            RepositoryCheckoutRecord,
+            RepositoryRecord,
+        ),
+        ProductStoreError,
+    > {
+        self.ensure_identity_schema(project_id)?;
+        validate_relative_id(project_id)?;
+        let authority = LogicalCodebaseStore::new(self.paths.clone());
+        let manifest = authority.load_manifest(project_id)?.ok_or_else(|| {
+            ProductStoreError::NotFound {
+                kind: "logical_repository_manifest",
+                id: project_id.to_string(),
+            }
+        })?;
+        if !manifest.member_ids.contains(&logical_id) {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "logical_repository",
+                id: logical_id.0.to_string(),
+            });
+        }
+
+        let member = authority
+            .load_member(project_id, logical_id)?
+            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                kind: "logical_repository",
+                id: logical_id.0.to_string(),
+            })?;
+        validate_relative_id(&member.physical_repository_id)?;
+        let repository = self
+            .list_compatibility_projection(project_id)?
+            .into_iter()
+            .find(|record| record.id == member.physical_repository_id)
+            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                kind: "logical_repository",
+                id: logical_id.0.to_string(),
+            })?;
+        let checkout_id =
+            repository
+                .primary_checkout_id
+                .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                    kind: "logical_repository",
+                    id: logical_id.0.to_string(),
+                })?;
+        let checkout = authority
+            .load_checkout(project_id, checkout_id)?
+            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                kind: "logical_repository",
+                id: logical_id.0.to_string(),
+            })?;
+        if member.logical_repository_id != logical_id
+            || member.status != MemberStatus::Active
+            || !member.checkout_ids.contains(&checkout_id)
+            || checkout.logical_repository_id != logical_id
+            || checkout.physical_repository_id != member.physical_repository_id
+            || repository.project_id != project_id
+            || repository.logical_repository_id != Some(logical_id)
+            || repository.identity_schema_version != 1
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "logical_repository",
+                id: logical_id.0.to_string(),
+            });
+        }
+        Ok((member, checkout, repository))
+    }
+
     /// Resolves a legacy physical repository ID only during the persisted
     /// dual-read migration window. This is deliberately separate from the
     /// logical-ID reader so callers cannot accidentally treat a physical ID

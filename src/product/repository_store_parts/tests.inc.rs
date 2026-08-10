@@ -198,6 +198,78 @@ mod tests {
     }
 
     #[test]
+    fn strict_resolver_manifest_missing_is_fail_closed_not_legacy_projection() {
+        // B1：逻辑状态调用 strict resolver，manifest 缺失时不得退回 dual-read legacy 投影。
+        let fixture = resolution_fixture();
+        fixture.write_compatible_repository_projection();
+        fixture.set_read_mode("dual");
+
+        assert!(matches!(
+            fixture
+                .store
+                .resolve_logical_repository_strict("project_0001", fixture.logical_id),
+            Err(ProductStoreError::NotFound {
+                kind: "logical_repository_manifest",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn strict_resolver_inconsistent_member_is_fail_closed() {
+        // B1：checkout 与 member/物理投影不一致时不得退回 legacy projection。
+        let fixture = resolution_fixture();
+        fixture.write_authority_with_path("/workspace/api-authority");
+        fixture.write_compatible_repository_projection();
+        fixture.set_read_mode("dual");
+        LogicalCodebaseStore::new(fixture.paths.clone())
+            .save_checkout(
+                "project_0001",
+                &RepositoryCheckoutRecord {
+                    checkout_id: fixture.checkout_id,
+                    logical_repository_id: fixture.logical_id,
+                    physical_repository_id: "repository_inconsistent".to_string(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: PathBuf::from("/workspace/api-authority"),
+                    checkout_path_hash: "sha256:authority-path".to_string(),
+                    git_dir_identity: fixture.source_identity.git_dir_identity(),
+                    revision: None,
+                    availability: CheckoutAvailability::Available,
+                    observed_at: "2026-08-08T00:00:00Z".to_string(),
+                    created_at: "2026-08-08T00:00:00Z".to_string(),
+                    updated_at: "2026-08-08T00:00:00Z".to_string(),
+                },
+            )
+            .expect("write inconsistent checkout");
+
+        assert!(matches!(
+            fixture
+                .store
+                .resolve_logical_repository_strict("project_0001", fixture.logical_id),
+            Err(ProductStoreError::IdentityMismatch {
+                kind: "logical_repository",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn resolve_logical_repository_with_source_logical_authority() {
+        let fixture = resolution_fixture();
+        fixture.write_authority_with_path("/workspace/api-authority");
+        fixture.write_compatible_repository_projection();
+        fixture.set_read_mode("dual");
+
+        let (_, checkout, repository, source) = fixture
+            .store
+            .resolve_logical_repository_with_source("project_0001", fixture.logical_id)
+            .expect("authority records must resolve without legacy projection");
+        assert_eq!(source, ResolutionSource::LogicalAuthority);
+        assert_eq!(checkout.canonical_path, PathBuf::from("/workspace/api-authority"));
+        assert_eq!(repository.id, "repository_0001");
+    }
+
+    #[test]
     fn missing_authority_member_in_dual_mode_uses_unique_legacy_projection() {
         let fixture = resolution_fixture();
         fixture.write_authority_with_path("/workspace/api-authority");
