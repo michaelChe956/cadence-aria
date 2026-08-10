@@ -461,6 +461,41 @@ mod tests {
     }
 
     #[test]
+    fn migration_rejects_unsupported_authoritative_selection_schema_version() {
+        let fixture = migration_fixture_with_one_git_repository();
+        let executor = IdentityMigrationExecutor::new(fixture.paths.clone());
+        executor
+            .ensure_through_authority("project_0001")
+            .expect("migrate through authority");
+        let mut journal = fixture.journal();
+        executor
+            .backfill_compatibility(&mut journal)
+            .expect("write compatibility projections");
+
+        let selection_path = fixture
+            .paths
+            .codebase_selection_path("project_0001", "issue_0001");
+        crate::product::logical_codebase::IssueCodebaseSelectionStore::new(fixture.paths.clone())
+            .load("project_0001", "issue_0001")
+            .expect("rewrite selection")
+            .expect("selection exists");
+        let mut selection: serde_json::Value = read_json(&selection_path).expect("read selection");
+        selection["schema_version"] = serde_json::Value::from(2_u16);
+        write_json(&selection_path, &selection).expect("write unsupported schema version");
+
+        let error = IdentityMigrationExecutor::new(fixture.paths.clone())
+            .ensure_identity_schema("project_0001")
+            .expect_err("unsupported authoritative schema version must fail closed");
+        assert!(error.to_string().contains("issue_codebase_selection"));
+        let failed = fixture.journal();
+        assert_eq!(failed.phase, IdentityMigrationPhase::Failed);
+        assert!(failed
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("migration verifier failed")));
+    }
+
+    #[test]
     fn migration_rejects_authoritative_selection_with_mismatched_issue_identity() {
         let fixture = migration_fixture_with_one_git_repository();
         let executor = IdentityMigrationExecutor::new(fixture.paths.clone());

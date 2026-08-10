@@ -162,7 +162,7 @@ impl IdentityMigrationVerifier {
                     })?;
                     if selection.project_id != project_id
                         || selection.issue_id != issue.id
-                        || selection.schema_version == 0
+                        || selection.schema_version != 1
                     {
                         return Err(ProductStoreError::IdentityMismatch {
                             kind: "issue_codebase_selection",
