@@ -937,7 +937,14 @@ impl IdentityMigrationExecutor {
         &self,
         journal: &mut IdentityMigrationJournal,
     ) -> Result<(), ProductStoreError> {
-        IdentityMigrationVerifier::new(self.paths.clone()).verify(&journal.project_id)?;
+        if let Err(error) = IdentityMigrationVerifier::new(self.paths.clone()).verify(&journal.project_id)
+        {
+            journal.phase = IdentityMigrationPhase::Failed;
+            journal.last_error = Some(format!("migration verifier failed: {error}"));
+            touch(journal);
+            self.journals.save(&journal.project_id, journal)?;
+            return Err(error);
+        }
         let manifest = self.required_manifest(&journal.project_id)?;
         journal.phase = IdentityMigrationPhase::SwitchingReads;
         journal.read_mode = Some("logical_authoritative".to_string());

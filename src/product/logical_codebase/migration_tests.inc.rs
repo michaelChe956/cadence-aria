@@ -183,6 +183,27 @@ mod tests {
     }
 
     impl MigrationFixture {
+        fn write_legacy_issue(&self, issue_id: &str) {
+            write_json(
+                &self.paths.issue_root("project_0001", issue_id).join("issue.json"),
+                &serde_json::json!({
+                    "id": issue_id,
+                    "project_id": "project_0001",
+                    "repo_id": "repository_0001",
+                    "author": null,
+                    "title": "legacy issue",
+                    "description": null,
+                    "change_id": "legacy",
+                    "phase": "clarification",
+                    "status": "draft",
+                    "active_binding_id": null,
+                    "created_at": "2026-08-08T00:00:00Z",
+                    "updated_at": "2026-08-08T00:00:00Z"
+                }),
+            )
+            .expect("write legacy issue");
+        }
+
         fn attempt_path(&self) -> PathBuf {
             self.paths
                 .issue_root("project_0001", "issue_0001")
@@ -321,6 +342,157 @@ mod tests {
         let recovered = fixture.journal();
         assert_eq!(recovered.phase, IdentityMigrationPhase::SwitchingReads);
         assert_eq!(recovered.read_mode.as_deref(), Some("logical_authoritative"));
+    }
+
+    #[test]
+    fn migration_recovers_through_switch_reads_with_mixed_selection_schemas() {
+        let fixture = migration_fixture_with_one_git_repository();
+        fixture.write_legacy_issue("issue_0002");
+        let executor = IdentityMigrationExecutor::new(fixture.paths.clone());
+        executor
+            .ensure_through_authority("project_0001")
+            .expect("migrate through authority");
+
+        let mut journal = fixture.journal();
+        executor
+            .backfill_compatibility(&mut journal)
+            .expect("write compatibility projections");
+        let selection_store = crate::product::logical_codebase::IssueCodebaseSelectionStore::new(
+            fixture.paths.clone(),
+        );
+        selection_store
+            .load("project_0001", "issue_0001")
+            .expect("rewrite first selection")
+            .expect("first selection exists");
+        let first = std::fs::read_to_string(
+            fixture
+                .paths
+                .codebase_selection_path("project_0001", "issue_0001"),
+        )
+        .expect("read first selection");
+        let second = std::fs::read_to_string(
+            fixture
+                .paths
+                .codebase_selection_path("project_0001", "issue_0002"),
+        )
+        .expect("read second selection");
+        assert!(first.contains("\"focus_repository_ids\""));
+        assert!(second.contains("\"focus\":"));
+
+        IdentityMigrationExecutor::new(fixture.paths.clone())
+            .ensure_identity_schema("project_0001")
+            .expect("mixed old and new selections are recoverable");
+        let recovered = fixture.journal();
+        assert_eq!(recovered.phase, IdentityMigrationPhase::SwitchingReads);
+        assert_eq!(recovered.read_mode.as_deref(), Some("logical_authoritative"));
+    }
+
+    #[test]
+    fn migration_rejects_incomplete_authoritative_selection_and_marks_failed() {
+        let fixture = migration_fixture_with_one_git_repository();
+        let executor = IdentityMigrationExecutor::new(fixture.paths.clone());
+        executor
+            .ensure_through_authority("project_0001")
+            .expect("migrate through authority");
+        let mut journal = fixture.journal();
+        executor
+            .backfill_compatibility(&mut journal)
+            .expect("write compatibility projections");
+
+        let selection_path = fixture
+            .paths
+            .codebase_selection_path("project_0001", "issue_0001");
+        crate::product::logical_codebase::IssueCodebaseSelectionStore::new(fixture.paths.clone())
+            .load("project_0001", "issue_0001")
+            .expect("rewrite selection")
+            .expect("selection exists");
+        let mut selection: serde_json::Value = read_json(&selection_path).expect("read selection");
+        selection
+            .as_object_mut()
+            .expect("selection object")
+            .remove("focus_repository_ids");
+        write_json(&selection_path, &selection).expect("corrupt selection");
+
+        let error = IdentityMigrationExecutor::new(fixture.paths.clone())
+            .ensure_identity_schema("project_0001")
+            .expect_err("incomplete authoritative selection must fail closed");
+        assert!(error.to_string().contains("issue_codebase_selection"));
+        let failed = fixture.journal();
+        assert_eq!(failed.phase, IdentityMigrationPhase::Failed);
+        assert!(failed
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("migration verifier failed")));
+    }
+
+    #[test]
+    fn migration_rejects_unparseable_authoritative_selection_and_marks_failed() {
+        let fixture = migration_fixture_with_one_git_repository();
+        let executor = IdentityMigrationExecutor::new(fixture.paths.clone());
+        executor
+            .ensure_through_authority("project_0001")
+            .expect("migrate through authority");
+        let mut journal = fixture.journal();
+        executor
+            .backfill_compatibility(&mut journal)
+            .expect("write compatibility projections");
+
+        let selection_path = fixture
+            .paths
+            .codebase_selection_path("project_0001", "issue_0001");
+        crate::product::logical_codebase::IssueCodebaseSelectionStore::new(fixture.paths.clone())
+            .load("project_0001", "issue_0001")
+            .expect("rewrite selection")
+            .expect("selection exists");
+        let mut selection: serde_json::Value = read_json(&selection_path).expect("read selection");
+        selection["selection_policy"] = serde_json::Value::String("invalid".to_string());
+        write_json(&selection_path, &selection).expect("corrupt selection policy");
+
+        let error = IdentityMigrationExecutor::new(fixture.paths.clone())
+            .ensure_identity_schema("project_0001")
+            .expect_err("unparseable authoritative selection must fail closed");
+        assert!(error.to_string().contains("issue_codebase_selection"));
+        let failed = fixture.journal();
+        assert_eq!(failed.phase, IdentityMigrationPhase::Failed);
+        assert!(failed
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("migration verifier failed")));
+    }
+
+    #[test]
+    fn migration_rejects_authoritative_selection_with_mismatched_issue_identity() {
+        let fixture = migration_fixture_with_one_git_repository();
+        let executor = IdentityMigrationExecutor::new(fixture.paths.clone());
+        executor
+            .ensure_through_authority("project_0001")
+            .expect("migrate through authority");
+        let mut journal = fixture.journal();
+        executor
+            .backfill_compatibility(&mut journal)
+            .expect("write compatibility projections");
+
+        let selection_path = fixture
+            .paths
+            .codebase_selection_path("project_0001", "issue_0001");
+        crate::product::logical_codebase::IssueCodebaseSelectionStore::new(fixture.paths.clone())
+            .load("project_0001", "issue_0001")
+            .expect("rewrite selection")
+            .expect("selection exists");
+        let mut selection: serde_json::Value = read_json(&selection_path).expect("read selection");
+        selection["issue_id"] = serde_json::Value::String("issue_9999".to_string());
+        write_json(&selection_path, &selection).expect("mismatch selection identity");
+
+        let error = IdentityMigrationExecutor::new(fixture.paths.clone())
+            .ensure_identity_schema("project_0001")
+            .expect_err("mismatched authoritative selection must fail closed");
+        assert!(error.to_string().contains("issue_codebase_selection"));
+        let failed = fixture.journal();
+        assert_eq!(failed.phase, IdentityMigrationPhase::Failed);
+        assert!(failed
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("migration verifier failed")));
     }
 
     #[test]

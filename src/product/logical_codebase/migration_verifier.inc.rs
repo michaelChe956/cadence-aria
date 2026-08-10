@@ -129,12 +129,65 @@ impl IdentityMigrationVerifier {
             if let Some(physical_id) = issue.repo_id.as_deref() {
                 let mapping = mapping_for_physical(mappings, physical_id)?;
                 let selection_path = issue_root.join("codebase-selection.json");
-                let selection: serde_json::Value = read_json(&selection_path)?;
-                if selection.get("schema_version").is_none()
-                    || selection.get("focus_repository_ids").is_none()
-                {
-                    let selection: IssueCodebaseSelection = serde_json::from_value(selection)
-                        .map_err(|error| ProductStoreError::Json(error.to_string()))?;
+                let raw_selection: serde_json::Value = read_json(&selection_path)?;
+                let is_authoritative = raw_selection.get("schema_version").is_some()
+                    || raw_selection.get("focus_repository_ids").is_some();
+                if is_authoritative {
+                    let required_fields = [
+                        "schema_version",
+                        "project_id",
+                        "issue_id",
+                        "selection_policy",
+                        "included_repository_ids",
+                        "excluded_repository_ids",
+                        "focus_repository_ids",
+                        "created_at",
+                        "updated_at",
+                    ];
+                    if required_fields
+                        .iter()
+                        .any(|field| raw_selection.get(*field).is_none())
+                    {
+                        return Err(ProductStoreError::InvalidRecord {
+                            kind: "issue_codebase_selection",
+                            reason: "authoritative selection is missing required fields".to_string(),
+                        });
+                    }
+                    let selection = serde_json::from_value::<
+                        crate::product::logical_codebase::IssueCodebaseSelection,
+                    >(raw_selection)
+                    .map_err(|error| ProductStoreError::InvalidRecord {
+                        kind: "issue_codebase_selection",
+                        reason: error.to_string(),
+                    })?;
+                    if selection.project_id != project_id
+                        || selection.issue_id != issue.id
+                        || selection.schema_version == 0
+                    {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "issue_codebase_selection",
+                            id: issue.id.clone(),
+                        });
+                    }
+                    selection.validate_focus_subset()?;
+                    let expected = vec![mapping.logical_repository_id];
+                    if selection.selection_policy
+                        != crate::product::logical_codebase::SelectionPolicy::Explicit
+                        || selection.included_repository_ids != expected
+                        || selection.focus_repository_ids != expected
+                        || !selection.excluded_repository_ids.is_empty()
+                    {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "issue_codebase_selection",
+                            id: issue.id.clone(),
+                        });
+                    }
+                } else {
+                    let selection: IssueCodebaseSelection = serde_json::from_value(raw_selection)
+                        .map_err(|error| ProductStoreError::InvalidRecord {
+                            kind: "issue_codebase_selection",
+                            reason: error.to_string(),
+                        })?;
                     let expected = IssueCodebaseSelection {
                         included: vec![mapping.logical_repository_id],
                         focus: vec![mapping.logical_repository_id],
@@ -143,7 +196,7 @@ impl IdentityMigrationVerifier {
                     if selection != expected {
                         return Err(ProductStoreError::IdentityMismatch {
                             kind: "issue_codebase_selection",
-                            id: issue.id,
+                            id: issue.id.clone(),
                         });
                     }
                 }
