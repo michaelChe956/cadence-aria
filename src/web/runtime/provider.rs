@@ -496,6 +496,7 @@ fn provider_type_to_name(provider: &ProviderType) -> Option<ProviderName> {
         ProviderType::ClaudeCode => Some(ProviderName::ClaudeCode),
         ProviderType::Codex => Some(ProviderName::Codex),
         ProviderType::Pi => None,
+        ProviderType::KimiCode => None,
         ProviderType::Fake => None,
     }
 }

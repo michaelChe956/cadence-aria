@@ -1,6 +1,7 @@
 mod claude_code;
 mod codex;
 mod fake;
+mod kimi_code;
 mod pi;
 
 use std::collections::BTreeSet;
@@ -20,6 +21,7 @@ use super::{
 use claude_code::ClaudeCodeProjectionRenderer;
 use codex::CodexProjectionRenderer;
 use fake::FakeProjectionRenderer;
+use kimi_code::KimiCodeProjectionRenderer;
 use pi::PiProjectionRenderer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +189,7 @@ pub fn renderer_for(provider: &ProviderName) -> Box<dyn ProviderProjectionRender
         ProviderName::Codex => Box::new(CodexProjectionRenderer),
         ProviderName::ClaudeCode => Box::new(ClaudeCodeProjectionRenderer),
         ProviderName::Pi => Box::new(PiProjectionRenderer),
+        ProviderName::KimiCode => Box::new(KimiCodeProjectionRenderer),
         ProviderName::Fake => Box::new(FakeProjectionRenderer),
     }
 }

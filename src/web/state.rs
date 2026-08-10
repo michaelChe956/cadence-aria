@@ -613,6 +613,7 @@ mod tests {
                 success("1.0"),
                 success("2.0"),
                 success("0.83.0"),
+                success("0.34.0"),
             ]));
             let health = provider_health(root.path(), runner.clone());
             let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));

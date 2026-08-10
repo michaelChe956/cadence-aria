@@ -118,6 +118,7 @@ impl From<ProviderName> for ProviderType {
             ProviderName::ClaudeCode => Self::ClaudeCode,
             ProviderName::Codex => Self::Codex,
             ProviderName::Pi => Self::Pi,
+            ProviderName::KimiCode => Self::KimiCode,
             ProviderName::Fake => Self::Fake,
         }
     }

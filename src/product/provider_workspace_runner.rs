@@ -48,7 +48,7 @@ impl ProviderWorkspaceRunner {
             workspace_repository_for_session(&self.paths, &store, &session).map_err(store_error)?;
         let prompt = build_prompt(&session, &input.user_prompt);
         let adapter_input = AdapterInput {
-            provider_type: provider_type_for_name(&session.author_provider),
+            provider_type: provider_type_for_name(&session.author_provider)?,
             role: AdapterRole::Orchestrator,
             worktree_path: Some(repository.path.to_string_lossy().to_string()),
             // workspace session 无 coding attempt 上下文，按契约缺省不写流日志。
@@ -127,12 +127,17 @@ impl ProviderWorkspaceRunner {
     }
 }
 
-fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
+fn provider_type_for_name(provider: &ProviderName) -> Result<ProviderType, ProviderAdapterError> {
     match provider {
-        ProviderName::ClaudeCode => ProviderType::ClaudeCode,
-        ProviderName::Codex => ProviderType::Codex,
+        ProviderName::ClaudeCode => Ok(ProviderType::ClaudeCode),
+        ProviderName::Codex => Ok(ProviderType::Codex),
         ProviderName::Pi => unreachable!("legacy fake runner does not support pi"),
-        ProviderName::Fake => ProviderType::Fake,
+        ProviderName::KimiCode => Err(ProviderAdapterError::incompatible_output(
+            "legacy fake runner does not support kimi_code",
+            String::new(),
+            String::new(),
+        )),
+        ProviderName::Fake => Ok(ProviderType::Fake),
     }
 }
 

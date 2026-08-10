@@ -60,6 +60,7 @@ fn provider_type_slug(provider_type: &ProviderType) -> &'static str {
         ProviderType::ClaudeCode => "claude",
         ProviderType::Codex => "codex",
         ProviderType::Pi => unreachable!("task run output chunks do not originate from pi"),
+        ProviderType::KimiCode => "kimi_code",
         ProviderType::Fake => "fake",
     }
 }

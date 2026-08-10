@@ -70,6 +70,11 @@ impl ProviderAdapter for RoutingProviderAdapter {
                 String::new(),
                 String::new(),
             )),
+            ProviderType::KimiCode => Err(ProviderAdapterError::incompatible_output(
+                "task run routing provider does not schedule kimi_code",
+                String::new(),
+                String::new(),
+            )),
             ProviderType::Fake => Err(ProviderAdapterError::incompatible_output(
                 "task run routing provider does not execute fake provider inputs",
                 String::new(),

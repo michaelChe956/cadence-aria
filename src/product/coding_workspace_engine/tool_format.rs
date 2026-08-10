@@ -108,6 +108,7 @@ pub(crate) fn provider_type_for_name(provider: &ProviderName) -> ProviderType {
         ProviderName::ClaudeCode => ProviderType::ClaudeCode,
         ProviderName::Codex => ProviderType::Codex,
         ProviderName::Pi => ProviderType::Pi,
+        ProviderName::KimiCode => ProviderType::KimiCode,
         ProviderName::Fake => ProviderType::Fake,
     }
 }
@@ -121,5 +122,13 @@ mod tests {
     #[test]
     fn provider_type_for_name_maps_pi() {
         assert_eq!(provider_type_for_name(&ProviderName::Pi), ProviderType::Pi);
+    }
+
+    #[test]
+    fn provider_type_for_name_maps_kimi_code() {
+        assert_eq!(
+            provider_type_for_name(&ProviderName::KimiCode),
+            ProviderType::KimiCode
+        );
     }
 }

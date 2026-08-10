@@ -74,7 +74,9 @@ export function CreateRepositoryDialog({
   const providerOptions = getProviderOptions(availabilitySnapshot);
   const visibleProviderOptions = providerOptions.filter(
     (option) =>
-      option.value !== "pi" && // 仓库初始化仅支持 Claude Code（Decision 1：不扩大初始化范围）
+      // capability policy: 仅 Claude Code 可初始化仓库，Kimi 同 Pi 不参与
+      option.value !== "pi" &&
+      option.value !== "kimi_code" &&
       (option.visible || option.value === providerMode),
   );
   const unavailableProviderOptions = visibleProviderOptions.filter(
