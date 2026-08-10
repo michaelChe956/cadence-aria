@@ -10,6 +10,7 @@ use crate::cross_cutting::bounded_command_runner::{
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::image_client::ImageClient;
+use crate::cross_cutting::kimi_code_provider::KimiCodeProvider;
 use crate::cross_cutting::pi_provider::PiProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
@@ -359,6 +360,12 @@ fn default_provider_registry(
         );
         registry.register(
             ProviderName::Pi,
+            Arc::new(TestControlledFakeStreamingProvider::new(
+                test_controls.clone(),
+            )),
+        );
+        registry.register(
+            ProviderName::KimiCode,
             Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
         );
         return Arc::new(registry);
@@ -381,6 +388,11 @@ fn default_provider_registry(
     registry.register_gated(
         ProviderName::Pi,
         Arc::new(PiProvider::new(PathBuf::from("pi"))),
+        provider_gate.clone(),
+    );
+    registry.register_gated(
+        ProviderName::KimiCode,
+        Arc::new(KimiCodeProvider::new(PathBuf::from("kimi"))),
         provider_gate,
     );
     Arc::new(registry)

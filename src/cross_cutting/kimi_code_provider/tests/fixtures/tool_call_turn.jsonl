@@ -1,0 +1,6 @@
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":{},"permissionMode":"auto"}}
+{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session_tool_fixture","configOptions":[],"modes":{"currentModeId":"auto","availableModes":[]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session_tool_fixture","update":{"sessionUpdate":"tool_call","toolCallId":"tool_fixture_1","title":"Bash","kind":"execute","status":"pending","rawInput":"{\"command\":\"pwd\"}"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session_tool_fixture","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool_fixture_1","status":"in_progress","content":[{"type":"content","content":{"type":"text","text":"/"}}]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session_tool_fixture","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool_fixture_1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"/tmp\n"}}]}}}
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}
