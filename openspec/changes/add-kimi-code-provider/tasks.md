@@ -8,6 +8,7 @@
 
 - [ ] 2.1 新增 `src/cross_cutting/kimi_code_provider/`（mod.rs/parse.rs/session.rs/tests.rs），冻结 `.pi-subagents/spike/acp/` 的 0.34.0 真实 ACP 往返为 `tests/fixtures/*.jsonl`。实现 `KimiCodeProvider` + `impl StreamingProviderAdapter`：复用 `JsonRpcPeer`，spawn `kimi acp`（cwd = 代码库目录），驱动 initialize → session/new → session/prompt 状态机，终态由 `session/prompt` result `stopReason` 判定（end_turn→Completed，其他/error→Failed）。覆盖：文本流（AgentMessageChunk 计入 full_output，AgentThoughtChunk 不计入）、工具调用（tool_call/tool_call_update）、退出码（0/1/75）、Abort（进程终止+不双发终态）、异常退出→Failed、版本<0.34.0 启动门禁报错。不变量：Completed/Failed 一次且仅一次；provider_session_id 仅 session/new 后上报。注册到生产/测试 `default_provider_registry()`。
 - [ ] 2.2 实现 Supervised 审批往返：`session/new` 的 `permissionMode` 按 Aria 模式映射（Auto→`auto`，Supervised→`default`）；收到 `session/request_permission` 映射为既有 `PermissionRequest`（经 ApprovalBridge）；用户响应映射回 ACP result（approve_once/allow_always/reject）；reject 后工具不执行且会话继续。Auto 模式不发审批。回归测试：approve 完整往返、reject 后会话继续、Auto 不发 request_permission。
+- [ ] 2.3 文本提问 + end_turn 续接（spike 实证 ACP 无独立提问方法）：断言 Kimi 遇歧义时以 `agent_message_chunk` 正文提问并以 `end_turn` 收尾（一次正常 Completed，full_output 含提问正文），**不产生 ChoiceRequest**，不加载 aria-ask.ts；断言同一 role 多轮交互复用同一 Kimi sessionId（用户下一轮回复时上下文完整，不丢上下文）；断言 yolo 模式下同样 end_turn 停下、tool_call=0（不藏提问）。
 
 ## 3. Workspace 角色配置与执行
 

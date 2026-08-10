@@ -137,10 +137,17 @@ ProviderPermissionMode::Supervised → session/new permissionMode: "default"
 ```
 Auto 模式不发 request_permission；Supervised 模式正常走 ApprovalBridge。
 
-### 3.4a 提问能力边界（spike 实证）
-Phase 0 Spike 在 yolo 模式下给 Kimi 故意歧义、要求提问的任务，实测：ACP 协议下 Kimi **只有** `session/request_permission`（工具审批），**无** 独立的开方式提问/选择方法（无 question/choice/input 事件）；agent 遇到需求歧义时以纯文本提问（`agent_message_chunk`）。因此：
+### 3.4a 提问能力边界（spike 实证，跨两种模式验证）
+
+Phase 0 Spike 分别在 **yolo** 与 **default（Supervised 等价）** 两种模式下，给 Kimi 故意歧义、强制要求提问的任务，实测结论一致：
+
+- ACP 协议下 Kimi **只有** `session/request_permission`（工具审批），**无** 独立的开方式提问/选择方法（无 question/choice/input 事件）。
+- 遇到需求歧义时，Kimi 把问题写进 `agent_message_chunk`（正文），并以 `stopReason: "end_turn"` **终止当前轮**，等用户下一轮 `session/prompt`（同一 sessionId）再继续——**两种模式下均如此，yolo 不会因为全自动而「跳过/藏掉」提问**。实测 yolo 模式下 tool_call=0、6 秒后 end_turn 停下，正文写明“在你回答前不会做任何操作”。
+
+因此：
 - Kimi **不复用** Pi 的 `aria-ask.ts` 扩展（那是 Pi 私有 RPC 的产物）。
-- Kimi **不产生** `ProviderEvent::ChoiceRequest`；需求歧义走文本 fallback（agent_message 正文提问）。
+- Kimi **不产生** `ProviderEvent::ChoiceRequest`；需求歧义走**文本提问 + end_turn 收尾**——Aria 侧表现为一次正常 `Completed`（full_output 含提问正文），用户在下一轮以新 prompt 回复，Aria 用同一 Kimi sessionId 续接。这不是「藏掉问题」，而是以 `end_turn` 明确把控制权交回用户。
+- **会话续接前提**：Aria 持有 Kimi sessionId，用户下一轮提问时复用同一 session（`session/load` 或新建 session 时携带上下文）；若 Aria 侧不复用 session，则每轮提问独立、上下文丢失——实施时须保证同一 role 的多轮交互复用同一 sessionId。
 
 ### 3.5 终态判定（spike 实证）
 `session/prompt` 的 id 响应即终态：result `{stopReason:"end_turn"}` → Completed；result error / 非 end_turn → Failed；进程异常退出（未收到 prompt 响应）→ Failed。退出码：0 成功 / 1 不可重试 / 75 可重试（映射到 Failed 文案区分）。

@@ -97,16 +97,24 @@
 - **THEN** Provider 选项不包含 Kimi
 - **AND THEN** 过滤逻辑以 capability policy 注释说明
 
-### Requirement: Kimi 不产生需求歧义结构化提问
+### Requirement: Kimi 不产生需求歧义结构化提问（以文本提问 + end_turn 收尾）
 
-Phase 0 Spike 已实证：ACP 协议下 Kimi 仅有工具审批（`session/request_permission`），无独立的开方式提问/选择方法。因此系统 SHALL 不为 Kimi 产生 `ChoiceRequest` 事件；Kimi 遇到需求歧义时以纯文本提问（`agent_message_chunk`），Aria 以文本 fallback 呈现。系统 SHALL 不为 Kimi 复用 Pi 的 `aria-ask.ts` 提问扩展。
+Phase 0 Spike 已跨 yolo 与 default（Supervised 等价）两种模式实证：ACP 协议下 Kimi 仅有工具审批（`session/request_permission`），无独立的开方式提问/选择方法。因此系统 SHALL 不为 Kimi 产生 `ChoiceRequest` 事件；Kimi 遇到需求歧义时把问题写进 `agent_message_chunk`（正文），并以 `end_turn` 终止当前轮，把控制权交回用户。系统 SHALL 不为 Kimi 复用 Pi 的 `aria-ask.ts` 提问扩展。两种模式下行为一致——yolo 模式不会因全自动而跳过或藏掉提问（实测 yolo 模式下 tool_call=0、end_turn 停下、正文明示“回答前不做任何操作”）。
 
-#### Scenario: Kimi 遇到歧义时以文本提问
+#### Scenario: Kimi 遇到歧义时以文本提问并停下等用户
 
 - **WHEN** Kimi 在生成角色产物时发现需要用户决策的歧义
 - **THEN** Kimi 以纯文本（`agent_message_chunk`）提问
+- **AND THEN** 当前轮以 `stopReason: end_turn` 结束（系统上报一次正常 Completed，full_output 含提问正文）
 - **AND THEN** 系统不产生 `ChoiceRequest` 事件
 - **AND THEN** 不加载或调用任何 `aria-ask.ts` 扩展
+- **AND THEN** 用户下一轮回复时，系统复用同一 Kimi sessionId 续接，上下文完整
+
+#### Scenario: yolo 模式不藏掉提问
+
+- **WHEN** Kimi 以 Auto（yolo）模式运行且遇到需要用户决策的歧义
+- **THEN** Kimi 不自动跳过提问、不自顾执行
+- **AND THEN** Kimi 以文本提问并以 end_turn 停下，等用户下一轮输入
 
 ### Requirement: image-create 支持 Kimi
 

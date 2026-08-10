@@ -14,7 +14,7 @@ Kimi Code CLI 通过 `kimi acp` 子命令提供基于 stdin/stdout 的 ACP（Age
 - 仓库初始化仅 Claude Code 可用，Kimi（同 Pi）被显式过滤，不展示或不允许用于初始化。
 - Task Runner（task-run）及其 CLI/API、专用协议、旧的 Fake Provider Workspace Runner 的可调度 Provider 范围与运行行为不变；为满足流式链路共享类型约束，`ProviderType` 与 `ProviderName` 增加 `KimiCode` 变体，但 Kimi 在 task-run 所有入口被显式拒绝，返回稳定错误（不使用 `unreachable!`，不引入新的 panic 风险）。
 - structured-output repair / review repair 第一阶段排除 Kimi（不实证 Kimi resume 稳定性，留作后续 enhancement）。
-- Kimi 第一阶段**不支持需求歧义结构化提问**（`ChoiceRequest` 等价物）。Phase 0 Spike 已验证：ACP 协议下 Kimi 仅有工具审批（`session/request_permission`），无独立的开方式提问/选择方法；agent 遇到歧义时以纯文本提问（`agent_message_chunk`）。因此 Kimi 不复用 Pi 的 `aria-ask.ts` 提问扩展，需求歧义走文本 fallback。
+- Kimi 第一阶段**不支持需求歧义结构化提问**（`ChoiceRequest` 等价物）。Phase 0 Spike 跨 yolo 与 default 两种模式验证：ACP 协议下 Kimi 仅有工具审批（`session/request_permission`），无独立的开方式提问/选择方法；agent 遇到歧义时把问题写进正文（`agent_message_chunk`）并以 `end_turn` 收尾，把控制权交回用户——两种模式下均如此，yolo 不会因全自动藏掉提问。因此 Kimi 不复用 Pi 的 `aria-ask.ts` 提问扩展，需求歧义走「文本提问 + end_turn + 同 sessionId 下一轮续接」。
 
 ## Capabilities
 
