@@ -1,7 +1,7 @@
 use super::*;
 
 mod authoring;
-mod compile_support;
+pub(crate) mod compile_support;
 mod decisions;
 mod runs;
 

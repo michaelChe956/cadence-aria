@@ -41,6 +41,8 @@ struct PlanningResumeFixture {
     temp: tempfile::TempDir,
     paths: ProductAppPaths,
     api_member_id: LogicalRepositoryId,
+    physical_repository_id: Option<String>,
+    api_checkout_id: Option<RepositoryCheckoutId>,
 }
 
 impl PlanningResumeFixture {
@@ -50,6 +52,8 @@ impl PlanningResumeFixture {
             paths: ProductAppPaths::new(temp.path()),
             temp,
             api_member_id: LogicalRepositoryId(API_MEMBER_UUID),
+            physical_repository_id: None,
+            api_checkout_id: None,
         }
     }
 
@@ -61,22 +65,27 @@ impl PlanningResumeFixture {
         PlanningContextResolver::new(self.paths.clone())
     }
 
-    /// 写入单成员 manifest + selection + active aggregate index + policy bootstrap，
-    /// 与 planning_context_resolver 测试 fixture 同构，覆盖 resolver 的所有必读依赖。
+    /// 写入单成员 selection + active aggregate index；物理仓库存在时复用迁移生成的
+    /// 权威 manifest/member/checkout，纯 resolver fixture 则写入原有最小权威记录。
     fn write_logical_codebase(&self) {
         let store = LogicalCodebaseStore::new(self.paths.clone());
-        let manifest = LogicalCodebaseManifest::new(
-            "project_0001",
-            self.aggregate_root(),
-            vec![self.api_member_id],
-        );
-        store.save_manifest("project_0001", &manifest).unwrap();
-        store
-            .save_member("project_0001", &self.member_record())
-            .unwrap();
-        store
-            .save_checkout("project_0001", &self.checkout_record())
-            .unwrap();
+        let manifest = if self.physical_repository_id.is_some() {
+            store.load_manifest("project_0001").unwrap().unwrap()
+        } else {
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.aggregate_root(),
+                vec![self.api_member_id],
+            );
+            store.save_manifest("project_0001", &manifest).unwrap();
+            store
+                .save_member("project_0001", &self.member_record())
+                .unwrap();
+            store
+                .save_checkout("project_0001", &self.checkout_record())
+                .unwrap();
+            manifest
+        };
 
         let selection = IssueCodebaseSelection::explicit(
             "project_0001",
@@ -124,12 +133,41 @@ impl PlanningResumeFixture {
         index_store.replace_active("project_0001", index).unwrap();
     }
 
+    fn update_api_member_identity_from_authority(&mut self) {
+        let store = LogicalCodebaseStore::new(self.paths.clone());
+        let manifest = store.load_manifest("project_0001").unwrap().unwrap();
+        let [api_member_id] = manifest.member_ids.as_slice() else {
+            panic!("expected exactly one migrated logical member");
+        };
+        let member = store
+            .load_member("project_0001", *api_member_id)
+            .unwrap()
+            .unwrap();
+        let [checkout_id] = member.checkout_ids.as_slice() else {
+            panic!("expected exactly one migrated repository checkout");
+        };
+        self.api_member_id = *api_member_id;
+        self.physical_repository_id = Some(member.physical_repository_id);
+        self.api_checkout_id = Some(*checkout_id);
+    }
+
+    fn physical_repository_id(&self) -> &str {
+        self.physical_repository_id
+            .as_deref()
+            .unwrap_or("repository_api")
+    }
+
+    fn api_checkout_id(&self) -> RepositoryCheckoutId {
+        self.api_checkout_id
+            .unwrap_or(RepositoryCheckoutId(Uuid::nil()))
+    }
+
     fn member_record(&self) -> CodebaseMemberRecord {
         let now = "2026-08-10T00:00:00Z".to_string();
         let checkout_path = self.aggregate_root().join("api");
         CodebaseMemberRecord {
             logical_repository_id: self.api_member_id,
-            physical_repository_id: "repository_api".to_string(),
+            physical_repository_id: self.physical_repository_id().to_string(),
             alias: "api".to_string(),
             role: "service".to_string(),
             ordinal: 1,
@@ -143,7 +181,7 @@ impl PlanningResumeFixture {
             owner: None,
             tags: Vec::new(),
             default_ref: None,
-            checkout_ids: vec![RepositoryCheckoutId(Uuid::nil())],
+            checkout_ids: vec![self.api_checkout_id()],
             status: MemberStatus::Active,
             created_at: now.clone(),
             updated_at: now,
@@ -153,9 +191,9 @@ impl PlanningResumeFixture {
     fn checkout_record(&self) -> RepositoryCheckoutRecord {
         let now = "2026-08-10T00:00:00Z".to_string();
         RepositoryCheckoutRecord {
-            checkout_id: RepositoryCheckoutId(Uuid::nil()),
+            checkout_id: self.api_checkout_id(),
             logical_repository_id: self.api_member_id,
-            physical_repository_id: "repository_api".to_string(),
+            physical_repository_id: self.physical_repository_id().to_string(),
             kind: CheckoutKind::Main,
             canonical_path: self.aggregate_root().join("api"),
             checkout_path_hash: "sha256:checkout".to_string(),
@@ -383,12 +421,21 @@ async fn stale_context_rebuild_starts_new_outline_run_with_rebuilt_context() {
         WorkspaceStage as WsWorkspaceStage,
     };
 
-    let fixture = PlanningResumeFixture::new();
+    let mut fixture = PlanningResumeFixture::new();
     let app_paths = fixture.paths.clone();
     // 物理仓库 + issue：必须在 write_logical_codebase 之前创建，否则 selection 会先创建
     // `issues/issue_0001/` 目录，导致 IssueStore 自动 id 变为 issue_0002（而 session 的
     // issue_id 固定为 issue_0001）。
     let repo_dir = tempfile::tempdir().unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repo_dir.path())
+            .status()
+            .expect("初始化测试物理仓库")
+            .success(),
+        "测试物理仓库初始化失败"
+    );
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -399,6 +446,13 @@ async fn stale_context_rebuild_starts_new_outline_run_with_rebuilt_context() {
             idempotency_key: "planning-resume-rebuild-repository".to_string(),
         })
         .unwrap();
+    crate::product::repository_store::RepositoryStore::with_logical_codebase_feature(
+        app_paths.clone(),
+        crate::product::logical_codebase::LogicalCodebaseFeature::enabled(),
+    )
+    .ensure_identity_schema("project_0001")
+    .unwrap();
+    fixture.update_api_member_identity_from_authority();
     let issue = IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),

@@ -10,6 +10,7 @@ use crate::product::logical_codebase::{
 use crate::product::models::{RepositoryRecord, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
+use crate::product::workspace_engine::draft_batch::compile_support::resolve_logical_work_item_plan_repository_targets;
 
 pub fn workspace_repository_for_session(
     app_paths: &ProductAppPaths,
@@ -103,19 +104,10 @@ fn workspace_repository(
                     manifest,
                     selection,
                 } => {
-                    let work_items =
-                        lifecycle.list_work_items(&session.project_id, &session.issue_id)?;
-                    let target_ids = unique_ids(
-                        plan.work_item_ids
-                            .iter()
-                            .filter_map(|work_item_id| {
-                                work_items
-                                    .iter()
-                                    .find(|work_item| &work_item.id == work_item_id)
-                                    .and_then(|work_item| work_item.target_repository_id)
-                            })
-                            .collect(),
-                    );
+                    let targets =
+                        resolve_logical_work_item_plan_repository_targets(lifecycle, &plan)
+                            .map_err(|reason| routing_error_for_target_error(&reason))?;
+                    let target_ids = targets.unwrap_or_default().keys().copied().collect();
                     let logical_id = unique_target(target_ids, &plan.id)?;
                     resolve_selected_logical_repository(
                         app_paths,
@@ -256,6 +248,17 @@ fn unique_target(
             format!("{entity_id} has multiple logical repository targets"),
         )),
     }
+}
+
+fn routing_error_for_target_error(reason: &str) -> ProductStoreError {
+    let code = if reason.contains("target_member_removed") || reason.contains("invalid members") {
+        RepositoryRoutingErrorCode::Inconsistent
+    } else if reason.contains("cannot resolve target") {
+        RepositoryRoutingErrorCode::TargetUnknown
+    } else {
+        RepositoryRoutingErrorCode::TargetMissing
+    };
+    routing_error(code, reason)
 }
 
 fn routing_error(code: RepositoryRoutingErrorCode, reason: impl Into<String>) -> ProductStoreError {

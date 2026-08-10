@@ -77,7 +77,7 @@ mod compile;
 mod compile_parse;
 mod controls;
 mod decisions;
-mod draft_batch;
+pub(crate) mod draft_batch;
 mod human_presentation;
 mod interrupted_run_recovery;
 mod lifecycle;
