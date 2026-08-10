@@ -272,6 +272,40 @@ fn planning_resume_decision_is_none_for_legacy_single_repo_path() {
 }
 
 #[test]
+fn planning_resume_fail_closed_when_manifest_without_selection() {
+    // 有 manifest、无 selection → 与 compile 一致 fail-closed（当前返回 Ok(None)）。
+    let root = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    LogicalCodebaseStore::new(paths.clone())
+        .save_manifest(
+            "project_0001",
+            &LogicalCodebaseManifest::new(
+                "project_0001",
+                paths.root().join("aggregate-root"),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+
+    let error = planning_resume_decision(&paths, "project_0001", "issue_0001").unwrap_err();
+    assert!(error.contains("repository_routing_target_missing"));
+    assert!(error.contains("work_item_target_missing"));
+}
+
+#[test]
+fn planning_resume_legacy_when_none_none() {
+    // 无 manifest、无 selection → Ok(None)，传统单仓不受影响。
+    let root = tempfile::tempdir().unwrap();
+    let result = planning_resume_decision(
+        &ProductAppPaths::new(root.path().join(".aria")),
+        "project_0001",
+        "issue_0001",
+    );
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none());
+}
+
+#[test]
 fn planning_resume_decision_reuses_context_on_matching_fingerprint() {
     let fixture = PlanningResumeFixture::new();
     fixture.write_logical_codebase();

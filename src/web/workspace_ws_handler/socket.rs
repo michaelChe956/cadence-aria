@@ -1,6 +1,6 @@
 use super::*;
 use crate::product::logical_codebase::{
-    IssueCodebaseSelectionStore, LogicalCodebaseStore, PlanningContextResolver, ResumeDecision,
+    PlanningContextResolver, RepositoryRouting, RepositoryRoutingErrorCode, ResumeDecision,
 };
 
 pub async fn workspace_ws(
@@ -61,7 +61,9 @@ pub(crate) fn spawn_idle_timeout_task(
 /// 逻辑代码库分支的规划会话 resume 校验入口（Task 11 / REQ-PLN-03）。
 ///
 /// 在 provider 启动前校验 planning snapshot 指纹：
-/// - 传统单仓路径（无 logical manifest 或 issue 无 selection）→ `Ok(None)`，不受影响。
+/// - 传统单仓路径（无 logical manifest 且 issue 无 selection）→ `Ok(None)`，不受影响。
+/// - 逻辑代码库路径（manifest 与 selection 成对）→ 校验 planning snapshot 指纹。
+/// - manifest 与 selection 不成对 → fail-closed，拒绝恢复。
 /// - 指纹一致 → `SameContext`：沿用现有 session 审计与 prompt 上下文。
 /// - 指纹漂移 → `StaleContext`：不得沿用可能过时/越权的 prompt/cwd/policy，调用方应
 ///   启动新会话并重建上下文（重新 build）。
@@ -70,22 +72,35 @@ pub(crate) fn planning_resume_decision(
     project_id: &str,
     issue_id: &str,
 ) -> Result<Option<ResumeDecision>, String> {
-    let logical = LogicalCodebaseStore::new(app_paths.clone());
-    let selection_store = IssueCodebaseSelectionStore::new(app_paths.clone());
-    let manifest = logical
-        .load_manifest(project_id)
-        .map_err(|error| format!("load logical codebase manifest failed: {error}"))?;
-    let selection = selection_store
-        .load(project_id, issue_id)
-        .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
-    // 传统单仓路径：无 manifest 或 issue 无 selection 时不校验，行为完全不变。
-    if manifest.is_none() || selection.is_none() {
-        return Ok(None);
+    let routing = RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
+        .map_err(|error| format!("load repository routing failed: {error}"))?;
+    match routing {
+        RepositoryRouting::Legacy { .. } => Ok(None),
+        RepositoryRouting::Logical { .. } => {
+            let decision = PlanningContextResolver::new(app_paths.clone())
+                .resume(project_id, issue_id)
+                .map_err(|error| format!("planning context resume failed: {error}"))?;
+            Ok(Some(decision))
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            Err(planning_resume_routing_error(code, &reason))
+        }
     }
-    let decision = PlanningContextResolver::new(app_paths.clone())
-        .resume(project_id, issue_id)
-        .map_err(|error| format!("planning context resume failed: {error}"))?;
-    Ok(Some(decision))
+}
+
+/// 将 repository routing 的 fail-closed 分类转换为稳定错误码，保持 resume 与 compile
+/// 对不成对 manifest/selection 状态的拒绝语义一致。
+fn planning_resume_routing_error(code: RepositoryRoutingErrorCode, reason: &str) -> String {
+    let stable_code = match code {
+        RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
+        RepositoryRoutingErrorCode::OrphanedSelection
+        | RepositoryRoutingErrorCode::Inconsistent
+        | RepositoryRoutingErrorCode::MemberRemoved
+        | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
+        RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
+        RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
+    };
+    format!("{stable_code}: {reason}")
 }
 
 /// 依据 planning resume 决策决定实际启动的 run kind（B3 修复）。
