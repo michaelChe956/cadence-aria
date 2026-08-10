@@ -127,6 +127,12 @@ where
     pub async fn next_incoming(&self) -> Option<Value> {
         self.incoming_rx.lock().await.recv().await
     }
+
+    /// Returns an already-buffered notification without waiting. This lets consumers
+    /// drain notifications that arrived before a terminal JSON-RPC response.
+    pub async fn try_next_incoming(&self) -> Option<Value> {
+        self.incoming_rx.lock().await.try_recv().ok()
+    }
 }
 
 async fn read_json_rpc_lines<R>(

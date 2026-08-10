@@ -106,6 +106,20 @@ impl KimiCodeProvider {
     }
 }
 
+pub(crate) fn format_kimi_exit_failure(
+    details: String,
+    status: Option<std::process::ExitStatus>,
+) -> String {
+    let suffix = match status.and_then(|status| status.code()) {
+        Some(0) => "Kimi ACP process exited with code 0 before terminal prompt result",
+        Some(1) => "Kimi ACP process exited with code 1 (non-retryable failure)",
+        Some(75) => "Kimi ACP process exited with code 75 (temporary failure)",
+        Some(code) => return format!("{details}; Kimi ACP process exited with code {code}"),
+        None => return details,
+    };
+    format!("{details}; {suffix}")
+}
+
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for KimiCodeProvider {
     fn supports_tool_calls(&self) -> bool {
@@ -152,14 +166,32 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                 cancel.clone(),
             )
             .await;
-            if result.is_err() {
-                child.terminate().await;
+            let status = if result.is_err() {
+                match tokio::time::timeout(std::time::Duration::from_millis(100), child.wait())
+                    .await
+                {
+                    Ok(Ok(status)) => Some(status),
+                    Ok(Err(wait_error)) => {
+                        tracing::debug!(target: "kimi_code_provider", %wait_error, "failed to reap Kimi ACP process");
+                        None
+                    }
+                    Err(_) => {
+                        child.terminate().await;
+                        None
+                    }
+                }
             } else {
-                let _ = child.wait().await;
-            }
+                child.wait().await.ok()
+            };
             let _ = stderr_task.await;
-            if let Err(error) = result {
-                tracing::debug!(target: "kimi_code_provider", details = %error.details, "Kimi provider session ended");
+            if let Err(error) = result
+                && error.details != session::KIMI_SESSION_ABORTED
+            {
+                let message = format_kimi_exit_failure(error.details, status);
+                let _ = event_tx
+                    .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
+                    .await;
+                let _ = event_tx.send(ProviderEvent::Failed { message }).await;
             }
         });
         Ok(ProviderSession {

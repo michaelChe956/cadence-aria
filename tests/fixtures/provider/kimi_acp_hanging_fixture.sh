@@ -13,9 +13,14 @@ while IFS= read -r line; do
   elif [[ "$line" == *'"session/new"'* ]]; then
     echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-2},\"result\":{\"sessionId\":\"hanging_kimi_fixture\"}}"
   elif [[ "$line" == *'"session/prompt"'* ]]; then
-    sleep 30
-  elif [[ "$line" == *'"session/cancel"'* ]]; then
-    echo 'Kimi cancellation received' >&2
-    exit 0
+    # Keep stdin readable so the test can prove ACP session/cancel arrives before
+    # ProcessManager's mandatory termination fallback.
+    if IFS= read -r cancel_line; then
+      if [[ "$cancel_line" == *'"session/cancel"'* ]]; then
+        [[ -z "${KIMI_CANCEL_MARKER:-}" ]] || : > "$KIMI_CANCEL_MARKER"
+        echo 'Kimi cancellation received' >&2
+        sleep 30
+      fi
+    fi
   fi
 done
