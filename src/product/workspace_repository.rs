@@ -1,7 +1,12 @@
+use std::collections::BTreeSet;
+
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::logical_codebase::{
+    LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode, SelectionPolicy,
+};
 use crate::product::models::{RepositoryRecord, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
@@ -11,22 +16,16 @@ pub fn workspace_repository_for_session(
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
 ) -> Result<RepositoryRecord, ProductStoreError> {
-    let repository_id = workspace_repository_id(app_paths, lifecycle, session)?;
-    RepositoryStore::new(app_paths.clone())
-        .list(&session.project_id)?
-        .into_iter()
-        .find(|repository| repository.id == repository_id)
-        .ok_or(ProductStoreError::NotFound {
-            kind: "repository",
-            id: repository_id,
-        })
+    workspace_repository(app_paths, lifecycle, session)
 }
 
-fn workspace_repository_id(
+fn workspace_repository(
     app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
-) -> Result<String, ProductStoreError> {
+) -> Result<RepositoryRecord, ProductStoreError> {
+    let routing =
+        RepositoryRouting::load_for_issue(app_paths, &session.project_id, &session.issue_id)?;
     match session.workspace_type {
         WorkspaceType::Story => {
             let story = lifecycle
@@ -37,77 +36,278 @@ fn workspace_repository_id(
                     kind: "story_spec",
                     id: session.entity_id.clone(),
                 })?;
-            // Prefer the new logical identity when backfilled (logical codebase feature
-            // enabled); otherwise fall back to the legacy physical repository_id.
-            story
-                .focus_repository_id
-                .and_then(|logical_id| {
-                    resolve_logical_to_physical(app_paths, &session.project_id, logical_id)
-                })
-                .or(story.repository_id.into())
-                .ok_or_else(|| ProductStoreError::NotFound {
-                    kind: "repository",
-                    id: format!("story_spec:{}:repository_id", session.entity_id),
-                })
+            match routing {
+                RepositoryRouting::Legacy { .. } => resolve_legacy_physical_repository(
+                    app_paths,
+                    &session.project_id,
+                    &story.repository_id,
+                ),
+                RepositoryRouting::Logical {
+                    manifest,
+                    selection,
+                } => {
+                    let logical_id = story.focus_repository_id.ok_or_else(|| {
+                        routing_error(
+                            RepositoryRoutingErrorCode::TargetMissing,
+                            format!("story {} has no focus repository", story.id),
+                        )
+                    })?;
+                    resolve_selected_logical_repository(
+                        app_paths,
+                        &session.project_id,
+                        logical_id,
+                        &manifest,
+                        &selection,
+                    )
+                }
+                RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
+            }
         }
-        WorkspaceType::Design | WorkspaceType::WorkItemPlan => {
-            issue_repository_id(app_paths, session)
+        WorkspaceType::Design => {
+            let design = lifecycle
+                .list_design_specs(&session.project_id, &session.issue_id)?
+                .into_iter()
+                .find(|design| design.id == session.entity_id)
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "design_spec",
+                    id: session.entity_id.clone(),
+                })?;
+            match routing {
+                RepositoryRouting::Legacy { .. } => resolve_issue_repository(app_paths, session),
+                RepositoryRouting::Logical {
+                    manifest,
+                    selection,
+                } => {
+                    let target_ids = unique_ids(design.involved_repository_ids);
+                    let logical_id = unique_target(target_ids, &design.id)?;
+                    resolve_selected_logical_repository(
+                        app_paths,
+                        &session.project_id,
+                        logical_id,
+                        &manifest,
+                        &selection,
+                    )
+                }
+                RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
+            }
+        }
+        WorkspaceType::WorkItemPlan => {
+            let plan = lifecycle.get_issue_work_item_plan(
+                &session.project_id,
+                &session.issue_id,
+                &session.entity_id,
+            )?;
+            match routing {
+                RepositoryRouting::Legacy { .. } => resolve_issue_repository(app_paths, session),
+                RepositoryRouting::Logical {
+                    manifest,
+                    selection,
+                } => {
+                    let work_items =
+                        lifecycle.list_work_items(&session.project_id, &session.issue_id)?;
+                    let target_ids = unique_ids(
+                        plan.work_item_ids
+                            .iter()
+                            .filter_map(|work_item_id| {
+                                work_items
+                                    .iter()
+                                    .find(|work_item| &work_item.id == work_item_id)
+                                    .and_then(|work_item| work_item.target_repository_id)
+                            })
+                            .collect(),
+                    );
+                    let logical_id = unique_target(target_ids, &plan.id)?;
+                    resolve_selected_logical_repository(
+                        app_paths,
+                        &session.project_id,
+                        logical_id,
+                        &manifest,
+                        &selection,
+                    )
+                }
+                RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
+            }
         }
         WorkspaceType::WorkItem => {
             WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
-            lifecycle
+            let work_item = lifecycle
                 .list_work_items(&session.project_id, &session.issue_id)?
                 .into_iter()
                 .find(|work_item| work_item.id == session.entity_id)
-                .and_then(|work_item| {
-                    work_item
-                        .target_repository_id
-                        .and_then(|logical_id| {
-                            resolve_logical_to_physical(app_paths, &session.project_id, logical_id)
-                        })
-                        .or(work_item.repository_id.into())
-                })
-                .or_else(|| issue_repo_id(app_paths, session).ok())
                 .ok_or_else(|| ProductStoreError::NotFound {
-                    kind: "repository",
-                    id: format!("work_item:{}:repository_id", session.entity_id),
-                })
+                    kind: "work_item",
+                    id: session.entity_id.clone(),
+                })?;
+            match routing {
+                RepositoryRouting::Legacy { .. } => resolve_legacy_physical_repository(
+                    app_paths,
+                    &session.project_id,
+                    &work_item.repository_id,
+                ),
+                RepositoryRouting::Logical {
+                    manifest,
+                    selection,
+                } => {
+                    let logical_id = work_item.target_repository_id.ok_or_else(|| {
+                        routing_error(
+                            RepositoryRoutingErrorCode::TargetMissing,
+                            format!("work item {} has no target repository", work_item.id),
+                        )
+                    })?;
+                    resolve_selected_logical_repository(
+                        app_paths,
+                        &session.project_id,
+                        logical_id,
+                        &manifest,
+                        &selection,
+                    )
+                }
+                RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
+            }
         }
     }
 }
 
-fn issue_repository_id(
+fn resolve_selected_logical_repository(
     app_paths: &ProductAppPaths,
-    session: &WorkspaceSessionRecord,
-) -> Result<String, ProductStoreError> {
-    issue_repo_id(app_paths, session)
+    project_id: &str,
+    logical_id: LogicalRepositoryId,
+    manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
+    selection: &crate::product::logical_codebase::IssueCodebaseSelection,
+) -> Result<RepositoryRecord, ProductStoreError> {
+    if selection.invalidation.is_some() {
+        return Err(routing_error(
+            RepositoryRoutingErrorCode::SelectionInvalidated,
+            "issue codebase selection has been invalidated",
+        ));
+    }
+    selection.validate_focus_subset().map_err(|error| {
+        routing_error(
+            RepositoryRoutingErrorCode::Inconsistent,
+            format!("invalid issue codebase selection: {error}"),
+        )
+    })?;
+    let selected_ids: BTreeSet<LogicalRepositoryId> = match selection.selection_policy {
+        SelectionPolicy::AllMembers => manifest.member_ids.iter().copied().collect(),
+        SelectionPolicy::Explicit => selection.resolve_effective_members().into_iter().collect(),
+    };
+    if !selected_ids.contains(&logical_id) {
+        return Err(routing_error(
+            RepositoryRoutingErrorCode::TargetUnknown,
+            format!("logical repository target {logical_id:?} is not in the effective selection"),
+        ));
+    }
+    RepositoryStore::new(app_paths.clone())
+        .resolve_logical_repository_strict(project_id, logical_id)
+        .map(|(_, _, repository)| repository)
 }
 
-fn issue_repo_id(
+fn resolve_legacy_physical_repository(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    physical_repository_id: &str,
+) -> Result<RepositoryRecord, ProductStoreError> {
+    let store = RepositoryStore::new(app_paths.clone());
+    if let Ok((_, _, repository)) =
+        store.resolve_legacy_physical_repository_if_dual(project_id, physical_repository_id)
+    {
+        return Ok(repository);
+    }
+    store
+        .list(project_id)?
+        .into_iter()
+        .find(|repository| repository.id == physical_repository_id)
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "repository",
+            id: physical_repository_id.to_string(),
+        })
+}
+
+fn resolve_issue_repository(
     app_paths: &ProductAppPaths,
     session: &WorkspaceSessionRecord,
-) -> Result<String, ProductStoreError> {
-    IssueStore::new(app_paths.clone())
+) -> Result<RepositoryRecord, ProductStoreError> {
+    let physical_repository_id = IssueStore::new(app_paths.clone())
         .get(&session.project_id, &session.issue_id)?
         .repo_id
         .ok_or_else(|| ProductStoreError::NotFound {
             kind: "repository",
             id: format!("issue:{}:repo_id", session.issue_id),
-        })
+        })?;
+    resolve_legacy_physical_repository(app_paths, &session.project_id, &physical_repository_id)
 }
 
-/// Resolves a logical repository identity to its current physical repository ID
-/// via the dual-read authority. Returns None when the logical identity cannot
-/// be resolved (e.g. feature disabled or migration not yet backfilled), letting
-/// callers fall back to the legacy physical ID.
-fn resolve_logical_to_physical(
-    app_paths: &ProductAppPaths,
-    project_id: &str,
-    logical_id: crate::product::logical_codebase::LogicalRepositoryId,
-) -> Option<String> {
-    let store = RepositoryStore::new(app_paths.clone());
-    store
-        .resolve_logical_repository(project_id, logical_id)
-        .ok()
-        .map(|(_, _, repository)| repository.id)
+fn unique_ids(ids: Vec<LogicalRepositoryId>) -> BTreeSet<LogicalRepositoryId> {
+    ids.into_iter().collect()
+}
+
+fn unique_target(
+    target_ids: BTreeSet<LogicalRepositoryId>,
+    entity_id: &str,
+) -> Result<LogicalRepositoryId, ProductStoreError> {
+    match target_ids.len() {
+        0 => Err(routing_error(
+            RepositoryRoutingErrorCode::TargetMissing,
+            format!("{entity_id} has no unique logical repository target"),
+        )),
+        1 => Ok(*target_ids.first().expect("one target exists")),
+        _ => Err(routing_error(
+            RepositoryRoutingErrorCode::TargetAmbiguous,
+            format!("{entity_id} has multiple logical repository targets"),
+        )),
+    }
+}
+
+fn routing_error(code: RepositoryRoutingErrorCode, reason: impl Into<String>) -> ProductStoreError {
+    let stable_code = match code {
+        RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
+        RepositoryRoutingErrorCode::OrphanedSelection
+        | RepositoryRoutingErrorCode::Inconsistent
+        | RepositoryRoutingErrorCode::MemberRemoved
+        | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
+        RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
+        RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
+    };
+    ProductStoreError::InvalidRecord {
+        kind: "repository_routing",
+        reason: format!("{stable_code}: {}", reason.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::logical_codebase::{LogicalCodebaseManifest, LogicalCodebaseStore};
+
+    fn write_manifest_fixture(paths: &ProductAppPaths, project_id: &str) {
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest(
+                project_id,
+                &LogicalCodebaseManifest::new(
+                    project_id,
+                    paths.root().join("aggregate-root"),
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn load_routing_none_none_is_legacy() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let routing =
+            RepositoryRouting::load_for_issue(&paths, "project_0001", "issue_0001").unwrap();
+        assert!(matches!(routing, RepositoryRouting::Legacy { .. }));
+    }
+
+    #[test]
+    fn load_routing_some_none_is_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        write_manifest_fixture(&paths, "project_0001");
+        let routing =
+            RepositoryRouting::load_for_issue(&paths, "project_0001", "issue_0001").unwrap();
+        assert!(matches!(routing, RepositoryRouting::FailClosed { .. }));
+    }
 }
