@@ -39,7 +39,7 @@ src/cross_cutting/kimi_code_provider/
 
 **权限映射**：Kimi `default` ↔ Aria `Supervised`；Kimi `auto`/`yolo` ↔ Aria `Auto`；Kimi `plan` 暂不暴露。`session/new` 的 `permissionMode` 按 Aria 侧选择传入。
 
-**会话**：每个 role 运行 = 一个 `kimi acp` 子进程，cwd = Aria workspace 代码库目录；Kimi 用默认 `~/.kimi-code/`（凭证复用用户全局登录）；Aria 持有 Kimi `sessionId`，第一阶段不实现同 provider 重试。
+**会话与恢复**：每个 role 运行 = 一个 `kimi acp` 子进程，cwd = Aria workspace 代码库目录；Kimi 用默认 `~/.kimi-code/`（凭证复用用户全局登录）；Aria 持有 Kimi `sessionId`（上报为 `provider_session_id`）。**支持 resume**：复用 Aria 既有 `StreamingProviderInput.resume_provider_session_id` 机制，当传入历史 sessionId 时，适配器发 ACP `session/load`（spike 实证 initialize 声明 `loadSession:true` + `sessionCapabilities.resume`）续接同一会话，与 Claude/Codex/Pi 一致。第一阶段不实现同 provider **失败重试**（artifact retry / resume-stall fresh retry）。
 
 **健康检查**：`kimi --version`，解析版本，`< 0.34.0` 报"版本过低"。
 
@@ -109,6 +109,8 @@ struct KimiPermissionRequest { request_id, tool_call_id, options: [AllowOnce|All
 struct KimiPromptResult { stop_reason: StopReason }  // end_turn | ...
 ```
 `function.arguments` 是 JSON 字符串，二次 `serde_json::from_str` 安全解析（失败不 panic）。未知 sessionUpdate 子类型向前兼容不 panic。
+
+**协议向前兼容与降级**：ACP 协议随 Kimi 版本演进可能新增 method 或扩展 request_permission/session/update 的 schema。适配器 SHALL 对未知 method 静默忽略并记录日志；对 request_permission 中未知 option kind 按拒绝处理（安全侧）；对 session/update 中未知 sessionUpdate 子类型跳过不 panic。fixture 锁定 0.34.0 协议形态，健康检查门禁 (< 0.34.0) 保证运行期协议在 spike 实证范围内；超出范围的字段变化以 degrade 为主，不阻断已有能力。
 
 ### 3.3 session.rs — ACP 会话驱动（核心状态机）
 

@@ -48,13 +48,29 @@
 - **WHEN** Kimi 子进程在未发送 `session/prompt` 终态响应前异常退出
 - **THEN** 系统发送一次 Failed 事件并附进程退出信息
 
+### Requirement: Kimi 权限模式默认 Auto 且支持 Supervised
+
+普通 Workspace 的 Author 与 Reviewer、以及 Coding Workspace 的每个 Provider 角色 SHALL 默认使用 `Auto` 权限模式（对应 ACP `session/new` 的 `permissionMode="auto"`），与 Claude Code、Codex 一致。Kimi 额外支持 `Supervised`（对应 ACP `permissionMode="default"`），用户可为每个适用角色独立切换。Auto 模式下工具调用直接执行；Supervised 模式下经 ApprovalBridge 逐工具审批。该默认值与权限能力与 Pi 区分（Pi 仅 Auto）。
+
+#### Scenario: 默认 Auto 运行 Kimi
+
+- **WHEN** 用户启动一个已选择 Kimi 的角色运行
+- **THEN** 该角色以 `Auto` 模式执行（ACP `permissionMode="auto"`）
+- **AND THEN** Kimi 工具调用不要求用户逐项确认
+
+#### Scenario: Kimi 可切换 Supervised
+
+- **WHEN** 用户为已选择 Kimi 的角色切换权限模式
+- **THEN** 系统提供 `Auto` 与 `Supervised` 两种选项
+- **AND THEN** `Supervised` 模式下逐工具审批（见「逐工具审批」Requirement）
+
 ### Requirement: Kimi 支持逐工具审批（Supervised 模式）
 
-系统 SHALL 在用户为 Kimi 选择 `Supervised` 权限模式时，将 ACP `session/new` 的 `permissionMode` 设为 `default`，并在收到 Kimi 的 `session/request_permission` 时映射为既有 `PermissionRequest` 事件，经现有授权桥接（ApprovalBridge）向用户请求批准；用户响应后映射回 ACP `session/request_permission` 响应。用户拒绝时工具不执行且会话继续。默认权限模式为 `Auto`（对应 ACP `auto`），与 Claude Code、Codex 一致。
+系统 SHALL 在用户为 Kimi 选择 `Supervised` 权限模式时，将 ACP `session/new` 的 `permissionMode` 设为 `default`，并在收到 Kimi 的 `session/request_permission`（`toolCall.title != "AskUserQuestion"`）时映射为既有 `PermissionRequest` 事件，经现有授权桥接（ApprovalBridge）向用户请求批准；用户响应后映射回 ACP `session/request_permission` 响应。用户拒绝时工具不执行且会话继续。AskUserQuestion 的 request_permission 走「结构化提问」Requirement，不走本审批路径。
 
 #### Scenario: Supervised 模式下工具调用触发审批
 
-- **WHEN** Kimi 以 Supervised 模式运行且 Agent 发起工具调用
+- **WHEN** Kimi 以 Supervised 模式运行且 Agent 发起非 AskUserQuestion 的工具调用
 - **THEN** Kimi 发送 `session/request_permission`
 - **AND THEN** 适配器将其映射为既有 `PermissionRequest`，授权桥接向用户展示批准选项（允许一次 / 允许本次会话 / 拒绝）
 - **AND THEN** 用户批准后适配器回送 ACP 响应，工具执行
@@ -65,11 +81,20 @@
 - **THEN** 工具不执行
 - **AND THEN** Kimi 会话继续，可能发起新的工具调用或新的审批请求
 
-#### Scenario: Auto 模式下不触发审批
+### Requirement: Kimi 支持会话恢复（resume）
 
-- **WHEN** Kimi 以 Auto 模式运行
-- **THEN** 适配器将 `permissionMode` 设为 `auto`
-- **AND THEN** 不产生 `PermissionRequest` 事件
+系统 SHALL 复用既有 `StreamingProviderInput.resume_provider_session_id` 机制，当传入历史 Kimi sessionId 时，适配器发 ACP `session/load` 续接同一会话（spike 实证 initialize 声明 `loadSession:true` + `sessionCapabilities.resume`），与 Claude Code、Codex、Pi 一致。第一阶段不实现同 Provider 失败重试（artifact retry / resume-stall fresh retry）。
+
+#### Scenario: resume 续接历史 Kimi 会话
+
+- **WHEN** 既有流程请求继续同一 Kimi 会话并传入历史 sessionId
+- **THEN** 适配器发 ACP `session/load` 加载该 sessionId
+- **AND THEN** Kimi 上下文完整续接
+
+#### Scenario: resume 不等于失败重试
+
+- **WHEN** Kimi 启动或运行失败
+- **THEN** 系统直接报告失败，不自动重试同一 Kimi 会话
 
 ### Requirement: Kimi 复用既有授权与失败边界
 

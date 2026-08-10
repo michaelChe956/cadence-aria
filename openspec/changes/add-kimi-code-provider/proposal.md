@@ -8,7 +8,7 @@ Kimi Code CLI 通过 `kimi acp` 子命令提供基于 stdin/stdout 的 ACP（Age
 
 - 在日常产品执行链路中新增 Kimi Code Provider：Story、Design、Work Item Workspace 的 Author / Reviewer，以及 Coding Workspace 的 Coder、Code Reviewer、Internal Reviewer 均可选择 Kimi。
 - 为 Kimi 提供健康检查（`kimi --version`，最低 0.34.0）、可用性展示、ACP 流式会话、工具审批往返、取消与会话标识持有；与现有 Provider Registry 和 WebSocket 运行链路集成。
-- Kimi 同时支持 `Auto` 与 `Supervised` 权限模式（ACP `default` = Supervised，`auto`/`yolo` = Auto），默认 `Auto`，与 Claude Code/Codex 对齐。
+- Kimi 同时支持 `Auto` 与 `Supervised` 权限模式（ACP `default` = Supervised，`auto`/`yolo` = Auto），默认 `Auto`，与 Claude Code/Codex 对齐；**支持会话恢复（resume）**，复用既有 `resume_provider_session_id` 机制经 ACP `session/load` 续接，与 Claude/Codex/Pi 一致。
 - 图片创作（image-create）支持 Kimi（image-create 复用 streaming provider 会话，无需独立图像 API）。
 - Provider 启动或运行失败时直接报告失败，不在运行期自动切换到其他 Provider；第一阶段不实现同 Provider 内部重试（artifact retry / resume retry）。
 - 仓库初始化仅 Claude Code 可用，Kimi（同 Pi）被显式过滤，不展示或不允许用于初始化。
