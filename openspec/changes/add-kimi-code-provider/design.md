@@ -161,16 +161,19 @@ Phase 0 Spike 强触发实测：Kimi **有 `AskUserQuestion` 工具**（与 Clau
 
 因此：Kimi **不复用** Pi 的 `aria-ask.ts`；复用 Claude Code 的 AskUserQuestion 语义。两路均走标准 ACP 机制。
 
-### 3.4b 自由文本状态机（B2，需产品决策定案）
+### 3.4b 自由文本与混合输入规则（B2，对齐 Claude）
 
-用户在提问卡片选了选项 + 又填了自由文本（或仅填文本不选选项）时，需要明确规则（**本节为待定案项，见「需拍板」**）。原型状态机（草案）：
-1. 若 `ChoiceResponse.selected_option_ids` 非空 → 按选项路径回 `Selected(optionId)`，**忽略** free_text（或拼接进下一轮）；同轮继续。
-2. 若仅 free_text（选项都不要）→ 对原 request_permission 回标准 ACP `Cancelled`（关闭原请求，避免 Kimi 挂起），**不发** Failed/Completed 中间终态；适配器内部发第二个 `session/prompt(用户文本)` 注入同 sessionId；第二轮的 `session/prompt` result 才是最终终态。
-3. 中间不得向 Aria 上游发 Completed/Failed，否则 Workspace 会误判运行结束。
+用户在提问卡片同时提供选项与自由文本时的处理，**对齐 Claude**（`ask_user_question_answers_from_decision`：free_text 优先，不拼接）：
 
-### 3.4c 普通工具审批（Supervised，B6 需产品决策定案）
+- **选项路径**：`ChoiceResponse.selected_option_ids` 非空 **且** `free_text` 为空/空白 → 回 ACP `Selected(optionId)`，同轮继续。
+- **自由文本路径**（free_text 优先）：`ChoiceResponse.free_text` 非空 → 对原 request_permission 回标准 ACP `Cancelled`（关闭原请求，避免 Kimi 挂起），**忽略** selected_option_ids（不拼接）；适配器内部发第二个 `session/prompt(用户 free_text)` 注入同 sessionId；**不发**中间 Failed/Completed；第二轮 `session/prompt` result 为唯一终态。
+- **不拼接**：两者二选一，free_text 优先，与 Claude 一致。
 
-Supervised 下普通工具的 request_permission 选项含 AllowOnce/AllowAlways/RejectOnce，但现有 `ProviderCommand::PermissionResponse` 仅 `approved: bool`（无法区分 once/always）。**需拍板**：或收窄为二元（approved→allow_once），或扩展契约——见「需拍板」。保留 ACP 原始 JSON-RPC id（可 number/string）用于回包。
+> 注：Pi 现有实现是 selected 优先（`pi_provider/session.rs:283`），与 Claude/Kimi 相反；这是 Pi 的历史差异，不在本 change 范围，后续单独任务统一三个 provider 的优先级。
+
+### 3.4c 普通工具审批（Supervised，B6 收窄二元）
+
+Supervised 下普通工具的 request_permission 选项含 AllowOnce/AllowAlways/RejectOnce，但第一阶段 **收窄为二元**：`ProviderCommand::PermissionResponse.approved=true → 回 allow_once`；`approved=false → 回 reject_once`。**不使用 AllowAlways**（不扩展现有 `PermissionResponse:bool` 共享契约）。AllowAlways 留作后续 enhancement（届时统一扩契约，惠及所有 provider）。保留 ACP 原始 JSON-RPC id（可 number/string）用于回包，UI 使用独立稳定字符串 id。
 
 ### 3.5 终态判定（spike 实证）
 `session/prompt` 的 id 响应即终态：result `{stopReason:"end_turn"}` → Completed；result error / 非 end_turn → Failed；进程异常退出（未收到 prompt 响应）→ Failed。退出码：0 成功 / 1 不可重试 / 75 可重试（映射到 Failed 文案区分）。

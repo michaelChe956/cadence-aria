@@ -72,8 +72,8 @@
 
 - **WHEN** Kimi 以 Supervised 模式运行且 Agent 发起非 AskUserQuestion 的工具调用
 - **THEN** Kimi 发送 `session/request_permission`
-- **AND THEN** 适配器将其映射为既有 `PermissionRequest`，授权桥接向用户展示批准选项（允许一次 / 允许本次会话 / 拒绝）
-- **AND THEN** 用户批准后适配器回送 ACP 响应，工具执行
+- **AND THEN** 适配器将其映射为既有 `PermissionRequest`，授权桥接向用户展示二元批准选项（第一阶段不提供「允许本次会话」）
+- **AND THEN** 用户批准后适配器回送 ACP `allow_once`，工具执行；拒绝则回 `reject_once`
 
 #### Scenario: 用户拒绝审批后会话继续
 
@@ -138,11 +138,12 @@ Phase 0 Spike 实证：Kimi 有 `AskUserQuestion` 工具（与 Claude Code 同�
 - **THEN** Kimi 逐题依次发多个 `session/request_permission`，每次单题单选
 - **AND THEN** 每题映射为单个 `ChoiceRequest`（`allow_multiple=false`），用户答完一题后 Kimi 自行发下一题
 
-#### Scenario: 选项都不合适时用户自由输入
+#### Scenario: 选项都不合适时用户自由输入（free_text 优先）
 
 - **WHEN** AskUserQuestion 提问的选项都不符合用户意图，用户在自由文本框输入自己的回答
 - **THEN** 适配器以 ACP `Cancelled` 关闭原 request_permission（避免 Kimi 挂起）
-- **AND THEN** 适配器不发中间 Failed/Completed，内部发第二个 `session/prompt` 注入用户文本
+- **AND THEN** 适配器忽略 selected_option_ids（不拼接，free_text 优先，对齐 Claude）
+- **AND THEN** 适配器不发中间 Failed/Completed，内部发第二个 `session/prompt` 注入用户 free_text
 - **AND THEN** 第二轮 `session/prompt` result 为唯一终态，Kimi 上下文完整续接
 
 #### Scenario: UI 呈现选项与自由文本框并存
