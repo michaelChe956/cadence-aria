@@ -273,7 +273,7 @@ fn planning_resume_decision_is_none_for_legacy_single_repo_path() {
 
 #[test]
 fn planning_resume_fail_closed_when_manifest_without_selection() {
-    // 有 manifest、无 selection → 与 compile 一致 fail-closed（当前返回 Ok(None)）。
+    // 有 manifest、无 selection → 与 compile 一致 fail-closed（返回稳定错误码 repository_routing_target_missing）。
     let root = tempfile::tempdir().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     LogicalCodebaseStore::new(paths.clone())
