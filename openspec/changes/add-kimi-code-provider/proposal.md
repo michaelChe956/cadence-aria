@@ -14,6 +14,7 @@ Kimi Code CLI 通过 `kimi acp` 子命令提供基于 stdin/stdout 的 ACP（Age
 - 仓库初始化仅 Claude Code 可用，Kimi（同 Pi）被显式过滤，不展示或不允许用于初始化。
 - Task Runner（task-run）及其 CLI/API、专用协议、旧的 Fake Provider Workspace Runner 的可调度 Provider 范围与运行行为不变；为满足流式链路共享类型约束，`ProviderType` 与 `ProviderName` 增加 `KimiCode` 变体，但 Kimi 在 task-run 所有入口被显式拒绝，返回稳定错误（不使用 `unreachable!`，不引入新的 panic 风险）。
 - structured-output repair / review repair 第一阶段排除 Kimi（不实证 Kimi resume 稳定性，留作后续 enhancement）。
+- Kimi 第一阶段**不支持需求歧义结构化提问**（`ChoiceRequest` 等价物）。Phase 0 Spike 已验证：ACP 协议下 Kimi 仅有工具审批（`session/request_permission`），无独立的开方式提问/选择方法；agent 遇到歧义时以纯文本提问（`agent_message_chunk`）。因此 Kimi 不复用 Pi 的 `aria-ask.ts` 提问扩展，需求歧义走文本 fallback。
 
 ## Capabilities
 
@@ -33,4 +34,5 @@ Kimi Code CLI 通过 `kimi acp` 子命令提供基于 stdin/stdout 的 ACP（Age
 - 新增 Kimi ACP 适配模块（`kimi_code_provider/`，含 mod/parse/session/tests 与冻结自 0.34.0 的 JSON-RPC fixture）；不修改全局 Kimi 配置或会话目录（复用用户默认 `~/.kimi-code/`）。
 - image-create 的 `ProviderName → ProviderType` 映射与前端 dropdown。
 - task-run 边界：四入口显式拒绝 Kimi，返回稳定错误文案。
+- 凭证前置：Kimi 不从环境变量（如 `KIMI_API_KEY`）自动读取凭证，必须写入 `~/.kimi-code/config.toml` 或完成 `kimi login`；运行期若凭证缺失，从 ACP 错误/stderr 捕获并映射为清晰运行错误。
 - 前端 provider catalog、权限控件、仓库初始化过滤、WebSocket parser、guidance 文案。

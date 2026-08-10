@@ -31,6 +31,6 @@
 
 ## 7. 回归验证与质量门禁
 
-- [ ] 7.1 后端：provider_health（Kimi 可用/缺失/超时/版本过低，snapshot 持久化，并行 probe）、provider_registry（stable order）、provider_availability_gate（entry 存在/缺失）、handlers/providers（DTO）、task-run 四入口拒绝（不 panic）。
+- [ ] 7.1 后端：provider_health（Kimi 可用/缺失/超时/版本过低，snapshot 持久化，并行 probe）、provider_registry（stable order）、provider_availability_gate（entry 存在/缺失）、handlers/providers（DTO）、task-run 四入口拒绝（不 panic）、**凭证缺失运行错误映射**（模拟 ACP 认证错误/stderr → 清晰运行错误，提示 `kimi login`）。
 - [ ] 7.2 前端：provider-options.test（catalog/order/可用禁用）、ProviderConfigPanel.test（Auto+Supervised）、CreateRepositoryDialog.test（Kimi 被过滤）、WebSocket parser、Chat fallback 含 kimi_code。
 - [ ] 7.3 质量门禁：`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo test --locked`、`cd web && pnpm tsc -b && pnpm test`。

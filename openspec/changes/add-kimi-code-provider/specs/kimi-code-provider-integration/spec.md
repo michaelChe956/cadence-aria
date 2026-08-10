@@ -97,6 +97,17 @@
 - **THEN** Provider 选项不包含 Kimi
 - **AND THEN** 过滤逻辑以 capability policy 注释说明
 
+### Requirement: Kimi 不产生需求歧义结构化提问
+
+Phase 0 Spike 已实证：ACP 协议下 Kimi 仅有工具审批（`session/request_permission`），无独立的开方式提问/选择方法。因此系统 SHALL 不为 Kimi 产生 `ChoiceRequest` 事件；Kimi 遇到需求歧义时以纯文本提问（`agent_message_chunk`），Aria 以文本 fallback 呈现。系统 SHALL 不为 Kimi 复用 Pi 的 `aria-ask.ts` 提问扩展。
+
+#### Scenario: Kimi 遇到歧义时以文本提问
+
+- **WHEN** Kimi 在生成角色产物时发现需要用户决策的歧义
+- **THEN** Kimi 以纯文本（`agent_message_chunk`）提问
+- **AND THEN** 系统不产生 `ChoiceRequest` 事件
+- **AND THEN** 不加载或调用任何 `aria-ask.ts` 扩展
+
 ### Requirement: image-create 支持 Kimi
 
 系统 SHALL 允许 image-create 选择并执行 Kimi（image-create 复用 streaming provider 会话，无需独立图像 API）。
@@ -106,3 +117,9 @@
 - **WHEN** 用户在 image-create 中选择 Provider
 - **THEN** Kimi 出现在选项中
 - **AND THEN** 选择 Kimi 后 image-create 经 streaming provider 会话执行
+
+#### Scenario: Kimi 不可用时 image-create 禁用 Kimi
+
+- **WHEN** Kimi 健康检查报告不可用（未安装 / 版本过低 / 健康探测失败）
+- **THEN** image-create 的 Provider 选项中 Kimi 被禁用
+- **AND THEN** 界面说明不可用原因或安装提示

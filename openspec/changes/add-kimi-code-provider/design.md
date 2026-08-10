@@ -118,7 +118,11 @@ struct KimiPromptResult { stop_reason: StopReason }  // end_turn | ...
 3. 发 session/new (id:2, cwd, permissionMode)，拿 sessionId，上报 provider_session_id。
 4. 发 session/prompt (id:N, input.prompt)，进入事件循环。
 5. 事件循环（select peer/command/cancel）：
-   - `session/update` → 按 KimiSessionUpdate 映射 ProviderEvent（TextChunk 累计 full_output / ToolCall / ToolResult；thought chunk 仅日志，不计 full_output）。
+   - `session/update` → 按 KimiSessionUpdate 映射 ProviderEvent：
+     - AgentMessageChunk → `ProviderEvent::TextChunk`，累计 full_output。
+     - ToolCall/ToolCallUpdate → `ProviderEvent::ToolCall`/`ToolResult`。
+     - AgentThoughtChunk → 写入既有 provider 流式日志（与 Claude Code 的 thinking 一致），不计入 full_output，不作为正文事件转发。
+     - UsageUpdate → 日志。
    - `session/request_permission` (id:M) → `ProviderEvent::PermissionRequest`；等 `command_rx` 的 PermissionResponse → 回 `session/request_permission` result `{options:[{optionId, outcome:selected}]}`。用户 reject → 工具不执行，会话继续（仍可能再请求）。
    - `session/prompt` (id:N) result → 终态：`stopReason=end_turn` → `ProviderEvent::Completed(full_output)`（一次且仅一次）；其他/error → `Failed`。
    - `Abort`/cancel → terminate 进程 → `Failed`(取消)。
@@ -132,6 +136,11 @@ ProviderPermissionMode::Auto       → session/new permissionMode: "auto"
 ProviderPermissionMode::Supervised → session/new permissionMode: "default"
 ```
 Auto 模式不发 request_permission；Supervised 模式正常走 ApprovalBridge。
+
+### 3.4a 提问能力边界（spike 实证）
+Phase 0 Spike 在 yolo 模式下给 Kimi 故意歧义、要求提问的任务，实测：ACP 协议下 Kimi **只有** `session/request_permission`（工具审批），**无** 独立的开方式提问/选择方法（无 question/choice/input 事件）；agent 遇到需求歧义时以纯文本提问（`agent_message_chunk`）。因此：
+- Kimi **不复用** Pi 的 `aria-ask.ts` 扩展（那是 Pi 私有 RPC 的产物）。
+- Kimi **不产生** `ProviderEvent::ChoiceRequest`；需求歧义走文本 fallback（agent_message 正文提问）。
 
 ### 3.5 终态判定（spike 实证）
 `session/prompt` 的 id 响应即终态：result `{stopReason:"end_turn"}` → Completed；result error / 非 end_turn → Failed；进程异常退出（未收到 prompt 响应）→ Failed。退出码：0 成功 / 1 不可重试 / 75 可重试（映射到 Failed 文案区分）。
@@ -168,7 +177,7 @@ image-create 复用 streaming provider 会话，无需独立图像 API：
 - 穷尽 match/union 补 Kimi：`ProviderConfigPanel.tsx`（Auto+Supervised）、`CodingProviderConfigPanel.tsx`、`ChatWorkspacePageParts.tsx`、`workspace-ws-message-handler.ts`、`CreateRepositoryDialog.tsx`（仓库初始化过滤 Kimi，加 policy 注释）、`workspace-ws-store-guidance.ts`，及相关 `.test.tsx` fixture union。
 
 ### 4.6 错误文案
-- 运行时未登录：从 stderr / ACP 错误捕获，映射清晰运行错误（install_hint 不提登录，保持模板一致）。
+- **凭证前置陷阱**：Kimi 不从环境变量（如 `KIMI_API_KEY`）自动读取凭证，必须写入 `~/.kimi-code/config.toml` 或完成 `kimi login`。Aria 的 `StreamingProviderInput.env_vars` 对 Kimi 认证无效。运行期若凭证缺失，从 ACP 错误/stderr 捕获并映射为清晰运行错误（提示用户运行 `kimi login`）。install_hint 不提登录，保持模板一致。
 - 版本过低：health snapshot reason 提示。
 - task-run 误调度：稳定错误文案。
 
@@ -205,7 +214,8 @@ provider-options.test（catalog/order/可用禁用）/ ProviderConfigPanel.test�
 - task-run 调度 Kimi。
 - 同 provider 内部重试（artifact retry / resume retry）。
 - Kimi `plan` 模式暴露。
-- thought chunk 展示给用户（仅日志）。
+- thought chunk 展示给用户（仅写入 provider 流式日志，与 Claude Code thinking 一致）。
+- **需求歧义结构化提问（`ChoiceRequest`）**：Phase 0 Spike 已实证 ACP 无此能力，Kimi 走文本 fallback，不复用 Pi 的 `aria-ask.ts`。
 - Pi 现有 `unreachable!` 的清理（不动 Pi）。
 
 ## 7. 兜底策略
