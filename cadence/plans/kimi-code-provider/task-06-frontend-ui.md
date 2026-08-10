@@ -59,12 +59,17 @@
 - [ ] Run: `cd web && pnpm test -- CreateRepositoryDialog` 及受影响 fixture 测试
 - Expected: PASS
 
-## Step 4: 错误文案可见性
+## Step 4: 错误文案可见性（失败测试先行）
 
-确认 health snapshot 的 reason（版本过低 / 未登录运行错误）经 `provider-options.ts` 的 `blockedReason` 正确显示为禁用原因（既有逻辑，Kimi 复用；若 Kimi 的 reason 字段格式不同则适配）。
+`web/src/state/provider-options.test.ts` 加断言：
+```typescript
+// 模拟 Kimi health 不可用（版本过低 / 未登录 / 探测失败）的 snapshot
+// 断言 Kimi option disabled===true，reason 含可读原因（版本过低提示升级 / 未登录提示 kimi login）
+```
+确认 health snapshot 的 reason 经 `provider-options.ts` 的 `blockedReason` 正确显示（既有逻辑，Kimi 复用；若 Kimi 的 reason 字段格式不同则适配）。
 
 - [ ] Run: `cd web && pnpm test -- provider-options`
-- Expected: Kimi 不可用时显示原因。
+- Expected: Kimi 不可用时显示原因；先 FAIL 后 PASS。
 
 ## Step 5: 质量检查与提交
 

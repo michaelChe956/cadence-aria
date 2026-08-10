@@ -36,8 +36,14 @@ async fn image_create_runs_with_kimi_provider() {
 }
 ```
 
-- [ ] Run: `cd web && pnpm test -- image-create` 与 `cargo test --locked --lib image_create`
-- Expected: dropdown 含 Kimi；engine 跑通 Kimi；先 FAIL 后 PASS。
+前端不可用禁用断言（spec「image-create 不可用禁用」Scenario）：
+```typescript
+// web/src/api/types/image-create 相关测试或 provider-options 测试
+// 模拟 Kimi health 不可用（未安装/版本过低/探测失败）→ 断言 image-create dropdown 中 Kimi 被禁用，显示不可用原因
+```
+
+- [ ] Run: `cd web && pnpm test -- image-create` 与 `cd web && pnpm test -- provider-options` 与 `cargo test --locked --lib image_create`
+- Expected: dropdown 含 Kimi；engine 跑通 Kimi；Kimi 不可用时 image-create 禁用；先 FAIL 后 PASS。
 
 ## Step 2: artifact retry / review repair 排除 Kimi
 

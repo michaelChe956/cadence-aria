@@ -18,7 +18,7 @@
   - `src/product/work_item_split_engine/types.rs`
   - `src/product/image_create/models.rs:115`（`From<ProviderName>`）
   - `src/product/provider_workspace_runner.rs`（legacy Fake runner 的 `provider_type_for_name`，加 KimiCode 拒绝臂）
-- Modify: `src/product/work_item_projection/render.rs`（`renderer_for(provider)` —— 此 task 先返回稳定"未配置"错误占位，真正 renderer 在 Task 4；此处只让 match 穷尽编译）
+- Modify: `src/product/work_item_projection/render.rs`（`renderer_for(provider)` 加 KimiCode 分支：**此 task 创建最小占位 renderer `KimiCodeProjectionRenderer`**，见 Step 3；Task 4 补全 profile）
 - Modify: `src/cross_cutting/provider_health.rs`（新增 `kimi_version_command()`；`refresh()`/`uninitialized_snapshot()`/`real_workflow_blocked()` 加 Kimi）
 - Modify: `src/cross_cutting/provider_registry.rs:47`（`available_names()` 加 `ProviderName::KimiCode`，置 `Pi` 之后、`Fake` 之前）
 - Modify: `src/web/handlers/providers.rs:82-99`（`provider_dto()` match 加 KimiCode 分支：`"kimi_code"` / `"Kimi Code"` / install_hint）
@@ -36,7 +36,7 @@
 - Consumes: `CommandSpec::new(program, args)`、`probe_provider(provider, command, checked_at, cancellation)`、`ProviderAdapterError::incompatible_output`、`getProviderOptions(snapshot)`。
 - Produces: `ProviderName::KimiCode`/`ProviderType::KimiCode`（wire `"kimi_code"`）；所有 `provider_type_for_name(&ProviderName::KimiCode) -> ProviderType::KimiCode`；健康检查 `kimi_version_command()`；状态 API 返回 Kimi 条目；`ProviderRegistry::available_names()` 含 Kimi。**Task 2-7 依赖。**
 
-**约束：** Task Runner 四入口稳定拒绝（不用 `unreachable!`）；健康检查 Kimi version_command 内联（不调 `matrix.entry_for(KimiCode)`，矩阵无 Kimi 条目）；仓库初始化过滤 Kimi；`renderer_for` 此 task 只补穷尽分支（真正 renderer 在 Task 4）。
+**约束：** Task Runner 四入口稳定拒绝（不用 `unreachable!`）；健康检查 Kimi version_command 内联（不调 `matrix.entry_for(KimiCode)`，矩阵无 Kimi 条目）；仓库初始化过滤 Kimi；`renderer_for` 此 task 创建最小占位 renderer（`KimiCodeProjectionRenderer`，label="Kimi Code"，profile 内容最简），Task 4 补全；image-create 此 task **仅补 `From<ProviderName>` 编译分支**，前端 dropdown 与回归测试在 Task 5。
 
 ---
 
@@ -75,18 +75,33 @@ mod tests {
 - [ ] Run: `cargo test --locked --lib provider_name_kimi_code`
 - Expected: PASS
 
-## Step 3: 补全所有 `provider_type_for_name` / `From<ProviderName>` 穷尽 match
+## Step 3: 补全所有 `provider_type_for_name` / `From<ProviderName>` 穷尽 match + 最小占位 renderer
 
 在以下文件的穷尽 match 中加 `ProviderName::KimiCode => ProviderType::KimiCode`（或等价）：
 - `src/product/workspace_engine/mappings.rs`
 - `src/product/coding_workspace_engine/tool_format.rs`
 - `src/product/work_item_split_engine/types.rs`
-- `src/product/image_create/models.rs`（`From<ProviderName> for ProviderType`）
+- `src/product/image_create/models.rs`（`From<ProviderName> for ProviderType`）—— **仅补枚举映射编译分支**；image-create 前端 dropdown 与回归测试在 Task 5
 - `src/product/provider_workspace_runner.rs`（legacy runner 加 KimiCode 拒绝臂，返回 incompatible）
-- `src/product/work_item_projection/render.rs`（`renderer_for` 加 KimiCode 分支：此 task 返回稳定 "kimi_code renderer not configured" 错误占位，Task 4 实装）
+
+`src/product/work_item_projection/render.rs` 的 `renderer_for` 返回 `Box<dyn ProviderProjectionRenderer>`（**非 Result**，不能返回错误占位）。此 task 创建最小占位 renderer：
+
+新建 `src/product/work_item_projection/render/kimi_code.rs`（仿 `render/pi.rs` 最小形态）：
+```rust
+use super::*; // 复用 ProviderProjectionRenderer trait 与通用类型
+
+pub(crate) struct KimiCodeProjectionRenderer;
+
+impl ProviderProjectionRenderer for KimiCodeProjectionRenderer {
+    // 最小实现：label="Kimi Code"，其余 profile 字段用通用默认/最简值
+    // 具体 profile（Supervised tool hint、structured-output wrapper）在 Task 4 补全
+    // TODO(Task4): 补全完整 profile
+}
+```
+`render.rs` 加 `mod kimi_code;` + `use kimi_code::KimiCodeProjectionRenderer;` + `renderer_for` 加 `ProviderName::KimiCode => Box::new(KimiCodeProjectionRenderer),`。
 
 - [ ] Run: `cargo check --locked`
-- Expected: PASS（所有穷尽 match 已补全，无编译错误）
+- Expected: PASS（所有穷尽 match 已补全，无编译错误；占位 renderer 可编译）
 
 ## Step 4: 健康检查 `kimi_version_command()` 与接入
 

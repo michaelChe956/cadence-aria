@@ -13,8 +13,8 @@
 - Modify: `src/product/workspace_engine/mappings.rs`（Kimi **不**像 Pi 强制 Auto；保留用户选择的 Supervised）
 - Modify: `src/web/workspace_context/prompts.rs`（Kimi interaction guidance：支持 structured permission request + AskUserQuestion choice；与前端一致）
 - Modify: `web/src/state/workspace-ws-store-guidance.ts`（同上，前端 guidance，**与 Rust 端声明一致**——避免 Pi 那种 Rust/前端自相矛盾）
-- Create: `src/product/work_item_projection/render/kimi_code.rs`（renderer，仿 `render/pi.rs`）
-- Modify: `src/product/work_item_projection/render.rs`（替换 Task 1 的占位 `renderer_for(KimiCode)`，接入真正 renderer + import + mod 声明）
+- Modify: `src/product/work_item_projection/render/kimi_code.rs`（补全 Task 1 占位 `KimiCodeProjectionRenderer` 的完整 profile：Supervised tool hint、structured-output wrapper、renderer version；仿 `render/pi.rs`）
+- Verify: `src/product/work_item_projection/render.rs`（Task 1 已接入 `renderer_for` + mod 声明，此 task 仅验证）
 
 **Interfaces:**
 - Consumes（来自 Task 1/2/3）：`ProviderName::KimiCode`、Kimi provider 能力（Auto+Supervised、AskUserQuestion）。
@@ -55,15 +55,14 @@ fn kimi_supervised_mode_is_preserved_not_forced_auto() {
 - [ ] Run: `cargo test --locked --lib workspace_context` 与 `cd web && pnpm test -- workspace-ws-store-guidance`（若有测试）
 - Expected: guidance 含 Kimi；两端一致。
 
-## Step 3: `render/kimi_code.rs` renderer（失败测试先行）
+## Step 3: 补全 `render/kimi_code.rs` renderer profile（失败测试先行）
 
-`src/product/work_item_projection/render/kimi_code.rs`，仿 `render/pi.rs`：
+`src/product/work_item_projection/render/kimi_code.rs`，把 Task 1 的占位 `KimiCodeProjectionRenderer` 补全为完整 profile（仿 `render/pi.rs`）：
 ```rust
-pub(crate) struct KimiCodeRenderer;
-impl Renderer for KimiCodeRenderer { /* label "Kimi Code"、renderer version、
-    Supervised tool hint（支持逐工具审批）、structured-output wrapper */ }
+// 补全 impl ProviderProjectionRenderer for KimiCodeProjectionRenderer
+// label "Kimi Code"、renderer version、Supervised tool hint（支持逐工具审批）、
+// structured-output wrapper
 ```
-`render.rs`：替换 Task 1 占位 `renderer_for` 的 KimiCode 分支为 `&KimiCodeRenderer`；加 `mod kimi_code;` + `use kimi_code::KimiCodeRenderer;`。
 
 测试：golden output——KimiCode renderer 产出的 profile 含正确 label/version/tool hint。
 

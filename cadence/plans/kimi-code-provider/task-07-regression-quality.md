@@ -2,7 +2,7 @@
 
 > 自包含任务文件。执行前请先读 `00-overview.md`。依赖 Task 1-6 全部完成。
 
-**Goal:** 集中补齐跨任务的回归测试矩阵（health/registry/gate/DTO/task-run 拒绝/凭证缺失/审批/提问/resume/取消/超时），前端测试，并执行完整质量门禁。
+**Goal:** 跨任务交叉回归 + 完整质量门禁。**注意**：前序 task 已写的单测此处仅验证存在与绿色，本 task 重点是跨 task 交叉场景（多能力联动）与端到端门禁，不重复劳动。
 
 **对应 spec requirement:** 全部 Requirement 的 Scenario 回归覆盖。
 

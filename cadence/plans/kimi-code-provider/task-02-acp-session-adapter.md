@@ -28,16 +28,17 @@
 
 ## Step 1: 冻结 ACP fixture
 
-把 `.pi-subagents/spike/acp/acp_session_trace.jsonl` 转为多个 fixture（按场景切分），至少含：
-- `initialize.jsonl`（initialize 往返）
-- `text_turn.jsonl`（纯文本：agent_message_chunk → session/prompt result end_turn）
-- `tool_call_turn.jsonl`（tool_call/tool_call_update completed/failed）
-- `request_permission.jsonl`（普通工具审批 + AskUserQuestion 提问）
+把 `.pi-subagents/spike/acp/acp_session_trace.jsonl` **按 method/场景边界手王截取对应行段**，切分为多个独立 .jsonl（每文件 = 一个完整场景的 JSON-RPC 往返）：
+- `initialize.jsonl`（initialize 请求 + result 往返）
+- `text_turn.jsonl`（session/new + agent_message_chunk + session/prompt result end_turn）
+- `tool_call_turn.jsonl`（tool_call/tool_call_update completed/failed + prompt result）
 - `error_exit.jsonl`（进程异常退出 / exit 1 / exit 75）
 
-并创建脚本化子进程 fixture `tests/fixtures/provider/kimi_acp_text_fixture.sh` 等（仿 `codex_app_server_*`）：读取 stdin、按行回放 fixture 到 stdout、写 stderr、按指定 exit code 退出；支持参数化场景。
+**注意**：request_permission 场景（普通审批 + AskUserQuestion）**不在此 task 的 fixture**——留给 Task 3 的专用 fixture（`askuser_multiquestion.jsonl` 等），避免本 task 占位逻辑误触 AskUserQuestion。
 
-- [ ] 手工核对：fixture 内容与 spike 0.34.0 真实往返一致（字段名、JSON 结构）。
+并创建脚本化子进程 fixture `tests/fixtures/provider/kimi_acp_*_fixture.sh` 等（仿 `codex_app_server_*`）：读取 stdin、按行回放 fixture 到 stdout、写 stderr、按指定 exit code 退出；支持参数化场景。
+
+- [ ] 手工核对：fixture 内容与 spike 0.34.0 真实往返一致（字段名、JSON 结构）；不含 request_permission 场景。
 
 ## Step 2: `mod.rs` 骨架 + 版本探测（失败测试先行）
 
@@ -181,7 +182,7 @@ async fn total_timeout_consumes_input_timeout_secs() { /* 超时 → 取消流�
      - ToolCallUpdate → 按 tool_call_id 缓冲；**仅 completed/failed** 发一次 `ProviderEvent::ToolResult(ProviderToolResult{tool_use_id,output:聚合content,is_error:(status==failed)})`；in_progress 不发 ToolResult。
      - AgentThoughtChunk → 不计 full_output，输出到 tracing（**不写文件**）。
      - UsageUpdate → tracing 指标。
-   - `session/request_permission`（id:M）→ **此 task 仅占位**：Task 3 实装 ApprovalBridge/ChoiceRequest 往返；本 task 先按"未配置审批"返回 reject（让会话继续不阻塞），并在注释标 TODO(Task3)。区分 AskUserQuestion(title) 与普通工具（Task3 用）。
+   - `session/request_permission`（id:M）→ **此 task 仅占位**（Task 3 实装 ApprovalBridge/ChoiceRequest 往返）：本 task 的 fixture **不含** request_permission 场景（见 Step 1），故占位逻辑实际不触发；实现时写一个防御性分支：收到 request_permission 则发一次 `ProviderEvent::Failed("request_permission handling not configured until Task 3")` 并在注释标 TODO(Task3)，避免未来误用时静默挂起。
    - `session/prompt`(id:N) result → 终态：`stopReason=="end_turn"` → `Completed(full_output)`（一次）；其他/error → `Failed`。
    - timeout（`input.timeout_secs` 总超时 / 各 request 独立超时 / resume stall）→ 走取消流程。
    - cancel/Abort → 发 ACP `session/cancel` notification → 短超时 drain → 未果 `ProcessManager` 进程组 terminate → 发 `ProviderStatus::Aborted`（**不发 Failed**）。
