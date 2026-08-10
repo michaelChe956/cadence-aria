@@ -55,18 +55,11 @@ mod session_tests {
         session: &mut crate::cross_cutting::streaming_provider::ProviderSession,
     ) -> Vec<ProviderEvent> {
         let mut events = Vec::new();
-        while let Some(event) =
-            tokio::time::timeout(std::time::Duration::from_secs(3), session.events.recv())
-                .await
-                .expect("provider event")
-        {
-            let terminal = matches!(
-                event,
-                ProviderEvent::Completed(_) | ProviderEvent::Failed { .. }
-            );
-            events.push(event);
-            if terminal {
-                break;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(300);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, session.events.recv()).await {
+                Ok(Some(event)) => events.push(event),
+                Ok(None) | Err(_) => break,
             }
         }
         events
@@ -118,6 +111,26 @@ mod session_tests {
         (commands, events, run)
     }
 
+    #[test]
+    fn kimi_version_parser_and_gate_enforce_minimum() {
+        assert_eq!(
+            super::super::parse_kimi_version("kimi 0.34.0"),
+            super::super::KimiVersion(0, 34, 0)
+        );
+        assert!(
+            super::super::ensure_kimi_version_compatible(&super::super::parse_kimi_version(
+                "kimi 0.33.9"
+            ))
+            .is_err()
+        );
+        assert!(
+            super::super::ensure_kimi_version_compatible(&super::super::parse_kimi_version(
+                "kimi 0.34.0"
+            ))
+            .is_ok()
+        );
+    }
+
     #[tokio::test]
     async fn text_turn_completes_with_full_output() {
         let provider = KimiCodeProvider::new(fixture_command("kimi_acp_text_fixture.sh"));
@@ -135,6 +148,17 @@ mod session_tests {
             })
             .expect("completion");
         assert_eq!(completion.full_output, "Kimi fixture output");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    ProviderEvent::Completed(_) | ProviderEvent::Failed { .. }
+                ))
+                .count(),
+            1,
+            "exactly one successful-or-failed terminal event"
+        );
         assert_eq!(
             completion.provider_session_id.as_deref(),
             Some("kimi_text_fixture")
@@ -167,10 +191,150 @@ mod session_tests {
         assert!(results.iter().any(|result| result.tool_use_id == "tool_1"
             && !result.is_error
             && result.output.contains("tmp")));
-        assert!(
-            results
+        assert_eq!(
+            events
                 .iter()
-                .any(|result| result.tool_use_id == "tool_2" && result.is_error)
+                .filter(|event| matches!(
+                    event,
+                    ProviderEvent::Completed(_) | ProviderEvent::Failed { .. }
+                ))
+                .count(),
+            1,
+            "tool turn emits exactly one terminal event"
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_and_resume_capability_rejections_emit_one_failed() {
+        for response in [
+            serde_json::json!({"protocolVersion":2,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}),
+            serde_json::json!({"protocolVersion":1,"agentCapabilities":{"loadSession":false,"sessionCapabilities":{}}}),
+        ] {
+            let (peer, server) = test_peer();
+            let (_commands, _events, run) =
+                direct_session_events(peer, input(Some("resume"), 10)).await;
+            let server_task = tokio::spawn(async move {
+                let (reader, mut writer) = tokio::io::split(server);
+                let mut reader = tokio::io::BufReader::new(reader);
+                let initialize = read_request(&mut reader).await;
+                send_message(
+                    &mut writer,
+                    serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":response}),
+                )
+                .await;
+            });
+            assert!(run.await.expect("run join").is_err());
+            server_task.await.expect("server task");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_request_receives_method_not_found_and_notification_is_ignored() {
+        let (peer, server) = test_peer();
+        let (_commands, mut events, run) = direct_session_events(peer, input(None, 10)).await;
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            let initialize = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}})).await;
+            let _initialized = read_request(&mut reader).await;
+            let new = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"unknown_fixture"}})).await;
+            let prompt = read_request(&mut reader).await;
+            send_message(
+                &mut writer,
+                serde_json::json!({"jsonrpc":"2.0","method":"future/notification","params":{}}),
+            )
+            .await;
+            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"unknown-request","method":"future/request","params":{}})).await;
+            let reply = read_request(&mut reader).await;
+            assert_eq!(reply["id"], "unknown-request");
+            assert_eq!(reply["error"]["code"], -32601);
+            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
+        });
+        let mut seen_completed = 0;
+        while let Some(event) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("event")
+        {
+            if matches!(event, ProviderEvent::Completed(_)) {
+                seen_completed += 1;
+                break;
+            }
+            assert!(!matches!(event, ProviderEvent::Failed { .. }));
+        }
+        assert_eq!(seen_completed, 0);
+        assert!(run.await.expect("run join").is_err());
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn unknown_permission_option_replies_cancelled_with_original_rpc_id() {
+        let (peer, server) = test_peer();
+        let (_commands, _events, run) = direct_session_events(peer, input(None, 10)).await;
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            let initialize = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}})).await;
+            let _initialized = read_request(&mut reader).await;
+            let new = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"permission_fixture"}})).await;
+            let _prompt = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"permission-id","method":"session/request_permission","params":{"options":[{"optionId":"future","name":"Future","kind":"future_kind"}],"toolCall":{"toolCallId":"tool","title":"Bash","content":[]}}})).await;
+            let reply = read_request(&mut reader).await;
+            assert_eq!(reply["id"], "permission-id");
+            assert_eq!(reply["result"]["outcome"], "cancelled");
+        });
+        assert!(run.await.expect("run join").is_err());
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn total_timeout_cancels_once_without_failed() {
+        let provider = KimiCodeProvider::new(fixture_command("kimi_acp_timeout_fixture.sh"));
+        let mut session = provider
+            .start(input(None, 1), CancellationToken::new())
+            .await
+            .expect("start");
+        let mut statuses = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            let event = tokio::time::timeout_at(deadline, session.events.recv())
+                .await
+                .expect("event wait");
+            let Some(event) = event else {
+                break;
+            };
+            statuses.push(event.clone());
+            if matches!(
+                event,
+                ProviderEvent::StatusChanged(
+                    crate::cross_cutting::streaming_provider::ProviderStatus::Aborted
+                )
+            ) {
+                break;
+            }
+        }
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    ProviderEvent::StatusChanged(
+                        crate::cross_cutting::streaming_provider::ProviderStatus::Aborted
+                    )
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|event| matches!(event, ProviderEvent::Failed { .. }))
+                .count(),
+            0
         );
     }
 
@@ -289,6 +453,32 @@ mod session_tests {
         assert_eq!(
             completion.provider_session_id.as_deref(),
             Some("resumed_kimi_fixture")
+        );
+    }
+
+    #[tokio::test]
+    async fn nonstandard_process_crash_emits_failed_once() {
+        let mut env_vars = BTreeMap::new();
+        env_vars.insert("KIMI_FIXTURE_EXIT_CODE".to_string(), "42".to_string());
+        let provider = KimiCodeProvider::new(fixture_command("kimi_acp_crash_fixture.sh"));
+        let mut session = provider
+            .start(input_with_env(None, 10, env_vars), CancellationToken::new())
+            .await
+            .expect("start");
+        let events = terminal_events(&mut session).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProviderEvent::Failed { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProviderEvent::Completed(_)))
+                .count(),
+            0
         );
     }
 

@@ -200,3 +200,94 @@ fn extract_text(value: &Value) -> String {
         _ => String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn update(kind: &str, fields: serde_json::Value) -> serde_json::Value {
+        let mut update = fields.as_object().expect("update fields object").clone();
+        update.insert("sessionUpdate".to_string(), serde_json::json!(kind));
+        serde_json::json!({
+            "jsonrpc":"2.0", "method":"session/update",
+            "params":{"update": update}
+        })
+    }
+
+    #[test]
+    fn parses_each_session_update_variant() {
+        let message = update(
+            "agent_message_chunk",
+            serde_json::json!({"content":{"type":"text","text":"message"}}),
+        );
+        assert!(
+            matches!(parse_message(&message), Parsed::SessionUpdate(KimiSessionUpdate::AgentMessageChunk { content }) if content == "message")
+        );
+        let thought = update(
+            "agent_thought_chunk",
+            serde_json::json!({"content":{"type":"text","text":"thought"}}),
+        );
+        assert!(
+            matches!(parse_message(&thought), Parsed::SessionUpdate(KimiSessionUpdate::AgentThoughtChunk { content }) if content == "thought")
+        );
+        let call = update(
+            "tool_call",
+            serde_json::json!({"toolCallId":"tool","title":"Bash","kind":"execute","status":"pending","rawInput":"{\"command\":\"pwd\"}"}),
+        );
+        assert!(
+            matches!(parse_message(&call), Parsed::SessionUpdate(KimiSessionUpdate::ToolCall { tool_call_id, title, kind, status, arguments }) if tool_call_id == "tool" && title == "Bash" && kind == "execute" && status == "pending" && arguments["command"] == "pwd")
+        );
+        for status in ["in_progress", "completed", "failed"] {
+            let tool_update = update(
+                "tool_call_update",
+                serde_json::json!({"toolCallId":"tool","status":status,"content":[{"type":"content","content":{"type":"text","text":"out"}}]}),
+            );
+            assert!(
+                matches!(parse_message(&tool_update), Parsed::SessionUpdate(KimiSessionUpdate::ToolCallUpdate { status: actual, content, .. }) if actual == status && content == "out")
+            );
+        }
+        let info = update("session_info_update", serde_json::json!({"title":"title"}));
+        assert!(
+            matches!(parse_message(&info), Parsed::SessionUpdate(KimiSessionUpdate::SessionInfoUpdate { title }) if title == "title")
+        );
+        let usage = update("usage_update", serde_json::json!({"used":3,"size":9}));
+        assert!(matches!(
+            parse_message(&usage),
+            Parsed::SessionUpdate(KimiSessionUpdate::UsageUpdate { used: 3, size: 9 })
+        ));
+        let commands = update("available_commands_update", serde_json::json!({}));
+        assert!(matches!(
+            parse_message(&commands),
+            Parsed::SessionUpdate(KimiSessionUpdate::AvailableCommandsUpdate)
+        ));
+    }
+
+    #[test]
+    fn malformed_tool_arguments_are_empty_object_and_unknown_update_is_safe() {
+        assert_eq!(
+            parse_tool_arguments(Some(&serde_json::json!("not json"))),
+            serde_json::json!({})
+        );
+        assert_eq!(parse_tool_arguments(None), serde_json::json!({}));
+        let unknown = update("future_update", serde_json::json!({}));
+        assert!(
+            matches!(parse_message(&unknown), Parsed::Unknown(method) if method == "session/update")
+        );
+    }
+
+    #[test]
+    fn parses_permission_request_preserving_rpc_id_and_unknown_option_kind() {
+        let message = serde_json::json!({
+            "jsonrpc":"2.0", "id":"request-7", "method":"session/request_permission",
+            "params":{"options":[{"optionId":"future","name":"Future","kind":"future_kind"}],
+                "toolCall":{"toolCallId":"tool-7","title":"AskUserQuestion","content":[{"type":"content","content":{"type":"text","text":"Choose"}}]}}
+        });
+        let Parsed::RequestPermission(request) = parse_message(&message) else {
+            panic!("permission parse")
+        };
+        assert_eq!(request.request_id, serde_json::json!("request-7"));
+        assert_eq!(request.tool_call_id, "tool-7");
+        assert_eq!(request.options[0].kind, "future_kind");
+        assert_eq!(request.content_text, "Choose");
+    }
+}

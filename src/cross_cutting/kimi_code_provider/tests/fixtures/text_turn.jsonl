@@ -1,6 +1,8 @@
-{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":{},"permissionMode":"auto"}}
-{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session_text_fixture","configOptions":[],"modes":{"currentModeId":"auto","availableModes":[]}}}
-{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session_text_fixture","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"internal thought"}}}}
-{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session_text_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Kimi fixture output"}}}}
-{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"session_text_fixture","prompt":[{"type":"text","text":"fixture prompt"}]}}
+# Synthetic protocol-shape reference; executable transport: tests/fixtures/provider/kimi_acp_text_fixture.sh.
+# Keep mcpServers, sessionId, and event payloads aligned with that script.
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"permissionMode":"auto"}}
+{"jsonrpc":"2.0","id":2,"result":{"sessionId":"kimi_text_fixture","configOptions":[],"modes":{"currentModeId":"auto","availableModes":[]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"kimi_text_fixture","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"private thought"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"kimi_text_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Kimi fixture output"}}}}
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"kimi_text_fixture","prompt":[{"type":"text","text":"fixture prompt"}]}}
 {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}
