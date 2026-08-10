@@ -658,4 +658,9 @@ mod tests {
 
         assert_eq!(error.code.as_str(), "provider_unavailable");
     }
+
+    #[test]
+    fn web_runtime_does_not_schedule_kimi_code() {
+        assert_eq!(provider_type_to_name(&ProviderType::KimiCode), None);
+    }
 }

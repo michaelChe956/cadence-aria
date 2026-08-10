@@ -145,3 +145,14 @@ fn verification_commands_for_node(node_id: &str) -> Vec<String> {
         _ => vec!["cargo check --locked".to_string()],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::provider_type_text;
+    use crate::protocol::contracts::ProviderType;
+
+    #[test]
+    fn provider_type_text_kimi_code_is_stable() {
+        assert_eq!(provider_type_text(&ProviderType::KimiCode), "kimi_code");
+    }
+}

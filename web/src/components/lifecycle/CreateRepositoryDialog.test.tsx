@@ -26,7 +26,9 @@ function providerEntry(
         ? "Claude Code"
         : provider === "codex"
           ? "Codex"
-          : "Pi",
+          : provider === "pi"
+            ? "Pi"
+            : "Kimi Code",
     available,
     version: available ? "1.0.0" : null,
     reason_code: available ? null : "command_missing",
@@ -40,6 +42,7 @@ function setProviderHealth(
   claudeAvailable: boolean,
   codexAvailable: boolean,
   piAvailable = false,
+  kimiAvailable = false,
   overrides: Partial<ProviderHealthResponse> = {},
 ) {
   const snapshot: ProviderHealthResponse = {
@@ -48,12 +51,13 @@ function setProviderHealth(
     checked_at: "2026-07-14T00:00:00Z",
     state_status: "ready",
     state_error: null,
-    real_workflow_blocked: !claudeAvailable && !codexAvailable,
+    real_workflow_blocked: !claudeAvailable && !codexAvailable && !piAvailable && !kimiAvailable,
     test_provider_enabled: false,
     providers: [
       providerEntry("claude_code", claudeAvailable),
       providerEntry("codex", codexAvailable),
       providerEntry("pi", piAvailable),
+      providerEntry("kimi_code", kimiAvailable),
     ],
     ...overrides,
   };
@@ -579,6 +583,29 @@ describe("CreateRepositoryDialog", () => {
     const provider = screen.getByLabelText("Provider");
     expect(
       within(provider).queryByRole("option", { name: "Pi" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(provider).getByRole("option", { name: "Claude Code" }),
+    ).toBeEnabled();
+    await user.selectOptions(provider, "claude_code");
+    expect(provider).toHaveValue("claude_code");
+  });
+
+  it("仓库初始化不显示 Kimi Code 即使 Kimi 可用", async () => {
+    setProviderHealth(true, true, false, true);
+    const user = userEvent.setup();
+    render(
+      <CreateRepositoryDialog
+        onCreate={vi.fn()}
+        onFetchOperation={vi.fn()}
+        onInitializationCompleted={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const provider = screen.getByLabelText("Provider");
+    expect(
+      within(provider).queryByRole("option", { name: "Kimi Code" }),
     ).not.toBeInTheDocument();
     expect(
       within(provider).getByRole("option", { name: "Claude Code" }),
