@@ -33,7 +33,7 @@ pub enum RepositoryRouting {
     /// (Some, Some)：有 manifest 且有有效 selection → 逻辑解析（由调用方按 target/snapshot 定具体成员）。
     Logical {
         manifest: LogicalCodebaseManifest,
-        selection: IssueCodebaseSelection,
+        selection: Box<IssueCodebaseSelection>,
     },
     /// 其余一切不一致状态 → 明确错误，稳定错误码 + 可诊断 reason，绝不静默回退物理仓库。
     FailClosed {
@@ -52,7 +52,10 @@ impl RepositoryRouting {
             (None, None) => RepositoryRouting::Legacy {
                 repository_id: String::new(),
             }, // repository_id 由调用方从 entity 取
-            (Some(manifest), Some(selection)) => RepositoryRouting::Logical { manifest, selection },
+            (Some(manifest), Some(selection)) => RepositoryRouting::Logical {
+                manifest,
+                selection: Box::new(selection),
+            },
             (Some(_), None) => RepositoryRouting::FailClosed {
                 code: RepositoryRoutingErrorCode::TargetMissing,
                 reason: "work_item_target_missing: logical codebase manifest and issue selection must both exist".to_string(),
