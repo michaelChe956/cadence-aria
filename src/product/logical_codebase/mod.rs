@@ -13,6 +13,7 @@ pub mod provider_gateway;
 pub mod reference_scanner;
 pub mod registration;
 pub mod registry;
+pub mod repository_routing;
 pub mod store;
 pub mod types;
 
@@ -75,6 +76,7 @@ pub use registration::{
 pub use registry::{
     IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
 };
+pub use repository_routing::{RepositoryRouting, RepositoryRoutingErrorCode};
 pub use store::{LogicalCodebaseLayout, LogicalCodebaseManifest, LogicalCodebaseStore};
 pub use types::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalRepositoryId, MemberStatus,
