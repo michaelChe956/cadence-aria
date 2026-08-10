@@ -108,59 +108,82 @@ enum KimiSessionUpdate {
 struct KimiPermissionRequest { request_id, tool_call_id, options: [AllowOnce|AllowAlways|RejectOnce] }
 struct KimiPromptResult { stop_reason: StopReason }  // end_turn | ...
 ```
-`function.arguments` 是 JSON 字符串，二次 `serde_json::from_str` 安全解析（失败不 panic）。未知 sessionUpdate 子类型向前兼容不 panic。
+`function.arguments` 是 JSON 字符串，二次 `serde_json::from_str` 安全解析（失败不 panic）。未知 sessionUpdate 子类型跳过不 panic。
 
-**协议向前兼容与降级**：ACP 协议随 Kimi 版本演进可能新增 method 或扩展 request_permission/session/update 的 schema。适配器 SHALL 对未知 method 静默忽略并记录日志；对 request_permission 中未知 option kind 按拒绝处理（安全侧）；对 session/update 中未知 sessionUpdate 子类型跳过不 panic。fixture 锁定 0.34.0 协议形态，健康检查门禁 (< 0.34.0) 保证运行期协议在 spike 实证范围内；超出范围的字段变化以 degrade 为主，不阻断已有能力。
+**协议向前兼容与降级**：ACP 协议随 Kimi 版本演进可能新增 method 或扩展 schema。适配器 SHALL：未知 **notification**（无 id）记兼容性日志后忽略；未知 **request**（有 id）返回标准 JSON-RPC `-32601 Method not found`（避免 Kimi 无限等待）；request_permission 中未知 option kind 按拒绝处理（安全侧）并保留原 RPC id 回包；session/update 中未知 sessionUpdate 子类型跳过不 panic。fixture 锁定 0.34.0 协议形态。
+
+**initialize 后 capability 校验**（不只靠版本号）：校验 `protocolVersion==1`；resume 路径要求 `agentCapabilities.loadSession==true` 与 `sessionCapabilities.resume`；Supervised 要求 request_permission 真实生效（由 fixture 保证）。不满足时给出能力缺失错误或降级（如缺 resume 则不支持 resume、缺 Supervised 则 UI 隐藏）。版本门禁 (< 0.34.0) 保留为第一道闸，但不作为唯一兼容性判断。
 
 ### 3.3 session.rs — ACP 会话驱动（核心状态机）
 
 仿 `codex_provider/session.rs`：
-1. 发 initialize (id:1)，校验 protocolVersion==1。
+1. 发 initialize (id:1)，校验 protocolVersion==1 + capability（见 §3.2）。
 2. 发 notifications/initialized。
-3. 发 session/new (id:2, cwd, permissionMode)，拿 sessionId，上报 provider_session_id。
+3. **resume / new 互斥分支**：
+   - 若 `input.resume_provider_session_id` 存在 → 发 `session/load (id:2, sessionId, cwd, permissionMode)`，加载历史会话（不复创建新会话）；load 失败→Failed（不脚到 new）。
+   - 否则 → 发 `session/new (id:2, cwd, permissionMode)`。
+   - 从 load/new 的 response 取 sessionId，上报 `provider_session_id`。
 4. 发 session/prompt (id:N, input.prompt)，进入事件循环。
-5. 事件循环（select peer/command/cancel）：
+5. 事件循环（select peer/command/timeout/cancel）：
    - `session/update` → 按 KimiSessionUpdate 映射 ProviderEvent：
-     - AgentMessageChunk → `ProviderEvent::TextChunk`，累计 full_output。
-     - ToolCall/ToolCallUpdate → `ProviderEvent::ToolCall`/`ToolResult`。
-     - AgentThoughtChunk → 写入既有 provider 流式日志（与 Claude Code 的 thinking 一致），不计入 full_output，不作为正文事件转发。
-     - UsageUpdate → 日志。
-   - `session/request_permission` (id:M) → `ProviderEvent::PermissionRequest`；等 `command_rx` 的 PermissionResponse → 回 `session/request_permission` result `{options:[{optionId, outcome:selected}]}`。用户 reject → 工具不执行，会话继续（仍可能再请求）。
+     - AgentMessageChunk → `ProviderEvent::TextDelta { content }`，累计 full_output。
+     - ToolCall(title,status:pending) → `ProviderEvent::ToolCall(ProviderToolCall{ tool_use_id, tool_name=title, input=arguments(若已完成) })`。
+     - ToolCallUpdate → 按 toolCallId 緩冲；**仅在 status=completed|failed 时发送一次** `ProviderEvent::ToolResult(ProviderToolResult{ tool_use_id, output=聚合 content, is_error=(status==failed) })`。in_progress 增量不作为 ToolResult 发送（避免重复/虚构结果）。
+     - AgentThoughtChunk → **不写文件**（见 §3.6 thought 处理），不计 full_output，不作为正文转发。
+     - UsageUpdate → 日志/指标。
+   - `session/request_permission` (id:M) → **按 toolCall.title 区分**（见 §3.4/§3.4a）：AskUserQuestion→ChoiceRequest；其他→PermissionRequest。
    - `session/prompt` (id:N) result → 终态：`stopReason=end_turn` → `ProviderEvent::Completed(full_output)`（一次且仅一次）；其他/error → `Failed`。
-   - `Abort`/cancel → terminate 进程 → `Failed`(取消)。
+   - timeout/cancel → 见 §3.7 取消与超时。
 6. 进程退出：exit 0 且已发 Completed 则静默；未发终态则发 Failed。
 
-**不变量**：Completed/Failed 一次且仅一次；provider_session_id 仅 session/new 确认后上报；Abort 清理子孙进程；full_output 只累计 AgentMessageChunk。
+**不变量**：Completed/Failed 一次且仅一次；provider_session_id 在 load/new response 后上报（resume 路径优先用历史 sessionId）；full_output 只累计 AgentMessageChunk。
 
 ### 3.4 权限模式映射
 ```
-ProviderPermissionMode::Auto       → session/new permissionMode: "auto"
-ProviderPermissionMode::Supervised → session/new permissionMode: "default"
+ProviderPermissionMode::Auto       → session/new|load permissionMode: "auto"
+ProviderPermissionMode::Supervised → session/new|load permissionMode: "default"
 ```
-Auto 模式不发 request_permission；Supervised 模式正常走 ApprovalBridge。
+**B1 spike 实证**：Auto 模式不发**普通工具**（Bash 等）的 request_permission（不产生 PermissionRequest）；但 **AskUserQuestion 的 request_permission 在 Auto 下仍发**（提问是用户输入请求，不是危险操作，Auto 不藏提问）。故「Auto 不发 request_permission」仅限普通工具审批，不适用于提问。
 
 ### 3.4a 提问能力（spike 实证，与 Claude Code 对齐）
 
-Phase 0 Spike 强触发实测：Kimi **有 `AskUserQuestion` 工具**（与 Claude Code 同名同 schema：参数为 `{questions:[{question,header,options:[{label,description}]}]}`）。Kimi 把提问统一收敛到 ACP `session/request_permission` 机制：
+Phase 0 Spike 强触发实测：Kimi **有 `AskUserQuestion` 工具**（与 Claude Code 同名同 schema）。Kimi 把提问统一收敛到 ACP `session/request_permission` 机制：
 
 - 提问正文 = `session/request_permission` 的 `toolCall.content` text。
-- 选项 = `options` 数组，每项 `{optionId, name(显示文本), kind}`；Kimi 会自动补一个 `*_skip`（kind=reject_once）作为跳过。
-- 用户选某选项 → 客户端回 `session/request_permission` result `{options:[{optionId, outcome:"selected"}]}`（标准 ACP `Selected`，可靠）。
-- **自由文本补充**：ACP `session/request_permission` 的 result 只支持 `Cancelled`/`Selected`/`Other`，其中 `Other` 协议明确「非为用户输入文本设计」。故自由文本不走 request_permission，而走**下一轮 `session/prompt`**（同 sessionId 续接）。
+- 选项 = `options` 数组，每项 `{optionId, name(显示文本), kind}`；Kimi 自动补 `*_skip`（kind=reject_once）作为跳过。
+- 用户选某选项 → 回 `session/request_permission` result `{options:[{optionId, outcome:"selected"}]}`（标准 ACP `Selected`，可靠）。
+- **B3 spike 实证（多问题）**：Kimi **逐题串行**——多问题会依次发多个 request_permission，每次单题、单选（含 Skip）。故实现**不处理 questions[] 数组**，每次 request_permission 映射为单个 ChoiceRequest，`allow_multiple=false`（单选）；用户答完 Q1 后 Kimi 自行发 Q2。
+- **自由文本补充**：ACP result 只支持 `Cancelled`/`Selected`/`Other`，其中 `Other` 协议明确「非为用户输入文本设计」。故自由文本不走 request_permission，而走**下一轮 `session/prompt`**（同 sessionId 续接）——具体状态机见 §3.4b。
 
-**方案 D 的映射（选项 + 始终可编辑文本框的融合卡片）**：
-- 适配器识别 `session/request_permission` 中 `toolCall.title == "AskUserQuestion"` → 映射为既有 `ProviderEvent::ChoiceRequest`（source=`AskUserQuestion`，options 来自 request_permission.options，`allow_free_text=true`，UI 同时展示选项按钮 + 自由文本框）。
-- 其他 title 的 request_permission → 映射为既有 `ProviderEvent::PermissionRequest`（工具审批）。
-- **用户选选项** → `ChoiceResponse(selected_option_ids=[对应 optionId])` → 适配器回 ACP `Selected(optionId)`，同轮继续。
-- **用户填自由文本（选项都不合适）** → 不回 request_permission，适配器以“用户自主输入”结束当前轮（Failed/Cancelled 语义或正常收尾），用户文本作为**下一轮 `session/prompt`** 注入同 sessionId，上下文完整。
+**方案 D 映射（选项 + 始终可编辑文本框的融合卡片）**：
+- `session/request_permission` 中 `toolCall.title == "AskUserQuestion"` → `ProviderEvent::ChoiceRequest`（source=`AskUserQuestion`，options 来自 request_permission.options，`allow_free_text=true`，`allow_multiple=false`）。
+- 其他 title → `ProviderEvent::PermissionRequest`（普通工具审批，见 §3.4c）。
 
-因此：
-- Kimi **不复用** Pi 的 `aria-ask.ts` 扩展（那是 Pi 私有 RPC 的产物）。
-- Kimi 复用 Claude Code 的 `AskUserQuestion → ChoiceRequest` 映射思路（同一工具名/schema）。
-- 两路均走标准 ACP 机制（Selected / session-prompt），零非标准解析、不坏菜。
+因此：Kimi **不复用** Pi 的 `aria-ask.ts`；复用 Claude Code 的 AskUserQuestion 语义。两路均走标准 ACP 机制。
+
+### 3.4b 自由文本状态机（B2，需产品决策定案）
+
+用户在提问卡片选了选项 + 又填了自由文本（或仅填文本不选选项）时，需要明确规则（**本节为待定案项，见「需拍板」**）。原型状态机（草案）：
+1. 若 `ChoiceResponse.selected_option_ids` 非空 → 按选项路径回 `Selected(optionId)`，**忽略** free_text（或拼接进下一轮）；同轮继续。
+2. 若仅 free_text（选项都不要）→ 对原 request_permission 回标准 ACP `Cancelled`（关闭原请求，避免 Kimi 挂起），**不发** Failed/Completed 中间终态；适配器内部发第二个 `session/prompt(用户文本)` 注入同 sessionId；第二轮的 `session/prompt` result 才是最终终态。
+3. 中间不得向 Aria 上游发 Completed/Failed，否则 Workspace 会误判运行结束。
+
+### 3.4c 普通工具审批（Supervised，B6 需产品决策定案）
+
+Supervised 下普通工具的 request_permission 选项含 AllowOnce/AllowAlways/RejectOnce，但现有 `ProviderCommand::PermissionResponse` 仅 `approved: bool`（无法区分 once/always）。**需拍板**：或收窄为二元（approved→allow_once），或扩展契约——见「需拍板」。保留 ACP 原始 JSON-RPC id（可 number/string）用于回包。
 
 ### 3.5 终态判定（spike 实证）
 `session/prompt` 的 id 响应即终态：result `{stopReason:"end_turn"}` → Completed；result error / 非 end_turn → Failed；进程异常退出（未收到 prompt 响应）→ Failed。退出码：0 成功 / 1 不可重试 / 75 可重试（映射到 Failed 文案区分）。
+
+### 3.6 thought chunk 处理（B9 修正，不再臆造日志路径）
+
+`AgentThoughtChunk` **不计入 full_output**，不作为正文事件转发。第一阶段**不写入文件**（`StreamingProviderInput` 无日志目录字段，不存在「既有 provider 流式日志」可写；不preferred 从 working_dir 推导目录以免污染仓库）。处理方式：作为内部调试日志输出到 stderr/tracing（与 Kimi 子进程自身 stderr 一致）。后续若统一为所有 streaming provider 增设显式日志目录抽象，再让 thought 落盘。
+
+### 3.7 取消与超时（B7/B8）
+
+**取消（B7）**：Abort/cancel 到达时，优先发 ACP `session/cancel` notification（利用 ACP 会话强控）；在固定短超时内继续 drain，忽略取消后的文本输出；未得协议终态或写入失败时，调 `ProcessManager` 进程组 terminate（子孙清理）兑底。向上游只发送一次一致的取消终态（`ProviderStatus::Aborted`，与 Claude/Pi 取消语义一致），**不**发 ProviderEvent::Failed 以免下游误判为普通失败。
+
+**超时（B8）**：事件循环必须消费 `input.timeout_secs` 作为全 session 总超时；并为 initialize、session/new|load、session/prompt 各设独立的有界 JSON-RPC request timeout；resume 无进度时触发 stall timeout。任何有效 `session/update` 重置空闲计时。超时后执行 §3.7 取消流程，只发一次终态。
 
 ## 4. 产品层映射、前端与 image-create
 
@@ -231,7 +254,7 @@ provider-options.test（catalog/order/可用禁用）/ ProviderConfigPanel.test�
 - task-run 调度 Kimi。
 - 同 provider 内部重试（artifact retry / resume retry）。
 - Kimi `plan` 模式暴露。
-- thought chunk 展示给用户（仅写入 provider 流式日志，与 Claude Code thinking 一致）。
+- thought chunk 不展示给用户、第一阶段不落盘（输出到 stderr/tracing，不臆造日志目录）。
 - **自由文本走 ACP `Other` 扩展字段**：协议明确非为用户输入设计，不采用；自由文本统一走下一轮 `session/prompt`。
 - Pi 现有 `unreachable!` 的清理（不动 Pi）。
 

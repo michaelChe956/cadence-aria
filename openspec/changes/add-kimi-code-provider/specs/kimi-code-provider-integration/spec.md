@@ -124,7 +124,7 @@
 
 ### Requirement: Kimi 支持 AskUserQuestion 结构化提问
 
-Phase 0 Spike 实证：Kimi 有 `AskUserQuestion` 工具（与 Claude Code 同名同 schema），并把提问选项统一收敛到 ACP `session/request_permission`。系统 SHALL 识别 `session/request_permission` 中 `toolCall.title == "AskUserQuestion"` 并映射为既有 `ProviderEvent::ChoiceRequest`（source=`AskUserQuestion`，options 来自 request_permission.options，`allow_free_text=true`）；其他 title 映射为 `PermissionRequest`。系统 SHALL 不为 Kimi 复用 Pi 的 `aria-ask.ts` 扩展。
+Phase 0 Spike 实证：Kimi 有 `AskUserQuestion` 工具（与 Claude Code 同名同 schema），并把提问选项统一收敛到 ACP `session/request_permission`。系统 SHALL 识别 `session/request_permission` 中 `toolCall.title == "AskUserQuestion"` 并映射为既有 `ProviderEvent::ChoiceRequest`（source=`AskUserQuestion`，options 来自 request_permission.options，`allow_free_text=true`，`allow_multiple=false`）；其他 title 映射为 `PermissionRequest`。系统 SHALL 不为 Kimi 复用 Pi 的 `aria-ask.ts` 扩展。**Auto 与 Supervised 模式下 AskUserQuestion 均产生 ChoiceRequest**（提问是用户输入请求，Auto 不藏提问）；Auto 仅对普通工具不产生 PermissionRequest。
 
 #### Scenario: 用户选择提问选项
 
@@ -132,12 +132,18 @@ Phase 0 Spike 实证：Kimi 有 `AskUserQuestion` 工具（与 Claude Code 同�
 - **THEN** 适配器把所选 optionId 以 ACP `Selected(optionId)` 回传
 - **AND THEN** Kimi 在同一会话轮内继续
 
+#### Scenario: 多问题逐题串行呈现
+
+- **WHEN** Kimi 需问多个问题
+- **THEN** Kimi 逐题依次发多个 `session/request_permission`，每次单题单选
+- **AND THEN** 每题映射为单个 `ChoiceRequest`（`allow_multiple=false`），用户答完一题后 Kimi 自行发下一题
+
 #### Scenario: 选项都不合适时用户自由输入
 
 - **WHEN** AskUserQuestion 提问的选项都不符合用户意图，用户在自由文本框输入自己的回答
-- **THEN** 适配器不以 `Other` 扩展字段回传（避免非标准用法）
-- **AND THEN** 适配器收尾当前轮，用户文本作为下一轮 `session/prompt` 注入同一 Kimi sessionId
-- **AND THEN** Kimi 上下文完整续接
+- **THEN** 适配器以 ACP `Cancelled` 关闭原 request_permission（避免 Kimi 挂起）
+- **AND THEN** 适配器不发中间 Failed/Completed，内部发第二个 `session/prompt` 注入用户文本
+- **AND THEN** 第二轮 `session/prompt` result 为唯一终态，Kimi 上下文完整续接
 
 #### Scenario: UI 呈现选项与自由文本框并存
 
