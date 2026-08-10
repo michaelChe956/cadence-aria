@@ -277,6 +277,16 @@ fn resolve_group_repository(
             manifest,
             selection,
         } => {
+            if let Some(reason) = authoritative
+                .units
+                .iter()
+                .find_map(|unit| unit.source_draft_error.as_deref())
+            {
+                return Err(routing_api_error(
+                    RepositoryRoutingErrorCode::Inconsistent,
+                    reason,
+                ));
+            }
             let selected_ids =
                 validate_logical_group_selection(app_paths, project_id, &manifest, &selection)?;
             let target_ids: BTreeSet<LogicalRepositoryId> = authoritative

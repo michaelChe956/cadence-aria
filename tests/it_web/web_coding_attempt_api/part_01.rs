@@ -282,6 +282,42 @@ async fn create_group_attempt_multi_target_non_unique_is_ambiguous_4xx() {
 }
 
 #[tokio::test]
+async fn rejects_group_attempt_when_authoritative_source_draft_is_missing() {
+    // source draft 丢失不是合法的零 target，必须在 focus 兜底前 fail-closed。
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    seed_logical_fixture_multi_target(&app).await;
+    fs::remove_file(
+        ProductAppPaths::new(root.path().join(".aria"))
+            .issue_root("project_0001", "issue_0001")
+            .join(
+                "work_item_plan_drafts/work_item_plan_0001/round_0001/draft_work_item_revision_0001.json",
+            ),
+    )
+    .expect("remove authoritative source draft");
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert!(status.is_client_error(), "response: {body}");
+    assert_eq!(body["code"], "repository_routing_inconsistent");
+    assert_eq!(
+        body["details"]["reason"],
+        "work item revision source draft is missing"
+    );
+}
+
+#[tokio::test]
 async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     let root = tempdir().expect("root");
     let repo = git_repo();

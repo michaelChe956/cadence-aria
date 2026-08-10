@@ -15,7 +15,10 @@ pub struct AuthoritativeCodingUnitBinding {
     pub work_item_revision_id: String,
     pub verification_plan_revision_id: String,
     pub projection_bundle_id: String,
+    /// `None` 仅表示 source draft 已校验存在且 target 未指定；回溯断链另存错误，
+    /// 防止被 group B2 误判为可 focus 兜底的零 target。
     pub target_repository_id: Option<LogicalRepositoryId>,
+    pub source_draft_error: Option<String>,
     pub dependency_logical_work_item_ids: Vec<String>,
 }
 
@@ -135,11 +138,17 @@ impl super::CodingAttemptStore {
             values.sort();
         }
 
-        let mut draft_targets = WorkItemPlanStore::new(self.paths())
+        let mut draft_targets = BTreeMap::new();
+        let mut ambiguous_draft_ids = BTreeSet::new();
+        for draft in WorkItemPlanStore::new(self.paths())
             .list_draft_records(project_id, issue_id, plan_id)?
-            .into_iter()
-            .map(|draft| (draft.draft_id.clone(), draft))
-            .collect::<BTreeMap<_, _>>();
+        {
+            if draft_targets.contains_key(&draft.draft_id) {
+                ambiguous_draft_ids.insert(draft.draft_id);
+            } else {
+                draft_targets.insert(draft.draft_id.clone(), draft);
+            }
+        }
         let mut units = Vec::with_capacity(ordered_ids.len());
         let mut projection_bundle_ids = BTreeSet::new();
         for logical_id in ordered_ids {
@@ -182,10 +191,29 @@ impl super::CodingAttemptStore {
                     "work item revision dependencies do not match the bound logical work item",
                 ));
             }
-            let target_repository_id = draft_targets
-                .remove(&work_item_revision.source_draft_revision_id)
-                .filter(|draft| draft.candidate.logical_work_item_id == logical_id)
-                .and_then(|draft| draft.candidate.target_repository_id);
+            let (target_repository_id, source_draft_error) =
+                if ambiguous_draft_ids.contains(&work_item_revision.source_draft_revision_id) {
+                    (
+                        None,
+                        Some("work item revision source draft is ambiguous".to_string()),
+                    )
+                } else {
+                    match draft_targets.get(&work_item_revision.source_draft_revision_id) {
+                        None => (
+                            None,
+                            Some("work item revision source draft is missing".to_string()),
+                        ),
+                        Some(source_draft)
+                            if source_draft.candidate.logical_work_item_id != logical_id => (
+                            None,
+                            Some(
+                                "work item revision source draft logical work item does not match"
+                                    .to_string(),
+                            ),
+                        ),
+                        Some(source_draft) => (source_draft.candidate.target_repository_id, None),
+                    }
+                };
             projection_bundle_ids.insert(projection.id.clone());
             units.push(AuthoritativeCodingUnitBinding {
                 logical_work_item_id: logical_id.clone(),
@@ -193,6 +221,7 @@ impl super::CodingAttemptStore {
                 verification_plan_revision_id: verification.id,
                 projection_bundle_id: projection.id,
                 target_repository_id,
+                source_draft_error,
                 dependency_logical_work_item_ids: dependencies
                     .remove(&logical_id)
                     .expect("known logical work item"),
