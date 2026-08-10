@@ -2,10 +2,14 @@
 mod session_tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
 
     use serde_json::Value;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
     use crate::cross_cutting::streaming_provider::{
         ProviderCommand, ProviderEvent, ProviderPermissionMode, StreamingProviderInput,
@@ -91,14 +95,17 @@ mod session_tests {
         (JsonRpcPeer::new(reader, writer), server)
     }
 
-    async fn direct_session_events(
-        peer: JsonRpcPeer<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
+    async fn direct_session_events<W>(
+        peer: JsonRpcPeer<W>,
         input: StreamingProviderInput,
     ) -> (
         mpsc::Sender<ProviderCommand>,
         mpsc::Receiver<ProviderEvent>,
         tokio::task::JoinHandle<Result<(), ProviderAdapterError>>,
-    ) {
+    )
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (commands, command_rx) = mpsc::channel(8);
         let (event_tx, events) = mpsc::channel(32);
         let run = tokio::spawn(run_kimi_session(
@@ -109,6 +116,46 @@ mod session_tests {
             CancellationToken::new(),
         ));
         (commands, events, run)
+    }
+
+    struct ToggleFailWriter<W> {
+        inner: W,
+        fail_writes: Arc<AtomicBool>,
+    }
+
+    impl<W> tokio::io::AsyncWrite for ToggleFailWriter<W>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let this = self.get_mut();
+            if this.fail_writes.load(Ordering::SeqCst) {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "simulated closed ACP stdin",
+                )));
+            }
+            Pin::new(&mut this.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            if this.fail_writes.load(Ordering::SeqCst) {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "simulated closed ACP stdin",
+                )));
+            }
+            Pin::new(&mut this.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        }
     }
 
     #[test]
@@ -240,7 +287,7 @@ mod session_tests {
             let _initialized = read_request(&mut reader).await;
             let new = read_request(&mut reader).await;
             send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"unknown_fixture"}})).await;
-            let prompt = read_request(&mut reader).await;
+            let _prompt = read_request(&mut reader).await;
             send_message(
                 &mut writer,
                 serde_json::json!({"jsonrpc":"2.0","method":"future/notification","params":{}}),
@@ -250,7 +297,6 @@ mod session_tests {
             let reply = read_request(&mut reader).await;
             assert_eq!(reply["id"], "unknown-request");
             assert_eq!(reply["error"]["code"], -32601);
-            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         });
         let mut seen_completed = 0;
         while let Some(event) =
@@ -336,6 +382,134 @@ mod session_tests {
                 .count(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn resume_stall_aborts_before_total_timeout() {
+        let (peer, server) = test_peer();
+        let (_commands, mut events, run) =
+            direct_session_events(peer, input(Some("resume"), 10)).await;
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            let initialize = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            })).await;
+            let _initialized = read_request(&mut reader).await;
+            let load = read_request(&mut reader).await;
+            assert_eq!(load["method"], "session/load");
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":load["id"], "result":{"sessionId":"stalled_resume"}
+                }),
+            )
+            .await;
+            let prompt = read_request(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            ready_tx.send(()).expect("resume prompt ready");
+            let cancel = read_request(&mut reader).await;
+            assert_eq!(cancel["method"], "session/cancel");
+            finish_rx.await.expect("finish server");
+        });
+
+        ready_rx.await.expect("resume path reached prompt");
+        let started = tokio::time::Instant::now();
+        let mut saw_aborted = false;
+        let mut saw_failed = false;
+        while !saw_aborted {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("resume stall must be shorter than the ten-second total timeout")
+                .expect("event value");
+            saw_aborted = matches!(
+                event,
+                ProviderEvent::StatusChanged(
+                    crate::cross_cutting::streaming_provider::ProviderStatus::Aborted
+                )
+            );
+            saw_failed |= matches!(event, ProviderEvent::Failed { .. });
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "resume stall must expire before the total timeout"
+        );
+        assert!(!saw_failed);
+        finish_tx.send(()).expect("finish server signal");
+        assert!(run.await.expect("run join").is_err());
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn cancel_write_failure_still_emits_aborted_without_failed() {
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let fail_writes = Arc::new(AtomicBool::new(false));
+        let peer = JsonRpcPeer::new(
+            reader,
+            ToggleFailWriter {
+                inner: writer,
+                fail_writes: Arc::clone(&fail_writes),
+            },
+        );
+        let (commands, mut events, run) = direct_session_events(peer, input(None, 10)).await;
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            let initialize = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            })).await;
+            let _initialized = read_request(&mut reader).await;
+            let new = read_request(&mut reader).await;
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"cancel_write_failure"}
+                }),
+            )
+            .await;
+            let prompt = read_request(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            ready_tx.send(()).expect("prompt ready");
+            finish_rx.await.expect("finish server");
+        });
+
+        ready_rx.await.expect("session prompt ready");
+        fail_writes.store(true, Ordering::SeqCst);
+        commands
+            .send(ProviderCommand::Abort)
+            .await
+            .expect("abort command");
+        let mut saw_aborted = false;
+        let mut saw_failed = false;
+        while !saw_aborted {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("event wait")
+                .expect("event value");
+            saw_aborted = matches!(
+                event,
+                ProviderEvent::StatusChanged(
+                    crate::cross_cutting::streaming_provider::ProviderStatus::Aborted
+                )
+            );
+            saw_failed |= matches!(event, ProviderEvent::Failed { .. });
+        }
+        assert!(
+            !saw_failed,
+            "a best-effort cancel write failure must not emit Failed"
+        );
+        finish_tx.send(()).expect("finish server signal");
+        assert!(run.await.expect("run join").is_err());
+        server_task.await.expect("server task");
     }
 
     #[tokio::test]

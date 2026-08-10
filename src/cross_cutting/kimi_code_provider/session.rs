@@ -18,6 +18,8 @@ const KIMI_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const KIMI_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(not(test))]
 const KIMI_RESUME_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const KIMI_RESUME_STALL_TIMEOUT: Duration = Duration::from_millis(100);
 pub(crate) const KIMI_SESSION_ABORTED: &str = "Kimi provider session aborted";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,18 +311,12 @@ where
     }
 }
 
-#[cfg(not(test))]
 fn kimi_idle_timeout(timeout_secs: u64, resuming: bool) -> Duration {
     if resuming {
         KIMI_RESUME_STALL_TIMEOUT.min(Duration::from_secs(timeout_secs))
     } else {
         Duration::from_secs(timeout_secs)
     }
-}
-
-#[cfg(test)]
-fn kimi_idle_timeout(timeout_secs: u64, _resuming: bool) -> Duration {
-    Duration::from_secs(timeout_secs)
 }
 
 fn append_tool_content(accumulated: &mut String, content: &str) {
