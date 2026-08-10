@@ -15,6 +15,17 @@ use crate::product::models::RepositoryRecord;
 use crate::product::repository_store::RepositoryStore;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
+/// 指定 schema-v2 lineage 与 attempt scope 不一致时的入口兼容策略。
+///
+/// HTTP 删除/repair 在 fix base 中仅将 `WorkItemGroup` scope 视为 group；workspace
+/// context 则将存在的 lineage 直接视为 group。共享 resolver 接收该策略以原样保留
+/// 两个入口的既有语义，而不把该状态转换成新的 routing 错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaV2GroupAttemptScopePolicy {
+    RequireWorkItemGroupScope,
+    TreatLineageAsGroup,
+}
+
 /// 以逻辑代码库权威状态解析 coding attempt 所属 repository。
 ///
 /// 所有 coding 入口必须通过该函数执行三态 routing、snapshot 优先校验、
@@ -22,6 +33,7 @@ use crate::product::work_item_revision_store::WorkItemRevisionStore;
 pub fn resolve_coding_attempt_repository(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
+    group_scope_policy: SchemaV2GroupAttemptScopePolicy,
 ) -> Result<RepositoryRecord, ProductStoreError> {
     let routing =
         RepositoryRouting::load_for_issue(app_paths, &attempt.project_id, &attempt.issue_id)?;
@@ -84,22 +96,25 @@ pub fn resolve_coding_attempt_repository(
                 &manifest,
                 &selection,
             )?;
-            let logical_repository_id = if is_schema_v2_group_attempt(app_paths, attempt)? {
-                logical_repository_for_group_attempt(app_paths, attempt, &selection)?
-            } else {
-                let current_work_item_id = current_work_item_id_for_attempt(attempt);
-                LifecycleStore::new(app_paths.clone())
-                    .list_work_items(&attempt.project_id, &attempt.issue_id)?
-                    .into_iter()
-                    .find(|work_item| work_item.id == current_work_item_id)
-                    .and_then(|work_item| work_item.target_repository_id)
-                    .ok_or_else(|| {
-                        routing_error(
-                            RepositoryRoutingErrorCode::TargetMissing,
-                            format!("work item {current_work_item_id} has no target repository"),
-                        )
-                    })?
-            };
+            let logical_repository_id =
+                if is_schema_v2_group_attempt(app_paths, attempt, group_scope_policy)? {
+                    logical_repository_for_group_attempt(app_paths, attempt, &selection)?
+                } else {
+                    let current_work_item_id = current_work_item_id_for_attempt(attempt);
+                    LifecycleStore::new(app_paths.clone())
+                        .list_work_items(&attempt.project_id, &attempt.issue_id)?
+                        .into_iter()
+                        .find(|work_item| work_item.id == current_work_item_id)
+                        .and_then(|work_item| work_item.target_repository_id)
+                        .ok_or_else(|| {
+                            routing_error(
+                                RepositoryRoutingErrorCode::TargetMissing,
+                                format!(
+                                    "work item {current_work_item_id} has no target repository"
+                                ),
+                            )
+                        })?
+                };
             if !selected_ids.contains(&logical_repository_id) {
                 return Err(routing_error(
                     RepositoryRoutingErrorCode::TargetUnknown,
@@ -118,12 +133,17 @@ pub fn resolve_coding_attempt_repository(
 
 /// 检查 attempt 是否确实引用 schema-v2 group lineage。
 ///
-/// scope 与存在的 group lineage 不一致时视为损坏状态，不能把它按普通 work item
-/// 或 group 任一方向静默解析。
+/// `group_scope_policy` 由调用入口传入，以保持 fix base 的 scope 兼容行为。
 pub fn is_schema_v2_group_attempt(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
+    group_scope_policy: SchemaV2GroupAttemptScopePolicy,
 ) -> Result<bool, ProductStoreError> {
+    if group_scope_policy == SchemaV2GroupAttemptScopePolicy::RequireWorkItemGroupScope
+        && attempt.scope != CodingAttemptScope::WorkItemGroup
+    {
+        return Ok(false);
+    }
     let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
         return Ok(false);
     };
@@ -132,11 +152,7 @@ pub fn is_schema_v2_group_attempt(
         &attempt.issue_id,
         plan_id,
     ) {
-        Ok(_) if attempt.scope == CodingAttemptScope::WorkItemGroup => Ok(true),
-        Ok(_) => Err(routing_error(
-            RepositoryRoutingErrorCode::Inconsistent,
-            "schema-v2 group lineage requires work item group attempt scope",
-        )),
+        Ok(_) => Ok(true),
         Err(ProductStoreError::NotFound {
             kind: "work_item_plan_lineage",
             ..
@@ -362,7 +378,8 @@ mod tests {
         CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
     };
     use crate::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
-    use crate::product::models::{ProviderName, RepositoryRecord};
+    use crate::product::models::{ProviderName, RepositoryRecord, WorkItemPlanLineage};
+    use crate::product::work_item_revision_store::WorkItemRevisionStore;
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
     #[test]
@@ -383,10 +400,54 @@ mod tests {
             })
             .unwrap();
 
-        let repository = resolve_coding_attempt_repository(&paths, &attempt_fixture()).unwrap();
+        let repository = resolve_coding_attempt_repository(
+            &paths,
+            &attempt_fixture(),
+            SchemaV2GroupAttemptScopePolicy::RequireWorkItemGroupScope,
+        )
+        .unwrap();
 
         assert_eq!(repository.id, "repository_0001");
         assert_eq!(repository.path, repository_path);
+    }
+
+    #[test]
+    fn schema_v2_group_detection_preserves_entrypoint_scope_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        WorkItemRevisionStore::new(paths.clone())
+            .put_plan_lineage(&WorkItemPlanLineage {
+                id: "work_item_plan_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                story_spec_refs: Vec::new(),
+                design_spec_refs: Vec::new(),
+                active_revision_id: None,
+                active_amendment_id: None,
+                created_at: "2026-08-11T00:00:00Z".to_string(),
+                updated_at: "2026-08-11T00:00:00Z".to_string(),
+            })
+            .unwrap();
+        let mut attempt = attempt_fixture();
+        attempt.scope = CodingAttemptScope::WorkItem;
+        attempt.work_item_group_id = Some("work_item_plan_0001".to_string());
+
+        assert!(
+            !is_schema_v2_group_attempt(
+                &paths,
+                &attempt,
+                SchemaV2GroupAttemptScopePolicy::RequireWorkItemGroupScope,
+            )
+            .unwrap()
+        );
+        assert!(
+            is_schema_v2_group_attempt(
+                &paths,
+                &attempt,
+                SchemaV2GroupAttemptScopePolicy::TreatLineageAsGroup,
+            )
+            .unwrap()
+        );
     }
 
     fn attempt_fixture() -> CodingExecutionAttempt {

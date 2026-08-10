@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_repository::{
-    is_schema_v2_group_attempt, resolve_coding_attempt_repository,
+    SchemaV2GroupAttemptScopePolicy, is_schema_v2_group_attempt, resolve_coding_attempt_repository,
 };
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
@@ -48,7 +48,11 @@ pub(crate) fn ensure_work_item_execution_plan_confirmed(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<(), CodingWorkspaceEngineError> {
-    if is_schema_v2_group_attempt(app_paths, attempt)? {
+    if is_schema_v2_group_attempt(
+        app_paths,
+        attempt,
+        SchemaV2GroupAttemptScopePolicy::TreatLineageAsGroup,
+    )? {
         return Ok(());
     }
     let current_work_item_id = current_work_item_id_for_attempt(attempt);
@@ -82,7 +86,11 @@ pub(crate) fn repository_path_for_attempt(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<PathBuf, CodingWorkspaceEngineError> {
-    let repository = resolve_coding_attempt_repository(app_paths, attempt)?;
+    let repository = resolve_coding_attempt_repository(
+        app_paths,
+        attempt,
+        SchemaV2GroupAttemptScopePolicy::TreatLineageAsGroup,
+    )?;
     Ok(attempt
         .target_snapshot
         .as_ref()

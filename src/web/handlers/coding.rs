@@ -1,7 +1,9 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
-use crate::product::coding_attempt_repository::resolve_coding_attempt_repository;
+use crate::product::coding_attempt_repository::{
+    SchemaV2GroupAttemptScopePolicy, resolve_coding_attempt_repository,
+};
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_models::CodingAttemptScope;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
@@ -302,7 +304,12 @@ fn resolve_attempt_repository(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> ApiResult<RepositoryRecord> {
-    resolve_coding_attempt_repository(app_paths, attempt).map_err(product_store_api_error)
+    resolve_coding_attempt_repository(
+        app_paths,
+        attempt,
+        SchemaV2GroupAttemptScopePolicy::RequireWorkItemGroupScope,
+    )
+    .map_err(product_store_api_error)
 }
 
 pub(crate) fn save_work_item_execution_plan_for_attempt(
