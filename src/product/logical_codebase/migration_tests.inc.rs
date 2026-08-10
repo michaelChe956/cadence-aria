@@ -288,6 +288,38 @@ mod tests {
     }
 
     #[test]
+    fn migration_executor_write_issue_selection_tolerates_new_format() {
+        let fixture = migration_fixture_with_one_git_repository();
+        let executor = IdentityMigrationExecutor::new(fixture.paths.clone());
+        executor
+            .ensure_through_authority("project_0001")
+            .expect("migrate through authority");
+        let mapping = fixture.journal().mappings.remove(0);
+        let selections = crate::product::logical_codebase::IssueCodebaseSelectionStore::new(
+            fixture.paths.clone(),
+        );
+        selections
+            .save(
+                &crate::product::logical_codebase::IssueCodebaseSelection::explicit(
+                    "project_0001",
+                    "issue_0001",
+                    vec![mapping.logical_repository_id],
+                    Vec::new(),
+                    vec![mapping.logical_repository_id],
+                    None,
+                ),
+            )
+            .expect("seed authoritative selection");
+
+        executor
+            .write_issue_selection(
+                &fixture.paths.issue_root("project_0001", "issue_0001"),
+                &mapping,
+            )
+            .expect("new format is already migrated");
+    }
+
+    #[test]
     fn migration_persists_bootstrap_policy_artifact_after_authority_write() {
         let fixture = migration_fixture_with_one_git_repository();
         IdentityMigrationExecutor::new(fixture.paths.clone())

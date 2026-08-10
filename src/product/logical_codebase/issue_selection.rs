@@ -126,6 +126,49 @@ pub struct IssueCodebaseSelectionStore {
     paths: ProductAppPaths,
 }
 
+/// Loads an issue selection through its authoritative store, including legacy
+/// selection decoding and on-disk rewrite.
+pub fn load_selection(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> Result<Option<IssueCodebaseSelection>, ProductStoreError> {
+    IssueCodebaseSelectionStore::new(paths.clone()).load(project_id, issue_id)
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyIssueCodebaseSelection {
+    included: Vec<LogicalRepositoryId>,
+    focus: Vec<LogicalRepositoryId>,
+    selection_policy: String,
+}
+
+impl LegacyIssueCodebaseSelection {
+    fn into_authoritative(
+        self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<IssueCodebaseSelection, ProductStoreError> {
+        let selection_policy =
+            serde_json::from_value(serde_json::Value::String(self.selection_policy))
+                .map_err(|error| ProductStoreError::Json(error.to_string()))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        Ok(IssueCodebaseSelection {
+            schema_version: 1,
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            selection_policy,
+            included_repository_ids: self.included,
+            excluded_repository_ids: Vec::new(),
+            focus_repository_ids: self.focus,
+            snapshot_ref: None,
+            invalidation: None,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+}
+
 impl IssueCodebaseSelectionStore {
     pub fn new(paths: ProductAppPaths) -> Self {
         Self { paths }
@@ -153,7 +196,15 @@ impl IssueCodebaseSelectionStore {
         if !path.exists() {
             return Ok(None);
         }
-        Ok(Some(read_json::<IssueCodebaseSelection>(&path)?))
+        match read_json::<IssueCodebaseSelection>(&path) {
+            Ok(selection) => Ok(Some(selection)),
+            Err(_) => {
+                let legacy: LegacyIssueCodebaseSelection = read_json(&path)?;
+                let selection = legacy.into_authoritative(project_id, issue_id)?;
+                self.save(&selection)?;
+                Ok(Some(selection))
+            }
+        }
     }
 
     /// 显式标记 selection 失效（成员删除/停用等）；只写标记，不删除既有 JSON。
@@ -276,6 +327,40 @@ mod tests {
             .validate_focus_subset()
             .is_err()
         );
+    }
+
+    #[test]
+    fn load_migrates_legacy_focus_json_to_authoritative_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let path = paths.codebase_selection_path("project_0001", "issue_0001");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"included":["11111111-1111-1111-1111-111111111111"],"focus":["11111111-1111-1111-1111-111111111111"],"selection_policy":"explicit"}"#,
+        )
+        .unwrap();
+
+        let store = IssueCodebaseSelectionStore::new(paths.clone());
+        let loaded = store.load("project_0001", "issue_0001").unwrap().unwrap();
+        assert_eq!(loaded.selection_policy, SelectionPolicy::Explicit);
+        assert_eq!(loaded.included_repository_ids.len(), 1);
+        assert_eq!(loaded.focus_repository_ids.len(), 1);
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"schema_version\""));
+        assert!(raw.contains("\"focus_repository_ids\""));
+        assert!(!raw.contains("\"focus\":"));
+
+        let rewritten = store.load("project_0001", "issue_0001").unwrap().unwrap();
+        assert!(rewritten.schema_version >= 1);
+    }
+
+    #[test]
+    fn load_returns_none_when_file_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = IssueCodebaseSelectionStore::new(ProductAppPaths::new(temp.path()));
+        assert!(store.load("project_0001", "issue_0001").unwrap().is_none());
     }
 
     #[test]

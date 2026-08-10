@@ -37,7 +37,7 @@ pub use aggregate_initialization_store::AggregateInitializationOperationStore;
 pub use feature::LogicalCodebaseFeature;
 pub use issue_selection::{
     EffectiveMemberResolution, InvalidationRecord, IssueCodebaseSelection,
-    IssueCodebaseSelectionStore, SelectionPolicy,
+    IssueCodebaseSelectionStore, SelectionPolicy, load_selection,
 };
 pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,

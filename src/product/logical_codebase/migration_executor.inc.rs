@@ -549,7 +549,14 @@ impl IdentityMigrationExecutor {
             selection_policy: "explicit".to_string(),
         };
         if path.exists() {
-            let existing: IssueCodebaseSelection = read_json(&path)?;
+            let existing: serde_json::Value = read_json(&path)?;
+            if existing.get("schema_version").is_some()
+                && existing.get("focus_repository_ids").is_some()
+            {
+                return Ok(());
+            }
+            let existing: IssueCodebaseSelection = serde_json::from_value(existing)
+                .map_err(|error| ProductStoreError::Json(error.to_string()))?;
             if existing != expected {
                 return Err(ProductStoreError::IdentityMismatch {
                     kind: "issue_codebase_selection",

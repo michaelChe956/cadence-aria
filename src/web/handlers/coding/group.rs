@@ -248,18 +248,16 @@ fn resolve_issue_selection_repository(
     project_id: &str,
     issue_id: &str,
 ) -> ApiResult<RepositoryRecord> {
-    #[derive(serde::Deserialize)]
-    struct IssueCodebaseSelection {
-        focus: Vec<crate::product::logical_codebase::LogicalRepositoryId>,
-    }
-
-    let selection: IssueCodebaseSelection = crate::product::json_store::read_json(
-        &app_paths
-            .issue_root(project_id, issue_id)
-            .join("codebase-selection.json"),
-    )
-    .map_err(product_store_api_error)?;
-    let [logical_repository_id] = selection.focus.as_slice() else {
+    let selection =
+        crate::product::logical_codebase::load_selection(app_paths, project_id, issue_id)
+            .map_err(product_store_api_error)?
+            .ok_or_else(|| {
+                product_store_api_error(ProductStoreError::NotFound {
+                    kind: "issue_codebase_selection",
+                    id: issue_id.to_string(),
+                })
+            })?;
+    let [logical_repository_id] = selection.focus_repository_ids.as_slice() else {
         return Err(product_store_api_error(ProductStoreError::Ambiguous {
             kind: "issue_codebase_selection",
             id: issue_id.to_string(),

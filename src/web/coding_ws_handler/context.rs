@@ -204,17 +204,16 @@ fn issue_selection_logical_repository_id(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> Result<crate::product::logical_codebase::LogicalRepositoryId, ProductStoreError> {
-    #[derive(serde::Deserialize)]
-    struct IssueCodebaseSelection {
-        focus: Vec<crate::product::logical_codebase::LogicalRepositoryId>,
-    }
-
-    let selection: IssueCodebaseSelection = crate::product::json_store::read_json(
-        &app_paths
-            .issue_root(&attempt.project_id, &attempt.issue_id)
-            .join("codebase-selection.json"),
-    )?;
-    let [logical_repository_id] = selection.focus.as_slice() else {
+    let selection = crate::product::logical_codebase::load_selection(
+        app_paths,
+        &attempt.project_id,
+        &attempt.issue_id,
+    )?
+    .ok_or_else(|| ProductStoreError::NotFound {
+        kind: "issue_codebase_selection",
+        id: attempt.issue_id.clone(),
+    })?;
+    let [logical_repository_id] = selection.focus_repository_ids.as_slice() else {
         return Err(ProductStoreError::Ambiguous {
             kind: "issue_codebase_selection",
             id: attempt.issue_id.clone(),
