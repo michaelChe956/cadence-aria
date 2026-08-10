@@ -214,7 +214,7 @@ impl PlanningResumeFixture {
             1,
             vec![AggregateIndexMemberSnapshot::indexed(
                 self.api_member_id,
-                RepositoryCheckoutId(Uuid::nil()),
+                self.api_checkout_id(),
                 "abc123".to_string(),
                 false,
                 now,
