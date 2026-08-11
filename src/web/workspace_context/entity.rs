@@ -72,7 +72,13 @@ pub(super) fn workspace_entity_context(
             )?);
             Ok(WorkspaceEntityContext {
                 title: format!("Issue Work Item Plan ({})", plan.id),
-                repository_id: issue_repo_id(issue)?,
+                // 聚合代码库（logical_aggregate）WorkItemPlan 无单一物理仓库，用空串占位；
+                // 单仓（Legacy）仍以 issue.repo_id 解析（向后兼容）。
+                repository_id: if logical_aggregate {
+                    String::new()
+                } else {
+                    issue_repo_id(issue)?
+                },
                 linked_context,
             })
         }

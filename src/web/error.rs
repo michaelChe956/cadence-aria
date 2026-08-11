@@ -107,7 +107,8 @@ impl IntoResponse for ApiError {
             | "repository_not_git"
             | "work_item_split_invalid"
             | "involved_repositories_undetermined"
-            | "change_order_required_for_logical_codebase" => StatusCode::BAD_REQUEST,
+            | "change_order_required_for_logical_codebase"
+            | "target_not_in_selection" => StatusCode::BAD_REQUEST,
             "issue_worktree_active"
             | "repository_already_registered"
             | "repository_initialization_in_progress"
@@ -372,6 +373,15 @@ mod tests {
             assert_eq!(response.status(), expected_status, "{code} status mapping");
             assert!(response.status().is_client_error(), "{code} must be 4xx");
         }
+    }
+    #[test]
+    fn work_item_plan_target_not_in_selection_is_bad_request() {
+        // Task 7 prepare_work_item_plan Logical 分支：design involved ∉ selection 必须是 4xx
+        // 业务阻断（REQ-TGT-01，不是 500）。
+        let response = ApiError::validation("target_not_in_selection", "target not in selection")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.status().is_client_error(), "must be 4xx");
     }
     #[test]
     fn work_item_group_empty_is_bad_request() {

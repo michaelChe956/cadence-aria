@@ -15,6 +15,7 @@ use crate::product::models::{WorkspaceMessageRecord, WorkspaceSessionRecord, Wor
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 use crate::product::workspace_engine::{
     aggregate_design_scope_prompt, aggregate_story_scope_prompt,
+    aggregate_work_item_target_scope_prompt,
 };
 use chrono::Utc;
 
@@ -120,6 +121,8 @@ fn build_workspace_context_message(
     // 物理仓库解析，向后兼容；FailClosed 提前拦截报稳定错误码 repository_routing_*。
     // C1 修复：routing 判定在 workspace_entity_context 之前，Logical Story/Design 传
     // logical_aggregate 标志（Design 分支不再依赖 issue.repo_id，多仓 issue 可达）。
+    // Task 7 扩展：WorkItemPlan 同样走聚合视野（无单一物理仓库，entity 用空串占位，
+    // prompt 注入 target 集合），解决“WorkItemPlan+Logical 仍依赖 issue.repo_id”遗留。
     let routing =
         RepositoryRouting::load_for_issue(app_paths, &session.project_id, &session.issue_id)?;
     let aggregate_planning = match &routing {
@@ -129,7 +132,7 @@ fn build_workspace_context_message(
         RepositoryRouting::Logical { .. }
             if matches!(
                 session.workspace_type,
-                WorkspaceType::Story | WorkspaceType::Design
+                WorkspaceType::Story | WorkspaceType::Design | WorkspaceType::WorkItemPlan
             ) =>
         {
             // targets 空 → AI 自决 involved；snapshot 为权威 effective_member_ids。
@@ -168,6 +171,10 @@ fn build_workspace_context_message(
             .as_ref()
             .map(|resolved| match session.workspace_type {
                 WorkspaceType::Story => aggregate_story_scope_prompt(
+                    &resolved.inventory_injection.rendered,
+                    &resolved.snapshot.effective_member_ids,
+                ),
+                WorkspaceType::WorkItemPlan => aggregate_work_item_target_scope_prompt(
                     &resolved.inventory_injection.rendered,
                     &resolved.snapshot.effective_member_ids,
                 ),

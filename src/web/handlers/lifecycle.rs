@@ -544,14 +544,54 @@ pub async fn prepare_work_item_plan(
     let issue = IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
-    let repository_id = issue
-        .repo_id
-        .clone()
-        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
-    find_repository(&app_paths, &project_id, &repository_id)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
     validate_confirmed_design_specs(&lifecycle, &project_id, &issue_id, &request.design_spec_ids)?;
+    // 方案 X 阶段1：按 RepositoryRouting 三态分流（与 generate_story/design 一致）。
+    // Legacy（单仓）保持原 repository_id 校验 + find_repository；Logical（多仓）targets =
+    // confirmed design 的 involved，经 PlanningContextResolver 校验 target ∈ selection
+    // （REQ-TGT-01），无单仓 repo_id；FailClosed 报稳定错误码 repository_routing_*。
+    let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    match routing {
+        RepositoryRouting::Legacy { .. } => {
+            let repository_id = issue.repo_id.clone().ok_or_else(|| {
+                ApiError::validation("repository_required", "repository_id is required")
+            })?;
+            find_repository(&app_paths, &project_id, &repository_id)?;
+        }
+        RepositoryRouting::Logical { .. } => {
+            // targets = confirmed design 的 involved（validate_confirmed_design_specs 已保证
+            // design_spec_ids 非空且 Confirmed，首项必存在）。
+            let designs = lifecycle
+                .list_design_specs(&project_id, &issue_id)
+                .map_err(product_store_api_error)?;
+            let design = designs
+                .iter()
+                .find(|design| design.id == request.design_spec_ids[0])
+                .ok_or_else(|| {
+                    product_store_api_error(ProductStoreError::NotFound {
+                        kind: "design_spec",
+                        id: request.design_spec_ids[0].clone(),
+                    })
+                })?;
+            let resolved = PlanningContextResolver::new(app_paths.clone())
+                .build(&project_id, &issue_id, &design.involved_repository_ids)
+                .map_err(product_store_api_error)?;
+            // REQ-TGT-01：design involved 必须 ⊆ selection 有效成员，否则 4xx blocker。
+            for target in &design.involved_repository_ids {
+                if !resolved.snapshot.effective_member_ids.contains(target) {
+                    return Err(ApiError::validation(
+                        "target_not_in_selection",
+                        format!("design involved {target:?} is not in issue codebase selection"),
+                    ));
+                }
+            }
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            return Err(routing_api_error(code, &reason));
+        }
+    };
 
     let plan = lifecycle
         .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
