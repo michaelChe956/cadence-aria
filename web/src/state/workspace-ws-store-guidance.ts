@@ -9,7 +9,7 @@ const PROVIDER_INTERACTION_GUIDANCE: Record<WorkspaceProviderName, string> = {
   pi:
     "当前 author provider 是 Pi；Pi 不声明原生结构化交互能力。需要向用户确认时，必须输出 daemon 可识别的暂停信号并交给 text_fallback。禁止伪造 AskUserQuestion 或 requestUserInput 工具调用，也不要把文本选择题作为正常交互路径。",
   kimi_code:
-    "当前 author provider 是 Kimi Code；需要向用户确认时，必须使用结构化 AskUserQuestion 并等待回答。禁止输出文本 A/B/C 选择题作为交互替代。",
+    "当前 author provider 是 Kimi Code；Supervised 模式下工具操作必须使用结构化 permission request（逐工具审批），并等待用户审批或回答。需要向用户确认时，必须使用结构化 AskUserQuestion（用户可选择选项或自由输入）并等待回答。禁止输出文本 A/B/C 选择题作为交互替代。",
   fake:
     "当前 author provider 未声明原生结构化交互能力；需要向用户确认时，必须输出 daemon 可识别的暂停信号并交给 text_fallback。禁止伪造 AskUserQuestion 或 requestUserInput 工具调用，也不要把文本选择题作为正常交互路径。",
 };

@@ -138,7 +138,7 @@ fn assert_reviewer_section_oracle(
 }
 
 #[test]
-fn kimi_code_reviewer_renderer_uses_minimal_profile() {
+fn kimi_code_reviewer_renderer_uses_full_profile() {
     let compiled = compiled_fixture();
     let rendered = renderer_for(&ProviderName::KimiCode)
         .render_reviewer(&compiled.reviewer, &reviewer_execution_envelope_fixture())
@@ -148,7 +148,19 @@ fn kimi_code_reviewer_renderer_uses_minimal_profile() {
         rendered.renderer_version,
         "kimi-code-provider-projection-renderer-v1"
     );
-    assert!(rendered.text.contains("Kimi Code"));
+    assert!(
+        rendered
+            .text
+            .contains("# Kimi Code Reviewer Work Item Projection")
+    );
+    assert!(
+        rendered
+            .text
+            .contains("Supervised mode supports per-tool approval")
+    );
+    assert!(rendered.text.contains(
+        "Return the requested Kimi Code result without altering the normative projection sections."
+    ));
 }
 
 #[test]

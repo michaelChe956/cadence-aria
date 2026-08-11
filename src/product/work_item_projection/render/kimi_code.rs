@@ -10,11 +10,10 @@ use crate::product::work_item_projection::{
 const PROFILE: ProviderRenderProfile = ProviderRenderProfile {
     provider_label: "Kimi Code",
     renderer_version: "kimi-code-provider-projection-renderer-v1",
-    permission_and_tool_hint: "Use repository tools within the configured permission mode.",
-    structured_output_wrapper: "Return the requested result without altering the normative projection sections.",
+    permission_and_tool_hint: "Use Kimi Code tools within repository permissions; Supervised mode supports per-tool approval.",
+    structured_output_wrapper: "Return the requested Kimi Code result without altering the normative projection sections.",
 };
 
-/// TODO(Task4): complete the Kimi Code rendering profile.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct KimiCodeProjectionRenderer;
 

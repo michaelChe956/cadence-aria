@@ -247,7 +247,8 @@ pub(crate) fn latest_artifact_from_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::provider_type_for_name;
+    use super::{permission_mode_for_provider, provider_type_for_name};
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
     use crate::product::models::ProviderName;
     use crate::protocol::contracts::ProviderType;
 
@@ -261,6 +262,17 @@ mod tests {
         assert_eq!(
             provider_type_for_name(&ProviderName::KimiCode),
             ProviderType::KimiCode
+        );
+    }
+
+    #[test]
+    fn kimi_supervised_mode_is_preserved_not_forced_auto() {
+        assert_eq!(
+            permission_mode_for_provider(
+                &ProviderName::KimiCode,
+                ProviderPermissionMode::Supervised
+            ),
+            ProviderPermissionMode::Supervised
         );
     }
 }

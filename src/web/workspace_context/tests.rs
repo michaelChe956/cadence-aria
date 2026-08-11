@@ -336,6 +336,22 @@ fn pi_story_context_requires_ask_user_tool() {
 }
 
 #[test]
+fn kimi_story_context_declares_structured_permission_and_choice_interactions() {
+    let guidance = workflow_discipline_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::KimiCode,
+    ));
+
+    assert!(guidance.contains("当前 author provider 是 Kimi Code"));
+    assert!(
+        guidance
+            .contains("Supervised 模式下工具操作必须使用结构化 permission request（逐工具审批）")
+    );
+    assert!(guidance.contains("AskUserQuestion（用户可选择选项或自由输入）"));
+    assert!(guidance.contains("等待用户审批或回答"));
+}
+
+#[test]
 fn claude_code_story_context_requires_structured_ask_user_question() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
