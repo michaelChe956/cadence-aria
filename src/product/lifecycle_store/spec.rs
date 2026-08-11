@@ -295,6 +295,84 @@ impl LifecycleStore {
         }
     }
 
+    pub fn update_story_spec_aggregate(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        entity_id: &str,
+        scope: &AggregateStorySpecScope,
+    ) -> Result<StorySpecRecord, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(entity_id)?;
+        // 校验 involved ⊆ effective_member_ids（Draft 态也校验，防止脏数据）；顺带校验
+        // focus_repository_id ∈ involved。Draft 态允许空 involved（AI 尚未产出）。
+        validate_aggregate_story_scope(scope, LifecycleConfirmationStatus::Draft)?;
+
+        let ExistingSpecRecord::Story {
+            path,
+            record: mut story,
+        } = self.load_existing_spec(project_id, issue_id, entity_id)?
+        else {
+            return Err(ProductStoreError::Conflict {
+                kind: "story_aggregate_kind_mismatch",
+                id: entity_id.to_string(),
+            });
+        };
+        // 仅 Draft 态可更新（Confirmed 后锁定）。
+        if story.confirmation_status != LifecycleConfirmationStatus::Draft {
+            return Err(ProductStoreError::Conflict {
+                kind: "story_aggregate_locked",
+                id: entity_id.to_string(),
+            });
+        }
+
+        story.involved_repository_ids = scope.involved_repository_ids.clone();
+        story.focus_repository_id = scope.focus_repository_id;
+        story.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &story)?;
+        Ok(story)
+    }
+
+    pub fn update_design_spec_aggregate(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        entity_id: &str,
+        scope: &AggregateDesignSpecScope,
+    ) -> Result<DesignSpecRecord, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(entity_id)?;
+        // 校验 involved ⊆ effective_member_ids（Draft 态也校验，防止脏数据）；顺带校验
+        // change_order ⊆ involved 且不重复。Draft 态允许空 involved（AI 尚未产出）。
+        validate_aggregate_design_scope(scope, LifecycleConfirmationStatus::Draft)?;
+
+        let ExistingSpecRecord::Design {
+            path,
+            record: mut design,
+        } = self.load_existing_spec(project_id, issue_id, entity_id)?
+        else {
+            return Err(ProductStoreError::Conflict {
+                kind: "design_aggregate_kind_mismatch",
+                id: entity_id.to_string(),
+            });
+        };
+        // 仅 Draft 态可更新（Confirmed 后锁定）。
+        if design.confirmation_status != LifecycleConfirmationStatus::Draft {
+            return Err(ProductStoreError::Conflict {
+                kind: "design_aggregate_locked",
+                id: entity_id.to_string(),
+            });
+        }
+
+        design.involved_repository_ids = scope.involved_repository_ids.clone();
+        design.change_order = scope.change_order.clone();
+        design.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &design)?;
+        Ok(design)
+    }
+
     pub fn upsert_project_provider_defaults(
         &self,
         input: CreateProjectProviderDefaultsInput,
@@ -490,8 +568,311 @@ fn validate_aggregate_design_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::product::app_paths::ProductAppPaths;
     use crate::product::logical_codebase::LogicalRepositoryId;
+    use tempfile::TempDir;
     use uuid::Uuid;
+
+    const TEST_PROJECT_ID: &str = "project_0001";
+    const TEST_ISSUE_ID: &str = "issue_0001";
+    const TEST_REPOSITORY_ID: &str = "repository_0001";
+    const TEST_STORY_SPEC_ID: &str = "story_spec_0001";
+
+    fn setup() -> (TempDir, LifecycleStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        (tmp, store)
+    }
+
+    /// 构造一个聚合视野 Story（involved 空、Draft 态），作为 update 回写测试的前置。
+    fn create_aggregate_story(store: &LifecycleStore) -> StorySpecRecord {
+        store
+            .create_story_spec(CreateStorySpecInput {
+                project_id: TEST_PROJECT_ID.to_string(),
+                issue_id: TEST_ISSUE_ID.to_string(),
+                repository_id: TEST_REPOSITORY_ID.to_string(),
+                title: "aggregate story".to_string(),
+                aggregate_codebase: Some(AggregateStorySpecScope {
+                    logical_codebase_ref: Uuid::from_u128(0x0100),
+                    effective_member_ids: vec![LogicalRepositoryId(Uuid::from_u128(1))],
+                    involved_repository_ids: Vec::new(),
+                    focus_repository_id: None,
+                }),
+            })
+            .unwrap()
+    }
+
+    /// 构造一个聚合视野 Design（involved 空、Draft 态），作为 update 回写测试的前置。
+    fn create_aggregate_design(store: &LifecycleStore) -> DesignSpecRecord {
+        store
+            .create_design_spec(CreateDesignSpecInput {
+                project_id: TEST_PROJECT_ID.to_string(),
+                issue_id: TEST_ISSUE_ID.to_string(),
+                story_spec_ids: vec![TEST_STORY_SPEC_ID.to_string()],
+                title: "aggregate design".to_string(),
+                aggregate_codebase: Some(AggregateDesignSpecScope {
+                    logical_codebase_ref: Uuid::from_u128(0x0100),
+                    effective_member_ids: vec![LogicalRepositoryId(Uuid::from_u128(1))],
+                    involved_repository_ids: Vec::new(),
+                    change_order: Vec::new(),
+                }),
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn update_story_spec_aggregate_writes_involved_in_draft() {
+        let (_tmp, store) = setup();
+        let story = create_aggregate_story(&store);
+        let involved = LogicalRepositoryId(Uuid::from_u128(1));
+        let scope = AggregateStorySpecScope {
+            logical_codebase_ref: story.logical_codebase_ref.unwrap(),
+            effective_member_ids: vec![involved],
+            involved_repository_ids: vec![involved], // AI 产出
+            focus_repository_id: Some(involved),
+        };
+
+        let updated = store
+            .update_story_spec_aggregate(&story.project_id, &story.issue_id, &story.id, &scope)
+            .unwrap();
+        assert_eq!(updated.involved_repository_ids, vec![involved]);
+        assert_eq!(updated.focus_repository_id, Some(involved));
+        assert_eq!(
+            updated.confirmation_status,
+            LifecycleConfirmationStatus::Draft
+        );
+
+        // 磁盘持久化一致（reload 校验回写落盘）。
+        let reloaded = store
+            .load_existing_spec(&story.project_id, &story.issue_id, &story.id)
+            .unwrap();
+        match reloaded {
+            ExistingSpecRecord::Story { record, .. } => {
+                assert_eq!(record.involved_repository_ids, vec![involved]);
+                assert_eq!(record.focus_repository_id, Some(involved));
+            }
+            ExistingSpecRecord::Design { .. } => panic!("expected story spec"),
+        }
+    }
+
+    #[test]
+    fn update_story_spec_aggregate_rejects_involved_outside_effective() {
+        let (_tmp, store) = setup();
+        let story = create_aggregate_story(&store);
+        let outside = LogicalRepositoryId(Uuid::from_u128(99));
+        let scope = AggregateStorySpecScope {
+            logical_codebase_ref: story.logical_codebase_ref.unwrap(),
+            effective_member_ids: vec![LogicalRepositoryId(Uuid::from_u128(1))],
+            involved_repository_ids: vec![outside],
+            focus_repository_id: None,
+        };
+
+        let error = store
+            .update_story_spec_aggregate(&story.project_id, &story.issue_id, &story.id, &scope)
+            .unwrap_err();
+        assert!(
+            matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+                if reason.contains("involved_repository_not_effective")),
+            "越界 involved 应拒绝，错误: {error:?}"
+        );
+
+        // 校验失败不得落盘：reload 仍为空 involved。
+        let reloaded = store
+            .load_existing_spec(&story.project_id, &story.issue_id, &story.id)
+            .unwrap();
+        match reloaded {
+            ExistingSpecRecord::Story { record, .. } => {
+                assert!(record.involved_repository_ids.is_empty());
+            }
+            ExistingSpecRecord::Design { .. } => panic!("expected story spec"),
+        }
+    }
+
+    #[test]
+    fn update_story_spec_aggregate_rejects_focus_outside_involved() {
+        let (_tmp, store) = setup();
+        let story = create_aggregate_story(&store);
+        let scope = AggregateStorySpecScope {
+            logical_codebase_ref: story.logical_codebase_ref.unwrap(),
+            effective_member_ids: vec![
+                LogicalRepositoryId(Uuid::from_u128(1)),
+                LogicalRepositoryId(Uuid::from_u128(2)),
+            ],
+            involved_repository_ids: vec![LogicalRepositoryId(Uuid::from_u128(1))],
+            focus_repository_id: Some(LogicalRepositoryId(Uuid::from_u128(2))),
+        };
+
+        let error = store
+            .update_story_spec_aggregate(&story.project_id, &story.issue_id, &story.id, &scope)
+            .unwrap_err();
+        assert!(
+            matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+                if reason.contains("focus_repository_not_involved")),
+            "focus 必须在 involved 集合内，错误: {error:?}"
+        );
+    }
+
+    #[test]
+    fn update_story_spec_aggregate_rejects_when_confirmed() {
+        let (_tmp, store) = setup();
+        let story = create_aggregate_story(&store);
+        store
+            .update_spec_confirmation_status(
+                &story.project_id,
+                &story.issue_id,
+                &story.id,
+                LifecycleConfirmationStatus::Confirmed,
+            )
+            .unwrap();
+        let involved = LogicalRepositoryId(Uuid::from_u128(1));
+        let scope = AggregateStorySpecScope {
+            logical_codebase_ref: story.logical_codebase_ref.unwrap(),
+            effective_member_ids: vec![involved],
+            involved_repository_ids: vec![involved],
+            focus_repository_id: Some(involved),
+        };
+
+        let error = store
+            .update_story_spec_aggregate(&story.project_id, &story.issue_id, &story.id, &scope)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ProductStoreError::Conflict {
+                    kind: "story_aggregate_locked",
+                    ..
+                }
+            ),
+            "Confirmed 态应锁定，错误: {error:?}"
+        );
+
+        // 锁定后原值不变。
+        let reloaded = store
+            .load_existing_spec(&story.project_id, &story.issue_id, &story.id)
+            .unwrap();
+        match reloaded {
+            ExistingSpecRecord::Story { record, .. } => {
+                assert!(record.involved_repository_ids.is_empty());
+                assert_eq!(
+                    record.confirmation_status,
+                    LifecycleConfirmationStatus::Confirmed
+                );
+            }
+            ExistingSpecRecord::Design { .. } => panic!("expected story spec"),
+        }
+    }
+
+    #[test]
+    fn update_design_spec_aggregate_writes_involved_and_change_order_in_draft() {
+        let (_tmp, store) = setup();
+        let design = create_aggregate_design(&store);
+        let involved = LogicalRepositoryId(Uuid::from_u128(1));
+        let scope = AggregateDesignSpecScope {
+            logical_codebase_ref: design.logical_codebase_ref.unwrap(),
+            effective_member_ids: vec![involved],
+            involved_repository_ids: vec![involved], // AI 产出
+            change_order: vec![involved],
+        };
+
+        let updated = store
+            .update_design_spec_aggregate(&design.project_id, &design.issue_id, &design.id, &scope)
+            .unwrap();
+        assert_eq!(updated.involved_repository_ids, vec![involved]);
+        assert_eq!(updated.change_order, vec![involved]);
+
+        // 磁盘持久化一致（reload 校验回写落盘）。
+        let reloaded = store
+            .load_existing_spec(&design.project_id, &design.issue_id, &design.id)
+            .unwrap();
+        match reloaded {
+            ExistingSpecRecord::Design { record, .. } => {
+                assert_eq!(record.involved_repository_ids, vec![involved]);
+                assert_eq!(record.change_order, vec![involved]);
+            }
+            ExistingSpecRecord::Story { .. } => panic!("expected design spec"),
+        }
+    }
+
+    #[test]
+    fn update_design_spec_aggregate_rejects_involved_outside_effective() {
+        let (_tmp, store) = setup();
+        let design = create_aggregate_design(&store);
+        let outside = LogicalRepositoryId(Uuid::from_u128(99));
+        let scope = AggregateDesignSpecScope {
+            logical_codebase_ref: design.logical_codebase_ref.unwrap(),
+            effective_member_ids: vec![LogicalRepositoryId(Uuid::from_u128(1))],
+            involved_repository_ids: vec![outside],
+            change_order: Vec::new(),
+        };
+
+        let error = store
+            .update_design_spec_aggregate(&design.project_id, &design.issue_id, &design.id, &scope)
+            .unwrap_err();
+        assert!(
+            matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+                if reason.contains("involved_repository_not_effective")),
+            "越界 involved 应拒绝，错误: {error:?}"
+        );
+    }
+
+    #[test]
+    fn update_design_spec_aggregate_rejects_change_order_outside_involved() {
+        let (_tmp, store) = setup();
+        let design = create_aggregate_design(&store);
+        let scope = AggregateDesignSpecScope {
+            logical_codebase_ref: design.logical_codebase_ref.unwrap(),
+            effective_member_ids: vec![
+                LogicalRepositoryId(Uuid::from_u128(1)),
+                LogicalRepositoryId(Uuid::from_u128(2)),
+            ],
+            involved_repository_ids: vec![LogicalRepositoryId(Uuid::from_u128(1))],
+            change_order: vec![LogicalRepositoryId(Uuid::from_u128(2))],
+        };
+
+        let error = store
+            .update_design_spec_aggregate(&design.project_id, &design.issue_id, &design.id, &scope)
+            .unwrap_err();
+        assert!(
+            matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
+                if reason.contains("change_order_repository_not_involved")),
+            "change_order 必须在 involved 集合内，错误: {error:?}"
+        );
+    }
+
+    #[test]
+    fn update_design_spec_aggregate_rejects_when_confirmed() {
+        let (_tmp, store) = setup();
+        let design = create_aggregate_design(&store);
+        store
+            .update_spec_confirmation_status(
+                &design.project_id,
+                &design.issue_id,
+                &design.id,
+                LifecycleConfirmationStatus::Confirmed,
+            )
+            .unwrap();
+        let involved = LogicalRepositoryId(Uuid::from_u128(1));
+        let scope = AggregateDesignSpecScope {
+            logical_codebase_ref: design.logical_codebase_ref.unwrap(),
+            effective_member_ids: vec![involved],
+            involved_repository_ids: vec![involved],
+            change_order: vec![involved],
+        };
+
+        let error = store
+            .update_design_spec_aggregate(&design.project_id, &design.issue_id, &design.id, &scope)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ProductStoreError::Conflict {
+                    kind: "design_aggregate_locked",
+                    ..
+                }
+            ),
+            "Confirmed 态应锁定，错误: {error:?}"
+        );
+    }
 
     #[test]
     fn validate_story_scope_draft_allows_empty_involved() {
