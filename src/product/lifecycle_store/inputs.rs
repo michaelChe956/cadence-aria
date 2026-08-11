@@ -41,7 +41,8 @@ pub struct CreateStorySpecInput {
 /// `logical_codebase_ref` 取 manifest.logical_codebase_id；`effective_member_ids` 来自
 /// `PlanningContextSnapshot.effective_member_ids`（权威）；`involved_repository_ids` 来自 AI
 /// 输出且必须 ⊆ effective_member_ids；`change_order` 为 AI 显式给出的改动顺序图（执行顺序，
-/// 非服务调用图，REQ-TGT-04），缺失不强制 blocker。
+/// 非服务调用图，REQ-TGT-04）。**多仓 Design（involved > 1）必须提供 change_order**，缺失即
+/// blocker `change_order_required_for_logical_codebase`（REQ-PLN-05 收紧）；单仓 Design 可空。
 ///
 /// AI 未明确涉及仓库（空 involved）或涉及不在有效集合的仓库 → blocker；Design 不再读取
 /// `issue.repo_id` 填充任何字段（REQ-PLN-08）。`change_order` 若给出，其全部 id 必须 ∈
@@ -52,7 +53,9 @@ pub struct AggregateDesignSpecScope {
     pub effective_member_ids: Vec<LogicalRepositoryId>,
     /// AI 明确声明的涉及仓库；空表示未确定 → blocker（不回落 issue.repo_id）。
     pub involved_repository_ids: Vec<LogicalRepositoryId>,
-    /// AI 显式给出的改动顺序图（执行顺序）。可空；若给出则全部 id 必须 ∈ involved 且不重复。
+    /// AI 显式给出的改动顺序图（执行顺序）。当 `involved_repository_ids.len() > 1`（多仓）时
+    /// **必须**提供（缺失即 blocker `change_order_required_for_logical_codebase`，REQ-PLN-05）；
+    /// 单仓 Design（involved ≤ 1）可空。若给出则全部 id 必须 ∈ involved 且不重复。
     pub change_order: Vec<LogicalRepositoryId>,
 }
 
