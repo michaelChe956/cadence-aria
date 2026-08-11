@@ -43,11 +43,15 @@
 - **THEN** Story SHALL 明确列出涉及仓库并描述各自改动范围；AI 无法确定涉及仓库时产生 blocker
 
 ### Requirement: Design 聚合视野与改动顺序（REQ-PLN-05）
-系统 SHALL 使 Design 显式携带 `logical_codebase_ref` 与 `involved_repositories`，不再回落 `issue.repo_id`；跨仓关系由 AI 从聚合索引按需检索（启发式，非语义级服务图）；Design 表达改动顺序作为 Work Item `depends_on` 依据。
+系统 SHALL 使 Design 显式携带 `logical_codebase_ref` 与 `involved_repositories`，不再回落 `issue.repo_id`；跨仓关系由 AI 从聚合索引按需检索（启发式，非语义级服务图）；Design 表达改动顺序作为 Work Item `depends_on` 依据；**当 Design 涉及多个 involved_repository（多仓）时，SHALL 必须提供 `change_order`（改动顺序图），缺失即 blocker `change_order_required_for_logical_codebase`**；单仓 Design（involved_repository 唯一）的 `change_order` 可选。
 
 #### Scenario: Design 表达跨仓改动顺序
 - **WHEN** Design 涉及跨仓接口/契约变更
 - **THEN** Design SHALL 表达改动顺序（如 公共契约 → provider → consumer），作为 Work Item `depends_on` 依据
+
+#### Scenario: 多仓 Design 缺失 change_order 即 blocker
+- **WHEN** 逻辑代码库（多仓）Issue 的 Design 涉及多个 involved_repository，但未提供 change_order
+- **THEN** 系统 SHALL 拒绝该 Design（blocker `change_order_required_for_logical_codebase`），不得在无执行顺序图的情况下进入 compile
 
 ### Requirement: 规划只读边界（REQ-PLN-06）
 规划 provider 会话 SHALL 为只读语义的 best-effort（`best_effort_configured`：Aria-owned 配置 + cwd + pre/post 检测）；仅在固定 provider/OS 越界写 fixture 通过后才可升级为 `production_verified_readonly`；未达到该级别时不得宣称「物理上无法写入」；疑似越权写入需被检测并标记。
