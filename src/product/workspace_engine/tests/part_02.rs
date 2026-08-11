@@ -1,3 +1,9 @@
+use crate::product::lifecycle_store::spec::ExistingSpecRecord;
+use crate::product::lifecycle_store::{
+    AggregateDesignSpecScope, AggregateStorySpecScope,
+};
+use crate::product::logical_codebase::{PlanningContextSnapshot, PlanningContextSnapshotStore};
+
 #[test]
 fn artifact_constraint_spec_defines_story_required_and_forbidden_rules() {
     let spec = artifact_constraint_spec_for(&WorkspaceType::Story);
@@ -730,4 +736,350 @@ async fn fake_reviewer_creates_skipped_review_node_and_enters_human_confirm() {
         }
         _ => panic!("expected SessionState"),
     }
+}
+
+// ---- Task 4（方案X阶段2）：AI run 后解析 structured output 回写 involved ----
+
+fn save_planning_snapshot(app_paths: &ProductAppPaths, project_id: &str, issue_id: &str, effective_member_ids: Vec<LogicalRepositoryId>) {
+    PlanningContextSnapshotStore::new(app_paths.clone())
+        .save(&PlanningContextSnapshot {
+            schema_version: 1,
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            membership_revision: 1,
+            effective_member_ids,
+            member_fingerprints: Vec::new(),
+            aggregate_index_id: "agg_index_0001".to_string(),
+            index_revision: 1,
+            policy_digest: "policy_0001".to_string(),
+            access_fingerprint: String::new(),
+            invalidation: None,
+            captured_at: "2026-07-01T00:00:00Z".to_string(),
+        })
+        .unwrap();
+}
+
+async fn drive_author_completed(
+    engine: &mut WorkspaceEngine,
+    full_output: String,
+) {
+    let node_id = create_author_run_node(engine).await;
+    let (provider_event_tx, provider_event_rx) = mpsc::channel(8);
+    let (provider_command_tx, _provider_command_rx) = mpsc::channel(8);
+    provider_event_tx
+        .send(ProviderEvent::Completed(ProviderCompletion::plain(
+            full_output,
+            None,
+        )))
+        .await
+        .unwrap();
+    drop(provider_event_tx);
+    engine
+        .drive_provider_session(ProviderSessionDriveInput {
+            session: Ok(ProviderSession {
+                events: provider_event_rx,
+                commands: provider_command_tx,
+            }),
+            command_rx: empty_provider_commands(),
+            node_id: Some(node_id),
+            agent: Some(ProviderName::ClaudeCode),
+            role: ProviderConversationRole::Author,
+            artifact_retry: None,
+            revision_resume_fallback: None,
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn provider_drive_story_run_writes_back_involved_from_structured_output() {
+    let (tmp, checkpoint_store) = setup();
+    let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle_store = LifecycleStore::new(app_paths.clone());
+    let member_a = LogicalRepositoryId(Uuid::from_u128(0xaaaa));
+    let member_b = LogicalRepositoryId(Uuid::from_u128(0xbbbb));
+    let effective_member_ids = vec![member_a, member_b];
+    let logical_codebase_ref = Uuid::from_u128(0x0100);
+
+    // 聚合代码库 Story（Draft、空 involved）。
+    let story = lifecycle_store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                logical_codebase_ref,
+                effective_member_ids: effective_member_ids.clone(),
+                involved_repository_ids: Vec::new(),
+                focus_repository_id: None,
+            }),
+        })
+        .unwrap();
+    assert_eq!(story.confirmation_status, LifecycleConfirmationStatus::Draft);
+    save_planning_snapshot(&app_paths, "project_0001", "issue_0001", effective_member_ids.clone());
+
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id.clone(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session = WorkspaceSession::from_record(session_record);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+
+    // AI 产出含 structured output 的完整 Story artifact。
+    let structured = format!(
+        "<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{{\"involved_repository_ids\":[\"{a}\",\"{b}\"],\"focus_repository_id\":\"{b}\"}}</ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">",
+        a = member_a.0,
+        b = member_b.0,
+    );
+    let artifact_markdown = format!(
+        "{}\n{structured}",
+        complete_story_artifact("生成候选草稿。", "候选草稿可进入人工确认。")
+    );
+    drive_author_completed(&mut engine, format!("```artifact\n{artifact_markdown}\n```")).await;
+
+    // 验证 record.involved_repository_ids / focus_repository_id 被回写。
+    let updated = lifecycle_store
+        .load_existing_spec("project_0001", "issue_0001", &story.id)
+        .unwrap();
+    match updated {
+        ExistingSpecRecord::Story { record, .. } => {
+            assert_eq!(
+                record.involved_repository_ids, effective_member_ids,
+                "AI 产出的 involved 应回写到 Story record"
+            );
+            assert_eq!(record.focus_repository_id, Some(member_b));
+        }
+        _ => panic!("expected story spec"),
+    }
+}
+
+#[tokio::test]
+async fn provider_drive_design_run_writes_back_involved_and_change_order_from_structured_output() {
+    let (tmp, checkpoint_store) = setup();
+    let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle_store = LifecycleStore::new(app_paths.clone());
+    let member_a = LogicalRepositoryId(Uuid::from_u128(0xaaaa));
+    let member_b = LogicalRepositoryId(Uuid::from_u128(0xbbbb));
+    let effective_member_ids = vec![member_a, member_b];
+    let logical_codebase_ref = Uuid::from_u128(0x0100);
+
+    let story = lifecycle_store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Story".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    let design = lifecycle_store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            story_spec_ids: vec![story.id.clone()],
+            title: "Design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                logical_codebase_ref,
+                effective_member_ids: effective_member_ids.clone(),
+                involved_repository_ids: Vec::new(),
+                change_order: Vec::new(),
+            }),
+        })
+        .unwrap();
+    assert_eq!(design.confirmation_status, LifecycleConfirmationStatus::Draft);
+    save_planning_snapshot(&app_paths, "project_0001", "issue_0001", effective_member_ids.clone());
+
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: design.id.clone(),
+            workspace_type: WorkspaceType::Design,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session = WorkspaceSession::from_record(session_record);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+
+    let structured = format!(
+        "<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{{\"involved_repository_ids\":[\"{a}\",\"{b}\"],\"change_order\":[\"{a}\",\"{b}\"]}}</ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">",
+        a = member_a.0,
+        b = member_b.0,
+    );
+    let artifact_markdown = format!(
+        "{}\n{structured}",
+        complete_design_artifact("保留设计边界。", "公开接口保持稳定。")
+    );
+    drive_author_completed(&mut engine, format!("```artifact\n{artifact_markdown}\n```")).await;
+
+    let updated = lifecycle_store
+        .load_existing_spec("project_0001", "issue_0001", &design.id)
+        .unwrap();
+    match updated {
+        ExistingSpecRecord::Design { record, .. } => {
+            assert_eq!(
+                record.involved_repository_ids, effective_member_ids,
+                "AI 产出的 involved 应回写到 Design record"
+            );
+            assert_eq!(
+                record.change_order, effective_member_ids,
+                "AI 产出的 change_order 应回写到 Design record"
+            );
+        }
+        _ => panic!("expected design spec"),
+    }
+}
+
+#[tokio::test]
+async fn provider_drive_single_repo_story_run_does_not_write_back_aggregate() {
+    // 传统单仓 Story（aggregate_codebase=None）：AI 产出无 structured output，
+    // 回写应跳过且不产生诊断/失败，既有 append_version 行为不变。
+    let (tmp, checkpoint_store) = setup();
+    let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle_store = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle_store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Story".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id.clone(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session = WorkspaceSession::from_record(session_record);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+
+    // 单仓：无 structured output，直接产出完整 Story artifact。
+    drive_author_completed(&mut engine, complete_story_artifact("生成候选。", "可验收。")).await;
+
+    let updated = lifecycle_store
+        .load_existing_spec("project_0001", "issue_0001", &story.id)
+        .unwrap();
+    match updated {
+        ExistingSpecRecord::Story { record, .. } => {
+            assert!(
+                record.involved_repository_ids.is_empty(),
+                "单仓 Story 不应回写 involved"
+            );
+            assert_eq!(record.focus_repository_id, None);
+            // 既有 append_version 行为不变：已追加一个版本。
+            assert_eq!(record.current_version, Some(1));
+        }
+        _ => panic!("expected story spec"),
+    }
+    // 无诊断 system 消息。
+    let system_messages = engine
+        .session()
+        .messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .count();
+    assert_eq!(system_messages, 0, "单仓路径不应产生聚合回写诊断");
+}
+
+#[tokio::test]
+async fn provider_drive_aggregate_story_missing_structured_output_records_diagnostic() {
+    // 聚合代码库 Story 但 AI 未产出 structured output（缺 tag）：
+    // 约束4——不回写 involved，且不静默吞，产生可见 system 诊断消息。
+    let (tmp, checkpoint_store) = setup();
+    let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle_store = LifecycleStore::new(app_paths.clone());
+    let member_a = LogicalRepositoryId(Uuid::from_u128(0xaaaa));
+    let member_b = LogicalRepositoryId(Uuid::from_u128(0xbbbb));
+    let effective_member_ids = vec![member_a, member_b];
+    let story = lifecycle_store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                logical_codebase_ref: Uuid::from_u128(0x0100),
+                effective_member_ids: effective_member_ids.clone(),
+                involved_repository_ids: Vec::new(),
+                focus_repository_id: None,
+            }),
+        })
+        .unwrap();
+    save_planning_snapshot(&app_paths, "project_0001", "issue_0001", effective_member_ids.clone());
+
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id.clone(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 2,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session = WorkspaceSession::from_record(session_record);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+
+    // 完整 Story artifact 但不含 <ARIA_STRUCTURED_OUTPUT>。
+    drive_author_completed(&mut engine, complete_story_artifact("生成候选。", "可验收。")).await;
+
+    let updated = lifecycle_store
+        .load_existing_spec("project_0001", "issue_0001", &story.id)
+        .unwrap();
+    match updated {
+        ExistingSpecRecord::Story { record, .. } => {
+            assert!(
+                record.involved_repository_ids.is_empty(),
+                "AI 未产出 involved 时不应回写"
+            );
+        }
+        _ => panic!("expected story spec"),
+    }
+    // 约束4：产生可见 system 诊断消息，不静默吞。
+    let diagnostics = engine
+        .session()
+        .messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1, "缺 tag 应记录一条可见诊断");
+    assert!(
+        diagnostics[0].content.contains("involved"),
+        "诊断应说明 AI 未产出 involved：{}",
+        diagnostics[0].content
+    );
 }
