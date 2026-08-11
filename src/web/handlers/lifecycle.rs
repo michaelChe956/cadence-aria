@@ -1,6 +1,7 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
+use crate::product::lifecycle_store::spec::ExistingSpecRecord;
 use crate::product::lifecycle_store::{AggregateDesignSpecScope, AggregateStorySpecScope};
 use crate::product::logical_codebase::{
     LogicalRepositoryId, PlanningContextResolver, PlanningContextSetResolver, RepositoryRouting,
@@ -875,14 +876,52 @@ pub(crate) fn confirm_workspace_entity(
     session: &WorkspaceSessionRecord,
 ) -> ApiResult<()> {
     match session.workspace_type {
-        WorkspaceType::Story | WorkspaceType::Design => lifecycle
-            .update_spec_confirmation_status(
-                &session.project_id,
-                &session.issue_id,
-                &session.entity_id,
-                LifecycleConfirmationStatus::Confirmed,
-            )
-            .map_err(product_store_api_error),
+        WorkspaceType::Story | WorkspaceType::Design => {
+            // confirm gate（方案 X 3b 收紧）：多仓 Spec（logical_codebase_ref Some）在
+            // Confirmed 前校验 ① involved 非空（REQ-PLN-04「AI 不确定即 blocker」）；
+            // ② Design involved>1 必须 change_order（决策 3b，REQ-PLN-05 收紧）。
+            // 单仓（logical_codebase_ref None）不校验，保持 Legacy 行为不变（红线）。
+            let spec = lifecycle
+                .load_existing_spec(&session.project_id, &session.issue_id, &session.entity_id)
+                .map_err(product_store_api_error)?;
+            let (is_logical, involved_len, change_order_empty) = match &spec {
+                ExistingSpecRecord::Story { record, .. } => (
+                    record.logical_codebase_ref.is_some(),
+                    record.involved_repository_ids.len(),
+                    true,
+                ),
+                ExistingSpecRecord::Design { record, .. } => (
+                    record.logical_codebase_ref.is_some(),
+                    record.involved_repository_ids.len(),
+                    record.change_order.is_empty(),
+                ),
+            };
+            if is_logical {
+                if involved_len == 0 {
+                    return Err(ApiError::validation(
+                        "involved_repositories_undetermined",
+                        "多仓 Spec 必须有 involved",
+                    ));
+                }
+                if matches!(session.workspace_type, WorkspaceType::Design)
+                    && involved_len > 1
+                    && change_order_empty
+                {
+                    return Err(ApiError::validation(
+                        "change_order_required_for_logical_codebase",
+                        "多仓 Design 必须有 change_order",
+                    ));
+                }
+            }
+            lifecycle
+                .update_spec_confirmation_status(
+                    &session.project_id,
+                    &session.issue_id,
+                    &session.entity_id,
+                    LifecycleConfirmationStatus::Confirmed,
+                )
+                .map_err(product_store_api_error)
+        }
         WorkspaceType::WorkItem => lifecycle
             .update_work_item_plan_status(
                 &session.project_id,

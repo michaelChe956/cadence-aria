@@ -891,3 +891,230 @@ async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
     assert!(content.contains("change_order"), "缺 change_order 指令：{content}");
     assert!(content.contains("depends_on"), "缺 depends_on 依据：{content}");
 }
+
+// ---- Task 6：confirm gate（多仓 involved + change_order 校验，3b 收紧）----
+// confirm_workspace_entity 在 Confirmed 前对多仓（logical_codebase_ref Some）Spec 校验：
+// ① involved 非空（REQ-PLN-04「AI 不确定即 blocker」）；② Design involved>1 必须 change_order
+// （决策 3b，REQ-PLN-05 收紧）。单仓（logical_codebase_ref None）不校验，保持 Legacy 行为不变。
+use cadence_aria::product::lifecycle_store::{
+    AggregateDesignSpecScope, AggregateStorySpecScope, CreateDesignSpecInput,
+};
+
+/// 建多仓 issue + 聚合视野 Story/Design spec + 其 workspace session，返回 (root, router, session_id)。
+/// 直接经 LifecycleStore 构造聚合视野（involved/change_order 由调用方指定），确认门只读 spec。
+/// 必须保留返回的 TempDir（root）直到请求完成，否则目录被清理导致 404。
+async fn create_logical_confirm_fixture(
+    kind: WorkspaceType,
+    involved: Vec<LogicalRepositoryId>,
+    change_order: Vec<LogicalRepositoryId>,
+) -> (tempfile::TempDir, axum::Router, String) {
+    let root = tempdir().expect("root");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            title: "多仓聚合 confirm".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("multi-repo issue");
+    let effective = involved.clone();
+    let entity_id = match kind {
+        WorkspaceType::Story => {
+            let story = lifecycle
+                .create_story_spec(CreateStorySpecInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    repository_id: String::new(),
+                    title: "多仓 Story".to_string(),
+                    aggregate_codebase: Some(AggregateStorySpecScope {
+                        logical_codebase_ref: uuid::Uuid::from_u128(0x0100),
+                        effective_member_ids: effective,
+                        involved_repository_ids: involved,
+                        focus_repository_id: None,
+                    }),
+                })
+                .expect("logical story");
+            story.id
+        }
+        WorkspaceType::Design => {
+            let design = lifecycle
+                .create_design_spec(CreateDesignSpecInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    story_spec_ids: Vec::new(),
+                    title: "多仓 Design".to_string(),
+                    aggregate_codebase: Some(AggregateDesignSpecScope {
+                        logical_codebase_ref: uuid::Uuid::from_u128(0x0100),
+                        effective_member_ids: effective,
+                        involved_repository_ids: involved,
+                        change_order,
+                    }),
+                })
+                .expect("logical design");
+            design.id
+        }
+        _ => panic!("only Story/Design supported"),
+    };
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id,
+            workspace_type: kind,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("workspace session");
+    (root, app, session.id)
+}
+
+#[tokio::test]
+async fn confirm_logical_design_without_change_order_is_blocked() {
+    // 多仓 Design（involved>1，无 change_order）→ confirm → 4xx blocker（3b）。
+    let m1 = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    let m2 = LogicalRepositoryId(uuid::Uuid::from_u128(2));
+    let (_root, app, session_id) =
+        create_logical_confirm_fixture(WorkspaceType::Design, vec![m1, m2], Vec::new()).await;
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/workspace-sessions/{session_id}/confirm"),
+        json!({ "confirmed_by": "human" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "多仓 Design 缺 change_order 必须 4xx 阻断: {body}"
+    );
+    assert_eq!(body["code"], "change_order_required_for_logical_codebase");
+}
+
+#[tokio::test]
+async fn confirm_logical_story_with_involved_succeeds() {
+    // 多仓 Story（involved 非空）→ confirm → 200（3b：Story 不要求 change_order）。
+    let member = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    let (_root, app, session_id) =
+        create_logical_confirm_fixture(WorkspaceType::Story, vec![member], Vec::new()).await;
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/workspace-sessions/{session_id}/confirm"),
+        json!({ "confirmed_by": "human" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "多仓 Story confirm 应成功: {body}");
+    assert_eq!(body["status"], "confirmed");
+}
+
+#[tokio::test]
+async fn confirm_logical_story_without_involved_is_blocked() {
+    // 多仓 Story（involved 空）→ confirm → 4xx blocker（REQ-PLN-04「AI 不确定即 blocker」）。
+    let (_root, app, session_id) =
+        create_logical_confirm_fixture(WorkspaceType::Story, Vec::new(), Vec::new()).await;
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/workspace-sessions/{session_id}/confirm"),
+        json!({ "confirmed_by": "human" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "多仓 Story 缺 involved 必须 4xx 阻断: {body}"
+    );
+    assert_eq!(body["code"], "involved_repositories_undetermined");
+}
+
+#[tokio::test]
+async fn confirm_logical_design_with_change_order_succeeds() {
+    // 多仓 Design（involved>1，有 change_order）→ confirm → 200。
+    let m1 = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    let m2 = LogicalRepositoryId(uuid::Uuid::from_u128(2));
+    let (_root, app, session_id) = create_logical_confirm_fixture(
+        WorkspaceType::Design,
+        vec![m1, m2],
+        vec![m1, m2],
+    )
+    .await;
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/workspace-sessions/{session_id}/confirm"),
+        json!({ "confirmed_by": "human" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "多仓 Design 带 change_order confirm 应成功: {body}"
+    );
+    assert_eq!(body["status"], "confirmed");
+}
+
+#[tokio::test]
+async fn confirm_legacy_single_repo_story_without_involved_succeeds() {
+    // 红线：单仓（logical_codebase_ref None）不校验 involved，保持 Legacy 行为不变。
+    let root = tempdir().expect("root");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            title: "单仓 Story confirm".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("legacy issue");
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "单仓 Story".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("legacy story");
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("legacy session");
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/workspace-sessions/{}/confirm", session.id),
+        json!({ "confirmed_by": "human" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "单仓 Story confirm 不得被新门拦截: {body}"
+    );
+    assert_eq!(body["status"], "confirmed");
+}

@@ -105,7 +105,9 @@ impl IntoResponse for ApiError {
             | "repository_path_not_git_repo"
             | "repository_path_invalid"
             | "repository_not_git"
-            | "work_item_split_invalid" => StatusCode::BAD_REQUEST,
+            | "work_item_split_invalid"
+            | "involved_repositories_undetermined"
+            | "change_order_required_for_logical_codebase" => StatusCode::BAD_REQUEST,
             "issue_worktree_active"
             | "repository_already_registered"
             | "repository_initialization_in_progress"
@@ -346,6 +348,27 @@ mod tests {
 
         for (code, expected_status) in cases {
             let response = ApiError::validation(code, "routing fail-closed").into_response();
+            assert_eq!(response.status(), expected_status, "{code} status mapping");
+            assert!(response.status().is_client_error(), "{code} must be 4xx");
+        }
+    }
+    #[test]
+    fn confirm_gate_error_codes_map_to_4xx() {
+        // Task 6 confirm gate：多仓 involved 缺失 / 多仓 Design 缺 change_order 必须是 4xx
+        // 业务阻断（不是 500），与 brief 的 "4xx blocker" 一致。
+        let cases = [
+            (
+                "involved_repositories_undetermined",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "change_order_required_for_logical_codebase",
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+
+        for (code, expected_status) in cases {
+            let response = ApiError::validation(code, "confirm gate fail-closed").into_response();
             assert_eq!(response.status(), expected_status, "{code} status mapping");
             assert!(response.status().is_client_error(), "{code} must be 4xx");
         }
