@@ -640,6 +640,28 @@ fn valid_structured_output(json: &str) -> String {
 }
 
 #[tokio::test]
+async fn kimi_review_does_not_attempt_structured_output_repair() {
+    let review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let provider = QueuedReviewProvider::new(vec![missing_end_nonce_output(review_json)]);
+    let (_tmp, mut engine, mut rx, _review_node_id) =
+        queued_review_engine("sess_kimi_review_no_repair").await;
+    engine.session.reviewer_provider = Some(ProviderName::KimiCode);
+
+    engine
+        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    let diagnostic = engine
+        .latest_review_verdict
+        .as_ref()
+        .and_then(|verdict| verdict.structured_output_diagnostic.as_ref())
+        .expect("fallback diagnostic");
+    assert!(!diagnostic.repair_attempted);
+    assert!(repair_event_statuses(&mut rx).is_empty());
+}
+
+#[tokio::test]
 async fn review_structured_output_repair_failure_persists_diagnostic() {
     let review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
     let provider = QueuedReviewProvider::new(vec![

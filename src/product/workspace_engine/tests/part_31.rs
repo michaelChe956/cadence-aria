@@ -661,6 +661,57 @@ async fn pi_author_runs_from_story_design_and_work_item_entries_in_auto_mode() {
 }
 
 #[tokio::test]
+async fn kimi_author_does_not_retry_missing_artifact() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_kimi_no_artifact_retry");
+    session.author_provider = ProviderName::KimiCode;
+    session.reviewer_provider = None;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    let starts = Arc::new(AtomicUsize::new(0));
+    let provider = KimiIncompleteArtifactProvider {
+        starts: starts.clone(),
+    };
+
+    engine
+        .handle_user_message("start".to_string(), Arc::new(provider), empty_provider_commands())
+        .await;
+
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+}
+
+struct KimiIncompleteArtifactProvider {
+    starts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for KimiIncompleteArtifactProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let output = "Kimi returned an incomplete artifact.".to_string();
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::plain(output, None)))
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[tokio::test]
 async fn pi_start_failure_does_not_retry_selected_provider() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 

@@ -51,7 +51,10 @@ impl WorkspaceEngine {
 
         match self.parse_review_completion_for_active_node(&first_completion) {
             Ok(verdict) => self.complete_review(first_completion, verdict).await,
-            Err(first_error) if first_error.is_repairable() && reviewer != ProviderName::Pi => {
+            // 第一阶段不实证 Kimi resume 稳定性，排除 review repair（同 Pi）
+            Err(first_error)
+                if provider_allows_review_repair(&reviewer) && first_error.is_repairable() =>
+            {
                 let repair_input = match self.build_review_repair_input(
                     &input,
                     &first_completion,
@@ -216,8 +219,12 @@ impl WorkspaceEngine {
             )
             .await;
         }
+        // 第一阶段不实证 Kimi resume 稳定性，排除 artifact retry（同 Pi）
         let retry_context =
-            (self.session.author_provider != ProviderName::Pi).then(|| ArtifactRetryContext {
+            crate::product::workspace_engine::provider_drive::provider_allows_artifact_retry(
+                &self.session.author_provider,
+            )
+            .then(|| ArtifactRetryContext {
                 provider: provider.clone(),
                 input: input.clone(),
                 attempted: false,
@@ -626,5 +633,21 @@ impl WorkspaceEngine {
             let completion = ProviderCompletion::plain(full_content, None);
             ReviewProviderRunResult::Completed(completion)
         }
+    }
+}
+
+fn provider_allows_review_repair(provider: &ProviderName) -> bool {
+    !matches!(provider, ProviderName::Pi | ProviderName::KimiCode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kimi_is_excluded_from_review_repair() {
+        assert!(!provider_allows_review_repair(&ProviderName::KimiCode));
+        assert!(!provider_allows_review_repair(&ProviderName::Pi));
+        assert!(provider_allows_review_repair(&ProviderName::Codex));
     }
 }

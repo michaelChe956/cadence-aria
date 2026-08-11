@@ -440,6 +440,15 @@ mod tests {
             }
         }
 
+        fn with_record_for(provider_name: ProviderName) -> Self {
+            let mut record = test_record();
+            record.session.provider_name = provider_name;
+            Self {
+                record: AsyncMutex::new(Some(record)),
+                ..Self::default()
+            }
+        }
+
         fn fail_generation_writes(count: usize) -> Self {
             Self {
                 record: AsyncMutex::new(Some(test_record())),
@@ -726,9 +735,16 @@ mod tests {
     }
 
     fn registry(provider: Option<Arc<dyn StreamingProviderAdapter>>) -> Arc<ProviderRegistry> {
+        registry_for_provider(ProviderName::Fake, provider)
+    }
+
+    fn registry_for_provider(
+        provider_name: ProviderName,
+        provider: Option<Arc<dyn StreamingProviderAdapter>>,
+    ) -> Arc<ProviderRegistry> {
         let mut registry = ProviderRegistry::new();
         registry.register(
-            ProviderName::Fake,
+            provider_name,
             provider.unwrap_or_else(|| Arc::new(FakeStreamingProvider)),
         );
         Arc::new(registry)
@@ -747,6 +763,24 @@ mod tests {
             Arc::new(FakeSettingsStore(settings)),
             client,
             registry(provider),
+            Arc::new(ImageCreateRunRegistry::default()),
+        )
+    }
+
+    fn engine_for_provider(
+        store: Arc<FakeSessionStore>,
+        settings: ImageCreateSettings,
+        client: Arc<dyn ImageClientApi>,
+        provider_name: ProviderName,
+        provider: Arc<dyn StreamingProviderAdapter>,
+    ) -> ImageCreateEngine {
+        let root = tempfile::tempdir().expect("root").keep();
+        ImageCreateEngine::new(
+            AriaStatePaths::from_workspace_root(root),
+            store,
+            Arc::new(FakeSettingsStore(settings)),
+            client,
+            registry_for_provider(provider_name, Some(provider)),
             Arc::new(ImageCreateRunRegistry::default()),
         )
     }
@@ -851,6 +885,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_create_runs_with_kimi_provider() {
+        let store = Arc::new(FakeSessionStore::with_record_for(ProviderName::KimiCode));
+        let provider = Arc::new(ScriptedIterationProvider {
+            suggested_prompt: Some("Kimi 图片 prompt".to_string()),
+        });
+        let engine = engine_for_provider(
+            store.clone(),
+            valid_settings(),
+            Arc::new(FakeImageClient::success()),
+            ProviderName::KimiCode,
+            provider,
+        );
+
+        let mut events = engine
+            .start_iteration("session", "用 Kimi 完善图片提示词".to_string())
+            .await
+            .expect("start Kimi image iteration");
+        let mut done_session_id = None;
+        while let Some(event) = events.recv().await {
+            if event.kind == "done" {
+                done_session_id = event.provider_session_id;
+            }
+        }
+
+        assert_eq!(done_session_id.as_deref(), Some("provider-session"));
+        assert_eq!(
+            store
+                .record
+                .lock()
+                .await
+                .as_ref()
+                .expect("record")
+                .session
+                .last_provider_session_id
+                .as_deref(),
+            Some("provider-session")
+        );
+    }
+
+    #[tokio::test]
     async fn iteration_persists_message_optional_prompt_and_meta_in_order() {
         for suggested_prompt in [Some("final prompt".to_string()), None] {
             let store = Arc::new(FakeSessionStore::with_record());
@@ -931,8 +1005,8 @@ mod tests {
     #[test]
     fn request_types_remain_enum_backed() {
         let req = request("draw");
-        let _: ProviderType = ProviderName::Fake.into();
         let _ = ApiKeyAction::Retain;
+        let _: ProviderType = ProviderName::KimiCode.into();
         assert_eq!(req.size, ImageSize::Square);
     }
 }

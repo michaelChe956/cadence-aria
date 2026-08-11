@@ -23,7 +23,19 @@ export const IMAGE_INPUT_FIDELITY_OPTIONS = ["low", "high"] as const;
 export type ImageInputFidelity =
   (typeof IMAGE_INPUT_FIDELITY_OPTIONS)[number];
 
-export const IMAGE_CREATE_PROVIDER_OPTIONS = ["claude_code", "codex", "pi"] as const;
+export type ImageCreateProviderOption = {
+  value: ImageCreateProvider;
+  label: string;
+  disabled: boolean;
+  reason: string | null;
+};
+
+export const IMAGE_CREATE_PROVIDER_OPTIONS = [
+  "claude_code",
+  "codex",
+  "pi",
+  "kimi_code",
+] as const;
 export type ImageCreateProvider =
   (typeof IMAGE_CREATE_PROVIDER_OPTIONS)[number];
 
