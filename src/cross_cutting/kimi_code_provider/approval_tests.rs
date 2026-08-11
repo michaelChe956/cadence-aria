@@ -282,7 +282,7 @@ async fn supervised_tool_approval_rejected_maps_to_reject_once_and_continues() {
 
 #[tokio::test]
 async fn auto_mode_skips_permission_request_for_normal_tools() {
-    let provider = KimiCodeProvider::new(fixture_command("kimi_acp_tool_fixture.sh"));
+    let provider = KimiCodeProvider::new(fixture_command("kimi_acp_auto_permission_fixture.sh"));
     let mut session = provider
         .start(input(None, 10), CancellationToken::new())
         .await
@@ -558,15 +558,6 @@ async fn askuserquestion_free_text_only_no_selected() {
 
 #[tokio::test]
 async fn multiquestion_serial_one_at_a_time() {
-    let fixture = include_str!("tests/fixtures/askuser_multiquestion.jsonl");
-    assert_eq!(
-        fixture
-            .lines()
-            .filter(|line| line.contains("\"method\":\"session/request_permission\""))
-            .count(),
-        2
-    );
-
     let (peer, server) = test_peer();
     let (commands, mut events, run) = direct_session_events(peer, input(None, 10)).await;
     let server_task = tokio::spawn(async move {

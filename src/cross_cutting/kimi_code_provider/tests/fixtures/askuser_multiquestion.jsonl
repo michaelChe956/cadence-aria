@@ -1,7 +1,0 @@
-# Synthetic protocol-shape reference; executable coverage is in the Kimi session tests.
-# Kimi emits each AskUserQuestion as a separate request_permission request; do not combine questions[].
-{"jsonrpc":"2.0","id":"ask-q1","method":"session/request_permission","params":{"options":[{"optionId":"q1-a","name":"Option A","kind":"allow_once"},{"optionId":"q1-skip","name":"Skip","kind":"reject_once"}],"toolCall":{"toolCallId":"ask-q1-tool","title":"AskUserQuestion","content":{"type":"text","text":"Question 1?"}}}}
-{"jsonrpc":"2.0","id":"ask-q1","result":{"options":[{"optionId":"q1-a","outcome":"selected"}]}}
-{"jsonrpc":"2.0","id":"ask-q2","method":"session/request_permission","params":{"options":[{"optionId":"q2-b","name":"Option B","kind":"allow_once"},{"optionId":"q2-skip","name":"Skip","kind":"reject_once"}],"toolCall":{"toolCallId":"ask-q2-tool","title":"AskUserQuestion","content":{"type":"text","text":"Question 2?"}}}}
-{"jsonrpc":"2.0","id":"ask-q2","result":{"options":[{"optionId":"q2-b","outcome":"selected"}]}}
-{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}

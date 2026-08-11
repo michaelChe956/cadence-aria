@@ -729,6 +729,60 @@ mod session_tests {
     }
 
     #[tokio::test]
+    async fn command_sender_drop_aborts_session_without_failed() {
+        let (peer, server) = test_peer();
+        let (commands, mut events, run) = direct_session_events(peer, input(None, 10)).await;
+        let (prompt_ready_tx, prompt_ready_rx) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            let initialize = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}})).await;
+            let _initialized = read_request(&mut reader).await;
+            let new = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"closed_commands_fixture"}})).await;
+            let _prompt = read_request(&mut reader).await;
+            prompt_ready_tx.send(()).expect("prompt ready");
+            let cancel = read_request(&mut reader).await;
+            assert_eq!(cancel["method"], "session/cancel");
+        });
+        prompt_ready_rx.await.expect("session prompt ready");
+        drop(commands);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), run)
+                .await
+                .expect("session must abort")
+                .expect("run join")
+                .is_err()
+        );
+        server_task.await.expect("server task");
+
+        let mut aborted_count = 0;
+        let mut failed_count = 0;
+        let mut completed_count = 0;
+        while let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await
+        {
+            aborted_count += usize::from(matches!(
+                event,
+                ProviderEvent::StatusChanged(
+                    crate::cross_cutting::streaming_provider::ProviderStatus::Aborted
+                )
+            ));
+            failed_count += usize::from(matches!(event, ProviderEvent::Failed { .. }));
+            completed_count += usize::from(matches!(event, ProviderEvent::Completed(_)));
+        }
+        assert_eq!(aborted_count, 1, "closed command channel must abort once");
+        assert_eq!(
+            failed_count, 0,
+            "closed command channel must not emit Failed"
+        );
+        assert_eq!(
+            completed_count, 0,
+            "closed command channel must not emit Completed"
+        );
+    }
+    #[tokio::test]
     async fn abort_emits_aborted_without_failed() {
         let provider = KimiCodeProvider::new(fixture_command("kimi_acp_hanging_fixture.sh"));
         let cancel = CancellationToken::new();

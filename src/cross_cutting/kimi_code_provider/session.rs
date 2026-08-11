@@ -78,6 +78,7 @@ where
                 command = command_rx.recv() => command,
             };
             let Some(command) = command else {
+                relay_abort.cancel();
                 break;
             };
             let is_abort = matches!(
@@ -85,6 +86,7 @@ where
                 crate::cross_cutting::streaming_provider::ProviderCommand::Abort
             );
             if bridge_commands.send(command).await.is_err() {
+                relay_abort.cancel();
                 break;
             }
             if is_abort {
