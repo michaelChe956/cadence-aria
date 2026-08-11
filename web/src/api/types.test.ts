@@ -200,6 +200,7 @@ describe("workspace websocket protocol types", () => {
       ],
       workspace_sessions: [],
       coding_attempts: [attempt],
+      work_item_repository_groups: [],
     } satisfies IssueLifecycleResponse;
 
     expect(lifecycle.work_items[0].latest_attempt?.attempt_id).toBe("coding_attempt_0001");
@@ -236,6 +237,7 @@ describe("workspace websocket protocol types", () => {
       work_items: [],
       workspace_sessions: [],
       coding_attempts: [],
+      work_item_repository_groups: [],
     } satisfies IssueLifecycleResponse;
 
     expect(response.work_item_plans[0].work_item_ids).toEqual([

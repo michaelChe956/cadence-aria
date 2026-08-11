@@ -5,6 +5,7 @@ import type {
   IssueLifecycleResponse,
   LifecycleWorkItem,
   ProductIssue,
+  WorkItemRepositoryGroup,
   WorkspaceSessionSummary,
 } from "../../api/types";
 import type {
@@ -106,6 +107,7 @@ export function IssueLifecycleDetail({
   storySpecs,
   designSpecs,
   workItems,
+  workItemRepositoryGroups = [],
   selectedKey,
   deletingKey,
   onSelect,
@@ -116,6 +118,7 @@ export function IssueLifecycleDetail({
   storySpecs: LifecycleCardData[];
   designSpecs: LifecycleCardData[];
   workItems: LifecycleCardData[];
+  workItemRepositoryGroups?: WorkItemRepositoryGroup[];
   selectedKey: string | null;
   deletingKey: string | null;
   onSelect: (card: LifecycleCardData) => void;
@@ -219,16 +222,26 @@ export function IssueLifecycleDetail({
           onSelect={onSelect}
           onDelete={onDelete}
         />
-        <LifecycleContentSection
-          title="Work Item"
-          ariaLabel="Work Item 内容"
-          cards={workItems}
-          selectedKey={selectedKey}
-          deletingKey={deletingKey}
-          onSelect={onSelect}
-          onDelete={onDelete}
-          allWorkItems={allWorkItems}
-        />
+        {workItemRepositoryGroups.length > 0 ? (
+          <WorkItemRepositoryGroupSection
+            groups={workItemRepositoryGroups}
+            selectedKey={selectedKey}
+            deletingKey={deletingKey}
+            onSelect={onSelect}
+            onDelete={onDelete}
+          />
+        ) : (
+          <LifecycleContentSection
+            title="Work Item"
+            ariaLabel="Work Item 内容"
+            cards={workItems}
+            selectedKey={selectedKey}
+            deletingKey={deletingKey}
+            onSelect={onSelect}
+            onDelete={onDelete}
+            allWorkItems={allWorkItems}
+          />
+        )}
       </div>
     </section>
   );
@@ -236,6 +249,118 @@ export function IssueLifecycleDetail({
 
 function shouldShowFullIssueAction(preview: string) {
   return preview.split(/\r?\n/u).length > 6 || preview.length > 520;
+}
+
+// REQ-TGT-05：将 LifecycleWorkItem 转成扁平卡片数据，供分组视图内复用 LifecycleCard。
+export function lifecycleWorkItemCard(
+  item: LifecycleWorkItem,
+): LifecycleCardData {
+  return {
+    kind: "work_item",
+    id: item.work_item_id,
+    issueId: item.issue_id,
+    title: item.title,
+    status: item.plan_status,
+    version: null,
+    preview: null,
+    sourceIds: [...item.story_spec_ids],
+    artifactVersions: item.artifact_versions,
+    raw: item,
+  };
+}
+
+// REQ-TGT-05：按 target_repository_id 分组展示 Work Item（前端独立 TS 实现，
+// 语义对齐后端 group_work_items_by_target）：每组标注仓库名（alias）、聚合状态，
+// 遗留/未指定仓库组标注“兼容投影”。
+function WorkItemRepositoryGroupSection({
+  groups,
+  selectedKey,
+  deletingKey,
+  onSelect,
+  onDelete,
+}: {
+  groups: WorkItemRepositoryGroup[];
+  selectedKey: string | null;
+  deletingKey: string | null;
+  onSelect: (card: LifecycleCardData) => void;
+  onDelete: (card: LifecycleCardData) => void;
+}) {
+  return (
+    <section
+      role="region"
+      aria-label="Work Item 内容"
+      className="min-h-72 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
+    >
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-[var(--aria-ink)]">
+          Work Item
+        </h3>
+        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+          {groups.length} 个仓库分组
+        </span>
+      </div>
+      {groups.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]">
+          暂无内容
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {groups.map((group) => {
+            const groupKey =
+              group.target_repository_id ?? "unassigned";
+            const groupItems = group.items ?? [];
+            return (
+              <div
+                key={groupKey}
+                data-testid={`work-item-repository-group-${groupKey}`}
+                className="overflow-hidden rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
+              >
+                <header className="flex flex-wrap items-center gap-2 border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2">
+                  <span className="text-sm font-semibold text-[var(--aria-ink)]">
+                    {group.alias}
+                  </span>
+                  <span className="rounded border border-[var(--aria-primary)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--aria-primary)]">
+                    {group.status}
+                  </span>
+                  {group.compatibility_projection ? (
+                    <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-800">
+                      兼容投影
+                    </span>
+                  ) : null}
+                  <span className="font-mono text-[11px] text-[var(--aria-ink-muted)]">
+                    {groupItems.length} 个 Work Item
+                  </span>
+                </header>
+                {groupItems.length === 0 ? (
+                  <div className="p-3 text-sm text-[var(--aria-ink-muted)]">
+                    该仓库暂无 Work Item
+                  </div>
+                ) : (
+                  <ul className="space-y-2 p-2">
+                    {groupItems.map((item) => {
+                      const card = lifecycleWorkItemCard(item);
+                      return (
+                        <li key={item.work_item_id}>
+                          <LifecycleCard
+                            card={card}
+                            selected={selectedKey === lifecycleCardKey(card)}
+                            deleting={deletingKey === lifecycleCardKey(card)}
+                            onSelect={() => onSelect(card)}
+                            onDelete={() => onDelete(card)}
+                            allWorkItems={groupItems}
+                          />
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function LifecycleContentSection({
@@ -342,7 +467,18 @@ export function normalizeLifecycleResponse(
     throw new Error("invalid lifecycle response");
   }
 
-  return lifecycle as IssueLifecycleResponse;
+  // REQ-TGT-05：work_item_repository_groups 为可选兼容字段——缺失（旧响应/单仓）时
+  // 归一为空数组，保持扁平展示；存在时按组渲染。
+  const workItemRepositoryGroups = Array.isArray(
+    lifecycle.work_item_repository_groups,
+  )
+    ? (lifecycle.work_item_repository_groups as WorkItemRepositoryGroup[])
+    : [];
+
+  return {
+    ...lifecycle,
+    work_item_repository_groups: workItemRepositoryGroups,
+  } as IssueLifecycleResponse;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

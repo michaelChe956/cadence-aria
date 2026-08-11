@@ -142,6 +142,7 @@ const lifecycle: IssueLifecycleResponse = {
   ],
   work_item_plans: [],
   work_items: [],
+  work_item_repository_groups: [],
   workspace_sessions: [],
   coding_attempts: [],
 };

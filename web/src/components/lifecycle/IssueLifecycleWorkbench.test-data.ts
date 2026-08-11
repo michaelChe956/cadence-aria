@@ -11,6 +11,8 @@ export type MockLifecycleData = {
   design_specs: Array<Record<string, unknown>>;
   work_item_plans: unknown[];
   work_items: Array<Record<string, unknown>>;
+  // REQ-TGT-05：后端按 target_repository_id 分组的聚合视图（空数组 = 单仓/扁平兼容）。
+  work_item_repository_groups: Array<Record<string, unknown>>;
   workspace_sessions: WorkspaceSession[];
   coding_attempts: CodingAttempt[];
 };
@@ -114,6 +116,19 @@ export function workspaceSessionRecordShape(
   };
 }
 
+export function workItemRepositoryGroupRecord(
+  overrides: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    target_repository_id: "repo_target_0001",
+    alias: "api",
+    status: "pending",
+    compatibility_projection: false,
+    items: [],
+    ...overrides,
+  };
+}
+
 export function initialLifecycleData(
   issueId: string,
   duplicate: boolean | undefined,
@@ -130,6 +145,7 @@ export function initialLifecycleData(
       design_specs: [],
       work_item_plans: [],
       work_items: [],
+      work_item_repository_groups: [],
       workspace_sessions: [],
       coding_attempts: [],
     };
@@ -225,6 +241,7 @@ export function initialLifecycleData(
     ],
     work_item_plans: workItemPlans ?? defaultWorkItemPlans,
     work_items: workItems,
+    work_item_repository_groups: [],
     workspace_sessions: [
       workspaceSessionRecord("story", storyId, "workspace_session_story_0001"),
       workspaceSessionRecord(

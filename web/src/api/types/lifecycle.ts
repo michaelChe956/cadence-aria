@@ -65,12 +65,27 @@ export type LifecycleWorkItem = {
   validator_findings?: WorkItemSplitFinding[];
 };
 
+// REQ-TGT-05：后端按 target_repository_id 分组的 WorkItem 聚合视图 DTO（对应
+// human_presentation.rs 的 WorkItemRepositoryGroup）。
+// - target_repository_id 为 null 时表示遗留/未指定仓库（compatibility_projection = true）。
+// - alias 为仓库展示名（member alias / 物理投影名）。
+// - status 为仓库级聚合状态（blocked/pending/planning/coding/completed）。
+export type WorkItemRepositoryGroup = {
+  target_repository_id: string | null;
+  alias: string;
+  status: string;
+  compatibility_projection: boolean;
+  items: LifecycleWorkItem[];
+};
+
 export type IssueLifecycleResponse = {
   issue: ProductIssue;
   story_specs: StorySpec[];
   design_specs: DesignSpec[];
   work_item_plans: IssueWorkItemPlanDetailDto[];
   work_items: LifecycleWorkItem[];
+  // 向后兼容：后端始终返回该字段；旧响应缺失时前端按空数组（单仓扁平展示）处理。
+  work_item_repository_groups: WorkItemRepositoryGroup[];
   workspace_sessions: WorkspaceSessionSummary[];
   coding_attempts: CodingAttempt[];
 };

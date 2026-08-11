@@ -44,6 +44,8 @@ export function lifecycleFetch(options?: {
   workItemPlans?: unknown[];
   skippedIntegrationRisk?: boolean;
   codingAttempts?: CodingAttempt[];
+  // REQ-TGT-05：后端 work_item_repository_groups 的 mock 值；缺省空数组（单仓扁平兼容）。
+  workItemRepositoryGroups?: Array<Record<string, unknown>>;
 }) {
   const projects = [
     ...(options?.projects ?? [projectRecord("project_0001", "Aria")]),
@@ -115,6 +117,7 @@ export function lifecycleFetch(options?: {
       issue_id: issueId,
       title: `${issueId} Child`,
     };
+    data.work_item_repository_groups = [];
     data.workspace_sessions = [
       workspaceSessionRecord(
         "story",
@@ -749,6 +752,7 @@ export function lifecycleFetch(options?: {
           design_specs: [],
           work_item_plans: [],
           work_items: [],
+          work_item_repository_groups: [],
           workspace_sessions: [],
           coding_attempts: [],
         });
@@ -776,6 +780,9 @@ export function lifecycleFetch(options?: {
         design_specs: data.design_specs,
         work_item_plans: data.work_item_plans,
         work_items: data.work_items,
+        work_item_repository_groups:
+          options?.workItemRepositoryGroups ??
+          data.work_item_repository_groups,
         workspace_sessions: data.workspace_sessions,
         coding_attempts: data.coding_attempts,
       });

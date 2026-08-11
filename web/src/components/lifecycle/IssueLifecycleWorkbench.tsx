@@ -232,6 +232,15 @@ export function IssueLifecycleWorkbench({
     () => selectedLifecycleColumns(allColumns, focusedIssueId),
     [allColumns, focusedIssueId],
   );
+  // REQ-TGT-05：取当前聚焦 Issue 的 work_item_repository_groups，传给详情组件按仓渲染。
+  const focusedWorkItemRepositoryGroups =
+    selectedIssueColumns.issue[0]?.issueId
+      ? (lifecycles.find(
+          (lifecycle) =>
+            lifecycle.issue.issue_id ===
+            selectedIssueColumns.issue[0]?.issueId,
+        )?.work_item_repository_groups ?? [])
+      : [];
   const focusedEntity = useMemo(
     () => findCardInColumns(allColumns, drawerFocusedEntityKey),
     [allColumns, drawerFocusedEntityKey],
@@ -718,6 +727,7 @@ export function IssueLifecycleWorkbench({
                 storySpecs={selectedIssueColumns.story_spec}
                 designSpecs={selectedIssueColumns.design_spec}
                 workItems={selectedIssueColumns.work_item}
+                workItemRepositoryGroups={focusedWorkItemRepositoryGroups}
                 selectedKey={selectedCardKey}
                 onSelect={handleSelectCard}
                 onOpenFullIssue={handleOpenFullIssue}
