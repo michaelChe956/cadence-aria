@@ -138,10 +138,8 @@ async fn supervised_tool_approval_approved_maps_to_allow_once() {
         let reply = read_request(&mut reader).await;
         assert_eq!(reply["id"], "approval-request");
         assert_eq!(
-            reply["result"]["options"],
-            serde_json::json!([
-                {"optionId":"allow-once","outcome":"selected"}
-            ])
+            reply["result"]["outcome"],
+            serde_json::json!({"outcome":"selected","optionId":"allow-once"})
         );
         send_message(
             &mut writer,
@@ -230,10 +228,8 @@ async fn supervised_tool_approval_rejected_maps_to_reject_once_and_continues() {
         let reply = read_request(&mut reader).await;
         assert_eq!(reply["id"], 42);
         assert_eq!(
-            reply["result"]["options"],
-            serde_json::json!([
-                {"optionId":"reject-once","outcome":"selected"}
-            ])
+            reply["result"]["outcome"],
+            serde_json::json!({"outcome":"selected","optionId":"reject-once"})
         );
         send_message(
             &mut writer,
@@ -388,7 +384,7 @@ async fn askuserquestion_select_option_returns_selected_and_continues() {
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-select","method":"session/request_permission","params":{"options":[{"optionId":"choice-a","name":"Choice A","kind":"allow_once"}],"toolCall":{"toolCallId":"question-tool","title":"AskUserQuestion","content":{"type":"text","text":"Pick one"}}}})).await;
         let reply = read_request(&mut reader).await;
         assert_eq!(reply["id"], "ask-select");
-        assert_eq!(reply["result"]["options"][0]["optionId"], "choice-a");
+        assert_eq!(reply["result"]["outcome"], serde_json::json!({"outcome":"selected","optionId":"choice-a"}));
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });
@@ -444,7 +440,7 @@ async fn askuserquestion_free_text_takes_priority_over_selected() {
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-text","method":"session/request_permission","params":{"options":[{"optionId":"selected","name":"Selected","kind":"allow_once"}],"toolCall":{"toolCallId":"question-tool","title":"AskUserQuestion","content":{"type":"text","text":"What?"}}}})).await;
         let cancel = read_request(&mut reader).await;
         assert_eq!(cancel["id"], "ask-text");
-        assert_eq!(cancel["result"]["outcome"], "cancelled");
+        assert_eq!(cancel["result"]["outcome"], serde_json::json!({"outcome":"cancelled"}));
         let second_prompt = read_request(&mut reader).await;
         assert_eq!(second_prompt["method"], "session/prompt");
         assert_eq!(
@@ -515,7 +511,7 @@ async fn askuserquestion_free_text_only_no_selected() {
         let _first_prompt = read_request(&mut reader).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-text-only","method":"session/request_permission","params":{"options":[],"toolCall":{"toolCallId":"question-tool","title":"AskUserQuestion","content":{"type":"text","text":"What?"}}}})).await;
         let cancel = read_request(&mut reader).await;
-        assert_eq!(cancel["result"]["outcome"], "cancelled");
+        assert_eq!(cancel["result"]["outcome"], serde_json::json!({"outcome":"cancelled"}));
         let second_prompt = read_request(&mut reader).await;
         assert_eq!(
             second_prompt["params"]["prompt"][0]["text"],
@@ -571,10 +567,10 @@ async fn multiquestion_serial_one_at_a_time() {
         let prompt = read_request(&mut reader).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-q1","method":"session/request_permission","params":{"options":[{"optionId":"q1-a","name":"Option A","kind":"allow_once"}],"toolCall":{"toolCallId":"ask-q1-tool","title":"AskUserQuestion","content":{"type":"text","text":"Question 1?"}}}})).await;
         let first_reply = read_request(&mut reader).await;
-        assert_eq!(first_reply["result"]["options"][0]["optionId"], "q1-a");
+        assert_eq!(first_reply["result"]["outcome"]["optionId"], "q1-a");
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-q2","method":"session/request_permission","params":{"options":[{"optionId":"q2-b","name":"Option B","kind":"allow_once"}],"toolCall":{"toolCallId":"ask-q2-tool","title":"AskUserQuestion","content":{"type":"text","text":"Question 2?"}}}})).await;
         let second_reply = read_request(&mut reader).await;
-        assert_eq!(second_reply["result"]["options"][0]["optionId"], "q2-b");
+        assert_eq!(second_reply["result"]["outcome"]["optionId"], "q2-b");
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });

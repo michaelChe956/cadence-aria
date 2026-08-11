@@ -339,7 +339,7 @@ mod session_tests {
             send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"permission-id","method":"session/request_permission","params":{"options":[{"optionId":"future","name":"Future","kind":"future_kind"}],"toolCall":{"toolCallId":"tool","title":"Bash","content":[]}}})).await;
             let reply = read_request(&mut reader).await;
             assert_eq!(reply["id"], "permission-id");
-            assert_eq!(reply["result"]["outcome"], "cancelled");
+            assert_eq!(reply["result"]["outcome"], serde_json::json!({"outcome":"cancelled"}));
         });
         assert!(run.await.expect("run join").is_err());
         server_task.await.expect("server task");

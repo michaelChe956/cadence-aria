@@ -16,7 +16,7 @@ while IFS= read -r line; do
     echo '{"jsonrpc":"2.0","id":"auto-permission","method":"session/request_permission","params":{"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject once","kind":"reject_once"}],"toolCall":{"toolCallId":"auto-tool","title":"Bash","content":{"type":"text","text":"pwd"}}}}'
     response=""
     if IFS= read -r response; then
-      if [[ "$response" != *'"optionId":"allow-once"'* || "$response" != *'"outcome":"selected"'* ]]; then
+      if [[ "$response" != *'"outcome":{'* || "$response" != *'"optionId":"allow-once"'* || "$response" != *'"outcome":"selected"'* ]]; then
         echo "unexpected auto permission response: $response" >&2
         exit 1
       fi

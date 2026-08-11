@@ -372,7 +372,7 @@ where
                 {
                     peer.send(json!({
                         "jsonrpc":"2.0", "id":request.request_id,
-                        "result":{"outcome":"cancelled"}
+                        "result":{"outcome":{"outcome":"cancelled"}}
                     }))
                     .await?;
                     return Ok(IncomingDisposition::RestartPrompt(free_text.to_string()));
@@ -380,7 +380,7 @@ where
                 let Some(selected_option_id) = decision.selected_option_ids.first() else {
                     peer.send(json!({
                         "jsonrpc":"2.0", "id":request.request_id,
-                        "result":{"outcome":"cancelled"}
+                        "result":{"outcome":{"outcome":"cancelled"}}
                     }))
                     .await?;
                     return Ok(IncomingDisposition::Progress);
@@ -395,7 +395,7 @@ where
                 if !has_supported_permission_option(&request.options) {
                     peer.send(json!({
                         "jsonrpc":"2.0", "id":request.request_id,
-                        "result":{"outcome":"cancelled"}
+                        "result":{"outcome":{"outcome":"cancelled"}}
                     }))
                     .await?;
                     return Err(provider_error(format!(
@@ -423,7 +423,7 @@ where
                 else {
                     peer.send(json!({
                         "jsonrpc":"2.0", "id":request.request_id,
-                        "result":{"outcome":"cancelled"}
+                        "result":{"outcome":{"outcome":"cancelled"}}
                     }))
                     .await?;
                     return Err(provider_error(format!(
@@ -466,7 +466,7 @@ fn session_prompt_request(session_id: &str, text: &str, id: u64) -> Value {
 fn selected_option_response(request_id: Value, option_id: &str) -> Value {
     json!({
         "jsonrpc":"2.0", "id":request_id,
-        "result":{"options":[{"optionId":option_id,"outcome":"selected"}]}
+        "result":{"outcome":{"outcome":"selected","optionId":option_id}}
     })
 }
 
