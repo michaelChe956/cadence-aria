@@ -16,7 +16,14 @@ function providerEntry(
 ): ProviderHealthEntry {
   return {
     provider,
-    display_name: provider === "claude_code" ? "Claude Code CLI" : "Codex CLI",
+    display_name:
+      provider === "claude_code"
+        ? "Claude Code CLI"
+        : provider === "codex"
+          ? "Codex CLI"
+          : provider === "pi"
+            ? "Pi"
+            : "Kimi Code CLI",
     available,
     version: available ? "1.0.0" : null,
     reason_code: available ? null : "command_missing",
@@ -66,7 +73,7 @@ function piEntry(available: boolean): ProviderHealthEntry {
   };
 }
 
-function setHealthWithPi(piAvailable: boolean) {
+function setHealthWithPiAndKimi(piAvailable: boolean, kimiAvailable = false) {
   useProviderAvailabilityStore.setState({
     snapshot: {
       schema_version: 1,
@@ -80,6 +87,7 @@ function setHealthWithPi(piAvailable: boolean) {
         providerEntry("claude_code", true),
         providerEntry("codex", true),
         piEntry(piAvailable),
+        providerEntry("kimi_code", kimiAvailable),
       ],
     },
   });
@@ -136,7 +144,7 @@ afterEach(() => {
 
 describe("CodingProviderConfigPanel", () => {
   it("hides the retired group final reviewer provider", async () => {
-    setHealthWithPi(true);
+    setHealthWithPiAndKimi(true);
     const onSelect = vi.fn();
     const onPermissionModeSelect = vi.fn();
     const { rerender } = render(
@@ -204,6 +212,35 @@ describe("CodingProviderConfigPanel", () => {
         }),
       ).toBeNull();
       expect(within(role).getByText("Pi 仅支持 Auto")).toBeInTheDocument();
+    }
+  });
+
+  it("Kimi Code 同时提供 Auto 与 Supervised 授权模式", () => {
+    setHealthWithPiAndKimi(false, true);
+    renderPanel({
+      snapshot: roleSnapshot({
+        coder: "kimi_code",
+        code_reviewer: "kimi_code",
+        permission_modes: {
+          coder: "auto",
+          code_reviewer: "supervised",
+          internal_reviewer: "supervised",
+        },
+      }),
+    });
+
+    for (const label of ["Coder", "Code Reviewer"]) {
+      const role = screen.getByRole("group", { name: `${label} Provider 配置` });
+      expect(
+        within(role).getByRole("button", {
+          name: `将 ${label} 授权模式切换为 Auto`,
+        }),
+      ).toBeTruthy();
+      expect(
+        within(role).getByRole("button", {
+          name: `将 ${label} 授权模式切换为 Supervised`,
+        }),
+      ).toBeTruthy();
     }
   });
 

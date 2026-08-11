@@ -124,6 +124,41 @@ describe("provider options", () => {
     }
   });
 
+  it("maps Kimi Code availability failures to readable health reasons", () => {
+    const versionTooLow = getProviderOption(
+      snapshot([
+        entry("kimi_code", false, {
+          display_name: "Kimi Code CLI",
+          reason_code: "version_too_low",
+          reason: "Kimi Code CLI 0.33.9 is below the required 0.34.0; please upgrade.",
+          install_hint: "Install Kimi Code CLI and ensure `kimi` is available on PATH.",
+        }),
+      ]),
+      "kimi_code",
+    );
+    const notLoggedIn = getProviderOption(
+      snapshot([
+        entry("kimi_code", false, {
+          display_name: "Kimi Code CLI",
+          reason_code: "non_zero_exit",
+          reason: "Kimi Code is not logged in; run `kimi login` and retry.",
+        }),
+      ]),
+      "kimi_code",
+    );
+
+    expect(versionTooLow).toMatchObject({
+      disabled: true,
+      available: false,
+      reason: expect.stringMatching(/upgrade/i),
+    });
+    expect(notLoggedIn).toMatchObject({
+      disabled: true,
+      available: false,
+      reason: expect.stringMatching(/kimi login/i),
+    });
+  });
+
   it("fails closed for a degraded snapshot even when old entries remain available", () => {
     const options = getProviderOptions(
       snapshot([entry("claude_code", true), entry("codex", true)], {

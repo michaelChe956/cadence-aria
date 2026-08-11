@@ -212,6 +212,57 @@ describe("useWorkspaceWs websocket messages", () => {
     });
   });
 
+  it("保留 Kimi Code 运行事件的 provider 元数据", () => {
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "timeline_node_kimi",
+          node_type: "author_run",
+          agent: "kimi_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "Kimi Code 生成",
+          summary: null,
+          started_at: "2026-08-10T00:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: {
+            author: "kimi_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      });
+      harness.ws.receive({
+        type: "execution_event",
+        event: {
+          event_id: "provider",
+          node_id: "timeline_node_kimi",
+          agent: "kimi_code",
+          kind: "provider",
+          status: "started",
+          title: "Kimi Code provider started",
+          detail: null,
+          command: null,
+          cwd: "/tmp/repo",
+          output: null,
+          exit_code: null,
+        },
+      });
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries.at(-1)).toMatchObject({
+      type: "execution_event",
+      role: "author",
+      metadata: expect.objectContaining({ provider: "kimi_code" }),
+    });
+  });
+
   it("keeps repeated provider lifecycle events scoped to their timeline node", () => {
     const harness = renderWorkspaceHook();
 
