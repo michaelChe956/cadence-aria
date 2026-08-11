@@ -71,6 +71,7 @@ use crate::web::workspace_ws_types::{
     WsCheckpointDto, WsMessageDto, WsOutMessage, WsProviderConfig,
 };
 
+pub mod aggregate_output_parser;
 mod artifact_constraints;
 mod author_confirm;
 mod compile;
