@@ -15,6 +15,7 @@ pub mod worktree;
 mod tests;
 
 pub use inputs::*;
+pub use spec::{ConfirmAggregateGateError, ConfirmGateViolation};
 pub(crate) use utils::*;
 
 #[derive(Debug, Clone)]

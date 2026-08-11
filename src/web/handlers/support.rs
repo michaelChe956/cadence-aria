@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::product::logical_codebase::RepositoryRoutingErrorCode;
+
 #[derive(Debug, Deserialize)]
 pub struct ProjectionQuery {
     pub workspace_id: Option<String>,
@@ -248,6 +250,18 @@ fn repository_routing_api_error(
     details: serde_json::Value,
 ) -> ApiError {
     ApiError::runtime(code, message, details)
+}
+
+/// RepositoryRouting FailClosed 的稳定错误码映射（B3）：把 [`RepositoryRoutingErrorCode`]
+/// 经其 `stable_code()` 转成稳定码，包成 `repository routing failed closed` 的 runtime
+/// ApiError。各 Web 入口（lifecycle/coding）共用此函数，避免字面量重复导致错误码漂移（#3 收尾）。
+pub(crate) fn routing_api_error(code: RepositoryRoutingErrorCode, reason: &str) -> ApiError {
+    let stable_code = code.stable_code();
+    ApiError::runtime(
+        stable_code,
+        "repository routing failed closed",
+        json!({ "reason": reason }),
+    )
 }
 
 fn routing_error_code_from_reason(kind: &str, reason: &str) -> Option<&'static str> {

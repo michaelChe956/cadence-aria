@@ -29,6 +29,7 @@ import type {
   Repository,
   CreateRepositoryRequest,
   RepositoryInitializationOperationSnapshot,
+  WorkItemRepositoryGroup,
 } from "../../api/types";
 import {
   groupLifecycleCards,
@@ -233,14 +234,18 @@ export function IssueLifecycleWorkbench({
     [allColumns, focusedIssueId],
   );
   // REQ-TGT-05：取当前聚焦 Issue 的 work_item_repository_groups，传给详情组件按仓渲染。
-  const focusedWorkItemRepositoryGroups =
-    selectedIssueColumns.issue[0]?.issueId
-      ? (lifecycles.find(
-          (lifecycle) =>
-            lifecycle.issue.issue_id ===
-            selectedIssueColumns.issue[0]?.issueId,
-        )?.work_item_repository_groups ?? [])
-      : [];
+  // useMemo 守护：避免每次 render 新建 [] 引用触发 WorkItemRepositoryGroupSection 无谓重渲染（#4 收尾）。
+  const focusedIssueIdForGroups = selectedIssueColumns.issue[0]?.issueId;
+  const focusedWorkItemRepositoryGroups = useMemo<WorkItemRepositoryGroup[]>(
+    () =>
+      focusedIssueIdForGroups
+        ? (lifecycles.find(
+            (lifecycle) =>
+              lifecycle.issue.issue_id === focusedIssueIdForGroups,
+          )?.work_item_repository_groups ?? [])
+        : [],
+    [lifecycles, focusedIssueIdForGroups],
+  );
   const focusedEntity = useMemo(
     () => findCardInColumns(allColumns, drawerFocusedEntityKey),
     [allColumns, drawerFocusedEntityKey],

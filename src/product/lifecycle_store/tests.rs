@@ -861,9 +861,20 @@ fn validate_confirm_aggregate_spec_rejects_multi_repo_story_without_involved() {
     let error = store
         .validate_confirm_aggregate_spec(PROJECT_ID, ISSUE_ID, &story.id, &WorkspaceType::Story)
         .unwrap_err();
+    assert_eq!(
+        error.stable_code(),
+        "involved_repositories_undetermined",
+        "expected involved_repositories_undetermined, got: {error:?}"
+    );
     assert!(
-        error.contains("involved_repositories_undetermined"),
-        "expected involved_repositories_undetermined, got: {error}"
+        matches!(
+            error,
+            ConfirmAggregateGateError::Violation {
+                violation: ConfirmGateViolation::InvolvedUndetermined,
+                ..
+            }
+        ),
+        "expected InvolvedUndetermined violation, got: {error:?}"
     );
 }
 
@@ -888,9 +899,20 @@ fn validate_confirm_aggregate_spec_rejects_multi_repo_design_without_change_orde
     let error = store
         .validate_confirm_aggregate_spec(PROJECT_ID, ISSUE_ID, &design.id, &WorkspaceType::Design)
         .unwrap_err();
+    assert_eq!(
+        error.stable_code(),
+        "change_order_required_for_logical_codebase",
+        "expected change_order_required_for_logical_codebase, got: {error:?}"
+    );
     assert!(
-        error.contains("change_order_required_for_logical_codebase"),
-        "expected change_order_required_for_logical_codebase, got: {error}"
+        matches!(
+            error,
+            ConfirmAggregateGateError::Violation {
+                violation: ConfirmGateViolation::ChangeOrderRequired,
+                ..
+            }
+        ),
+        "expected ChangeOrderRequired violation, got: {error:?}"
     );
 }
 

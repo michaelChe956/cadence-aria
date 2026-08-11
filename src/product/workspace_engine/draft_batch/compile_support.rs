@@ -1,7 +1,5 @@
 use super::*;
-use crate::product::logical_codebase::repository_routing::{
-    RepositoryRouting, RepositoryRoutingErrorCode,
-};
+use crate::product::logical_codebase::repository_routing::RepositoryRouting;
 use crate::product::logical_codebase::{
     IssueCodebaseSelectionStore, LogicalCodebaseFeature, LogicalCodebaseStore, LogicalRepositoryId,
     MemberStatus,
@@ -69,7 +67,7 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
         RepositoryRouting::FailClosed { code, .. } => {
             return Err(format!(
                 "{}: logical codebase manifest and issue selection must both exist",
-                stable_repository_routing_code(code)
+                code.stable_code()
             ));
         }
     };
@@ -162,21 +160,6 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
         })
         .collect::<Result<_, _>>()
         .map(Some)
-}
-
-/// RepositoryRoutingErrorCode → 稳定错误码字符串（B3），compile fail-closed 文案使用。
-/// 与 workspace_repository.rs / workspace_ws_handler/socket.rs 等消费点保持一致，
-/// 避免各入口间错误码漂移。
-fn stable_repository_routing_code(code: RepositoryRoutingErrorCode) -> &'static str {
-    match code {
-        RepositoryRoutingErrorCode::TargetMissing => "repository_routing_target_missing",
-        RepositoryRoutingErrorCode::OrphanedSelection
-        | RepositoryRoutingErrorCode::Inconsistent
-        | RepositoryRoutingErrorCode::MemberRemoved
-        | RepositoryRoutingErrorCode::SelectionInvalidated => "repository_routing_inconsistent",
-        RepositoryRoutingErrorCode::TargetUnknown => "repository_routing_target_unknown",
-        RepositoryRoutingErrorCode::TargetAmbiguous => "repository_routing_ambiguous",
-    }
 }
 
 /// 加载 issue 的 confirmed Design 的 change_order（仓级执行顺序，REQ-TGT-04 消费点）。
@@ -525,6 +508,7 @@ impl WorkspaceEngine {
 mod tests {
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
+    use crate::product::logical_codebase::repository_routing::RepositoryRoutingErrorCode;
     use crate::product::logical_codebase::{
         CodebaseMemberRecord, IssueCodebaseSelection, LogicalCodebaseManifest, MemberStatus,
         RepositoryCheckoutId, RepositorySourceIdentity, RepositoryType,

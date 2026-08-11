@@ -26,6 +26,85 @@ pub(crate) enum ExistingSpecRecord {
     },
 }
 
+/// confirm 聚合 spec 门禁的业务违规类型（4xx 阻断，稳定错误码）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmGateViolation {
+    /// 多仓 Story/Design involved 为空（REQ-PLN-04）。
+    InvolvedUndetermined,
+    /// 多仓 Design（involved>1）缺 change_order（REQ-PLN-05 收紧）。
+    ChangeOrderRequired,
+}
+
+impl ConfirmGateViolation {
+    /// 稳定错误码字符串（HTTP `code` 字段，消费者依赖，不得漂移）。
+    pub fn stable_code(&self) -> &'static str {
+        match self {
+            ConfirmGateViolation::InvolvedUndetermined => "involved_repositories_undetermined",
+            ConfirmGateViolation::ChangeOrderRequired => {
+                "change_order_required_for_logical_codebase"
+            }
+        }
+    }
+}
+
+/// validate_confirm_aggregate_spec 的失败分类，供调用方区分 HTTP 状态码（#5 收尾）。
+///
+/// - [`Self::Violation`]：业务违规 → 4xx + [`ConfirmGateViolation::stable_code`]；
+/// - [`Self::SpecNotFound`]：spec 文件缺失 → 404 `spec_not_found`；
+/// - [`Self::SpecLoad`]：spec 读盘/解析失败 → 500 `confirm_gate_spec_load_failed`。
+#[derive(Debug, thiserror::Error)]
+pub enum ConfirmAggregateGateError {
+    /// 业务违规（involved 空 / 多仓 Design 缺 change_order）。
+    #[error("{message}")]
+    Violation {
+        violation: ConfirmGateViolation,
+        message: String,
+    },
+    /// spec 文件不存在（load_existing_spec 返 NotFound）。
+    #[error("spec not found: {0}")]
+    SpecNotFound(String),
+    /// spec 读盘/解析失败（IO/JSON 等基础设施错误）。
+    #[error("confirm_gate_spec_load_failed: {0}")]
+    SpecLoad(ProductStoreError),
+}
+
+impl ConfirmAggregateGateError {
+    /// 构造业务违规错误。
+    pub fn gate_violation(violation: ConfirmGateViolation, message: &str) -> Self {
+        Self::Violation {
+            violation,
+            message: message.to_string(),
+        }
+    }
+
+    /// 业务违规的稳定错误码（仅 [`Self::Violation`] 有意义，其余变体返回各自读盘语义码）。
+    pub fn stable_code(&self) -> &'static str {
+        match self {
+            Self::Violation { violation, .. } => violation.stable_code(),
+            Self::SpecNotFound(_) => "spec_not_found",
+            Self::SpecLoad(_) => "confirm_gate_spec_load_failed",
+        }
+    }
+
+    /// 业务违规的可读消息（WS/HTTP message 字段统一用此，避免调用方重复 match）。
+    pub fn message(&self) -> String {
+        match self {
+            Self::Violation { message, .. } => message.clone(),
+            other => other.to_string(),
+        }
+    }
+}
+
+impl From<ProductStoreError> for ConfirmAggregateGateError {
+    /// 把 load_existing_spec 的 ProductStoreError 分类：NotFound → SpecNotFound，其余 → SpecLoad。
+    fn from(error: ProductStoreError) -> Self {
+        match error {
+            ProductStoreError::NotFound { kind: "spec", id } => Self::SpecNotFound(id),
+            other => Self::SpecLoad(other),
+        }
+    }
+}
+
 impl LifecycleStore {
     pub fn create_story_spec(
         &self,
@@ -407,22 +486,22 @@ impl LifecycleStore {
     /// ② Design involved>1 必须 change_order（决策 3b，REQ-PLN-05 收紧）。
     ///
     /// 单仓（logical_codebase_ref None）或非 Story/Design 不校验，保持 Legacy 行为不变（红线）。
-    /// 错误字符串以稳定码开头（`involved_repositories_undetermined` /
-    /// `change_order_required_for_logical_codebase`），供 WebSocket（直接 Err）与
-    /// HTTP（映射 ApiError::validation 稳定码）两路复用。
+    ///
+    /// 返回 [`ConfirmAggregateGateError`]，让调用方（WebSocket/HTTP）按变体决定 HTTP 状态码与
+    /// 稳定错误码：① 业务违规（involved 空 / 多仓 Design 缺 change_order）→ 4xx + 稳定码；
+    /// ② spec 文件缺失（NotFound）→ 404；③ spec 读盘/解析失败 → 500。修复前三者被字符串化
+    /// 后统一映射 500，丢失了 NotFound 的 404 语义（#5 收尾）。
     pub fn validate_confirm_aggregate_spec(
         &self,
         project_id: &str,
         issue_id: &str,
         entity_id: &str,
         workspace_type: &WorkspaceType,
-    ) -> Result<(), String> {
+    ) -> Result<(), ConfirmAggregateGateError> {
         if !matches!(workspace_type, WorkspaceType::Story | WorkspaceType::Design) {
             return Ok(());
         }
-        let spec = self
-            .load_existing_spec(project_id, issue_id, entity_id)
-            .map_err(|error| format!("confirm_gate_spec_load_failed: {error:?}"))?;
+        let spec = self.load_existing_spec(project_id, issue_id, entity_id)?;
         let (is_logical, involved_len, change_order_empty) = match &spec {
             ExistingSpecRecord::Story { record, .. } => (
                 record.logical_codebase_ref.is_some(),
@@ -436,20 +515,20 @@ impl LifecycleStore {
             ),
         };
         if is_logical && involved_len == 0 {
-            return Err(
-                "involved_repositories_undetermined: AI 未明确涉及仓库，不能确认多仓 Spec（REQ-PLN-04）"
-                    .to_string(),
-            );
+            return Err(ConfirmAggregateGateError::gate_violation(
+                ConfirmGateViolation::InvolvedUndetermined,
+                "AI 未明确涉及仓库，不能确认多仓 Spec（REQ-PLN-04）",
+            ));
         }
         if matches!(workspace_type, WorkspaceType::Design)
             && is_logical
             && involved_len > 1
             && change_order_empty
         {
-            return Err(
-                "change_order_required_for_logical_codebase: 多仓 Design 必须提供 change_order（REQ-PLN-05）"
-                    .to_string(),
-            );
+            return Err(ConfirmAggregateGateError::gate_violation(
+                ConfirmGateViolation::ChangeOrderRequired,
+                "多仓 Design 必须提供 change_order（REQ-PLN-05）",
+            ));
         }
         Ok(())
     }

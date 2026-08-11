@@ -1,10 +1,11 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
-use crate::product::lifecycle_store::{AggregateDesignSpecScope, AggregateStorySpecScope};
+use crate::product::lifecycle_store::{
+    AggregateDesignSpecScope, AggregateStorySpecScope, ConfirmAggregateGateError,
+};
 use crate::product::logical_codebase::{
     LogicalRepositoryId, PlanningContextResolver, PlanningContextSetResolver, RepositoryRouting,
-    RepositoryRoutingErrorCode,
 };
 use crate::product::models::WorkItemRuntimeBinding;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
@@ -14,16 +15,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod deletion;
 pub use deletion::{delete_work_item, delete_work_item_plan};
-
-/// FailClosed 稳定错误码映射（与 coding/group.rs 的 routing_api_error 一致，B3）。
-fn routing_api_error(code: RepositoryRoutingErrorCode, reason: &str) -> ApiError {
-    let stable_code = code.stable_code();
-    ApiError::runtime(
-        stable_code,
-        "repository routing failed closed",
-        json!({ "reason": reason }),
-    )
-}
 
 pub async fn issue_lifecycle(
     State(state): State<WebAppState>,
@@ -910,14 +901,17 @@ pub(crate) fn validate_confirmed_design_specs(
     Ok(())
 }
 
-/// 从 product 层 gate 校验的错误字符串提取稳定码（冒号前段），供 ApiError::validation 使用。
-fn confirm_gate_error_code(message: &str) -> &str {
-    match message.split(':').next() {
-        Some("involved_repositories_undetermined") => "involved_repositories_undetermined",
-        Some("change_order_required_for_logical_codebase") => {
-            "change_order_required_for_logical_codebase"
-        }
-        _ => "confirm_gate_failed",
+/// confirm gate 失败映射（#5 收尾）：按 [`ConfirmAggregateGateError`] 变体区分 HTTP 状态。
+/// - Violation（业务违规）→ 4xx + 稳定码（error.rs 显式映射 400）；
+/// - SpecNotFound → 404 `spec_not_found`；
+/// - SpecLoad → 500 `confirm_gate_spec_load_failed`。
+fn confirm_gate_api_error(error: ConfirmAggregateGateError) -> ApiError {
+    let code = error.stable_code();
+    let message = error.message();
+    match error {
+        ConfirmAggregateGateError::Violation { .. } => ApiError::validation(code, message),
+        ConfirmAggregateGateError::SpecNotFound(_) => ApiError::validation(code, message),
+        ConfirmAggregateGateError::SpecLoad(_) => ApiError::runtime(code, message, json!({})),
     }
 }
 
@@ -930,14 +924,14 @@ pub(crate) fn confirm_workspace_entity(
             // confirm gate（方案 X 3b 收紧，Blocker 2 下沉到 product 层）：多仓 Spec
             // （logical_codebase_ref Some）在 Confirmed 前校验 ① involved 非空（REQ-PLN-04）；
             // ② Design involved>1 必须 change_order（REQ-PLN-05 收紧）。单仓不校验（红线）。
-            if let Err(message) = lifecycle.validate_confirm_aggregate_spec(
+            // #5 收尾：load_existing_spec 失败按 NotFound→404 / IO→500 区分（修复前统一 500）。
+            if let Err(error) = lifecycle.validate_confirm_aggregate_spec(
                 &session.project_id,
                 &session.issue_id,
                 &session.entity_id,
                 &session.workspace_type,
             ) {
-                let code = confirm_gate_error_code(&message).to_string();
-                return Err(ApiError::validation(code, message));
+                return Err(confirm_gate_api_error(error));
             }
             lifecycle
                 .update_spec_confirmation_status(

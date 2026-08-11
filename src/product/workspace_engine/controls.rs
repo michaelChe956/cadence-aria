@@ -47,7 +47,13 @@ impl WorkspaceEngine {
                             &self.session.entity_id,
                             &self.session.workspace_type,
                         )
-                        .map_err(|message| format!("confirm gate 校验失败：{message}"))?;
+                        .map_err(|error| {
+                            format!(
+                                "confirm gate 校验失败：{}: {}",
+                                error.stable_code(),
+                                error.message()
+                            )
+                        })?;
                 }
                 self.complete_active_node(Some("已确认通过".to_string()))
                     .await;

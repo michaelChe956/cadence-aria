@@ -423,15 +423,6 @@ fn validate_logical_group_selection(
     }
 }
 
-fn routing_api_error(code: RepositoryRoutingErrorCode, reason: &str) -> ApiError {
-    let stable_code = code.stable_code();
-    ApiError::runtime(
-        stable_code,
-        "repository routing failed closed",
-        json!({ "reason": reason }),
-    )
-}
-
 fn issue_worktree_active_api_error(error: ProductStoreError) -> ApiError {
     match error {
         ProductStoreError::Io(message) if message.contains("issue_worktree_active") => {

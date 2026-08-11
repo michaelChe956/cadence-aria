@@ -1118,3 +1118,116 @@ async fn confirm_legacy_single_repo_story_without_involved_succeeds() {
     );
     assert_eq!(body["status"], "confirmed");
 }
+
+// ---- #5 minor 收尾：spec 加载失败的 HTTP 状态码区分 ----
+// validate_confirm_aggregate_spec 经 load_existing_spec 读盘，失败分两类：
+//   ① NotFound（spec 文件不存在，如 session 指向已删 spec）→ 应 404；
+//   ② IO/JSON 解析错误（文件损坏）→ 应 500。
+// 修复前两者都被包成 "confirm_gate_spec_load_failed: ..." → confirm_gate_failed → 500，
+// NotFound 丢失 404 语义。本组测试守护区分后的稳定契约。
+
+/// 建多仓 Story spec + session，额外返回 spec 文件路径（供调用方删/写坏以模拟加载失败）。
+async fn create_logical_confirm_fixture_with_spec_path(
+    involved: Vec<LogicalRepositoryId>,
+) -> (
+    tempfile::TempDir,
+    axum::Router,
+    String,
+    std::path::PathBuf,
+) {
+    let root = tempdir().expect("root");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            title: "多仓 confirm 加载失败".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("multi-repo issue");
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: String::new(),
+            title: "多仓 Story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                logical_codebase_ref: uuid::Uuid::from_u128(0x0100),
+                effective_member_ids: involved.clone(),
+                involved_repository_ids: involved,
+                focus_repository_id: None,
+            }),
+        })
+        .expect("logical story");
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id.clone(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+        })
+        .expect("workspace session");
+    let spec_path = app_paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("story-specs")
+        .join(format!("{}.json", story.id));
+    (root, app, session.id, spec_path)
+}
+
+#[tokio::test]
+async fn confirm_logical_gate_missing_spec_file_returns_not_found() {
+    // #5：spec 文件不存在（NotFound）→ confirm 应 404，而非 500。
+    // 修复前：load_existing_spec 返 NotFound → 被包成 confirm_gate_spec_load_failed 字符串
+    // → HTTP 映射 confirm_gate_failed → 500（错误，丢了 404 语义）。
+    let member = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    let (_root, app, session_id, spec_path) =
+        create_logical_confirm_fixture_with_spec_path(vec![member]).await;
+    fs::remove_file(&spec_path).expect("remove spec file to simulate NotFound");
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/workspace-sessions/{session_id}/confirm"),
+        json!({ "confirmed_by": "human" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "spec 文件缺失应是 404 NotFound，而非 500: {body}"
+    );
+    assert_eq!(body["code"], "spec_not_found");
+}
+
+#[tokio::test]
+async fn confirm_logical_gate_corrupted_spec_file_returns_server_error() {
+    // #5：spec 文件 JSON 损坏（解析错误）→ confirm 应 500，且 code 区分于 NotFound/gate 违规。
+    // 修复前：落 confirm_gate_failed（碰巧 500，但与 NotFound 混在一起无法区分）。
+    let member = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    let (_root, app, session_id, spec_path) =
+        create_logical_confirm_fixture_with_spec_path(vec![member]).await;
+    fs::write(&spec_path, "{ this is not valid json").expect("corrupt spec file");
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/workspace-sessions/{session_id}/confirm"),
+        json!({ "confirmed_by": "human" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "spec 文件损坏应是 500 server error: {body}"
+    );
+    assert_eq!(body["code"], "confirm_gate_spec_load_failed");
+}
