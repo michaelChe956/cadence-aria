@@ -25,8 +25,10 @@ pub mod tests;
 pub(crate) use session::run_kimi_session;
 
 pub const KIMI_COMMAND: &str = "kimi";
-const MIN_KIMI_VERSION: &str = "0.34.0";
+pub const MIN_KIMI_VERSION: &str = "0.34.0";
 const KIMI_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const KIMI_LOGIN_GUIDANCE: &str = "Kimi Code is not logged in; run `kimi login` and retry.";
+const KIMI_SENSITIVE_MARKERS: [&str; 4] = ["token", "authorization", "api_key", "config"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct KimiVersion(pub u64, pub u64, pub u64);
@@ -110,14 +112,43 @@ pub(crate) fn format_kimi_exit_failure(
     details: String,
     status: Option<std::process::ExitStatus>,
 ) -> String {
+    if kimi_authentication_failure(&details) {
+        return KIMI_LOGIN_GUIDANCE.to_string();
+    }
     let suffix = match status.and_then(|status| status.code()) {
         Some(0) => "Kimi ACP process exited with code 0 before terminal prompt result",
         Some(1) => "Kimi ACP process exited with code 1 (non-retryable failure)",
         Some(75) => "Kimi ACP process exited with code 75 (temporary failure)",
-        Some(code) => return format!("{details}; Kimi ACP process exited with code {code}"),
-        None => return details,
+        Some(code) => {
+            return sanitize_kimi_failure(format!(
+                "{details}; Kimi ACP process exited with code {code}"
+            ));
+        }
+        None => return sanitize_kimi_failure(details),
     };
-    format!("{details}; {suffix}")
+    sanitize_kimi_failure(format!("{details}; {suffix}"))
+}
+
+fn kimi_authentication_failure(details: &str) -> bool {
+    let normalized = details.to_ascii_lowercase();
+    normalized.contains("unauthorized")
+        || normalized.contains("not logged in")
+        || normalized.contains("authentication")
+        || normalized.contains("\"code\":401")
+        || normalized.contains("code 401")
+}
+
+fn sanitize_kimi_failure(message: String) -> String {
+    message
+        .lines()
+        .filter(|line| {
+            let normalized = line.to_ascii_lowercase();
+            !KIMI_SENSITIVE_MARKERS
+                .iter()
+                .any(|marker| normalized.contains(marker))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[async_trait::async_trait]
@@ -154,9 +185,19 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         tokio::spawn(async move {
             let stderr_task = tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
+                let mut output = String::new();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "kimi_code_provider", "kimi stderr: {line}");
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&line);
+                    tracing::debug!(
+                        target: "kimi_code_provider",
+                        "kimi stderr: {}",
+                        sanitize_kimi_failure(line)
+                    );
                 }
+                output
             });
             let result = session::run_kimi_session(
                 peer,
@@ -183,11 +224,12 @@ impl StreamingProviderAdapter for KimiCodeProvider {
             } else {
                 child.wait().await.ok()
             };
-            let _ = stderr_task.await;
+            let stderr_output = stderr_task.await.unwrap_or_default();
             if let Err(error) = result
                 && error.details != session::KIMI_SESSION_ABORTED
             {
-                let message = format_kimi_exit_failure(error.details, status);
+                let message =
+                    format_kimi_exit_failure(format!("{}\n{stderr_output}", error.details), status);
                 let _ = event_tx
                     .send(ProviderEvent::StatusChanged(ProviderStatus::Failed))
                     .await;

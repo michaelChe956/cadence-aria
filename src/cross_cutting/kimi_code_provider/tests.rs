@@ -687,6 +687,42 @@ mod session_tests {
     }
 
     #[tokio::test]
+    async fn authentication_failures_prompt_kimi_login_without_leaking_credentials() {
+        for mode in ["acp", "stderr"] {
+            let mut env_vars = BTreeMap::new();
+            env_vars.insert("KIMI_FIXTURE_AUTH_MODE".to_string(), mode.to_string());
+            env_vars.insert("KIMI_API_KEY".to_string(), "ignored-api-key".to_string());
+            let provider = KimiCodeProvider::new(fixture_command("kimi_acp_auth_fixture.sh"));
+            let mut session = provider
+                .start(input_with_env(None, 10, env_vars), CancellationToken::new())
+                .await
+                .expect("start");
+            let events = terminal_events(&mut session).await;
+            let failures = events
+                .iter()
+                .filter_map(|event| match event {
+                    ProviderEvent::Failed { message } => Some(message),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                failures.len(),
+                1,
+                "{mode} must emit one failure: {events:?}"
+            );
+            assert!(failures[0].contains("kimi login"));
+            assert!(!failures[0].contains("fixture-secret-token"));
+            assert!(!failures[0].contains("/tmp/kimi/config.toml"));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, ProviderEvent::Completed(_)))
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn abort_sends_session_cancel_before_process_termination() {
         let marker = tempfile::NamedTempFile::new().expect("marker");
         let marker_path = marker.path().to_path_buf();
