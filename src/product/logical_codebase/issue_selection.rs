@@ -175,6 +175,8 @@ impl IssueCodebaseSelectionStore {
     }
 
     pub fn save(&self, selection: &IssueCodebaseSelection) -> Result<(), ProductStoreError> {
+        // 强制校验 focus ⊆ include，避免写入不一致的 selection（阶段 A 发现 save 未强制）。
+        selection.validate_focus_subset()?;
         validate_relative_id(&selection.project_id)?;
         validate_relative_id(&selection.issue_id)?;
         write_json(
@@ -327,6 +329,39 @@ mod tests {
             .validate_focus_subset()
             .is_err()
         );
+    }
+
+    #[test]
+    fn save_rejects_focus_outside_include() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = IssueCodebaseSelectionStore::new(ProductAppPaths::new(temp.path()));
+        let a = LogicalRepositoryId(stable_uuid(0x0001));
+        let b = LogicalRepositoryId(stable_uuid(0x0002));
+
+        // focus=b 不在 include=[a]：save 必须强制失败，不写盘。
+        let invalid = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![a],
+            Vec::new(),
+            vec![b],
+            None,
+        );
+        assert!(store.save(&invalid).is_err());
+        assert!(store.load("project_0001", "issue_0001").unwrap().is_none());
+
+        // focus ⊆ include 时 save 正常落盘。
+        let valid = IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![a, b],
+            Vec::new(),
+            vec![b],
+            None,
+        );
+        store.save(&valid).unwrap();
+        let loaded = store.load("project_0001", "issue_0001").unwrap().unwrap();
+        assert_eq!(loaded.focus_repository_ids, vec![b]);
     }
 
     #[test]
