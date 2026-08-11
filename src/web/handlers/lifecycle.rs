@@ -1,7 +1,6 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
-use crate::product::lifecycle_store::spec::ExistingSpecRecord;
 use crate::product::lifecycle_store::{AggregateDesignSpecScope, AggregateStorySpecScope};
 use crate::product::logical_codebase::{
     LogicalRepositoryId, PlanningContextResolver, PlanningContextSetResolver, RepositoryRouting,
@@ -911,47 +910,34 @@ pub(crate) fn validate_confirmed_design_specs(
     Ok(())
 }
 
+/// 从 product 层 gate 校验的错误字符串提取稳定码（冒号前段），供 ApiError::validation 使用。
+fn confirm_gate_error_code(message: &str) -> &str {
+    match message.split(':').next() {
+        Some("involved_repositories_undetermined") => "involved_repositories_undetermined",
+        Some("change_order_required_for_logical_codebase") => {
+            "change_order_required_for_logical_codebase"
+        }
+        _ => "confirm_gate_failed",
+    }
+}
+
 pub(crate) fn confirm_workspace_entity(
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
 ) -> ApiResult<()> {
     match session.workspace_type {
         WorkspaceType::Story | WorkspaceType::Design => {
-            // confirm gate（方案 X 3b 收紧）：多仓 Spec（logical_codebase_ref Some）在
-            // Confirmed 前校验 ① involved 非空（REQ-PLN-04「AI 不确定即 blocker」）；
-            // ② Design involved>1 必须 change_order（决策 3b，REQ-PLN-05 收紧）。
-            // 单仓（logical_codebase_ref None）不校验，保持 Legacy 行为不变（红线）。
-            let spec = lifecycle
-                .load_existing_spec(&session.project_id, &session.issue_id, &session.entity_id)
-                .map_err(product_store_api_error)?;
-            let (is_logical, involved_len, change_order_empty) = match &spec {
-                ExistingSpecRecord::Story { record, .. } => (
-                    record.logical_codebase_ref.is_some(),
-                    record.involved_repository_ids.len(),
-                    true,
-                ),
-                ExistingSpecRecord::Design { record, .. } => (
-                    record.logical_codebase_ref.is_some(),
-                    record.involved_repository_ids.len(),
-                    record.change_order.is_empty(),
-                ),
-            };
-            if is_logical {
-                if involved_len == 0 {
-                    return Err(ApiError::validation(
-                        "involved_repositories_undetermined",
-                        "多仓 Spec 必须有 involved",
-                    ));
-                }
-                if matches!(session.workspace_type, WorkspaceType::Design)
-                    && involved_len > 1
-                    && change_order_empty
-                {
-                    return Err(ApiError::validation(
-                        "change_order_required_for_logical_codebase",
-                        "多仓 Design 必须有 change_order",
-                    ));
-                }
+            // confirm gate（方案 X 3b 收紧，Blocker 2 下沉到 product 层）：多仓 Spec
+            // （logical_codebase_ref Some）在 Confirmed 前校验 ① involved 非空（REQ-PLN-04）；
+            // ② Design involved>1 必须 change_order（REQ-PLN-05 收紧）。单仓不校验（红线）。
+            if let Err(message) = lifecycle.validate_confirm_aggregate_spec(
+                &session.project_id,
+                &session.issue_id,
+                &session.entity_id,
+                &session.workspace_type,
+            ) {
+                let code = confirm_gate_error_code(&message).to_string();
+                return Err(ApiError::validation(code, message));
             }
             lifecycle
                 .update_spec_confirmation_status(

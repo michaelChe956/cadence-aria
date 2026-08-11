@@ -717,3 +717,137 @@ async fn append_context_note_creates_timeline_node() {
             .any(|candidate| candidate.node_id == node.node_id)
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Blocker 2：confirm gate 下沉 —— WebSocket handle_confirm 不能绕过 gate
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 多仓 Design（involved=2 无 change_order）在 handle_confirm 时必须被 gate 拦截，
+/// 返回 Err 且不把 session 置为 Confirmed（REQ-PLN-05 收紧，不能绕过）。
+#[tokio::test]
+async fn handle_confirm_rejects_multi_repo_design_without_change_order_without_setting_confirmed() {
+    let root = tempfile::TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let codebase_ref = uuid::Uuid::new_v4();
+    let member_a = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+    let member_b = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+
+    let design = lifecycle
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "multi repo design".to_string(),
+            aggregate_codebase: Some(
+                crate::product::lifecycle_store::AggregateDesignSpecScope {
+                    logical_codebase_ref: codebase_ref,
+                    effective_member_ids: vec![member_a, member_b],
+                    involved_repository_ids: vec![member_a, member_b],
+                    change_order: Vec::new(),
+                },
+            ),
+        })
+        .unwrap();
+
+    let record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: design.id.clone(),
+            workspace_type: WorkspaceType::Design,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session_id = record.id.clone();
+
+    let checkpoint_store = Arc::new(CheckpointStore::new(
+        paths.issue_lifecycle_root("project_0001", "issue_0001"),
+    ));
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = WorkspaceSession::from_record(record);
+    session.stage = WorkspaceStage::HumanConfirm;
+    let mut engine = WorkspaceEngine::new_persistent(checkpoint_store, lifecycle.clone(), tx, session);
+
+    let error = engine.handle_confirm().await.unwrap_err();
+    assert!(
+        error.contains("change_order_required_for_logical_codebase"),
+        "handle_confirm must fail the confirm gate for multi-repo Design without change_order: {error}"
+    );
+
+    let stored = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session must remain readable");
+    assert_ne!(
+        stored.status,
+        crate::product::models::WorkspaceSessionStatus::Confirmed,
+        "gate failure must NOT set the session to Confirmed"
+    );
+}
+
+/// 多仓 Story（involved 空）在 handle_confirm 时同样被 gate 拦截（REQ-PLN-04）。
+#[tokio::test]
+async fn handle_confirm_rejects_multi_repo_story_without_involved_without_setting_confirmed() {
+    let root = tempfile::TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let codebase_ref = uuid::Uuid::new_v4();
+    let member_a = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: String::new(),
+            title: "aggregate story".to_string(),
+            aggregate_codebase: Some(crate::product::lifecycle_store::AggregateStorySpecScope {
+                logical_codebase_ref: codebase_ref,
+                effective_member_ids: vec![member_a],
+                involved_repository_ids: Vec::new(),
+                focus_repository_id: None,
+            }),
+        })
+        .unwrap();
+
+    let record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id.clone(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: ProviderName::Codex,
+            review_rounds: 1,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+        })
+        .unwrap();
+    let session_id = record.id.clone();
+
+    let checkpoint_store = Arc::new(CheckpointStore::new(
+        paths.issue_lifecycle_root("project_0001", "issue_0001"),
+    ));
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = WorkspaceSession::from_record(record);
+    session.stage = WorkspaceStage::HumanConfirm;
+    let mut engine = WorkspaceEngine::new_persistent(checkpoint_store, lifecycle.clone(), tx, session);
+
+    let error = engine.handle_confirm().await.unwrap_err();
+    assert!(
+        error.contains("involved_repositories_undetermined"),
+        "handle_confirm must fail the confirm gate for multi-repo Story without involved: {error}"
+    );
+
+    let stored = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session must remain readable");
+    assert_ne!(
+        stored.status,
+        crate::product::models::WorkspaceSessionStatus::Confirmed,
+        "gate failure must NOT set the session to Confirmed"
+    );
+}

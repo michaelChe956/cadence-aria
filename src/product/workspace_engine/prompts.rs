@@ -1,4 +1,5 @@
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
 
 mod review;
@@ -6,6 +7,11 @@ mod review_context;
 mod review_repair;
 mod reviewer_context_filter;
 mod revision;
+
+/// 聚合视野 prompt 的唯一 marker（`aggregate_story_scope_prompt` / `aggregate_design_scope_prompt` /
+/// `aggregate_work_item_target_scope_prompt` 均以 `## 聚合代码库成员清单` 开头）。用于在
+/// `build_streaming_input` 中识别 Logical（有 aggregate scope）Story/Design 会话。
+const AGGREGATE_SCOPE_MARKER: &str = "## 聚合代码库成员清单";
 
 pub(crate) fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {
     match workspace_type {
@@ -112,6 +118,41 @@ pub(crate) fn structured_output_nonce() -> String {
         .collect()
 }
 
+/// 聚合 Story/Design author 的 structured output schema（仅 build_streaming_input 注入用）。
+pub(crate) fn aggregate_author_schema_for(workspace_type: &WorkspaceType) -> &'static str {
+    match workspace_type {
+        WorkspaceType::Story => {
+            r#"{"involved_repository_ids":["<logical_repository_id>"],"focus_repository_id":"<logical_repository_id>|null"}"#
+        }
+        WorkspaceType::Design => {
+            r#"{"involved_repository_ids":["<logical_repository_id>"],"change_order":["<logical_repository_id>"]}"#
+        }
+        _ => "",
+    }
+}
+
+pub(crate) fn aggregate_author_schema_name_for(workspace_type: &WorkspaceType) -> &'static str {
+    match workspace_type {
+        WorkspaceType::Story => "story_aggregate",
+        WorkspaceType::Design => "design_aggregate",
+        _ => "",
+    }
+}
+
+/// 聚合 Story/Design author 的 nonce sentinel 输出指令（协议闭环：AI 必须产出带 nonce 的
+/// ARIA_STRUCTURED_OUTPUT 标签，供 `extract_structured_json` 提取 involved/change_order）。
+pub(crate) fn aggregate_author_output_contract(nonce: &str, schema: &str) -> String {
+    format!(
+        "\n\n聚合视野结构化输出（aggregate Story/Design 必须提供）：\n\
+         artifact 之外必须额外输出一个 nonce sentinel block 承载聚合视野 JSON，\
+         不得用 Markdown code fence 包裹该 JSON；involved_repository_ids 只能取成员清单中的 \
+         logical_repository_id，不确定即声明 blocker。schema：\n\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
+         {schema}\n\
+         </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n",
+    )
+}
+
 pub(crate) fn reviewer_output_contract(nonce: &str, schema: &str, intro: &str) -> String {
     format!(
         "{}\
@@ -141,13 +182,31 @@ impl WorkspaceEngine {
         let resume_provider_session_id =
             self.provider_resume_session_id(ProviderConversationRole::Author, &provider);
 
+        let mut prompt = match prompt_mode {
+            AuthorPromptMode::FullConversation => self.build_prompt(user_content),
+            AuthorPromptMode::DeltaOnly => user_content.to_string(),
+        };
+        // Blocker 1 修复：聚合 Story/Design（session 含聚合视野 context，即 Logical routing）
+        // 协议闭环 —— 给 AI 注入带 nonce 的 ARIA_STRUCTURED_OUTPUT 指令并设置 contract，
+        // 使 write_back_aggregate_output 的 extract_structured_json 能取到 nonce 标签。
+        // 单仓/WorkItemPlan 保持 structured_output_contract: None（红线：单仓行为不变）。
+        let structured_output_contract = if self.is_aggregate_story_or_design() {
+            let nonce = structured_output_nonce();
+            let schema = aggregate_author_schema_for(&self.session.workspace_type);
+            let schema_name = aggregate_author_schema_name_for(&self.session.workspace_type);
+            prompt.push_str(&aggregate_author_output_contract(&nonce, schema));
+            Some(StructuredOutputContract {
+                nonce,
+                schema_name: schema_name.to_string(),
+            })
+        } else {
+            None
+        };
+
         Ok(StreamingProviderInput {
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Orchestrator,
-            prompt: match prompt_mode {
-                AuthorPromptMode::FullConversation => self.build_prompt(user_content),
-                AuthorPromptMode::DeltaOnly => user_content.to_string(),
-            },
+            prompt,
             working_dir,
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id,
@@ -155,10 +214,27 @@ impl WorkspaceEngine {
                 &provider,
                 self.session.permission_modes.author.clone(),
             ),
-            structured_output_contract: None,
+            structured_output_contract,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
+    }
+
+    /// 会话上下文是否包含聚合视野 prompt（web 的 `ensure_workspace_context_message` 在
+    /// Logical routing 下注入 `## 聚合代码库成员清单`）。
+    fn has_aggregate_scope_system_context(&self) -> bool {
+        self.session
+            .messages
+            .iter()
+            .any(|message| message.content.contains(AGGREGATE_SCOPE_MARKER))
+    }
+
+    /// 聚合 Story/Design（Logical routing 且有 aggregate scope）—— structured output 协议生效。
+    fn is_aggregate_story_or_design(&self) -> bool {
+        matches!(
+            self.session.workspace_type,
+            WorkspaceType::Story | WorkspaceType::Design
+        ) && self.has_aggregate_scope_system_context()
     }
 
     pub fn build_work_item_plan_streaming_input(

@@ -13,13 +13,14 @@ use crate::product::models::{
 /// `PlanningContextSnapshot.effective_member_ids`（权威）；`involved_repository_ids` 来自 AI
 /// 输出且必须 ⊆ effective_member_ids；`focus_repository_id` 可空，若给出必须 ∈ involved。
 ///
-/// AI 未明确涉及仓库（空 involved）或涉及不在有效集合的仓库 → blocker，不塞 primary
-/// （REQ-PLN-07）。
+/// AI 未明确涉及仓库（空 involved）或涉及不在有效集合的仓库 → 非 Draft 态 blocker，不塞
+/// primary（REQ-PLN-07）；Draft 态允许空 involved（AI 尚未产出，Task 1）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateStorySpecScope {
     pub logical_codebase_ref: uuid::Uuid,
     pub effective_member_ids: Vec<LogicalRepositoryId>,
-    /// AI 明确声明的涉及仓库；空表示未确定 → blocker（不回落 primary）。
+    /// AI 明确声明的涉及仓库；空表示未确定 → 非 Draft 态 blocker（不回落 primary，
+    /// Draft 态允许空 involved 待 AI 产出）。
     pub involved_repository_ids: Vec<LogicalRepositoryId>,
     /// 迁移期 focus/primary 投影；可空，若给出必须 ∈ involved_repository_ids。
     pub focus_repository_id: Option<LogicalRepositoryId>,

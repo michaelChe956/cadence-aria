@@ -835,3 +835,140 @@ fn design_without_aggregate_scope_keeps_single_repository_path() {
     assert!(design.involved_repository_ids.is_empty());
     assert!(design.change_order.is_empty());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 确认 gate（Task 6 下沉，Blocker 2）：validate_confirm_aggregate_spec
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 多仓 Story（logical_codebase_ref Some）involved 为空 → blocker involved_repositories_undetermined。
+#[test]
+fn validate_confirm_aggregate_spec_rejects_multi_repo_story_without_involved() {
+    let (_tmp, store) = setup();
+    let story = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: String::new(),
+            title: "aggregate story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                involved_repository_ids: Vec::new(),
+                focus_repository_id: None,
+                ..two_effective_members_scope()
+            }),
+        })
+        .unwrap();
+
+    let error = store
+        .validate_confirm_aggregate_spec(PROJECT_ID, ISSUE_ID, &story.id, &WorkspaceType::Story)
+        .unwrap_err();
+    assert!(
+        error.contains("involved_repositories_undetermined"),
+        "expected involved_repositories_undetermined, got: {error}"
+    );
+}
+
+/// 多仓 Design（involved=2）缺 change_order → blocker change_order_required_for_logical_codebase。
+#[test]
+fn validate_confirm_aggregate_spec_rejects_multi_repo_design_without_change_order() {
+    let (_tmp, store) = setup();
+    let design = store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "multi repo design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                involved_repository_ids: vec![API_MEMBER, WEB_MEMBER],
+                change_order: Vec::new(),
+                ..two_effective_members_design_scope()
+            }),
+        })
+        .unwrap();
+
+    let error = store
+        .validate_confirm_aggregate_spec(PROJECT_ID, ISSUE_ID, &design.id, &WorkspaceType::Design)
+        .unwrap_err();
+    assert!(
+        error.contains("change_order_required_for_logical_codebase"),
+        "expected change_order_required_for_logical_codebase, got: {error}"
+    );
+}
+
+/// 多仓 Design 带 change_order → 通过 gate。
+#[test]
+fn validate_confirm_aggregate_spec_passes_multi_repo_design_with_change_order() {
+    let (_tmp, store) = setup();
+    let design = store
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec!["story_spec_0001".to_string()],
+            title: "multi repo design".to_string(),
+            aggregate_codebase: Some(AggregateDesignSpecScope {
+                involved_repository_ids: vec![API_MEMBER, WEB_MEMBER],
+                change_order: vec![API_MEMBER, WEB_MEMBER],
+                ..two_effective_members_design_scope()
+            }),
+        })
+        .unwrap();
+
+    store
+        .validate_confirm_aggregate_spec(PROJECT_ID, ISSUE_ID, &design.id, &WorkspaceType::Design)
+        .expect("multi-repo design with change_order must pass the confirm gate");
+}
+
+/// 多仓 Story 带 involved → 通过 gate。
+#[test]
+fn validate_confirm_aggregate_spec_passes_multi_repo_story_with_involved() {
+    let (_tmp, store) = setup();
+    let story = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: String::new(),
+            title: "aggregate story".to_string(),
+            aggregate_codebase: Some(AggregateStorySpecScope {
+                involved_repository_ids: vec![API_MEMBER, WEB_MEMBER],
+                focus_repository_id: None,
+                ..two_effective_members_scope()
+            }),
+        })
+        .unwrap();
+
+    store
+        .validate_confirm_aggregate_spec(PROJECT_ID, ISSUE_ID, &story.id, &WorkspaceType::Story)
+        .expect("multi-repo story with involved must pass the confirm gate");
+}
+
+/// 单仓 Story（无 aggregate）→ 不校验，gate 通过（红线）。
+#[test]
+fn validate_confirm_aggregate_spec_passes_single_repo_story() {
+    let (_tmp, store) = setup();
+    let story = store
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "single repo story".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+
+    store
+        .validate_confirm_aggregate_spec(PROJECT_ID, ISSUE_ID, &story.id, &WorkspaceType::Story)
+        .expect("single-repo story must pass the confirm gate");
+}
+
+/// 非 Story/Design workspace（如 WorkItem）→ gate 直接通过（不校验）。
+#[test]
+fn validate_confirm_aggregate_spec_ignores_non_story_design_workspace() {
+    let (_tmp, store) = setup();
+    store
+        .validate_confirm_aggregate_spec(
+            PROJECT_ID,
+            ISSUE_ID,
+            "work_item_0001",
+            &WorkspaceType::WorkItem,
+        )
+        .expect("non story/design workspace must skip the aggregate confirm gate");
+}

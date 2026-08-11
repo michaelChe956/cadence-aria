@@ -684,3 +684,162 @@ async fn pi_start_failure_does_not_retry_selected_provider() {
     assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 只启动一次，不重试");
     assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
 }
+
+#[test]
+fn aggregate_story_author_input_sets_structured_output_contract_with_nonce() {
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_aggregate_story_contract");
+    session.workspace_type = WorkspaceType::Story;
+    // 模拟 web ensure_workspace_context_message 注入的聚合视野 context message。
+    session.messages.push(SessionMessage {
+        id: "msg_generation_context".to_string(),
+        role: "system".to_string(),
+        content: crate::product::workspace_engine::aggregate_story_scope_prompt(
+            "inventory-rendered",
+            &[],
+        ),
+        checkpoint_id: None,
+        created_at: "2026-08-11T00:00:00Z".to_string(),
+    });
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    let contract = input
+        .structured_output_contract
+        .expect("aggregate Story author input must carry a structured output contract");
+    assert_eq!(contract.schema_name, "story_aggregate");
+    assert_eq!(contract.nonce.len(), 8, "nonce must be 8 chars");
+    assert!(
+        contract.nonce.chars().all(|ch| ch.is_ascii_alphanumeric()),
+        "nonce must be ascii alphanumeric: {}",
+        contract.nonce
+    );
+    assert!(
+        input
+            .prompt
+            .contains(&format!("<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">", contract.nonce)),
+        "prompt must instruct the AI with the matching nonce sentinel: {}",
+        input.prompt
+    );
+    assert!(
+        input.prompt.contains("involved_repository_ids")
+            && input.prompt.contains("focus_repository_id"),
+        "Story aggregate schema must expose involved_repository_ids + focus_repository_id: {}",
+        input.prompt
+    );
+}
+
+#[test]
+fn aggregate_design_author_input_sets_structured_output_contract_with_change_order() {
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_aggregate_design_contract");
+    session.workspace_type = WorkspaceType::Design;
+    session.messages.push(SessionMessage {
+        id: "msg_generation_context".to_string(),
+        role: "system".to_string(),
+        content: crate::product::workspace_engine::aggregate_design_scope_prompt(
+            "inventory-rendered",
+            &[],
+        ),
+        checkpoint_id: None,
+        created_at: "2026-08-11T00:00:00Z".to_string(),
+    });
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    let contract = input
+        .structured_output_contract
+        .expect("aggregate Design author input must carry a structured output contract");
+    assert_eq!(contract.schema_name, "design_aggregate");
+    assert_eq!(contract.nonce.len(), 8);
+    assert!(
+        input
+            .prompt
+            .contains(&format!("<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">", contract.nonce)),
+        "prompt must instruct the AI with the matching nonce sentinel: {}",
+        input.prompt
+    );
+    assert!(
+        input.prompt.contains("involved_repository_ids")
+            && input.prompt.contains("change_order"),
+        "Design aggregate schema must expose involved_repository_ids + change_order: {}",
+        input.prompt
+    );
+}
+
+#[test]
+fn single_repo_story_author_input_keeps_structured_output_contract_none() {
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_single_repo_story_contract");
+    session.workspace_type = WorkspaceType::Story;
+    // 单仓：无聚合视野 context message（与既有 make_session 一致）。
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    assert!(
+        input.structured_output_contract.is_none(),
+        "single-repo Story author input must keep structured_output_contract None"
+    );
+    assert!(
+        !input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"),
+        "single-repo Story author prompt must not contain a nonce sentinel instruction: {}",
+        input.prompt
+    );
+}
+
+#[test]
+fn single_repo_design_author_input_keeps_structured_output_contract_none() {
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_single_repo_design_contract");
+    session.workspace_type = WorkspaceType::Design;
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    assert!(input.structured_output_contract.is_none());
+    assert!(!input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"));
+}
+
+#[test]
+fn aggregate_work_item_plan_author_input_keeps_structured_output_contract_none() {
+    // 红线：WorkItemPlan 聚合 prompt 存在，但 structured output 协议只对 Story/Design 生效。
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_aggregate_plan_contract");
+    session.workspace_type = WorkspaceType::WorkItemPlan;
+    session.messages.push(SessionMessage {
+        id: "msg_generation_context".to_string(),
+        role: "system".to_string(),
+        content: crate::product::workspace_engine::aggregate_work_item_target_scope_prompt(
+            "inventory-rendered",
+            &[],
+        ),
+        checkpoint_id: None,
+        created_at: "2026-08-11T00:00:00Z".to_string(),
+    });
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    assert!(
+        input.structured_output_contract.is_none(),
+        "WorkItemPlan aggregate author input must NOT carry a structured output contract"
+    );
+}

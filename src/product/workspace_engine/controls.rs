@@ -31,6 +31,24 @@ impl WorkspaceEngine {
     pub async fn handle_confirm(&mut self) -> Result<WorkspaceConfirmOutcome, String> {
         match self.session.stage {
             WorkspaceStage::HumanConfirm => {
+                // Blocker 2 修复：confirm gate 下沉到 product 层（LifecycleStore 的
+                // validate_confirm_aggregate_spec），在置 Confirmed **前**拦截多仓 Story/Design
+                // 校验失败（involved 空 / 多仓 Design 缺 change_order），杜绝 WebSocket 绕过
+                // REQ-PLN-04/05 进入 prepare。失败返回 Err，不置 Confirmed（单仓不校验，红线）。
+                if matches!(
+                    self.session.workspace_type,
+                    WorkspaceType::Story | WorkspaceType::Design
+                ) && let Some(store) = &self.lifecycle_store
+                {
+                    store
+                        .validate_confirm_aggregate_spec(
+                            &self.session.project_id,
+                            &self.session.issue_id,
+                            &self.session.entity_id,
+                            &self.session.workspace_type,
+                        )
+                        .map_err(|message| format!("confirm gate 校验失败：{message}"))?;
+                }
                 self.complete_active_node(Some("已确认通过".to_string()))
                     .await;
                 self.mark_latest_artifact_confirmed(Some("human".to_string()));

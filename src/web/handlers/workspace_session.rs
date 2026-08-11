@@ -56,9 +56,15 @@ pub async fn workspace_session_confirm(
 ) -> ApiResult<Json<WorkspaceSessionDto>> {
     let lifecycle = LifecycleStore::new(product_app_paths(&state));
     let session = lifecycle
+        .get_workspace_session(&session_id)
+        .map_err(product_store_api_error)?;
+    // Blocker 2 修复：先 gate 后确认。confirm_workspace_entity 内部先跑 product 层
+    // validate_confirm_aggregate_spec（多仓 involved/change_order 校验），gate 失败即返回
+    // 4xx，此时 session 尚未被置 Confirmed（不再出现“先确认后 gate 失败遗留已 Confirmed”的不一致）。
+    confirm_workspace_entity(&lifecycle, &session)?;
+    lifecycle
         .update_workspace_session_status(&session_id, WorkspaceSessionStatus::Confirmed)
         .map_err(product_store_api_error)?;
-    confirm_workspace_entity(&lifecycle, &session)?;
     let session = lifecycle
         .append_workspace_message(
             &session_id,
@@ -204,7 +210,76 @@ pub(crate) fn provider_workspace_prompt(prompt: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::product::lifecycle_store::{AggregateDesignSpecScope, CreateDesignSpecInput};
+    use crate::product::logical_codebase::LogicalRepositoryId;
+    use crate::product::models::{WorkspaceSessionStatus, WorkspaceType};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn workspace_session_confirm_gate_failure_leaves_session_not_confirmed() {
+        let tmp = TempDir::new().expect("temp dir");
+        let root = tmp.path().to_path_buf();
+        let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root.clone()));
+        let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.join(".aria")));
+        let member_a = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let member_b = LogicalRepositoryId(uuid::Uuid::new_v4());
+        // 多仓 Design（involved=2，无 change_order）→ confirm gate 必须 4xx 拦截。
+        let design = lifecycle
+            .create_design_spec(CreateDesignSpecInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                story_spec_ids: vec!["story_spec_0001".to_string()],
+                title: "multi repo design".to_string(),
+                aggregate_codebase: Some(AggregateDesignSpecScope {
+                    logical_codebase_ref: uuid::Uuid::new_v4(),
+                    effective_member_ids: vec![member_a, member_b],
+                    involved_repository_ids: vec![member_a, member_b],
+                    change_order: Vec::new(),
+                }),
+            })
+            .expect("create design spec");
+        let session = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: design.id.clone(),
+                workspace_type: WorkspaceType::Design,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: ProviderName::Codex,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+            })
+            .expect("create workspace session");
+        let session_id = session.id.clone();
+
+        let result = workspace_session_confirm(
+            State(state),
+            Path(session_id.clone()),
+            Json(WorkspaceSessionConfirmRequest {
+                confirmed_by: "user".to_string(),
+            }),
+        )
+        .await;
+
+        let error = result.expect_err("multi-repo Design without change_order must be rejected");
+        assert_eq!(error.code, "change_order_required_for_logical_codebase");
+        let response = error.into_response();
+        assert!(
+            response.status().is_client_error(),
+            "gate failure must be 4xx, got {:?}",
+            response.status()
+        );
+
+        let stored = lifecycle
+            .get_workspace_session(&session_id)
+            .expect("session must remain readable");
+        assert_ne!(
+            stored.status,
+            WorkspaceSessionStatus::Confirmed,
+            "HTTP confirm gate failure must NOT set the session to Confirmed"
+        );
+    }
 
     #[tokio::test]
     async fn workspace_session_artifact_version_includes_serialized_artifact_payload() {

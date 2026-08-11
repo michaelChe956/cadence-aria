@@ -402,6 +402,58 @@ impl LifecycleStore {
         Ok(defaults)
     }
 
+    /// 确认 gate 校验（Task 6 下沉，Blocker 2 修复）：多仓（logical_codebase_ref 非 None）
+    /// Story/Design 在 Confirmed 前校验 ① involved 非空（REQ-PLN-04「AI 不确定即 blocker」）；
+    /// ② Design involved>1 必须 change_order（决策 3b，REQ-PLN-05 收紧）。
+    ///
+    /// 单仓（logical_codebase_ref None）或非 Story/Design 不校验，保持 Legacy 行为不变（红线）。
+    /// 错误字符串以稳定码开头（`involved_repositories_undetermined` /
+    /// `change_order_required_for_logical_codebase`），供 WebSocket（直接 Err）与
+    /// HTTP（映射 ApiError::validation 稳定码）两路复用。
+    pub fn validate_confirm_aggregate_spec(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        entity_id: &str,
+        workspace_type: &WorkspaceType,
+    ) -> Result<(), String> {
+        if !matches!(workspace_type, WorkspaceType::Story | WorkspaceType::Design) {
+            return Ok(());
+        }
+        let spec = self
+            .load_existing_spec(project_id, issue_id, entity_id)
+            .map_err(|error| format!("confirm_gate_spec_load_failed: {error:?}"))?;
+        let (is_logical, involved_len, change_order_empty) = match &spec {
+            ExistingSpecRecord::Story { record, .. } => (
+                record.logical_codebase_ref.is_some(),
+                record.involved_repository_ids.len(),
+                true,
+            ),
+            ExistingSpecRecord::Design { record, .. } => (
+                record.logical_codebase_ref.is_some(),
+                record.involved_repository_ids.len(),
+                record.change_order.is_empty(),
+            ),
+        };
+        if is_logical && involved_len == 0 {
+            return Err(
+                "involved_repositories_undetermined: AI 未明确涉及仓库，不能确认多仓 Spec（REQ-PLN-04）"
+                    .to_string(),
+            );
+        }
+        if matches!(workspace_type, WorkspaceType::Design)
+            && is_logical
+            && involved_len > 1
+            && change_order_empty
+        {
+            return Err(
+                "change_order_required_for_logical_codebase: 多仓 Design 必须提供 change_order（REQ-PLN-05）"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn load_existing_spec(
         &self,
         project_id: &str,
