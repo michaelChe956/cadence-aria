@@ -45,7 +45,7 @@ impl LifecycleStore {
         let (logical_codebase_ref, involved_repository_ids, focus_repository_id) =
             match &input.aggregate_codebase {
                 Some(scope) => {
-                    validate_aggregate_story_scope(scope)?;
+                    validate_aggregate_story_scope(scope, LifecycleConfirmationStatus::Draft)?;
                     (
                         Some(scope.logical_codebase_ref),
                         scope.involved_repository_ids.clone(),
@@ -129,7 +129,7 @@ impl LifecycleStore {
         let (logical_codebase_ref, involved_repository_ids, change_order) =
             match &input.aggregate_codebase {
                 Some(scope) => {
-                    validate_aggregate_design_scope(scope)?;
+                    validate_aggregate_design_scope(scope, LifecycleConfirmationStatus::Draft)?;
                     (
                         Some(scope.logical_codebase_ref),
                         scope.involved_repository_ids.clone(),
@@ -382,15 +382,17 @@ impl LifecycleStore {
 }
 
 /// 校验聚合代码库 Story 视野（REQ-PLN-07）。fail-closed，不回落单仓 primary：
-/// 1. `involved_repository_ids` 空 → AI 未明确涉及仓库 → blocker
-///    `involved_repositories_undetermined`。
+/// 1. `involved_repository_ids` 空 → Draft 态允许（AI 尚未产出，方案 X 阶段 1）；其余状态
+///    （Confirmed 等）→ blocker `involved_repositories_undetermined`。
 /// 2. 任一 involved id ∉ `effective_member_ids` → 越界成员 → blocker
 ///    `involved_repository_not_effective`。
 /// 3. `focus_repository_id` 若给出但 ∉ involved → blocker `focus_repository_not_involved`。
 fn validate_aggregate_story_scope(
     scope: &AggregateStorySpecScope,
+    status: LifecycleConfirmationStatus,
 ) -> Result<(), ProductStoreError> {
-    if scope.involved_repository_ids.is_empty() {
+    // Draft 态允许空 involved（AI 尚未产出，方案 X 阶段 1）；其余状态强制非空。
+    if status != LifecycleConfirmationStatus::Draft && scope.involved_repository_ids.is_empty() {
         return Err(ProductStoreError::InvalidRecord {
             kind: "story_aggregate_scope",
             reason: "involved_repositories_undetermined: AI 未明确涉及仓库，不回落 primary"
@@ -424,8 +426,8 @@ fn validate_aggregate_story_scope(
 }
 
 /// 校验聚合代码库 Design 视野（REQ-PLN-08）。fail-closed，不回落 issue.repo_id：
-/// 1. `involved_repository_ids` 空 → AI 未明确涉及仓库 → blocker
-///    `involved_repositories_undetermined`。
+/// 1. `involved_repository_ids` 空 → Draft 态允许（AI 尚未产出，方案 X 阶段 1）；其余状态
+///    （Confirmed 等）→ blocker `involved_repositories_undetermined`。
 /// 2. 任一 involved id ∉ `effective_member_ids` → 越界成员 → blocker
 ///    `involved_repository_not_effective`。
 /// 3. `change_order` 若给出，任一 id ∉ involved_repository_ids → blocker
@@ -437,8 +439,10 @@ fn validate_aggregate_story_scope(
 /// change_order 才作 depends_on 依据（Task 9 消费）。Design 不再读取 issue.repo_id 填充任何字段。
 fn validate_aggregate_design_scope(
     scope: &AggregateDesignSpecScope,
+    status: LifecycleConfirmationStatus,
 ) -> Result<(), ProductStoreError> {
-    if scope.involved_repository_ids.is_empty() {
+    // Draft 态允许空 involved（AI 尚未产出，方案 X 阶段 1）；其余状态强制非空。
+    if status != LifecycleConfirmationStatus::Draft && scope.involved_repository_ids.is_empty() {
         return Err(ProductStoreError::InvalidRecord {
             kind: "design_aggregate_scope",
             reason: "involved_repositories_undetermined: AI 未明确涉及仓库，不回落 issue.repo_id"
@@ -481,4 +485,44 @@ fn validate_aggregate_design_scope(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::logical_codebase::LogicalRepositoryId;
+    use uuid::Uuid;
+
+    #[test]
+    fn validate_story_scope_draft_allows_empty_involved() {
+        let scope = AggregateStorySpecScope {
+            logical_codebase_ref: Uuid::nil(),
+            effective_member_ids: vec![LogicalRepositoryId(Uuid::from_u128(1))],
+            involved_repository_ids: vec![], // 空
+            focus_repository_id: None,
+        };
+        // Draft 态允许空 involved（AI 尚未产出）
+        assert!(validate_aggregate_story_scope(&scope, LifecycleConfirmationStatus::Draft).is_ok());
+        // Confirmed 态强制非空
+        assert!(
+            validate_aggregate_story_scope(&scope, LifecycleConfirmationStatus::Confirmed).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_design_scope_draft_allows_empty_involved() {
+        let scope = AggregateDesignSpecScope {
+            logical_codebase_ref: Uuid::nil(),
+            effective_member_ids: vec![LogicalRepositoryId(Uuid::from_u128(1))],
+            involved_repository_ids: vec![],
+            change_order: vec![],
+        };
+        assert!(
+            validate_aggregate_design_scope(&scope, LifecycleConfirmationStatus::Draft).is_ok()
+        );
+        assert!(
+            validate_aggregate_design_scope(&scope, LifecycleConfirmationStatus::Confirmed)
+                .is_err()
+        );
+    }
 }

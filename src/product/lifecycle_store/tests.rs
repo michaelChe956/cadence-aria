@@ -7,7 +7,8 @@ use crate::product::json_store::{ProductStoreError, read_json, write_json};
 use crate::product::lifecycle_store::{AggregateDesignSpecScope, AggregateStorySpecScope};
 use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
-    DesignSpecRecord, ProviderName, StorySpecRecord, WorkItemRuntimeBinding, WorkspaceType,
+    DesignSpecRecord, LifecycleConfirmationStatus, ProviderName, StorySpecRecord,
+    WorkItemRuntimeBinding, WorkspaceType,
 };
 
 use super::*;
@@ -445,11 +446,13 @@ fn story_spec_dto_path(store: &LifecycleStore, story_id: &str) -> std::path::Pat
         .join(format!("{story_id}.json"))
 }
 
-/// AI 未明确涉及任何仓库（involved_repository_ids 为空）→ blocker，不持久化 StorySpec。
+/// AI 未明确涉及任何仓库（involved_repository_ids 为空）→ 方案 X 阶段 1：Draft 态允许空
+/// involved（AI 尚未产出），create 时恒为 Draft → 成功持久化为 Draft，不回落 primary 也不
+/// blocker；Confirmed 态强制非空由 spec::tests 的 validate_aggregate_story_scope 单测覆盖。
 #[test]
-fn story_without_involved_repositories_becomes_blocker_not_primary() {
+fn story_without_involved_repositories_persists_as_draft() {
     let (_tmp, store) = setup();
-    let error = store
+    let story = store
         .create_story_spec(CreateStorySpecInput {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
@@ -461,17 +464,24 @@ fn story_without_involved_repositories_becomes_blocker_not_primary() {
                 ..two_effective_members_scope()
             }),
         })
-        .unwrap_err();
+        .unwrap();
 
-    assert!(
-        matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
-            if reason.contains("involved_repositories_undetermined")),
-        "空 involved_repository_ids 应 fail-closed 为 blocker，错误: {error:?}"
-    );
+    // Draft 态允许空 involved：不回落 primary，聚合字段按原值持久化。
     assert_eq!(
-        store.list_story_specs(PROJECT_ID, ISSUE_ID).unwrap().len(),
-        0,
-        "blocker 时不应持久化 StorySpec"
+        story.confirmation_status,
+        LifecycleConfirmationStatus::Draft
+    );
+    assert!(story.involved_repository_ids.is_empty());
+    assert_eq!(story.focus_repository_id, None);
+    assert_eq!(story.logical_codebase_ref, Some(CODEBASE_REF));
+    assert_eq!(story.repository_id, REPOSITORY_ID);
+
+    // 磁盘持久化一致（不回落 primary）。
+    let persisted: StorySpecRecord = read_json(&story_spec_dto_path(&store, &story.id)).unwrap();
+    assert!(persisted.involved_repository_ids.is_empty());
+    assert_eq!(
+        persisted.confirmation_status,
+        LifecycleConfirmationStatus::Draft
     );
 }
 
@@ -608,12 +618,13 @@ fn design_spec_dto_path(store: &LifecycleStore, design_id: &str) -> std::path::P
         .join(format!("{design_id}.json"))
 }
 
-/// AI 未明确涉及任何仓库（involved_repository_ids 为空）→ blocker，不持久化 DesignSpec，
-/// 不回落 issue.repo_id（REQ-PLN-08）。
+/// AI 未明确涉及任何仓库（involved_repository_ids 为空）→ 方案 X 阶段 1：Draft 态允许空
+/// involved（AI 尚未产出），create 时恒为 Draft → 成功持久化为 Draft，不回落 issue.repo_id
+/// 也不 blocker；Confirmed 态强制非空由 spec::tests 的 validate_aggregate_design_scope 单测覆盖。
 #[test]
-fn design_without_involved_repositories_becomes_blocker_not_repo_id() {
+fn design_without_involved_repositories_persists_as_draft() {
     let (_tmp, store) = setup();
-    let error = store
+    let design = store
         .create_design_spec(CreateDesignSpecInput {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
@@ -625,17 +636,23 @@ fn design_without_involved_repositories_becomes_blocker_not_repo_id() {
                 ..two_effective_members_design_scope()
             }),
         })
-        .unwrap_err();
+        .unwrap();
 
-    assert!(
-        matches!(error, ProductStoreError::InvalidRecord { ref reason, .. }
-            if reason.contains("involved_repositories_undetermined")),
-        "空 involved_repository_ids 应 fail-closed 为 blocker，错误: {error:?}"
-    );
+    // Draft 态允许空 involved：不回落 issue.repo_id，聚合字段按原值持久化。
     assert_eq!(
-        store.list_design_specs(PROJECT_ID, ISSUE_ID).unwrap().len(),
-        0,
-        "blocker 时不应持久化 DesignSpec"
+        design.confirmation_status,
+        LifecycleConfirmationStatus::Draft
+    );
+    assert!(design.involved_repository_ids.is_empty());
+    assert!(design.change_order.is_empty());
+    assert_eq!(design.logical_codebase_ref, Some(CODEBASE_REF));
+
+    // 磁盘持久化一致。
+    let persisted: DesignSpecRecord = read_json(&design_spec_dto_path(&store, &design.id)).unwrap();
+    assert!(persisted.involved_repository_ids.is_empty());
+    assert_eq!(
+        persisted.confirmation_status,
+        LifecycleConfirmationStatus::Draft
     );
 }
 
