@@ -629,3 +629,46 @@ async fn multiquestion_serial_one_at_a_time() {
     assert!(run.await.expect("run join").is_ok());
     server_task.await.expect("server task");
 }
+
+#[tokio::test]
+async fn askuser_question_multiple_questions_emits_protocol_error() {
+    let (peer, server) = test_peer();
+    let (_commands, _events, run) = direct_session_events(peer, input(None, 10)).await;
+    let server_task = tokio::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(server);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let initialize = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({ "jsonrpc":"2.0", "id":initialize["id"], "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}} })).await;
+        let _initialized = read_request(&mut reader).await;
+        let new = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({ "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"multi_questions_fixture"} })).await;
+        let _prompt = read_request(&mut reader).await;
+        // 多题 AskUserQuestion 的 tool_call（arguments.questions 含 2 题）
+        send_message(&mut writer, serde_json::json!({
+            "jsonrpc":"2.0", "method":"session/update",
+            "params":{"sessionId":"multi_questions_fixture","update":{
+                "sessionUpdate":"tool_call","toolCallId":"multi-tool","title":"AskUserQuestion",
+                "kind":"other","status":"pending",
+                "content":[{"type":"content","content":{"type":"text","text":""}}],
+                "arguments":{"questions":[{"question":"Q1","options":[]},{"question":"Q2","options":[]}]}
+            }}
+        })).await;
+        // 随后 request_permission（AskUserQuestion）——应触发多题 protocol error
+        send_message(&mut writer, serde_json::json!({
+            "jsonrpc":"2.0", "id":"multi-1", "method":"session/request_permission",
+            "params":{"options":[{"optionId":"a","name":"A","kind":"allow_once"}],
+                "toolCall":{"toolCallId":"multi-tool","title":"AskUserQuestion","content":{"type":"text","text":"Q1?"}}}
+        })).await;
+    });
+    let err = run
+        .await
+        .expect("run join")
+        .expect_err("multi-question AskUserQuestion must fail with a protocol error");
+    assert!(
+        err.to_string()
+            .contains("KIMI_ASK_USER_QUESTION_MULTIPLE_QUESTIONS_UNSUPPORTED"),
+        "{}",
+        err.to_string()
+    );
+    server_task.await.expect("server task");
+}

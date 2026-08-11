@@ -35,6 +35,7 @@ pub(crate) struct ArtifactConstraintSpec {
     pub(crate) forbidden_tokens: Vec<ArtifactTokenRule>,
     pub(crate) required_tokens: Vec<ArtifactTokenRule>,
     pub(crate) required_id_patterns: Vec<ArtifactIdPatternRule>,
+    pub(crate) open_item_policy_hint: Option<&'static str>,
     pub(crate) reviewer_must_fix_rules: Vec<&'static str>,
 }
 
@@ -111,6 +112,9 @@ pub(crate) fn artifact_constraint_spec_for(
                 id_rule("[REQ-*]", ArtifactTokenPattern::BracketPrefix("REQ-")),
                 id_rule("[AC-*]", ArtifactTokenPattern::BracketPrefix("AC-")),
             ],
+            open_item_policy_hint: Some(
+                "## 待确认项：若某项已通过 AskUserQuestion 交互解决，必须标注「已通过 AskUserQuestion 确认：<结论>」；若无开放问题，写「无待确认项」。不得以含糊描述（如「经提问未获回答，作者自行决定」）把已解决决策留在待确认项。",
+            ),
             reviewer_must_fix_rules: vec![
                 "Story artifact: Work Item heading, task splitting, [TASK-*], or WI-* content must be reported as must_fix.",
             ],
@@ -148,6 +152,7 @@ pub(crate) fn artifact_constraint_spec_for(
             reviewer_must_fix_rules: vec![
                 "Design artifact: Work Item Plan、开发任务列表、任务拆分、测试计划、测试范围或场景、测试文件或模块、测试框架或夹具、测试命令、构建命令、执行 checklist 或将测试或验证职责分配给组件或文件必须报告为 must_fix；仅把 [DEC-*] 关联到 [REQ-*]/[AC-*] 且不描述如何测试的抽象验收可追踪性不得报告为 must_fix。",
             ],
+            open_item_policy_hint: None,
         },
         WorkspaceType::WorkItem => ArtifactConstraintSpec {
             workspace_type: workspace_type.clone(),
@@ -179,6 +184,7 @@ pub(crate) fn artifact_constraint_spec_for(
             reviewer_must_fix_rules: vec![
                 "Work Item artifact: sibling tasks, issue-level full plans, or cross-task content must be reported as must_fix.",
             ],
+            open_item_policy_hint: None,
         },
         WorkspaceType::WorkItemPlan => ArtifactConstraintSpec {
             workspace_type: workspace_type.clone(),
@@ -208,6 +214,7 @@ pub(crate) fn artifact_constraint_spec_for(
             reviewer_must_fix_rules: vec![
                 "Work Item Plan artifact: code implementation or rewritten full Story/Design content must be reported as must_fix.",
             ],
+            open_item_policy_hint: None,
         },
     }
 }
@@ -349,6 +356,9 @@ fn append_markdown_artifact_schema_items(output: &mut String, spec: &ArtifactCon
             "- 禁止 token：{}。\n",
             format_rule_labels(spec.forbidden_tokens.iter().map(|rule| rule.label))
         ));
+    }
+    if let Some(hint) = spec.open_item_policy_hint {
+        output.push_str(&format!("- 待确认项策略：{hint}\n"));
     }
 }
 

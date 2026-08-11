@@ -179,6 +179,7 @@ where
     let mut full_output = String::new();
     let mut tool_outputs = HashMap::<String, String>::new();
     let mut completed_tools = HashSet::<String>::new();
+    let mut askuser_question_counts = HashMap::<String, usize>::new();
     let mut idle_deadline = Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
     let _ = event_tx
         .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
@@ -222,6 +223,7 @@ where
                     &mut full_output,
                     &mut tool_outputs,
                     &mut completed_tools,
+                    &mut askuser_question_counts,
                 ).await? {
                     IncomingDisposition::Progress => {
                         idle_deadline = Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
@@ -257,6 +259,7 @@ where
                         &mut full_output,
                         &mut tool_outputs,
                         &mut completed_tools,
+                        &mut askuser_question_counts,
                     ).await?;
                 }
                 match parse_message(&json!({"jsonrpc":"2.0","id":3,"result":response})) {
@@ -288,6 +291,7 @@ async fn handle_incoming<W>(
     full_output: &mut String,
     tool_outputs: &mut HashMap<String, String>,
     completed_tools: &mut HashSet<String>,
+    askuser_question_counts: &mut HashMap<String, usize>,
 ) -> Result<IncomingDisposition, ProviderAdapterError>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -312,6 +316,14 @@ where
                     arguments,
                     ..
                 } if status == "pending" => {
+                    if title == "AskUserQuestion"
+                        && let Some(questions) = arguments
+                            .get("questions")
+                            .and_then(Value::as_array)
+                    {
+                        askuser_question_counts
+                            .insert(tool_call_id.clone(), questions.len());
+                    }
                     event_tx
                         .send(ProviderEvent::ToolCall(ProviderToolCall {
                             id: tool_call_id,
@@ -356,6 +368,19 @@ where
         }
         Parsed::RequestPermission(request) => {
             if request.title == "AskUserQuestion" {
+                if askuser_question_counts
+                    .get(&request.tool_call_id)
+                    .is_some_and(|count| *count > 1)
+                {
+                    let count = askuser_question_counts
+                        .get(&request.tool_call_id)
+                        .copied()
+                        .unwrap_or(0);
+                    return Err(provider_error(format!(
+                        "KIMI_ASK_USER_QUESTION_MULTIPLE_QUESTIONS_UNSUPPORTED: AskUserQuestion tool call {} carries {} questions; ACP request_permission can answer one question per request. Ask Kimi to ask one question at a time.",
+                        request.tool_call_id, count
+                    )));
+                }
                 let choice_request = super::parse::ask_user_question_choice_request(&request);
                 let decision = match bridge.request_choice(choice_request, cancel.clone()).await {
                     Ok(decision) => decision,

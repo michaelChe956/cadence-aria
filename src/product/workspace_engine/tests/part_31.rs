@@ -257,6 +257,20 @@ fn parser_derived_schema_contract_keeps_concrete_heading_and_id_examples() {
 }
 
 #[test]
+fn story_schema_contract_exposes_open_item_resolution_protocol() {
+    let schema = author_artifact_schema_contract_for(&WorkspaceType::Story)
+        .expect("Story must have a schema contract");
+    assert!(
+        schema.contains("已通过 AskUserQuestion 确认"),
+        "Story schema contract must teach the resolved-cue protocol for 待确认项: {schema}"
+    );
+    assert!(
+        schema.contains("无待确认项"),
+        "Story schema contract must teach the empty marker for 待确认项: {schema}"
+    );
+}
+
+#[test]
 fn retry_and_revision_prompts_render_parser_derived_schema() {
     let review = ReviewVerdict {
         verdict: ReviewVerdictType::Revise,
