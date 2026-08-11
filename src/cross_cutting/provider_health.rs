@@ -16,6 +16,7 @@ use crate::cross_cutting::bounded_command_runner::{
     BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
     TokioBoundedCommandRunner,
 };
+use crate::cross_cutting::kimi_code_provider::MIN_KIMI_VERSION;
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::ProviderType;
 
@@ -390,7 +391,7 @@ fn entry_from_result(
             checked_at,
             ProviderHealthReasonCode::VersionTooLow,
             format!(
-                "Kimi Code version {version} is below the minimum supported version 0.34.0; upgrade Kimi Code"
+                "Kimi Code version {version} is below the minimum supported version {MIN_KIMI_VERSION}; upgrade Kimi Code"
             ),
         );
     }
@@ -457,7 +458,12 @@ fn kimi_version_supported(version: &str) -> bool {
         return false;
     };
     let patch = components.next().flatten().unwrap_or(0);
-    (major, minor, patch) >= (0, 34, 0)
+    let minimum = MIN_KIMI_VERSION
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("MIN_KIMI_VERSION must be a three-part numeric version");
+    (major, minor, patch) >= (minimum[0], minimum[1], minimum[2])
 }
 
 fn sanitize_reason(reason: &str) -> String {
