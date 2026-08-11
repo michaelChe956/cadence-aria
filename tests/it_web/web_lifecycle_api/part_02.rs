@@ -559,6 +559,8 @@ use cadence_aria::product::logical_codebase::{
     RepositoryType,
 };
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
+use cadence_aria::product::lifecycle_store::CreateStorySpecInput;
+use cadence_aria::product::models::LifecycleConfirmationStatus;
 
 /// 多仓场景 fixture：写 manifest + active member + checkout + 显式 selection + active
 /// aggregate index + policy bootstrap，使 `RepositoryRouting::load_for_issue` 判为 Logical。
@@ -781,4 +783,111 @@ async fn generate_story_specs_logical_branch_injects_aggregate_prompt() {
         content.contains("禁止回落到任意单一 primary 仓库"),
         "缺禁止 primary 回落指令：{content}"
     );
+}
+
+#[tokio::test]
+async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
+    // 多仓 issue → POST design-specs:generate → 200，design 为草稿态聚合视野
+    // （aggregate_codebase=Some），session context message 注入 aggregate_design prompt
+    // （inventory + involved/change_order/depends_on 指令）。C1 回归保护：Design Logical
+    // 分支不得因 issue.repo_id=None 在 workspace_entity_context（issue_repo_id）处失败。
+    let root = tempdir().expect("root");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+
+    // 先建多仓 issue（repo_id=None，成为 issue_0001），再写 selection。
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            title: "多仓聚合 Design".to_string(),
+            description: Some("跨 api 仓库的聚合设计".to_string()),
+            change_id: None,
+        })
+        .expect("multi-repo issue");
+    let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    seed_logical_codebase(&app_paths, member_id);
+
+    // Design 生成要求至少一个 Confirmed story（validate_confirmed_story_specs）。
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "前置 Story Spec".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("confirmed story");
+    lifecycle
+        .update_spec_confirmation_status(
+            "project_0001",
+            "issue_0001",
+            &story.id,
+            LifecycleConfirmationStatus::Confirmed,
+        )
+        .expect("confirm story");
+
+    let (status, design_response) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+        json!({
+            "title":"聚合 Design Spec",
+            "story_spec_ids":[story.id],
+            "author_provider":"fake",
+            "reviewer_provider":"codex",
+            "review_rounds":3,
+            "superpowers_enabled":false,
+            "openspec_enabled":false
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Logical design-specs:generate must succeed: {design_response}"
+    );
+    // 草稿态聚合 design（involved 空、Draft）。
+    assert_eq!(
+        design_response["design_specs"][0]["confirmation_status"], "draft"
+    );
+
+    // session context message 注入 inventory + 聚合视野指令（含 change_order/depends_on）。
+    let messages = design_response["workspace_session"]["messages"]
+        .as_array()
+        .unwrap();
+    let context = messages
+        .iter()
+        .find(|message| {
+            message["role"] == "system"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("Workspace 生成任务已准备"))
+        })
+        .expect("generation context message");
+    let content = context["content"].as_str().unwrap();
+    assert!(content.contains("聚合代码库成员清单"), "缺 inventory：{content}");
+    assert!(
+        content.contains("00000000-0000-0000-0000-000000000001"),
+        "缺成员行：{content}"
+    );
+    assert!(content.contains("involved_repository_ids"), "缺聚合指令：{content}");
+    assert!(
+        content.contains("禁止回落到任意单一 primary 仓库"),
+        "缺禁止 primary 回落指令：{content}"
+    );
+    assert!(content.contains("change_order"), "缺 change_order 指令：{content}");
+    assert!(content.contains("depends_on"), "缺 depends_on 依据：{content}");
 }

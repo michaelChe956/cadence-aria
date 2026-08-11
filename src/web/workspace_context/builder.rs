@@ -115,26 +115,39 @@ fn build_workspace_context_message(
         WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
     }
     let issue = IssueStore::new(app_paths.clone()).get(&session.project_id, &session.issue_id)?;
-    let entity = workspace_entity_context(app_paths, lifecycle, session, &issue)?;
     // 方案 X 阶段1：按 RepositoryRouting 分流。Logical（聚合代码库）Story/Design 无单一
     // 物理仓库，以聚合根 cwd 为仓库上下文并注入聚合视野 prompt；Legacy（单仓）保持原
-    // 物理仓库解析，向后兼容；FailClosed 报稳定错误码 repository_routing_*。
+    // 物理仓库解析，向后兼容；FailClosed 提前拦截报稳定错误码 repository_routing_*。
+    // C1 修复：routing 判定在 workspace_entity_context 之前，Logical Story/Design 传
+    // logical_aggregate 标志（Design 分支不再依赖 issue.repo_id，多仓 issue 可达）。
     let routing =
         RepositoryRouting::load_for_issue(app_paths, &session.project_id, &session.issue_id)?;
-    let aggregate_planning = if matches!(routing, RepositoryRouting::Logical { .. })
-        && matches!(
-            session.workspace_type,
-            WorkspaceType::Story | WorkspaceType::Design
-        ) {
-        // targets 空 → AI 自决 involved；snapshot 为权威 effective_member_ids。
-        Some(PlanningContextResolver::new(app_paths.clone()).build(
-            &session.project_id,
-            &session.issue_id,
-            &[],
-        )?)
-    } else {
-        None
+    let aggregate_planning = match &routing {
+        RepositoryRouting::FailClosed { code, reason } => {
+            return Err(routing_error_for_builder(*code, reason.clone()));
+        }
+        RepositoryRouting::Logical { .. }
+            if matches!(
+                session.workspace_type,
+                WorkspaceType::Story | WorkspaceType::Design
+            ) =>
+        {
+            // targets 空 → AI 自决 involved；snapshot 为权威 effective_member_ids。
+            Some(PlanningContextResolver::new(app_paths.clone()).build(
+                &session.project_id,
+                &session.issue_id,
+                &[],
+            )?)
+        }
+        _ => None,
     };
+    let entity = workspace_entity_context(
+        app_paths,
+        lifecycle,
+        session,
+        &issue,
+        aggregate_planning.is_some(),
+    )?;
     let (repository_name, repository_id_label, repository_path) =
         if let Some(resolved) = aggregate_planning.as_ref() {
             (
@@ -143,20 +156,12 @@ fn build_workspace_context_message(
                 resolved.cwd.display().to_string(),
             )
         } else {
-            match routing {
-                RepositoryRouting::FailClosed { code, reason } => {
-                    return Err(routing_error_for_builder(code, reason));
-                }
-                _ => {
-                    let repository =
-                        repository_for(app_paths, &session.project_id, &entity.repository_id)?;
-                    (
-                        repository.name,
-                        repository.id,
-                        repository.path.display().to_string(),
-                    )
-                }
-            }
+            let repository = repository_for(app_paths, &session.project_id, &entity.repository_id)?;
+            (
+                repository.name,
+                repository.id,
+                repository.path.display().to_string(),
+            )
         };
     let aggregate_prompt =
         aggregate_planning
