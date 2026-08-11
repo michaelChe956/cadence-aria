@@ -63,11 +63,15 @@ mod session_tests {
         session: &mut crate::cross_cutting::streaming_provider::ProviderSession,
     ) -> Vec<ProviderEvent> {
         let mut events = Vec::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(300);
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout_at(deadline, session.events.recv()).await {
-                Ok(Some(event)) => events.push(event),
-                Ok(None) | Err(_) => break,
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, session.events.recv()).await {
+            let terminal = matches!(
+                event,
+                ProviderEvent::Completed(_) | ProviderEvent::Failed { .. }
+            );
+            events.push(event);
+            if terminal {
+                break;
             }
         }
         events
