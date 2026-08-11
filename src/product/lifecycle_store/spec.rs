@@ -33,7 +33,11 @@ impl LifecycleStore {
     ) -> Result<StorySpecRecord, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
-        validate_relative_id(&input.repository_id)?;
+        // 聚合代码库（aggregate_codebase=Some）无 repo_id（Logical 分支传空串），跳过
+        // validate_relative_id（空串必败）；单仓（None）保持原校验，向后兼容。
+        if input.aggregate_codebase.is_none() {
+            validate_relative_id(&input.repository_id)?;
+        }
 
         let root = self.story_specs_root(&input.project_id, &input.issue_id);
         let id = next_sequential_id("story_spec", count_json_files(&root)?);

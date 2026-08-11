@@ -8,8 +8,14 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::logical_codebase::{
+    PlanningContextResolver, RepositoryRouting, RepositoryRoutingErrorCode,
+};
 use crate::product::models::{WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
+use crate::product::workspace_engine::{
+    aggregate_design_scope_prompt, aggregate_story_scope_prompt,
+};
 use chrono::Utc;
 
 pub fn ensure_workspace_context_message(
@@ -110,7 +116,61 @@ fn build_workspace_context_message(
     }
     let issue = IssueStore::new(app_paths.clone()).get(&session.project_id, &session.issue_id)?;
     let entity = workspace_entity_context(app_paths, lifecycle, session, &issue)?;
-    let repository = repository_for(app_paths, &session.project_id, &entity.repository_id)?;
+    // 方案 X 阶段1：按 RepositoryRouting 分流。Logical（聚合代码库）Story/Design 无单一
+    // 物理仓库，以聚合根 cwd 为仓库上下文并注入聚合视野 prompt；Legacy（单仓）保持原
+    // 物理仓库解析，向后兼容；FailClosed 报稳定错误码 repository_routing_*。
+    let routing =
+        RepositoryRouting::load_for_issue(app_paths, &session.project_id, &session.issue_id)?;
+    let aggregate_planning = if matches!(routing, RepositoryRouting::Logical { .. })
+        && matches!(
+            session.workspace_type,
+            WorkspaceType::Story | WorkspaceType::Design
+        ) {
+        // targets 空 → AI 自决 involved；snapshot 为权威 effective_member_ids。
+        Some(PlanningContextResolver::new(app_paths.clone()).build(
+            &session.project_id,
+            &session.issue_id,
+            &[],
+        )?)
+    } else {
+        None
+    };
+    let (repository_name, repository_id_label, repository_path) =
+        if let Some(resolved) = aggregate_planning.as_ref() {
+            (
+                "聚合代码库".to_string(),
+                "<logical>".to_string(),
+                resolved.cwd.display().to_string(),
+            )
+        } else {
+            match routing {
+                RepositoryRouting::FailClosed { code, reason } => {
+                    return Err(routing_error_for_builder(code, reason));
+                }
+                _ => {
+                    let repository =
+                        repository_for(app_paths, &session.project_id, &entity.repository_id)?;
+                    (
+                        repository.name,
+                        repository.id,
+                        repository.path.display().to_string(),
+                    )
+                }
+            }
+        };
+    let aggregate_prompt =
+        aggregate_planning
+            .as_ref()
+            .map(|resolved| match session.workspace_type {
+                WorkspaceType::Story => aggregate_story_scope_prompt(
+                    &resolved.inventory_injection.rendered,
+                    &resolved.snapshot.effective_member_ids,
+                ),
+                _ => aggregate_design_scope_prompt(
+                    &resolved.inventory_injection.rendered,
+                    &resolved.snapshot.effective_member_ids,
+                ),
+            });
     let issue_description = issue
         .description
         .as_deref()
@@ -130,7 +190,7 @@ fn build_workspace_context_message(
     };
     let runtime_contract = runtime_contract_for(session);
 
-    Ok(format!(
+    let mut message = format!(
         "Workspace 生成任务已准备\n\n\
          [system]\n\
          {}\n\n\
@@ -166,9 +226,9 @@ fn build_workspace_context_message(
         issue.title,
         issue.id,
         issue_description,
-        repository.name,
-        repository.id,
-        repository.path.display(),
+        repository_name,
+        repository_id_label,
+        repository_path,
         linked_context,
         work_item_context_block,
         constraint_summary_for(session),
@@ -176,7 +236,23 @@ fn build_workspace_context_message(
         workflow_discipline_for(session),
         output_schema_for(&session.workspace_type),
         completion_or_failure_for(session),
-    ))
+    );
+    if let Some(aggregate_prompt) = aggregate_prompt {
+        message.push_str(&aggregate_prompt);
+    }
+    Ok(message)
+}
+
+/// FailClosed 稳定错误码映射（B3）：ProductStoreError 经 product_store_api_error 的
+/// routing_error_code_from_reason 映射回 repository_routing_* HTTP 稳定错误码。
+fn routing_error_for_builder(
+    code: RepositoryRoutingErrorCode,
+    reason: impl Into<String>,
+) -> ProductStoreError {
+    ProductStoreError::InvalidRecord {
+        kind: "repository_routing",
+        reason: format!("{}: {}", code.stable_code(), reason.into()),
+    }
 }
 
 fn is_workspace_generation_brief(content: &str) -> bool {

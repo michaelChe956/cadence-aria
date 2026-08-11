@@ -542,3 +542,243 @@ fn git_repo() -> tempfile::TempDir {
     assert!(status.success());
     dir
 }
+
+// ---- 方案 X 阶段1：聚合代码库（Logical）Web 接入回归测试（Task 5）----
+// 多仓 issue 无 repo_id（manifest + selection 同时存在 → RepositoryRouting::Logical）：
+// 1. issue_lifecycle 不要求 repo_id（Logical 分支不报 repository_required）；
+// 2. generate_story_specs Logical 分支经 PlanningContextResolver + 草稿态 create + 注入
+//    aggregate prompt（session context message 含 inventory + 聚合视野指令）。
+use cadence_aria::product::logical_codebase::{
+    aggregate_index::{
+        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
+    },
+    policy::AggregatePolicyArtifactStore,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
+    IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
+    MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
+    RepositoryType,
+};
+use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
+
+/// 多仓场景 fixture：写 manifest + active member + checkout + 显式 selection + active
+/// aggregate index + policy bootstrap，使 `RepositoryRouting::load_for_issue` 判为 Logical。
+fn seed_logical_codebase(app_paths: &ProductAppPaths, member_id: LogicalRepositoryId) {
+    let aggregate_root = app_paths.root().join("aggregate-root");
+    let manifest = LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), vec![member_id]);
+    LogicalCodebaseStore::new(app_paths.clone())
+        .save_manifest("project_0001", &manifest)
+        .unwrap();
+    let now = "2026-08-10T00:00:00Z".to_string();
+    let checkout_path = aggregate_root.join("api");
+    LogicalCodebaseStore::new(app_paths.clone())
+        .save_member(
+            "project_0001",
+            &CodebaseMemberRecord {
+                logical_repository_id: member_id,
+                physical_repository_id: "repository_api".to_string(),
+                alias: "api".to_string(),
+                role: "service".to_string(),
+                ordinal: 1,
+                source_identity: RepositorySourceIdentity::from_git_parts(
+                    &checkout_path,
+                    checkout_path.join(".git"),
+                    Some("ssh://git@example.test/acme/api.git".to_string()),
+                ),
+                repo_type: RepositoryType::Backend,
+                tech_stack: vec!["rust".to_string()],
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![RepositoryCheckoutId(uuid::Uuid::nil())],
+                status: MemberStatus::Active,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .unwrap();
+    LogicalCodebaseStore::new(app_paths.clone())
+        .save_checkout(
+            "project_0001",
+            &RepositoryCheckoutRecord {
+                checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+                logical_repository_id: member_id,
+                physical_repository_id: "repository_api".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: checkout_path,
+                checkout_path_hash: "sha256:checkout".to_string(),
+                git_dir_identity: "sha256:git-dir".to_string(),
+                revision: Some("abc123".to_string()),
+                availability: CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .unwrap();
+    IssueCodebaseSelectionStore::new(app_paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![member_id],
+            Vec::new(),
+            Vec::new(),
+            None,
+        ))
+        .unwrap();
+    let index = AggregateIndexRecord::building(
+        "aggregate_index_0001".to_string(),
+        "project_0001".to_string(),
+        1,
+        vec![AggregateIndexMemberSnapshot::indexed(
+            member_id,
+            RepositoryCheckoutId(uuid::Uuid::nil()),
+            "abc123".to_string(),
+            false,
+            now.clone(),
+        )],
+        now.clone(),
+    );
+    AggregateIndexStore::new(app_paths.clone())
+        .create("project_0001", index.clone())
+        .unwrap();
+    let mut activated = index;
+    activated.status = AggregateIndexStatus::Active;
+    AggregateIndexStore::new(app_paths.clone())
+        .replace_active("project_0001", activated)
+        .unwrap();
+    AggregatePolicyArtifactStore::new(app_paths.clone())
+        .ensure_bootstrap(&manifest)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn logical_issue_lifecycle_does_not_require_repo_id() {
+    // 多仓 issue（manifest+selection，无 repo_id）→ GET issue_lifecycle → 200，
+    // 不报 repository_required / repository 相关 4xx。
+    let root = tempdir().expect("root");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+
+    // 先建多仓 issue（repo_id=None，成为 issue_0001），再写 selection —— 避免 selection 的
+    // issue_0001 目录被 count_entries 计入导致 issue 变成 issue_0002。
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            title: "多仓聚合 Issue".to_string(),
+            description: Some("跨 api 仓库的聚合变更".to_string()),
+            change_id: None,
+        })
+        .expect("multi-repo issue");
+    let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    seed_logical_codebase(&app_paths, member_id);
+
+    let (status, lifecycle) = request_json(
+        app,
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Logical issue_lifecycle must not require repo_id: {lifecycle}"
+    );
+    assert_ne!(lifecycle["code"], "repository_required");
+    assert_eq!(lifecycle["issue"]["repo_id"], Value::Null);
+    assert_eq!(lifecycle["story_specs"].as_array().unwrap().len(), 0);
+    assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn generate_story_specs_logical_branch_injects_aggregate_prompt() {
+    // 多仓 issue → POST story-specs:generate → 200，story 为草稿态聚合视野
+    // （aggregate_codebase=Some），session context message 含 inventory + 聚合指令。
+    let root = tempdir().expect("root");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Lifecycle","description":null}),
+    )
+    .await;
+
+    // 先建多仓 issue（repo_id=None，成为 issue_0001），再写 selection。
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            title: "多仓聚合 Story".to_string(),
+            description: Some("跨 api 仓库的聚合变更".to_string()),
+            change_id: None,
+        })
+        .expect("multi-repo issue");
+    let member_id = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    seed_logical_codebase(&app_paths, member_id);
+
+    let (status, story_response) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({
+            "title":"聚合 Story Spec",
+            "author_provider":"fake",
+            "reviewer_provider":"codex",
+            "review_rounds":3,
+            "superpowers_enabled":false,
+            "openspec_enabled":false
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Logical story-specs:generate must succeed: {story_response}"
+    );
+    // 草稿态聚合 story（involved 空、Draft），repository_id 为空串（Logical 无单仓 repo_id）。
+    let story = &story_response["story_specs"][0];
+    assert_eq!(story["repository_id"], "");
+
+    // session context message 注入 inventory + 聚合视野指令。
+    let messages = story_response["workspace_session"]["messages"]
+        .as_array()
+        .unwrap();
+    let context = messages
+        .iter()
+        .find(|message| {
+            message["role"] == "system"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("Workspace 生成任务已准备"))
+        })
+        .expect("generation context message");
+    let content = context["content"].as_str().unwrap();
+    assert!(content.contains("聚合代码库成员清单"), "缺 inventory：{content}");
+    assert!(
+        content.contains("00000000-0000-0000-0000-000000000001"),
+        "缺成员行：{content}"
+    );
+    assert!(content.contains("involved_repository_ids"), "缺聚合指令：{content}");
+    assert!(
+        content.contains("禁止回落到任意单一 primary 仓库"),
+        "缺禁止 primary 回落指令：{content}"
+    );
+}

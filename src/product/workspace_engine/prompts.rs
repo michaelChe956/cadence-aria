@@ -370,8 +370,7 @@ fn structured_interaction_artifact_decision_contract(
 ///
 /// 接入点：由 Web Story 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
 /// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取 inventory_injection
-/// 后注入）。本 task 已实现并单测，Web 接入在本计划后续 task。
-#[allow(dead_code)]
+/// 后注入）。方案 X 阶段1已由 generate_story_specs 接线。
 pub fn aggregate_story_scope_prompt(
     inventory_rendered: &str,
     effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
@@ -410,8 +409,7 @@ pub fn aggregate_story_scope_prompt(
 ///
 /// 接入点：由 Web Design 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
 /// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取 inventory_injection
-/// 后注入）。本 task 已实现并单测，Web 接入在本计划后续 task。
-#[allow(dead_code)]
+/// 后注入）。方案 X 阶段1已由 generate_design_specs 接线。
 pub fn aggregate_design_scope_prompt(
     inventory_rendered: &str,
     effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],

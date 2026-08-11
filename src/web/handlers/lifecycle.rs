@@ -1,7 +1,11 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
-use crate::product::logical_codebase::{LogicalRepositoryId, PlanningContextSetResolver};
+use crate::product::lifecycle_store::{AggregateDesignSpecScope, AggregateStorySpecScope};
+use crate::product::logical_codebase::{
+    LogicalRepositoryId, PlanningContextResolver, PlanningContextSetResolver, RepositoryRouting,
+    RepositoryRoutingErrorCode,
+};
 use crate::product::models::WorkItemRuntimeBinding;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
@@ -10,6 +14,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod deletion;
 pub use deletion::{delete_work_item, delete_work_item_plan};
+
+/// FailClosed 稳定错误码映射（与 coding/group.rs 的 routing_api_error 一致，B3）。
+fn routing_api_error(code: RepositoryRoutingErrorCode, reason: &str) -> ApiError {
+    let stable_code = code.stable_code();
+    ApiError::runtime(
+        stable_code,
+        "repository routing failed closed",
+        json!({ "reason": reason }),
+    )
+}
 
 pub async fn issue_lifecycle(
     State(state): State<WebAppState>,
@@ -68,12 +82,23 @@ pub async fn issue_lifecycle(
         .collect::<Vec<_>>();
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let mut coding_attempts = Vec::new();
-    let repository_id = issue.repo_id.clone().ok_or_else(|| {
-        product_store_api_error(ProductStoreError::NotFound {
-            kind: "issue_repository",
-            id: issue.id.clone(),
-        })
-    })?;
+    // 方案 X 阶段1：按 RepositoryRouting 三态分流。Logical（多仓）不要求 issue.repo_id，
+    // 后续经 manifest/selection 解析（聚合视野）；Legacy（单仓）保持原无条件要求 repo_id，
+    // 向后兼容；FailClosed 由下游解析按稳定错误码 repository_routing_* 报错（阶段A已实现）。
+    let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let repository_id = match routing {
+        RepositoryRouting::Legacy { .. } => issue.repo_id.clone().ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "issue_repository",
+                id: issue.id.clone(),
+            })
+        })?,
+        RepositoryRouting::Logical { .. } | RepositoryRouting::FailClosed { .. } => {
+            // Logical 不要求 repo_id（manifest/selection 权威）；FailClosed 在后续解析时报稳定错误码。
+            issue.repo_id.clone().unwrap_or_default()
+        }
+    };
     let revision_store = WorkItemRevisionStore::new(app_paths.clone());
     let runtime_reader = WorkItemRuntimeReader::new(app_paths.clone());
     let mut schema_v2_plan_ids = BTreeSet::new();
@@ -364,19 +389,45 @@ pub async fn generate_story_specs(
     let issue = IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
-    let repository_id = issue
-        .repo_id
-        .clone()
-        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
-    find_repository(&app_paths, &project_id, &repository_id)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    // 方案 X 阶段1：按 RepositoryRouting 三态分流。Legacy（单仓）保持原 repository_id 校验 +
+    // find_repository；Logical（多仓）接 PlanningContextResolver + 草稿态聚合视野
+    // （aggregate_codebase=Some，involved 空由 AI 自决，create 跳过 repository_id 校验）；
+    // FailClosed 报稳定错误码 repository_routing_*。
+    let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let (repository_id, aggregate_codebase) = match routing {
+        RepositoryRouting::Legacy { .. } => {
+            let repository_id = issue.repo_id.clone().ok_or_else(|| {
+                ApiError::validation("repository_required", "repository_id is required")
+            })?;
+            find_repository(&app_paths, &project_id, &repository_id)?;
+            (repository_id, None)
+        }
+        RepositoryRouting::Logical { manifest, .. } => {
+            // targets 空 → AI 自决 involved；snapshot 为权威 effective_member_ids。
+            let resolved = PlanningContextResolver::new(app_paths.clone())
+                .build(&project_id, &issue_id, &[])
+                .map_err(product_store_api_error)?;
+            let scope = AggregateStorySpecScope {
+                logical_codebase_ref: manifest.logical_codebase_id,
+                effective_member_ids: resolved.snapshot.effective_member_ids.clone(),
+                involved_repository_ids: Vec::new(),
+                focus_repository_id: None,
+            };
+            (String::new(), Some(scope))
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            return Err(routing_api_error(code, &reason));
+        }
+    };
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
             project_id: project_id.clone(),
             issue_id: issue_id.clone(),
             repository_id,
             title: request.title,
-            aggregate_codebase: None,
+            aggregate_codebase,
         })
         .map_err(product_store_api_error)?;
     let session = lifecycle
@@ -421,13 +472,35 @@ pub async fn generate_design_specs(
         .map_err(product_store_api_error)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
+    // 方案 X 阶段1：Logical（多仓）接 PlanningContextResolver + 草稿态聚合视野
+    // （aggregate_codebase=Some，involved/change_order 空由 AI 自决）；Legacy 保持现状
+    // （aggregate_codebase=None）；FailClosed 报稳定错误码 repository_routing_*。
+    let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let aggregate_codebase = match routing {
+        RepositoryRouting::Legacy { .. } => None,
+        RepositoryRouting::Logical { manifest, .. } => {
+            let resolved = PlanningContextResolver::new(app_paths.clone())
+                .build(&project_id, &issue_id, &[])
+                .map_err(product_store_api_error)?;
+            Some(AggregateDesignSpecScope {
+                logical_codebase_ref: manifest.logical_codebase_id,
+                effective_member_ids: resolved.snapshot.effective_member_ids.clone(),
+                involved_repository_ids: Vec::new(),
+                change_order: Vec::new(),
+            })
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            return Err(routing_api_error(code, &reason));
+        }
+    };
     let design = lifecycle
         .create_design_spec(CreateDesignSpecInput {
             project_id: project_id.clone(),
             issue_id: issue_id.clone(),
             story_spec_ids: request.story_spec_ids,
             title: request.title,
-            aggregate_codebase: None,
+            aggregate_codebase,
         })
         .map_err(product_store_api_error)?;
     let session = lifecycle
