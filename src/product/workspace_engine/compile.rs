@@ -297,6 +297,10 @@ impl WorkspaceEngine {
                     logical_targets: logical_targets.as_ref(),
                     now: &now,
                 },
+                &draft_batch::compile_support::load_change_order_from_confirmed_design(
+                    &lifecycle,
+                    &previous_plan,
+                )?,
             )?;
         tx.status = WorkItemPlanCompileStatus::Validating;
         tx.step_cursor = "validating".to_string();

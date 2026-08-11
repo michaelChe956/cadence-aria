@@ -27,6 +27,7 @@ fn compile_rejects_draft_without_target_and_does_not_publish_partial_items() {
             &previous_plan,
             &[draft_a, draft_b],
             compile_projection_context(&["outline_a", "outline_b"], Some(&targets)),
+            &[],
         )
         .expect_err("missing target must block the whole compile projection");
 
@@ -72,6 +73,7 @@ fn compile_allows_same_target_across_items_but_rejects_target_outside_selection(
                 &["outline_a", "outline_b", "outline_c"],
                 Some(&targets),
             ),
+            &[],
         )
         .expect_err("target outside effective selection must block compile");
 
@@ -109,6 +111,7 @@ fn compile_publishes_distinct_targets_in_single_transaction() {
             &previous_plan,
             &drafts,
             compile_projection_context(&["outline_a", "outline_b"], Some(&targets)),
+            &[],
         )
         .expect("distinct valid targets must compile together");
 
@@ -281,6 +284,7 @@ fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
                 logical_targets: None,
                 now: "2026-06-27T00:00:00Z",
             },
+            &[],
         )
         .expect("project compile records");
 
@@ -350,6 +354,7 @@ fn final_compile_projects_source_draft_context_into_work_items() {
                 logical_targets: None,
                 now: "2026-06-30T00:00:00Z",
             },
+            &[],
         )
         .expect("project compile records");
 

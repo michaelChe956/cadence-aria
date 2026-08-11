@@ -179,6 +179,132 @@ fn stable_repository_routing_code(code: RepositoryRoutingErrorCode) -> &'static 
     }
 }
 
+/// 加载 issue 的 confirmed Design 的 change_order（仓级执行顺序，REQ-TGT-04 消费点）。
+/// compile 入口经 lifecycle + plan.source_design_spec_ids 加载 confirmed design，取
+/// DesignSpecRecord.change_order。单仓/无 aggregate scope（无 confirmed design）→ 返回空
+/// （不映射），compile 行为不变（红线）。
+pub(crate) fn load_change_order_from_confirmed_design(
+    lifecycle: &LifecycleStore,
+    plan: &IssueWorkItemPlan,
+) -> Result<Vec<LogicalRepositoryId>, String> {
+    let designs = lifecycle
+        .list_design_specs(&plan.project_id, &plan.issue_id)
+        .map_err(|error| format!("list design specs failed: {error}"))?;
+    // 只取 plan.source_design_spec_ids 指向且已 Confirmed 的 design（Task 6 confirm gate 产物）。
+    let confirmed = designs.iter().find(|design| {
+        plan.source_design_spec_ids.contains(&design.id)
+            && design.confirmation_status == LifecycleConfirmationStatus::Confirmed
+    });
+    Ok(confirmed
+        .map(|design| design.change_order.clone())
+        .unwrap_or_default())
+}
+
+/// 把 Design 的 change_order（仓级执行顺序）映射成跨仓 WorkItem depends_on（REQ-TGT-04）。
+/// 规则：
+/// ① 两个 WorkItem target 仓 tA≠tB 且 change_order 中 tA 在 tB 之前 → B depends_on A；
+/// ② 同 target 仓的多 item 不因 change_order 建跨仓依赖（同仓顺序由既有 WorkItem 级
+///    depends_on/sequence_hint 决定）；
+/// ③ 合并既有 WorkItem 级 depends_on（candidate input_contracts 提取）；
+/// ④ 环检测 → blocker dependency_cycle。
+fn apply_change_order_cross_repo_depends_on(
+    work_items: &mut [LifecycleWorkItemRecord],
+    change_order: &[LogicalRepositoryId],
+) -> Result<(), String> {
+    if change_order.is_empty() {
+        // 单仓/无 aggregate scope → 空，不映射（红线：单仓 compile 行为不变）。
+        return Ok(());
+    }
+    // 按 target 仓聚合 work item id（仅 Logical 分支有 target_repository_id）。
+    let mut by_target: BTreeMap<LogicalRepositoryId, Vec<String>> = BTreeMap::new();
+    for item in work_items.iter() {
+        if let Some(target) = item.target_repository_id {
+            by_target.entry(target).or_default().push(item.id.clone());
+        }
+    }
+    // 对每对 (earlier_repo, later_repo)：所有 target=later_repo 的 item depends_on 所有
+    // target=earlier_repo 的 item（规则①②——change_order 内索引 i<j 保证 tA≠tB 且 tA 在前）。
+    for (index, earlier_repo) in change_order.iter().enumerate() {
+        for later_repo in change_order.iter().skip(index + 1) {
+            let earlier_items = by_target.get(earlier_repo);
+            let later_items = by_target.get(later_repo);
+            if let (Some(earlier_items), Some(later_items)) = (earlier_items, later_items) {
+                for later_item in later_items {
+                    for earlier_item in earlier_items {
+                        let item = work_items
+                            .iter_mut()
+                            .find(|it| &it.id == later_item)
+                            .expect("later item id must exist in work_items");
+                        // 规则③：合并既有 WorkItem 级 depends_on，去重。
+                        if !item.depends_on.contains(earlier_item) {
+                            item.depends_on.push(earlier_item.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 规则④：环检测 → blocker dependency_cycle。
+    if let Some(cycle_ids) = detect_dependency_cycle(work_items) {
+        return Err(format!(
+            "dependency_cycle: change_order 与既有 WorkItem 依赖构成环: {}",
+            cycle_ids.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// 环检测（Kahn）：对 work_items 的 depends_on（限定在本批 item id 内的边）做拓扑排序，
+/// 有环则返回环内 work item id 列表，无环返回 None。
+fn detect_dependency_cycle(work_items: &[LifecycleWorkItemRecord]) -> Option<Vec<String>> {
+    let ids: HashSet<&str> = work_items.iter().map(|item| item.id.as_str()).collect();
+    let mut indegree: HashMap<&str, usize> = work_items
+        .iter()
+        .map(|item| (item.id.as_str(), 0usize))
+        .collect();
+    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+    for item in work_items {
+        for dependency_id in &item.depends_on {
+            if ids.contains(dependency_id.as_str()) && dependency_id != &item.id {
+                adjacency
+                    .entry(dependency_id.as_str())
+                    .or_default()
+                    .push(item.id.as_str());
+                *indegree.entry(item.id.as_str()).or_default() += 1;
+            }
+        }
+    }
+    let mut queue: VecDeque<&str> = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(id, _)| *id)
+        .collect();
+    let mut visited = 0usize;
+    while let Some(id) = queue.pop_front() {
+        visited += 1;
+        if let Some(next_ids) = adjacency.get(id) {
+            for &next_id in next_ids {
+                let degree = indegree.get_mut(next_id).expect("next id in indegree");
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(next_id);
+                }
+            }
+        }
+    }
+    if visited == ids.len() {
+        None
+    } else {
+        Some(
+            indegree
+                .iter()
+                .filter(|(_, degree)| **degree > 0)
+                .map(|(id, _)| (*id).to_string())
+                .collect(),
+        )
+    }
+}
+
 impl WorkspaceEngine {
     pub(crate) fn work_item_plan_repository_id(
         &self,
@@ -201,6 +327,7 @@ impl WorkspaceEngine {
         previous_plan: &IssueWorkItemPlan,
         draft_records: &[WorkItemDraftRecord],
         context: WorkItemPlanCompileProjectionContext<'_>,
+        change_order: &[LogicalRepositoryId],
     ) -> Result<
         (
             IssueWorkItemPlan,
@@ -359,6 +486,9 @@ impl WorkspaceEngine {
                 now.to_string(),
             ));
         }
+        // Task 8：把 Design 的 change_order（仓级执行顺序）映射成跨仓 WorkItem depends_on。
+        // 单仓/无 aggregate scope → change_order 为空 → 不映射，compile 行为不变（红线）。
+        apply_change_order_cross_repo_depends_on(&mut work_items, change_order)?;
         let work_item_ids: Vec<String> = outline_order
             .iter()
             .filter_map(|outline_id| outline_to_work_item_id.get(outline_id).cloned())
@@ -742,5 +872,101 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Task 8 测试用最小 WorkItem：只需 id/target_repository_id/depends_on 三个字段有意义，
+    /// 其余用默认值，聚焦 change_order → 跨仓 depends_on 映射逻辑。
+    fn compile_test_work_item(
+        id: &str,
+        target_repository_id: Option<LogicalRepositoryId>,
+    ) -> LifecycleWorkItemRecord {
+        let now = "2026-08-10T00:00:00Z".to_string();
+        LifecycleWorkItemRecord {
+            id: id.to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_legacy".to_string(),
+            target_repository_id,
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: format!("Work Item {id}"),
+            plan_status: crate::product::models::WorkItemPlanStatus::Confirmed,
+            execution_status: crate::product::models::WorkItemStatus::Pending,
+            worktree_path: None,
+            work_item_set_id: None,
+            source_work_item_plan_id: None,
+            source_outline_id: None,
+            source_draft_id: None,
+            planned_implementation_context: None,
+            kind: crate::product::models::WorkItemKind::Backend,
+            sequence_hint: None,
+            depends_on: Vec::new(),
+            exclusive_write_scopes: Vec::new(),
+            forbidden_write_scopes: Vec::new(),
+            context_budget: crate::product::models::WorkItemContextBudget::default(),
+            verification_plan_ref: None,
+            require_execution_plan_confirm: false,
+            execution_plan_status: crate::product::models::WorkItemExecutionPlanStatus::NotStarted,
+            completion_commit: None,
+            completion_diff_summary_ref: None,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn compile_maps_change_order_to_cross_repo_depends_on() {
+        // design change_order=[A,B]；work item 1 target=A，work item 2 target=B
+        // compile → item 2 depends_on item 1（B 在 A 后）
+        let repo_a = LogicalRepositoryId(stable_uuid(0x0101));
+        let repo_b = LogicalRepositoryId(stable_uuid(0x0102));
+        let mut items = [
+            compile_test_work_item("work_item_a", Some(repo_a)),
+            compile_test_work_item("work_item_b", Some(repo_b)),
+        ];
+        apply_change_order_cross_repo_depends_on(&mut items, &[repo_a, repo_b]).unwrap();
+        assert!(
+            items[1].depends_on.contains(&"work_item_a".to_string()),
+            "B 在 change_order 中位于 A 之后 → item_b 应 depends_on item_a"
+        );
+        assert!(
+            !items[0].depends_on.contains(&"work_item_b".to_string()),
+            "A 在 change_order 中位于 B 之前 → item_a 不应 depends_on item_b"
+        );
+    }
+
+    #[test]
+    fn compile_rejects_change_order_cycle() {
+        // change_order=[A,B] 且既有 WorkItem 级 depends_on A→B（A 依赖 B），叠加后形成环
+        // A→B + B→A → blocker dependency_cycle。
+        let repo_a = LogicalRepositoryId(stable_uuid(0x0103));
+        let repo_b = LogicalRepositoryId(stable_uuid(0x0104));
+        let mut items = [
+            compile_test_work_item("work_item_a", Some(repo_a)),
+            compile_test_work_item("work_item_b", Some(repo_b)),
+        ];
+        items[0].depends_on.push("work_item_b".to_string());
+        let err = apply_change_order_cross_repo_depends_on(&mut items, &[repo_a, repo_b])
+            .expect_err("change_order 与既有 depends_on 构成环必须失败");
+        assert!(
+            err.contains("dependency_cycle"),
+            "环错误必须携带稳定 blocker 码 dependency_cycle，got: {err}"
+        );
+    }
+
+    #[test]
+    fn compile_same_repo_items_no_cross_repo_depends_from_change_order() {
+        // 两 item 同 target=A → change_order 不建跨仓依赖（同仓顺序由既有 WorkItem 级
+        // depends_on/sequence_hint 决定）。
+        let repo_a = LogicalRepositoryId(stable_uuid(0x0105));
+        let mut items = [
+            compile_test_work_item("work_item_1", Some(repo_a)),
+            compile_test_work_item("work_item_2", Some(repo_a)),
+        ];
+        apply_change_order_cross_repo_depends_on(&mut items, &[repo_a]).unwrap();
+        assert!(
+            items[0].depends_on.is_empty() && items[1].depends_on.is_empty(),
+            "同 target 仓的 item 不因 change_order 建跨仓依赖"
+        );
     }
 }
