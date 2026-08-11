@@ -639,6 +639,33 @@ mod session_tests {
     }
 
     #[tokio::test]
+    async fn resume_load_without_session_id_reuses_requested_session_id() {
+        let provider = KimiCodeProvider::new(fixture_command(
+            "kimi_acp_resume_without_session_id_fixture.sh",
+        ));
+        let mut session = provider
+            .start(
+                input(Some("existing_session"), 10),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("start");
+        let events = terminal_events(&mut session).await;
+        let completion = events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::Completed(completion) => Some(completion),
+                _ => None,
+            })
+            .expect("completion");
+        assert_eq!(completion.full_output, "resumed");
+        assert_eq!(
+            completion.provider_session_id.as_deref(),
+            Some("existing_session")
+        );
+    }
+
+    #[tokio::test]
     async fn nonstandard_process_crash_emits_failed_once() {
         let mut env_vars = BTreeMap::new();
         env_vars.insert("KIMI_FIXTURE_EXIT_CODE".to_string(), "42".to_string());

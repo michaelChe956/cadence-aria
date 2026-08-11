@@ -164,6 +164,7 @@ where
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .map(ToString::to_string)
+        .or_else(|| resume_id.clone())
         .ok_or_else(|| {
             provider_error(format!(
                 "Kimi ACP {session_method} response did not contain sessionId"
