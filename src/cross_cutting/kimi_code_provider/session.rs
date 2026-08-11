@@ -173,7 +173,7 @@ where
     let mut next_prompt_id = 4_u64;
     let prompt = peer.request_with_timeout(
         session_prompt_request(&session_id, &input.prompt, 3),
-        KIMI_RPC_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+        deadline.saturating_duration_since(Instant::now()),
     );
     tokio::pin!(prompt);
     let mut full_output = String::new();
@@ -230,7 +230,7 @@ where
                     IncomingDisposition::RestartPrompt(free_text) => {
                         prompt.set(peer.request_with_timeout(
                             session_prompt_request(&session_id, &free_text, next_prompt_id),
-                            KIMI_RPC_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+                            deadline.saturating_duration_since(Instant::now()),
                         ));
                         next_prompt_id += 1;
                         idle_deadline = Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
