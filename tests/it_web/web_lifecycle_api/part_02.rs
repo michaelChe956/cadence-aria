@@ -1230,4 +1230,15 @@ async fn confirm_logical_gate_corrupted_spec_file_returns_server_error() {
         "spec 文件损坏应是 500 server error: {body}"
     );
     assert_eq!(body["code"], "confirm_gate_spec_load_failed");
+    // reviewer Important 修复：SpecLoad 的 message 必须脱敏，不得拼接底层 ProductStoreError
+    // 的 Display（避免绝对路径/JSON 解析诊断经公开 API message 泄露）。
+    let message = body["message"].as_str().expect("message 字段应为字符串");
+    assert_eq!(
+        message, "spec load failed",
+        "SpecLoad message 必须是脱敏固定文案，不得含底层错误细节: {message}"
+    );
+    assert!(
+        !message.contains(".json"),
+        "SpecLoad message 不得泄露文件路径: {message}"
+    );
 }

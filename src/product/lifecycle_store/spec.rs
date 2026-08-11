@@ -87,10 +87,15 @@ impl ConfirmAggregateGateError {
     }
 
     /// 业务违规的可读消息（WS/HTTP message 字段统一用此，避免调用方重复 match）。
+    ///
+    /// `SpecLoad` 返回脱敏的固定文案（不拼接底层 `ProductStoreError` 的 Display，
+    /// 避免绝对路径/OS 诊断/JSON 解析细节经公开 API message 泄露——reviewer Important）。
+    /// 底层错误仍保留在 enum 变体里，供服务端日志/调试使用。
     pub fn message(&self) -> String {
         match self {
             Self::Violation { message, .. } => message.clone(),
-            other => other.to_string(),
+            Self::SpecNotFound(_) => "spec not found".to_string(),
+            Self::SpecLoad(_) => "spec load failed".to_string(),
         }
     }
 }
