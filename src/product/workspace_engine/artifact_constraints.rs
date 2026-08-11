@@ -702,7 +702,7 @@ fn find_bracket_prefixed_tokens(content: &str, prefix: &str) -> Vec<String> {
     let mut matches = Vec::new();
     for token in content.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';') {
         let trimmed = token.trim_matches(|ch: char| {
-            matches!(ch, '-' | '*' | ')' | '(' | '。' | '，' | ':' | '：')
+            matches!(ch, '-' | '*' | ')' | '(' | '。' | '，' | ':' | '：' | '`')
         });
         if trimmed.starts_with('[')
             && trimmed
