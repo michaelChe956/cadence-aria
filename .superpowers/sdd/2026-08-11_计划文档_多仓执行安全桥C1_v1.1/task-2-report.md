@@ -2,7 +2,7 @@
 
 ## 状态
 
-完成，待本报告更新 commit SHA 后交付。
+完成，commit：`a6a6ae0d feat(coding-attempt): 创建时持久化目标快照`。
 
 ## 实现摘要
 
@@ -46,7 +46,7 @@
 
 ## Commit
 
-待本报告写入后创建。
+`a6a6ae0d feat(coding-attempt): 创建时持久化目标快照`
 
 ## Concerns / 残余风险
 
