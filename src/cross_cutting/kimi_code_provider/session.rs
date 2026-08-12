@@ -214,9 +214,8 @@ where
                 let response = match response {
                     Ok(response) => response,
                     Err(error) => {
-                        let mut drained_incoming = false;
+                        let mut restarted_prompt = false;
                         while let Some(incoming) = peer.try_next_incoming().await {
-                            drained_incoming = true;
                             match handle_incoming(
                                 &peer,
                                 incoming,
@@ -237,6 +236,7 @@ where
                                     ));
                                     next_prompt_id += 1;
                                     idle_deadline = Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                                    restarted_prompt = true;
                                 }
                                 IncomingDisposition::Abort => {
                                     abort_kimi_session(&peer, &session_id, &event_tx).await;
@@ -244,7 +244,7 @@ where
                                 }
                             }
                         }
-                        if drained_incoming {
+                        if restarted_prompt {
                             continue;
                         }
                         return Err(error);
@@ -253,8 +253,9 @@ where
                 ensure_response_success(&response, "session/prompt")?;
                 // JsonRpcPeer has already delivered this response but can still have earlier
                 // session/update notifications buffered. Drain those updates before terminality.
+                let mut restarted_prompt = false;
                 while let Some(incoming) = peer.try_next_incoming().await {
-                    let _ = handle_incoming(
+                    match handle_incoming(
                         &peer,
                         incoming,
                         &bridge,
@@ -265,7 +266,25 @@ where
                         &mut tool_outputs,
                         &mut completed_tools,
                         &mut askuser_question_counts,
-                    ).await?;
+                    ).await? {
+                        IncomingDisposition::Progress | IncomingDisposition::NotProgress => {}
+                        IncomingDisposition::RestartPrompt(free_text) => {
+                            prompt.set(peer.request_with_timeout(
+                                session_prompt_request(&session_id, &free_text, next_prompt_id),
+                                deadline.saturating_duration_since(Instant::now()),
+                            ));
+                            next_prompt_id += 1;
+                            idle_deadline = Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                            restarted_prompt = true;
+                        }
+                        IncomingDisposition::Abort => {
+                            abort_kimi_session(&peer, &session_id, &event_tx).await;
+                            return Err(aborted_session_error());
+                        }
+                    }
+                }
+                if restarted_prompt {
+                    continue;
                 }
                 match parse_message(&json!({"jsonrpc":"2.0","id":3,"result":response})) {
                     Parsed::PromptResult(KimiPromptResult::StopReason(reason)) if reason == "end_turn" => {

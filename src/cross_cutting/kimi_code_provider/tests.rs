@@ -730,6 +730,121 @@ mod session_tests {
     }
 
     #[tokio::test]
+    async fn prompt_eof_after_buffered_update_returns_stream_ended_error() {
+        let (peer, server) = test_peer();
+        let (_commands, mut events, run) = direct_session_events(peer, input(None, 10)).await;
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            let initialize = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            })).await;
+            let _initialized = read_request(&mut reader).await;
+            let new = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"eof_update"}
+            })).await;
+            let _prompt = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":"eof_update","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"before eof"}}}
+            })).await;
+        });
+
+        assert!(matches!(
+            events.recv().await,
+            Some(ProviderEvent::StatusChanged(crate::cross_cutting::streaming_provider::ProviderStatus::Running))
+        ));
+        assert!(matches!(
+            events.recv().await,
+            Some(ProviderEvent::TextDelta { content }) if content == "before eof"
+        ));
+        let error = run.await.expect("run join").expect_err("prompt stream must fail");
+        assert!(
+            error.stderr.contains("response channel closed"),
+            "unexpected error: {error:?}"
+        );
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn terminal_response_restarts_prompt_for_buffered_free_text_choice() {
+        let (peer, server) = test_peer();
+        let (commands, mut events, run) = direct_session_events(peer, input(None, 10)).await;
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            let initialize = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            })).await;
+            let _initialized = read_request(&mut reader).await;
+            let new = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"terminal_choice"}
+            })).await;
+            let first_prompt = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":"choice-1", "method":"session/request_permission",
+                "params":{"options":[{"optionId":"selected","name":"Selected","kind":"allow_once"}],"toolCall":{"toolCallId":"choice-tool","title":"AskUserQuestion","content":{"type":"text","text":"Continue?"}}}
+            })).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":first_prompt["id"], "result":{"stopReason":"end_turn"}
+            })).await;
+            let cancel = read_request(&mut reader).await;
+            assert_eq!(cancel["id"], "choice-1");
+            let second_prompt = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                read_request(&mut reader),
+            )
+            .await
+            .expect("free-text choice must start a replacement prompt");
+            assert_eq!(second_prompt["method"], "session/prompt");
+            assert_eq!(second_prompt["params"]["prompt"][0]["text"], "replacement prompt");
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":second_prompt["id"], "result":{"stopReason":"end_turn"}
+            })).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        });
+
+        let choice = loop {
+            match events.recv().await.expect("choice event") {
+                ProviderEvent::ChoiceRequest(choice) => break choice,
+                ProviderEvent::StatusChanged(_) => {}
+                other => panic!("unexpected event before choice: {other:?}"),
+            }
+        };
+        commands
+            .send(ProviderCommand::ChoiceResponse {
+                id: choice.id,
+                selected_option_ids: Vec::new(),
+                free_text: Some("replacement prompt".to_string()),
+                answers: Vec::new(),
+            })
+            .await
+            .expect("free-text choice response");
+        let events = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut received = Vec::new();
+            loop {
+                let event = events.recv().await.expect("event");
+                let terminal = matches!(event, ProviderEvent::Completed(_) | ProviderEvent::Failed { .. });
+                received.push(event);
+                if terminal {
+                    return received;
+                }
+            }
+        })
+        .await
+        .expect("replacement prompt completion");
+        assert!(events.iter().any(|event| matches!(event, ProviderEvent::Completed(_))));
+        assert!(run.await.expect("run join").is_ok());
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
     async fn resume_load_failure_never_falls_back_to_new_or_prompt() {
         let provider = KimiCodeProvider::new(fixture_command("kimi_acp_load_failure_fixture.sh"));
         let mut session = provider
