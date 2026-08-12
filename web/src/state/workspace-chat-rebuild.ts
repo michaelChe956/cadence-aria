@@ -533,12 +533,19 @@ function buildGatePromptEntry(
     ? latestReview.metadata.findings
     : [];
   const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
+  const contextBlockerGate = isWorkItemPlanContextBlockerGate(state);
   const metadata = {
     ...(summary ? { summary } : {}),
     ...(verdict ? { verdict } : {}),
     ...(comments ? { comments } : {}),
     ...(findings.length > 0 ? { findings } : {}),
     ...(reviewGate ? { review_gate: reviewGate } : {}),
+    ...(contextBlockerGate
+      ? {
+          gate_kind: WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND,
+          allowed_actions: WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_ALLOWED_ACTIONS,
+        }
+      : {}),
   };
   const fallbackContent = verdict === "needs_human" ? "需要人工确认" : "等待人工确认";
   return {
@@ -553,14 +560,24 @@ function buildGatePromptEntry(
 }
 
 function workItemPlanContextBlockerGatePromptContent(state: WorkspaceWsState): string | null {
-  if (
-    state.workspaceType !== "work_item_plan" ||
-    state.workItemPlanArtifact?.type !== "context_blocker"
-  ) {
+  const artifact = state.workItemPlanArtifact;
+  if (!isWorkItemPlanContextBlockerGate(state) || artifact?.type !== "context_blocker") {
     return null;
   }
-  const summary = state.workItemPlanArtifact.payload.exploration_summary.trim();
+  const summary = artifact.payload.exploration_summary.trim();
   return summary || null;
+}
+
+// work_item_plan context_blocker gate：后端只接受 provide_context/terminate，
+// confirm 必被拒（INVALID_HUMAN_CONFIRM_ACTION），前端用该标记隐藏确认按钮。
+export const WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND = "work_item_plan_context_blocker";
+const WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_ALLOWED_ACTIONS = ["provide_context", "terminate"];
+
+function isWorkItemPlanContextBlockerGate(state: WorkspaceWsState): boolean {
+  return (
+    state.workspaceType === "work_item_plan" &&
+    state.workItemPlanArtifact?.type === "context_blocker"
+  );
 }
 
 function findLatestNodeOfType(nodes: TimelineNode[], type: TimelineNodeType) {

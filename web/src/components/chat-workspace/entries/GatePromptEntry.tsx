@@ -1,5 +1,6 @@
 import { Check, RotateCcw, X } from "lucide-react";
 import type { ChatEntry } from "../../../state/chat-entries";
+import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
 import { trustedReviewComments } from "../../../state/workspace-review-trust";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
@@ -31,6 +32,7 @@ export function GatePromptEntry({
         : "确认产物";
   const requestChangeLabel = canAdoptSuggestions ? "采纳建议并返修" : null;
   const isResolved = entry.resolved === true;
+  const isContextBlockerGate = gateKindFromEntry(entry) === WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND;
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
     : allowsCurrentVersion
@@ -54,18 +56,25 @@ export function GatePromptEntry({
             请在下方输入人工修改说明后发送返修。
           </div>
         ) : null}
+        {isContextBlockerGate && !isResolved ? (
+          <div className="text-xs text-[var(--aria-ink-muted)]">
+            请在下方输入补充上下文后发送（对应 provide_context），或选择终止
+          </div>
+        ) : null}
         {isResolved ? (
           <ResolutionBadge resolution={entry.resolution} />
         ) : onDecision ? (
           <div className="flex flex-wrap justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => onDecision("confirm")}
-              className="inline-flex h-8 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
-            >
-              <Check className="h-3.5 w-3.5" />
-              {confirmLabel}
-            </button>
+            {isContextBlockerGate ? null : (
+              <button
+                type="button"
+                onClick={() => onDecision("confirm")}
+                className="inline-flex h-8 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+              >
+                <Check className="h-3.5 w-3.5" />
+                {confirmLabel}
+              </button>
+            )}
             {requestChangeLabel ? (
               <button
                 type="button"
@@ -129,6 +138,11 @@ function verdictFromEntry(entry: ChatEntry) {
 function reviewGateFromEntry(entry: ChatEntry) {
   const metadata = entry.metadata as Record<string, unknown> | undefined;
   return typeof metadata?.review_gate === "string" ? metadata.review_gate : null;
+}
+
+function gateKindFromEntry(entry: ChatEntry) {
+  const metadata = entry.metadata as Record<string, unknown> | undefined;
+  return typeof metadata?.gate_kind === "string" ? metadata.gate_kind : null;
 }
 
 type ReviewFinding = {

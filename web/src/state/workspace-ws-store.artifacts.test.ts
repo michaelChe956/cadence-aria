@@ -559,6 +559,71 @@ describe("workspace ws store artifact payloads", () => {
     });
   });
 
+  it("marks the context blocker gate entry so the UI can hide the confirm action", () => {
+    const contextBlocker = makeContextBlockerArtifactPayload();
+
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_outline_blocker_marker",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { context_blocker: contextBlocker } as never,
+      providers: { author: "claude_code", reviewer: null },
+    });
+
+    const gatePrompt = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.type === "gate_prompt");
+    expect(gatePrompt?.metadata).toEqual(
+      expect.objectContaining({
+        gate_kind: "work_item_plan_context_blocker",
+        allowed_actions: ["provide_context", "terminate"],
+      }),
+    );
+  });
+
+  // workspace-artifact-bug-triage：表驱动覆盖 story/design/work_item 三类 gate，
+  // blocker 标记只允许出现在 work_item_plan context_blocker 节点。
+  it.each([["story"], ["design"], ["work_item"]])(
+    "does not mark %s human_confirm gate entries as context blocker gates",
+    (workspaceType) => {
+      useWorkspaceStore.getState().setSessionState({
+        session_id: `session_${workspaceType}_gate`,
+        workspace_type: workspaceType,
+        stage: "human_confirm",
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: null },
+      });
+
+      const gatePrompt = useWorkspaceStore
+        .getState()
+        .chatEntries.find((entry) => entry.type === "gate_prompt");
+      expect(gatePrompt).toBeDefined();
+      expect(gatePrompt?.metadata ?? {}).not.toHaveProperty("gate_kind");
+    },
+  );
+
+  it("does not mark non-blocker work item plan gate entries", () => {
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_outline_candidate_gate",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      messages: [],
+      checkpoints: [],
+      artifact: { outline_candidate: makeOutlineArtifactPayload() } as never,
+      providers: { author: "claude_code", reviewer: null },
+    });
+
+    const gatePrompt = useWorkspaceStore
+      .getState()
+      .chatEntries.find((entry) => entry.type === "gate_prompt");
+    expect(gatePrompt).toBeDefined();
+    expect(gatePrompt?.metadata ?? {}).not.toHaveProperty("gate_kind");
+  });
+
   it("tracks typed work item plan artifact versions", () => {
     const store = useWorkspaceStore.getState();
     const outlineCandidate = makeOutlineArtifactPayload();

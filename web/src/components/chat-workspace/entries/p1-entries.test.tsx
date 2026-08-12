@@ -475,6 +475,82 @@ describe("chat workspace p1 entries", () => {
     expect(onDecision).not.toHaveBeenCalled();
   });
 
+  it("hides confirm and prompts provide_context or terminate for the context blocker gate", () => {
+    const onDecision = vi.fn();
+    const entry = makeEntry({
+      type: "gate_prompt",
+      role: "system",
+      content: "Outline 自动重跑后仍校验失败，已停止继续生成。",
+      metadata: {
+        gate_kind: "work_item_plan_context_blocker",
+        allowed_actions: ["provide_context", "terminate"],
+      },
+    });
+
+    render(<GatePromptEntry entry={entry} onDecision={onDecision} />);
+
+    for (const confirmName of [
+      "确认产物",
+      "提交人工确认",
+      "确认当前版本",
+      "确认使用当前版本",
+    ]) {
+      expect(screen.queryByRole("button", { name: confirmName })).not.toBeInTheDocument();
+    }
+    expect(
+      screen.getByText("请在下方输入补充上下文后发送（对应 provide_context），或选择终止"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "终止" }));
+    expect(onDecision).toHaveBeenCalledWith("terminate");
+    expect(onDecision).not.toHaveBeenCalledWith("confirm");
+  });
+
+  it("hides the context blocker hint once the gate is resolved", () => {
+    const entry = makeEntry({
+      type: "gate_prompt",
+      role: "system",
+      content: "Outline 自动重跑后仍校验失败，已停止继续生成。",
+      metadata: { gate_kind: "work_item_plan_context_blocker" },
+      resolved: true,
+      resolution: "terminate",
+    });
+
+    render(<GatePromptEntry entry={entry} />);
+
+    expect(screen.getByText("已终止")).toBeInTheDocument();
+    expect(
+      screen.queryByText("请在下方输入补充上下文后发送（对应 provide_context），或选择终止"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "终止" })).not.toBeInTheDocument();
+  });
+
+  // workspace-artifact-bug-triage：表驱动覆盖 story/design/work_item 三类 gate，
+  // 确认 blocker 标记不影响普通 gate 的确认按钮。
+  it.each([
+    ["story"],
+    ["design"],
+    ["work_item"],
+    ["work_item_plan"],
+  ])("keeps the confirm button for %s gates without the blocker marker", (workspaceType) => {
+    const onDecision = vi.fn();
+    const entry = makeEntry({
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      metadata: { workspace_type: workspaceType },
+    });
+
+    render(<GatePromptEntry entry={entry} onDecision={onDecision} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "确认产物" }));
+    expect(screen.getByRole("button", { name: "终止" })).toBeInTheDocument();
+    expect(
+      screen.queryByText("请在下方输入补充上下文后发送（对应 provide_context），或选择终止"),
+    ).not.toBeInTheDocument();
+    expect(onDecision).toHaveBeenCalledWith("confirm");
+  });
+
   it("renders human decision entries", () => {
     const entry = makeEntry({
       type: "human_decision",
