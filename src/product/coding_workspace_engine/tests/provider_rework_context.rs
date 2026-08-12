@@ -24,6 +24,7 @@ async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .unwrap();

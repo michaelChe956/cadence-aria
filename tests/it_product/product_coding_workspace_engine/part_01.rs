@@ -109,6 +109,7 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");
@@ -328,6 +329,7 @@ fn running_group_engine_with_two_units_for_terminal_lock_tests() -> (
                 permission_modes:
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create group attempt");

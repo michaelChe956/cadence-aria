@@ -9,7 +9,7 @@ use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::logical_codebase::{
     IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
     LogicalCodebaseStore, LogicalRepositoryId, CodebaseMemberRecord, MemberStatus,
-    RepositorySourceIdentity, RepositoryType,
+    RepositorySourceIdentity, RepositoryType, IdentityMigrationExecutor,
 };
 use cadence_aria::product::models::{
     WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus,
@@ -645,6 +645,7 @@ async fn rejects_group_coding_attempt_when_a_legacy_single_item_attempt_is_activ
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("active legacy single-item attempt");

@@ -95,6 +95,7 @@ fn executor_fixture(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");

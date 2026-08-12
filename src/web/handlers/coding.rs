@@ -5,7 +5,8 @@ use crate::product::coding_attempt_repository::{
     SchemaV2GroupAttemptScopePolicy, resolve_coding_attempt_repository,
 };
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
-use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot;
+use crate::product::coding_models::{AttemptTargetSnapshot, CodingAttemptScope};
 use crate::product::logical_codebase::{RepositoryRouting, RepositoryRoutingErrorCode};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapshots};
@@ -136,6 +137,8 @@ pub async fn create_coding_attempt(
         ));
     }
 
+    let target_snapshot = attempt_target_snapshot(&app_paths, &project_id, &issue_id, work_item)?;
+
     let branch_name = format!("aria/issues/{issue_id}");
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
     let shared_worktree_path = repository
@@ -204,6 +207,7 @@ pub async fn create_coding_attempt(
             branch_name,
             worktree_path: None,
             provider_config_snapshot,
+            target_snapshot,
             max_auto_rework: 2,
         },
         &creation_guard,
@@ -264,6 +268,43 @@ pub async fn create_coding_attempt(
     );
 
     Ok(Json(coding_attempt_dto(&attempt)))
+}
+
+fn attempt_target_snapshot(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    work_item: &LifecycleWorkItemRecord,
+) -> ApiResult<Option<AttemptTargetSnapshot>> {
+    match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
+        .map_err(product_store_api_error)?
+    {
+        RepositoryRouting::Legacy { .. } => Ok(None),
+        RepositoryRouting::Logical { .. } => {
+            let logical_repository_id = work_item.target_repository_id.ok_or_else(|| {
+                product_store_api_error(routing_error(
+                    RepositoryRoutingErrorCode::TargetMissing,
+                    format!("work item {} has no target repository", work_item.id),
+                ))
+            })?;
+            build_attempt_target_snapshot(app_paths, project_id, logical_repository_id)
+                .map(Some)
+                .map_err(target_snapshot_api_error)
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            Err(product_store_api_error(routing_error(code, reason)))
+        }
+    }
+}
+
+fn target_snapshot_api_error(
+    error: crate::product::coding_attempt_store::target_snapshot::TargetSnapshotError,
+) -> ApiError {
+    ApiError::runtime(
+        "product_store_error",
+        "coding attempt target snapshot capture failed",
+        json!({ "reason": error.to_string() }),
+    )
 }
 
 fn resolve_work_item_repository(

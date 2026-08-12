@@ -18,6 +18,7 @@ async fn code_review_blocked_gate_accepts_manual_feedback_without_findings() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");

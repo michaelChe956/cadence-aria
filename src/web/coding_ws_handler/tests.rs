@@ -72,6 +72,7 @@ async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() 
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");

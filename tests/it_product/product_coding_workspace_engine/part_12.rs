@@ -43,6 +43,7 @@ fn group_engine_with_two_units() -> (
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create group attempt");
@@ -104,6 +105,7 @@ fn group_engine_with_last_running_unit() -> (
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create group attempt");
@@ -587,6 +589,7 @@ fn completed_group_attempt_with_handoff_revisions() -> (
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create group attempt");

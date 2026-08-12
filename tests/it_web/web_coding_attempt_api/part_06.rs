@@ -69,6 +69,7 @@ async fn scoped_coding_attempt_api_reports_scope_mismatch() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -119,6 +120,7 @@ async fn legacy_coding_attempt_api_loads_unique_valid_attempt() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -167,6 +169,7 @@ async fn legacy_coding_attempt_api_reports_scope_mismatch_for_unique_corrupt_ali
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("real attempt");

@@ -154,6 +154,7 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create group attempt");
@@ -317,6 +318,7 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create group attempt");
@@ -407,6 +409,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create group attempt");
@@ -616,6 +619,7 @@ fn create_input() -> CreateCodingAttemptInput {
             review_rounds: 1,
             permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
+        target_snapshot: None,
         max_auto_rework: 2,
     }
 }

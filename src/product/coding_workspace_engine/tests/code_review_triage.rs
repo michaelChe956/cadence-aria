@@ -283,6 +283,7 @@ async fn run_group_attempt_through_coding() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .unwrap();

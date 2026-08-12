@@ -408,6 +408,7 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -542,6 +543,7 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -615,6 +617,7 @@ fn app_with_full_chain_attempt_and_provider(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );

@@ -181,6 +181,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .map_err(fixture_error)?;

@@ -147,6 +147,7 @@ fn partial_group_attempt(store: &CodingAttemptStore) -> CodingExecutionAttempt {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("partial group attempt")

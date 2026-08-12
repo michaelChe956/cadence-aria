@@ -134,6 +134,7 @@ async fn delete_work_item_plan_legacy_rejected_when_group_attempt_bound() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create group attempt");

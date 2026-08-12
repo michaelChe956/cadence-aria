@@ -20,6 +20,7 @@ pub(super) fn coding_plan_repair_attempt(store: &CodingAttemptStore) -> CodingEx
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt")

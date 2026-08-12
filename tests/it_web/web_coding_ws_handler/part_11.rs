@@ -46,6 +46,7 @@ async fn legacy_coding_ws_reports_ambiguous_instead_of_not_found() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("template");
@@ -96,6 +97,7 @@ async fn legacy_coding_ws_reports_scope_mismatch_for_unique_corrupt_alias() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("real attempt");
@@ -171,6 +173,7 @@ async fn scoped_coding_ws_reports_scope_mismatch_for_corrupt_identity() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");

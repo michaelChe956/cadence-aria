@@ -522,6 +522,7 @@ fn group_final_review_evaluation_context_omits_projection_body_but_keeps_hash() 
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");
@@ -630,6 +631,7 @@ async fn group_attempt_records_base_head_as_first_unit_start_commit() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");
@@ -694,6 +696,7 @@ async fn coding_plan_repair_partial_group_attempt_cannot_start_coding() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("partial group attempt");
@@ -737,6 +740,7 @@ async fn coding_plan_repair_group_attempt_missing_active_pointer_cannot_start() 
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");
@@ -862,6 +866,7 @@ fn running_attempt_with_worktree() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");

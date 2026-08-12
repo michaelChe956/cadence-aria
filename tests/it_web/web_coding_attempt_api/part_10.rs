@@ -446,6 +446,7 @@ async fn retry_does_not_reconcile_ambiguous_active_attempts() {
             branch_name: first.branch_name.clone(),
             worktree_path: first.worktree_path.clone(),
             provider_config_snapshot: first.provider_config_snapshot.clone(),
+            target_snapshot: None,
             max_auto_rework: first.max_auto_rework,
         })
         .expect("second attempt");

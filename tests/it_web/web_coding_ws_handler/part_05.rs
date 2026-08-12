@@ -55,6 +55,7 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -131,6 +132,7 @@ fn app_with_code_review_rework_attempt(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -195,6 +197,7 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -231,6 +234,7 @@ fn app_with_running_code_review_attempt_and_state(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -309,6 +313,7 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );

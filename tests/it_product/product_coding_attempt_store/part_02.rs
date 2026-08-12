@@ -131,6 +131,7 @@ fn create_input_for(
             review_rounds: 1,
             permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
+        target_snapshot: None,
         max_auto_rework: 2,
     }
 }
@@ -158,6 +159,7 @@ fn group_create_input(current_work_item_id: &str) -> CreateGroupCodingAttemptInp
             review_rounds: 1,
             permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
+        target_snapshot: None,
         max_auto_rework: 2,
     }
 }

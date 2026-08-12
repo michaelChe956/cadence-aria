@@ -26,6 +26,7 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");

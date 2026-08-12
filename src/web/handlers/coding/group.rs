@@ -6,9 +6,11 @@ use super::super::*;
 use super::{
     RuntimeBindingProviderConfigInput, coding_provider_config_snapshot_for_runtime_binding,
 };
+use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot;
 use crate::product::coding_attempt_store::{
     AuthoritativeGroupPlanBinding, CodingGroupInitializationPhase,
 };
+use crate::product::coding_models::AttemptTargetSnapshot;
 use crate::product::issue_store::IssueStore;
 use crate::product::logical_codebase::{
     LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode, SelectionPolicy,
@@ -77,6 +79,8 @@ pub async fn create_group_coding_attempt(
             "repository path must point to a git work tree",
         ));
     }
+    let target_snapshot =
+        group_target_snapshot(&app_paths, &project_id, &issue_id, &authoritative)?;
     let branch_name = format!("aria/issues/{issue_id}");
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
     let shared_worktree_path = repository
@@ -105,6 +109,7 @@ pub async fn create_group_coding_attempt(
         branch_name: branch_name.clone(),
         worktree_path: None,
         provider_config_snapshot,
+        target_snapshot,
         max_auto_rework: 2,
     };
 
@@ -249,6 +254,79 @@ pub async fn create_group_coding_attempt(
         .advance_group_initialization_phase(&journal, CodingGroupInitializationPhase::Completed)
         .map_err(coding_group_attempt_incomplete_api_error)?;
     Ok(Json(coding_attempt_dto(&persisted_attempt)))
+}
+
+fn group_target_snapshot(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    authoritative: &AuthoritativeGroupPlanBinding,
+) -> ApiResult<Option<AttemptTargetSnapshot>> {
+    match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
+        .map_err(product_store_api_error)?
+    {
+        RepositoryRouting::Legacy { .. } => Ok(None),
+        RepositoryRouting::Logical {
+            manifest,
+            selection,
+        } => {
+            if let Some(reason) = authoritative
+                .units
+                .iter()
+                .find_map(|unit| unit.source_draft_error.as_deref())
+            {
+                return Err(routing_api_error(
+                    RepositoryRoutingErrorCode::Inconsistent,
+                    reason,
+                ));
+            }
+            let selected_ids =
+                validate_logical_group_selection(app_paths, project_id, &manifest, &selection)?;
+            let target_ids: BTreeSet<LogicalRepositoryId> = authoritative
+                .units
+                .iter()
+                .filter_map(|unit| unit.target_repository_id)
+                .collect();
+            let logical_repository_id = match target_ids.len() {
+                1 => *target_ids.first().expect("one group target exists"),
+                0 => {
+                    let [focus_repository_id] = selection.focus_repository_ids.as_slice() else {
+                        return Err(routing_api_error(
+                            RepositoryRoutingErrorCode::TargetMissing,
+                            "group has no unique target repository and selection focus is not unique",
+                        ));
+                    };
+                    *focus_repository_id
+                }
+                _ => {
+                    return Err(routing_api_error(
+                        RepositoryRoutingErrorCode::TargetAmbiguous,
+                        "group has multiple target repositories",
+                    ));
+                }
+            };
+            if !selected_ids.contains(&logical_repository_id) {
+                return Err(routing_api_error(
+                    RepositoryRoutingErrorCode::TargetUnknown,
+                    "group target repository is not in the effective selection",
+                ));
+            }
+            build_attempt_target_snapshot(app_paths, project_id, logical_repository_id)
+                .map(Some)
+                .map_err(target_snapshot_api_error)
+        }
+        RepositoryRouting::FailClosed { code, reason } => Err(routing_api_error(code, &reason)),
+    }
+}
+
+fn target_snapshot_api_error(
+    error: crate::product::coding_attempt_store::target_snapshot::TargetSnapshotError,
+) -> ApiError {
+    ApiError::runtime(
+        "product_store_error",
+        "coding attempt target snapshot capture failed",
+        json!({ "reason": error.to_string() }),
+    )
 }
 
 fn resolve_group_repository(

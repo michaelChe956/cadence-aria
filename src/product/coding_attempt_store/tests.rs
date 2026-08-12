@@ -52,6 +52,7 @@ fn setup() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .unwrap();
@@ -280,6 +281,7 @@ fn saving_group_attempt_preserves_explicit_internal_reviewer_role_config() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");
@@ -318,6 +320,7 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");
@@ -379,6 +382,7 @@ fn rejects_creating_second_active_unit_for_same_attempt() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");
@@ -427,6 +431,7 @@ fn rejects_updating_pending_unit_to_active_when_another_unit_is_active() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");
@@ -491,6 +496,7 @@ fn rejects_group_attempt_when_active_group_attempt_already_exists_for_other_plan
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("first group attempt");
@@ -505,6 +511,7 @@ fn rejects_group_attempt_when_active_group_attempt_already_exists_for_other_plan
             branch_name: "aria/issues/issue_0001-b".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect_err("should reject second active attempt");
@@ -532,6 +539,7 @@ fn rejects_group_attempt_when_active_work_item_attempt_exists() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect_err("should reject when single attempt is active");
@@ -558,6 +566,7 @@ fn clears_current_work_item_when_last_active_unit_completes() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");
@@ -607,6 +616,7 @@ fn blocked_or_waiting_units_do_not_set_started_at() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");

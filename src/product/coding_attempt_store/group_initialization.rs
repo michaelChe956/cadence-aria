@@ -462,7 +462,7 @@ impl super::CodingAttemptStore {
             provider_conversations: Vec::new(),
             created_at: now.clone(),
             updated_at: now.clone(),
-            target_snapshot: None,
+            target_snapshot: input.target_snapshot.clone(),
             completed_at: None,
         };
         let units = unit_bindings
@@ -623,6 +623,7 @@ fn journal_matches_request(
         && journal.attempt.branch_name == input.branch_name
         && journal.attempt.worktree_path == input.worktree_path
         && journal.attempt.provider_config_snapshot == input.provider_config_snapshot
+        && journal.attempt.target_snapshot == input.target_snapshot
         && journal.attempt.max_auto_rework == input.max_auto_rework
         && journal.plan_binding.bound_plan_revision_id == bound_plan_revision_id
         && journal.units.len() == unit_bindings.len()

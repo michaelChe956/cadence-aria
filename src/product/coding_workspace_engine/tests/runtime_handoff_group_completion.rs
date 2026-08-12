@@ -401,6 +401,7 @@ fn create_group_authority_other_attempt_run(
             branch_name: "aria/issues/issue_other".to_string(),
             worktree_path: None,
             provider_config_snapshot: fixture.attempt.provider_config_snapshot.clone(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .unwrap();

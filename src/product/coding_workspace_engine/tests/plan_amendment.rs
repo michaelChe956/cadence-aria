@@ -526,6 +526,7 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .unwrap();

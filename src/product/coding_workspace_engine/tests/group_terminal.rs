@@ -23,6 +23,7 @@ fn running_group_attempt() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("group attempt");
@@ -772,6 +773,7 @@ fn coding_plan_repair_single_work_item_terminal_status_update_is_unchanged() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("single attempt");

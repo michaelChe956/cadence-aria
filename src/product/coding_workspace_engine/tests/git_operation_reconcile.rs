@@ -26,6 +26,7 @@ async fn worktree_prepare_persists_completed_git_operation_journal() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -74,6 +75,7 @@ async fn cancellation_after_branch_exit_compensates_before_returning_aborted() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -134,6 +136,7 @@ async fn cancellation_after_worktree_add_exit_removes_worktree_and_branch_before
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -199,6 +202,7 @@ async fn cancellation_after_commit_exit_mixed_resets_head_and_preserves_changes(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -289,6 +293,7 @@ async fn cancellation_after_successful_push_exit_records_authoritative_completio
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -385,6 +390,7 @@ async fn cancellation_after_push_exit_keeps_ambiguous_push_started_and_local_com
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -502,6 +508,7 @@ async fn abort_reconciles_unjournaled_worktree_side_effect_before_aborted_status
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");

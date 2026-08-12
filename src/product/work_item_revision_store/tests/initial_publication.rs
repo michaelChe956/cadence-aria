@@ -659,6 +659,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .unwrap();

@@ -13,6 +13,7 @@ fn rejects_second_group_attempt_after_original_completed() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("first group attempt");
@@ -28,6 +29,7 @@ fn rejects_second_group_attempt_after_original_completed() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect_err("same group must not create a second attempt");
@@ -54,6 +56,7 @@ fn allows_group_attempt_for_different_plan_after_original_completed() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("first group attempt");
@@ -69,6 +72,7 @@ fn allows_group_attempt_for_different_plan_after_original_completed() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("different group attempt");

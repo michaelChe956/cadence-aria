@@ -21,6 +21,7 @@ async fn manual_continue_persists_quality_bypass_audit_and_injects_reviewer_cont
                     permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
                     ),
                 },
+                target_snapshot: None,
                 max_auto_rework: 2,
             },
         )
@@ -132,6 +133,7 @@ async fn send_to_coder_after_review_limit_uses_latest_code_review_without_qualit
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");
@@ -293,6 +295,7 @@ async fn send_to_coder_after_review_limit_accepts_actionable_blocked_code_review
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");

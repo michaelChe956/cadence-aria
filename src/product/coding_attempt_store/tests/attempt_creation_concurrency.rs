@@ -32,6 +32,7 @@ fn single_work_item_attempt_creation_is_serialized_across_store_instances() {
                 branch_name: branch_name.to_string(),
                 worktree_path: None,
                 provider_config_snapshot: provider_snapshot(),
+                target_snapshot: None,
                 max_auto_rework: 2,
             })
         })
@@ -132,6 +133,7 @@ fn work_item_creation_guard_rejects_same_ids_from_different_store_root() {
                 branch_name: "aria/work-items/work_item_0001/cross-root".to_string(),
                 worktree_path: None,
                 provider_config_snapshot: provider_snapshot(),
+                target_snapshot: None,
                 max_auto_rework: 2,
             },
             &guard,
