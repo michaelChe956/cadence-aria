@@ -469,6 +469,7 @@ mod code_review_triage;
 mod coder_resume_recovery;
 mod gate_coder_feedback;
 mod gate_rework;
+mod gates_worktree_routing;
 mod git_operation_reconcile;
 mod group_completion_authority;
 mod group_final_readiness;

@@ -46,6 +46,10 @@ pub enum CodingWorkspaceEngineError {
     NoReviewableChanges(String),
     #[error("shared_worktree_dirty_manual_gate: {0}")]
     SharedWorktreeDirtyManualGate(String),
+    /// 多仓路径首次访问仓维 worktree 前发现旧 `issue-shared-worktree.json`
+    /// （迁移契约化 §4.2.6 断言 fail-closed）。稳定码 `legacy_shared_worktree_present`。
+    #[error("legacy_shared_worktree_present: {0}")]
+    LegacySharedWorktreePresent(String),
     #[error("work_item_execution_plan_not_confirmed: {0}")]
     ExecutionPlanNotConfirmed(String),
     #[error("completion_commit_missing: {0}")]

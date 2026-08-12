@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryRouting};
 
 mod schema_v2;
 
@@ -60,7 +61,74 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
     }
 }
 
+/// 分流结果：该 attempt 的 shared worktree 访问应走哪一族方法。
+///
+/// REQ-COD-03（§4.2.3）：`Some(snapshot)` 走多仓仓维路径（三元键
+/// `(project, issue, logical repository)`）；`None + Legacy` 走单仓老路径（行为不变，红线）。
+enum IssueSharedWorktreeRoute {
+    /// 单仓老路径：`issue-shared-worktree.json`。
+    Legacy,
+    /// 多仓仓维路径：`shared-worktrees/{repository_id}.json`。
+    Repository { repository_id: LogicalRepositoryId },
+}
+
 impl CodingWorkspaceEngine {
+    /// 按 `attempt.target_snapshot` 与 issue routing 分流 shared worktree 访问。
+    ///
+    /// 语义（REQ-COD-03 §4.2.3）：
+    /// - `Some(snapshot)` → 多仓仓维路径（repository_id 取自
+    ///   `snapshot.logical_repository_id`；admission 已保证此时 routing 一致）。
+    /// - `None + Legacy` → 单仓老路径（行为不变）。
+    /// - `None + Logical` → 防御性 fail-closed（`target_snapshot_missing_for_logical`，
+    ///   正常不可能至此，admission 已拦截）。
+    /// - `None + FailClosed` → 防御性 fail-closed（`target_snapshot_identity_drifted`）。
+    ///
+    /// 多仓分支在分流前执行迁移 preflight 断言（§4.2.6）：同 issue 下存在旧
+    /// `issue-shared-worktree.json` → fail-closed `legacy_shared_worktree_present`。
+    fn route_issue_shared_worktree(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<IssueSharedWorktreeRoute, CodingWorkspaceEngineError> {
+        if let Some(snapshot) = &attempt.target_snapshot {
+            self.preflight_repo_shared_worktree_absent(attempt)?;
+            return Ok(IssueSharedWorktreeRoute::Repository {
+                repository_id: snapshot.logical_repository_id,
+            });
+        }
+        match RepositoryRouting::load_for_issue(
+            &self.store.paths(),
+            &attempt.project_id,
+            &attempt.issue_id,
+        )? {
+            RepositoryRouting::Legacy { .. } => Ok(IssueSharedWorktreeRoute::Legacy),
+            RepositoryRouting::Logical { .. } => Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::Io("target_snapshot_missing_for_logical".to_string()),
+            )),
+            RepositoryRouting::FailClosed { .. } => Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::Io("target_snapshot_identity_drifted".to_string()),
+            )),
+        }
+    }
+
+    /// 迁移契约化 preflight（§4.2.6）：多仓路径首次访问仓维 worktree 前，断言同 issue
+    /// 下不存在旧 `issue-shared-worktree.json`。发现旧文件 → fail-closed，稳定码
+    /// `legacy_shared_worktree_present`；绝不静默覆盖、绝不从旧文件推导 repository。
+    fn preflight_repo_shared_worktree_absent(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        if lifecycle
+            .issue_shared_worktree_path(&attempt.project_id, &attempt.issue_id)
+            .exists()
+        {
+            return Err(CodingWorkspaceEngineError::LegacySharedWorktreePresent(
+                format!("{}/{}", attempt.project_id, attempt.issue_id),
+            ));
+        }
+        Ok(())
+    }
+
     /// 当 Coder 输出无法进入任何自动化路由（plan defect 契约校验失败，
     /// 或 finding 校验后仍只能人工分诊）时，落地人工分诊 blocked gate，
     /// 避免流程停在 running/coding 而 UI 没有任何可操作入口。
@@ -216,11 +284,16 @@ impl CodingWorkspaceEngine {
         work_item_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let shared =
-            match lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)? {
-                Some(shared) => shared,
-                None => return Ok(()),
-            };
+        let shared = match self.route_issue_shared_worktree(attempt)? {
+            IssueSharedWorktreeRoute::Legacy => {
+                lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
+                .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, repository_id)?,
+        };
+        let Some(shared) = shared else {
+            return Ok(());
+        };
         if shared.current_active_work_item_id.as_deref() != Some(work_item_id) {
             return Ok(());
         }
@@ -371,8 +444,14 @@ impl CodingWorkspaceEngine {
         }
 
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let lock_holder_work_item_id = lifecycle
-            .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+        let shared_worktree = match self.route_issue_shared_worktree(attempt)? {
+            IssueSharedWorktreeRoute::Legacy => {
+                lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
+                .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, repository_id)?,
+        };
+        let lock_holder_work_item_id = shared_worktree
             .and_then(|shared| shared.current_active_work_item_id)
             .or_else(|| attempt.current_work_item_id.clone())
             .or_else(|| completed_work_item_ids.last().cloned())
@@ -457,7 +536,13 @@ impl CodingWorkspaceEngine {
             return Ok(path.clone());
         }
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let shared = lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?;
+        let shared = match self.route_issue_shared_worktree(attempt)? {
+            IssueSharedWorktreeRoute::Legacy => {
+                lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
+                .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, repository_id)?,
+        };
         match shared {
             Some(shared) if shared.worktree_path.exists() => Ok(shared.worktree_path),
             _ => Err(CodingWorkspaceEngineError::MissingWorktree(
@@ -472,12 +557,31 @@ impl CodingWorkspaceEngine {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        let attempt = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let lifecycle = LifecycleStore::new(self.store.paths());
-        if lifecycle
-            .get_issue_shared_worktree(project_id, issue_id)?
-            .is_some()
-        {
-            lifecycle.release_issue_worktree_lock_by_owner(project_id, issue_id, attempt_id)?;
+        match self.route_issue_shared_worktree(&attempt)? {
+            IssueSharedWorktreeRoute::Legacy => {
+                if lifecycle
+                    .get_issue_shared_worktree(project_id, issue_id)?
+                    .is_some()
+                {
+                    lifecycle
+                        .release_issue_worktree_lock_by_owner(project_id, issue_id, attempt_id)?;
+                }
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => {
+                if lifecycle
+                    .get_repo_shared_worktree(project_id, issue_id, repository_id)?
+                    .is_some()
+                {
+                    lifecycle.release_repo_worktree_lock_by_owner(
+                        project_id,
+                        issue_id,
+                        repository_id,
+                        attempt_id,
+                    )?;
+                }
+            }
         }
         Ok(())
     }
@@ -489,13 +593,44 @@ impl CodingWorkspaceEngine {
         work_item_id: &str,
         owner_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        // owner_id 语义上即持有该锁的 attempt id（所有调用方均以 attempt_id 传入）。
+        let attempt = self.store.get_attempt(project_id, issue_id, owner_id)?;
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let shared = match lifecycle.get_issue_shared_worktree(project_id, issue_id)? {
-            Some(shared) => shared,
-            None => return Ok(()),
-        };
-        if shared.current_active_work_item_id.is_some() || shared.current_lock_owner_id.is_some() {
-            lifecycle.release_issue_worktree_lock(project_id, issue_id, work_item_id, owner_id)?;
+        match self.route_issue_shared_worktree(&attempt)? {
+            IssueSharedWorktreeRoute::Legacy => {
+                let Some(shared) = lifecycle.get_issue_shared_worktree(project_id, issue_id)?
+                else {
+                    return Ok(());
+                };
+                if shared.current_active_work_item_id.is_some()
+                    || shared.current_lock_owner_id.is_some()
+                {
+                    lifecycle.release_issue_worktree_lock(
+                        project_id,
+                        issue_id,
+                        work_item_id,
+                        owner_id,
+                    )?;
+                }
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => {
+                let Some(shared) =
+                    lifecycle.get_repo_shared_worktree(project_id, issue_id, repository_id)?
+                else {
+                    return Ok(());
+                };
+                if shared.current_active_work_item_id.is_some()
+                    || shared.current_lock_owner_id.is_some()
+                {
+                    lifecycle.release_repo_worktree_lock(
+                        project_id,
+                        issue_id,
+                        repository_id,
+                        work_item_id,
+                        owner_id,
+                    )?;
+                }
+            }
         }
         Ok(())
     }
@@ -505,20 +640,39 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let Some(shared) =
-            lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
-        else {
+        let route = self.route_issue_shared_worktree(attempt)?;
+        let shared = match &route {
+            IssueSharedWorktreeRoute::Legacy => {
+                lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
+                .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, *repository_id)?,
+        };
+        let Some(shared) = shared else {
             return Ok(());
         };
         let Some(active_work_item_id) = shared.current_active_work_item_id.as_deref() else {
             return Ok(());
         };
-        lifecycle.validate_issue_worktree_lock_owner(
-            &attempt.project_id,
-            &attempt.issue_id,
-            active_work_item_id,
-            &attempt.id,
-        )?;
+        match route {
+            IssueSharedWorktreeRoute::Legacy => {
+                lifecycle.validate_issue_worktree_lock_owner(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    active_work_item_id,
+                    &attempt.id,
+                )?;
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => {
+                lifecycle.validate_repo_worktree_lock_owner(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    repository_id,
+                    active_work_item_id,
+                    &attempt.id,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -527,9 +681,15 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
-        let Some(shared) =
-            lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
-        else {
+        let route = self.route_issue_shared_worktree(attempt)?;
+        let shared = match &route {
+            IssueSharedWorktreeRoute::Legacy => {
+                lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
+                .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, *repository_id)?,
+        };
+        let Some(shared) = shared else {
             return Ok(());
         };
         let work_item_id = attempt
@@ -541,12 +701,25 @@ impl CodingWorkspaceEngine {
                     .flatten()
             })
             .unwrap_or(&attempt.work_item_id);
-        lifecycle.validate_issue_worktree_lock_owner(
-            &attempt.project_id,
-            &attempt.issue_id,
-            work_item_id,
-            &attempt.id,
-        )?;
+        match route {
+            IssueSharedWorktreeRoute::Legacy => {
+                lifecycle.validate_issue_worktree_lock_owner(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    work_item_id,
+                    &attempt.id,
+                )?;
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => {
+                lifecycle.validate_repo_worktree_lock_owner(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    repository_id,
+                    work_item_id,
+                    &attempt.id,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -557,17 +730,37 @@ impl CodingWorkspaceEngine {
         work_item_id: &str,
         owner_id: &str,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        // owner_id 语义上即持有该锁的 attempt id（所有调用方均以 attempt_id 传入）。
+        let attempt = self.store.get_attempt(project_id, issue_id, owner_id)?;
         let lifecycle = LifecycleStore::new(self.store.paths());
-        if lifecycle
-            .get_issue_shared_worktree(project_id, issue_id)?
-            .is_some()
-        {
-            lifecycle.mark_issue_worktree_completed_item(
-                project_id,
-                issue_id,
-                work_item_id,
-                owner_id,
-            )?;
+        match self.route_issue_shared_worktree(&attempt)? {
+            IssueSharedWorktreeRoute::Legacy => {
+                if lifecycle
+                    .get_issue_shared_worktree(project_id, issue_id)?
+                    .is_some()
+                {
+                    lifecycle.mark_issue_worktree_completed_item(
+                        project_id,
+                        issue_id,
+                        work_item_id,
+                        owner_id,
+                    )?;
+                }
+            }
+            IssueSharedWorktreeRoute::Repository { repository_id } => {
+                if lifecycle
+                    .get_repo_shared_worktree(project_id, issue_id, repository_id)?
+                    .is_some()
+                {
+                    lifecycle.mark_repo_worktree_completed_item(
+                        project_id,
+                        issue_id,
+                        repository_id,
+                        work_item_id,
+                        owner_id,
+                    )?;
+                }
+            }
         }
         Ok(())
     }
