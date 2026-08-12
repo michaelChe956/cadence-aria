@@ -47,6 +47,32 @@ impl super::CodingAttemptStore {
             .join(attempt_id)
     }
 
+    /// post-hoc 越界检测基线目录：`coding-attempts/{attempt_id}/cross-target-baselines`。
+    pub(crate) fn attempt_cross_target_baselines_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("cross-target-baselines")
+    }
+
+    /// 单个 role run 的越界检测基线文件：
+    /// `coding-attempts/{attempt_id}/cross-target-baselines/{run_id}.json`。
+    pub(crate) fn attempt_cross_target_baselines_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        run_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(run_id)?;
+        Ok(self
+            .attempt_cross_target_baselines_root(project_id, issue_id, attempt_id)
+            .join(format!("{run_id}.json")))
+    }
+
     pub(crate) fn admission_ticket_path(
         &self,
         project_id: &str,

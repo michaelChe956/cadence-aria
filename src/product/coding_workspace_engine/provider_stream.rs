@@ -1,3 +1,4 @@
+use super::cross_target_check::capture_cross_target_baseline;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputState;
 use std::sync::{Arc, Mutex};
@@ -129,6 +130,19 @@ impl CodingWorkspaceEngine {
             return Err(CodingWorkspaceEngineError::ProviderStream(
                 "logical_provider_gateway_required".to_string(),
             ));
+        }
+        // Task 14:逻辑代码库 target 的每个 provider role run 启动前采集跨仓越界
+        // baseline（只监控各成员主 checkout 的 HEAD/status）。run 结束后由 Task 15
+        // 统一门在交付前调用 detect 比对。Legacy 路径（`target_snapshot` 为 `None`）
+        // 不采，保持现状。
+        if is_logical_target && let Some(role_run) = role_run {
+            capture_cross_target_baseline(&self.store.paths(), attempt, &role_run.id).map_err(
+                |code| {
+                    CodingWorkspaceEngineError::ProviderStream(format!(
+                        "cross_target_baseline_capture_failed: {code}"
+                    ))
+                },
+            )?;
         }
         let active_legacy_input = legacy_input.clone();
         let active_input = input;

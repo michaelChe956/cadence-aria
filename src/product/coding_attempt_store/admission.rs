@@ -32,6 +32,9 @@ const ADMISSION_TICKET_TTL: Duration = Duration::minutes(5);
 pub(crate) const TARGET_SNAPSHOT_MISSING_FOR_LOGICAL: &str = "target_snapshot_missing_for_logical";
 pub(crate) const TARGET_SNAPSHOT_IDENTITY_DRIFTED: &str = "target_snapshot_identity_drifted";
 pub(crate) const MIXED_TARGET_GROUP_REJECTED: &str = "mixed_target_group_rejected";
+pub(crate) const CROSS_TARGET_VIOLATION_DETECTED: &str = "cross_target_violation_detected";
+pub(crate) const CROSS_TARGET_BASELINE_MISSING: &str = "cross_target_baseline_missing";
+const CROSS_TARGET_STORE_FAILURE: &str = "cross_target_store_failure";
 const TARGET_SNAPSHOT_POLICY_DRIFTED: &str = "target_snapshot_policy_drifted";
 const ADMISSION_TICKET_INVALID: &str = "admission_ticket_invalid";
 const ADMISSION_TICKET_EXPIRED: &str = "admission_ticket_expired";
@@ -51,6 +54,9 @@ pub enum StableCode {
     AdmissionTicketConsumed,
     AttemptAwaitingManualRecovery,
     AttemptTerminalTransitionInvalid,
+    CrossTargetViolationDetected,
+    CrossTargetBaselineMissing,
+    CrossTargetStoreFailure,
     StoreFailure,
 }
 
@@ -66,6 +72,9 @@ impl StableCode {
             Self::AdmissionTicketConsumed => ADMISSION_TICKET_CONSUMED,
             Self::AttemptAwaitingManualRecovery => ATTEMPT_AWAITING_MANUAL_RECOVERY,
             Self::AttemptTerminalTransitionInvalid => "attempt_terminal_transition_invalid",
+            Self::CrossTargetViolationDetected => CROSS_TARGET_VIOLATION_DETECTED,
+            Self::CrossTargetBaselineMissing => CROSS_TARGET_BASELINE_MISSING,
+            Self::CrossTargetStoreFailure => CROSS_TARGET_STORE_FAILURE,
             Self::StoreFailure => "admission_store_failure",
         }
     }
