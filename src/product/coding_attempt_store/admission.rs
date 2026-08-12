@@ -449,18 +449,22 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::product::coding_attempt_store::attempt::register_attempt_write_gap_hook;
+    use crate::product::coding_attempt_store::locking::register_lock_attempt_hook;
     use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
     use crate::product::coding_models::{
         AttemptTargetSnapshot, CodingAttemptStatus, CodingExecutionAttempt,
     };
-    use crate::product::json_store::{read_json, write_json};
+    use crate::product::json_store::{ProductStoreError, read_json, write_json};
     use crate::product::logical_codebase::{
         AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
         IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
         LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
         RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
     };
-    use crate::product::models::{ProviderName, RepositoryRecord};
+    use crate::product::models::{
+        ProviderConversationRef, ProviderConversationRole, ProviderName, RepositoryRecord,
+    };
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
     use uuid::Uuid;
@@ -712,6 +716,176 @@ mod tests {
         assert_eq!(
             persisted.head_commit.as_deref(),
             Some("concurrent-non-status-write")
+        );
+    }
+
+    /// Pauses a full-record write API between its record read and its
+    /// write-back, then commits the admission transition into that gap.
+    ///
+    /// An unlocked API reads before the gap without holding the attempt lock,
+    /// so the admission commit lands inside the gap and the stale write-back
+    /// must not overwrite it. A locked API holds the attempt lock across the
+    /// gap, so the transition can only commit after the API's own write and
+    /// still wins the final state. Either way the persisted record must keep
+    /// the admission frozen fields.
+    fn full_record_write_gap_preserves_admission_commit(
+        invoke: impl FnOnce(CodingAttemptStore, CodingExecutionAttempt) -> Result<(), ProductStoreError>
+        + Send
+        + 'static,
+    ) -> CodingExecutionAttempt {
+        let fixture = legacy_fixture();
+        let ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("ticket");
+        let attempt_path = fixture
+            .store
+            .attempt_path(PROJECT_ID, ISSUE_ID, &fixture.attempt.id);
+        let (_gap_hook, reached_gap, proceed) = register_attempt_write_gap_hook(&attempt_path);
+        let (_lock_hook, lock_attempts) = register_lock_attempt_hook(&attempt_path);
+        let store = fixture.store.clone();
+        let stale_attempt = fixture.attempt.clone();
+        let api_thread = std::thread::spawn(move || invoke(store, stale_attempt));
+
+        reached_gap
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("full-record write reached its read-write gap");
+        let api_holds_attempt_lock = lock_attempts.try_iter().count() > 0;
+
+        if api_holds_attempt_lock {
+            proceed.send(()).expect("release locked full-record write");
+            api_thread
+                .join()
+                .expect("full-record write thread")
+                .expect("full-record write");
+            fixture
+                .store
+                .transition_to_executable(&fixture.attempt.id, &ticket)
+                .expect("CAS commit after the locked full-record write");
+        } else {
+            fixture
+                .store
+                .transition_to_executable(&fixture.attempt.id, &ticket)
+                .expect("CAS commit inside the unlocked read-write gap");
+            proceed.send(()).expect("release stale full-record write");
+            api_thread
+                .join()
+                .expect("full-record write thread")
+                .expect("full-record write");
+        }
+
+        fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("persisted attempt")
+    }
+
+    #[test]
+    fn head_commit_update_after_admission_gap_preserves_running_cas_commit() {
+        let persisted = full_record_write_gap_preserves_admission_commit(|store, stale| {
+            store
+                .update_attempt_head_commit(
+                    &stale.project_id,
+                    &stale.issue_id,
+                    &stale.id,
+                    Some("gap-head-commit".to_string()),
+                )
+                .map(|_| ())
+        });
+        assert_eq!(persisted.status, CodingAttemptStatus::Running);
+        assert_eq!(persisted.version, 1);
+        assert!(persisted.admission_ticket_consumed_at.is_some());
+        assert_eq!(persisted.head_commit.as_deref(), Some("gap-head-commit"));
+    }
+
+    #[test]
+    fn review_request_state_update_after_admission_gap_preserves_running_cas_commit() {
+        let persisted = full_record_write_gap_preserves_admission_commit(|store, stale| {
+            store
+                .update_attempt_review_request_state(
+                    &stale.project_id,
+                    &stale.issue_id,
+                    &stale.id,
+                    "gap-review-head".to_string(),
+                    "origin".to_string(),
+                    "review_request_gap".to_string(),
+                )
+                .map(|_| ())
+        });
+        assert_eq!(persisted.status, CodingAttemptStatus::Running);
+        assert_eq!(persisted.version, 1);
+        assert!(persisted.admission_ticket_consumed_at.is_some());
+        assert_eq!(persisted.head_commit.as_deref(), Some("gap-review-head"));
+        assert_eq!(persisted.pushed_remote.as_deref(), Some("origin"));
+        assert_eq!(
+            persisted.review_request_id.as_deref(),
+            Some("review_request_gap")
+        );
+    }
+
+    #[test]
+    fn provider_config_snapshot_update_after_admission_gap_preserves_running_cas_commit() {
+        let persisted = full_record_write_gap_preserves_admission_commit(|store, stale| {
+            store
+                .update_attempt_provider_config_snapshot(
+                    &stale.project_id,
+                    &stale.issue_id,
+                    &stale.id,
+                    ProviderConfigSnapshot {
+                        author: ProviderName::Codex,
+                        reviewer: None,
+                        review_rounds: 4,
+                        permission_modes: Default::default(),
+                    },
+                )
+                .map(|_| ())
+        });
+        assert_eq!(persisted.status, CodingAttemptStatus::Running);
+        assert_eq!(persisted.version, 1);
+        assert!(persisted.admission_ticket_consumed_at.is_some());
+        assert_eq!(
+            persisted.provider_config_snapshot.author,
+            ProviderName::Codex
+        );
+        assert_eq!(persisted.provider_config_snapshot.review_rounds, 4);
+    }
+
+    #[test]
+    fn rework_count_increment_after_admission_gap_preserves_running_cas_commit() {
+        let persisted = full_record_write_gap_preserves_admission_commit(|store, stale| {
+            store
+                .increment_attempt_rework_count(&stale.project_id, &stale.issue_id, &stale.id)
+                .map(|_| ())
+        });
+        assert_eq!(persisted.status, CodingAttemptStatus::Running);
+        assert_eq!(persisted.version, 1);
+        assert!(persisted.admission_ticket_consumed_at.is_some());
+        assert_eq!(persisted.rework_count, 1);
+    }
+
+    #[test]
+    fn provider_conversation_replacement_after_admission_gap_preserves_running_cas_commit() {
+        let persisted = full_record_write_gap_preserves_admission_commit(|store, stale| {
+            store
+                .replace_attempt_provider_conversations(
+                    &stale,
+                    vec![ProviderConversationRef {
+                        role: ProviderConversationRole::Coder,
+                        provider: ProviderName::Fake,
+                        provider_session_id: "gap-session".to_string(),
+                        updated_at: "2026-08-11T00:00:00Z".to_string(),
+                        last_node_id: None,
+                    }],
+                )
+                .map(|_| ())
+        });
+        assert_eq!(persisted.status, CodingAttemptStatus::Running);
+        assert_eq!(persisted.version, 1);
+        assert!(persisted.admission_ticket_consumed_at.is_some());
+        assert_eq!(persisted.provider_conversations.len(), 1);
+        assert_eq!(
+            persisted.provider_conversations[0].provider_session_id,
+            "gap-session"
         );
     }
 

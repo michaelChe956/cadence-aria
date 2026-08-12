@@ -1,6 +1,15 @@
 use chrono::Utc;
 use uuid::Uuid;
 
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+
 use crate::product::coding_attempt_store::CreateCodingAttemptInput;
 use crate::product::coding_models::WorkItemExecutionPlan;
 use crate::product::coding_models::{
@@ -476,6 +485,11 @@ impl super::CodingAttemptStore {
         })
     }
 
+    /// 更新 head commit，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn update_attempt_head_commit(
         &self,
         project_id: &str,
@@ -484,13 +498,22 @@ impl super::CodingAttemptStore {
         head_commit: Option<String>,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.head_commit = head_commit;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.head_commit = head_commit;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
+    /// 更新 review request 相关字段，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn update_attempt_review_request_state(
         &self,
         project_id: &str,
@@ -501,15 +524,24 @@ impl super::CodingAttemptStore {
         review_request_id: String,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.head_commit = Some(head_commit);
-        attempt.pushed_remote = Some(pushed_remote);
-        attempt.review_request_id = Some(review_request_id);
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.head_commit = Some(head_commit);
+            attempt.pushed_remote = Some(pushed_remote);
+            attempt.review_request_id = Some(review_request_id);
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
+    /// 更新 provider 配置快照，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn update_attempt_provider_config_snapshot(
         &self,
         project_id: &str,
@@ -518,11 +550,15 @@ impl super::CodingAttemptStore {
         provider_config_snapshot: ProviderConfigSnapshot,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.provider_config_snapshot = provider_config_snapshot;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.provider_config_snapshot = provider_config_snapshot;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
     pub fn get_role_provider_config_snapshot(
@@ -562,6 +598,11 @@ impl super::CodingAttemptStore {
         Ok(role_provider_config_snapshot)
     }
 
+    /// 自增 rework 计数，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn increment_attempt_rework_count(
         &self,
         project_id: &str,
@@ -569,11 +610,15 @@ impl super::CodingAttemptStore {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.rework_count += 1;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.rework_count += 1;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
     pub fn update_attempt_max_auto_rework(
@@ -592,18 +637,28 @@ impl super::CodingAttemptStore {
         Ok(attempt)
     }
 
+    /// 替换 provider 会话引用，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn replace_attempt_provider_conversations(
         &self,
         attempt: &CodingExecutionAttempt,
         provider_conversations: Vec<ProviderConversationRef>,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         self.validate_scoped_attempt_record(attempt, &attempt.id, "coding_attempt", &attempt.id)?;
-        let mut updated = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let path = self.attempt_path(&updated.project_id, &updated.issue_id, &updated.id);
-        updated.provider_conversations = provider_conversations;
-        updated.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &updated)?;
-        Ok(updated)
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let mut updated =
+                self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+            updated.provider_conversations = provider_conversations;
+            updated.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&updated)?;
+            Ok(updated)
+        })
     }
 
     pub fn read_attempt_artifact_text(
@@ -707,4 +762,107 @@ fn valid_stage_transition(current: &CodingExecutionStage, next: &CodingExecution
         return true;
     }
     next.order() >= current.order()
+}
+
+#[cfg(test)]
+struct AttemptWriteGapHookEntry {
+    registration_id: u64,
+    reached_gap: mpsc::Sender<()>,
+    proceed: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+
+#[cfg(test)]
+pub(crate) struct AttemptWriteGapHookGuard {
+    attempt_path: PathBuf,
+    registration_id: u64,
+}
+
+#[cfg(test)]
+static ATTEMPT_WRITE_GAP_HOOKS: OnceLock<Mutex<HashMap<PathBuf, AttemptWriteGapHookEntry>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+static NEXT_ATTEMPT_WRITE_GAP_HOOK_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+fn attempt_write_gap_hooks() -> &'static Mutex<HashMap<PathBuf, AttemptWriteGapHookEntry>> {
+    ATTEMPT_WRITE_GAP_HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers a test hook that pauses a full-record attempt write API after it
+/// read the attempt record but before the write-back is persisted. The caller
+/// receives a channel that fires when the gap is reached and a sender that
+/// releases the paused write.
+#[cfg(test)]
+pub(crate) fn register_attempt_write_gap_hook(
+    attempt_path: &Path,
+) -> (
+    AttemptWriteGapHookGuard,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let attempt_path = std::fs::canonicalize(attempt_path)
+        .expect("registered attempt write gap hook path must be canonicalizable");
+    let registration_id = NEXT_ATTEMPT_WRITE_GAP_HOOK_ID.fetch_add(1, Ordering::Relaxed);
+    let (reached_gap_tx, reached_gap_rx) = mpsc::channel();
+    let (proceed_tx, proceed_rx) = mpsc::channel();
+    let mut hooks = attempt_write_gap_hooks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        !hooks.contains_key(&attempt_path),
+        "attempt write gap hook already registered for {}",
+        attempt_path.display()
+    );
+    hooks.insert(
+        attempt_path.clone(),
+        AttemptWriteGapHookEntry {
+            registration_id,
+            reached_gap: reached_gap_tx,
+            proceed: Arc::new(Mutex::new(proceed_rx)),
+        },
+    );
+    (
+        AttemptWriteGapHookGuard {
+            attempt_path,
+            registration_id,
+        },
+        reached_gap_rx,
+        proceed_tx,
+    )
+}
+
+#[cfg(test)]
+fn notify_attempt_write_gap(attempt_path: &Path) {
+    let Ok(attempt_path) = std::fs::canonicalize(attempt_path) else {
+        return;
+    };
+    let Some((reached_gap, proceed)) = attempt_write_gap_hooks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&attempt_path)
+        .map(|entry| (entry.reached_gap.clone(), Arc::clone(&entry.proceed)))
+    else {
+        return;
+    };
+    let _ = reached_gap.send(());
+    let _ = proceed
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recv();
+}
+
+#[cfg(test)]
+impl Drop for AttemptWriteGapHookGuard {
+    fn drop(&mut self) {
+        let mut hooks = attempt_write_gap_hooks()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if hooks
+            .get(&self.attempt_path)
+            .is_some_and(|entry| entry.registration_id == self.registration_id)
+        {
+            hooks.remove(&self.attempt_path);
+        }
+    }
 }
