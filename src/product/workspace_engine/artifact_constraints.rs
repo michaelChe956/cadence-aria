@@ -566,12 +566,14 @@ fn open_item_line_is_resolved(line: &str) -> bool {
         return true;
     }
 
-    let starts_with_empty_marker = open_item_empty_marker_remainder(&compact).is_some();
+    let raw_empty_marker_remainder = open_item_empty_marker_raw_remainder(line);
+    let starts_with_empty_marker = raw_empty_marker_remainder.is_some();
     let has_unresolved_cue = open_item_line_has_unresolved_cue(line);
     let has_resolved_cue = open_item_line_has_resolved_cue(line);
     if starts_with_empty_marker {
-        if open_item_line_claims_upstream_derivation(&compact) {
-            return open_item_line_is_upstream_derivation_note(line);
+        let raw_remainder = raw_empty_marker_remainder.as_deref().unwrap_or_default();
+        if open_item_remainder_claims_upstream_derivation(raw_remainder) {
+            return open_item_remainder_is_strict_upstream_derivation_note(raw_remainder);
         }
         if open_item_line_has_hard_unresolved_cue(line) {
             return false;
@@ -582,64 +584,83 @@ fn open_item_line_is_resolved(line: &str) -> bool {
     has_resolved_cue && !has_unresolved_cue
 }
 
-fn open_item_line_claims_upstream_derivation(compact: &str) -> bool {
-    let Some(remainder) = open_item_empty_marker_remainder(compact) else {
-        return false;
-    };
-
-    remainder.contains("上游issue") && remainder.contains("明示约束推导")
+fn open_item_remainder_claims_upstream_derivation(remainder: &str) -> bool {
+    let compact = compact_open_item_derivation_clause(remainder);
+    compact.contains("上游issue") && compact.contains("推导")
 }
 
-fn open_item_line_is_upstream_derivation_note(line: &str) -> bool {
-    let compact = compact_open_item_text(line);
-    let Some(remainder) = open_item_empty_marker_remainder(&compact) else {
+fn open_item_remainder_is_strict_upstream_derivation_note(remainder: &str) -> bool {
+    if open_item_line_has_unresolved_cue(remainder) {
+        return false;
+    }
+
+    let Some(statement) = strict_open_item_statement(remainder) else {
         return false;
     };
+    let clauses = statement
+        .split(['；', ';'])
+        .map(str::trim)
+        .collect::<Vec<_>>();
 
-    let Some(raw_remainder) = open_item_empty_marker_raw_remainder(line) else {
-        return false;
-    };
-    let derives_from_upstream = open_item_remainder_has_strict_upstream_derivation(remainder);
-    let no_structured_interaction = remainder.contains("无需发起结构化交互")
-        || remainder.contains("不需要发起结构化交互")
-        || remainder.contains("未发起结构化交互确认");
-
-    derives_from_upstream
-        && no_structured_interaction
-        && !open_item_line_has_unresolved_cue(&raw_remainder)
+    matches!(clauses.as_slice(), [derivation, no_interaction]
+        if strict_derivation_clause_matches(derivation)
+            && strict_no_structured_interaction_clause_matches(no_interaction))
 }
 
-fn open_item_remainder_has_strict_upstream_derivation(remainder: &str) -> bool {
+fn strict_open_item_statement(remainder: &str) -> Option<String> {
+    let normalized = normalize_open_item_inline_markdown(remainder);
+    let statement = normalized
+        .trim()
+        .trim_start_matches(['。', '.', '：', ':', ' ', '\t', '\r', '\n'])
+        .trim()
+        .trim_end_matches(['。', '！', '？', '.', '!', '?'])
+        .trim()
+        .to_string();
+
+    if statement.is_empty() || statement.contains(['。', '！', '？', '.', '!', '?']) {
+        return None;
+    }
+
+    Some(statement)
+}
+
+fn strict_derivation_clause_matches(clause: &str) -> bool {
     [
         "所有需求成功标准与验收口径均可由上游issue",
         "全部需求成功标准与验收口径均可由上游issue",
     ]
     .iter()
-    .any(|positive_scope| {
-        remainder
-            .find(positive_scope)
-            .map(|start| {
-                let relation_tail = &remainder[start + positive_scope.len()..];
-                relation_tail.contains("的明示约束推导得出")
-                    || relation_tail.contains("的明示约束推导")
-            })
-            .unwrap_or(false)
+    .any(|prefix| {
+        compact_open_item_derivation_clause(clause)
+            .strip_prefix(prefix)
+            .and_then(strip_optional_issue_parenthetical)
+            .is_some_and(|tail| tail == "的明示约束推导得出")
     })
 }
 
-fn open_item_empty_marker_remainder(compact: &str) -> Option<&str> {
-    [
-        "无待确认项",
-        "noopenquestions",
-        "noopenitems",
-        "暂无",
-        "无",
-        "none",
-        "notapplicable",
-        "na",
-    ]
-    .iter()
-    .find_map(|marker| compact.strip_prefix(marker))
+fn strict_no_structured_interaction_clause_matches(clause: &str) -> bool {
+    matches!(
+        compact_open_item_derivation_clause(clause).as_str(),
+        "无需发起结构化交互" | "不需要发起结构化交互" | "未发起结构化交互确认"
+    )
+}
+
+fn strip_optional_issue_parenthetical(tail: &str) -> Option<&str> {
+    if let Some(parenthetical_tail) = tail.strip_prefix('（') {
+        let close = parenthetical_tail.find('）')?;
+        return Some(&parenthetical_tail[close + '）'.len_utf8()..]);
+    }
+    if let Some(parenthetical_tail) = tail.strip_prefix('(') {
+        let close = parenthetical_tail.find(')')?;
+        return Some(&parenthetical_tail[close + ')'.len_utf8()..]);
+    }
+    Some(tail)
+}
+
+fn compact_open_item_derivation_clause(text: &str) -> String {
+    normalize_open_item_inline_markdown(text)
+        .to_ascii_lowercase()
+        .replace([' ', '\t', '\r', '\n', '、'], "")
 }
 
 fn open_item_empty_marker_raw_remainder(line: &str) -> Option<String> {
@@ -649,11 +670,14 @@ fn open_item_empty_marker_raw_remainder(line: &str) -> Option<String> {
     [
         "无待确认项",
         "no open questions",
+        "noopenquestions",
         "no open items",
+        "noopenitems",
         "暂无",
         "无",
         "none",
         "not applicable",
+        "notapplicable",
         "n/a",
         "na",
     ]
