@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
+use crate::product::logical_codebase::LogicalRepositoryId;
 
 use super::LifecycleStore;
 
@@ -72,6 +73,23 @@ impl LifecycleStore {
         self.paths
             .issue_lifecycle_root(project_id, issue_id)
             .join("issue-shared-worktree.json")
+    }
+
+    /// 多仓 shared worktree 三元键路径：`issues/{issue}/shared-worktrees/{repository_id}.json`。
+    ///
+    /// `repository_id` 为 `LogicalRepositoryId`，文件名用其裸 UUID 字符串（与
+    /// `LogicalRepositoryId` 的 serde transparent 序列化一致，参考
+    /// `logical_codebase::store::member_path`）。单仓老方法 `issue_shared_worktree_path` 不变。
+    pub(crate) fn repo_shared_worktree_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        repository_id: LogicalRepositoryId,
+    ) -> PathBuf {
+        self.paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("shared-worktrees")
+            .join(format!("{}.json", repository_id.0))
     }
 
     pub(crate) fn issue_work_item_plans_root(&self, project_id: &str, issue_id: &str) -> PathBuf {

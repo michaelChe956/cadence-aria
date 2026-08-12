@@ -250,3 +250,16 @@ pub struct UpsertIssueSharedWorktreeInput {
     pub worktree_path: PathBuf,
     pub base_branch: String,
 }
+
+/// 多仓 shared worktree upsert 输入：键域 (project, issue, logical repository)。
+/// `repository_id` 为 `LogicalRepositoryId`（三元键之一），写入文件名
+/// `shared-worktrees/{repository_id}.json` 并作为记录的 `target_repository_id`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsertRepoSharedWorktreeInput {
+    pub project_id: String,
+    pub issue_id: String,
+    pub repository_id: LogicalRepositoryId,
+    pub branch_name: String,
+    pub worktree_path: PathBuf,
+    pub base_branch: String,
+}

@@ -994,3 +994,6 @@ fn validate_confirm_aggregate_spec_ignores_non_story_design_workspace() {
         )
         .expect("non story/design workspace must skip the aggregate confirm gate");
 }
+
+// Task 9 三元键 shared worktree 回归测试拆分到独立文件，经 include! 引入（large_file_guard 1200 行红线）。
+include!("tests/task9_repo_worktree.rs");
