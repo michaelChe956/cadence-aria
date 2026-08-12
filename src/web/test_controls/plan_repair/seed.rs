@@ -755,6 +755,7 @@ pub(super) fn status_name(status: &CodingAttemptStatus) -> &'static str {
         CodingAttemptStatus::Running => "running",
         CodingAttemptStatus::WaitingForHuman => "waiting_for_human",
         CodingAttemptStatus::Blocked => "blocked",
+        CodingAttemptStatus::AwaitingManualRecovery => "awaiting_manual_recovery",
         CodingAttemptStatus::AwaitingPlanAmendment => "awaiting_plan_amendment",
         CodingAttemptStatus::ApplyingPlanAmendment => "applying_plan_amendment",
         CodingAttemptStatus::AmendmentApplyFailed => "amendment_apply_failed",

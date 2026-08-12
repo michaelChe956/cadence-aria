@@ -358,6 +358,8 @@ fn create_coding_role_run_fixture(
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Blocked,
+        version: 0,
+        manual_recovery_reason: None,
         stage: if blocked_stage_internal {
             FixtureStage::InternalPrReview
         } else {

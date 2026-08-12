@@ -898,6 +898,8 @@ mod tests {
                 attempt_no: 1,
                 scope: CodingAttemptScope::WorkItem,
                 status: CodingAttemptStatus::Completed,
+                version: 0,
+                manual_recovery_reason: None,
                 stage: CodingExecutionStage::FinalConfirm,
                 base_branch: "main".to_string(),
                 branch_name: "aria/attempt".to_string(),

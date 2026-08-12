@@ -890,6 +890,8 @@ fn test_attempt(id: &str) -> CodingExecutionAttempt {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
         stage: CodingExecutionStage::Coding,
         base_branch: "HEAD".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),

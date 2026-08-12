@@ -141,6 +141,8 @@ fn group_attempt_fixture(
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItemGroup,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
         stage: CodingExecutionStage::Coding,
         base_branch: "main".to_string(),
         branch_name: "aria/issues/issue_0001".to_string(),

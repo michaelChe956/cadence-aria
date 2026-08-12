@@ -39,6 +39,8 @@ fn permission_or_choice_wait_timeout_does_not_enqueue_automatic_retry() {
         "permission_timeout",
         &CodingExecutionAttempt {
             status: waiting.clone(),
+            version: 0,
+            manual_recovery_reason: None,
             ..plan_repair_fixture_with_dependency(false).attempt
         },
     ));
@@ -46,6 +48,8 @@ fn permission_or_choice_wait_timeout_does_not_enqueue_automatic_retry() {
         "choice_timeout",
         &CodingExecutionAttempt {
             status: waiting,
+            version: 0,
+            manual_recovery_reason: None,
             ..plan_repair_fixture_with_dependency(false).attempt
         },
     ));

@@ -72,6 +72,8 @@ impl super::CodingAttemptStore {
             attempt_no,
             scope: CodingAttemptScope::WorkItem,
             status: CodingAttemptStatus::Created,
+            version: 0,
+            manual_recovery_reason: None,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch,
             branch_name: input.branch_name,
@@ -144,6 +146,8 @@ impl super::CodingAttemptStore {
             attempt_no: stored.attempt_no,
             scope: stored.scope,
             status: stored.status,
+            version: stored.version,
+            manual_recovery_reason: stored.manual_recovery_reason,
             stage: attempt.stage.clone(),
             base_branch: attempt.base_branch.clone(),
             branch_name: attempt.branch_name.clone(),
@@ -653,6 +657,9 @@ pub(super) fn valid_status_transition(
                     | CodingAttemptStatus::AwaitingPlanAmendment
                     | CodingAttemptStatus::Aborted
             )
+        }
+        CodingAttemptStatus::AwaitingManualRecovery => {
+            matches!(next, CodingAttemptStatus::Aborted)
         }
         CodingAttemptStatus::AwaitingPlanAmendment => matches!(
             next,

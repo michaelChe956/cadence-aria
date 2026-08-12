@@ -71,12 +71,16 @@ fn provider_snapshot() -> ProviderConfigSnapshot {
 }
 
 #[test]
-fn update_attempt_non_status_fields_preserves_status_and_frozen_target_snapshot() {
+fn update_attempt_non_status_fields_preserves_status_and_frozen_admission_fields() {
     let (_tmp, store, attempt) = setup();
     let original_status = attempt.status.clone();
     let original_target_snapshot = attempt.target_snapshot.clone();
+    let original_version = attempt.version;
+    let original_manual_recovery_reason = attempt.manual_recovery_reason.clone();
     let mut replacement = attempt.clone();
     replacement.status = CodingAttemptStatus::Running;
+    replacement.version = original_version + 1;
+    replacement.manual_recovery_reason = Some("replacement recovery reason".to_string());
     replacement.target_snapshot = Some(AttemptTargetSnapshot {
         logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
         checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
@@ -100,6 +104,11 @@ fn update_attempt_non_status_fields_preserves_status_and_frozen_target_snapshot(
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("reload attempt");
     assert_eq!(persisted.status, original_status);
+    assert_eq!(persisted.version, original_version);
+    assert_eq!(
+        persisted.manual_recovery_reason,
+        original_manual_recovery_reason
+    );
     assert_eq!(persisted.target_snapshot, original_target_snapshot);
     assert_eq!(
         persisted.head_commit.as_deref(),
@@ -109,6 +118,81 @@ fn update_attempt_non_status_fields_preserves_status_and_frozen_target_snapshot(
         persisted.pushed_remote.as_deref(),
         Some("origin/replacement")
     );
+}
+
+#[test]
+fn status_machine_allows_blocked_to_running_and_manual_recovery_only_to_abort() {
+    let (_tmp, store, attempt) = setup();
+    let running = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("start attempt");
+    let blocked = store
+        .update_attempt_status(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("block attempt");
+    let running = store
+        .update_attempt_status(
+            &blocked.project_id,
+            &blocked.issue_id,
+            &blocked.id,
+            CodingAttemptStatus::Running,
+        )
+        .expect("reopen blocked attempt until Task 6/7 controlled transition is available");
+    assert_eq!(running.status, CodingAttemptStatus::Running);
+
+    store
+        .write_coding_attempt_for_test(&CodingExecutionAttempt {
+            status: CodingAttemptStatus::AwaitingManualRecovery,
+            version: 0,
+            manual_recovery_reason: None,
+            ..running
+        })
+        .expect("seed manual-recovery attempt");
+
+    for status in [
+        CodingAttemptStatus::Created,
+        CodingAttemptStatus::Running,
+        CodingAttemptStatus::WaitingForHuman,
+        CodingAttemptStatus::Blocked,
+        CodingAttemptStatus::AwaitingPlanAmendment,
+        CodingAttemptStatus::ApplyingPlanAmendment,
+        CodingAttemptStatus::AmendmentApplyFailed,
+        CodingAttemptStatus::Completed,
+        CodingAttemptStatus::Failed,
+    ] {
+        let rejected = store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            status.clone(),
+        );
+        assert!(matches!(
+            rejected,
+            Err(ProductStoreError::Io(message))
+                if message == format!(
+                    "invalid_coding_attempt_status_transition: AwaitingManualRecovery -> {status:?}"
+                )
+        ));
+    }
+
+    let aborted = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Aborted,
+        )
+        .expect("abort manual-recovery attempt");
+    assert_eq!(aborted.status, CodingAttemptStatus::Aborted);
 }
 
 #[test]
@@ -299,6 +383,8 @@ fn legacy_attempt_without_scope_deserializes_as_work_item_scope() {
     let attempt: CodingExecutionAttempt = serde_json::from_value(json).expect("attempt");
 
     assert_eq!(attempt.scope, CodingAttemptScope::WorkItem);
+    assert_eq!(attempt.version, 0);
+    assert!(attempt.manual_recovery_reason.is_none());
     assert_eq!(
         attempt.current_work_item_id.as_deref(),
         Some("work_item_0001")

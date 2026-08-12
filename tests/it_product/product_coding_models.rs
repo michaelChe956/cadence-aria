@@ -172,6 +172,8 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
         attempt_no: 1,
         scope: cadence_aria::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Created,
+        version: 0,
+        manual_recovery_reason: None,
         stage: CodingExecutionStage::PrepareContext,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
@@ -201,12 +203,16 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
     let value = serde_json::to_value(&attempt).expect("serialize attempt");
 
     assert_eq!(value["status"], "created");
+    assert_eq!(value["version"], 0);
+    assert!(value.get("manual_recovery_reason").is_none());
     assert_eq!(value["stage"], "prepare_context");
     assert_eq!(value["provider_config_snapshot"]["author"], "fake");
 
     let decoded: CodingExecutionAttempt =
         serde_json::from_value(value).expect("deserialize attempt");
     assert_eq!(decoded.status, CodingAttemptStatus::Created);
+    assert_eq!(decoded.version, 0);
+    assert!(decoded.manual_recovery_reason.is_none());
     assert_eq!(decoded.stage, CodingExecutionStage::PrepareContext);
 }
 

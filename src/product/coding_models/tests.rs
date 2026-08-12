@@ -1,8 +1,13 @@
 use crate::product::coding_models::{
-    CodeReviewReport, CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingGateKind,
-    CodingGateRequired, CodingProviderRole, FindingSeverity, InternalPrReview, ReviewFinding,
-    ReviewVerdict,
+    CodeReviewReport, CodingAttemptStatus, CodingExecutionStage, CodingGateAction,
+    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole, FindingSeverity,
+    InternalPrReview, ReviewFinding, ReviewVerdict,
 };
+
+#[test]
+fn awaiting_manual_recovery_is_not_active() {
+    assert!(!CodingAttemptStatus::AwaitingManualRecovery.is_active());
+}
 
 #[test]
 fn retained_coding_stages_keep_their_relative_order_after_testing_removal() {

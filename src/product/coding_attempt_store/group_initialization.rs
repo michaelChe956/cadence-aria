@@ -446,6 +446,8 @@ impl super::CodingAttemptStore {
             attempt_no,
             scope: CodingAttemptScope::WorkItemGroup,
             status: CodingAttemptStatus::Created,
+            version: 0,
+            manual_recovery_reason: None,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch.clone(),
             branch_name: input.branch_name.clone(),

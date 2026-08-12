@@ -183,7 +183,8 @@ fn blocked_gate_is_actionable_for_attempt(
     match attempt.status {
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman => true,
         CodingAttemptStatus::Running => attempt.stage == CodingExecutionStage::FinalConfirm,
-        CodingAttemptStatus::AwaitingPlanAmendment
+        CodingAttemptStatus::AwaitingManualRecovery
+        | CodingAttemptStatus::AwaitingPlanAmendment
         | CodingAttemptStatus::ApplyingPlanAmendment
         | CodingAttemptStatus::AmendmentApplyFailed => false,
         CodingAttemptStatus::Created

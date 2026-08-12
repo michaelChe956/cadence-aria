@@ -39,6 +39,7 @@ pub enum CodingAttemptStatus {
     Running,
     WaitingForHuman,
     Blocked,
+    AwaitingManualRecovery,
     AwaitingPlanAmendment,
     ApplyingPlanAmendment,
     AmendmentApplyFailed,
@@ -112,6 +113,10 @@ pub struct CodingExecutionAttempt {
     #[serde(default)]
     pub scope: CodingAttemptScope,
     pub status: CodingAttemptStatus,
+    #[serde(default)]
+    pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_recovery_reason: Option<String>,
     pub stage: CodingExecutionStage,
     pub base_branch: String,
     pub branch_name: String,
@@ -147,6 +152,10 @@ struct CodingExecutionAttemptSerde {
     #[serde(default)]
     scope: CodingAttemptScope,
     status: CodingAttemptStatus,
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
+    manual_recovery_reason: Option<String>,
     stage: CodingExecutionStage,
     base_branch: String,
     branch_name: String,
@@ -193,6 +202,8 @@ impl<'de> Deserialize<'de> for CodingExecutionAttempt {
             attempt_no: raw.attempt_no,
             scope: raw.scope,
             status: raw.status,
+            version: raw.version,
+            manual_recovery_reason: raw.manual_recovery_reason,
             stage: raw.stage,
             base_branch: raw.base_branch,
             branch_name: raw.branch_name,
