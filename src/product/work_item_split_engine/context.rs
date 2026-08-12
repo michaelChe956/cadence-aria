@@ -129,7 +129,43 @@ pub(crate) fn summarize_repository_structure(path: &Path) -> String {
     }
 }
 
+/// parser 强制的规范 Design Spec 结构标题（取 4 个核心结构标题作为检测集，
+/// 别名与 artifact_constraints.rs 的 heading_rule 保持一致）。
+const CANONICAL_DESIGN_SPEC_HEADING_RULES: &[(&str, &[&str])] = &[
+    ("设计范围", &["Design Scope"]),
+    ("设计决策", &["Design Decisions"]),
+    ("公共组件", &["Shared Components"]),
+    ("追踪关系", &["Traceability"]),
+];
+
+/// 规范 Design Spec 同时具备 parser 强制的 4 个结构标题时，视为完整设计上下文。
+fn has_canonical_design_spec_structure(markdown: &str) -> bool {
+    let headings = markdown_headings(markdown);
+    CANONICAL_DESIGN_SPEC_HEADING_RULES
+        .iter()
+        .all(|(label, aliases)| {
+            headings.iter().any(|heading| {
+                heading.eq_ignore_ascii_case(label)
+                    || aliases
+                        .iter()
+                        .any(|alias| heading.eq_ignore_ascii_case(alias))
+            })
+        })
+}
+
 pub fn extract_design_context_capabilities(markdown: &str) -> DesignContextCapabilities {
+    // Aria 规范 Design Spec 使用 设计范围/设计决策/公共组件/追踪关系 等 parser
+    // 强制标题，永远不会命中下方启发式标题，会被误判为 5 项上下文全缺失；
+    // 检测到规范结构时直接视为 5 项能力均具备。
+    if has_canonical_design_spec_structure(markdown) {
+        return DesignContextCapabilities {
+            has_architecture: true,
+            has_module_breakdown: true,
+            has_tech_stack: true,
+            has_test_strategy: true,
+            has_key_paths: true,
+        };
+    }
     let normalized = markdown_headings(markdown).join("\n").to_lowercase();
     DesignContextCapabilities {
         has_architecture: contains_any(&normalized, &["架构概览", "系统架构", "architecture"]),
