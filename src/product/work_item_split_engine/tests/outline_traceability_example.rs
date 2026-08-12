@@ -91,14 +91,14 @@ fn outline_prompt_example_uses_placeholder_source_ids_when_request_empty() {
     );
 
     assert_eq!(
-        prompt.matches("\"source_story_spec_ids\":[\"story_spec_1\"]").count(),
+        prompt.matches("\"source_story_spec_ids\":[\"story_spec_0001\"]").count(),
         3,
-        "request 无 story spec ID 时示例必须给非空占位：{prompt}"
+        "request 无 story spec ID 时示例必须给非空占位（占位需与真实 ID 零填充风格一致）：{prompt}"
     );
     assert_eq!(
-        prompt.matches("\"source_design_spec_ids\":[\"design_spec_1\"]").count(),
+        prompt.matches("\"source_design_spec_ids\":[\"design_spec_0001\"]").count(),
         3,
-        "request 无 design spec ID 时示例必须给非空占位：{prompt}"
+        "request 无 design spec ID 时示例必须给非空占位（占位需与真实 ID 零填充风格一致）：{prompt}"
     );
     assert!(
         !prompt.contains("\"source_story_spec_ids\":[]"),

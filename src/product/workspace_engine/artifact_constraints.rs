@@ -440,7 +440,7 @@ fn id_rule(label: &'static str, pattern: ArtifactTokenPattern) -> ArtifactIdPatt
     ArtifactIdPatternRule { label, pattern }
 }
 
-fn heading_matches_rule(heading: &str, rule: &ArtifactHeadingRule) -> bool {
+pub(crate) fn heading_matches_rule(heading: &str, rule: &ArtifactHeadingRule) -> bool {
     heading.eq_ignore_ascii_case(rule.label)
         || rule
             .aliases

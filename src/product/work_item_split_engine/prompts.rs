@@ -371,9 +371,9 @@ pub(crate) fn build_outline_prompt_with_nonce(
         nonce = nonce,
         schema = WORK_ITEM_PLAN_OUTLINE_OUTPUT_SCHEMA,
         example_story_spec_ids =
-            example_source_spec_id_array(&request.story_spec_ids, "story_spec_1"),
+            example_source_spec_id_array(&request.story_spec_ids, "story_spec_0001"),
         example_design_spec_ids =
-            example_source_spec_id_array(&request.design_spec_ids, "design_spec_1"),
+            example_source_spec_id_array(&request.design_spec_ids, "design_spec_0001"),
     );
     (prompt, nonce)
 }
