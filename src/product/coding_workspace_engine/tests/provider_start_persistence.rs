@@ -619,12 +619,7 @@ async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let mut attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
     attempt.head_commit = Some(head);
     attempt.stage = CodingExecutionStage::Coding;

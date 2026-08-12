@@ -233,6 +233,9 @@ fn coding_plan_repair_group_reviewer_loads_authoritative_no_target_projections()
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("attempt");
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记，否则过不了
+    // ensure_provider_run_allowed 的第二道防线。
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::InternalPrReview;
     store
         .write_coding_attempt_for_test(&attempt)
@@ -518,6 +521,8 @@ pub(super) fn prepared_group_review_fixture() -> (
     seed_group_attempt_fixture(&store, &attempt, true, false);
     complete_group_units_with_authoritative_runs(&store, &attempt);
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记（同 prepared_group_review_fixture）。
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::InternalPrReview;
     attempt.head_commit = Some(head.clone());
     store

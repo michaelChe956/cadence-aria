@@ -337,11 +337,10 @@ async fn plan_repair_history_bootstrap_fixture(
     let runtime_history = if refresh_before_child {
         fixture.attempt = fixture
             .store
-            .update_attempt_status(
+            .seed_running_attempt_for_test(
                 &fixture.attempt.project_id,
                 &fixture.attempt.issue_id,
                 &fixture.attempt.id,
-                crate::product::coding_models::CodingAttemptStatus::Running,
             )
             .expect("running attempt");
         Some(

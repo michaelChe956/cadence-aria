@@ -61,14 +61,7 @@ fn final_confirm_attempt(
             max_auto_rework: 2,
         })
         .expect("create attempt");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("set running");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let attempt = store
         .update_attempt_stage(
             &attempt.project_id,
@@ -119,14 +112,7 @@ fn failed_attempt(
             max_auto_rework: 2,
         })
         .expect("create attempt");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("set running");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let attempt = store
         .update_attempt_status(
             &attempt.project_id,

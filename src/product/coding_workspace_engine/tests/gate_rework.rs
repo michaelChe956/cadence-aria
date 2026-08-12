@@ -27,12 +27,7 @@ async fn manual_continue_persists_quality_bypass_audit_and_injects_reviewer_cont
         )
         .expect("create attempt");
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running");
     let attempt = store
         .update_attempt_stage(
@@ -138,12 +133,7 @@ async fn send_to_coder_after_review_limit_uses_latest_code_review_without_qualit
         })
         .expect("create attempt");
     let mut attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running");
     attempt = store
         .increment_attempt_rework_count(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -300,12 +290,7 @@ async fn send_to_coder_after_review_limit_accepts_actionable_blocked_code_review
         })
         .expect("create attempt");
     let mut attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running");
     attempt = store
         .increment_attempt_rework_count(&attempt.project_id, &attempt.issue_id, &attempt.id)

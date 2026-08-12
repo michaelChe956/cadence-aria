@@ -30,12 +30,7 @@ async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context(
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let mut attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
     attempt.head_commit = Some(head.clone());
     attempt.stage = CodingExecutionStage::Coding;

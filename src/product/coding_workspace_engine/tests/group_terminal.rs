@@ -29,12 +29,7 @@ fn running_group_attempt() -> (
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running group attempt");
     (root, store, attempt)
 }
@@ -102,6 +97,39 @@ async fn coding_plan_repair_group_terminal_abort_converges_units_and_clears_resu
         rx.try_recv().is_err(),
         "terminal group emitted a coding event"
     );
+}
+
+#[tokio::test]
+async fn group_terminal_transition_leaving_running_clears_admission_marker() {
+    // 会话语义守卫：group attempt 经 update_group_terminal_status_locked 离开 Running
+    // 进入终态时，必须在同一次锁内清空 admission 会话标记。
+    for target in [CodingAttemptStatus::Failed, CodingAttemptStatus::Aborted] {
+        let (_root, store, attempt) = running_group_attempt();
+        assert!(
+            attempt.admission_ticket_consumed_at.is_some(),
+            "{target:?}: fixture must enter Running through a seeded admission session"
+        );
+        let terminal = store
+            .update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                target.clone(),
+            )
+            .unwrap_or_else(|error| panic!("{target:?}: group terminal transition: {error}"));
+        assert_eq!(terminal.status, target);
+        assert!(
+            terminal.admission_ticket_consumed_at.is_none(),
+            "{target:?}: group terminal transition must clear the admission session marker"
+        );
+        let persisted = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap_or_else(|error| panic!("{target:?}: reload attempt: {error}"));
+        assert!(
+            persisted.admission_ticket_consumed_at.is_none(),
+            "{target:?}: persisted group attempt must have no admission session marker"
+        );
+    }
 }
 
 #[tokio::test]
@@ -778,12 +806,7 @@ fn coding_plan_repair_single_work_item_terminal_status_update_is_unchanged() {
         })
         .expect("single attempt");
     let running = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running single attempt");
 
     let aborted = store

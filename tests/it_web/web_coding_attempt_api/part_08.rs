@@ -12,14 +12,7 @@ async fn coding_plan_repair_terminal_group_post_returns_original_aborted_attempt
     assert_eq!(first_status, StatusCode::OK);
     let attempt_id = assert_global_attempt_id(&first);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt_id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("run group attempt");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt_id);
     let aborted = store
         .update_attempt_status(
             "project_0001",

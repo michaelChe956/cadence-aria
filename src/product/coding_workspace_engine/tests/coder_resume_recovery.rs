@@ -445,12 +445,7 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
         .expect("bind shared worktree lock");
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
     let prior_run = store
         .create_role_run(

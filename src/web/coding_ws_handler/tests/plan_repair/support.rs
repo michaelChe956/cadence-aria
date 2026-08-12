@@ -345,6 +345,9 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记，否则过不了
+    // ensure_provider_run_allowed 的第二道防线。
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::CodeReview;
     attempt.active_unit_id = Some(unit.id.clone());
     attempt.current_work_item_id = Some(current.id.clone());

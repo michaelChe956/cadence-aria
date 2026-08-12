@@ -536,12 +536,7 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
         .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
         .unwrap();
     let mut attempt = store
-        .update_attempt_status(
-            &initial.project_id,
-            &initial.issue_id,
-            &initial.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&initial.project_id, &initial.issue_id, &initial.id)
         .unwrap();
     let units = store
         .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)

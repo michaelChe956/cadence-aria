@@ -67,6 +67,17 @@ impl super::CodingAttemptStore {
                 "plan_amendment_blocks_provider_run".to_string(),
             ));
         }
+        // 第二道防线：可执行状态必须经 admission 进入并留有会话标记。即使有人绕过
+        // 接线直接写盘把 attempt 置为 Running，marker 缺失时 provider run 仍被拒。
+        // Legacy/Logical attempt 一视同仁——两者都必须经 admit（Legacy 走 legacy
+        // digest 路径）消费 ticket 后才能启动 provider run。
+        if current.status == CodingAttemptStatus::Running
+            && current.admission_ticket_consumed_at.is_none()
+        {
+            return Err(ProductStoreError::Io(
+                "admission_missing_blocks_provider_run".to_string(),
+            ));
+        }
         Ok(current)
     }
 

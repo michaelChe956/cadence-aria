@@ -343,12 +343,7 @@ fn coding_plan_repair_concurrent_amendment_pause_and_recovery_prepare_leave_no_p
     for _ in 0..20 {
         let (_tmp, store, attempt) = setup();
         let running = store
-            .update_attempt_status(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                CodingAttemptStatus::Running,
-            )
+            .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .expect("running attempt");
         let barrier = Arc::new(Barrier::new(3));
         let prepare_store = store.clone();
@@ -781,12 +776,7 @@ pub(super) fn recovery_boundary_fixture() -> (
 ) {
     let (tmp, store, attempt) = setup();
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
     let attempt = store
         .update_attempt_stage(

@@ -32,12 +32,7 @@ fn group_completion_fixture_at_stage(
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, with_dependency);
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
     let attempt = store
         .update_attempt_stage(

@@ -100,12 +100,7 @@ fn executor_fixture(
         })
         .expect("attempt");
     attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running");
     attempt = store
         .update_attempt_stage(

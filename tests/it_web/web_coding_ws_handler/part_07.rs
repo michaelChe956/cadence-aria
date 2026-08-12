@@ -119,14 +119,7 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
         }),
     );
 
-    let attempt = store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    let attempt = crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", "coding_attempt_0001");
     store
         .update_attempt_stage(
             "project_0001",

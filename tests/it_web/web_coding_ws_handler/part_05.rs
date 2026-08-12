@@ -238,14 +238,7 @@ fn app_with_running_code_review_attempt_and_state(
             max_auto_rework: 2,
         },
     );
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -317,14 +310,7 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
             max_auto_rework: 2,
         },
     );
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",

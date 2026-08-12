@@ -543,11 +543,10 @@ async fn incomplete_readiness_cannot_be_final_confirmed() {
     }
     let running = fixture
         .store
-        .update_attempt_status(
+        .seed_running_attempt_for_test(
             &fixture.attempt.project_id,
             &fixture.attempt.issue_id,
             &fixture.attempt.id,
-            CodingAttemptStatus::Running,
         )
         .expect("running attempt");
     let prepared = fixture

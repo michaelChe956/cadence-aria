@@ -110,12 +110,7 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let mut attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
     attempt.head_commit = Some(head.clone());
     attempt.stage = CodingExecutionStage::Coding;
@@ -280,12 +275,7 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
     let attempt = store
         .update_attempt_stage(
@@ -630,6 +620,9 @@ async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .unwrap();
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记，否则会在
+    // ensure_provider_run_allowed 处先被拒，无法到达 handoff 校验。
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::Coding;
     attempt.current_work_item_id = Some(second.logical_work_item_id.clone());
     attempt.active_unit_id = Some(second.id.clone());

@@ -2,14 +2,7 @@ fn create_active_coding_unit_run(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
 ) {
-    store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running attempt before group completion");
+    crate::seed_coding_attempt_running(store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     store
         .update_attempt_stage(
             &attempt.project_id,

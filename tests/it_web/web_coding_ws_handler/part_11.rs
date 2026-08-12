@@ -276,14 +276,7 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
             captured_prompts: captured,
         }),
     );
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", "coding_attempt_0001");
     store
         .update_attempt_stage(
             "project_0001",

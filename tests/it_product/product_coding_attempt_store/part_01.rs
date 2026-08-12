@@ -45,14 +45,7 @@ fn create_attempt_assigns_attempt_number_and_blocks_active_attempts() {
         "active created attempt should block duplicates"
     );
 
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &first.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &first.id);
     store
         .update_attempt_status(
             "project_0001",
@@ -121,16 +114,12 @@ fn scoped_lookup_reads_duplicate_legacy_ids_and_global_lookup_is_ambiguous() {
     first.id = "coding_attempt_0001".to_string();
     first.issue_id = "issue_0001".to_string();
     first.work_item_id = "work_item_issue_1".to_string();
-    store
-        .update_attempt_non_status_fields(&first)
-        .expect("save first legacy attempt");
+    crate::write_coding_attempt_record_for_test(&store, &first);
 
     let mut second = first.clone();
     second.issue_id = "issue_0002".to_string();
     second.work_item_id = "work_item_issue_2".to_string();
-    store
-        .update_attempt_non_status_fields(&second)
-        .expect("save second legacy attempt");
+    crate::write_coding_attempt_record_for_test(&store, &second);
 
     assert_eq!(
         store

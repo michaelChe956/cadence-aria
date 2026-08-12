@@ -159,14 +159,7 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -323,14 +316,7 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -428,14 +414,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
             },
         )
         .expect("set role provider snapshot");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -521,14 +500,7 @@ async fn handle_final_confirm_completes_when_required_plan_is_satisfied() {
     let attempt = store
         .create_attempt(create_input())
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",

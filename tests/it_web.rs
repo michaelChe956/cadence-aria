@@ -204,3 +204,23 @@ pub(crate) fn seed_coding_attempt_record(
     )
     .expect("seed coding attempt record fixture");
 }
+
+/// Fixture 初始状态播种：将 attempt 置为 Running 可执行态。先经 store 读取 record，
+/// 置 status=Running 并写入 admission 会话标记，再经 `seed_coding_attempt_record`
+/// 落盘——模拟「已经 admission CAS 进入」的合法可执行状态（状态机已封死直达
+/// Running 通道；播种不经 `update_attempt_status`，仅用于集成测试初始状态，
+/// 不代表生产写路径）。
+pub(crate) fn seed_coding_attempt_running(
+    store: &cadence_aria::product::coding_attempt_store::CodingAttemptStore,
+    project_id: &str,
+    issue_id: &str,
+    attempt_id: &str,
+) -> cadence_aria::product::coding_models::CodingExecutionAttempt {
+    let mut attempt = store
+        .get_attempt(project_id, issue_id, attempt_id)
+        .expect("load coding attempt for Running seeding");
+    attempt.status = cadence_aria::product::coding_models::CodingAttemptStatus::Running;
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
+    seed_coding_attempt_record(store, &attempt);
+    attempt
+}

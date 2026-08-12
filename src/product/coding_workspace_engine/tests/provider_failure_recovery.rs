@@ -972,12 +972,7 @@ async fn owner_change_during_transport_failure_creates_no_automatic_retry_record
         .bind_issue_worktree_lock_to_attempt(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID, &attempt.id)
         .expect("bind owner");
     let attempt = store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
     let provider = RetryBoundaryMutationProvider::new(RetryBoundaryMutation::OwnerChange {
         lifecycle,

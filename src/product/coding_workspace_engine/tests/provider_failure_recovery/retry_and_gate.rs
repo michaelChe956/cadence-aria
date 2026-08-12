@@ -503,12 +503,7 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
         })
         .expect("running active unit");
     let attempt = store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
     let attempt = store
         .update_attempt_stage(
@@ -760,12 +755,7 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
         })
         .expect("attempt");
     let attempt = store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
     store
         .save_timeline_node(
@@ -864,12 +854,7 @@ async fn abort_during_provider_failure_prewrite_pause_is_stable() {
         })
         .expect("attempt");
     let attempt = store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
     let attempt = store
         .update_attempt_stage(
@@ -1009,12 +994,7 @@ async fn internal_review_blocked_gates_use_triage_actions_without_coder_rework()
             })
             .expect("attempt");
         let attempt = store
-            .update_attempt_status(
-                PROJECT_ID,
-                ISSUE_ID,
-                &attempt.id,
-                CodingAttemptStatus::Running,
-            )
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
             .expect("running attempt");
         let attempt = store
             .update_attempt_stage(

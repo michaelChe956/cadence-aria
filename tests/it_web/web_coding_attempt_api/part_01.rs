@@ -858,14 +858,7 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
     );
     let worktree_path = attempt.worktree_path.expect("attempt worktree path");
     fs::write(worktree_path.join("dirty.txt"), "dirty changes").expect("dirty file");
-    coding_store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt_id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("mark attempt running");
+    crate::seed_coding_attempt_running(&coding_store, "project_0001", "issue_0001", &attempt_id);
     coding_store
         .update_attempt_status(
             "project_0001",

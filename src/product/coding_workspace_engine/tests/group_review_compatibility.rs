@@ -11,9 +11,8 @@ use crate::cross_cutting::streaming_provider::{
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateGroupCodingAttemptInput};
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionAttempt, CodingUnitRun, CodingUnitRunStatus,
-    CompactFindingDigest, PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict,
-    UnitReviewConclusionSnapshot,
+    CodingExecutionAttempt, CodingUnitRun, CodingUnitRunStatus, CompactFindingDigest, PushStatus,
+    RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, UnitReviewConclusionSnapshot,
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::coding_workspace_engine::GitWorkspaceService;
@@ -253,12 +252,7 @@ async fn legacy_hash_fixture(
         )
         .expect("review request state");
     attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running");
     let (event_tx, _event_rx) = mpsc::channel(128);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);

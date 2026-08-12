@@ -638,14 +638,7 @@ fn group_attempt_waiting_for_final_confirm() -> (
             Some("frontend done".to_string()),
         )
         .expect("refresh terminal attempt pointers");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("set running");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let attempt = store
         .update_attempt_stage(
             &attempt.project_id,

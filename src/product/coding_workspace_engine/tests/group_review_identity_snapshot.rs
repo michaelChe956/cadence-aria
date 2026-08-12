@@ -124,12 +124,7 @@ fn rebuilding_snapshot_from_report_and_authoritative_binding_is_deterministic() 
 async fn code_review_snapshot_write_failure_rolls_back_report() {
     let (root, store, attempt, _unit, unit_run) = group_attempt_with_completed_unit_run();
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
     let attempt = store
         .update_attempt_stage(
@@ -185,12 +180,7 @@ async fn code_review_snapshot_write_failure_rolls_back_report() {
 async fn code_review_persists_report_and_snapshot_on_normal_path() {
     let (_root, store, attempt, _unit, unit_run) = group_attempt_with_completed_unit_run();
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
     let attempt = store
         .update_attempt_stage(

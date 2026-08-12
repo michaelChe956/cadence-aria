@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
+use chrono::Utc;
 use tokio::sync::mpsc;
 
 use super::{PlanRepairFixtureError, PlanRepairFixtureWaiting};
@@ -433,6 +434,9 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
         .map_err(fixture_error)?;
 
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记，否则过不了
+    // ensure_provider_run_allowed 的第二道防线。
+    attempt.admission_ticket_consumed_at = Some(Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::CodeReview;
     write_json(
         &store.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id),

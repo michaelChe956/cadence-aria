@@ -386,6 +386,7 @@ async fn failed_code_review_recovery_reloads_attempt_and_rejects_status_change()
     let dirty_gate = fixture.dirty_gate.clone().expect("dirty gate");
     let mut changed = fixture.attempt.clone();
     changed.status = CodingAttemptStatus::Running;
+    changed.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     changed.completed_at = None;
     fixture
         .store

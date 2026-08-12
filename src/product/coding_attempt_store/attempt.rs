@@ -192,6 +192,25 @@ impl super::CodingAttemptStore {
         self.save_coding_attempt_with_status(attempt)
     }
 
+    /// 仅供测试播种：将 attempt 直接置为 `Running` 并写入 admission 会话标记，
+    /// 模拟「已经 admission CAS 进入」的合法可执行状态。状态机已封死直达 Running
+    /// 通道，播种不经 `update_attempt_status`；同时维护「Running ⟹ marker 非空」
+    /// 不变式，使播种后的 attempt 能通过 `ensure_provider_run_allowed` 的 admission
+    /// 校验。不推进 version（与旧 `update_attempt_status(Running)` 播种语义一致）。
+    #[cfg(test)]
+    pub(crate) fn seed_running_attempt_for_test(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        attempt.status = CodingAttemptStatus::Running;
+        attempt.admission_ticket_consumed_at = Some(Utc::now().to_rfc3339());
+        self.save_coding_attempt_with_status(&attempt)?;
+        Ok(attempt)
+    }
+
     /// 仅供受控状态转换使用的底层全字段持久化方法。
     pub(super) fn save_coding_attempt_with_status(
         &self,
@@ -383,8 +402,10 @@ impl super::CodingAttemptStore {
 
     /// 将 attempt 置为非可执行目标状态（终态/暂停态）。
     ///
-    /// 进入 `Running`（可执行目标）不允许走本 API：生产路径必须经
-    /// `admit_and_transition_attempt_to_executable`（admit 拿 ticket → CAS 消费）。
+    /// 进入 `Running`（可执行目标）不允许走本 API，状态机层已封死直达通道：
+    /// `valid_status_transition` 对 Running 目标一律拒绝（含 Running→Running 幂等调用），
+    /// 生产路径必须经 `admit_and_transition_attempt_to_executable`（admit 拿 ticket →
+    /// CAS 消费）。
     /// 离开 `Running` 的转换会在同一次锁内清空 `admission_ticket_consumed_at`，
     /// 因为 admission 票据按「Running 会话」单次消费，会话结束后必须允许重新 admission。
     pub fn update_attempt_status(
@@ -707,6 +728,11 @@ pub(super) fn valid_status_transition(
     current: &CodingAttemptStatus,
     next: &CodingAttemptStatus,
 ) -> bool {
+    // 进入 `Running` 的唯一途径是 admission CAS（admit 拿 ticket → transition 消费）。
+    // 状态机层不提供任何直达通道：对 Running 目标一律拒绝，含 Running→Running 幂等调用。
+    if next == &CodingAttemptStatus::Running {
+        return false;
+    }
     if current == &CodingAttemptStatus::AwaitingManualRecovery {
         return next == &CodingAttemptStatus::Aborted;
     }
@@ -714,12 +740,7 @@ pub(super) fn valid_status_transition(
         return true;
     }
     match current {
-        CodingAttemptStatus::Created => {
-            matches!(
-                next,
-                CodingAttemptStatus::Running | CodingAttemptStatus::Aborted
-            )
-        }
+        CodingAttemptStatus::Created => matches!(next, CodingAttemptStatus::Aborted),
         CodingAttemptStatus::Running => matches!(
             next,
             CodingAttemptStatus::WaitingForHuman
@@ -732,9 +753,7 @@ pub(super) fn valid_status_transition(
         CodingAttemptStatus::WaitingForHuman => {
             matches!(
                 next,
-                CodingAttemptStatus::Running
-                    | CodingAttemptStatus::Completed
-                    | CodingAttemptStatus::Aborted
+                CodingAttemptStatus::Completed | CodingAttemptStatus::Aborted
             )
         }
         CodingAttemptStatus::Blocked => {
@@ -752,9 +771,7 @@ pub(super) fn valid_status_transition(
         ),
         CodingAttemptStatus::ApplyingPlanAmendment => matches!(
             next,
-            CodingAttemptStatus::Running
-                | CodingAttemptStatus::AmendmentApplyFailed
-                | CodingAttemptStatus::Aborted
+            CodingAttemptStatus::AmendmentApplyFailed | CodingAttemptStatus::Aborted
         ),
         CodingAttemptStatus::AmendmentApplyFailed => matches!(
             next,
