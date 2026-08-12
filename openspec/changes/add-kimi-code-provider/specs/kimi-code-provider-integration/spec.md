@@ -98,7 +98,7 @@
 
 ### Requirement: Kimi 复用既有授权与失败边界
 
-系统 SHALL 在 Kimi 启动或运行失败时直接报告失败，不在运行期自动切换到其他 Provider，且不实现 artifact retry 或 resume-stall fresh retry。对于 reviewer，系统仅在首轮结构化输出包含 recoverable JSON、且错误仅为结束标签/nonce 包装缺陷时，允许 Kimi 在同一会话进行最多一次 structured-output repair；repair 后 JSON 必须与首轮 recoverable JSON 逐值相等并重新通过原始 nonce 严格校验。Pi SHALL 继续排除 review repair。任何不满足该条件、repair 失败、JSON 变化或仍然格式错误的情况 SHALL fail-closed，进入人工确认，且不得将未可信的可读文本作为 author 自动返修依据。系统 SHALL 在 task-run 所有入口（HTTP 调度、RoutingProviderAdapter、节点契约、step runner）显式拒绝 Kimi，返回稳定错误，不使用 `unreachable!`。
+系统 SHALL 在 Kimi 启动或运行失败时直接报告失败，不在运行期自动切换到其他 Provider，且不实现 artifact retry 或 resume-stall fresh retry。对于 reviewer，系统仅在首轮结构化输出包含 recoverable JSON、且错误仅为结束标签/nonce 包装缺陷时，允许 Kimi 在同一会话进行最多一次 structured-output repair；repair 后 JSON 必须与首轮 recoverable JSON 逐值相等并重新通过原始 nonce 严格校验。Pi SHALL 继续排除 review repair。任何不满足该条件、repair provider 启动/运行失败、JSON 变化或仍然格式错误的情况 SHALL fail-closed，进入人工确认，且不得将未可信的可读文本作为 author 自动返修依据。用户主动 Abort SHALL 保持既有 aborted 取消语义，不 retry、不 fallback、也不转人工 triage。系统 SHALL 在 task-run 所有入口（HTTP 调度、RoutingProviderAdapter、节点契约、step runner）显式拒绝 Kimi，返回稳定错误，不使用 `unreachable!`。
 
 #### Scenario: Kimi 启动或运行失败直接报告
 
@@ -119,11 +119,33 @@
 - **THEN** 系统不得接受输出，也不得再次 repair
 - **AND THEN** 系统保持 fail-closed 的人工确认状态，不把不可信 reviewer 可读文本作为 author 返修目标
 
-#### Scenario: 人工请求返修必须提供目标
+#### Scenario: 用户取消 reviewer repair 保持取消状态
 
-- **WHEN** 审核因无可信结构化 findings 而进入人工确认，用户选择请求修改但没有提供非空修改说明
+- **WHEN** Kimi reviewer 的 structured-output repair 正在执行且用户主动 Abort
+- **THEN** 系统保持既有 Aborted / PrepareContext 取消状态
+- **AND THEN** 系统不 retry、不 fallback 到 needs_human 或 user_triage_required
+
+#### Scenario: 无可信 findings 的人工请求返修必须提供人工来源目标
+
+- **WHEN** 审核因无可信结构化 findings 而进入人工确认，用户选择请求修改但没有提供 `source="human"` 的非空修改说明
 - **THEN** 系统保持人工确认状态并返回可操作错误
 - **AND THEN** 系统不得启动 author revision
+
+### Requirement: Work Item Plan 通用 Markdown 路径投影 validator schema
+
+系统 SHALL 让 Work Item Plan 的通用 Markdown author、artifact retry 与 delta/full revision prompt 投影唯一的 validator-derived artifact schema。该 contract 提供实际 validator 所需的 Markdown heading 与 `[TASK-*]` 示例；基准输出说明不得复制这些结构项。JSON Outline/Draft 主链 SHALL 使用其独立 JSON schema，且不得被要求输出 Markdown heading。
+
+#### Scenario: Work Item Plan Markdown revision 接收 canonical contract
+
+- **WHEN** 通用 Markdown Work Item Plan author、retry 或 revision prompt 被构建
+- **THEN** prompt 包含唯一一份 validator-derived schema contract 及 `[TASK-001]` 示例
+- **AND THEN** 基准 prose 不重复计划 heading 或任务 token 列表
+
+#### Scenario: Work Item Plan JSON Outline/Draft 不接收 Markdown heading 合同
+
+- **WHEN** Work ItemPlan Outline 或 Draft 的 JSON 主链 prompt 被构建
+- **THEN** 系统保留独立 JSON schema
+- **AND THEN** 不要求 JSON 输出 Markdown heading
 
 #### Scenario: task-run 误调度 Kimi 时返回稳定错误
 

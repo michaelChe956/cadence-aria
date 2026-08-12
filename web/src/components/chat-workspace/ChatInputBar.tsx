@@ -16,7 +16,7 @@ interface ChatInputBarProps {
   workItemPlanArtifact?: WorkItemPlanArtifactPayload | null;
   onSendContextNote: (content: string) => void;
   onStartGeneration: () => void;
-  onSendHumanDecision: (content: string) => void;
+  onSendHumanDecision: (payload: { description: string; source: "human" }) => void;
   onAuthorDecision?: (decision: "accept" | "reject") => void;
   onSelectWorkItemGenerationMode?: (mode: WorkItemGenerationMode) => void;
   onRequestOutlineRevision?: () => void;
@@ -77,7 +77,7 @@ export function ChatInputBar({
     if (isHumanConfirm) {
       useWorkspaceStore.getState().resolveGateEntry("request-change");
       appendOptimisticEntry("human_decision", trimmedInput);
-      onSendHumanDecision(trimmedInput);
+      onSendHumanDecision({ description: trimmedInput, source: "human" });
     } else {
       appendOptimisticEntry("context_note", trimmedInput);
       onSendContextNote(trimmedInput);

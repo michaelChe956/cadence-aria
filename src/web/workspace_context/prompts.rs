@@ -149,7 +149,7 @@ pub(super) fn output_schema_for(workspace_type: &WorkspaceType) -> String {
                 .to_string()
         }
         WorkspaceType::WorkItemPlan => {
-            "Markdown Work Item Plan 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item Plan 一级标题；内容必须包含计划范围、任务拆分（[TASK-001]）、依赖图、验证计划、执行顺序、风险与追踪关系；每个任务必须显式写出并绑定来源 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001。拆分目标是在单个 Claude Code 或 Codex 会话可完成的前提下最少拆分。每个任务必须最大内聚，优先合并目标一致、范围重叠且可在同一会话闭环的工作；不超过 40k 属正常范围，40001..=50000 需经 Reviewer 判断，超过 50k 必须继续拆分。"
+            "Markdown Work Item Plan 必须用 ```artifact fenced block 包裹，且 fenced block 内第一行必须是 Work Item Plan 一级标题；每个任务必须显式绑定来源 Story/Design source ids，例如 Story Spec story_spec_0001、Design Spec design_spec_0001。拆分目标是在单个 Claude Code 或 Codex 会话可完成的前提下最少拆分。每个任务必须最大内聚，优先合并目标一致、范围重叠且可在同一会话闭环的工作；不超过 40k 属正常范围，40001..=50000 需经 Reviewer 判断，超过 50k 必须继续拆分。下方 parser schema 是唯一的 Markdown 结构、heading、稳定 ID 与追踪合同。"
                 .to_string()
         }
     };

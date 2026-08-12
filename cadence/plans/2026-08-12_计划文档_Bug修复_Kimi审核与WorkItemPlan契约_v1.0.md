@@ -14,8 +14,8 @@
 - 不修改、删除或回写 `.aria` 中的历史 workspace/timeline 数据，也不调用真实 Provider。
 - 保留 `parse_structured_output` 的严格 nonce 校验；不得接受裸 `</ARIA_STRUCTURED_OUTPUT>`，不得降低跨请求防串包保护。
 - Kimi repair 最多一次，且只接受 `missing_end_tag`、`missing_end_nonce`、`nonce_mismatch` 三类、具有 recoverable JSON 的错误；repair JSON 必须和首轮 JSON 逐值相等。Pi 继续排除 review repair；Kimi artifact retry 继续排除。
-- repair 失败、JSON 改变或仍不可解析必须 fail-closed 到 `needs_human` / `user_triage_required`；无可信 reviewer finding 且用户未提交非空修改说明时，不得启动 author revision。
-- Work Item Plan schema 必须从 `artifact_constraint_spec_for` 投影，包含固定二级 heading `计划范围`、`任务拆分`、`依赖图`、`验证计划`、`执行顺序`、`风险`、`追踪关系`，以及 `[TASK-001]` 示例；不维护第二套 heading 列表。
+- repair provider 启动/运行失败、JSON 改变或仍不可解析必须 fail-closed 到 `needs_human` / `user_triage_required`；用户主动 Abort 保持既有 aborted/PrepareContext 取消语义，不 retry、不 fallback。无可信 reviewer finding 时仅 `source="human"` 的非空修改说明可启动 author revision。
+- 通用 Markdown Work Item Plan author/retry/delta-full revision schema 必须从 `artifact_constraint_spec_for` 投影，提供 validator-required Markdown heading 与 `[TASK-001]` 示例；JSON Outline/Draft 主链由独立 JSON schema 约束，不要求注入 Markdown heading。
 - 共享 reviewer 链路至少覆盖 Story、Design、Work Item、Work Item Plan；不得因本次修复回归前三者。
 - 遵循 TDD：先提交并运行失败的回归测试，再写最小实现；定向测试使用 `cargo test --locked --lib <过滤名>`，禁止给 Cargo 传 `-j 1`。
 - 每个任务独立原子提交；完成后不 push，除非用户另行要求。
@@ -35,7 +35,7 @@
 **Interfaces:**
 
 - Consumes: `ReviewCompletionError::is_repairable()`, `repair_payload_is_compatible`, `build_review_repair_input`, `ReviewGate::UserTriageRequired`, `HumanConfirmDecision::RequestChange`。
-- Produces: Kimi 可进入既有的一次 review repair 分支；无可信 fallback review 只能在携带非空人工说明时进入 `ReviewDecisionOutcome::StartRevision`。
+- Produces: Kimi 可进入既有的一次 review repair 分支；无可信 fallback review 只能在携带 `source="human"` 的非空人工说明时进入 `ReviewDecisionOutcome::StartRevision`；主动 Abort 保持既有取消语义。
 
 - [x] **Step 1: 写出 Kimi repair 的失败回归测试**
 
@@ -65,7 +65,7 @@
       .await
   ```
 
-  断言返回含“非空”与“修改说明”的错误，stage 仍为 `WorkspaceStage::HumanConfirm`，且没有 Active `TimelineNodeType::Revision`。再用 `{"description":"补充失败路径"}` 覆盖正向路径，断言仍能开始 revision，避免拒绝真实人工目标。
+  断言 `None`、`{"description":"补充失败路径"}` 与 `{"description":"补充失败路径","source":"review_findings"}` 均返回含 source 的错误，stage 仍为 `WorkspaceStage::HumanConfirm`，且没有 Active `TimelineNodeType::Revision`。再用 `{"description":"补充失败路径","source":"human"}` 覆盖正向路径，断言仍能开始 revision，避免拒绝真实人工目标；矩阵须覆盖 Story、Design、WorkItem 与 WorkItemPlan Outline。
 
 - [x] **Step 4: 运行测试，确认 RED**
 
@@ -81,7 +81,7 @@
 
   在 `provider_allows_review_repair` 中只排除 `ProviderName::Pi`，并把过期的“resume 未实证”注释改为说明 Kimi 仅复用现有的一次 JSON 等值 repair。不得改动 `ReviewCompletionError::is_repairable`、`repair_payload_is_compatible` 或 parser 的 nonce 规则；它们已经分别限定错误类别和 JSON 等值。
 
-  在 `handle_human_confirm` 的普通 `RequestChange` 分支，先规范化 `human_confirm_payload_description(payload)`。当最新 reviewer verdict 是 `ReviewGate::UserTriageRequired` 且没有可信 findings 时，若说明为空就立即返回错误；此检查必须发生在 `complete_active_node`、stage transition 和创建 Revision timeline node 之前。正常人工说明与现有 `UserConfirmAllowed` 路径保持行为不变。
+  在 `handle_human_confirm` 的普通 `RequestChange` 分支，先规范化 `human_confirm_payload_description(payload)` 与 payload source。当最新 reviewer verdict 是 `ReviewGate::UserTriageRequired` 且没有可信 findings 时，只有 `source="human"` 且说明非空才允许继续；此检查必须发生在 `complete_active_node`、stage transition 和创建 Revision timeline node 之前。正常人工说明与现有 `UserConfirmAllowed` 路径保持行为不变。
 
 - [x] **Step 6: 运行定向测试，确认 GREEN**
 
@@ -120,7 +120,7 @@
 **Interfaces:**
 
 - Consumes: `artifact_constraint_spec_for(&WorkspaceType)`, `author_artifact_schema_contract_for`, `build_artifact_retry_prompt`, `WorkspaceEngine::build_revision_delta_prompt`, `WorkspaceEngine::build_revision_full_prompt`。
-- Produces: 四种 Markdown workspace 均可获得 `[artifact_schema_contract]`，Work Item Plan prompt 含 parser 派生固定 heading 与 `[TASK-001]` 示例。
+- Produces: 四种通用 Markdown workspace 均可获得 `[artifact_schema_contract]`，Work Item Plan Markdown prompt 含 parser 派生 heading 与 `[TASK-001]` 示例；JSON Outline/Draft 主链不注入 Markdown heading。
 
 - [x] **Step 1: 写出 Work Item Plan schema 的失败回归测试**
 

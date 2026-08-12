@@ -250,6 +250,36 @@ fn work_item_plan_output_schema_requires_single_session_task_sizing() {
 }
 
 #[test]
+fn work_item_plan_output_schema_gets_its_required_headings_only_from_the_canonical_contract() {
+    let schema = output_schema_for(&WorkspaceType::WorkItemPlan);
+
+    for heading in [
+        "计划范围",
+        "任务拆分",
+        "依赖图",
+        "验证计划",
+        "执行顺序",
+        "风险",
+        "追踪关系",
+    ] {
+        assert!(
+            schema.contains(heading),
+            "canonical contract is missing `{heading}`: {schema}"
+        );
+        assert_eq!(
+            schema.matches(heading).count(),
+            1,
+            "`{heading}` must not be duplicated outside the canonical contract: {schema}"
+        );
+    }
+    assert_eq!(
+        schema.matches("[TASK-001]").count(),
+        1,
+        "task token example must come from the canonical contract only: {schema}"
+    );
+}
+
+#[test]
 fn output_schemas_require_visible_source_id_traceability() {
     let story = output_schema_for(&WorkspaceType::Story);
     assert!(story.contains("source id") || story.contains("source ids"));

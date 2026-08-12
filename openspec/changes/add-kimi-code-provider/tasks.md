@@ -23,8 +23,8 @@
 ## 5. image-create 与边界
 
 - [ ] 5.1 image-create 支持 Kimi：`image_create/models.rs` `From<ProviderName>` 加 Kimi 分支；前端 `web/src/api/types/image-create.ts` dropdown 加 Kimi；回归测试用脚本化 provider 跑通 Kimi 路径。
-- [x] 5.2 保持 `workspace_engine/provider_drive.rs` 的 Kimi artifact retry 排除；在 `workspace_engine/review/drive.rs` 为 Kimi 启用一次性 reviewer structured-output repair，限定 recoverable JSON + 结束标签/nonce 包装错误，repair 后 JSON 必须逐值等值且重新通过 nonce 严格校验；Pi 继续排除。任何失败继续 `needs_human`，并防止无可信 finding、无人工说明的 RequestChange 启动 author revision。回归覆盖 Story、Design、Work Item Plan。
-- [x] 5.3 将 Work Item Plan 纳入 `artifact_constraints.rs` 的 validator-derived author schema contract；generation、artifact retry 与 delta/full revision prompt 均须投影固定二级 heading 和 `[TASK-*]` 示例，且覆盖 Story、Design、Work Item、Work Item Plan 的回归矩阵。
+- [x] 5.2 保持 `workspace_engine/provider_drive.rs` 的 Kimi artifact retry 排除；在 `workspace_engine/review/drive.rs` 为 Kimi 启用一次性 reviewer structured-output repair，限定 recoverable JSON + 结束标签/nonce 包装错误，repair 后 JSON 必须逐值等值且重新通过 nonce 严格校验；Pi 继续排除。repair provider 启动/运行失败进入 `needs_human`；用户主动 Abort 保持既有 aborted 取消语义。无可信 finding 的 RequestChange 仅接受 `source="human"` 的非空人工说明。回归覆盖 Story、Design、Work Item、Work Item Plan。
+- [x] 5.3 将 Work Item Plan 的通用 Markdown author schema 纳入 `artifact_constraints.rs` 的 validator-derived contract；generation、artifact retry 与 delta/full revision prompt 均投影唯一的 validator-required Markdown heading 与 `[TASK-*]` 示例，且覆盖 Story、Design、Work Item、Work Item Plan 的回归矩阵。JSON Outline/Draft 主链保留独立 schema，不注入 Markdown heading。
 
 ## 6. 用户界面与运行可见性
 

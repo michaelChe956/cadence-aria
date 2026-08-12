@@ -348,6 +348,7 @@ describe("ChatWorkspacePage review decisions", () => {
       "request-change",
       expect.objectContaining({
         description: expect.stringContaining("建议补充说明"),
+        source: "review_findings",
       }),
     );
     const payload = vi.mocked(api.sendHumanConfirm).mock.calls[0][1] as {

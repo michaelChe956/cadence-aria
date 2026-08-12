@@ -245,10 +245,30 @@ async fn human_confirm_request_change_requires_context_after_untrusted_review() 
         node.node_type == TimelineNodeType::Revision && node.status == TimelineNodeStatus::Active
     }));
 
-    let outcome = engine
+    let error = engine
         .handle_human_confirm(
             HumanConfirmDecision::RequestChange,
             Some(serde_json::json!({"description": "补充失败路径"})),
+        )
+        .await
+        .expect_err("untrusted review must identify human-authored feedback");
+    assert!(error.contains("source"));
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+
+    let error = engine
+        .handle_human_confirm(
+            HumanConfirmDecision::RequestChange,
+            Some(serde_json::json!({"description": "补充失败路径", "source": "review_findings"})),
+        )
+        .await
+        .expect_err("review findings source is not trusted when findings are absent");
+    assert!(error.contains("source"));
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+
+    let outcome = engine
+        .handle_human_confirm(
+            HumanConfirmDecision::RequestChange,
+            Some(serde_json::json!({"description": "补充失败路径", "source": "human"})),
         )
         .await
         .expect("explicit human revision target may start revision");
@@ -364,10 +384,22 @@ async fn human_confirm_request_change_requires_context_for_untrusted_review_acro
             "{route_name} must not start a revision"
         );
 
+        for payload in [
+            serde_json::json!({"description": "补充失败路径"}),
+            serde_json::json!({"description": "补充失败路径", "source": "review_findings"}),
+        ] {
+            let error = engine
+                .handle_human_confirm(HumanConfirmDecision::RequestChange, Some(payload))
+                .await
+                .expect_err("untrusted review must require source=human for every workspace route");
+            assert!(error.contains("source"), "{route_name}");
+            assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm, "{route_name}");
+        }
+
         let outcome = engine
             .handle_human_confirm(
                 HumanConfirmDecision::RequestChange,
-                Some(serde_json::json!({"description": "补充失败路径"})),
+                Some(serde_json::json!({"description": "补充失败路径", "source": "human"})),
             )
             .await
             .expect("explicit human revision target must preserve the route");

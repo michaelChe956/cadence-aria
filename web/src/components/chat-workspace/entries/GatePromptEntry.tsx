@@ -3,7 +3,7 @@ import type { ChatEntry } from "../../../state/chat-entries";
 import { trustedReviewComments } from "../../../state/workspace-review-trust";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
-type HumanConfirmPayload = { description: string };
+type HumanConfirmPayload = { description: string; source: "human" | "review_findings" };
 type HumanConfirmDecision = "confirm" | "request-change" | "terminate";
 
 export function GatePromptEntry({
@@ -29,11 +29,7 @@ export function GatePromptEntry({
       : needsHuman
         ? "提交人工确认"
         : "确认产物";
-  const requestChangeLabel = canAdoptSuggestions
-    ? "采纳建议并返修"
-    : requiresTriage
-      ? "按 reviewer 意见返修"
-      : null;
+  const requestChangeLabel = canAdoptSuggestions ? "采纳建议并返修" : null;
   const isResolved = entry.resolved === true;
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
@@ -53,6 +49,11 @@ export function GatePromptEntry({
       <div className="space-y-3">
         <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
         {summary ? <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div> : null}
+        {requiresTriage && findings.length === 0 ? (
+          <div className="text-xs text-[var(--aria-ink-muted)]">
+            请在下方输入人工修改说明后发送返修。
+          </div>
+        ) : null}
         {isResolved ? (
           <ResolutionBadge resolution={entry.resolution} />
         ) : onDecision ? (
@@ -139,7 +140,7 @@ type ReviewFinding = {
 };
 
 function requestChangePayload(entry: ChatEntry): HumanConfirmPayload {
-  return { description: requestChangeDescription(entry) };
+  return { description: requestChangeDescription(entry), source: "review_findings" };
 }
 
 function requestChangeDescription(entry: ChatEntry) {

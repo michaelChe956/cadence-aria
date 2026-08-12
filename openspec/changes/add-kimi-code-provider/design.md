@@ -209,11 +209,11 @@ Supervised 下普通工具的 request_permission 选项含 AllowOnce/AllowAlways
 
 Kimi 继续排除 `workspace_engine/provider_drive.rs` 的 artifact retry 与任何 resume-stall fresh retry；失败不得切换 Provider，也不得无限重试。
 
-Kimi reviewer 在 `workspace_engine/review/drive.rs` 仅可复用既有的**一次性** structured-output repair，且仅限原始输出已经包含可解析 JSON、错误为 `missing_end_tag`、`missing_end_nonce` 或 `nonce_mismatch` 的包装缺陷。repair 输出必须重新通过完整 nonce sentinel 校验，并与首轮 recoverable JSON 值逐值完全一致；任何 JSON 变化、仍无法解析、启动/运行失败或取消都必须 fail-closed，进入 `needs_human` / `user_triage_required`。不得接受裸 `</ARIA_STRUCTURED_OUTPUT>`，不得弱化 nonce 防串包保护。Pi 继续排除 review repair。
+Kimi reviewer 在 `workspace_engine/review/drive.rs` 仅可复用既有的**一次性** structured-output repair，且仅限原始输出已经包含可解析 JSON、错误为 `missing_end_tag`、`missing_end_nonce` 或 `nonce_mismatch` 的包装缺陷。repair 输出必须重新通过完整 nonce sentinel 校验，并与首轮 recoverable JSON 值逐值完全一致；任何 JSON 变化、仍无法解析或 repair provider 启动/运行失败都必须 fail-closed，进入 `needs_human` / `user_triage_required`。用户主动 Abort 保持既有 `Aborted` / `PrepareContext` 取消语义：不 retry、不 fallback、也不转 `needs_human`。不得接受裸 `</ARIA_STRUCTURED_OUTPUT>`，不得弱化 nonce 防串包保护。Pi 继续排除 review repair。
 
-当 reviewer 没有可信的结构化 findings（包括上述 fail-closed fallback）时，系统不得将空的“需要人工确认”直接作为 author revision 的目标。用户若选择“请求修改”，必须提供非空的人工修改说明；否则保持人工确认状态。
+当 reviewer 没有可信的结构化 findings（包括上述 fail-closed fallback）时，系统不得将空的“需要人工确认”直接作为 author revision 的目标。用户若选择“请求修改”，必须提供 `source="human"` 的非空人工修改说明；否则保持人工确认状态。可信 findings 的快捷返修使用 `source="review_findings"`，而无 findings 的 triage UI 不得用摘要、comments 或 entry.content 合成 payload。
 
-Work Item Plan 的 author、artifact retry 与 revision prompt 必须和 Story、Design、Work Item 一样投影同一份 validator-derived artifact schema，明确固定二级 heading 与 `[TASK-*]` 示例，不维护手写的第二套 heading 列表。
+通用 Markdown Work Item Plan author、artifact retry 与 delta/full revision prompt 必须和 Story、Design、Work Item 一样投影同一份 validator-derived artifact schema，提供 validator-required Markdown heading 与 `[TASK-*]` 示例，不维护手写的第二套 heading 列表。JSON Outline/Draft 主链使用独立 JSON schema，不注入 Markdown headings。
 
 ### 4.4 image-create（支持）
 image-create 复用 streaming provider 会话，无需独立图像 API：
