@@ -118,9 +118,7 @@ where
         let _pending_request =
             PendingRequestGuard::register(Arc::clone(&self.pending), id.clone(), response_tx);
 
-        if let Err(error) = self.send(payload).await {
-            return Err(error);
-        }
+        self.send(payload).await?;
 
         let wait_for_response = async {
             if !discard_incoming {
