@@ -566,18 +566,15 @@ fn open_item_line_is_resolved(line: &str) -> bool {
         return true;
     }
 
-    let starts_with_empty_marker = compact.starts_with("无")
-        || compact.starts_with("暂无")
-        || compact.starts_with("none")
-        || compact.starts_with("na")
-        || compact.starts_with("notapplicable")
-        || compact.starts_with("noopenitems")
-        || compact.starts_with("noopenquestions");
+    let starts_with_empty_marker = open_item_empty_marker_remainder(&compact).is_some();
     let has_unresolved_cue = open_item_line_has_unresolved_cue(line);
     let has_resolved_cue = open_item_line_has_resolved_cue(line);
     if starts_with_empty_marker {
-        if open_item_line_is_upstream_derivation_note(&compact) {
-            return true;
+        if open_item_line_claims_upstream_derivation(&compact) {
+            return open_item_line_is_upstream_derivation_note(line);
+        }
+        if open_item_line_has_hard_unresolved_cue(line) {
+            return false;
         }
         return !has_unresolved_cue || has_resolved_cue;
     }
@@ -585,8 +582,53 @@ fn open_item_line_is_resolved(line: &str) -> bool {
     has_resolved_cue && !has_unresolved_cue
 }
 
-fn open_item_line_is_upstream_derivation_note(compact: &str) -> bool {
-    let Some(remainder) = [
+fn open_item_line_claims_upstream_derivation(compact: &str) -> bool {
+    let Some(remainder) = open_item_empty_marker_remainder(compact) else {
+        return false;
+    };
+
+    remainder.contains("上游issue") && remainder.contains("明示约束推导")
+}
+
+fn open_item_line_is_upstream_derivation_note(line: &str) -> bool {
+    let compact = compact_open_item_text(line);
+    let Some(remainder) = open_item_empty_marker_remainder(&compact) else {
+        return false;
+    };
+
+    let Some(raw_remainder) = open_item_empty_marker_raw_remainder(line) else {
+        return false;
+    };
+    let derives_from_upstream = open_item_remainder_has_strict_upstream_derivation(remainder);
+    let no_structured_interaction = remainder.contains("无需发起结构化交互")
+        || remainder.contains("不需要发起结构化交互")
+        || remainder.contains("未发起结构化交互确认");
+
+    derives_from_upstream
+        && no_structured_interaction
+        && !open_item_line_has_unresolved_cue(&raw_remainder)
+}
+
+fn open_item_remainder_has_strict_upstream_derivation(remainder: &str) -> bool {
+    [
+        "所有需求成功标准与验收口径均可由上游issue",
+        "全部需求成功标准与验收口径均可由上游issue",
+    ]
+    .iter()
+    .any(|positive_scope| {
+        remainder
+            .find(positive_scope)
+            .map(|start| {
+                let relation_tail = &remainder[start + positive_scope.len()..];
+                relation_tail.contains("的明示约束推导得出")
+                    || relation_tail.contains("的明示约束推导")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn open_item_empty_marker_remainder(compact: &str) -> Option<&str> {
+    [
         "无待确认项",
         "noopenquestions",
         "noopenitems",
@@ -597,28 +639,45 @@ fn open_item_line_is_upstream_derivation_note(compact: &str) -> bool {
         "na",
     ]
     .iter()
-    .find_map(|marker| compact.strip_prefix(marker)) else {
-        return false;
-    };
+    .find_map(|marker| compact.strip_prefix(marker))
+}
 
-    let derives_from_upstream =
-        remainder.contains("上游issue") && remainder.contains("明示约束推导");
-    let no_structured_interaction = remainder.contains("无需发起结构化交互")
-        || remainder.contains("不需要发起结构化交互")
-        || remainder.contains("未发起结构化交互确认");
+fn open_item_empty_marker_raw_remainder(line: &str) -> Option<String> {
+    let normalized = normalize_open_item_inline_markdown(line);
+    let trimmed = normalized.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    [
+        "无待确认项",
+        "no open questions",
+        "no open items",
+        "暂无",
+        "无",
+        "none",
+        "not applicable",
+        "n/a",
+        "na",
+    ]
+    .iter()
+    .find_map(|marker| {
+        lower
+            .starts_with(marker)
+            .then(|| trimmed[marker.len()..].to_string())
+    })
+}
 
-    derives_from_upstream
-        && no_structured_interaction
-        && !open_item_line_has_unresolved_cue(remainder)
+fn normalize_open_item_inline_markdown(text: &str) -> String {
+    text.replace("**", "").replace("__", "").replace('`', "")
 }
 
 fn compact_open_item_text(text: &str) -> String {
-    text.to_ascii_lowercase().replace(
-        [
-            ' ', '\t', '\r', '\n', '。', '.', '，', ',', '：', ':', '/', '-',
-        ],
-        "",
-    )
+    normalize_open_item_inline_markdown(text)
+        .to_ascii_lowercase()
+        .replace(
+            [
+                ' ', '\t', '\r', '\n', '。', '.', '，', '、', ',', '：', ':', '/', '-', '（', '）',
+            ],
+            "",
+        )
 }
 
 fn open_item_empty_marker_matches(compact: &str) -> bool {
@@ -635,7 +694,7 @@ fn open_item_empty_marker_matches(compact: &str) -> bool {
 }
 
 fn open_item_line_has_unresolved_cue(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
+    let lower = normalize_open_item_inline_markdown(line).to_ascii_lowercase();
     [
         "[open-",
         "open-",
@@ -645,6 +704,7 @@ fn open_item_line_has_unresolved_cue(line: &str) -> bool {
         "仍待",
         "尚待",
         "待定",
+        "未决",
         "未明确",
         "未确认",
         "tbd",
@@ -654,16 +714,34 @@ fn open_item_line_has_unresolved_cue(line: &str) -> bool {
     .any(|cue| lower.contains(cue))
 }
 
+fn open_item_line_has_hard_unresolved_cue(line: &str) -> bool {
+    let lower = normalize_open_item_inline_markdown(line).to_ascii_lowercase();
+    [
+        "[open-",
+        "open-",
+        "仍待确认",
+        "需确认",
+        "需要确认",
+        "尚待确认",
+        "tbd",
+        "todo",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+}
+
 fn open_item_line_has_resolved_cue(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
+    let normalized = normalize_open_item_inline_markdown(line);
+    let lower = normalized.to_ascii_lowercase();
     line.contains("已通过结构化交互确认")
         || line.contains("已通过 AskUserQuestion")
         || lower.contains("已通过askuserquestion")
-        || line.contains("已确认")
-        || line.contains("均已确认")
-        || line.contains("非待确认项")
-        || line.contains("非未决项")
-        || (line.contains("不属于") && (line.contains("待确认项") || line.contains("未决项")))
+        || normalized.contains("已确认")
+        || normalized.contains("均已确认")
+        || normalized.contains("非待确认项")
+        || normalized.contains("非未决项")
+        || (normalized.contains("不属于")
+            && (normalized.contains("待确认项") || normalized.contains("未决项")))
         || lower.contains("not an open item")
 }
 
