@@ -187,6 +187,7 @@ fn initial_author_prompts_render_parser_derived_schema() {
         WorkspaceType::Story,
         WorkspaceType::Design,
         WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
     ] {
         let (_tmp, store) = setup();
         let (event_tx, _event_rx) = mpsc::channel(8);
@@ -220,6 +221,12 @@ fn initial_author_prompts_render_parser_derived_schema() {
                 "{workspace_type:?} author prompt must include required parser label `{label}`: {prompt}"
             );
         }
+        if workspace_type == WorkspaceType::WorkItemPlan {
+            assert!(prompt.contains("[TASK-001]"), "{prompt}");
+            for heading in &spec.required_headings {
+                assert!(prompt.contains(&format!("## {}", heading.label)), "{prompt}");
+            }
+        }
     }
 }
 
@@ -229,6 +236,7 @@ fn parser_derived_schema_contract_keeps_concrete_heading_and_id_examples() {
         WorkspaceType::Story,
         WorkspaceType::Design,
         WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
     ] {
         let schema = author_artifact_schema_contract_for(&workspace_type)
             .expect("Markdown workspace must have a schema contract");
@@ -252,6 +260,10 @@ fn parser_derived_schema_contract_keeps_concrete_heading_and_id_examples() {
                 "{workspace_type:?} schema must derive a concrete example for `{}`: {schema}",
                 id_rule.label
             );
+        }
+        if workspace_type == WorkspaceType::WorkItemPlan {
+            assert!(schema.contains("[artifact_schema_contract]"), "{schema}");
+            assert!(schema.contains("[TASK-001]"), "{schema}");
         }
     }
 }
@@ -286,6 +298,7 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
         WorkspaceType::Story,
         WorkspaceType::Design,
         WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
     ] {
         let (_tmp, store) = setup();
         let (event_tx, _event_rx) = mpsc::channel(8);
@@ -324,6 +337,15 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
                     prompt.contains(label),
                     "{workspace_type:?} {kind} prompt must include parser label `{label}`: {prompt}"
                 );
+            }
+            if workspace_type == WorkspaceType::WorkItemPlan {
+                assert!(prompt.contains("[TASK-001]"), "{workspace_type:?} {kind}: {prompt}");
+                for heading in &spec.required_headings {
+                    assert!(
+                        prompt.contains(&format!("## {}", heading.label)),
+                        "{workspace_type:?} {kind}: {prompt}"
+                    );
+                }
             }
         }
     }

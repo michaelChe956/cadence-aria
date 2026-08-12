@@ -365,8 +365,7 @@ fn append_markdown_artifact_schema_items(output: &mut String, spec: &ArtifactCon
 fn markdown_artifact_constraint_spec_for(
     workspace_type: &WorkspaceType,
 ) -> Option<ArtifactConstraintSpec> {
-    (!matches!(workspace_type, WorkspaceType::WorkItemPlan))
-        .then(|| artifact_constraint_spec_for(workspace_type))
+    Some(artifact_constraint_spec_for(workspace_type))
 }
 
 fn format_rule_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> String {
