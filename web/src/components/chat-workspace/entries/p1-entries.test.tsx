@@ -397,6 +397,8 @@ describe("chat workspace p1 entries", () => {
       metadata: {
         verdict: "needs_human",
         review_gate: "user_triage_required",
+        summary: "不可信摘要不得作为返修依据",
+        comments: "不可信 comments 不得作为返修依据",
         findings: [
           {
             severity: "must_fix",
@@ -418,6 +420,10 @@ describe("chat workspace p1 entries", () => {
         source: "review_findings",
       }),
     );
+    const payload = onDecision.mock.calls[0][1] as { description: string };
+    expect(payload.description).toContain("补充影响闭环");
+    expect(payload.description).not.toContain("不可信摘要不得作为返修依据");
+    expect(payload.description).not.toContain("不可信 comments 不得作为返修依据");
   });
 
   it("keeps failed structured-output comments display-only when triage requires human feedback", () => {

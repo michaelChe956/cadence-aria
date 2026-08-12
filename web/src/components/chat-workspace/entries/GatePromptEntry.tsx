@@ -149,7 +149,7 @@ function requestChangeDescription(entry: ChatEntry) {
   const comments = trustedReviewComments(metadata);
   const findings = findingsFromEntry(entry);
   const reviewGate = reviewGateFromEntry(entry);
-  if (reviewGate === "user_confirm_allowed" && findings.length > 0) {
+  if (findings.length > 0) {
     return formatFindingsForRevision(findings);
   }
 

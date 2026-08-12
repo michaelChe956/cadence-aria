@@ -39,3 +39,10 @@
 - I2：增强 Kimi repair Abort 回归，断言 repair 启动次数为 2、Abort 后回到 `PrepareContext`、不存在 `latest_review_verdict` fallback。该断言在现有生产行为下通过；除 I1 前端判断外没有生产逻辑改动。
 - RED：新增 triage+findings 前端用例后，`pnpm test -- src/components/chat-workspace/entries/p1-entries.test.tsx` 找不到“采纳建议并返修”，证明旧条件阻断入口。
 - GREEN：前端定向 Vitest（106 files / 816 tests）及 `cargo test --locked --lib repair_abort_closes_started_event_as_failed` 通过。
+
+## Scoped re-review payload 收敛
+
+- 根因：triage+findings 的快捷入口已显示，但 `requestChangeDescription` 仍只在 `user_confirm_allowed` 时输出纯 findings，导致 triage 路径把 summary 与 comments 混入 `source="review_findings"` payload。
+- RED：增强 triage+findings 测试后，payload 包含“不可信摘要不得作为返修依据”和“不可信 comments 不得作为返修依据”。
+- 修复：只要存在有效 findings，快捷 payload 均使用 `formatFindingsForRevision`；triage+空 findings 不产生快捷入口，继续使用人工输入路径。
+- GREEN：`cd web && pnpm test -- src/components/chat-workspace/entries/p1-entries.test.tsx`（106 files / 816 tests）、`pnpm tsc -b`、`cargo fmt --check`、`git diff --check` 通过。
