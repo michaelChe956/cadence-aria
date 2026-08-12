@@ -210,6 +210,77 @@ where
                 abort_kimi_session(&peer, &session_id, &event_tx).await;
                 return Err(aborted_session_error());
             }
+            response = &mut prompt => {
+                let response = match response {
+                    Ok(response) => response,
+                    Err(error) => {
+                        let mut drained_incoming = false;
+                        while let Some(incoming) = peer.try_next_incoming().await {
+                            drained_incoming = true;
+                            match handle_incoming(
+                                &peer,
+                                incoming,
+                                &bridge,
+                                &event_tx,
+                                &cancel,
+                                &command_abort,
+                                &mut full_output,
+                                &mut tool_outputs,
+                                &mut completed_tools,
+                                &mut askuser_question_counts,
+                            ).await? {
+                                IncomingDisposition::Progress | IncomingDisposition::NotProgress => {}
+                                IncomingDisposition::RestartPrompt(free_text) => {
+                                    prompt.set(peer.request_with_timeout(
+                                        session_prompt_request(&session_id, &free_text, next_prompt_id),
+                                        deadline.saturating_duration_since(Instant::now()),
+                                    ));
+                                    next_prompt_id += 1;
+                                    idle_deadline = Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                                }
+                                IncomingDisposition::Abort => {
+                                    abort_kimi_session(&peer, &session_id, &event_tx).await;
+                                    return Err(aborted_session_error());
+                                }
+                            }
+                        }
+                        if drained_incoming {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                };
+                ensure_response_success(&response, "session/prompt")?;
+                // JsonRpcPeer has already delivered this response but can still have earlier
+                // session/update notifications buffered. Drain those updates before terminality.
+                while let Some(incoming) = peer.try_next_incoming().await {
+                    let _ = handle_incoming(
+                        &peer,
+                        incoming,
+                        &bridge,
+                        &event_tx,
+                        &cancel,
+                        &command_abort,
+                        &mut full_output,
+                        &mut tool_outputs,
+                        &mut completed_tools,
+                        &mut askuser_question_counts,
+                    ).await?;
+                }
+                match parse_message(&json!({"jsonrpc":"2.0","id":3,"result":response})) {
+                    Parsed::PromptResult(KimiPromptResult::StopReason(reason)) if reason == "end_turn" => {
+                        let completion = ProviderCompletion::from_output(full_output, input.structured_output_contract.as_ref(), Some(session_id));
+                        let _ = event_tx.send(ProviderEvent::StatusChanged(ProviderStatus::Completed)).await;
+                        let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
+                        return Ok(());
+                    }
+                    Parsed::PromptResult(KimiPromptResult::StopReason(reason)) => {
+                        return Err(provider_error(format!("Kimi prompt stopped with reason {reason}")));
+                    }
+                    Parsed::PromptResult(KimiPromptResult::Error(message)) => return Err(provider_error(message)),
+                    _ => return Err(provider_error("Kimi ACP prompt returned an invalid response")),
+                }
+            }
             incoming = peer.next_incoming() => {
                 let Some(incoming) = incoming else {
                     return Err(provider_error("Kimi ACP stream ended before prompt completion"));
@@ -242,39 +313,6 @@ where
                         abort_kimi_session(&peer, &session_id, &event_tx).await;
                         return Err(aborted_session_error());
                     }
-                }
-            }
-            response = &mut prompt => {
-                let response = response?;
-                ensure_response_success(&response, "session/prompt")?;
-                // JsonRpcPeer has already delivered this response but can still have earlier
-                // session/update notifications buffered. Drain those updates before terminality.
-                while let Some(incoming) = peer.try_next_incoming().await {
-                    let _ = handle_incoming(
-                        &peer,
-                        incoming,
-                        &bridge,
-                        &event_tx,
-                        &cancel,
-                        &command_abort,
-                        &mut full_output,
-                        &mut tool_outputs,
-                        &mut completed_tools,
-                        &mut askuser_question_counts,
-                    ).await?;
-                }
-                match parse_message(&json!({"jsonrpc":"2.0","id":3,"result":response})) {
-                    Parsed::PromptResult(KimiPromptResult::StopReason(reason)) if reason == "end_turn" => {
-                        let completion = ProviderCompletion::from_output(full_output, input.structured_output_contract.as_ref(), Some(session_id));
-                        let _ = event_tx.send(ProviderEvent::StatusChanged(ProviderStatus::Completed)).await;
-                        let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
-                        return Ok(());
-                    }
-                    Parsed::PromptResult(KimiPromptResult::StopReason(reason)) => {
-                        return Err(provider_error(format!("Kimi prompt stopped with reason {reason}")));
-                    }
-                    Parsed::PromptResult(KimiPromptResult::Error(message)) => return Err(provider_error(message)),
-                    _ => return Err(provider_error("Kimi ACP prompt returned an invalid response")),
                 }
             }
         }

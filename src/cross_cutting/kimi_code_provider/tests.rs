@@ -676,6 +676,60 @@ mod session_tests {
     }
 
     #[tokio::test]
+    async fn prompt_response_wins_when_reader_closes_after_terminal_response() {
+        let (peer, server) = test_peer();
+        let (_commands, mut events, run) = direct_session_events(peer, input(None, 10)).await;
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            let initialize = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            })).await;
+            let _initialized = read_request(&mut reader).await;
+            let new = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"terminal_response"}
+            })).await;
+            let prompt = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":"terminal_response","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"complete"}}}
+            })).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
+            })).await;
+        });
+
+        let events = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut received = Vec::new();
+            loop {
+                let Some(event) = events.recv().await else {
+                    return received;
+                };
+                let terminal = matches!(event, ProviderEvent::Completed(_) | ProviderEvent::Failed { .. });
+                received.push(event);
+                if terminal {
+                    return received;
+                }
+            }
+        })
+        .await
+        .expect("terminal response must complete before reader closure");
+        let completion = events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::Completed(completion) => Some(completion),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("completion after terminal response; events: {events:?}"));
+        assert_eq!(completion.full_output, "complete");
+        assert!(run.await.expect("run join").is_ok());
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
     async fn resume_load_failure_never_falls_back_to_new_or_prompt() {
         let provider = KimiCodeProvider::new(fixture_command("kimi_acp_load_failure_fixture.sh"));
         let mut session = provider
