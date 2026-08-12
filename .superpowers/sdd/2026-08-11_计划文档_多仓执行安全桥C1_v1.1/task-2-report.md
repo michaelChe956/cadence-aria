@@ -77,3 +77,27 @@
 
 - 快照 factory 的错误目前映射为既有 `product_store_error`，未引入或改变稳定错误码；更细的 snapshot admission 稳定码属于后续 Task 6/16 范围。
 - `.pi/subagents/` 及 `cadence/notes/` 下已有未跟踪文件不属于本任务，未暂存或提交。
+
+## Fix round 2（2026-08-12）：Completed journal 幂等重放复用冻结快照
+
+### 审查发现与根因
+
+- **Important**：round 1 仅对未完成 journal 复用 `journal.attempt.target_snapshot`。journal 已进入 `Completed` 时，handler 仍会重新调用 snapshot factory；新快照的 `captured_at` 发生漂移，而 `prepare_group_initialization` 保持对快照的全等校验，因此完成后的幂等 POST 被拒绝为 `coding_group_attempt_incomplete`。
+
+### 修复
+
+- `create_group_coding_attempt` 现在只在没有 journal 时调用 factory；只要存在 journal（包括 `Completed`），即复用其 `attempt.target_snapshot` 作为 initialization input。
+- 未更改 `journal_matches_request` 的完整快照全等断言，也未改变 Legacy 路径：不存在 legacy journal 时仍由 factory 路径返回 `None`；存在 journal 时按其已持久化值重放。
+- 扩展既有 Logical group 初始化重放回归：journal 完成后再次 POST 必须返回 `200 OK` 和原 attempt ID；现有完整快照相等断言同时证明 `captured_at` 保持原值。
+
+### 验证
+
+| 命令 | 结果 | 摘要 |
+|---|---|---|
+| `cargo test --locked --test it_web logical_group_initialization_replay_reuses_journal_target_snapshot -- --nocapture` | 通过 | 1/1；覆盖 Prepared、AttemptPersisted 重放和其完成后再次幂等重放，快照完整保持不变。 |
+| `cargo test --locked --lib group_initialization` | 通过 | 0 个名称匹配的单测；lib 测试二进制编译并成功运行。 |
+| `cargo test --locked --test it_web` | 通过 | 335 passed、12 ignored、0 failed。 |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | 通过 | 无 warning。 |
+| `cargo fmt --check` | 通过 | 无格式差异。 |
+
+全程未使用 `-j 1`。

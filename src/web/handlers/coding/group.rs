@@ -79,14 +79,12 @@ pub async fn create_group_coding_attempt(
             "repository path must point to a git work tree",
         ));
     }
-    // 未完成 journal 是本次初始化的权威重放输入：快照在 Prepared 时已冻结，
+    // 已存在 journal 是本次初始化的权威重放输入：快照在 Prepared 时已冻结，
     // 不能重新 capture（captured_at 会变化）。仍由 journal_matches_request 对此值作
     // 全等校验，确保后续持久化的 attempt 与 journal 一致。
     let target_snapshot = match pending_journal.as_ref() {
-        Some(journal) if journal.phase != CodingGroupInitializationPhase::Completed => {
-            journal.attempt.target_snapshot.clone()
-        }
-        _ => group_target_snapshot(&app_paths, &project_id, &issue_id, &authoritative)?,
+        Some(journal) => journal.attempt.target_snapshot.clone(),
+        None => group_target_snapshot(&app_paths, &project_id, &issue_id, &authoritative)?,
     };
     let branch_name = format!("aria/issues/{issue_id}");
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());

@@ -164,7 +164,7 @@ async fn logical_group_initialization_replay_reuses_journal_target_snapshot() {
             WebRuntime::new_fake(root.path().to_path_buf()),
         ));
         let (retry_status, retry) =
-            request_json(restarted_app, Method::POST, create_path, json!({})).await;
+            request_json(restarted_app.clone(), Method::POST, create_path, json!({})).await;
         assert_eq!(retry_status, StatusCode::OK, "{checkpoint:?}: {retry}");
         assert_eq!(
             retry["attempt_id"], interrupted_journal.attempt.id,
@@ -179,6 +179,19 @@ async fn logical_group_initialization_replay_reuses_journal_target_snapshot() {
             CodingGroupInitializationPhase::Completed,
             "{checkpoint:?}"
         );
+
+        let (replay_status, replay) =
+            request_json(restarted_app, Method::POST, create_path, json!({})).await;
+        assert_eq!(
+            replay_status,
+            StatusCode::OK,
+            "{checkpoint:?}: completed journal replay: {replay}"
+        );
+        assert_eq!(
+            replay["attempt_id"], interrupted_journal.attempt.id,
+            "{checkpoint:?}: completed journal replay must return the original attempt"
+        );
+
         let persisted = store
             .get_attempt(
                 "project_0001",
