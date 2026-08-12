@@ -1,6 +1,8 @@
 use super::*;
 
-use crate::product::logical_codebase::RepositoryRoutingErrorCode;
+use crate::product::logical_codebase::{
+    LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct ProjectionQuery {
@@ -631,6 +633,72 @@ pub(crate) fn cleanup_issue_shared_worktree_if_no_attempts(
     Ok(())
 }
 
+/// 多仓 attempt 删除后的仓维 shared worktree 条件清理（REQ-COD-03 §4.2.4）。
+///
+/// 仅当同 logical repository 无其他活动 attempt 引用时才删 `shared-worktrees/{id}.json`
+/// + `.lock`（同仓其他 item 可能复用，不能一个 attempt 删就清）。
+fn cleanup_repo_shared_worktree_if_no_active_attempts(
+    coding_store: &CodingAttemptStore,
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    repository_id: LogicalRepositoryId,
+) -> ApiResult<()> {
+    let other_active_in_repo = coding_store
+        .list_attempts_for_issue(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .any(|attempt| {
+            attempt
+                .target_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.logical_repository_id == repository_id)
+                && attempt.status.is_active()
+        });
+    if other_active_in_repo {
+        return Ok(());
+    }
+    LifecycleStore::new(app_paths.clone())
+        .delete_repo_shared_worktree(project_id, issue_id, repository_id)
+        .map_err(product_store_api_error)?;
+    Ok(())
+}
+
+/// issue/group plan 删除路径的 shared worktree 清理（REQ-COD-03 §4.2.4 issue 删除）。
+///
+/// 按 routing 分流：多仓（Logical）枚举 `shared-worktrees/` 下所有
+/// `{repository_id}.json` 逐个清（含锁文件，经 `list_repo_shared_worktrees` +
+/// `delete_repo_shared_worktree`）；单仓（Legacy）走老逻辑清 `issue-shared-worktree.json`
+/// （不变，红线）。FailClosed 稳定码上抛，绝不静默回退物理仓库。
+pub(crate) fn cleanup_shared_worktree_by_routing(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<()> {
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
+        .map_err(product_store_api_error)?
+    {
+        RepositoryRouting::Legacy { .. } => lifecycle
+            .delete_issue_shared_worktree(project_id, issue_id)
+            .map_err(product_store_api_error)?,
+        RepositoryRouting::Logical { .. } => {
+            for repository_id in lifecycle
+                .list_repo_shared_worktrees(project_id, issue_id)
+                .map_err(product_store_api_error)?
+            {
+                lifecycle
+                    .delete_repo_shared_worktree(project_id, issue_id, repository_id)
+                    .map_err(product_store_api_error)?;
+            }
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            return Err(routing_api_error(code, &reason));
+        }
+    }
+    Ok(())
+}
+
 /// 完成 attempt 删除的尾部清理（worktree/handoff 清理之后）。
 ///
 /// 顺序（spec `harden-coding-attempt-deletion`）：
@@ -649,12 +717,21 @@ pub(crate) fn finalize_coding_attempt_deletion(
         .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
     purge_coding_attempt_lock_residue(app_paths, attempt, &attempt_work_item_ids);
-    cleanup_issue_shared_worktree_if_no_attempts(
-        coding_store,
-        app_paths,
-        &attempt.project_id,
-        &attempt.issue_id,
-    )?;
+    match &attempt.target_snapshot {
+        Some(snapshot) => cleanup_repo_shared_worktree_if_no_active_attempts(
+            coding_store,
+            app_paths,
+            &attempt.project_id,
+            &attempt.issue_id,
+            snapshot.logical_repository_id,
+        )?,
+        None => cleanup_issue_shared_worktree_if_no_attempts(
+            coding_store,
+            app_paths,
+            &attempt.project_id,
+            &attempt.issue_id,
+        )?,
+    }
     Ok(())
 }
 
@@ -974,4 +1051,7 @@ mod tests {
         assert_eq!(error.details["work_item_id"], "work_item_1");
         assert_eq!(error.details["attempt_id"], "attempt_1");
     }
+
+    // Task 11 删除调用链改造测试拆分到独立文件（large_file_guard 1200 行红线）。
+    include!("support_task11_tests.rs");
 }

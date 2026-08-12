@@ -489,6 +489,7 @@ mod group_review_prompts;
 mod group_review_reduction;
 mod group_review_runner;
 mod group_terminal;
+mod handoffs_worktree_routing;
 mod internal_review_triage;
 mod parser_prompt;
 mod pi_rework_permission;

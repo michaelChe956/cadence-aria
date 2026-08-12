@@ -1,4 +1,7 @@
 use super::*;
+use crate::product::coding_attempt_store::admission::{
+    TARGET_SNAPSHOT_IDENTITY_DRIFTED, TARGET_SNAPSHOT_MISSING_FOR_LOGICAL,
+};
 use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryRouting};
 
 mod schema_v2;
@@ -65,7 +68,7 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
 ///
 /// REQ-COD-03（§4.2.3）：`Some(snapshot)` 走多仓仓维路径（三元键
 /// `(project, issue, logical repository)`）；`None + Legacy` 走单仓老路径（行为不变，红线）。
-enum IssueSharedWorktreeRoute {
+pub(crate) enum IssueSharedWorktreeRoute {
     /// 单仓老路径：`issue-shared-worktree.json`。
     Legacy,
     /// 多仓仓维路径：`shared-worktrees/{repository_id}.json`。
@@ -85,7 +88,7 @@ impl CodingWorkspaceEngine {
     ///
     /// 多仓分支在分流前执行迁移 preflight 断言（§4.2.6）：同 issue 下存在旧
     /// `issue-shared-worktree.json` → fail-closed `legacy_shared_worktree_present`。
-    fn route_issue_shared_worktree(
+    pub(crate) fn route_issue_shared_worktree(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<IssueSharedWorktreeRoute, CodingWorkspaceEngineError> {
@@ -102,10 +105,10 @@ impl CodingWorkspaceEngine {
         )? {
             RepositoryRouting::Legacy { .. } => Ok(IssueSharedWorktreeRoute::Legacy),
             RepositoryRouting::Logical { .. } => Err(CodingWorkspaceEngineError::Store(
-                ProductStoreError::Io("target_snapshot_missing_for_logical".to_string()),
+                ProductStoreError::Io(TARGET_SNAPSHOT_MISSING_FOR_LOGICAL.to_string()),
             )),
             RepositoryRouting::FailClosed { .. } => Err(CodingWorkspaceEngineError::Store(
-                ProductStoreError::Io("target_snapshot_identity_drifted".to_string()),
+                ProductStoreError::Io(TARGET_SNAPSHOT_IDENTITY_DRIFTED.to_string()),
             )),
         }
     }

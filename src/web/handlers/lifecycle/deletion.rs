@@ -233,10 +233,9 @@ async fn delete_schema_v2_work_item_plan_with_cleanup(
         .map_err(product_store_api_error)?;
     // 3. plan store drafts/compiles/outlines
     purge_work_item_plan_store_artifacts(app_paths, project_id, issue_id, plan_id)?;
-    // 4. issue shared worktree json + lock（Task 1）
-    store
-        .delete_issue_shared_worktree(project_id, issue_id)
-        .map_err(product_store_api_error)?;
+    // 4. issue shared worktree json + lock（Task 1）：多仓按 routing 枚举
+    //    `shared-worktrees/` 全清，单仓走老逻辑清 `issue-shared-worktree.json`。
+    cleanup_shared_worktree_by_routing(app_paths, project_id, issue_id)?;
     // 5. coding attempt 初始化残留 lock（attempt json 已被门禁确认不存在，
     //    残留的 arbitration / journal / attempt lock 一并清理）
     purge_attempt_lock_residue(app_paths, project_id, issue_id, plan_id, &work_item_ids)?;

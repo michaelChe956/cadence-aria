@@ -154,10 +154,21 @@ impl CodingWorkspaceEngine {
         let active_work_item_id = match current.scope {
             CodingAttemptScope::WorkItemGroup => {
                 self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
-                LifecycleStore::new(self.store.paths())
-                    .get_issue_shared_worktree(project_id, issue_id)?
-                    .and_then(|shared| shared.current_active_work_item_id)
-                    .unwrap_or_else(|| self.active_work_item_id_for_attempt(&current).to_string())
+                let lifecycle = LifecycleStore::new(self.store.paths());
+                match self.route_issue_shared_worktree(&current)? {
+                    IssueSharedWorktreeRoute::Legacy => lifecycle
+                        .get_issue_shared_worktree(project_id, issue_id)?
+                        .and_then(|shared| shared.current_active_work_item_id)
+                        .unwrap_or_else(|| {
+                            self.active_work_item_id_for_attempt(&current).to_string()
+                        }),
+                    IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
+                        .get_repo_shared_worktree(project_id, issue_id, repository_id)?
+                        .and_then(|shared| shared.current_active_work_item_id)
+                        .unwrap_or_else(|| {
+                            self.active_work_item_id_for_attempt(&current).to_string()
+                        }),
+                }
             }
             CodingAttemptScope::WorkItem => {
                 self.validate_attempt_issue_shared_worktree_lock_if_present(&current)?;
@@ -303,9 +314,16 @@ impl CodingWorkspaceEngine {
         match current.scope {
             CodingAttemptScope::WorkItemGroup => {
                 self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
-                let shared_active_work_item_id = LifecycleStore::new(self.store.paths())
-                    .get_issue_shared_worktree(project_id, issue_id)?
-                    .and_then(|shared| shared.current_active_work_item_id)
+                let lifecycle = LifecycleStore::new(self.store.paths());
+                let shared_active_work_item_id =
+                    match self.route_issue_shared_worktree(&current)? {
+                        IssueSharedWorktreeRoute::Legacy => lifecycle
+                            .get_issue_shared_worktree(project_id, issue_id)?
+                            .and_then(|shared| shared.current_active_work_item_id),
+                        IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
+                            .get_repo_shared_worktree(project_id, issue_id, repository_id)?
+                            .and_then(|shared| shared.current_active_work_item_id),
+                    }
                     .unwrap_or_else(|| active_work_item_id.clone());
                 self.ensure_issue_shared_worktree_clean(&current, &shared_active_work_item_id)
                     .await?;

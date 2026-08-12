@@ -29,8 +29,8 @@ pub struct AdmissionTicketRecord {
 
 const ADMISSION_TICKET_TTL: Duration = Duration::minutes(5);
 
-const TARGET_SNAPSHOT_MISSING_FOR_LOGICAL: &str = "target_snapshot_missing_for_logical";
-const TARGET_SNAPSHOT_IDENTITY_DRIFTED: &str = "target_snapshot_identity_drifted";
+pub(crate) const TARGET_SNAPSHOT_MISSING_FOR_LOGICAL: &str = "target_snapshot_missing_for_logical";
+pub(crate) const TARGET_SNAPSHOT_IDENTITY_DRIFTED: &str = "target_snapshot_identity_drifted";
 const TARGET_SNAPSHOT_POLICY_DRIFTED: &str = "target_snapshot_policy_drifted";
 const ADMISSION_TICKET_INVALID: &str = "admission_ticket_invalid";
 const ADMISSION_TICKET_EXPIRED: &str = "admission_ticket_expired";
