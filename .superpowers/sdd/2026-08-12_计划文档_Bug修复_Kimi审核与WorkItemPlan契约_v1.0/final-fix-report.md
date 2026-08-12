@@ -32,3 +32,10 @@
 - 复现：`outline_human_confirm_revision_is_recoverable_before_provider_spawn` 与 `work_item_plan_outline_human_confirm_change_uses_outline_revision` 都以缺少 `source` 的 payload 调用 `RequestChange`，因此命中无可信 findings 的新后端 guard，错误为“请提供 source=human 的非空修改说明”。
 - 修复：仅将两个测试夹具 payload 补为 `{"description": ..., "source": "human"}`；没有修改生产逻辑。
 - 验证：两个定向测试分别通过；`cargo test --locked --lib human_confirm_request_change_requires_context` 也通过；`cargo fmt --check` 与 `git diff --check` 通过。
+
+## 最终复审 Important 修复
+
+- I1：GatePromptEntry 原来错误地把可信 findings 的快捷返修限制在 `user_confirm_allowed`。现在只要存在有效 findings 就展示“采纳建议并返修”，仍发送 `source="review_findings"`；`user_triage_required` 且 findings 为空的人工输入提示与快捷按钮隐藏行为保持不变。
+- I2：增强 Kimi repair Abort 回归，断言 repair 启动次数为 2、Abort 后回到 `PrepareContext`、不存在 `latest_review_verdict` fallback。该断言在现有生产行为下通过；除 I1 前端判断外没有生产逻辑改动。
+- RED：新增 triage+findings 前端用例后，`pnpm test -- src/components/chat-workspace/entries/p1-entries.test.tsx` 找不到“采纳建议并返修”，证明旧条件阻断入口。
+- GREEN：前端定向 Vitest（106 files / 816 tests）及 `cargo test --locked --lib repair_abort_closes_started_event_as_failed` 通过。

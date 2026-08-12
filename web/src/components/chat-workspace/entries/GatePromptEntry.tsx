@@ -20,7 +20,7 @@ export function GatePromptEntry({
   const needsHuman = verdict === "needs_human";
   const requiresTriage = reviewGate === "user_triage_required";
   const allowsCurrentVersion = reviewGate === "user_confirm_allowed";
-  const canAdoptSuggestions = allowsCurrentVersion && findings.length > 0;
+  const canAdoptSuggestions = findings.length > 0;
   const confirmLabel =
     requiresTriage
       ? "确认当前版本"

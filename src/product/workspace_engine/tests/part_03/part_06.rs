@@ -541,11 +541,12 @@ async fn repair_abort_closes_started_event_as_failed() {
         Some("review-session-1".to_string()),
     );
     let starts = provider.starts.clone();
+    let abort_starts = starts.clone();
     let (_tmp, mut engine, mut rx, review_node_id) =
         queued_review_engine("sess_repair_terminal_abort").await;
     let (command_tx, command_rx) = mpsc::channel(4);
     let abort = tokio::spawn(async move {
-        while starts.load(Ordering::SeqCst) < 2 {
+        while abort_starts.load(Ordering::SeqCst) < 2 {
             tokio::task::yield_now().await;
         }
         command_tx.send(ProviderCommand::Abort).await.unwrap();
@@ -555,6 +556,10 @@ async fn repair_abort_closes_started_event_as_failed() {
         .drive_review_session(Arc::new(provider), command_rx)
         .await;
     abort.await.unwrap();
+
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+    assert!(engine.latest_review_verdict.is_none());
 
     assert_eq!(
         repair_event_statuses(&mut rx),
