@@ -576,10 +576,40 @@ fn open_item_line_is_resolved(line: &str) -> bool {
     let has_unresolved_cue = open_item_line_has_unresolved_cue(line);
     let has_resolved_cue = open_item_line_has_resolved_cue(line);
     if starts_with_empty_marker {
+        if open_item_line_is_upstream_derivation_note(&compact) {
+            return true;
+        }
         return !has_unresolved_cue || has_resolved_cue;
     }
 
     has_resolved_cue && !has_unresolved_cue
+}
+
+fn open_item_line_is_upstream_derivation_note(compact: &str) -> bool {
+    let Some(remainder) = [
+        "无待确认项",
+        "noopenquestions",
+        "noopenitems",
+        "暂无",
+        "无",
+        "none",
+        "notapplicable",
+        "na",
+    ]
+    .iter()
+    .find_map(|marker| compact.strip_prefix(marker)) else {
+        return false;
+    };
+
+    let derives_from_upstream =
+        remainder.contains("上游issue") && remainder.contains("明示约束推导");
+    let no_structured_interaction = remainder.contains("无需发起结构化交互")
+        || remainder.contains("不需要发起结构化交互")
+        || remainder.contains("未发起结构化交互确认");
+
+    derives_from_upstream
+        && no_structured_interaction
+        && !open_item_line_has_unresolved_cue(remainder)
 }
 
 fn compact_open_item_text(text: &str) -> String {

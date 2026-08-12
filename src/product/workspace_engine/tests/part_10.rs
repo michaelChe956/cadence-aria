@@ -164,6 +164,26 @@ fn story_artifact_accepts_resolved_open_items_with_confirmation_note() {
 }
 
 #[test]
+fn story_artifact_accepts_upstream_derivation_note_without_interaction() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无待确认项。所有需求、成功标准与验收口径均可由上游 Issue（issue_0001）的明示约束推导得出；未发起结构化交互确认。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(
+        report.passed,
+        "upstream derivation note should not be treated as an open item: {:?}",
+        report.blocking_reasons()
+    );
+}
+
+#[test]
 fn story_artifact_still_rejects_no_prefix_followed_by_real_open_item() {
     let report = validate_workspace_artifact_constraints(
         "# Aria Provider Setup Story Spec\n\n\
@@ -172,6 +192,29 @@ fn story_artifact_still_rejects_no_prefix_followed_by_real_open_item() {
          ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
          ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
          ## 待确认项\n无。Codex 的 npm 包名仍待确认。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(!report.passed);
+    let reasons = report.blocking_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("待确认项") && reason.contains("AskUserQuestion")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn story_artifact_rejects_derivation_note_with_real_open_item_appended() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无待确认项。所有需求、成功标准与验收口径均可由上游 Issue（issue_0001）的明示约束推导得出；未发起结构化交互确认。Codex 的 npm 包名仍待确认。\n\n\
          ## 非功能需求\n无。\n",
         &WorkspaceType::Story,
     );
