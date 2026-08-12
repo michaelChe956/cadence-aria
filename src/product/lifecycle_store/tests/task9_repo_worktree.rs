@@ -302,3 +302,227 @@ fn legacy_issue_shared_worktree_coexists_with_repo_shared_worktree() {
         "删除多仓记录不得影响单仓老记录"
     );
 }
+
+// === Task 9 fix round 1：bind / transfer / release_by_owner 锁状态机回归 ===
+
+/// bind：`repo_worktree_lease_` 前缀 lease 可绑定到 attempt，owner 转为 attempt id，
+/// active work item 不变，结果持久化。
+#[test]
+fn bind_repo_worktree_lock_to_attempt_transfers_lease_owner_to_attempt() {
+    let (_tmp, store) = setup();
+    store
+        .upsert_repo_shared_worktree(repo_worktree_input(API_MEMBER))
+        .expect("seed repo shared worktree");
+
+    let lease = store
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "work_item_0001",
+            "repo_worktree_lease_0001",
+        )
+        .expect("acquire lease");
+    assert!(lease.acquired);
+    assert_eq!(
+        lease.worktree.current_lock_owner_id.as_deref(),
+        Some("repo_worktree_lease_0001")
+    );
+
+    let bound = store
+        .bind_repo_worktree_lock_to_attempt(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "work_item_0001",
+            "coding_attempt_0001",
+        )
+        .expect("bind lease to attempt");
+    assert_eq!(
+        bound.current_lock_owner_id.as_deref(),
+        Some("coding_attempt_0001")
+    );
+    assert_eq!(
+        bound.current_active_work_item_id.as_deref(),
+        Some("work_item_0001"),
+        "bind 不得改变 active work item"
+    );
+
+    let reloaded = store
+        .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, API_MEMBER)
+        .expect("get")
+        .expect("record exists");
+    assert_eq!(
+        reloaded.current_lock_owner_id.as_deref(),
+        Some("coding_attempt_0001"),
+        "bind 的 owner 转换必须持久化"
+    );
+}
+
+/// bind 契约：非 `repo_worktree_lease_` 前缀的 owner 不能被绑定到 attempt。
+#[test]
+fn bind_repo_worktree_lock_rejects_non_lease_owner() {
+    let (_tmp, store) = setup();
+    store
+        .upsert_repo_shared_worktree(repo_worktree_input(API_MEMBER))
+        .expect("seed repo shared worktree");
+
+    store
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "work_item_0001",
+            "not_a_lease_prefix",
+        )
+        .expect("acquire lease with non-standard owner");
+
+    let error = store
+        .bind_repo_worktree_lock_to_attempt(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "work_item_0001",
+            "coding_attempt_0001",
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ProductStoreError::Conflict {
+                kind: "repo_worktree_lock_owner",
+                ..
+            }
+        ),
+        "非 repo_worktree_lease_ 前缀 owner 应拒绝 bind，实际: {error:?}"
+    );
+}
+
+/// transfer：active work item 从 current 转到 next，owner 不变，结果持久化。
+#[test]
+fn transfer_repo_worktree_lock_moves_active_work_item_and_keeps_owner() {
+    let (_tmp, store) = setup();
+    store
+        .upsert_repo_shared_worktree(repo_worktree_input(API_MEMBER))
+        .expect("seed repo shared worktree");
+
+    store
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "work_item_0001",
+            "repo_worktree_lease_0001",
+        )
+        .expect("acquire lease");
+
+    let transferred = store
+        .transfer_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "work_item_0001",
+            "work_item_0002",
+            "repo_worktree_lease_0001",
+        )
+        .expect("transfer lock");
+    assert_eq!(
+        transferred.current_active_work_item_id.as_deref(),
+        Some("work_item_0002")
+    );
+    assert_eq!(
+        transferred.current_lock_owner_id.as_deref(),
+        Some("repo_worktree_lease_0001"),
+        "transfer 不得改变 lock owner"
+    );
+    assert_eq!(
+        transferred.status,
+        crate::product::models::IssueSharedWorktreeStatus::Running
+    );
+
+    let reloaded = store
+        .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, API_MEMBER)
+        .expect("get")
+        .expect("record exists");
+    assert_eq!(
+        reloaded.current_active_work_item_id.as_deref(),
+        Some("work_item_0002"),
+        "transfer 的结果必须持久化"
+    );
+}
+
+/// release_by_owner：owner 不匹配时幂等 no-op（不释放他人持有的锁）；
+/// 正确 owner 释放清空；重复释放幂等。
+#[test]
+fn release_repo_worktree_lock_by_owner_is_idempotent_and_ignores_other_owners() {
+    let (_tmp, store) = setup();
+    store
+        .upsert_repo_shared_worktree(repo_worktree_input(API_MEMBER))
+        .expect("seed repo shared worktree");
+
+    store
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "work_item_0001",
+            "repo_worktree_lease_0001",
+        )
+        .expect("acquire lease");
+    store
+        .bind_repo_worktree_lock_to_attempt(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "work_item_0001",
+            "coding_attempt_0001",
+        )
+        .expect("bind to attempt");
+
+    // owner 不匹配：不释放，幂等返回当前记录（锁仍被 coding_attempt_0001 持有）。
+    let untouched = store
+        .release_repo_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "other_attempt",
+        )
+        .expect("release by non-owner must be a no-op");
+    assert_eq!(
+        untouched.current_lock_owner_id.as_deref(),
+        Some("coding_attempt_0001"),
+        "owner 不匹配不得释放他人持有的锁"
+    );
+    assert_eq!(
+        untouched.current_active_work_item_id.as_deref(),
+        Some("work_item_0001")
+    );
+
+    // 正确 owner：释放并清空。
+    let released = store
+        .release_repo_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "coding_attempt_0001",
+        )
+        .expect("release by owner");
+    assert_eq!(released.current_active_work_item_id, None);
+    assert_eq!(released.current_lock_owner_id, None);
+    assert_eq!(
+        released.status,
+        crate::product::models::IssueSharedWorktreeStatus::Ready
+    );
+
+    // 幂等：重复释放不报错，仍为空。
+    let again = store
+        .release_repo_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            API_MEMBER,
+            "coding_attempt_0001",
+        )
+        .expect("release again must be idempotent");
+    assert_eq!(again.current_active_work_item_id, None);
+    assert_eq!(again.current_lock_owner_id, None);
+}
