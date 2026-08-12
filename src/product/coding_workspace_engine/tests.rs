@@ -678,6 +678,52 @@ async fn group_attempt_records_base_head_as_first_unit_start_commit() {
 }
 
 #[tokio::test]
+async fn start_attempt_enters_running_through_admission_ticket() {
+    let root = tempdir().expect("tempdir");
+    let worktree = root.path().join("shared-worktree");
+    std::fs::create_dir_all(&worktree).expect("worktree dir");
+    init_test_git_repo(&worktree);
+    let base_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: base_head.clone(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree.clone()),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+        })
+        .expect("group attempt");
+    seed_group_attempt_fixture(&store, &attempt, true, false);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let updated = engine
+        .start_attempt("project_0001", "issue_0001", &attempt.id)
+        .await
+        .expect("start attempt through admission");
+
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.version, 1);
+    assert!(
+        updated.admission_ticket_consumed_at.is_some(),
+        "start_attempt 进入 Running 必经 admission ticket CAS"
+    );
+}
+
+#[tokio::test]
 async fn coding_plan_repair_partial_group_attempt_cannot_start_coding() {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));

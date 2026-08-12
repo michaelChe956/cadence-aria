@@ -3,7 +3,7 @@ use chrono::Utc;
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
 };
-use crate::product::json_store::{ProductStoreError, write_json};
+use crate::product::json_store::ProductStoreError;
 use crate::product::models::{AmendmentResumeMode, PlanAmendmentManifest};
 
 use super::locking::with_exclusive_lock;
@@ -70,11 +70,9 @@ impl super::CodingAttemptStore {
                     &current.id,
                 ));
             }
-            latest.status = if await_handoff {
-                CodingAttemptStatus::AwaitingPlanAmendment
-            } else {
-                CodingAttemptStatus::Running
-            };
+            if await_handoff {
+                latest.status = CodingAttemptStatus::AwaitingPlanAmendment;
+            }
             latest.stage = match manifest.resume_target.mode {
                 AmendmentResumeMode::Reexecute | AmendmentResumeMode::AwaitHandoff => {
                     CodingExecutionStage::Coding
@@ -85,9 +83,19 @@ impl super::CodingAttemptStore {
             latest.active_unit_id = Some(target.id.clone());
             latest.completed_at = None;
             latest.updated_at = Utc::now().to_rfc3339();
-            write_json(&path, &latest)?;
+            self.save_coding_attempt_with_status(&latest)?;
             Ok(latest)
-        })
+        })?;
+        if await_handoff {
+            return self.get_attempt(&current.project_id, &current.issue_id, &current.id);
+        }
+        // 恢复执行进入 Running 必经 admission：重新校验路由/快照/policy 签发 ticket，
+        // 再在 attempt 锁内消费 ticket 完成 CAS 转换。
+        self.admit_and_transition_attempt_to_executable(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+        )
     }
 }
 

@@ -121,7 +121,7 @@ fn update_attempt_non_status_fields_preserves_status_and_frozen_admission_fields
 }
 
 #[test]
-fn status_machine_allows_blocked_to_running_and_manual_recovery_only_to_abort() {
+fn status_machine_rejects_direct_blocked_to_running_and_manual_recovery_only_to_abort() {
     let (_tmp, store, attempt) = setup();
     let running = store
         .update_attempt_status(
@@ -139,15 +139,28 @@ fn status_machine_allows_blocked_to_running_and_manual_recovery_only_to_abort() 
             CodingAttemptStatus::Blocked,
         )
         .expect("block attempt");
+    // Blocked→Running 直达已删除：直接改状态必须被拒。
+    let rejected = store.update_attempt_status(
+        &blocked.project_id,
+        &blocked.issue_id,
+        &blocked.id,
+        CodingAttemptStatus::Running,
+    );
+    assert!(matches!(
+        rejected,
+        Err(ProductStoreError::Io(message))
+            if message.contains("invalid_coding_attempt_status_transition")
+    ));
+    // Blocked 只能重走 admission 进入 Running。
     let running = store
-        .update_attempt_status(
+        .admit_and_transition_attempt_to_executable(
             &blocked.project_id,
             &blocked.issue_id,
             &blocked.id,
-            CodingAttemptStatus::Running,
         )
-        .expect("reopen blocked attempt until Task 6/7 controlled transition is available");
+        .expect("reopen blocked attempt through admission");
     assert_eq!(running.status, CodingAttemptStatus::Running);
+    assert!(running.admission_ticket_consumed_at.is_some());
 
     store
         .write_coding_attempt_for_test(&CodingExecutionAttempt {

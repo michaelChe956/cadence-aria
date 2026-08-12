@@ -106,11 +106,10 @@ impl CodingWorkspaceEngine {
         let running = if current.status == CodingAttemptStatus::Running {
             current
         } else {
-            self.store.update_attempt_status(
+            self.store.admit_and_transition_attempt_to_executable(
                 &current.project_id,
                 &current.issue_id,
                 &current.id,
-                CodingAttemptStatus::Running,
             )?
         };
         let coding_attempt = self.store.update_attempt_stage(
@@ -355,11 +354,10 @@ impl CodingWorkspaceEngine {
         let running = if current.status == CodingAttemptStatus::Running {
             current.clone()
         } else {
-            self.store.update_attempt_status(
+            self.store.admit_and_transition_attempt_to_executable(
                 &current.project_id,
                 &current.issue_id,
                 &current.id,
-                CodingAttemptStatus::Running,
             )?
         };
         let coding_attempt = self.store.update_attempt_stage(
@@ -447,11 +445,10 @@ impl CodingWorkspaceEngine {
         let running = if current.status == CodingAttemptStatus::Running {
             current.clone()
         } else {
-            self.store.update_attempt_status(
+            self.store.admit_and_transition_attempt_to_executable(
                 &current.project_id,
                 &current.issue_id,
                 &current.id,
-                CodingAttemptStatus::Running,
             )?
         };
         let coding_attempt = self.store.update_attempt_stage(

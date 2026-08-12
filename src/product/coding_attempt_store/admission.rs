@@ -130,7 +130,11 @@ impl CodingAttemptStore {
             .map_err(admission_store_code)?;
         let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
         with_exclusive_lock(&path, || {
-            self.admit_attempt_for_execution_locked(&attempt.id)
+            self.admit_attempt_for_execution_locked(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )
         })
         .map_err(admission_store_code)
     }
@@ -150,7 +154,12 @@ impl CodingAttemptStore {
             .map_err(admission_store_code)?;
         let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
         with_exclusive_lock(&path, || {
-            self.transition_to_executable_locked(&attempt.id, ticket)
+            self.transition_to_executable_locked(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                ticket,
+            )
         })
         .map_err(admission_store_code)
     }
@@ -176,6 +185,9 @@ impl CodingAttemptStore {
                     "{ATTEMPT_AWAITING_MANUAL_RECOVERY}: {:?}",
                     attempt.status
                 )));
+            }
+            if attempt.status == CodingAttemptStatus::Running {
+                attempt.admission_ticket_consumed_at = None;
             }
             attempt.status = CodingAttemptStatus::AwaitingManualRecovery;
             attempt.version += 1;
@@ -221,15 +233,59 @@ impl CodingAttemptStore {
         .map_err(admission_store_code)
     }
 
+    /// 将 attempt 置于 Running 的唯一生产组合入口：先在 attempt 锁内重新校验
+    /// 路由/快照/policy 并签发 ticket，再于锁内消费 ticket 完成 CAS 转换，
+    /// 最后重载并返回权威 record。
+    ///
+    /// Created/WaitingForHuman/Blocked/ApplyingPlanAmendment/AmendmentApplyFailed
+    /// 进入 Running 必须经此入口（或等价的 admit+transition 序列）；调用方不得用
+    /// `update_attempt_status` 直接写 Running。
+    pub(crate) fn admit_and_transition_attempt_to_executable(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        // 直接调用 locked 版本以保留原始 ProductStoreError（稳定码不经过 StableCode 往返）；
+        // 两段锁顺序获取、不嵌套，无重入死锁风险。
+        let ticket = with_exclusive_lock(&path, || {
+            self.admit_attempt_for_execution_locked(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )
+        })?;
+        with_exclusive_lock(&path, || {
+            self.transition_to_executable_locked(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &ticket,
+            )
+        })?;
+        self.get_attempt(project_id, issue_id, attempt_id)
+    }
+
     fn admit_attempt_for_execution_locked(
         &self,
+        project_id: &str,
+        issue_id: &str,
         attempt_id: &str,
     ) -> Result<AdmissionTicketRecord, ProductStoreError> {
-        let attempt = self.get_attempt_by_id(attempt_id)?;
+        let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
         if attempt.status == CodingAttemptStatus::AwaitingManualRecovery {
             return Err(ProductStoreError::Io(
                 ATTEMPT_AWAITING_MANUAL_RECOVERY.to_string(),
             ));
+        }
+        if !super::attempt::valid_executable_admission_transition(&attempt.status) {
+            return Err(ProductStoreError::Io(format!(
+                "invalid_coding_attempt_status_transition: {:?} -> {:?}",
+                attempt.status,
+                CodingAttemptStatus::Running
+            )));
         }
 
         let routing =
@@ -283,10 +339,12 @@ impl CodingAttemptStore {
 
     fn transition_to_executable_locked(
         &self,
+        project_id: &str,
+        issue_id: &str,
         attempt_id: &str,
         ticket: &AdmissionTicketRecord,
     ) -> Result<(), ProductStoreError> {
-        let mut attempt = self.get_attempt_by_id(attempt_id)?;
+        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
         if attempt.status == CodingAttemptStatus::AwaitingManualRecovery {
             return Err(ProductStoreError::Io(
                 ATTEMPT_AWAITING_MANUAL_RECOVERY.to_string(),
@@ -297,7 +355,9 @@ impl CodingAttemptStore {
         if attempt.admission_ticket_consumed_at.is_some() {
             return Err(ProductStoreError::Io(ADMISSION_TICKET_CONSUMED.to_string()));
         }
-        let persisted: AdmissionTicketRecord = read_json(&ticket_path)?;
+        // 持久化凭证缺失（未签发或已成功消费后清理）时，出示的 ticket 一律按无效拒绝。
+        let persisted: AdmissionTicketRecord = read_json(&ticket_path)
+            .map_err(|_| ProductStoreError::Io(ADMISSION_TICKET_INVALID.to_string()))?;
         if persisted.attempt_id != ticket.attempt_id
             || persisted.attempt_id != attempt.id
             || persisted.attempt_version != ticket.attempt_version
@@ -315,10 +375,7 @@ impl CodingAttemptStore {
         }
         if persisted.attempt_version != attempt.version
             || attempt.status == CodingAttemptStatus::Running
-            || !super::attempt::valid_status_transition(
-                &attempt.status,
-                &CodingAttemptStatus::Running,
-            )
+            || !super::attempt::valid_executable_admission_transition(&attempt.status)
         {
             return Err(ProductStoreError::Io(ADMISSION_TICKET_INVALID.to_string()));
         }
@@ -924,6 +981,232 @@ mod tests {
                 .expect_err("policy drift"),
             StableCode::TargetSnapshotPolicyDrifted
         );
+    }
+
+    fn seed_attempt_status(
+        fixture: &Fixture,
+        status: CodingAttemptStatus,
+    ) -> CodingExecutionAttempt {
+        let mut attempt = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("attempt");
+        attempt.status = status;
+        attempt.admission_ticket_consumed_at = None;
+        fixture
+            .store
+            .write_coding_attempt_for_test(&attempt)
+            .expect("seed status");
+        attempt
+    }
+
+    #[test]
+    fn blocked_attempt_cannot_reach_running_through_direct_status_update() {
+        let fixture = legacy_fixture();
+        seed_attempt_status(&fixture, CodingAttemptStatus::Blocked);
+        let error = fixture
+            .store
+            .update_attempt_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &fixture.attempt.id,
+                CodingAttemptStatus::Running,
+            )
+            .expect_err("Blocked→Running 直达已删除，必须重走 admission");
+        assert!(
+            matches!(&error, ProductStoreError::Io(message)
+                if message.contains("invalid_coding_attempt_status_transition")),
+            "unexpected error: {error:?}"
+        );
+        let attempt = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("attempt");
+        assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
+    }
+
+    #[test]
+    fn blocked_attempt_re_enters_running_through_admission_cas() {
+        let fixture = legacy_fixture();
+        seed_attempt_status(&fixture, CodingAttemptStatus::Blocked);
+        let version_before = fixture.attempt.version;
+
+        let ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("Blocked 恢复必须重走 admission 校验");
+        fixture
+            .store
+            .transition_to_executable(&fixture.attempt.id, &ticket)
+            .expect("CAS 消费 ticket 进入 Running");
+
+        let attempt = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("running attempt");
+        assert_eq!(attempt.status, CodingAttemptStatus::Running);
+        assert_eq!(attempt.version, version_before + 1);
+        assert!(attempt.admission_ticket_consumed_at.is_some());
+    }
+
+    #[test]
+    fn paused_attempt_resume_cycle_consumes_fresh_admission_ticket() {
+        let fixture = legacy_fixture();
+        // 第一个 Running 会话：admit → transition。
+        let ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("first ticket");
+        fixture
+            .store
+            .transition_to_executable(&fixture.attempt.id, &ticket)
+            .expect("first session");
+
+        // 暂停：Running → WaitingForHuman 结束当前会话。
+        fixture
+            .store
+            .update_attempt_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &fixture.attempt.id,
+                CodingAttemptStatus::WaitingForHuman,
+            )
+            .expect("pause");
+
+        // 复跑：重新 admit 拿新 ticket 并经 CAS 回到 Running。
+        let resume_ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("resume requires a fresh admission");
+        fixture
+            .store
+            .transition_to_executable(&fixture.attempt.id, &resume_ticket)
+            .expect("resume through CAS");
+
+        let attempt = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("resumed attempt");
+        assert_eq!(attempt.status, CodingAttemptStatus::Running);
+        assert_eq!(attempt.version, 2);
+        assert!(attempt.admission_ticket_consumed_at.is_some());
+    }
+
+    #[test]
+    fn stale_ticket_replay_after_pause_is_rejected_by_version_cas() {
+        let fixture = legacy_fixture();
+        let first_ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("first ticket");
+        fixture
+            .store
+            .transition_to_executable(&fixture.attempt.id, &first_ticket)
+            .expect("first session");
+        fixture
+            .store
+            .update_attempt_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &fixture.attempt.id,
+                CodingAttemptStatus::Blocked,
+            )
+            .expect("pause");
+        let paused = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("paused attempt");
+        assert!(
+            paused.admission_ticket_consumed_at.is_none(),
+            "离开 Running 必须在同一次锁内结束 admission 会话"
+        );
+
+        // 暂停后重放上一会话的 ticket：version CAS 必须拒绝。
+        assert_eq!(
+            fixture
+                .store
+                .transition_to_executable(&fixture.attempt.id, &first_ticket)
+                .expect_err("stale ticket from a finished session"),
+            StableCode::AdmissionTicketInvalid
+        );
+        let attempt = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("attempt");
+        assert_eq!(attempt.status, CodingAttemptStatus::Blocked);
+    }
+
+    #[test]
+    fn max_auto_rework_update_after_admission_gap_preserves_running_cas_commit() {
+        let persisted = full_record_write_gap_preserves_admission_commit(|store, stale| {
+            store
+                .update_attempt_max_auto_rework(&stale.project_id, &stale.issue_id, &stale.id, 5)
+                .map(|_| ())
+        });
+        assert_eq!(persisted.status, CodingAttemptStatus::Running);
+        assert_eq!(persisted.version, 1);
+        assert!(persisted.admission_ticket_consumed_at.is_some());
+        assert_eq!(persisted.max_auto_rework, 5);
+    }
+
+    #[test]
+    fn combined_admission_entry_transitions_created_attempt_to_running() {
+        let fixture = legacy_fixture();
+        let attempt = fixture
+            .store
+            .admit_and_transition_attempt_to_executable(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("combined admission entry");
+        assert_eq!(attempt.status, CodingAttemptStatus::Running);
+        assert_eq!(attempt.version, 1);
+        assert!(attempt.admission_ticket_consumed_at.is_some());
+    }
+
+    #[test]
+    fn combined_admission_entry_rejects_attempt_that_is_already_running() {
+        let fixture = legacy_fixture();
+        fixture
+            .store
+            .admit_and_transition_attempt_to_executable(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("first entry");
+        let error = fixture
+            .store
+            .admit_and_transition_attempt_to_executable(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect_err("Running 中不得重复进入");
+        assert!(
+            matches!(&error, ProductStoreError::Io(message)
+                if message.contains("invalid_coding_attempt_status_transition")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn combined_admission_entry_fails_closed_for_logical_attempt_without_snapshot() {
+        let fixture = logical_fixture();
+        let error = fixture
+            .store
+            .admit_and_transition_attempt_to_executable(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect_err("logical 缺快照必须 fail-closed");
+        assert!(
+            matches!(error, ProductStoreError::Io(message) if message == TARGET_SNAPSHOT_MISSING_FOR_LOGICAL)
+        );
+        let attempt = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("attempt");
+        assert_eq!(attempt.status, CodingAttemptStatus::Created);
+        assert!(attempt.admission_ticket_consumed_at.is_none());
+    }
+
+    #[test]
+    fn combined_admission_entry_resumes_applying_plan_amendment_attempt() {
+        let fixture = legacy_fixture();
+        seed_attempt_status(&fixture, CodingAttemptStatus::ApplyingPlanAmendment);
+        let attempt = fixture
+            .store
+            .admit_and_transition_attempt_to_executable(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("amendment resume through admission");
+        assert_eq!(attempt.status, CodingAttemptStatus::Running);
+        assert!(attempt.admission_ticket_consumed_at.is_some());
     }
 
     fn legacy_fixture() -> Fixture {

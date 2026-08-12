@@ -381,6 +381,12 @@ impl super::CodingAttemptStore {
         Ok(attempts)
     }
 
+    /// 将 attempt 置为非可执行目标状态（终态/暂停态）。
+    ///
+    /// 进入 `Running`（可执行目标）不允许走本 API：生产路径必须经
+    /// `admit_and_transition_attempt_to_executable`（admit 拿 ticket → CAS 消费）。
+    /// 离开 `Running` 的转换会在同一次锁内清空 `admission_ticket_consumed_at`，
+    /// 因为 admission 票据按「Running 会话」单次消费，会话结束后必须允许重新 admission。
     pub fn update_attempt_status(
         &self,
         project_id: &str,
@@ -425,6 +431,11 @@ impl super::CodingAttemptStore {
                     | CodingAttemptStatus::Aborted
             ) {
                 attempt.completed_at = Some(now.clone());
+            }
+            if attempt.status == CodingAttemptStatus::Running
+                && status != CodingAttemptStatus::Running
+            {
+                attempt.admission_ticket_consumed_at = None;
             }
             attempt.status = status;
             attempt.updated_at = now;
@@ -621,6 +632,11 @@ impl super::CodingAttemptStore {
         })
     }
 
+    /// 更新 rework 自动上限，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn update_attempt_max_auto_rework(
         &self,
         project_id: &str,
@@ -630,11 +646,15 @@ impl super::CodingAttemptStore {
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         super::validate_max_auto_rework(max_auto_rework)?;
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.max_auto_rework = max_auto_rework;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.max_auto_rework = max_auto_rework;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
     /// 替换 provider 会话引用，只覆盖该 API 负责的字段。
@@ -720,9 +740,7 @@ pub(super) fn valid_status_transition(
         CodingAttemptStatus::Blocked => {
             matches!(
                 next,
-                CodingAttemptStatus::Running
-                    | CodingAttemptStatus::AwaitingPlanAmendment
-                    | CodingAttemptStatus::Aborted
+                CodingAttemptStatus::AwaitingPlanAmendment | CodingAttemptStatus::Aborted
             )
         }
         CodingAttemptStatus::AwaitingManualRecovery => {
@@ -746,6 +764,22 @@ pub(super) fn valid_status_transition(
         | CodingAttemptStatus::Failed
         | CodingAttemptStatus::Aborted => false,
     }
+}
+
+/// 经 admission CAS（`admit_attempt_for_execution` + `transition_to_executable`）进入
+/// `Running` 的合法源状态集。
+///
+/// `Blocked→Running` 已从 `valid_status_transition` 直达表中删除：Blocked 只能重走
+/// admission 校验（重新验证路由/快照/policy）并经 ticket CAS 进入 Running。
+pub(super) fn valid_executable_admission_transition(current: &CodingAttemptStatus) -> bool {
+    matches!(
+        current,
+        CodingAttemptStatus::Created
+            | CodingAttemptStatus::WaitingForHuman
+            | CodingAttemptStatus::Blocked
+            | CodingAttemptStatus::ApplyingPlanAmendment
+            | CodingAttemptStatus::AmendmentApplyFailed
+    )
 }
 
 fn valid_stage_transition(current: &CodingExecutionStage, next: &CodingExecutionStage) -> bool {

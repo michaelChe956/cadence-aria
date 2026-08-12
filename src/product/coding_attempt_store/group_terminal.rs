@@ -15,6 +15,10 @@ impl super::CodingAttemptStore {
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let (stored, _authoritative, units) = self.validate_group_attempt_structure(&attempt)?;
         attempt = stored;
+        // 离开 Running 的终态转换在同一次锁内结束当前 admission 会话。
+        if attempt.status == CodingAttemptStatus::Running {
+            attempt.admission_ticket_consumed_at = None;
+        }
         if status == CodingAttemptStatus::Completed
             && units
                 .iter()

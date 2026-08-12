@@ -884,6 +884,9 @@ fn reset_completed_application_to_unfinished_finalization(
         .get_attempt(&applied.project_id, &applied.issue_id, &applied.id)
         .unwrap();
     applying.status = CodingAttemptStatus::ApplyingPlanAmendment;
+    // 生产不变式：admission 票据只随 Running 会话消费，离开 Running 后标记必为空。
+    // 直接回写状态绕过了受控转换，这里补上会话标记清理以保持状态一致。
+    applying.admission_ticket_consumed_at = None;
     fixture
         .store
         .write_coding_attempt_for_test(&applying)

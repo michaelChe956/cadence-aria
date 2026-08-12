@@ -654,11 +654,10 @@ impl super::CodingAttemptStore {
         let current = self.validate_attempt_lineage(attempt)?;
         self.ensure_failed_review_recovery_write_allowed(&current)?;
         match current.status {
-            CodingAttemptStatus::Blocked => self.update_attempt_status(
+            CodingAttemptStatus::Blocked => self.admit_and_transition_attempt_to_executable(
                 &current.project_id,
                 &current.issue_id,
                 &current.id,
-                CodingAttemptStatus::Running,
             ),
             CodingAttemptStatus::Running => Ok(current),
             _ => Err(recovery_state_changed()),

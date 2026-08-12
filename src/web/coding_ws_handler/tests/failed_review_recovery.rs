@@ -502,11 +502,10 @@ async fn failed_code_review_recovery_journal_prefixes_converge_idempotently() {
         ) {
             fixture
                 .store
-                .update_attempt_status(
+                .admit_and_transition_attempt_to_executable(
                     &fixture.attempt.project_id,
                     &fixture.attempt.issue_id,
                     &fixture.attempt.id,
-                    CodingAttemptStatus::Running,
                 )
                 .expect("persist running attempt prefix");
             journal = fixture

@@ -66,12 +66,22 @@ impl CodingWorkspaceEngine {
             let mut updated =
                 self.store
                     .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+            let needs_execution_admission = updated.status != CodingAttemptStatus::Running;
             updated.current_work_item_id = Some(next.logical_work_item_id.clone());
             updated.active_unit_id = Some(next.id.clone());
             updated.stage = CodingExecutionStage::PrepareContext;
-            updated.status = CodingAttemptStatus::Running;
             updated.updated_at = Utc::now().to_rfc3339();
             self.store.update_attempt_non_status_fields(&updated)?;
+            let updated = if needs_execution_admission {
+                self.store.admit_and_transition_attempt_to_executable(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                )?
+            } else {
+                self.store
+                    .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            };
             let lifecycle = LifecycleStore::new(self.store.paths());
             if lifecycle
                 .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?

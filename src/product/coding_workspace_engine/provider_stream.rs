@@ -393,12 +393,12 @@ impl CodingWorkspaceEngine {
                                         &attempt.id,
                                     )?;
                                     if current.status == CodingAttemptStatus::WaitingForHuman {
-                                        self.store.update_attempt_status(
-                                            &attempt.project_id,
-                                            &attempt.issue_id,
-                                            &attempt.id,
-                                            CodingAttemptStatus::Running,
-                                        )?;
+                                        self.store
+                                            .admit_and_transition_attempt_to_executable(
+                                                &attempt.project_id,
+                                                &attempt.issue_id,
+                                                &attempt.id,
+                                            )?;
                                     }
                                     let _ = self
                                         .event_tx

@@ -133,12 +133,8 @@ impl CodingWorkspaceEngine {
         let running = if current.status == CodingAttemptStatus::Running {
             current
         } else {
-            self.store.update_attempt_status(
-                project_id,
-                issue_id,
-                attempt_id,
-                CodingAttemptStatus::Running,
-            )?
+            self.store
+                .admit_and_transition_attempt_to_executable(project_id, issue_id, attempt_id)?
         };
         if running.scope == CodingAttemptScope::WorkItemGroup && running.worktree_path.is_some() {
             let mut attempt = self.store.update_attempt_stage(

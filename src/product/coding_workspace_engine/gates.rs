@@ -744,11 +744,8 @@ impl CodingWorkspaceEngine {
                     self.store.create_context_note(&current, content)?;
                 }
                 let running = if current.status == CodingAttemptStatus::Blocked {
-                    self.store.update_attempt_status(
-                        project_id,
-                        issue_id,
-                        attempt_id,
-                        CodingAttemptStatus::Running,
+                    self.store.admit_and_transition_attempt_to_executable(
+                        project_id, issue_id, attempt_id,
                     )?
                 } else {
                     current
@@ -782,11 +779,8 @@ impl CodingWorkspaceEngine {
                     },
                 )?;
                 if current.status == CodingAttemptStatus::Blocked {
-                    self.store.update_attempt_status(
-                        project_id,
-                        issue_id,
-                        attempt_id,
-                        CodingAttemptStatus::Running,
+                    self.store.admit_and_transition_attempt_to_executable(
+                        project_id, issue_id, attempt_id,
                     )?
                 } else {
                     current
@@ -814,11 +808,10 @@ impl CodingWorkspaceEngine {
             current.status,
             CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman
         ) {
-            self.store.update_attempt_status(
+            self.store.admit_and_transition_attempt_to_executable(
                 &current.project_id,
                 &current.issue_id,
                 &current.id,
-                CodingAttemptStatus::Running,
             )?
         } else {
             current.clone()

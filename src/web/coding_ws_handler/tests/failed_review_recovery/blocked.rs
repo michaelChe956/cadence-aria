@@ -200,11 +200,10 @@ async fn blocked_provider_interrupted_recovery_prefixes_converge_idempotently() 
         ) {
             fixture
                 .store
-                .update_attempt_status(
+                .admit_and_transition_attempt_to_executable(
                     &fixture.attempt.project_id,
                     &fixture.attempt.issue_id,
                     &fixture.attempt.id,
-                    CodingAttemptStatus::Running,
                 )
                 .expect("persist blocked attempt-running prefix");
             journal = fixture
