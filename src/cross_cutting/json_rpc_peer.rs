@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -9,7 +9,35 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 
-type PendingResponses = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
+type PendingResponses = Arc<StdMutex<HashMap<String, oneshot::Sender<Value>>>>;
+
+struct PendingRequestGuard {
+    pending: PendingResponses,
+    id: String,
+}
+
+impl PendingRequestGuard {
+    fn register(
+        pending: PendingResponses,
+        id: String,
+        response_tx: oneshot::Sender<Value>,
+    ) -> Self {
+        pending
+            .lock()
+            .expect("pending response lock")
+            .insert(id.clone(), response_tx);
+        Self { pending, id }
+    }
+}
+
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .expect("pending response lock")
+            .remove(&self.id);
+    }
+}
 
 #[derive(Clone)]
 pub struct JsonRpcPeer<W> {
@@ -27,7 +55,7 @@ where
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
-        let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingResponses = Arc::new(StdMutex::new(HashMap::new()));
         let (incoming_tx, incoming_rx) = mpsc::channel(32);
 
         tokio::spawn(read_json_rpc_lines(
@@ -87,10 +115,10 @@ where
             .to_string();
         let id = ensure_request_id(&mut payload, &self.next_id)?;
         let (response_tx, mut response_rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), response_tx);
+        let _pending_request =
+            PendingRequestGuard::register(Arc::clone(&self.pending), id.clone(), response_tx);
 
         if let Err(error) = self.send(payload).await {
-            self.pending.lock().await.remove(&id);
             return Err(error);
         }
 
@@ -141,7 +169,6 @@ where
         match tokio::time::timeout(timeout, wait_for_response).await {
             Ok(response) => response,
             Err(_) => {
-                self.pending.lock().await.remove(&id);
                 let duration_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
                 Err(ProviderAdapterError::timeout_with_details(
                     format!("JSON-RPC request {method} timed out"),
@@ -200,7 +227,7 @@ async fn read_json_rpc_lines<R>(
 
         let pending_response =
             if let (true, Some(id)) = (is_response(&value), value.get("id").and_then(id_key)) {
-                pending.lock().await.remove(&id)
+                pending.lock().expect("pending response lock").remove(&id)
             } else {
                 None
             };
@@ -219,7 +246,7 @@ async fn read_json_rpc_lines<R>(
             break;
         }
     }
-    pending.lock().await.clear();
+    pending.lock().expect("pending response lock").clear();
 }
 
 fn ensure_request_id(
@@ -262,6 +289,7 @@ fn io_error(error: std::io::Error) -> ProviderAdapterError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -350,7 +378,49 @@ mod tests {
 
         let error = result.expect_err("request should time out");
         assert!(error.details.contains("turn/start"));
-        assert!(peer.pending.lock().await.is_empty());
+        assert!(peer.pending.lock().expect("pending response lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn json_rpc_peer_removes_pending_request_when_waiter_is_cancelled() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(client_io);
+        let peer = Arc::new(JsonRpcPeer::new(reader, writer));
+        let (request_received_tx, request_received_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            let (server_reader, _server_writer) = tokio::io::split(server_io);
+            let mut line = String::new();
+            let mut reader = tokio::io::BufReader::new(server_reader);
+            reader.read_line(&mut line).await.expect("read request");
+            request_received_tx.send(()).expect("request received");
+            finish_rx.await.expect("finish server");
+        });
+        let request_peer = Arc::clone(&peer);
+        let request_task = tokio::spawn(async move {
+            request_peer
+                .request_with_timeout(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {},
+                    }),
+                    Duration::from_secs(1),
+                )
+                .await
+        });
+
+        request_received_rx.await.expect("request registered");
+        request_task.abort();
+        assert!(request_task.await.expect_err("request task cancelled").is_cancelled());
+        assert!(
+            peer.pending.lock().expect("pending response lock").is_empty(),
+            "cancelling a request waiter must remove its pending response sender"
+        );
+        finish_tx.send(()).expect("finish server");
+        server_task.await.expect("server task");
     }
 
     #[tokio::test]
