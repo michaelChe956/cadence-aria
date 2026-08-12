@@ -450,9 +450,9 @@ async fn retry_does_not_reconcile_ambiguous_active_attempts() {
             max_auto_rework: first.max_auto_rework,
         })
         .expect("second attempt");
-    store
-        .update_attempt_non_status_fields(&first)
-        .expect("restore duplicate active attempt fixture");
+    // fixture 恢复第一个 attempt 的原始磁盘状态（含 Created status）以制造双 active
+    // 歧义：受控写 API 保留存储 status，无法表达该初始状态，直接播种。
+    crate::seed_coding_attempt_record(&store, &first);
     let lifecycle = LifecycleStore::new(app_paths);
     let lease_before = lifecycle
         .get_issue_shared_worktree("project_0001", "issue_0001")

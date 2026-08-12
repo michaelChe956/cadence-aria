@@ -186,3 +186,21 @@ mod web_work_item_plan_staged_flow;
 mod web_work_item_split_flow;
 #[path = "it_web/web_workspace_recovery_consistency.rs"]
 mod web_workspace_recovery_consistency;
+
+/// Fixture 初始状态播种：受控写 API 既不允许改 attempt 身份（id/issue），也不允许
+/// 直接写 status；fixture 沿 store 路径直接落盘初始 record（等价于 lib 测试的
+/// write_coding_attempt_for_test，仅用于集成测试初始状态，不代表生产写路径）。
+pub(crate) fn seed_coding_attempt_record(
+    store: &cadence_aria::product::coding_attempt_store::CodingAttemptStore,
+    attempt: &cadence_aria::product::coding_models::CodingExecutionAttempt,
+) {
+    cadence_aria::product::json_store::write_json(
+        &store
+            .paths()
+            .issue_root(&attempt.project_id, &attempt.issue_id)
+            .join("coding-attempts")
+            .join(format!("{}.json", attempt.id)),
+        attempt,
+    )
+    .expect("seed coding attempt record fixture");
+}

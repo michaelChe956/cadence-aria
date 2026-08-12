@@ -21,9 +21,8 @@ async fn scoped_coding_attempt_api_loads_exact_attempt_and_legacy_route_reports_
         .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("original attempt");
     duplicate.issue_id = "issue_0002".to_string();
-    store
-        .update_attempt_non_status_fields(&duplicate)
-        .expect("duplicate legacy scope");
+    // fixture 跨 issue 复制同一 attempt id：受控写 API 不允许改身份，直接播种。
+    crate::seed_coding_attempt_record(&store, &duplicate);
 
     let (scoped_status, scoped) = request_json(
         app.clone(),
@@ -129,9 +128,8 @@ async fn legacy_coding_attempt_api_loads_unique_valid_attempt() {
         .delete_attempt(&attempt.project_id, &attempt.issue_id, &generated_id)
         .expect("delete generated attempt");
     attempt.id = "coding_attempt_legacy".to_string();
-    store
-        .update_attempt_non_status_fields(&attempt)
-        .expect("save legacy attempt");
+    // fixture 重新键值：受控写 API 不允许改身份，直接播种。
+    crate::seed_coding_attempt_record(&store, &attempt);
 
     let (status, body) = request_json(
         app,

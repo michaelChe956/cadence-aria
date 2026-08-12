@@ -98,9 +98,8 @@ fn rewrite_as_legacy_coding_attempt_fixture(
         .delete_attempt(&attempt.project_id, &attempt.issue_id, &generated_id)
         .expect("delete generated attempt fixture");
     attempt.id = "coding_attempt_0001".to_string();
-    store
-        .update_attempt_non_status_fields(&attempt)
-        .expect("save legacy attempt fixture");
+    // 受控写 API 不允许改 attempt 身份；fixture 重新键值后直接播种初始 record。
+    crate::seed_coding_attempt_record(store, &attempt);
     attempt
 }
 
@@ -519,7 +518,8 @@ async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaust
         .expect("attempt");
     attempt.status = CodingAttemptStatus::Blocked;
     attempt.stage = CodingExecutionStage::CodeReview;
-    store.update_attempt_non_status_fields(&attempt).expect("blocked attempt");
+    // 受控写 API 不回写 status；fixture 直接播种带状态的初始 record。
+    crate::seed_coding_attempt_record(&store, &attempt);
 
     let failed_node = CodingTimelineNode {
         id: "coding_node_0009".to_string(),
