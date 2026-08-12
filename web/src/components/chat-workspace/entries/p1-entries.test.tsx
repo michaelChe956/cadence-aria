@@ -483,7 +483,7 @@ describe("chat workspace p1 entries", () => {
       content: "Outline 自动重跑后仍校验失败，已停止继续生成。",
       metadata: {
         gate_kind: "work_item_plan_context_blocker",
-        allowed_actions: ["provide_context", "terminate"],
+        allowed_actions: ["provide_context", "abort"],
       },
     });
 

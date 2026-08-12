@@ -578,7 +578,7 @@ describe("workspace ws store artifact payloads", () => {
     expect(gatePrompt?.metadata).toEqual(
       expect.objectContaining({
         gate_kind: "work_item_plan_context_blocker",
-        allowed_actions: ["provide_context", "terminate"],
+        allowed_actions: ["provide_context", "abort"],
       }),
     );
   });
