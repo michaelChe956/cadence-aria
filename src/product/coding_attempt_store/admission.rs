@@ -31,6 +31,7 @@ const ADMISSION_TICKET_TTL: Duration = Duration::minutes(5);
 
 pub(crate) const TARGET_SNAPSHOT_MISSING_FOR_LOGICAL: &str = "target_snapshot_missing_for_logical";
 pub(crate) const TARGET_SNAPSHOT_IDENTITY_DRIFTED: &str = "target_snapshot_identity_drifted";
+pub(crate) const MIXED_TARGET_GROUP_REJECTED: &str = "mixed_target_group_rejected";
 const TARGET_SNAPSHOT_POLICY_DRIFTED: &str = "target_snapshot_policy_drifted";
 const ADMISSION_TICKET_INVALID: &str = "admission_ticket_invalid";
 const ADMISSION_TICKET_EXPIRED: &str = "admission_ticket_expired";
@@ -44,6 +45,7 @@ pub enum StableCode {
     TargetSnapshotMissingForLogical,
     TargetSnapshotIdentityDrifted,
     TargetSnapshotPolicyDrifted,
+    MixedTargetGroupRejected,
     AdmissionTicketInvalid,
     AdmissionTicketExpired,
     AdmissionTicketConsumed,
@@ -58,6 +60,7 @@ impl StableCode {
             Self::TargetSnapshotMissingForLogical => TARGET_SNAPSHOT_MISSING_FOR_LOGICAL,
             Self::TargetSnapshotIdentityDrifted => TARGET_SNAPSHOT_IDENTITY_DRIFTED,
             Self::TargetSnapshotPolicyDrifted => TARGET_SNAPSHOT_POLICY_DRIFTED,
+            Self::MixedTargetGroupRejected => MIXED_TARGET_GROUP_REJECTED,
             Self::AdmissionTicketInvalid => ADMISSION_TICKET_INVALID,
             Self::AdmissionTicketExpired => ADMISSION_TICKET_EXPIRED,
             Self::AdmissionTicketConsumed => ADMISSION_TICKET_CONSUMED,

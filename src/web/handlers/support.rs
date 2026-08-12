@@ -413,6 +413,13 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ProductStoreError::NotFound { kind: "gate", .. } => {
             ApiError::runtime("gate_not_found", "gate not found", json!({}))
         }
+        ProductStoreError::Io(message) if message == "mixed_target_group_rejected" => {
+            ApiError::runtime(
+                "mixed_target_group_rejected",
+                "mixed-target group rejected",
+                json!({}),
+            )
+        }
         ProductStoreError::Io(message) if message == "workspace_session_ambiguous" => {
             ApiError::runtime(
                 "workspace_session_ambiguous",

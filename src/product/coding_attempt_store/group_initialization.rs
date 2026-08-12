@@ -8,8 +8,11 @@ use crate::product::coding_models::{
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::logical_codebase::RepositoryRouting;
 
-use super::group_validation::AuthoritativeCodingUnitBinding;
+use super::group_validation::{
+    AuthoritativeCodingUnitBinding, mixed_target_group_rejected, validate_group_single_target,
+};
 use super::locking::ExclusiveFileLock;
 use super::{
     CreateGroupCodingAttemptInput, WorkItemAttemptCreationGuard, incomplete_group_attempt,
@@ -101,7 +104,14 @@ impl super::CodingAttemptStore {
         bound_plan_revision_id: &str,
         unit_bindings: &[AuthoritativeCodingUnitBinding],
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
-        validate_group_initialization_input(input, bound_plan_revision_id, unit_bindings)?;
+        let routing =
+            RepositoryRouting::load_for_issue(&self.paths, &input.project_id, &input.issue_id)?;
+        validate_group_initialization_input(
+            input,
+            bound_plan_revision_id,
+            unit_bindings,
+            &routing,
+        )?;
         let path = self.group_initialization_journal_path(
             &input.project_id,
             &input.issue_id,
@@ -528,6 +538,7 @@ fn validate_group_initialization_input(
     input: &CreateGroupCodingAttemptInput,
     bound_plan_revision_id: &str,
     unit_bindings: &[AuthoritativeCodingUnitBinding],
+    routing: &RepositoryRouting,
 ) -> Result<(), ProductStoreError> {
     for id in [
         input.project_id.as_str(),
@@ -547,6 +558,8 @@ fn validate_group_initialization_input(
             id: input.plan_id.clone(),
         });
     }
+    validate_group_single_target(routing, unit_bindings, input.target_snapshot.as_ref())
+        .map_err(|_| mixed_target_group_rejected())?;
     for binding in unit_bindings {
         validate_relative_id(&binding.logical_work_item_id)?;
         validate_relative_id(&binding.work_item_revision_id)?;

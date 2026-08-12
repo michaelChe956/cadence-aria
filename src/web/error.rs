@@ -76,7 +76,9 @@ impl IntoResponse for ApiError {
             "repository_project_not_found" | "repository_routing_target_unknown" => {
                 StatusCode::NOT_FOUND
             }
-            "repository_routing_target_missing" => StatusCode::UNPROCESSABLE_ENTITY,
+            "repository_routing_target_missing" | "mixed_target_group_rejected" => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             "repository_routing_inconsistent" | "repository_routing_ambiguous" => {
                 StatusCode::CONFLICT
             }
@@ -353,6 +355,15 @@ mod tests {
             assert_eq!(response.status(), expected_status, "{code} status mapping");
             assert!(response.status().is_client_error(), "{code} must be 4xx");
         }
+    }
+    #[test]
+    fn mixed_target_group_rejected_maps_to_422() {
+        // REQ-COD-04（Task 12）：mixed-target group 拒绝码必须 422 UNPROCESSABLE_ENTITY，
+        // 不是 500（未知码默认 500，必须显式声明）。
+        let response = ApiError::validation("mixed_target_group_rejected", "mixed-target group")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(response.status().is_client_error(), "must be 4xx");
     }
     #[test]
     fn confirm_gate_error_codes_map_to_4xx() {

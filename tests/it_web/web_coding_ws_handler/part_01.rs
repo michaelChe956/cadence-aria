@@ -29,8 +29,10 @@ use cadence_aria::product::models::WorkItemStatus;
 use cadence_aria::product::models::{
     DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
     PlanProjectionBundle, PlanRevisionReason, ProviderName, VerificationPlanRevision,
-    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle,
-    WorkItemRevision, WorkspaceSessionStatus, WorkspaceType,
+    WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus,
+    WorkItemDraftVerificationPlan, WorkItemGenerationMode, WorkItemPlanLineage,
+    WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use cadence_aria::product::work_item_contract::{
@@ -38,6 +40,7 @@ use cadence_aria::product::work_item_contract::{
     WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
 };
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
+use cadence_aria::product::work_item_plan_store::WorkItemPlanStore;
 use cadence_aria::product::work_item_projection::{
     CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
     ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler, projection_hashes,

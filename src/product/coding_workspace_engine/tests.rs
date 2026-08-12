@@ -14,14 +14,17 @@ use crate::product::lifecycle_store::{
 use crate::product::models::{
     DependencyGraphRevision, HandoffRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
     LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason, ProviderConversationRef,
-    ProviderConversationRole, VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision,
-    WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
+    ProviderConversationRole, VerificationPlanRevision, WorkItemDraftCandidate,
+    WorkItemDraftRecord, WorkItemDraftStatus, WorkItemDraftVerificationPlan,
+    WorkItemGenerationMode, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus,
+    WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract, PromisedOutputContract,
     VerificationCheck, WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy,
     canonical_contract_hash,
 };
+use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::product::work_item_projection::{
     CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
     ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler,
@@ -267,6 +270,44 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
         revision_store
             .put_work_item_revision(&lineage, &work_item_revision)
             .expect("work item revision");
+        // 补 source draft record：validate_group_single_target 拒绝任何
+        // source_draft_error（draft 溯源断链），Legacy 单仓 unit 的 target 为 None。
+        WorkItemPlanStore::new(store.paths())
+            .put_draft_record(&WorkItemDraftRecord {
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                plan_id: lineage.id.clone(),
+                draft_id: work_item_revision.source_draft_revision_id.clone(),
+                outline_id: format!("outline_{:04}", index + 1),
+                generation_round_id: "round_0001".to_string(),
+                batch_id: None,
+                attempt_index: 1,
+                outline_version_ref: "outline_version_0001".to_string(),
+                generation_mode: WorkItemGenerationMode::Serial,
+                generation_diagnostics: None,
+                candidate: WorkItemDraftCandidate {
+                    target_repository_id: None,
+                    outline_id: format!("outline_{:04}", index + 1),
+                    logical_work_item_id: logical.id.clone(),
+                    canonical_contract_candidate: contract.clone(),
+                    verification_plan: WorkItemDraftVerificationPlan {
+                        checks: verification_checks.to_vec(),
+                    },
+                },
+                status: WorkItemDraftStatus::Accepted,
+                active: true,
+                superseded_by_draft_id: None,
+                supersede_reason: None,
+                copied_from_draft_id: None,
+                review_node_id: None,
+                review_verdict_ref: None,
+                generated_from_node_id: "timeline_node_0001".to_string(),
+                accepted_at: Some("2026-07-18T00:00:00Z".to_string()),
+                superseded_at: None,
+                created_at: "2026-07-18T00:00:00Z".to_string(),
+                updated_at: "2026-07-18T00:00:00Z".to_string(),
+            })
+            .expect("group source draft");
         let projections = WorkItemProjectionCompiler
             .compile(
                 &work_item_revision.canonical_contract,

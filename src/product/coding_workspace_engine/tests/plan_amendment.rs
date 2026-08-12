@@ -658,6 +658,44 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
     revision_store
         .put_work_item_revision(&plan, &revised)
         .unwrap();
+    // 补 amended revision 的 source draft record：validate_group_single_target 拒绝任何
+    // source_draft_error，Legacy 单仓 unit 的 target 仍为 None。
+    WorkItemPlanStore::new(paths.clone())
+        .put_draft_record(&WorkItemDraftRecord {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: plan.id.clone(),
+            draft_id: revised.source_draft_revision_id.clone(),
+            outline_id: "outline_0101".to_string(),
+            generation_round_id: "round_0001".to_string(),
+            batch_id: None,
+            attempt_index: 1,
+            outline_version_ref: "outline_version_0001".to_string(),
+            generation_mode: WorkItemGenerationMode::Serial,
+            generation_diagnostics: None,
+            candidate: WorkItemDraftCandidate {
+                target_repository_id: None,
+                outline_id: "outline_0101".to_string(),
+                logical_work_item_id: revised.logical_work_item_id.clone(),
+                canonical_contract_candidate: revised.canonical_contract.clone(),
+                verification_plan: WorkItemDraftVerificationPlan {
+                    checks: revised.canonical_contract.verification_checks.clone(),
+                },
+            },
+            status: WorkItemDraftStatus::Accepted,
+            active: true,
+            superseded_by_draft_id: None,
+            supersede_reason: None,
+            copied_from_draft_id: None,
+            review_node_id: None,
+            review_verdict_ref: None,
+            generated_from_node_id: "timeline_node_0001".to_string(),
+            accepted_at: Some("2026-07-19T00:00:01Z".to_string()),
+            superseded_at: None,
+            created_at: "2026-07-19T00:00:01Z".to_string(),
+            updated_at: "2026-07-19T00:00:01Z".to_string(),
+        })
+        .unwrap();
     let mut revised_bundle = old_bundle;
     revised_bundle.id = revised.work_item_projection_bundle_id.clone();
     revised_bundle.work_item_revision_id = revised.id.clone();
