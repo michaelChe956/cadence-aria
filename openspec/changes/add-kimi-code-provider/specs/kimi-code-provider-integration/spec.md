@@ -98,13 +98,32 @@
 
 ### Requirement: Kimi 复用既有授权与失败边界
 
-系统 SHALL 在 Kimi 启动或运行失败时直接报告失败，不在运行期自动切换到其他 Provider，且第一阶段不实现同 Provider 内部重试（artifact retry / resume retry）。系统 SHALL 将 Kimi 排除在 structured-output repair / review repair 之外（与 Pi 一致）。系统 SHALL 在 task-run 所有入口（HTTP 调度、RoutingProviderAdapter、节点契约、step runner）显式拒绝 Kimi，返回稳定错误，不使用 `unreachable!`。
+系统 SHALL 在 Kimi 启动或运行失败时直接报告失败，不在运行期自动切换到其他 Provider，且不实现 artifact retry 或 resume-stall fresh retry。对于 reviewer，系统仅在首轮结构化输出包含 recoverable JSON、且错误仅为结束标签/nonce 包装缺陷时，允许 Kimi 在同一会话进行最多一次 structured-output repair；repair 后 JSON 必须与首轮 recoverable JSON 逐值相等并重新通过原始 nonce 严格校验。Pi SHALL 继续排除 review repair。任何不满足该条件、repair 失败、JSON 变化或仍然格式错误的情况 SHALL fail-closed，进入人工确认，且不得将未可信的可读文本作为 author 自动返修依据。系统 SHALL 在 task-run 所有入口（HTTP 调度、RoutingProviderAdapter、节点契约、step runner）显式拒绝 Kimi，返回稳定错误，不使用 `unreachable!`。
 
 #### Scenario: Kimi 启动或运行失败直接报告
 
 - **WHEN** Kimi 子进程启动失败或运行中失败
 - **THEN** 系统直接报告失败
 - **AND THEN** 不切换到其他 Provider，不自动重试同一 Kimi 会话
+
+#### Scenario: Kimi reviewer 仅修复完整 JSON 的结构化包装
+
+- **WHEN** Kimi reviewer 输出了完整可解析的审核 JSON，但 `<ARIA_STRUCTURED_OUTPUT>` 结束标签缺少 nonce、缺失结束标签或 nonce 不匹配
+- **THEN** 系统至多发起一次同会话 repair
+- **AND THEN** repair 输出必须使用匹配原始 nonce 的完整 sentinel，且 JSON 值与首轮 recoverable JSON 完全一致
+- **AND THEN** 通过后正常路由审核 verdict
+
+#### Scenario: Kimi repair 不能改变审核业务内容
+
+- **WHEN** Kimi reviewer 的 repair 输出改变 JSON、仍缺少有效 sentinel，或 repair 运行失败
+- **THEN** 系统不得接受输出，也不得再次 repair
+- **AND THEN** 系统保持 fail-closed 的人工确认状态，不把不可信 reviewer 可读文本作为 author 返修目标
+
+#### Scenario: 人工请求返修必须提供目标
+
+- **WHEN** 审核因无可信结构化 findings 而进入人工确认，用户选择请求修改但没有提供非空修改说明
+- **THEN** 系统保持人工确认状态并返回可操作错误
+- **AND THEN** 系统不得启动 author revision
 
 #### Scenario: task-run 误调度 Kimi 时返回稳定错误
 

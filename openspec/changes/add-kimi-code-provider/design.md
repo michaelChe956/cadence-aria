@@ -205,8 +205,15 @@ Supervised 下普通工具的 request_permission 选项含 AllowOnce/AllowAlways
 ### 4.2 Work Item Projection renderer
 新增 `src/product/work_item_projection/render/kimi_code.rs`（仿 `render/pi.rs`），含专属 label、renderer version、Supervised tool hint、structured-output wrapper；接入 `render/mod.rs` import + `renderer_for()`。
 
-### 4.3 artifact retry / review repair（排除）
-同 Pi 先例，第一阶段排除 Kimi 于 `workspace_engine/provider_drive.rs`（artifact retry）与 `workspace_engine/review/drive.rs`（review repair），写明注释。
+### 4.3 artifact retry / review repair（受限）
+
+Kimi 继续排除 `workspace_engine/provider_drive.rs` 的 artifact retry 与任何 resume-stall fresh retry；失败不得切换 Provider，也不得无限重试。
+
+Kimi reviewer 在 `workspace_engine/review/drive.rs` 仅可复用既有的**一次性** structured-output repair，且仅限原始输出已经包含可解析 JSON、错误为 `missing_end_tag`、`missing_end_nonce` 或 `nonce_mismatch` 的包装缺陷。repair 输出必须重新通过完整 nonce sentinel 校验，并与首轮 recoverable JSON 值逐值完全一致；任何 JSON 变化、仍无法解析、启动/运行失败或取消都必须 fail-closed，进入 `needs_human` / `user_triage_required`。不得接受裸 `</ARIA_STRUCTURED_OUTPUT>`，不得弱化 nonce 防串包保护。Pi 继续排除 review repair。
+
+当 reviewer 没有可信的结构化 findings（包括上述 fail-closed fallback）时，系统不得将空的“需要人工确认”直接作为 author revision 的目标。用户若选择“请求修改”，必须提供非空的人工修改说明；否则保持人工确认状态。
+
+Work Item Plan 的 author、artifact retry 与 revision prompt 必须和 Story、Design、Work Item 一样投影同一份 validator-derived artifact schema，明确固定二级 heading 与 `[TASK-*]` 示例，不维护手写的第二套 heading 列表。
 
 ### 4.4 image-create（支持）
 image-create 复用 streaming provider 会话，无需独立图像 API：
@@ -241,7 +248,7 @@ fixture 来自 `.pi-subagents/spike/acp/` 冻结的 0.34.0 真实往返。
 provider_health（Kimi 可用/缺失/超时/版本过低，snapshot 持久化，并行 probe）/ provider_registry（stable order，available/executable 断言）/ provider_availability_gate（entry 存在/缺失）/ handlers/providers（DTO 正确）。
 
 ### 5.3 产品层
-work_item_projection render（Kimi golden）/ 权限配置（默认 Auto 可切 Supervised）/ artifact retry·review repair（Kimi 被排除断言）/ image-create（From<ProviderName> 含 Kimi，脚本化跑通）。
+work_item_projection render（Kimi golden）/ 权限配置（默认 Auto 可切 Supervised）/ reviewer structured-output repair（Kimi 仅可做一次包装修复、JSON 等值校验、Pi 仍排除、Story/Design/Work Item Plan 回归）/ 无可信 finding 时的人工返修目标保护 / Work Item Plan validator-derived author schema（generation、retry、revision）/ image-create（From<ProviderName> 含 Kimi，脚本化跑通）。
 
 ### 5.4 task-run 边界
 provider_factory（incompatible_output，仿 Pi expect_err）/ step_runner·utils（Kimi 分支不 panic）。
