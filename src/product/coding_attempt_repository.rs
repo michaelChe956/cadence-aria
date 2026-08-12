@@ -453,6 +453,7 @@ mod tests {
             status: CodingAttemptStatus::Running,
             version: 0,
             manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
             stage: CodingExecutionStage::WorktreePrepare,
             base_branch: "main".to_string(),
             branch_name: "aria/attempt".to_string(),

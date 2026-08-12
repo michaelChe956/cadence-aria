@@ -154,6 +154,7 @@ fn status_machine_allows_blocked_to_running_and_manual_recovery_only_to_abort() 
             status: CodingAttemptStatus::AwaitingManualRecovery,
             version: 0,
             manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
             ..running
         })
         .expect("seed manual-recovery attempt");

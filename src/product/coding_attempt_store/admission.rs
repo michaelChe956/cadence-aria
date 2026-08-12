@@ -1,6 +1,10 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionAttempt};
@@ -290,7 +294,10 @@ impl CodingAttemptStore {
         }
         let ticket_path =
             self.admission_ticket_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
-        let mut persisted: AdmissionTicketRecord = read_json(&ticket_path)?;
+        if attempt.admission_ticket_consumed_at.is_some() {
+            return Err(ProductStoreError::Io(ADMISSION_TICKET_CONSUMED.to_string()));
+        }
+        let persisted: AdmissionTicketRecord = read_json(&ticket_path)?;
         if persisted.attempt_id != ticket.attempt_id
             || persisted.attempt_id != attempt.id
             || persisted.attempt_version != ticket.attempt_version
@@ -320,10 +327,73 @@ impl CodingAttemptStore {
         attempt.status = CodingAttemptStatus::Running;
         attempt.version += 1;
         attempt.updated_at = now.clone();
-        persisted.consumed_at = Some(now);
+        attempt.admission_ticket_consumed_at = Some(now);
         self.save_coding_attempt_with_status(&attempt)?;
-        write_json(&ticket_path, &persisted)
+        // The attempt record is authoritative. Cleanup is intentionally best-effort: a failed
+        // ticket-file deletion cannot turn a successfully committed transition into an error.
+        remove_admission_ticket_best_effort(&ticket_path);
+        Ok(())
     }
+}
+
+#[cfg(test)]
+static ADMISSION_TICKET_CLEANUP_FAILPOINTS: OnceLock<Mutex<HashSet<std::path::PathBuf>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+struct AdmissionTicketCleanupFailpointGuard {
+    ticket_path: std::path::PathBuf,
+}
+
+#[cfg(test)]
+fn admission_ticket_cleanup_failpoints() -> &'static Mutex<HashSet<std::path::PathBuf>> {
+    ADMISSION_TICKET_CLEANUP_FAILPOINTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(test)]
+fn register_admission_ticket_cleanup_failpoint(
+    ticket_path: &std::path::Path,
+) -> AdmissionTicketCleanupFailpointGuard {
+    let ticket_path = std::fs::canonicalize(ticket_path)
+        .expect("persisted admission ticket must be canonicalizable");
+    assert!(
+        admission_ticket_cleanup_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(ticket_path.clone()),
+        "admission ticket cleanup failpoint already registered for {}",
+        ticket_path.display()
+    );
+    AdmissionTicketCleanupFailpointGuard { ticket_path }
+}
+
+#[cfg(test)]
+fn admission_ticket_cleanup_is_failed(ticket_path: &std::path::Path) -> bool {
+    let Ok(ticket_path) = std::fs::canonicalize(ticket_path) else {
+        return false;
+    };
+    admission_ticket_cleanup_failpoints()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&ticket_path)
+}
+
+#[cfg(test)]
+impl Drop for AdmissionTicketCleanupFailpointGuard {
+    fn drop(&mut self) {
+        admission_ticket_cleanup_failpoints()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.ticket_path);
+    }
+}
+
+fn remove_admission_ticket_best_effort(ticket_path: &std::path::Path) {
+    #[cfg(test)]
+    if admission_ticket_cleanup_is_failed(ticket_path) {
+        return;
+    }
+    let _ = std::fs::remove_file(ticket_path);
 }
 
 fn ticket_expired(ticket: &AdmissionTicketRecord) -> Result<bool, ProductStoreError> {
@@ -438,13 +508,51 @@ mod tests {
                 .expect_err("ticket cannot be consumed twice"),
             StableCode::AdmissionTicketConsumed
         );
-        let persisted: AdmissionTicketRecord = read_json(&fixture.store.admission_ticket_path(
-            PROJECT_ID,
-            ISSUE_ID,
-            &fixture.attempt.id,
-        ))
-        .expect("ticket persisted");
-        assert!(persisted.consumed_at.is_some());
+        assert!(attempt.admission_ticket_consumed_at.is_some());
+        assert!(
+            !fixture
+                .store
+                .admission_ticket_path(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+                .exists(),
+            "ticket is only an admission credential and is removed after the authoritative attempt commit"
+        );
+    }
+
+    #[test]
+    fn ticket_cleanup_failure_cannot_leave_a_half_committed_transition() {
+        let fixture = legacy_fixture();
+        let ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("ticket");
+        let ticket_path =
+            fixture
+                .store
+                .admission_ticket_path(PROJECT_ID, ISSUE_ID, &fixture.attempt.id);
+        let _failpoint = register_admission_ticket_cleanup_failpoint(&ticket_path);
+
+        fixture
+            .store
+            .transition_to_executable(&fixture.attempt.id, &ticket)
+            .expect("attempt commit must not depend on ticket cleanup");
+
+        let attempt = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("authoritative attempt");
+        assert_eq!(attempt.status, CodingAttemptStatus::Running);
+        assert_eq!(attempt.version, 1);
+        assert!(attempt.admission_ticket_consumed_at.is_some());
+        let persisted_ticket: AdmissionTicketRecord = read_json(&ticket_path)
+            .expect("cleanup failpoint deliberately retains ticket credential");
+        assert!(persisted_ticket.consumed_at.is_none());
+        assert_eq!(
+            fixture
+                .store
+                .transition_to_executable(&fixture.attempt.id, &ticket)
+                .expect_err("authoritative consumed marker rejects retained credential"),
+            StableCode::AdmissionTicketConsumed
+        );
     }
 
     #[test]
@@ -573,6 +681,38 @@ mod tests {
         assert_eq!(aborted.status, CodingAttemptStatus::Aborted);
         assert_eq!(aborted.version, 3);
         assert!(aborted.completed_at.is_some());
+    }
+
+    #[test]
+    fn non_status_update_after_admission_preserves_running_cas_commit() {
+        let fixture = legacy_fixture();
+        let ticket = fixture
+            .store
+            .admit_attempt_for_execution(&fixture.attempt.id)
+            .expect("ticket");
+        let mut stale_non_status = fixture.attempt.clone();
+        stale_non_status.head_commit = Some("concurrent-non-status-write".to_string());
+
+        fixture
+            .store
+            .transition_to_executable(&fixture.attempt.id, &ticket)
+            .expect("CAS transition");
+        fixture
+            .store
+            .update_attempt_non_status_fields(&stale_non_status)
+            .expect("stale non-status payload must reload frozen fields under the lock");
+
+        let persisted = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("persisted attempt");
+        assert_eq!(persisted.status, CodingAttemptStatus::Running);
+        assert_eq!(persisted.version, 1);
+        assert!(persisted.admission_ticket_consumed_at.is_some());
+        assert_eq!(
+            persisted.head_commit.as_deref(),
+            Some("concurrent-non-status-write")
+        );
     }
 
     #[test]

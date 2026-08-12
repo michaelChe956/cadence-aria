@@ -174,6 +174,7 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
         status: CodingAttemptStatus::Created,
         version: 0,
         manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
         stage: CodingExecutionStage::PrepareContext,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),

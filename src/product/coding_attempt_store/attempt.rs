@@ -74,6 +74,7 @@ impl super::CodingAttemptStore {
             status: CodingAttemptStatus::Created,
             version: 0,
             manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch,
             branch_name: input.branch_name,
@@ -127,47 +128,51 @@ impl super::CodingAttemptStore {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), ProductStoreError> {
-        let stored = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        if stored.work_item_id != attempt.work_item_id
-            || stored.attempt_no != attempt.attempt_no
-            || stored.scope != attempt.scope
-            || stored.work_item_group_id != attempt.work_item_group_id
-        {
-            return Err(ProductStoreError::IdentityMismatch {
-                kind: "coding_attempt",
-                id: attempt.id.clone(),
-            });
-        }
-        let updated = CodingExecutionAttempt {
-            id: stored.id,
-            project_id: stored.project_id,
-            issue_id: stored.issue_id,
-            work_item_id: stored.work_item_id,
-            attempt_no: stored.attempt_no,
-            scope: stored.scope,
-            status: stored.status,
-            version: stored.version,
-            manual_recovery_reason: stored.manual_recovery_reason,
-            stage: attempt.stage.clone(),
-            base_branch: attempt.base_branch.clone(),
-            branch_name: attempt.branch_name.clone(),
-            worktree_path: attempt.worktree_path.clone(),
-            provider_config_snapshot: attempt.provider_config_snapshot.clone(),
-            rework_count: attempt.rework_count,
-            max_auto_rework: attempt.max_auto_rework,
-            work_item_group_id: stored.work_item_group_id,
-            current_work_item_id: attempt.current_work_item_id.clone(),
-            active_unit_id: attempt.active_unit_id.clone(),
-            head_commit: attempt.head_commit.clone(),
-            pushed_remote: attempt.pushed_remote.clone(),
-            review_request_id: attempt.review_request_id.clone(),
-            provider_conversations: attempt.provider_conversations.clone(),
-            created_at: attempt.created_at.clone(),
-            updated_at: attempt.updated_at.clone(),
-            target_snapshot: stored.target_snapshot,
-            completed_at: attempt.completed_at.clone(),
-        };
-        self.save_coding_attempt_with_status(&updated)
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let stored = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+            if stored.work_item_id != attempt.work_item_id
+                || stored.attempt_no != attempt.attempt_no
+                || stored.scope != attempt.scope
+                || stored.work_item_group_id != attempt.work_item_group_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_attempt",
+                    id: attempt.id.clone(),
+                });
+            }
+            let updated = CodingExecutionAttempt {
+                id: stored.id,
+                project_id: stored.project_id,
+                issue_id: stored.issue_id,
+                work_item_id: stored.work_item_id,
+                attempt_no: stored.attempt_no,
+                scope: stored.scope,
+                status: stored.status,
+                version: stored.version,
+                manual_recovery_reason: stored.manual_recovery_reason,
+                admission_ticket_consumed_at: stored.admission_ticket_consumed_at,
+                stage: attempt.stage.clone(),
+                base_branch: attempt.base_branch.clone(),
+                branch_name: attempt.branch_name.clone(),
+                worktree_path: attempt.worktree_path.clone(),
+                provider_config_snapshot: attempt.provider_config_snapshot.clone(),
+                rework_count: attempt.rework_count,
+                max_auto_rework: attempt.max_auto_rework,
+                work_item_group_id: stored.work_item_group_id,
+                current_work_item_id: attempt.current_work_item_id.clone(),
+                active_unit_id: attempt.active_unit_id.clone(),
+                head_commit: attempt.head_commit.clone(),
+                pushed_remote: attempt.pushed_remote.clone(),
+                review_request_id: attempt.review_request_id.clone(),
+                provider_conversations: attempt.provider_conversations.clone(),
+                created_at: attempt.created_at.clone(),
+                updated_at: attempt.updated_at.clone(),
+                target_snapshot: stored.target_snapshot,
+                completed_at: attempt.completed_at.clone(),
+            };
+            self.save_coding_attempt_with_status(&updated)
+        })
     }
 
     #[cfg(test)]
@@ -439,17 +444,19 @@ impl super::CodingAttemptStore {
         stage: CodingExecutionStage,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if !valid_stage_transition(&attempt.stage, &stage) {
-            return Err(ProductStoreError::Io(format!(
-                "invalid_coding_attempt_stage_transition: {:?} -> {:?}",
-                attempt.stage, stage
-            )));
-        }
-        attempt.stage = stage;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            if !valid_stage_transition(&attempt.stage, &stage) {
+                return Err(ProductStoreError::Io(format!(
+                    "invalid_coding_attempt_stage_transition: {:?} -> {:?}",
+                    attempt.stage, stage
+                )));
+            }
+            attempt.stage = stage;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
     pub fn update_attempt_worktree_path(
@@ -460,11 +467,13 @@ impl super::CodingAttemptStore {
         worktree_path: std::path::PathBuf,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.worktree_path = Some(worktree_path);
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.worktree_path = Some(worktree_path);
+            attempt.updated_at = Utc::now().to_rfc3339();
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
     pub fn update_attempt_head_commit(

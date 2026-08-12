@@ -148,6 +148,7 @@ impl super::CodingAttemptStore {
             status: CodingAttemptStatus::Created,
             version: 0,
             manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch,
             branch_name: input.branch_name,
@@ -371,7 +372,7 @@ impl super::CodingAttemptStore {
                 }
             }
             attempt.updated_at = Utc::now().to_rfc3339();
-            self.update_attempt_non_status_fields(&attempt)?;
+            self.save_coding_attempt_with_status(&attempt)?;
 
             Ok(unit)
         })

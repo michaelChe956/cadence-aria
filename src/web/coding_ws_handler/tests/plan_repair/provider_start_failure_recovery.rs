@@ -41,6 +41,7 @@ fn permission_or_choice_wait_timeout_does_not_enqueue_automatic_retry() {
             status: waiting.clone(),
             version: 0,
             manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
             ..plan_repair_fixture_with_dependency(false).attempt
         },
     ));
@@ -50,6 +51,7 @@ fn permission_or_choice_wait_timeout_does_not_enqueue_automatic_retry() {
             status: waiting,
             version: 0,
             manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
             ..plan_repair_fixture_with_dependency(false).attempt
         },
     ));

@@ -448,6 +448,7 @@ impl super::CodingAttemptStore {
             status: CodingAttemptStatus::Created,
             version: 0,
             manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch.clone(),
             branch_name: input.branch_name.clone(),

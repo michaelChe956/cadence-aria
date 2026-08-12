@@ -360,6 +360,7 @@ fn create_coding_role_run_fixture(
         status: CodingAttemptStatus::Blocked,
         version: 0,
         manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
         stage: if blocked_stage_internal {
             FixtureStage::InternalPrReview
         } else {

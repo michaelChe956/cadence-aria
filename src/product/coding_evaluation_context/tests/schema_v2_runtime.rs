@@ -34,6 +34,7 @@ fn schema_v2_attempt_without_active_unit_binding_fails_closed() {
         status: CodingAttemptStatus::Running,
         version: 0,
         manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
         stage: CodingExecutionStage::Coding,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/schema-v2".to_string(),
