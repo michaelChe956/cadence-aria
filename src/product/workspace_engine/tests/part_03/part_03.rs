@@ -640,25 +640,112 @@ fn valid_structured_output(json: &str) -> String {
 }
 
 #[tokio::test]
-async fn kimi_review_does_not_attempt_structured_output_repair() {
-    let review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
-    let provider = QueuedReviewProvider::new(vec![missing_end_nonce_output(review_json)]);
-    let (_tmp, mut engine, mut rx, _review_node_id) =
-        queued_review_engine("sess_kimi_review_no_repair").await;
-    engine.session.reviewer_provider = Some(ProviderName::KimiCode);
+async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
+    enum KimiReviewRepairCase {
+        General {
+            name: &'static str,
+            workspace_type: WorkspaceType,
+            artifact: ArtifactPayload,
+            review_json: &'static str,
+        },
+        WorkItemPlan,
+    }
 
-    engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
-        .await;
+    let general_review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let cases = [
+        KimiReviewRepairCase::General {
+            name: "story",
+            workspace_type: WorkspaceType::Story,
+            artifact: artifact_payload(&complete_story_artifact(
+                "补充格式修复",
+                "修复后可继续审核",
+            )),
+            review_json: general_review_json,
+        },
+        KimiReviewRepairCase::General {
+            name: "design",
+            workspace_type: WorkspaceType::Design,
+            artifact: artifact_payload(&complete_design_artifact(
+                "保持业务 payload",
+                "复用 reviewer session",
+            )),
+            review_json: general_review_json,
+        },
+        KimiReviewRepairCase::General {
+            name: "work_item",
+            workspace_type: WorkspaceType::WorkItem,
+            artifact: artifact_payload(&complete_work_item_artifact("修复 reviewer 结构化输出")),
+            review_json: general_review_json,
+        },
+        KimiReviewRepairCase::WorkItemPlan,
+    ];
 
-    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
-    let diagnostic = engine
-        .latest_review_verdict
-        .as_ref()
-        .and_then(|verdict| verdict.structured_output_diagnostic.as_ref())
-        .expect("fallback diagnostic");
-    assert!(!diagnostic.repair_attempted);
-    assert!(repair_event_statuses(&mut rx).is_empty());
+    for case in cases {
+        let (_tmp, case_name, review_json, mut engine, mut rx, review_node_id) = match case {
+            KimiReviewRepairCase::General {
+                name,
+                workspace_type,
+                artifact,
+                review_json,
+            } => {
+                let (_tmp, engine, rx, review_node_id) = queued_review_engine_for(
+                    &format!("sess_kimi_review_repair_{name}"),
+                    workspace_type,
+                    artifact,
+                )
+                .await;
+                (_tmp, name, review_json, engine, rx, review_node_id)
+            }
+            KimiReviewRepairCase::WorkItemPlan => {
+                let (_tmp, engine, rx, review_node_id) = queued_work_item_plan_outline_review_engine(
+                    "sess_kimi_review_repair_work_item_plan",
+                )
+                .await;
+                (
+                    _tmp,
+                    "work_item_plan",
+                    work_item_plan_outline_revise_json(),
+                    engine,
+                    rx,
+                    review_node_id,
+                )
+            }
+        };
+        let provider = QueuedReviewProvider::new(vec![
+            missing_end_nonce_output(review_json),
+            valid_structured_output(review_json),
+        ]);
+        engine.session.reviewer_provider = Some(ProviderName::KimiCode);
+
+        engine
+            .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+            .await;
+
+        assert_eq!(provider.starts.load(Ordering::SeqCst), 2, "{case_name}");
+        assert_eq!(
+            provider.resume_provider_session_ids.lock().unwrap()[1],
+            Some("review-session-1".to_string()),
+            "{case_name}"
+        );
+        let diagnostic = engine
+            .latest_review_verdict
+            .as_ref()
+            .and_then(|verdict| verdict.structured_output_diagnostic.as_ref())
+            .expect("repair diagnostic");
+        assert!(diagnostic.repair_attempted, "{case_name}");
+        assert!(diagnostic.repair_succeeded, "{case_name}");
+        assert_eq!(
+            repair_event_statuses(&mut rx),
+            vec![
+                (
+                    ProviderExecutionEventStatus::Started,
+                    Some(review_node_id.clone())
+                ),
+                (ProviderExecutionEventStatus::Completed, Some(review_node_id)),
+            ],
+            "{case_name}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -714,6 +801,7 @@ async fn review_structured_output_repair_rejects_payload_change() {
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
         queued_review_engine("sess_review_repair_payload_changed").await;
+    engine.session.reviewer_provider = Some(ProviderName::KimiCode);
 
     engine
         .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())

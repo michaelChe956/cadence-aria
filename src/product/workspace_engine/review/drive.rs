@@ -51,7 +51,7 @@ impl WorkspaceEngine {
 
         match self.parse_review_completion_for_active_node(&first_completion) {
             Ok(verdict) => self.complete_review(first_completion, verdict).await,
-            // 第一阶段不实证 Kimi resume 稳定性，排除 review repair（同 Pi）
+            // Kimi 仅复用既有的一次 JSON 等值 repair；Pi 仍不进入 repair。
             Err(first_error)
                 if provider_allows_review_repair(&reviewer) && first_error.is_repairable() =>
             {
@@ -637,7 +637,7 @@ impl WorkspaceEngine {
 }
 
 fn provider_allows_review_repair(provider: &ProviderName) -> bool {
-    !matches!(provider, ProviderName::Pi | ProviderName::KimiCode)
+    !matches!(provider, ProviderName::Pi)
 }
 
 #[cfg(test)]
@@ -645,8 +645,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kimi_is_excluded_from_review_repair() {
-        assert!(!provider_allows_review_repair(&ProviderName::KimiCode));
+    fn only_pi_is_excluded_from_review_repair() {
+        assert!(provider_allows_review_repair(&ProviderName::KimiCode));
         assert!(!provider_allows_review_repair(&ProviderName::Pi));
         assert!(provider_allows_review_repair(&ProviderName::Codex));
     }

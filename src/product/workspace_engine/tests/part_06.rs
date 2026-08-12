@@ -209,6 +209,58 @@ async fn handle_human_confirm_request_change_starts_revision() {
 }
 
 #[tokio::test]
+async fn human_confirm_request_change_requires_context_after_untrusted_review() {
+    let (_tmp, store) = setup();
+    let (tx, _) = mpsc::channel(64);
+    let session = make_session("sess_human_request_change_untrusted_review");
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    engine.latest_review_verdict = Some(ReviewVerdict {
+        verdict: ReviewVerdictType::NeedsHuman,
+        comments: "reviewer 输出封装失败".to_string(),
+        summary: String::new(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::UserTriageRequired,
+        work_item_plan_review: None,
+        structured_output_diagnostic: Some(StructuredOutputDiagnostic {
+            code: "missing_end_nonce".to_string(),
+            message: "missing structured output end nonce".to_string(),
+            repair_attempted: true,
+            repair_succeeded: false,
+            raw_output_preview: None,
+        }),
+    });
+    engine
+        .enter_human_confirm(Some("需要人工确认".to_string()))
+        .await;
+
+    let error = engine
+        .handle_human_confirm(HumanConfirmDecision::RequestChange, None)
+        .await
+        .expect_err("untrusted review requires an explicit revision target");
+
+    assert!(error.contains("非空"));
+    assert!(error.contains("修改说明"));
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    assert!(!engine.timeline_nodes.iter().any(|node| {
+        node.node_type == TimelineNodeType::Revision && node.status == TimelineNodeStatus::Active
+    }));
+
+    let outcome = engine
+        .handle_human_confirm(
+            HumanConfirmDecision::RequestChange,
+            Some(serde_json::json!({"description": "补充失败路径"})),
+        )
+        .await
+        .expect("explicit human revision target may start revision");
+
+    assert_eq!(outcome, ReviewDecisionOutcome::StartRevision);
+    assert_eq!(engine.session().stage, WorkspaceStage::Revision);
+    assert!(engine.timeline_nodes.iter().any(|node| {
+        node.node_type == TimelineNodeType::Revision && node.status == TimelineNodeStatus::Active
+    }));
+}
+
+#[tokio::test]
 async fn set_provider_updates_author_and_reviewer() {
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);
