@@ -122,14 +122,14 @@ fn scoped_lookup_reads_duplicate_legacy_ids_and_global_lookup_is_ambiguous() {
     first.issue_id = "issue_0001".to_string();
     first.work_item_id = "work_item_issue_1".to_string();
     store
-        .save_coding_attempt(&first)
+        .update_attempt_non_status_fields(&first)
         .expect("save first legacy attempt");
 
     let mut second = first.clone();
     second.issue_id = "issue_0002".to_string();
     second.work_item_id = "work_item_issue_2".to_string();
     store
-        .save_coding_attempt(&second)
+        .update_attempt_non_status_fields(&second)
         .expect("save second legacy attempt");
 
     assert_eq!(

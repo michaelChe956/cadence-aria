@@ -184,7 +184,7 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
     attempt.stage = CodingExecutionStage::FinalConfirm;
     attempt.head_commit = Some(head);
     store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("final review attempt");
 
     let (tx, _rx) = mpsc::channel(8);

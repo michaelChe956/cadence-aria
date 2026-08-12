@@ -534,7 +534,7 @@ fn coding_session_state_includes_group_final_readiness_snapshot() {
     let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
     let coding_store = CodingAttemptStore::new(app_paths);
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save coding attempt");
     let readiness = GroupFinalReadinessSnapshot {
         attempt_id: attempt.id.clone(),
@@ -589,7 +589,7 @@ fn coding_session_state_omits_stale_blocked_gate_for_inactive_stage() {
 
     let coding_store = CodingAttemptStore::new(app_paths);
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save coding attempt");
     coding_store
         .create_blocked_gate(
@@ -634,7 +634,7 @@ fn coding_session_state_keeps_final_confirm_blocked_gate_for_current_stage() {
 
     let coding_store = CodingAttemptStore::new(app_paths);
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save coding attempt");
     coding_store
         .create_blocked_gate(
@@ -674,7 +674,7 @@ fn coding_session_state_does_not_reactivate_historical_blocked_node() {
     let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
     let coding_store = CodingAttemptStore::new(app_paths);
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save coding attempt");
     coding_store
         .save_timeline_node(

@@ -741,7 +741,7 @@ fn coding_plan_repair_group_terminal_validator_rejects_created_attempt_disguised
         .expect("review request stage");
     corrupted.status = CodingAttemptStatus::Created;
     store
-        .save_coding_attempt(&corrupted)
+        .write_coding_attempt_for_test(&corrupted)
         .expect("corrupt attempt status");
 
     let error = store

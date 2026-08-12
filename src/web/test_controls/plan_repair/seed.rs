@@ -434,7 +434,11 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
 
     attempt.status = CodingAttemptStatus::Running;
     attempt.stage = CodingExecutionStage::CodeReview;
-    store.save_coding_attempt(&attempt).map_err(fixture_error)?;
+    write_json(
+        &store.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
+        &attempt,
+    )
+    .map_err(fixture_error)?;
     let lifecycle = LifecycleStore::new(paths);
     let base_plan_session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {

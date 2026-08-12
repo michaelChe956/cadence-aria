@@ -438,7 +438,10 @@ async fn coding_amendment_recovery_rejects_corrupt_resume_target_prefix_without_
         .unwrap();
     forged_attempt.active_unit_id = Some("coding_unit_0002".to_string());
     forged_attempt.current_work_item_id = Some("work_item_0002".to_string());
-    fixture.store.save_coding_attempt(&forged_attempt).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&forged_attempt)
+        .unwrap();
     let attempt_before = fixture
         .store
         .get_attempt(

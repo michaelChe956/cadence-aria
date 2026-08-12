@@ -389,7 +389,7 @@ async fn failed_code_review_recovery_reloads_attempt_and_rejects_status_change()
     changed.completed_at = None;
     fixture
         .store
-        .save_coding_attempt(&changed)
+        .write_coding_attempt_for_test(&changed)
         .expect("persist changed attempt status");
     let runs_before = fixture
         .store

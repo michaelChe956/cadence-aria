@@ -219,6 +219,6 @@ fn pause_attempt_for_repair(
         .expect("load attempt for repair pause");
     attempt.status = CodingAttemptStatus::AwaitingPlanAmendment;
     store
-        .save_coding_attempt(&attempt)
+        .update_attempt_non_status_fields(&attempt)
         .expect("persist paused attempt for plan repair");
 }

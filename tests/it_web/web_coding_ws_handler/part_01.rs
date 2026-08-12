@@ -99,7 +99,7 @@ fn rewrite_as_legacy_coding_attempt_fixture(
         .expect("delete generated attempt fixture");
     attempt.id = "coding_attempt_0001".to_string();
     store
-        .save_coding_attempt(&attempt)
+        .update_attempt_non_status_fields(&attempt)
         .expect("save legacy attempt fixture");
     attempt
 }
@@ -519,7 +519,7 @@ async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaust
         .expect("attempt");
     attempt.status = CodingAttemptStatus::Blocked;
     attempt.stage = CodingExecutionStage::CodeReview;
-    store.save_coding_attempt(&attempt).expect("blocked attempt");
+    store.update_attempt_non_status_fields(&attempt).expect("blocked attempt");
 
     let failed_node = CodingTimelineNode {
         id: "coding_node_0009".to_string(),

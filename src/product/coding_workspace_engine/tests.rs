@@ -751,7 +751,7 @@ async fn coding_plan_repair_group_attempt_missing_active_pointer_cannot_start() 
     attempt.active_unit_id = None;
     attempt.current_work_item_id = None;
     store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("corrupt attempt pointers");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);

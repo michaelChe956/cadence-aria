@@ -234,7 +234,9 @@ fn coding_plan_repair_group_reviewer_loads_authoritative_no_target_projections()
         .expect("attempt");
     attempt.status = CodingAttemptStatus::Running;
     attempt.stage = CodingExecutionStage::InternalPrReview;
-    store.save_coding_attempt(&attempt).expect("save attempt");
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save attempt");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let review = internal_review_with_finding(no_target_finding(
@@ -518,7 +520,9 @@ pub(super) fn prepared_group_review_fixture() -> (
     attempt.status = CodingAttemptStatus::Running;
     attempt.stage = CodingExecutionStage::InternalPrReview;
     attempt.head_commit = Some(head.clone());
-    store.save_coding_attempt(&attempt).expect("save attempt");
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save attempt");
     store
         .save_review_request(
             &attempt,

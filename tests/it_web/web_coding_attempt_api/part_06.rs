@@ -22,7 +22,7 @@ async fn scoped_coding_attempt_api_loads_exact_attempt_and_legacy_route_reports_
         .expect("original attempt");
     duplicate.issue_id = "issue_0002".to_string();
     store
-        .save_coding_attempt(&duplicate)
+        .update_attempt_non_status_fields(&duplicate)
         .expect("duplicate legacy scope");
 
     let (scoped_status, scoped) = request_json(
@@ -130,7 +130,7 @@ async fn legacy_coding_attempt_api_loads_unique_valid_attempt() {
         .expect("delete generated attempt");
     attempt.id = "coding_attempt_legacy".to_string();
     store
-        .save_coding_attempt(&attempt)
+        .update_attempt_non_status_fields(&attempt)
         .expect("save legacy attempt");
 
     let (status, body) = request_json(

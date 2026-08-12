@@ -266,7 +266,7 @@ impl super::CodingAttemptStore {
             attempt.active_unit_id = Some(unit.id.clone());
             attempt.current_work_item_id = Some(unit.logical_work_item_id.clone());
             attempt.updated_at = Utc::now().to_rfc3339();
-            self.save_coding_attempt(&attempt)?;
+            self.update_attempt_non_status_fields(&attempt)?;
         }
 
         Ok(unit)
@@ -369,7 +369,7 @@ impl super::CodingAttemptStore {
                 }
             }
             attempt.updated_at = Utc::now().to_rfc3339();
-            self.save_coding_attempt(&attempt)?;
+            self.update_attempt_non_status_fields(&attempt)?;
 
             Ok(unit)
         })

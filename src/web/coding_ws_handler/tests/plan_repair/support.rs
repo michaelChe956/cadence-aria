@@ -348,7 +348,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
     attempt.stage = CodingExecutionStage::CodeReview;
     attempt.active_unit_id = Some(unit.id.clone());
     attempt.current_work_item_id = Some(current.id.clone());
-    store.save_coding_attempt(&attempt).unwrap();
+    store.write_coding_attempt_for_test(&attempt).unwrap();
     store
         .create_coding_unit_run(
             &attempt,

@@ -228,7 +228,10 @@ async fn rest_and_ws_snapshots_reconcile_the_same_plan_repair_pause_before_pendi
         .get_attempt(&started.project_id, &started.issue_id, &started.id)
         .unwrap();
     original.stage = CodingExecutionStage::FinalConfirm;
-    fixture.store.save_coding_attempt(&original).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&original)
+        .unwrap();
     fixture
         .store
         .create_blocked_gate(
@@ -313,7 +316,10 @@ fn reset_plan_repair_prefix(
         }
         PlanRepairPrefix::UnitRunBlocked | PlanRepairPrefix::FullyReconciled => {}
     }
-    fixture.store.save_coding_attempt(&current).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&current)
+        .unwrap();
     write_json(
         &fixture.store.coding_unit_run_path(
             &current.project_id,

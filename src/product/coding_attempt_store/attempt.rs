@@ -109,7 +109,73 @@ impl super::CodingAttemptStore {
         Ok(attempt)
     }
 
-    pub fn save_coding_attempt(
+    /// 更新可公开修改的 attempt 字段，同时保留状态和 admission 冻结字段。
+    ///
+    /// 该 API 必须以字段方式构造持久化 record，而非将传入的 `attempt` 整体写盘。
+    /// 因而后续为 admission 添加的新冻结字段时，编译器会强制在这里明确从
+    /// 已持久化 record 保留它们，避免公开 API 无意中取得覆写权限。
+    ///
+    /// ```compile_fail
+    /// use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
+    ///
+    /// // 写入 status 的底层 API 只对 coding_attempt_store 模块可见。
+    /// let _ = CodingAttemptStore::save_coding_attempt_with_status;
+    /// ```
+    pub fn update_attempt_non_status_fields(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        let stored = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        if stored.work_item_id != attempt.work_item_id
+            || stored.attempt_no != attempt.attempt_no
+            || stored.scope != attempt.scope
+            || stored.work_item_group_id != attempt.work_item_group_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_attempt",
+                id: attempt.id.clone(),
+            });
+        }
+        let updated = CodingExecutionAttempt {
+            id: stored.id,
+            project_id: stored.project_id,
+            issue_id: stored.issue_id,
+            work_item_id: stored.work_item_id,
+            attempt_no: stored.attempt_no,
+            scope: stored.scope,
+            status: stored.status,
+            stage: attempt.stage.clone(),
+            base_branch: attempt.base_branch.clone(),
+            branch_name: attempt.branch_name.clone(),
+            worktree_path: attempt.worktree_path.clone(),
+            provider_config_snapshot: attempt.provider_config_snapshot.clone(),
+            rework_count: attempt.rework_count,
+            max_auto_rework: attempt.max_auto_rework,
+            work_item_group_id: stored.work_item_group_id,
+            current_work_item_id: attempt.current_work_item_id.clone(),
+            active_unit_id: attempt.active_unit_id.clone(),
+            head_commit: attempt.head_commit.clone(),
+            pushed_remote: attempt.pushed_remote.clone(),
+            review_request_id: attempt.review_request_id.clone(),
+            provider_conversations: attempt.provider_conversations.clone(),
+            created_at: attempt.created_at.clone(),
+            updated_at: attempt.updated_at.clone(),
+            target_snapshot: stored.target_snapshot,
+            completed_at: attempt.completed_at.clone(),
+        };
+        self.save_coding_attempt_with_status(&updated)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_coding_attempt_for_test(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        self.save_coding_attempt_with_status(attempt)
+    }
+
+    /// 仅供受控状态转换使用的底层全字段持久化方法。
+    pub(super) fn save_coding_attempt_with_status(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), ProductStoreError> {

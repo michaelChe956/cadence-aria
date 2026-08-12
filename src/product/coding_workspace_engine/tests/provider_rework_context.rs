@@ -39,7 +39,7 @@ async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context(
         .unwrap();
     attempt.head_commit = Some(head.clone());
     attempt.stage = CodingExecutionStage::Coding;
-    store.save_coding_attempt(&attempt).unwrap();
+    store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let initial = super::provider_execution_context::CapturingProjectionProvider::new(

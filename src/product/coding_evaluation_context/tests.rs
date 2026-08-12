@@ -504,7 +504,9 @@ fn code_reviewer_context_pack_includes_coder_evidence() {
         target_snapshot: None,
         completed_at: None,
     };
-    store.save_coding_attempt(&attempt).expect("save attempt");
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save attempt");
     let role_run = store
         .create_role_run(
             &attempt,

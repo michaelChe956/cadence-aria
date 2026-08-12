@@ -71,7 +71,7 @@ impl CodingWorkspaceEngine {
             updated.stage = CodingExecutionStage::PrepareContext;
             updated.status = CodingAttemptStatus::Running;
             updated.updated_at = Utc::now().to_rfc3339();
-            self.store.save_coding_attempt(&updated)?;
+            self.store.update_attempt_non_status_fields(&updated)?;
             let lifecycle = LifecycleStore::new(self.store.paths());
             if lifecycle
                 .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?

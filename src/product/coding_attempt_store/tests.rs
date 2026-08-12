@@ -3,12 +3,14 @@ use tempfile::TempDir;
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage, CodingExecutionUnitStatus,
-    CodingGateAction, CodingGateActionType, CodingProviderRole, FindingSeverity,
-    GroupFinalReadinessDiagnostic, GroupFinalReadinessDiagnosticKind, GroupFinalReadinessSnapshot,
-    GroupFinalReadinessStatus, GroupFinalReadinessUnit, ReviewFinding, ReviewVerdict,
+    AttemptTargetSnapshot, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
+    CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType, CodingProviderRole,
+    FindingSeverity, GroupFinalReadinessDiagnostic, GroupFinalReadinessDiagnosticKind,
+    GroupFinalReadinessSnapshot, GroupFinalReadinessStatus, GroupFinalReadinessUnit, ReviewFinding,
+    ReviewVerdict,
 };
 use crate::product::json_store::write_json;
+use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
 use crate::product::models::{
     PlanDefectClass, PlanDefectRoute, ProviderName, RepairTarget, RepairTargetKind,
 };
@@ -66,6 +68,47 @@ fn provider_snapshot() -> ProviderConfigSnapshot {
         review_rounds: 1,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     }
+}
+
+#[test]
+fn update_attempt_non_status_fields_preserves_status_and_frozen_target_snapshot() {
+    let (_tmp, store, attempt) = setup();
+    let original_status = attempt.status.clone();
+    let original_target_snapshot = attempt.target_snapshot.clone();
+    let mut replacement = attempt.clone();
+    replacement.status = CodingAttemptStatus::Running;
+    replacement.target_snapshot = Some(AttemptTargetSnapshot {
+        logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
+        checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+        physical_repository_id: "repository_replacement".to_string(),
+        canonical_path: std::path::PathBuf::from("/replacement/repository"),
+        git_dir_identity: "replacement-git-dir".to_string(),
+        revision: Some("replacement-revision".to_string()),
+        policy_digest: "replacement-policy".to_string(),
+        membership_revision: 99,
+        captured_at: "2026-08-11T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    });
+    replacement.head_commit = Some("head_commit_replacement".to_string());
+    replacement.pushed_remote = Some("origin/replacement".to_string());
+
+    store
+        .update_attempt_non_status_fields(&replacement)
+        .expect("update non-status fields");
+
+    let persisted = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reload attempt");
+    assert_eq!(persisted.status, original_status);
+    assert_eq!(persisted.target_snapshot, original_target_snapshot);
+    assert_eq!(
+        persisted.head_commit.as_deref(),
+        Some("head_commit_replacement")
+    );
+    assert_eq!(
+        persisted.pushed_remote.as_deref(),
+        Some("origin/replacement")
+    );
 }
 
 #[test]
@@ -297,7 +340,7 @@ fn saving_group_attempt_preserves_explicit_internal_reviewer_role_config() {
         .expect("select internal reviewer");
 
     store
-        .save_coding_attempt(&group_attempt)
+        .update_attempt_non_status_fields(&group_attempt)
         .expect("save after group unit completion");
 
     let persisted = store

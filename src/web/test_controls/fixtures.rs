@@ -15,6 +15,7 @@ use crate::product::coding_models::{
     ReviewRequestKind,
 };
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+use crate::product::json_store::write_json;
 use crate::product::lifecycle_store::{
     CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
@@ -380,7 +381,10 @@ fn create_coding_role_run_fixture(
         target_snapshot: None,
         completed_at: None,
     };
-    store.save_coding_attempt(&attempt)?;
+    write_json(
+        &store.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
+        &attempt,
+    )?;
 
     let now = chrono::Utc::now().to_rfc3339();
     if blocked_stage_internal {

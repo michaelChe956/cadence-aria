@@ -306,7 +306,7 @@ fn coding_plan_repair_prepare_rechecks_authoritative_amendment_status_before_wri
         let mut authoritative = stale_attempt.clone();
         authoritative.status = status.clone();
         store
-            .save_coding_attempt(&authoritative)
+            .write_coding_attempt_for_test(&authoritative)
             .expect("save authoritative amendment status");
 
         let rejected = store.prepare_failed_code_review_recovery_journal(
@@ -695,7 +695,9 @@ fn coding_plan_repair_amendment_status_blocks_every_recovery_write_boundary() {
         }
         let mut amendment_attempt = attempt.clone();
         amendment_attempt.status = CodingAttemptStatus::AwaitingPlanAmendment;
-        store.save_coding_attempt(&amendment_attempt).unwrap();
+        store
+            .write_coding_attempt_for_test(&amendment_attempt)
+            .unwrap();
         let journal_before = store
             .get_failed_code_review_recovery_journal(
                 &attempt.project_id,

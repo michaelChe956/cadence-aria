@@ -451,7 +451,7 @@ async fn retry_does_not_reconcile_ambiguous_active_attempts() {
         })
         .expect("second attempt");
     store
-        .save_coding_attempt(&first)
+        .update_attempt_non_status_fields(&first)
         .expect("restore duplicate active attempt fixture");
     let lifecycle = LifecycleStore::new(app_paths);
     let lease_before = lifecycle

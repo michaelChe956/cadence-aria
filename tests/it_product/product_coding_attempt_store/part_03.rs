@@ -114,12 +114,12 @@ fn scoped_writes_target_only_exact_legacy_attempt_identity() {
         .expect("create target attempt");
     target.id = "coding_attempt_0001".to_string();
     store
-        .save_coding_attempt(&target)
+        .update_attempt_non_status_fields(&target)
         .expect("save legacy target attempt");
     let mut other = target.clone();
     other.issue_id = "issue_0002".to_string();
     store
-        .save_coding_attempt(&other)
+        .update_attempt_non_status_fields(&other)
         .expect("save duplicate legacy attempt");
 
     store

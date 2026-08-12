@@ -92,6 +92,6 @@ fn persist_completed_group_uniqueness_fixture(
     attempt.completed_at = Some(completed_at.clone());
     attempt.updated_at = completed_at;
     store
-        .save_coding_attempt(attempt)
+        .write_coding_attempt_for_test(attempt)
         .expect("persist terminal group uniqueness fixture");
 }

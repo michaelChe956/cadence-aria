@@ -359,7 +359,7 @@ async fn coding_plan_repair_existing_group_attempt_rejects_invalid_active_pointe
             _ => unreachable!(),
         }
         store
-            .save_coding_attempt(&attempt)
+            .update_attempt_non_status_fields(&attempt)
             .expect("persist corrupt pointers");
 
         let (status, body) = request_json(app, Method::POST, path, json!({})).await;

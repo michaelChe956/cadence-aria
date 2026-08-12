@@ -884,5 +884,8 @@ fn reset_completed_application_to_unfinished_finalization(
         .get_attempt(&applied.project_id, &applied.issue_id, &applied.id)
         .unwrap();
     applying.status = CodingAttemptStatus::ApplyingPlanAmendment;
-    fixture.store.save_coding_attempt(&applying).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&applying)
+        .unwrap();
 }

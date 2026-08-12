@@ -54,7 +54,7 @@ async fn legacy_coding_ws_reports_ambiguous_instead_of_not_found() {
         let mut legacy = template.clone();
         legacy.id = "coding_attempt_0001".to_string();
         legacy.issue_id = issue_id.to_string();
-        store.save_coding_attempt(&legacy).expect("legacy attempt");
+        store.update_attempt_non_status_fields(&legacy).expect("legacy attempt");
     }
     let app = build_web_router(WebAppState::new(
         root.path().to_path_buf(),
@@ -222,7 +222,7 @@ async fn scoped_coding_ws_keeps_exact_identity_for_business_messages() {
     let mut duplicate = attempt.clone();
     duplicate.issue_id = "issue_0002".to_string();
     store
-        .save_coding_attempt(&duplicate)
+        .update_attempt_non_status_fields(&duplicate)
         .expect("duplicate legacy attempt");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -357,7 +357,7 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
         .clone();
     duplicate.issue_id = "issue_0002".to_string();
     store
-        .save_coding_attempt(&duplicate)
+        .update_attempt_non_status_fields(&duplicate)
         .expect("duplicate legacy attempt");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -473,7 +473,7 @@ async fn scoped_start_coding_persists_target_provider_output_and_conversation() 
         .expect("attempt");
     duplicate.issue_id = "issue_0002".to_string();
     store
-        .save_coding_attempt(&duplicate)
+        .update_attempt_non_status_fields(&duplicate)
         .expect("duplicate legacy attempt");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -572,7 +572,7 @@ async fn scoped_context_note_updates_only_target_issue_for_legacy_duplicate() {
         .expect("attempt");
     duplicate.issue_id = "issue_0002".to_string();
     store
-        .save_coding_attempt(&duplicate)
+        .update_attempt_non_status_fields(&duplicate)
         .expect("duplicate legacy attempt");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -628,7 +628,7 @@ async fn scoped_start_coding_persists_target_timeline_without_partial_state() {
         .expect("attempt");
     duplicate.issue_id = "issue_0002".to_string();
     store
-        .save_coding_attempt(&duplicate)
+        .update_attempt_non_status_fields(&duplicate)
         .expect("duplicate legacy attempt");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -716,7 +716,7 @@ async fn scoped_abort_notifies_only_target_issue_runner_for_legacy_duplicate() {
         .expect("attempt");
     duplicate.issue_id = "issue_0002".to_string();
     store
-        .save_coding_attempt(&duplicate)
+        .update_attempt_non_status_fields(&duplicate)
         .expect("duplicate legacy attempt");
     let state = WebAppState::new(
         root.path().to_path_buf(),

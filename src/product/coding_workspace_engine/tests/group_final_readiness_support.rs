@@ -322,7 +322,7 @@ pub(super) fn seed_complete_group_readiness(fixture: &ReadinessFixture) -> Codin
     attempt.head_commit = Some(completion);
     fixture
         .store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("attempt head");
     fixture
         .store

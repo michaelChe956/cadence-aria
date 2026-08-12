@@ -628,7 +628,9 @@ async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture
         .expect("running attempt");
     attempt.head_commit = Some(head);
     attempt.stage = CodingExecutionStage::Coding;
-    store.save_coding_attempt(&attempt).expect("save attempt");
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save attempt");
     let (event_tx, _event_rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
     let coder = CapturingProjectionProvider::new(

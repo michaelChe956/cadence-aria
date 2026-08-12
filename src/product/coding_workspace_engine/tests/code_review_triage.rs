@@ -298,7 +298,7 @@ async fn run_group_attempt_through_coding() -> (
         .unwrap();
     attempt.head_commit = Some(head.clone());
     attempt.stage = CodingExecutionStage::Coding;
-    store.save_coding_attempt(&attempt).unwrap();
+    store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(
         store.clone(),

@@ -119,7 +119,7 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
         .unwrap();
     attempt.head_commit = Some(head.clone());
     attempt.stage = CodingExecutionStage::Coding;
-    store.save_coding_attempt(&attempt).unwrap();
+    store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let coder = CapturingProjectionProvider::new(current_plan_defect_output());
@@ -634,7 +634,7 @@ async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_
     attempt.current_work_item_id = Some(second.logical_work_item_id.clone());
     attempt.active_unit_id = Some(second.id.clone());
     attempt.head_commit = Some(head);
-    store.save_coding_attempt(&attempt).unwrap();
+    store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let provider = CapturingProjectionProvider::new("must not run");

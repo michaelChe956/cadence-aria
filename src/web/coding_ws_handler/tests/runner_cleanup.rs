@@ -422,7 +422,7 @@ fn seed_http_attempt_with_lease() -> (
     attempt.status = CodingAttemptStatus::Running;
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("persist HTTP attempt fixture");
 
     let repository_path = tmp.path().join("repository");

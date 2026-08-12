@@ -133,7 +133,7 @@ pub(super) async fn provider_interrupted_review_fixture(
         .then(|| "work_item_plan_0001".to_string());
     attempt.active_unit_id = None;
     store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save running review attempt");
     if matches!(scope, CodingAttemptScope::WorkItemGroup) {
         seed_group_plan_facts(&store, &attempt);
@@ -465,7 +465,7 @@ pub(super) fn failed_review_fixture(
         .then(|| "work_item_plan_0001".to_string());
     attempt.active_unit_id = None;
     store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save historical failed attempt");
     if matches!(scope, CodingAttemptScope::WorkItemGroup) {
         seed_group_plan_facts(&store, &attempt);
@@ -501,7 +501,7 @@ pub(super) fn failed_review_fixture(
     {
         attempt.active_unit_id = Some("coding_unit_0001".to_string());
         store
-            .save_coding_attempt(&attempt)
+            .write_coding_attempt_for_test(&attempt)
             .expect("save invalid work item active unit id");
     }
     if matches!(scope, CodingAttemptScope::WorkItemGroup)
@@ -509,13 +509,13 @@ pub(super) fn failed_review_fixture(
     {
         attempt.active_unit_id = Some("coding_unit_9999".to_string());
         store
-            .save_coding_attempt(&attempt)
+            .write_coding_attempt_for_test(&attempt)
             .expect("save mismatched group active unit id");
     }
     if matches!(case, FixtureCase::MissingWorktreePath) {
         attempt.worktree_path = None;
         store
-            .save_coding_attempt(&attempt)
+            .write_coding_attempt_for_test(&attempt)
             .expect("save missing worktree path");
     }
 

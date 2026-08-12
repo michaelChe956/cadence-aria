@@ -446,7 +446,10 @@ async fn coding_plan_repair_group_internal_review_uses_unique_completed_unit_run
         .unwrap();
     assert!(attempt.active_unit_id.is_none());
     attempt.stage = CodingExecutionStage::InternalPrReview;
-    fixture.store.save_coding_attempt(&attempt).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&attempt)
+        .unwrap();
     let review = internal_plan_defect_review(&attempt, plan_defect_finding("group_review"));
 
     let updated = fixture
@@ -553,7 +556,10 @@ async fn coding_plan_repair_group_internal_review_ambiguous_run_fails_closed() {
         )
         .unwrap();
     attempt.stage = CodingExecutionStage::InternalPrReview;
-    fixture.store.save_coding_attempt(&attempt).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&attempt)
+        .unwrap();
     let review = internal_plan_defect_review(&attempt, plan_defect_finding("ambiguous"));
 
     let error = fixture
@@ -607,7 +613,10 @@ async fn coding_plan_repair_failed_review_recovery_writes_no_journal_during_amen
         let fixture = plan_repair_fixture();
         let mut attempt = fixture.attempt.clone();
         attempt.status = status.clone();
-        fixture.store.save_coding_attempt(&attempt).unwrap();
+        fixture
+            .store
+            .write_coding_attempt_for_test(&attempt)
+            .unwrap();
 
         let error = fixture
             .engine
@@ -640,7 +649,10 @@ async fn assert_provider_entry_blocked(status: CodingAttemptStatus, entry: Provi
     let fixture = plan_repair_fixture();
     let mut attempt = fixture.attempt.clone();
     attempt.status = status.clone();
-    fixture.store.save_coding_attempt(&attempt).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&attempt)
+        .unwrap();
     let before = fixture
         .store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
