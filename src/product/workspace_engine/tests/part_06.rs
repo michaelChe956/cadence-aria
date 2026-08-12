@@ -261,6 +261,138 @@ async fn human_confirm_request_change_requires_context_after_untrusted_review() 
 }
 
 #[tokio::test]
+async fn human_confirm_request_change_requires_context_for_untrusted_review_across_workspace_routes() {
+    enum HumanConfirmRoute {
+        General(WorkspaceType),
+        WorkItemPlanOutline,
+    }
+
+    for route in [
+        HumanConfirmRoute::General(WorkspaceType::Story),
+        HumanConfirmRoute::General(WorkspaceType::Design),
+        HumanConfirmRoute::General(WorkspaceType::WorkItem),
+        HumanConfirmRoute::WorkItemPlanOutline,
+    ] {
+        let (route_name, is_outline, mut engine, _fixture) = match route {
+            HumanConfirmRoute::General(workspace_type) => {
+                let (_tmp, store) = setup();
+                let (tx, _) = mpsc::channel(64);
+                let mut session = make_session(&format!(
+                    "sess_human_request_change_untrusted_{workspace_type:?}"
+                ));
+                session.workspace_type = workspace_type.clone();
+                let mut engine = WorkspaceEngine::new(store, tx, session);
+                engine.latest_review_verdict = Some(ReviewVerdict {
+                    verdict: ReviewVerdictType::NeedsHuman,
+                    comments: "需要人工判断".to_string(),
+                    summary: "需要人工确认".to_string(),
+                    findings: Vec::new(),
+                    review_gate: ReviewGate::UserTriageRequired,
+                    work_item_plan_review: None,
+                    structured_output_diagnostic: None,
+                });
+                engine
+                    .enter_human_confirm(Some("需要人工确认".to_string()))
+                    .await;
+                (format!("{workspace_type:?}"), false, engine, _tmp)
+            }
+            HumanConfirmRoute::WorkItemPlanOutline => {
+                let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+                    make_work_item_plan_engine_with_draft_candidate(
+                        "sess_human_request_change_untrusted_work_item_plan",
+                    );
+                let persisted_session = lifecycle
+                    .list_workspace_sessions("project_0001", "issue_0001")
+                    .expect("workspace sessions")
+                    .into_iter()
+                    .next()
+                    .expect("persisted workspace session");
+                engine.session.session_id = persisted_session.id;
+                prepare_work_item_plan_outline_artifact(&mut engine).await;
+                engine
+                    .complete_active_node(Some("准备 Outline review".to_string()))
+                    .await;
+                let review_node_id = engine
+                    .create_timeline_node(TimelineNodeDraft {
+                        node_type: TimelineNodeType::WorkItemPlanOutlineReview,
+                        agent: Some(ProviderName::Codex),
+                        stage: WorkspaceStage::CrossReview,
+                        round: Some(1),
+                        title: "WorkItemPlan Outline Review Round 1".to_string(),
+                        summary: None,
+                        status: TimelineNodeStatus::Active,
+                    })
+                    .await;
+                engine
+                    .update_timeline_node(
+                        &review_node_id,
+                        TimelineNodeStatus::Completed,
+                        Some("恢复的审核结果需要人工确认".to_string()),
+                    )
+                    .await;
+                engine.latest_review_verdict = Some(ReviewVerdict {
+                    verdict: ReviewVerdictType::NeedsHuman,
+                    comments: "需要人工判断".to_string(),
+                    summary: "需要人工确认 Outline review".to_string(),
+                    findings: Vec::new(),
+                    review_gate: ReviewGate::UserTriageRequired,
+                    work_item_plan_review: None,
+                    structured_output_diagnostic: None,
+                });
+                engine
+                    .enter_human_confirm(Some("等待人工确认 Outline review".to_string()))
+                    .await;
+                ("WorkItemPlanOutline".to_string(), true, engine, _tmp)
+            }
+        };
+
+        let error = engine
+            .handle_human_confirm(HumanConfirmDecision::RequestChange, None)
+            .await
+            .expect_err("untrusted review without an explicit target must be rejected");
+        assert!(error.contains("非空"), "{route_name}");
+        assert!(error.contains("修改说明"), "{route_name}");
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm, "{route_name}");
+        assert!(
+            !engine.timeline_nodes.iter().any(|node| {
+                node.status == TimelineNodeStatus::Active
+                    && matches!(
+                        node.node_type,
+                        TimelineNodeType::Revision | TimelineNodeType::WorkItemPlanOutlineRun
+                    )
+            }),
+            "{route_name} must not start a revision"
+        );
+
+        let outcome = engine
+            .handle_human_confirm(
+                HumanConfirmDecision::RequestChange,
+                Some(serde_json::json!({"description": "补充失败路径"})),
+            )
+            .await
+            .expect("explicit human revision target must preserve the route");
+        if is_outline {
+            assert!(matches!(
+                outcome,
+                ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
+            ));
+            assert_eq!(engine.session().stage, WorkspaceStage::Running, "{route_name}");
+            assert!(engine.timeline_nodes.iter().any(|node| {
+                node.node_type == TimelineNodeType::WorkItemPlanOutlineRun
+                    && node.status == TimelineNodeStatus::Active
+            }));
+        } else {
+            assert_eq!(outcome, ReviewDecisionOutcome::StartRevision, "{route_name}");
+            assert_eq!(engine.session().stage, WorkspaceStage::Revision, "{route_name}");
+            assert!(engine.timeline_nodes.iter().any(|node| {
+                node.node_type == TimelineNodeType::Revision
+                    && node.status == TimelineNodeStatus::Active
+            }));
+        }
+    }
+}
+
+#[tokio::test]
 async fn set_provider_updates_author_and_reviewer() {
     let (_tmp, store) = setup();
     let (tx, _) = mpsc::channel(64);

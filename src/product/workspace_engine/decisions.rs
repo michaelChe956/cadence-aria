@@ -388,6 +388,14 @@ impl WorkspaceEngine {
             },
             HumanConfirmDecision::RequestChange => {
                 let context = human_confirm_payload_description(payload);
+                let review_has_no_trusted_findings =
+                    self.latest_review_verdict.as_ref().is_some_and(|verdict| {
+                        verdict.review_gate == ReviewGate::UserTriageRequired
+                            && verdict.findings.is_empty()
+                    });
+                if review_has_no_trusted_findings && context.is_none() {
+                    return Err("无可信 reviewer 修改目标时，请提供非空修改说明".to_string());
+                }
                 if self.human_confirm_should_revise_work_item_plan_outline() {
                     let feedback = self
                         .prepare_work_item_plan_outline_revision(
@@ -399,18 +407,6 @@ impl WorkspaceEngine {
                     return Ok(ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision {
                         feedback,
                     });
-                }
-                let review_has_no_trusted_findings =
-                    self.latest_review_verdict.as_ref().is_some_and(|verdict| {
-                        verdict.review_gate == ReviewGate::UserTriageRequired
-                            && verdict.findings.is_empty()
-                            && verdict
-                                .structured_output_diagnostic
-                                .as_ref()
-                                .is_some_and(|diagnostic| !diagnostic.repair_succeeded)
-                    });
-                if review_has_no_trusted_findings && context.is_none() {
-                    return Err("无可信 reviewer 修改目标时，请提供非空修改说明".to_string());
                 }
                 if self.latest_review_verdict.is_none() {
                     self.latest_review_verdict = Some(ReviewVerdict {
