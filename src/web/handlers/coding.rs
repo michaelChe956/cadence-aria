@@ -14,9 +14,14 @@ use crate::web::state::CodingAttemptRunKey;
 
 mod group;
 mod scope;
+mod worktree_route;
 
 pub use group::create_group_coding_attempt;
 use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};
+use worktree_route::{
+    IssueWorktreeRoute, issue_worktree_active_api_error, release_worktree_lock,
+    repo_worktree_active_api_error,
+};
 
 pub(crate) struct RuntimeBindingProviderConfigInput<'a> {
     pub project_id: &'a str,
@@ -138,42 +143,81 @@ pub async fn create_coding_attempt(
     }
 
     let target_snapshot = attempt_target_snapshot(&app_paths, &project_id, &issue_id, work_item)?;
+    let worktree_route = IssueWorktreeRoute::from_target_snapshot(&target_snapshot);
 
     let branch_name = format!("aria/issues/{issue_id}");
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
-    let shared_worktree_path = repository
-        .path
-        .join(".worktrees")
-        .join("aria-issues")
-        .join(&issue_id);
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            repository_id: repository.id.clone(),
-            branch_name: branch_name.clone(),
-            worktree_path: shared_worktree_path,
-            base_branch: base_branch.clone(),
-        })
-        .map_err(product_store_api_error)?;
-    let issue_worktree_lease_id = format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple());
-    let issue_worktree_lease = lifecycle
-        .try_acquire_issue_worktree_lock(
-            &project_id,
-            &issue_id,
-            &work_item_id,
-            &issue_worktree_lease_id,
-        )
-        .map_err(|error| match error {
-            ProductStoreError::Io(ref msg) if msg.contains("issue_worktree_active") => {
-                ApiError::runtime(
-                    "issue_worktree_active",
-                    "another work item is already active on the issue shared worktree",
-                    json!({}),
+    match &worktree_route {
+        IssueWorktreeRoute::Legacy => {
+            let shared_worktree_path = repository
+                .path
+                .join(".worktrees")
+                .join("aria-issues")
+                .join(&issue_id);
+            lifecycle
+                .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+                    project_id: project_id.clone(),
+                    issue_id: issue_id.clone(),
+                    repository_id: repository.id.clone(),
+                    branch_name: branch_name.clone(),
+                    worktree_path: shared_worktree_path,
+                    base_branch: base_branch.clone(),
+                })
+                .map_err(product_store_api_error)?;
+        }
+        IssueWorktreeRoute::Repository { repository_id } => {
+            let shared_worktree_path = target_snapshot
+                .as_ref()
+                .expect("repository route has target snapshot")
+                .canonical_path
+                .join(".worktrees")
+                .join("aria-issues")
+                .join(&issue_id);
+            lifecycle
+                .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+                    project_id: project_id.clone(),
+                    issue_id: issue_id.clone(),
+                    repository_id: *repository_id,
+                    branch_name: branch_name.clone(),
+                    worktree_path: shared_worktree_path,
+                    base_branch: base_branch.clone(),
+                })
+                .map_err(product_store_api_error)?;
+        }
+    }
+    let worktree_lease_id = match &worktree_route {
+        IssueWorktreeRoute::Legacy => {
+            format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple())
+        }
+        IssueWorktreeRoute::Repository { .. } => {
+            format!("repo_worktree_lease_{}", uuid::Uuid::new_v4().simple())
+        }
+    };
+    let (worktree_lease_acquired, worktree_lease_id) = match &worktree_route {
+        IssueWorktreeRoute::Legacy => {
+            let lease = lifecycle
+                .try_acquire_issue_worktree_lock(
+                    &project_id,
+                    &issue_id,
+                    &work_item_id,
+                    &worktree_lease_id,
                 )
-            }
-            _ => product_store_api_error(error),
-        })?;
+                .map_err(issue_worktree_active_api_error)?;
+            (lease.acquired, lease.lease_id)
+        }
+        IssueWorktreeRoute::Repository { repository_id } => {
+            let lease = lifecycle
+                .try_acquire_repo_worktree_lock(
+                    &project_id,
+                    &issue_id,
+                    *repository_id,
+                    &work_item_id,
+                    &worktree_lease_id,
+                )
+                .map_err(repo_worktree_active_api_error)?;
+            (lease.acquired, lease.lease_id)
+        }
+    };
     state
         .test_controls
         .pause_coding_attempt_after_worktree_acquire_if_configured()
@@ -187,12 +231,14 @@ pub async fn create_coding_attempt(
     ) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            if issue_worktree_lease.acquired {
-                let _ = lifecycle.release_issue_worktree_lock(
+            if worktree_lease_acquired {
+                release_worktree_lock(
+                    &lifecycle,
+                    &worktree_route,
                     &project_id,
                     &issue_id,
                     &work_item_id,
-                    &issue_worktree_lease.lease_id,
+                    &worktree_lease_id,
                 );
             }
             return Err(error);
@@ -220,12 +266,14 @@ pub async fn create_coding_attempt(
             },
         ) => return Err(product_store_api_error(error)),
         Err(error) => {
-            if issue_worktree_lease.acquired {
-                let _ = lifecycle.release_issue_worktree_lock(
+            if worktree_lease_acquired {
+                release_worktree_lock(
+                    &lifecycle,
+                    &worktree_route,
                     &project_id,
                     &issue_id,
                     &work_item_id,
-                    &issue_worktree_lease.lease_id,
+                    &worktree_lease_id,
                 );
             }
             return Err(product_store_api_error(error));
@@ -241,19 +289,32 @@ pub async fn create_coding_attempt(
             json!({}),
         ));
     }
-    if let Err(error) = lifecycle.bind_issue_worktree_lock_to_attempt(
-        &project_id,
-        &issue_id,
-        &work_item_id,
-        &attempt.id,
-    ) {
+    let bind_result = match &worktree_route {
+        IssueWorktreeRoute::Legacy => lifecycle.bind_issue_worktree_lock_to_attempt(
+            &project_id,
+            &issue_id,
+            &work_item_id,
+            &attempt.id,
+        ),
+        IssueWorktreeRoute::Repository { repository_id } => lifecycle
+            .bind_repo_worktree_lock_to_attempt(
+                &project_id,
+                &issue_id,
+                *repository_id,
+                &work_item_id,
+                &attempt.id,
+            ),
+    };
+    if let Err(error) = bind_result {
         let _ = coding_store.delete_attempt(&project_id, &issue_id, &attempt.id);
-        if issue_worktree_lease.acquired {
-            let _ = lifecycle.release_issue_worktree_lock(
+        if worktree_lease_acquired {
+            release_worktree_lock(
+                &lifecycle,
+                &worktree_route,
                 &project_id,
                 &issue_id,
                 &work_item_id,
-                &issue_worktree_lease.lease_id,
+                &worktree_lease_id,
             );
         }
         return Err(product_store_api_error(error));

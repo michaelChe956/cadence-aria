@@ -36,7 +36,7 @@ use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
     CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
-    UpsertIssueSharedWorktreeInput,
+    UpsertIssueSharedWorktreeInput, UpsertRepoSharedWorktreeInput,
 };
 use crate::product::models::{
     DesignSpecRecord, GateStatus, IssuePhase as ProductIssuePhase,

@@ -67,6 +67,138 @@ async fn legacy_attempt_target_snapshot_remains_none() {
 }
 
 #[tokio::test]
+async fn multi_repo_work_item_attempt_uses_target_repo_worktree_not_primary() {
+    // REQ-COD-01 分层 c：多仓 WorkItem 启动 coding 时，shared worktree 必须落在
+    // 目标仓 checkout 下（不是 issue 的 primary 仓），且单仓 legacy 记录不被写入。
+    let root = tempdir().expect("root");
+    let primary_repo = git_repo();
+    let target_repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    // 项目 + 两个物理仓 + issue 绑定 primary 仓。
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name": "Coding", "description": null}),
+    )
+    .await;
+    let primary = register_repository_and_wait(
+        app.clone(),
+        json!({"name": "Primary", "path": primary_repo.path(), "default_provider_mode": "fake"}),
+    )
+    .await;
+    assert_eq!(primary["repository_id"], "repository_0001");
+    let target = register_repository_and_wait(
+        app.clone(),
+        json!({"name": "Target", "path": target_repo.path(), "default_provider_mode": "fake"}),
+    )
+    .await;
+    assert_eq!(target["repository_id"], "repository_0002");
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({
+            "title": "多仓工作项",
+            "description": "target 在 repository_0002",
+            "repository_id": "repository_0001"
+        }),
+    )
+    .await;
+
+    // WorkItem 绑定 target 仓；确认 plan 后经迁移获得 target_repository_id。
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0002".to_string(),
+            title: "实现目标仓功能".to_string(),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create work item");
+
+    IdentityMigrationExecutor::new(app_paths.clone())
+        .ensure_identity_schema("project_0001")
+        .expect("migrate fixture to logical codebase");
+    let target_logical_id = LogicalCodebaseStore::new(app_paths.clone())
+        .list_members("project_0001")
+        .expect("logical members")
+        .into_iter()
+        .find(|member| member.physical_repository_id == "repository_0002")
+        .expect("target logical member")
+        .logical_repository_id;
+
+    let primary_head_before = git_head_of(primary_repo.path());
+
+    let (status, created) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "response: {created}");
+
+    // 仓维 shared worktree 记录必须指向目标仓 checkout（不是 primary 仓）。
+    let shared = lifecycle
+        .get_repo_shared_worktree("project_0001", "issue_0001", target_logical_id)
+        .expect("repo shared worktree read")
+        .expect("repo shared worktree must exist");
+    assert_eq!(
+        shared.worktree_path,
+        target_repo
+            .path()
+            .join(".worktrees")
+            .join("aria-issues")
+            .join("issue_0001"),
+        "多仓 worktree 必须落在目标仓 checkout 下"
+    );
+    // 单仓 legacy 记录不得被写入（红线：Legacy 路径只在单仓 attempt 时使用）。
+    assert!(
+        lifecycle
+            .get_issue_shared_worktree("project_0001", "issue_0001")
+            .expect("legacy shared worktree read")
+            .is_none(),
+        "多仓 attempt 不得写 issue-shared-worktree.json"
+    );
+    // primary 仓 HEAD 与工作区保持不变。
+    assert_eq!(
+        git_head_of(primary_repo.path()),
+        primary_head_before,
+        "primary checkout HEAD 不得变化"
+    );
+    assert!(
+        !primary_repo.path().join(".worktrees").exists(),
+        "primary checkout 下不得创建 .worktrees"
+    );
+}
+
+fn git_head_of(repo_path: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .expect("git rev-parse HEAD");
+    assert!(
+        output.status.success(),
+        "git rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 git output")
+        .trim()
+        .to_string()
+}
+
+#[tokio::test]
 async fn multi_repo_group_attempt_persists_frozen_target_snapshot() {
     let root = tempdir().expect("root");
     let repo = git_repo();
