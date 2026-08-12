@@ -558,7 +558,8 @@ where
         emit_aborted(event_tx).await;
         return Ok(None);
     }
-    let request = peer.request_with_timeout(payload, KIMI_RPC_REQUEST_TIMEOUT.min(remaining));
+    let request = peer
+        .request_with_timeout_discarding_incoming(payload, KIMI_RPC_REQUEST_TIMEOUT.min(remaining));
     tokio::pin!(request);
     tokio::select! {
         _ = cancel.cancelled() => {

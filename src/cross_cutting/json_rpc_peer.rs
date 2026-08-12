@@ -50,7 +50,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     pub async fn request(&self, payload: Value) -> Result<Value, ProviderAdapterError> {
-        self.request_inner(payload, None).await
+        self.request_inner(payload, None, false).await
     }
 
     pub async fn request_with_timeout(
@@ -58,13 +58,27 @@ where
         payload: Value,
         timeout: Duration,
     ) -> Result<Value, ProviderAdapterError> {
-        self.request_inner(payload, Some(timeout)).await
+        self.request_inner(payload, Some(timeout), false).await
+    }
+
+    /// Waits for a request response while discarding notifications received before it.
+    ///
+    /// Control requests use this when a peer can replay an unbounded history before its
+    /// terminal response. Draining preserves the bounded incoming queue and prevents the
+    /// reader task from blocking before it reaches the matching response.
+    pub async fn request_with_timeout_discarding_incoming(
+        &self,
+        payload: Value,
+        timeout: Duration,
+    ) -> Result<Value, ProviderAdapterError> {
+        self.request_inner(payload, Some(timeout), true).await
     }
 
     async fn request_inner(
         &self,
         mut payload: Value,
         timeout: Option<Duration>,
+        discard_incoming: bool,
     ) -> Result<Value, ProviderAdapterError> {
         let method = payload
             .get("method")
@@ -72,7 +86,7 @@ where
             .unwrap_or("unknown")
             .to_string();
         let id = ensure_request_id(&mut payload, &self.next_id)?;
-        let (response_tx, response_rx) = oneshot::channel();
+        let (response_tx, mut response_rx) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), response_tx);
 
         if let Err(error) = self.send(payload).await {
@@ -81,14 +95,43 @@ where
         }
 
         let wait_for_response = async {
-            response_rx.await.map_err(|_| {
-                ProviderAdapterError::execution_failed(
-                    None,
-                    String::new(),
-                    "JSON-RPC response channel closed",
-                    0,
-                )
-            })
+            if !discard_incoming {
+                return response_rx.await.map_err(|_| {
+                    ProviderAdapterError::execution_failed(
+                        None,
+                        String::new(),
+                        "JSON-RPC response channel closed",
+                        0,
+                    )
+                });
+            }
+
+            loop {
+                tokio::select! {
+                    response = &mut response_rx => {
+                        let response = response.map_err(|_| {
+                            ProviderAdapterError::execution_failed(
+                                None,
+                                String::new(),
+                                "JSON-RPC response channel closed",
+                                0,
+                            )
+                        })?;
+                        while self.try_next_incoming().await.is_some() {}
+                        return Ok(response);
+                    }
+                    incoming = self.next_incoming() => {
+                        if incoming.is_none() {
+                            return Err(ProviderAdapterError::execution_failed(
+                                None,
+                                String::new(),
+                                "JSON-RPC response channel closed",
+                                0,
+                            ));
+                        }
+                    }
+                }
+            }
         };
 
         let Some(timeout) = timeout else {

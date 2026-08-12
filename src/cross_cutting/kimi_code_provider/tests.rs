@@ -566,6 +566,92 @@ mod session_tests {
     }
 
     #[tokio::test]
+    async fn resume_load_replay_over_queue_capacity_does_not_timeout() {
+        let requested_resume_id = "resume_load_replay";
+        let (peer, server) = test_peer();
+        let (_commands, mut events, run) =
+            direct_session_events(peer, input(Some(requested_resume_id), 10)).await;
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            let initialize = read_request(&mut reader).await;
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            })).await;
+            let _initialized = read_request(&mut reader).await;
+            let load = read_request(&mut reader).await;
+            assert_eq!(load["method"], "session/load");
+            for index in 0..46 {
+                send_message(&mut writer, serde_json::json!({
+                    "jsonrpc":"2.0", "method":"session/update",
+                    "params":{"sessionId":requested_resume_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("historical-{index}")}}}
+                })).await;
+            }
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":load["id"], "result":{}
+                }),
+            )
+            .await;
+            let prompt = read_request(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            assert_eq!(prompt["params"]["sessionId"], requested_resume_id);
+            send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":requested_resume_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"current prompt"}}}
+            })).await;
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
+                }),
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        });
+
+        let events = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            let mut received = Vec::new();
+            loop {
+                let Some(event) = events.recv().await else {
+                    return received;
+                };
+                let terminal = matches!(
+                    event,
+                    ProviderEvent::Completed(_) | ProviderEvent::Failed { .. }
+                );
+                received.push(event);
+                if terminal {
+                    return received;
+                }
+            }
+        })
+        .await
+        .expect("session/load must complete before the replay fills the incoming queue");
+        let run_result = run.await.expect("run join");
+        let completion = events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::Completed(completion) => Some(completion),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("completion; events: {events:?}; run: {run_result:?}"));
+        assert_eq!(completion.full_output, "current prompt");
+        assert_eq!(
+            completion.provider_session_id.as_deref(),
+            Some(requested_resume_id)
+        );
+        assert!(
+            !completion.full_output.contains("historical-"),
+            "session/load replay must not be forwarded into the current prompt output"
+        );
+        assert!(run_result.is_ok());
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
     async fn terminal_response_drains_prebuffered_updates_without_sleep() {
         let provider = KimiCodeProvider::new(fixture_command("kimi_acp_fast_fixture.sh"));
         let mut session = provider
