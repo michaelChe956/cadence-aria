@@ -163,6 +163,7 @@ fn status_machine_allows_blocked_to_running_and_manual_recovery_only_to_abort() 
         CodingAttemptStatus::Running,
         CodingAttemptStatus::WaitingForHuman,
         CodingAttemptStatus::Blocked,
+        CodingAttemptStatus::AwaitingManualRecovery,
         CodingAttemptStatus::AwaitingPlanAmendment,
         CodingAttemptStatus::ApplyingPlanAmendment,
         CodingAttemptStatus::AmendmentApplyFailed,

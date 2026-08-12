@@ -623,6 +623,9 @@ pub(super) fn valid_status_transition(
     current: &CodingAttemptStatus,
     next: &CodingAttemptStatus,
 ) -> bool {
+    if current == &CodingAttemptStatus::AwaitingManualRecovery {
+        return next == &CodingAttemptStatus::Aborted;
+    }
     if current == next {
         return true;
     }
