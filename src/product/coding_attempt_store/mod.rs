@@ -2,6 +2,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
+mod admission;
 mod amendment_arbitration;
 mod amendment_delivery;
 mod amendment_recovery;
@@ -32,6 +33,11 @@ mod unit_run_amendment;
 mod unit_run_handoff;
 mod utils;
 
+#[allow(unused_imports)]
+pub(crate) use admission::{
+    AdmissionTicketRecord, StableCode, admit_attempt_for_execution,
+    transition_to_awaiting_manual_recovery, transition_to_executable, transition_to_terminal,
+};
 #[cfg(test)]
 pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
 pub use attempt_creation::WorkItemAttemptCreationGuard;
@@ -43,6 +49,7 @@ pub(crate) use recovery::{
     FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, is_failed_review_manual_retry,
 };
 pub use recovery::{FailedCodeReviewRecoveryJournal, FailedCodeReviewRecoveryPhase};
+#[allow(unused_imports)]
 pub(crate) use utils::*;
 
 #[derive(Debug, Clone)]

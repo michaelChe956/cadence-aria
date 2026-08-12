@@ -44,9 +44,21 @@ pub fn validate_snapshot_fields(
         return Err(RepositoryRoutingErrorCode::Inconsistent);
     }
 
-    RepositoryStore::new(paths.clone())
-        .resolve_logical_repository_strict(&attempt.project_id, snapshot.logical_repository_id)
-        .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?;
+    let (resolved_member, resolved_checkout, resolved_repository) =
+        RepositoryStore::new(paths.clone())
+            .resolve_logical_repository_strict(&attempt.project_id, snapshot.logical_repository_id)
+            .map_err(|_| RepositoryRoutingErrorCode::Inconsistent)?;
+    if resolved_member.logical_repository_id != snapshot.logical_repository_id
+        || resolved_member.physical_repository_id != snapshot.physical_repository_id
+        || resolved_checkout.checkout_id != snapshot.checkout_id
+        || resolved_checkout.physical_repository_id != snapshot.physical_repository_id
+        || resolved_checkout.canonical_path != snapshot.canonical_path
+        || resolved_checkout.git_dir_identity != snapshot.git_dir_identity
+        || resolved_checkout.revision != snapshot.revision
+        || resolved_repository.id != snapshot.physical_repository_id
+    {
+        return Err(RepositoryRoutingErrorCode::Inconsistent);
+    }
 
     Ok(())
 }
@@ -60,6 +72,7 @@ mod tests {
     use crate::product::coding_models::{
         AttemptTargetSnapshot, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
     };
+    use crate::product::json_store::{read_json, write_json};
     use crate::product::logical_codebase::{
         CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
         IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalRepositoryId, MemberStatus,
@@ -72,6 +85,55 @@ mod tests {
     struct SnapshotFixture {
         paths: ProductAppPaths,
         attempt: CodingExecutionAttempt,
+    }
+
+    #[test]
+    fn snapshot_validator_rejects_primary_checkout_repointed_to_another_valid_checkout() {
+        // strict resolver must return its primary checkout and compare it with the frozen one;
+        // merely resolving the logical repository successfully is not sufficient.
+        let temp = tempfile::tempdir().unwrap();
+        let mut fixture = snapshot_with_stale_membership_revision(temp.path());
+        fixture
+            .attempt
+            .target_snapshot
+            .as_mut()
+            .unwrap()
+            .membership_revision = 2;
+        let authority = LogicalCodebaseStore::new(fixture.paths.clone());
+        let snapshot = fixture.attempt.target_snapshot.as_ref().unwrap();
+        let replacement_checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+        let original_checkout = authority
+            .load_checkout("project_0001", snapshot.checkout_id)
+            .unwrap()
+            .unwrap();
+        let mut replacement_checkout = original_checkout.clone();
+        replacement_checkout.checkout_id = replacement_checkout_id;
+        replacement_checkout.canonical_path = original_checkout
+            .canonical_path
+            .with_file_name("repository_0002");
+        authority
+            .save_checkout("project_0001", &replacement_checkout)
+            .unwrap();
+        let mut member = authority
+            .load_member("project_0001", snapshot.logical_repository_id)
+            .unwrap()
+            .unwrap();
+        member.checkout_ids.push(replacement_checkout_id);
+        authority.save_member("project_0001", &member).unwrap();
+        let repos_path = fixture
+            .paths
+            .project_root("project_0001")
+            .join("repos.json");
+        let mut repositories: Vec<RepositoryRecord> = read_json(&repos_path).unwrap();
+        repositories[0].primary_checkout_id = Some(replacement_checkout_id);
+        write_json(&repos_path, &repositories).unwrap();
+
+        let result = validate_snapshot_fields(&fixture.paths, &fixture.attempt);
+
+        assert!(matches!(
+            result,
+            Err(RepositoryRoutingErrorCode::Inconsistent)
+        ));
     }
 
     #[test]

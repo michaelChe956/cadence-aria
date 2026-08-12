@@ -47,6 +47,16 @@ impl super::CodingAttemptStore {
             .join(attempt_id)
     }
 
+    pub(crate) fn admission_ticket_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("admission-ticket.json")
+    }
+
     pub(crate) fn group_final_readiness_snapshot_path(
         &self,
         attempt: &crate::product::coding_models::CodingExecutionAttempt,
