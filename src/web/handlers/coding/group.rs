@@ -45,7 +45,7 @@ pub async fn create_group_coding_attempt(
             }) => None,
             Err(error) => return Err(coding_group_attempt_incomplete_api_error(error)),
         };
-    if let Some(journal) = pending_journal
+    if let Some(journal) = pending_journal.as_ref()
         && journal.phase != CodingGroupInitializationPhase::Completed
     {
         let active_revision_id = WorkItemRevisionStore::new(app_paths.clone())
@@ -58,7 +58,7 @@ pub async fn create_group_coding_attempt(
             return Err(coding_group_attempt_incomplete_api_error(
                 ProductStoreError::IdentityMismatch {
                     kind: "coding_group_initialization_plan_revision",
-                    id: journal.attempt.id,
+                    id: journal.attempt.id.clone(),
                 },
             ));
         }
@@ -79,8 +79,15 @@ pub async fn create_group_coding_attempt(
             "repository path must point to a git work tree",
         ));
     }
-    let target_snapshot =
-        group_target_snapshot(&app_paths, &project_id, &issue_id, &authoritative)?;
+    // 未完成 journal 是本次初始化的权威重放输入：快照在 Prepared 时已冻结，
+    // 不能重新 capture（captured_at 会变化）。仍由 journal_matches_request 对此值作
+    // 全等校验，确保后续持久化的 attempt 与 journal 一致。
+    let target_snapshot = match pending_journal.as_ref() {
+        Some(journal) if journal.phase != CodingGroupInitializationPhase::Completed => {
+            journal.attempt.target_snapshot.clone()
+        }
+        _ => group_target_snapshot(&app_paths, &project_id, &issue_id, &authoritative)?,
+    };
     let branch_name = format!("aria/issues/{issue_id}");
     let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
     let shared_worktree_path = repository
@@ -132,6 +139,10 @@ pub async fn create_group_coding_attempt(
             &authoritative.units,
         )
         .map_err(group_initialization_api_error)?;
+    maybe_interrupt_group_initialization(
+        &state,
+        crate::web::test_controls::GroupAttemptInitializationCheckpoint::PreparedBeforeAttemptPersisted,
+    )?;
     if journal.phase == CodingGroupInitializationPhase::Completed {
         let existing = coding_store
             .get_attempt(&project_id, &issue_id, &journal.attempt.id)

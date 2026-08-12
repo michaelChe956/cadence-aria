@@ -101,6 +101,104 @@ async fn multi_repo_group_attempt_persists_frozen_target_snapshot() {
     );
 }
 
+#[tokio::test]
+async fn logical_group_initialization_replay_reuses_journal_target_snapshot() {
+    use cadence_aria::product::coding_attempt_store::CodingGroupInitializationPhase;
+    use cadence_aria::web::test_controls::GroupAttemptInitializationCheckpoint;
+
+    for (checkpoint, expected_phase) in [
+        (
+            GroupAttemptInitializationCheckpoint::PreparedBeforeAttemptPersisted,
+            CodingGroupInitializationPhase::Prepared,
+        ),
+        (
+            GroupAttemptInitializationCheckpoint::PersistedBeforeBind,
+            CodingGroupInitializationPhase::AttemptPersisted,
+        ),
+    ] {
+        let root = tempdir().expect("root");
+        let repo = git_repo();
+        let initial_state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        initial_state
+            .test_controls
+            .fail_next_group_attempt_initialization_at(checkpoint);
+        let initial_app = build_web_router(initial_state);
+        bootstrap_confirmed_work_item_plan_group(initial_app.clone(), repo.path()).await;
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let logical_repository_id = seed_group_logical_target_fixture(&app_paths, repo.path());
+        let create_path = "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts";
+
+        let (interrupted_status, interrupted) =
+            request_json(initial_app, Method::POST, create_path, json!({})).await;
+        assert_eq!(
+            interrupted_status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{checkpoint:?}: {interrupted}"
+        );
+        assert_eq!(
+            interrupted["code"],
+            "coding_group_initialization_interrupted",
+            "{checkpoint:?}"
+        );
+
+        let store = CodingAttemptStore::new(app_paths.clone());
+        let interrupted_journal = store
+            .get_group_initialization("project_0001", "issue_0001", "work_item_plan_0001")
+            .expect("interrupted logical group initialization journal");
+        assert_eq!(
+            interrupted_journal.phase, expected_phase,
+            "{checkpoint:?}"
+        );
+        let frozen_snapshot = interrupted_journal
+            .attempt
+            .target_snapshot
+            .clone()
+            .expect("logical group initialization must freeze a target snapshot");
+        assert_eq!(frozen_snapshot.logical_repository_id, logical_repository_id);
+
+        let restarted_app = build_web_router(WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        ));
+        let (retry_status, retry) =
+            request_json(restarted_app, Method::POST, create_path, json!({})).await;
+        assert_eq!(retry_status, StatusCode::OK, "{checkpoint:?}: {retry}");
+        assert_eq!(
+            retry["attempt_id"], interrupted_journal.attempt.id,
+            "{checkpoint:?}"
+        );
+
+        let completed_journal = store
+            .get_group_initialization("project_0001", "issue_0001", "work_item_plan_0001")
+            .expect("completed logical group initialization journal");
+        assert_eq!(
+            completed_journal.phase,
+            CodingGroupInitializationPhase::Completed,
+            "{checkpoint:?}"
+        );
+        let persisted = store
+            .get_attempt(
+                "project_0001",
+                "issue_0001",
+                &interrupted_journal.attempt.id,
+            )
+            .expect("replayed logical group attempt");
+        assert_eq!(
+            persisted.target_snapshot.as_ref(),
+            Some(&frozen_snapshot),
+            "{checkpoint:?}: replay must preserve the journal-frozen target snapshot, including captured_at"
+        );
+        assert_eq!(
+            completed_journal.attempt.target_snapshot.as_ref(),
+            Some(&frozen_snapshot),
+            "{checkpoint:?}: completed journal must preserve the frozen target snapshot"
+        );
+    }
+}
+
 fn seed_group_logical_target_fixture(
     app_paths: &ProductAppPaths,
     _repository_path: &std::path::Path,

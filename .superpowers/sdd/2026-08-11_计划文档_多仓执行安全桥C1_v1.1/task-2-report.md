@@ -48,7 +48,32 @@
 
 `a6a6ae0d feat(coding-attempt): 创建时持久化目标快照`
 
-## Concerns / 残余风险
+## Fix round 1（2026-08-11）：修复 Logical group 初始化重放快照漂移
+
+### 审查发现与根因
+
+- **Important**：`journal_matches_request` 对 `attempt.target_snapshot` 保持全等校验是必要的完整性保护；但 group 创建 handler 在每一次请求均调用 snapshot factory。未完成 journal 重放时，factory 新生成的 `captured_at` 与 journal 中冻结值不同，导致 `prepare_group_initialization` 返回 `initialization journal identity differs`。
+
+### 修复
+
+- `create_group_coding_attempt` 在存在**未完成** group 初始化 journal 时，复用 `journal.attempt.target_snapshot` 构造重放 input；只有无 journal 或 journal 已 `Completed` 的新建/幂等读取路径才调用 factory。
+- 未删除或放宽 `journal_matches_request` 的 `target_snapshot` 全等条件，持久化 attempt 与 journal 的快照一致性仍受保护。
+- 新增 `PreparedBeforeAttemptPersisted` 测试检查点，以覆盖 attempt 尚未物化、但 journal 已落盘的真实重放边界。
+- 新增 Logical group 回归：在 `PreparedBeforeAttemptPersisted`（Prepared）与 `PersistedBeforeBind`（AttemptPersisted）中断后重试均成功；断言 attempt 与完成 journal 的完整快照严格等于首次 journal 值，因而 `captured_at` 保持不变。
+
+### 验证
+
+| 命令 | 结果 | 摘要 |
+|---|---|---|
+| `cargo test --locked --test it_web logical_group_initialization_replay_reuses_journal_target_snapshot -- --nocapture` | 通过 | 1/1；两个 journal 阶段均验证重放成功及完整快照不变。 |
+| `cargo test --locked --lib group_initialization` | 通过 | 命令过滤无匹配单测（0 executed），lib 编译及测试二进制通过。 |
+| `cargo test --locked --test it_web` | 通过 | 335 passed、12 ignored、0 failed。 |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | 通过 | 无 warning。 |
+| `cargo fmt --check` | 通过 | 无格式差异。 |
+| `git diff --check` | 通过 | 无空白错误。 |
+
+全程未使用 `-j 1`。Legacy 路径未修改，仍传递 `None`。
+
 
 - 快照 factory 的错误目前映射为既有 `product_store_error`，未引入或改变稳定错误码；更细的 snapshot admission 稳定码属于后续 Task 6/16 范围。
 - `.pi/subagents/` 及 `cadence/notes/` 下已有未跟踪文件不属于本任务，未暂存或提交。
