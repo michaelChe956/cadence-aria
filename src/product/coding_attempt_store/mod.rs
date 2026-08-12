@@ -25,6 +25,7 @@ mod recovery;
 mod report;
 mod role_run;
 mod role_run_event;
+pub mod target_snapshot;
 mod timeline;
 mod unit_run;
 mod unit_run_amendment;
