@@ -52,7 +52,7 @@ async fn work_item_plan_outline_human_confirm_change_uses_outline_revision() {
     let outcome = engine
         .handle_human_confirm(
             HumanConfirmDecision::RequestChange,
-            Some(serde_json::json!({"description": "请补齐共享状态影响面"})),
+            Some(serde_json::json!({"description": "请补齐共享状态影响面", "source": "human"})),
         )
         .await
         .expect("human request change should revise outline");

@@ -26,3 +26,9 @@
 
 - 未触碰 `.aria`，未调用真实 Provider。
 - 未执行完整 Rust suite；交由最终集成验证阶段执行。
+
+## 后续全量测试夹具修复
+
+- 复现：`outline_human_confirm_revision_is_recoverable_before_provider_spawn` 与 `work_item_plan_outline_human_confirm_change_uses_outline_revision` 都以缺少 `source` 的 payload 调用 `RequestChange`，因此命中无可信 findings 的新后端 guard，错误为“请提供 source=human 的非空修改说明”。
+- 修复：仅将两个测试夹具 payload 补为 `{"description": ..., "source": "human"}`；没有修改生产逻辑。
+- 验证：两个定向测试分别通过；`cargo test --locked --lib human_confirm_request_change_requires_context` 也通过；`cargo fmt --check` 与 `git diff --check` 通过。
