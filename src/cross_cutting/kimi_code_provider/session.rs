@@ -375,12 +375,10 @@ where
                     ..
                 } if status == "pending" => {
                     if title == "AskUserQuestion"
-                        && let Some(questions) = arguments
-                            .get("questions")
-                            .and_then(Value::as_array)
+                        && let Some(questions) =
+                            arguments.get("questions").and_then(Value::as_array)
                     {
-                        askuser_question_counts
-                            .insert(tool_call_id.clone(), questions.len());
+                        askuser_question_counts.insert(tool_call_id.clone(), questions.len());
                     }
                     event_tx
                         .send(ProviderEvent::ToolCall(ProviderToolCall {

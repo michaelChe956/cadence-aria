@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -376,7 +376,12 @@ mod tests {
 
         let error = result.expect_err("request should time out");
         assert!(error.details.contains("turn/start"));
-        assert!(peer.pending.lock().expect("pending response lock").is_empty());
+        assert!(
+            peer.pending
+                .lock()
+                .expect("pending response lock")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -412,9 +417,17 @@ mod tests {
 
         request_received_rx.await.expect("request registered");
         request_task.abort();
-        assert!(request_task.await.expect_err("request task cancelled").is_cancelled());
         assert!(
-            peer.pending.lock().expect("pending response lock").is_empty(),
+            request_task
+                .await
+                .expect_err("request task cancelled")
+                .is_cancelled()
+        );
+        assert!(
+            peer.pending
+                .lock()
+                .expect("pending response lock")
+                .is_empty(),
             "cancelling a request waiter must remove its pending response sender"
         );
         finish_tx.send(()).expect("finish server");

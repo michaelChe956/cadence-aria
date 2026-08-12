@@ -339,7 +339,10 @@ mod session_tests {
             send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"permission-id","method":"session/request_permission","params":{"options":[{"optionId":"future","name":"Future","kind":"future_kind"}],"toolCall":{"toolCallId":"tool","title":"Bash","content":[]}}})).await;
             let reply = read_request(&mut reader).await;
             assert_eq!(reply["id"], "permission-id");
-            assert_eq!(reply["result"]["outcome"], serde_json::json!({"outcome":"cancelled"}));
+            assert_eq!(
+                reply["result"]["outcome"],
+                serde_json::json!({"outcome":"cancelled"})
+            );
         });
         assert!(run.await.expect("run join").is_err());
         server_task.await.expect("server task");
@@ -689,17 +692,25 @@ mod session_tests {
             })).await;
             let _initialized = read_request(&mut reader).await;
             let new = read_request(&mut reader).await;
-            send_message(&mut writer, serde_json::json!({
-                "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"terminal_response"}
-            })).await;
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"terminal_response"}
+                }),
+            )
+            .await;
             let prompt = read_request(&mut reader).await;
             send_message(&mut writer, serde_json::json!({
                 "jsonrpc":"2.0", "method":"session/update",
                 "params":{"sessionId":"terminal_response","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"complete"}}}
             })).await;
-            send_message(&mut writer, serde_json::json!({
-                "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
-            })).await;
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
+                }),
+            )
+            .await;
         });
 
         let events = tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -708,7 +719,10 @@ mod session_tests {
                 let Some(event) = events.recv().await else {
                     return received;
                 };
-                let terminal = matches!(event, ProviderEvent::Completed(_) | ProviderEvent::Failed { .. });
+                let terminal = matches!(
+                    event,
+                    ProviderEvent::Completed(_) | ProviderEvent::Failed { .. }
+                );
                 received.push(event);
                 if terminal {
                     return received;
@@ -743,9 +757,13 @@ mod session_tests {
             })).await;
             let _initialized = read_request(&mut reader).await;
             let new = read_request(&mut reader).await;
-            send_message(&mut writer, serde_json::json!({
-                "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"eof_update"}
-            })).await;
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"eof_update"}
+                }),
+            )
+            .await;
             let _prompt = read_request(&mut reader).await;
             send_message(&mut writer, serde_json::json!({
                 "jsonrpc":"2.0", "method":"session/update",
@@ -755,13 +773,18 @@ mod session_tests {
 
         assert!(matches!(
             events.recv().await,
-            Some(ProviderEvent::StatusChanged(crate::cross_cutting::streaming_provider::ProviderStatus::Running))
+            Some(ProviderEvent::StatusChanged(
+                crate::cross_cutting::streaming_provider::ProviderStatus::Running
+            ))
         ));
         assert!(matches!(
             events.recv().await,
             Some(ProviderEvent::TextDelta { content }) if content == "before eof"
         ));
-        let error = run.await.expect("run join").expect_err("prompt stream must fail");
+        let error = run
+            .await
+            .expect("run join")
+            .expect_err("prompt stream must fail");
         assert!(
             error.stderr.contains("response channel closed"),
             "unexpected error: {error:?}"
@@ -783,17 +806,25 @@ mod session_tests {
             })).await;
             let _initialized = read_request(&mut reader).await;
             let new = read_request(&mut reader).await;
-            send_message(&mut writer, serde_json::json!({
-                "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"terminal_choice"}
-            })).await;
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":"terminal_choice"}
+                }),
+            )
+            .await;
             let first_prompt = read_request(&mut reader).await;
             send_message(&mut writer, serde_json::json!({
                 "jsonrpc":"2.0", "id":"choice-1", "method":"session/request_permission",
                 "params":{"options":[{"optionId":"selected","name":"Selected","kind":"allow_once"}],"toolCall":{"toolCallId":"choice-tool","title":"AskUserQuestion","content":{"type":"text","text":"Continue?"}}}
             })).await;
-            send_message(&mut writer, serde_json::json!({
-                "jsonrpc":"2.0", "id":first_prompt["id"], "result":{"stopReason":"end_turn"}
-            })).await;
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":first_prompt["id"], "result":{"stopReason":"end_turn"}
+                }),
+            )
+            .await;
             let cancel = read_request(&mut reader).await;
             assert_eq!(cancel["id"], "choice-1");
             let second_prompt = tokio::time::timeout(
@@ -803,10 +834,17 @@ mod session_tests {
             .await
             .expect("free-text choice must start a replacement prompt");
             assert_eq!(second_prompt["method"], "session/prompt");
-            assert_eq!(second_prompt["params"]["prompt"][0]["text"], "replacement prompt");
-            send_message(&mut writer, serde_json::json!({
-                "jsonrpc":"2.0", "id":second_prompt["id"], "result":{"stopReason":"end_turn"}
-            })).await;
+            assert_eq!(
+                second_prompt["params"]["prompt"][0]["text"],
+                "replacement prompt"
+            );
+            send_message(
+                &mut writer,
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id":second_prompt["id"], "result":{"stopReason":"end_turn"}
+                }),
+            )
+            .await;
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         });
 
@@ -830,7 +868,10 @@ mod session_tests {
             let mut received = Vec::new();
             loop {
                 let event = events.recv().await.expect("event");
-                let terminal = matches!(event, ProviderEvent::Completed(_) | ProviderEvent::Failed { .. });
+                let terminal = matches!(
+                    event,
+                    ProviderEvent::Completed(_) | ProviderEvent::Failed { .. }
+                );
                 received.push(event);
                 if terminal {
                     return received;
@@ -839,7 +880,11 @@ mod session_tests {
         })
         .await
         .expect("replacement prompt completion");
-        assert!(events.iter().any(|event| matches!(event, ProviderEvent::Completed(_))));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Completed(_)))
+        );
         assert!(run.await.expect("run join").is_ok());
         server_task.await.expect("server task");
     }

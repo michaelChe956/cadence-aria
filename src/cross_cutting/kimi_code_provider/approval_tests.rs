@@ -384,7 +384,10 @@ async fn askuserquestion_select_option_returns_selected_and_continues() {
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-select","method":"session/request_permission","params":{"options":[{"optionId":"choice-a","name":"Choice A","kind":"allow_once"}],"toolCall":{"toolCallId":"question-tool","title":"AskUserQuestion","content":{"type":"text","text":"Pick one"}}}})).await;
         let reply = read_request(&mut reader).await;
         assert_eq!(reply["id"], "ask-select");
-        assert_eq!(reply["result"]["outcome"], serde_json::json!({"outcome":"selected","optionId":"choice-a"}));
+        assert_eq!(
+            reply["result"]["outcome"],
+            serde_json::json!({"outcome":"selected","optionId":"choice-a"})
+        );
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });
@@ -440,7 +443,10 @@ async fn askuserquestion_free_text_takes_priority_over_selected() {
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-text","method":"session/request_permission","params":{"options":[{"optionId":"selected","name":"Selected","kind":"allow_once"}],"toolCall":{"toolCallId":"question-tool","title":"AskUserQuestion","content":{"type":"text","text":"What?"}}}})).await;
         let cancel = read_request(&mut reader).await;
         assert_eq!(cancel["id"], "ask-text");
-        assert_eq!(cancel["result"]["outcome"], serde_json::json!({"outcome":"cancelled"}));
+        assert_eq!(
+            cancel["result"]["outcome"],
+            serde_json::json!({"outcome":"cancelled"})
+        );
         let second_prompt = read_request(&mut reader).await;
         assert_eq!(second_prompt["method"], "session/prompt");
         assert_eq!(
@@ -511,7 +517,10 @@ async fn askuserquestion_free_text_only_no_selected() {
         let _first_prompt = read_request(&mut reader).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-text-only","method":"session/request_permission","params":{"options":[],"toolCall":{"toolCallId":"question-tool","title":"AskUserQuestion","content":{"type":"text","text":"What?"}}}})).await;
         let cancel = read_request(&mut reader).await;
-        assert_eq!(cancel["result"]["outcome"], serde_json::json!({"outcome":"cancelled"}));
+        assert_eq!(
+            cancel["result"]["outcome"],
+            serde_json::json!({"outcome":"cancelled"})
+        );
         let second_prompt = read_request(&mut reader).await;
         assert_eq!(
             second_prompt["params"]["prompt"][0]["text"],
