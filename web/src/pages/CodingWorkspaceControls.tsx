@@ -17,6 +17,7 @@ export const ACTIVE_ATTEMPT_STATUSES = new Set([
   "running",
   "waiting_for_human",
   "blocked",
+  "awaiting_manual_recovery",
 ]);
 
 function blockedGateDisplayTitle(gate: CodingPendingGate) {

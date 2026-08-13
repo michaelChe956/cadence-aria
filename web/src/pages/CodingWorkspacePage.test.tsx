@@ -756,6 +756,28 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(api.abortAttempt).toHaveBeenCalled();
   });
 
+  it("shows abort action for awaiting_manual_recovery status", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "awaiting_manual_recovery",
+      stage: "code_review",
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />
+    );
+
+    const abortButton = screen.getByRole("button", { name: "中止" });
+    expect(abortButton).toBeEnabled();
+
+    await userEvent.click(abortButton);
+    expect(api.abortAttempt).toHaveBeenCalled();
+  });
+
   it("renders pending gate actions and sends gate responses", async () => {
     const api = mockCodingWs();
     useCodingWorkspaceStore.setState({
