@@ -93,7 +93,8 @@ async fn outline_human_confirm_request_change_starts_dedicated_revision_over_web
             "type": "human_confirm",
             "decision": "request-change",
             "payload": {
-                "description": "按影响闭环契约修订 Outline，并明确集成测试 owner"
+                "description": "按影响闭环契约修订 Outline，并明确集成测试 owner",
+                "source": "human"
             }
         })
         .to_string()

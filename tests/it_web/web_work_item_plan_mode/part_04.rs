@@ -102,7 +102,8 @@ async fn persist_outline_revision_before_provider_spawn() -> (tempfile::TempDir,
         .handle_human_confirm(
             cadence_aria::web::workspace_ws_types::HumanConfirmDecision::RequestChange,
             Some(json!({
-                "description": "按影响闭环契约修订 Outline，并明确集成测试 owner"
+                "description": "按影响闭环契约修订 Outline，并明确集成测试 owner",
+                "source": "human"
             })),
         )
         .await
