@@ -24,11 +24,14 @@ use tokio_util::sync::CancellationToken;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::validate_relative_id;
 use crate::product::logical_codebase::AggregateInitializationOperationStatus;
+use crate::product::logical_codebase::AggregateInitializationStepKind;
 use crate::product::logical_codebase::aggregate_initialization_coordinator::{
-    AggregateInitializationCoordinator, AggregateInitializationError,
+    AggregateInitializationCoordinator, AggregateInitializationError, AggregatePreflightSnapshot,
+    AggregateProviderTurnDriver, GatewayBackedAggregateProviderTurnDriver,
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
 use crate::web::error::ApiError;
+use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use crate::web::state::{InitializationRunKey, InitializationRunRegistry};
 use crate::web::types::{
     CancelAggregateInitializationRequest, CreateAggregateInitializationRequest,
@@ -53,6 +56,54 @@ impl AggregateInitializationDependencies {
     #[allow(dead_code)]
     pub fn coordinator(&self) -> &AggregateInitializationCoordinator {
         &self.coordinator
+    }
+}
+
+/// Web 层 provider turn 驱动适配器:每个 turn 经
+/// [`LogicalCodebaseGatewayFactory::build`] 现组装 gateway,再委托给
+/// [`GatewayBackedAggregateProviderTurnDriver`] 启动 provider。factory 缺失时
+/// fail-closed(run_turn 返回 `ProviderTurn` 错误),不破坏 create/get/cancel 的
+/// 既有 handler 流程。
+struct GatewayFactoryProviderTurnDriver {
+    factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
+}
+
+impl GatewayFactoryProviderTurnDriver {
+    fn new(factory: Option<Arc<LogicalCodebaseGatewayFactory>>) -> Self {
+        Self { factory }
+    }
+}
+
+#[async_trait::async_trait]
+impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
+    async fn run_turn(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        step: AggregateInitializationStepKind,
+        preflight: &AggregatePreflightSnapshot,
+        cancellation: CancellationToken,
+    ) -> Result<String, AggregateInitializationError> {
+        let Some(factory) = self.factory.as_ref() else {
+            return Err(AggregateInitializationError::ProviderTurn {
+                step,
+                reason: "logical codebase gateway factory is not configured".to_string(),
+                retryable: false,
+            });
+        };
+        let gateway = factory.build(project_id).map_err(|error| {
+            AggregateInitializationError::ProviderTurn {
+                step,
+                reason: format!("logical codebase gateway factory build failed: {error}"),
+                retryable: true,
+            }
+        })?;
+        GatewayBackedAggregateProviderTurnDriver::claude_code(
+            Arc::new(gateway),
+            "cap_managed_snapshot",
+        )
+        .run_turn(project_id, operation_id, step, preflight, cancellation)
+        .await
     }
 }
 
@@ -166,7 +217,8 @@ fn build_default_aggregate_dependencies(
     let project_paths = product_app_paths(state);
     let operations = AggregateInitializationOperationStore::new(project_paths.clone());
     let clock: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| chrono::Utc::now().to_rfc3339());
-    let coordinator = build_coordinator(project_paths, operations, clock);
+    let factory = state.gateway_factory().cloned();
+    let coordinator = build_coordinator(project_paths, operations, clock, factory);
     AggregateInitializationDependencies::new(
         Arc::new(coordinator),
         InitializationRunRegistry::default(),
@@ -177,10 +229,10 @@ fn build_coordinator(
     paths: ProductAppPaths,
     operations: AggregateInitializationOperationStore,
     clock: Arc<dyn Fn() -> String + Send + Sync>,
+    factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
 ) -> AggregateInitializationCoordinator {
     use crate::product::logical_codebase::aggregate_initialization_coordinator::{
-        AggregatePreflightService, AggregatePreflightSnapshot, AggregateSkillsPreparation,
-        MachineSkillsPreparation,
+        AggregatePreflightService, AggregateSkillsPreparation, MachineSkillsPreparation,
     };
     use std::path::PathBuf;
 
@@ -223,28 +275,10 @@ fn build_coordinator(
         }
     }
 
-    struct NoopProvider;
-    #[async_trait::async_trait]
-    impl crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnDriver
-        for NoopProvider
-    {
-        async fn run_turn(
-            &self,
-            _project_id: &str,
-            _operation_id: &str,
-            _step: crate::product::logical_codebase::AggregateInitializationStepKind,
-            _preflight: &AggregatePreflightSnapshot,
-            _cancellation: CancellationToken,
-        ) -> Result<String, AggregateInitializationError> {
-            Ok("noop".to_string())
-        }
-    }
-
     let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(NoopSkills);
     let preflight: Arc<dyn AggregatePreflightService> = Arc::new(NoopPreflight);
-    let provider: Arc<
-        dyn crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnDriver,
-    > = Arc::new(NoopProvider);
+    let provider: Arc<dyn AggregateProviderTurnDriver> =
+        Arc::new(GatewayFactoryProviderTurnDriver::new(factory));
     AggregateInitializationCoordinator::new(paths, operations, skills, preflight, provider, clock)
 }
 
@@ -348,23 +382,105 @@ mod tests {
             .unwrap();
 
         let runtime_root = root_path.clone();
+        let factory = fake_registry_gateway_factory(ProductAppPaths::new(root_path.join(".aria")));
         let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(runtime_root))
-            .with_aggregate_initialization_dependencies(build_test_dependencies(root_path));
+            .with_aggregate_initialization_dependencies(build_test_dependencies(
+                root_path,
+                Some(factory),
+            ));
         // Leak the temp dir for the test duration so the manifest stays on disk.
         std::mem::forget(root);
         build_web_router(state)
     }
 
-    fn build_test_dependencies(root: std::path::PathBuf) -> AggregateInitializationDependencies {
+    fn build_test_dependencies(
+        root: std::path::PathBuf,
+        factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
+    ) -> AggregateInitializationDependencies {
         let paths = ProductAppPaths::new(root.join(".aria"));
         let operations = AggregateInitializationOperationStore::new(paths.clone());
         let clock: Arc<dyn Fn() -> String + Send + Sync> =
             Arc::new(|| "2026-08-09T00:00:00Z".to_string());
-        let coordinator = build_coordinator(paths, operations, clock);
+        let coordinator = build_coordinator(paths, operations, clock, factory);
         AggregateInitializationDependencies::new(
             Arc::new(coordinator),
             InitializationRunRegistry::default(),
         )
+    }
+
+    /// 测试用 gateway factory:fake streaming provider + 恒可用 gate + stub sync
+    /// adapter。ClaudeCode 路由到 `FakeStreamingProvider`,使 provider turn 经
+    /// gateway 启动时无需真实 claude 二进制。
+    fn fake_registry_gateway_factory(paths: ProductAppPaths) -> Arc<LogicalCodebaseGatewayFactory> {
+        struct StubSyncAdapter;
+        impl crate::cross_cutting::provider_adapter::ProviderAdapter for StubSyncAdapter {
+            fn run(
+                &self,
+                _input: &crate::protocol::contracts::AdapterInput,
+            ) -> Result<
+                crate::protocol::contracts::AdapterOutput,
+                crate::cross_cutting::provider_adapter::ProviderAdapterError,
+            > {
+                Ok(crate::protocol::contracts::AdapterOutput {
+                    exit_code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    structured_output: None,
+                    files_modified: Vec::new(),
+                    duration_ms: 0,
+                    timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+                })
+            }
+        }
+
+        struct AlwaysHealthy(Arc<crate::cross_cutting::provider_health::ProviderHealthSnapshot>);
+        impl crate::cross_cutting::provider_availability_gate::ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(
+                &self,
+            ) -> Arc<crate::cross_cutting::provider_health::ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+        use crate::cross_cutting::streaming_provider::FakeStreamingProvider;
+        use crate::product::models::ProviderName;
+        let checked_at = chrono::Utc::now();
+        let gate = Arc::new(
+            crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::new(
+                Arc::new(AlwaysHealthy(Arc::new(ProviderHealthSnapshot {
+                    schema_version: 1,
+                    generation: 1,
+                    checked_at,
+                    providers: [ProviderName::ClaudeCode, ProviderName::Codex]
+                        .into_iter()
+                        .map(|provider| ProviderHealthEntry {
+                            provider,
+                            command: "stub".to_string(),
+                            available: true,
+                            version: Some("1.0".to_string()),
+                            reason_code: None,
+                            reason: None,
+                            checked_at,
+                        })
+                        .collect(),
+                }))),
+            ),
+        );
+
+        let mut registry = crate::cross_cutting::provider_registry::ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, Arc::new(FakeStreamingProvider));
+
+        Arc::new(LogicalCodebaseGatewayFactory::new(
+            paths,
+            Arc::new(registry),
+            Arc::new(StubSyncAdapter),
+            gate,
+        ))
     }
 
     async fn post_json(
@@ -456,5 +572,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn aggregate_initialization_provider_turn_launches_through_gateway_factory() {
+        let root = tempdir().expect("root");
+        let root_path = root.path().to_path_buf();
+        let paths = ProductAppPaths::new(root_path.join(".aria"));
+        let aggregate_root = root_path.join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+        let manifest = crate::product::logical_codebase::store::LogicalCodebaseManifest::new(
+            "project_0001",
+            aggregate_root,
+            Vec::new(),
+        );
+        crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
+            .save_manifest("project_0001", &manifest)
+            .unwrap();
+
+        let factory = fake_registry_gateway_factory(paths);
+        let dependencies = build_test_dependencies(root_path.clone(), Some(factory.clone()));
+        let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
+            .with_aggregate_initialization_dependencies(dependencies.clone());
+        std::mem::forget(root);
+        let app = build_web_router(state);
+
+        let created = post_json(
+            &app,
+            "/api/projects/project_0001/logical-codebase/initializations",
+            serde_json::json!({"idempotency_key":"init-provider-turn"}),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(created.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let operation_id = value["operation_id"]
+            .as_str()
+            .expect("operation_id")
+            .to_string();
+
+        dependencies
+            .coordinator()
+            .execute("project_0001", &operation_id, CancellationToken::new())
+            .await
+            .expect("aggregate initialization should execute through the gateway factory");
+
+        // 三个 provider turn 经 factory 组装出的 gateway 启动,audit 计数为 3;
+        // machine_skills / aggregate_preflight 是确定性 Cadence 代码,不产生启动。
+        assert_eq!(factory.audit().stream_launches(), 3);
     }
 }
