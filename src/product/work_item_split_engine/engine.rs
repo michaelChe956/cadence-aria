@@ -131,6 +131,18 @@ impl WorkItemSplitEngine {
         lifecycle: &LifecycleStore,
         issue: &IssueRecord,
     ) -> ApiResult<ProviderInvocationResult> {
+        // 防线：逻辑代码库仓库（logical_repository_id 为 Some）必须经
+        // `LogicalCodebaseProviderGateway` 启动（REQ-ENV-01/02「无政策不得启动」）。
+        // 本同步路径当前为死代码，但若未来被复活用于逻辑代码库仓库，会绕过
+        // gateway 直连真实 provider——因此在此 fail-closed，不执行 adapter.run。
+        if repository.logical_repository_id.is_some() {
+            return Err(ApiError::runtime(
+                "logical_provider_gateway_required",
+                "logical codebase work item split must launch through LogicalCodebaseProviderGateway",
+                json!({}),
+            ));
+        }
+
         let provider_type = provider_name_to_type(&author_provider);
         let worktree_path = repository.path.to_string_lossy().to_string();
         let adapter_input = AdapterInput {
