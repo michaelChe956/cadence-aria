@@ -901,6 +901,25 @@ impl LogicalCodebaseProviderGateway {
             });
         }
 
+        // 5b. target 重解析(REQ-ENV-03):用冻结值重建启动请求,调用注入的 resolver
+        // 重新解析并复验 target identity;返回 target 与 envelope 冻结 target
+        // 不一致 → fail-closed(validate→spawn 之间 .git 指针/target 被调包)。
+        let revalidate_request = SessionLaunchRequest {
+            project_id: validated.project_id.clone(),
+            provider: validated.provider.clone(),
+            action: validated.action,
+            target: envelope.target.clone(),
+            readable_roots: envelope.readable_roots.clone(),
+            writable_roots: envelope.writable_roots.clone(),
+            config_artifact_ref: envelope.config_artifact_ref.clone(),
+        };
+        let revalidated_target = self.targets.resolve_and_revalidate(&revalidate_request)?;
+        if revalidated_target != envelope.target {
+            return Err(ProviderGatewayError::TargetMismatch {
+                field: "target".to_string(),
+            });
+        }
+
         // 6. availability gate。
         let provider_name = provider_name_for_dialect(envelope.provider_dialect);
         self.availability_gate

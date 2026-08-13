@@ -9,6 +9,8 @@
 //!
 //! 任一复验失败都 fail-closed 为 `ProviderGatewayError::{Target, TargetMismatch}`。
 
+use std::path::Path;
+
 use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
@@ -56,11 +58,7 @@ impl ProductionPolicyTargetResolver {
         let canonical_worktree = std::fs::canonicalize(&request.target.worktree)
             .map_err(|_| ProviderGatewayError::Target("worktree missing".to_string()))?;
 
-        if !canonical_worktree.join(".git").exists() {
-            return Err(ProviderGatewayError::TargetMismatch {
-                field: "git_dir".to_string(),
-            });
-        }
+        revalidate_git_dir_identity(&canonical_worktree, &checkout.canonical_path)?;
 
         Ok(PolicyTarget::checkout(
             logical_id.0.to_string(),
@@ -91,6 +89,68 @@ impl PolicyTargetResolver for ProductionPolicyTargetResolver {
             self.resolve_checkout_target(request)
         }
     }
+}
+
+/// 校验 worktree 的 `.git` 归属(REQ-ENV-03 的 git-dir identity 复验)。
+///
+/// 真实 git worktree 的 `.git` 是指向 `<主仓>/.git/worktrees/<name>` 的文件,
+/// 非 worktree checkout 的 `.git` 是目录。两种形态解析出的实际 git dir 都必须在
+/// canonicalize 后以主仓 `.git` 目录为前缀,否则视为 git-dir identity 漂移
+/// (validate→spawn 之间 `.git` 指针被调包),fail-closed。
+fn revalidate_git_dir_identity(
+    canonical_worktree: &Path,
+    main_checkout_path: &Path,
+) -> Result<(), ProviderGatewayError> {
+    let git_entry = canonical_worktree.join(".git");
+    if !git_entry.exists() {
+        return Err(ProviderGatewayError::TargetMismatch {
+            field: "git_dir".to_string(),
+        });
+    }
+
+    let actual_git_dir = if git_entry.is_dir() {
+        std::fs::canonicalize(&git_entry).map_err(|_| ProviderGatewayError::TargetMismatch {
+            field: "git_dir".to_string(),
+        })?
+    } else if git_entry.is_file() {
+        let content = std::fs::read_to_string(&git_entry).map_err(|_| {
+            ProviderGatewayError::TargetMismatch {
+                field: "git_dir".to_string(),
+            }
+        })?;
+        let pointer = content
+            .lines()
+            .next()
+            .and_then(|line| line.trim().strip_prefix("gitdir:"))
+            .map(str::trim)
+            .ok_or_else(|| ProviderGatewayError::TargetMismatch {
+                field: "git_dir".to_string(),
+            })?;
+        let pointer_path = Path::new(pointer);
+        let resolved = if pointer_path.is_absolute() {
+            pointer_path.to_path_buf()
+        } else {
+            canonical_worktree.join(pointer_path)
+        };
+        std::fs::canonicalize(&resolved).map_err(|_| ProviderGatewayError::TargetMismatch {
+            field: "git_dir".to_string(),
+        })?
+    } else {
+        return Err(ProviderGatewayError::TargetMismatch {
+            field: "git_dir".to_string(),
+        });
+    };
+
+    let main_git_dir = std::fs::canonicalize(main_checkout_path.join(".git"))
+        .map_err(|_| ProviderGatewayError::Target("main git dir missing".to_string()))?;
+
+    if !actual_git_dir.starts_with(&main_git_dir) {
+        return Err(ProviderGatewayError::TargetMismatch {
+            field: "git_dir".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -278,5 +338,60 @@ mod tests {
         );
         assert!(resolved.logical_repository_id.is_empty());
         assert!(resolved.checkout_id.is_empty());
+    }
+
+    fn write_gitdir_file(worktree_dir: &std::path::Path, git_dir: &std::path::Path) {
+        fs::write(
+            worktree_dir.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .expect("write gitdir file");
+    }
+
+    /// 正例:真实 git worktree 的 `.git` 是指向 `<主仓>/.git/worktrees/<name>` 的
+    /// 文件;解析出的 git dir 在主仓 `.git` 目录之内,应通过 identity 复验并返回
+    /// canonical target。
+    #[test]
+    fn coding_target_accepts_worktree_gitfile_pointing_into_main_git_dir() {
+        let fixture = resolver_fixture();
+        let linked = fixture._root.path().join("linked-worktree");
+        fs::create_dir_all(&linked).unwrap();
+        let worktree_git_dir = fixture.worktree.join(".git").join("worktrees").join("test");
+        fs::create_dir_all(&worktree_git_dir).unwrap();
+        write_gitdir_file(&linked, &worktree_git_dir);
+
+        let request = fixture.coding_request(linked.clone());
+
+        let resolved = fixture.resolver().resolve_and_revalidate(&request).unwrap();
+
+        assert_eq!(resolved.worktree, fs::canonicalize(&linked).unwrap());
+        assert_eq!(
+            resolved.logical_repository_id,
+            fixture.logical_id.0.to_string()
+        );
+        assert_eq!(resolved.checkout_id, fixture.checkout_id.0.to_string());
+    }
+
+    /// 负例:worktree 的 `.git` 文件指向主仓 `.git` **之外**的路径,git-dir identity
+    /// 漂移,应 fail-closed 为 `TargetMismatch { field: "git_dir" }`。
+    #[test]
+    fn coding_target_rejects_worktree_gitfile_pointing_outside_main_git_dir() {
+        let fixture = resolver_fixture();
+        let linked = fixture._root.path().join("linked-worktree");
+        fs::create_dir_all(&linked).unwrap();
+        let outside = fixture._root.path().join("stolen-git-dir");
+        fs::create_dir_all(&outside).unwrap();
+        write_gitdir_file(&linked, &outside);
+
+        let request = fixture.coding_request(linked);
+
+        let error = fixture
+            .resolver()
+            .resolve_and_revalidate(&request)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ProviderGatewayError::TargetMismatch { ref field } if field == "git_dir")
+        );
     }
 }

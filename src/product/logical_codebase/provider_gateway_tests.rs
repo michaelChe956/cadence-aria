@@ -105,6 +105,41 @@ fn gateway_revalidates_canonical_target_git_dir_and_managed_config_before_spawn(
     assert_eq!(fixture.registry_start_count(), 0);
 }
 
+/// spawn 前 target identity 复验(B-1):validate 成功后、start_streaming 前
+/// resolver 返回的 target 被改掉(模拟 .git 指针/target 被调包),spawn 必须
+/// fail-closed 为 `TargetMismatch { field: "target" }`,且不触达 registry。
+#[tokio::test]
+async fn start_streaming_revalidates_target_identity_before_spawn() {
+    let fixture = gateway_fixture();
+    fixture.install_bootstrap_policy();
+    let worktree = fixture.real_worktree();
+    let launch = fixture.validated_planning_streaming_input(worktree.clone());
+
+    // validate 后、spawn 前把 resolver 返回的 target 改掉。
+    fixture
+        .targets()
+        .change_target_after_request(PolicyTarget::checkout(
+            "logical_repo_0001",
+            "checkout_0001",
+            worktree.join("swapped"),
+        ));
+
+    let result = fixture
+        .gateway()
+        .start_streaming(launch, CancellationToken::new())
+        .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("expected TargetMismatch field=target, got a session"),
+    };
+
+    assert!(
+        matches!(error, ProviderGatewayError::TargetMismatch { ref field } if field == "target"),
+        "expected TargetMismatch field=target, got {error:?}"
+    );
+    assert_eq!(fixture.registry_start_count(), 0);
+}
+
 /// read-only action(planning/review)没有 write root;coding action 恰好一个
 /// 等于 canonical target worktree 的 write root。envelope 在 validate 时冻结该约束。
 #[test]
@@ -291,12 +326,15 @@ async fn start_streaming_resume_passes_when_resume_evidence_confirmed() {
     assert_eq!(fixture.registry_start_count(), 1);
 }
 
-/// 可变 target resolver:模拟 spawn 前 git_dir TOCTOU。初始 current 与
+/// 可变 target resolver:模拟 spawn 前 git_dir/target TOCTOU。初始 current 与
 /// expected 一致(resolve 通过);`change_git_dir_after_request` 后 current
-/// 偏离 expected,resolve 返回 `TargetMismatch { field: "git_dir" }`。
+/// 偏离 expected,resolve 返回 `TargetMismatch { field: "git_dir" }`;
+/// `change_target_after_request` 后 resolve 返回偏离请求的 target,供 spawn 前
+/// target identity 复验测试驱动漂移。
 struct MutableTargetResolver {
     expected_git_dir: PathBuf,
     current_git_dir: std::sync::Mutex<PathBuf>,
+    target_override: std::sync::Mutex<Option<PolicyTarget>>,
 }
 
 impl MutableTargetResolver {
@@ -305,11 +343,16 @@ impl MutableTargetResolver {
         Self {
             expected_git_dir: git_dir,
             current_git_dir: std::sync::Mutex::new(current),
+            target_override: std::sync::Mutex::new(None),
         }
     }
 
     fn change_git_dir_after_request(&self, git_dir: impl Into<PathBuf>) {
         *self.current_git_dir.lock().unwrap() = git_dir.into();
+    }
+
+    fn change_target_after_request(&self, target: PolicyTarget) {
+        *self.target_override.lock().unwrap() = Some(target);
     }
 }
 
@@ -323,6 +366,9 @@ impl PolicyTargetResolver for MutableTargetResolver {
             return Err(ProviderGatewayError::TargetMismatch {
                 field: "git_dir".to_string(),
             });
+        }
+        if let Some(target) = self.target_override.lock().unwrap().clone() {
+            return Ok(target);
         }
         Ok(request.target.clone())
     }
