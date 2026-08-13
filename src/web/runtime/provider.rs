@@ -496,6 +496,7 @@ fn provider_type_to_name(provider: &ProviderType) -> Option<ProviderName> {
         ProviderType::ClaudeCode => Some(ProviderName::ClaudeCode),
         ProviderType::Codex => Some(ProviderName::Codex),
         ProviderType::Pi => None,
+        ProviderType::KimiCode => None,
         ProviderType::Fake => None,
     }
 }
@@ -656,5 +657,10 @@ mod tests {
             .expect_err("adapter must recheck the shared gate");
 
         assert_eq!(error.code.as_str(), "provider_unavailable");
+    }
+
+    #[test]
+    fn web_runtime_does_not_schedule_kimi_code() {
+        assert_eq!(provider_type_to_name(&ProviderType::KimiCode), None);
     }
 }

@@ -133,6 +133,7 @@ fn reason_code_str(reason_code: ProviderHealthReasonCode) -> &'static str {
         ProviderHealthReasonCode::Timeout => "timeout",
         ProviderHealthReasonCode::NonZeroExit => "non_zero_exit",
         ProviderHealthReasonCode::VersionUnparseable => "version_unparseable",
+        ProviderHealthReasonCode::VersionTooLow => "version_too_low",
         ProviderHealthReasonCode::IoError => "io_error",
     }
 }

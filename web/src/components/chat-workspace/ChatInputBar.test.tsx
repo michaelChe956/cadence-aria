@@ -115,7 +115,10 @@ describe("ChatInputBar", () => {
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "补充失败路径" } });
     fireEvent.click(screen.getByRole("button", { name: "发送修改意见" }));
 
-    expect(onSendHumanDecision).toHaveBeenCalledWith("补充失败路径");
+    expect(onSendHumanDecision).toHaveBeenCalledWith({
+      description: "补充失败路径",
+      source: "human",
+    });
     expect(useWorkspaceStore.getState().chatEntries).toEqual([
       expect.objectContaining({
         id: "gate-1",

@@ -46,6 +46,7 @@ pub enum ProviderType {
     ClaudeCode,
     Codex,
     Pi,
+    KimiCode,
     Fake,
 }
 
@@ -56,6 +57,16 @@ mod tests {
     #[test]
     fn provider_type_pi_serializes_to_snake_case() {
         assert_eq!(serde_json::to_string(&ProviderType::Pi).unwrap(), "\"pi\"");
+    }
+
+    #[test]
+    fn provider_type_kimi_code_serializes_to_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ProviderType::KimiCode).unwrap(),
+            "\"kimi_code\""
+        );
+        let back: ProviderType = serde_json::from_str("\"kimi_code\"").unwrap();
+        assert_eq!(back, ProviderType::KimiCode);
     }
 }
 

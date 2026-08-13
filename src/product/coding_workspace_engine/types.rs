@@ -184,6 +184,24 @@ mod tests {
             ProviderPermissionMode::Supervised
         );
     }
+
+    #[test]
+    fn kimi_coding_supervised_mode_is_preserved_not_forced_auto() {
+        assert_eq!(
+            coding_permission_mode_for_provider(
+                &ProviderName::KimiCode,
+                CodingProviderPermissionMode::Supervised,
+            ),
+            ProviderPermissionMode::Supervised
+        );
+        assert_eq!(
+            normalize_coding_permission_mode_for_provider(
+                &ProviderName::KimiCode,
+                CodingProviderPermissionMode::Supervised,
+            ),
+            CodingProviderPermissionMode::Supervised
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,0 +1,5 @@
+# Process exits before emitting a session/prompt result.
+# Scenarios: exit 0 (unexpected protocol end), exit 1 (non-retryable), exit 75 (temporary failure).
+{"exitCode":0,"expected":"Failed: Kimi ACP stream ended before prompt completion"}
+{"exitCode":1,"expected":"Failed: Kimi ACP stream ended before prompt completion"}
+{"exitCode":75,"expected":"Failed: Kimi ACP stream ended before prompt completion"}

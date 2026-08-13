@@ -70,6 +70,7 @@ fn response_from_snapshot(
             ProviderName::ClaudeCode,
             ProviderName::Codex,
             ProviderName::Pi,
+            ProviderName::KimiCode,
         ]
         .iter()
         .filter_map(|provider| snapshot.entry(provider))
@@ -95,6 +96,11 @@ fn provider_dto(entry: &ProviderHealthEntry) -> ProviderStatusDto {
             "Pi",
             "Install Pi CLI and ensure `pi` is available on PATH.",
         ),
+        ProviderName::KimiCode => (
+            "kimi_code",
+            "Kimi Code",
+            "Install Kimi Code CLI and ensure `kimi` is available on PATH.",
+        ),
         ProviderName::Fake => unreachable!("Fake provider is not part of real health status"),
     };
     ProviderStatusDto {
@@ -115,6 +121,7 @@ fn reason_code(code: ProviderHealthReasonCode) -> &'static str {
         ProviderHealthReasonCode::Timeout => "timeout",
         ProviderHealthReasonCode::NonZeroExit => "non_zero_exit",
         ProviderHealthReasonCode::VersionUnparseable => "version_unparseable",
+        ProviderHealthReasonCode::VersionTooLow => "version_too_low",
         ProviderHealthReasonCode::IoError => "io_error",
     }
 }
@@ -239,10 +246,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn providers_status_includes_kimi_when_available() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(
+            vec![
+                success("1.0"),
+                success("2.0"),
+                success("0.83.0"),
+                success("0.34.0"),
+            ],
+            Duration::ZERO,
+        ));
+        let health = service(root.path(), runner.clone());
+        health
+            .refresh(CancellationToken::new())
+            .await
+            .expect("refresh");
+        let response = response_from_state(&state(root.path(), health, runner));
+        let kimi = response
+            .providers
+            .iter()
+            .find(|provider| provider.provider == "kimi_code")
+            .expect("Kimi provider status");
+
+        assert_eq!(kimi.display_name, "Kimi Code");
+        assert!(kimi.available);
+        assert_eq!(
+            kimi.install_hint,
+            "Install Kimi Code CLI and ensure `kimi` is available on PATH."
+        );
+    }
+
+    #[tokio::test]
     async fn providers_status_includes_pi_when_available() {
         let root = tempdir().expect("root");
         let runner = Arc::new(ScriptedRunner::new(
-            vec![success("1.0"), success("2.0"), success("0.83.0")],
+            vec![
+                success("1.0"),
+                success("2.0"),
+                success("0.83.0"),
+                success("0.34.0"),
+            ],
             Duration::ZERO,
         ));
         let health = service(root.path(), runner.clone());
@@ -252,7 +296,7 @@ mod tests {
             .expect("refresh");
         let response = response_from_state(&state(root.path(), health, runner));
 
-        assert_eq!(response.providers.len(), 3);
+        assert_eq!(response.providers.len(), 4);
         let pi = response
             .providers
             .iter()
@@ -267,18 +311,33 @@ mod tests {
     async fn providers_status_maps_all_availability_states_and_complete_fields() {
         for (results, expected_available, expected_blocked) in [
             (
-                vec![success("1.0"), success("2.0"), success("0.83.0")],
-                vec![true, true, true],
+                vec![
+                    success("1.0"),
+                    success("2.0"),
+                    success("0.83.0"),
+                    success("0.34.0"),
+                ],
+                vec![true, true, true, true],
                 false,
             ),
             (
-                vec![missing("claude"), success("2.0"), success("0.83.0")],
-                vec![false, true, true],
+                vec![
+                    missing("claude"),
+                    success("2.0"),
+                    success("0.83.0"),
+                    success("0.34.0"),
+                ],
+                vec![false, true, true, true],
                 false,
             ),
             (
-                vec![missing("claude"), missing("codex"), missing("pi")],
-                vec![false, false, false],
+                vec![
+                    missing("claude"),
+                    missing("codex"),
+                    missing("pi"),
+                    missing("kimi"),
+                ],
+                vec![false, false, false, false],
                 true,
             ),
         ] {
@@ -297,10 +356,11 @@ mod tests {
             assert_eq!(response.state_error, None);
             assert_eq!(response.real_workflow_blocked, expected_blocked);
             assert!(!response.test_provider_enabled);
-            assert_eq!(response.providers.len(), 3);
+            assert_eq!(response.providers.len(), 4);
             assert_eq!(response.providers[0].provider, "claude_code");
             assert_eq!(response.providers[1].provider, "codex");
             assert_eq!(response.providers[2].provider, "pi");
+            assert_eq!(response.providers[3].provider, "kimi_code");
             assert_eq!(
                 response
                     .providers
@@ -332,7 +392,12 @@ mod tests {
         let blocked_root = root.path().join("not-a-directory");
         std::fs::write(&blocked_root, "blocked").expect("blocked root");
         let runner = Arc::new(ScriptedRunner::new(
-            vec![success("1.0"), success("2.0"), success("0.83.0")],
+            vec![
+                success("1.0"),
+                success("2.0"),
+                success("0.83.0"),
+                success("0.34.0"),
+            ],
             Duration::ZERO,
         ));
         let health = service(&blocked_root, runner.clone());
@@ -347,7 +412,7 @@ mod tests {
         assert_ne!(state_error, "provider health state is degraded");
         assert!(response.real_workflow_blocked);
         assert_eq!(response.generation, 1);
-        assert_eq!(response.providers.len(), 3);
+        assert_eq!(response.providers.len(), 4);
     }
 
     #[tokio::test]
@@ -361,7 +426,7 @@ mod tests {
         let response = response_from_state(&state);
 
         assert!(response.test_provider_enabled);
-        assert_eq!(response.providers.len(), 3);
+        assert_eq!(response.providers.len(), 4);
         assert!(
             response
                 .providers
@@ -378,9 +443,11 @@ mod tests {
                 missing("claude"),
                 missing("codex"),
                 missing("pi"),
+                missing("kimi"),
                 success("1.0"),
                 success("2.0"),
                 success("0.83.0"),
+                success("0.34.0"),
             ],
             Duration::from_millis(20),
         ));
@@ -401,7 +468,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
-        assert_eq!(runner.max_active(), 3);
+        assert_eq!(runner.max_active(), 4);
         assert!(
             responses[0]
                 .providers
@@ -424,9 +491,11 @@ mod tests {
                 success("1.0"),
                 success("2.0"),
                 success("0.83.0"),
+                success("0.34.0"),
                 missing("claude"),
                 missing("codex"),
                 missing("pi"),
+                missing("kimi"),
             ],
             Duration::ZERO,
         ));

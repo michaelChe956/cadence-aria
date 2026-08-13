@@ -57,6 +57,7 @@ where
         ProviderName::ClaudeCode,
         ProviderName::Codex,
         ProviderName::Pi,
+        ProviderName::KimiCode,
     ] {
         if fallback != requested && is_available(&fallback) {
             return Ok(ResolvedProvider {
@@ -130,6 +131,7 @@ pub fn provider_name_available(provider: &ProviderName) -> bool {
         ProviderName::ClaudeCode => is_program_on_path("claude"),
         ProviderName::Codex => is_program_on_path("codex"),
         ProviderName::Pi => is_program_on_path("pi"),
+        ProviderName::KimiCode => is_program_on_path("kimi"),
     }
 }
 
@@ -139,6 +141,7 @@ pub fn provider_type_available(provider: &ProviderType) -> bool {
         ProviderType::ClaudeCode => is_program_on_path("claude"),
         ProviderType::Codex => is_program_on_path("codex"),
         ProviderType::Pi => false,
+        ProviderType::KimiCode => false,
     }
 }
 
@@ -165,6 +168,7 @@ pub fn provider_name_key(provider: &ProviderName) -> &'static str {
         ProviderName::ClaudeCode => "claude_code",
         ProviderName::Codex => "codex",
         ProviderName::Pi => "pi",
+        ProviderName::KimiCode => "kimi_code",
         ProviderName::Fake => "fake",
     }
 }
@@ -174,6 +178,7 @@ pub fn provider_type_key(provider: &ProviderType) -> &'static str {
         ProviderType::ClaudeCode => "claude_code",
         ProviderType::Codex => "codex",
         ProviderType::Pi => "pi",
+        ProviderType::KimiCode => "kimi_code",
         ProviderType::Fake => "fake",
     }
 }
@@ -183,10 +188,11 @@ fn parse_provider_name(value: &str) -> ApiResult<ProviderName> {
         "claude_code" => Ok(ProviderName::ClaudeCode),
         "codex" => Ok(ProviderName::Codex),
         "pi" => Ok(ProviderName::Pi),
+        "kimi_code" => Ok(ProviderName::KimiCode),
         "fake" => Ok(ProviderName::Fake),
         _ => Err(ApiError::validation(
             "invalid_provider",
-            "provider must be claude_code, codex, pi, or fake",
+            "provider must be claude_code, codex, pi, kimi_code, or fake",
         )),
     }
 }
@@ -221,7 +227,7 @@ fn real_workflow_blocked_api_error() -> ApiError {
         "real_workflow_blocked",
         "real workflow is blocked because no real provider CLI is available",
         json!({
-            "action": "install Claude Code, Codex, or Pi CLI with npm, then retry"
+            "action": "install Claude Code, Codex, Pi, or Kimi Code CLI, then retry"
         }),
     )
 }
@@ -230,6 +236,19 @@ fn real_workflow_blocked_api_error() -> ApiError {
 mod tests {
     use super::{parse_provider_name, parse_provider_type, provider_name_key};
     use crate::product::models::ProviderName;
+
+    #[test]
+    fn parse_provider_name_accepts_kimi_code() {
+        assert_eq!(
+            parse_provider_name("kimi_code").unwrap(),
+            ProviderName::KimiCode
+        );
+    }
+
+    #[test]
+    fn provider_name_key_kimi_code() {
+        assert_eq!(provider_name_key(&ProviderName::KimiCode), "kimi_code");
+    }
 
     #[test]
     fn parse_provider_name_accepts_pi() {

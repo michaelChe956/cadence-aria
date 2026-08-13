@@ -366,7 +366,13 @@ function providerNameFor(
   value: string | null | undefined,
   fallback: WorkspaceProviderName,
 ): WorkspaceProviderName {
-  if (value === "claude_code" || value === "codex" || value === "pi" || value === "fake") {
+  if (
+    value === "claude_code" ||
+    value === "codex" ||
+    value === "pi" ||
+    value === "kimi_code" ||
+    value === "fake"
+  ) {
     return value;
   }
   return fallback;

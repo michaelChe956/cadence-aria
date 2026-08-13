@@ -1,9 +1,10 @@
 import { Check, RotateCcw, X } from "lucide-react";
 import type { ChatEntry } from "../../../state/chat-entries";
+import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
 import { trustedReviewComments } from "../../../state/workspace-review-trust";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 
-type HumanConfirmPayload = { description: string };
+type HumanConfirmPayload = { description: string; source: "human" | "review_findings" };
 type HumanConfirmDecision = "confirm" | "request-change" | "terminate";
 
 export function GatePromptEntry({
@@ -20,7 +21,7 @@ export function GatePromptEntry({
   const needsHuman = verdict === "needs_human";
   const requiresTriage = reviewGate === "user_triage_required";
   const allowsCurrentVersion = reviewGate === "user_confirm_allowed";
-  const canAdoptSuggestions = allowsCurrentVersion && findings.length > 0;
+  const canAdoptSuggestions = findings.length > 0;
   const confirmLabel =
     requiresTriage
       ? "确认当前版本"
@@ -29,12 +30,9 @@ export function GatePromptEntry({
       : needsHuman
         ? "提交人工确认"
         : "确认产物";
-  const requestChangeLabel = canAdoptSuggestions
-    ? "采纳建议并返修"
-    : requiresTriage
-      ? "按 reviewer 意见返修"
-      : null;
+  const requestChangeLabel = canAdoptSuggestions ? "采纳建议并返修" : null;
   const isResolved = entry.resolved === true;
+  const isContextBlockerGate = gateKindFromEntry(entry) === WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND;
   const title = requiresTriage
     ? "需要判断 reviewer 意图"
     : allowsCurrentVersion
@@ -53,18 +51,30 @@ export function GatePromptEntry({
       <div className="space-y-3">
         <div className="text-sm text-[var(--aria-ink)]">{entry.content}</div>
         {summary ? <div className="text-xs text-[var(--aria-ink-muted)]">{summary}</div> : null}
+        {requiresTriage && findings.length === 0 ? (
+          <div className="text-xs text-[var(--aria-ink-muted)]">
+            请在下方输入人工修改说明后发送返修。
+          </div>
+        ) : null}
+        {isContextBlockerGate && !isResolved ? (
+          <div className="text-xs text-[var(--aria-ink-muted)]">
+            请在下方输入补充上下文后发送（对应 provide_context），或选择终止
+          </div>
+        ) : null}
         {isResolved ? (
           <ResolutionBadge resolution={entry.resolution} />
         ) : onDecision ? (
           <div className="flex flex-wrap justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => onDecision("confirm")}
-              className="inline-flex h-8 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
-            >
-              <Check className="h-3.5 w-3.5" />
-              {confirmLabel}
-            </button>
+            {isContextBlockerGate ? null : (
+              <button
+                type="button"
+                onClick={() => onDecision("confirm")}
+                className="inline-flex h-8 items-center gap-1 rounded-md border border-emerald-200 bg-white px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+              >
+                <Check className="h-3.5 w-3.5" />
+                {confirmLabel}
+              </button>
+            )}
             {requestChangeLabel ? (
               <button
                 type="button"
@@ -130,6 +140,11 @@ function reviewGateFromEntry(entry: ChatEntry) {
   return typeof metadata?.review_gate === "string" ? metadata.review_gate : null;
 }
 
+function gateKindFromEntry(entry: ChatEntry) {
+  const metadata = entry.metadata as Record<string, unknown> | undefined;
+  return typeof metadata?.gate_kind === "string" ? metadata.gate_kind : null;
+}
+
 type ReviewFinding = {
   severity?: string;
   message: string;
@@ -139,7 +154,7 @@ type ReviewFinding = {
 };
 
 function requestChangePayload(entry: ChatEntry): HumanConfirmPayload {
-  return { description: requestChangeDescription(entry) };
+  return { description: requestChangeDescription(entry), source: "review_findings" };
 }
 
 function requestChangeDescription(entry: ChatEntry) {
@@ -148,7 +163,7 @@ function requestChangeDescription(entry: ChatEntry) {
   const comments = trustedReviewComments(metadata);
   const findings = findingsFromEntry(entry);
   const reviewGate = reviewGateFromEntry(entry);
-  if (reviewGate === "user_confirm_allowed" && findings.length > 0) {
+  if (findings.length > 0) {
     return formatFindingsForRevision(findings);
   }
 

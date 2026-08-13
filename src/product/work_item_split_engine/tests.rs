@@ -5,3 +5,5 @@ include!("tests/part_03.rs");
 include!("tests/author_canonical.rs");
 include!("tests/draft_scalar_evidence.rs");
 include!("tests/outline_option_semantics.rs");
+include!("tests/outline_traceability_example.rs");
+include!("tests/design_context_canonical.rs");

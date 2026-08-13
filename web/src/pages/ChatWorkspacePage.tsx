@@ -689,8 +689,8 @@ export function ChatWorkspacePage({
                 onSendContextNote={sendContextNote}
                 onStartGeneration={handleStartGeneration}
                 hideStartGeneration={Boolean(recoverableInterruptedRun)}
-                onSendHumanDecision={(content) =>
-                  sendHumanConfirm("request-change", content)
+                onSendHumanDecision={(payload) =>
+                  sendHumanConfirm("request-change", payload)
                 }
                 onAuthorDecision={handleAuthorDecision}
                 onSelectWorkItemGenerationMode={

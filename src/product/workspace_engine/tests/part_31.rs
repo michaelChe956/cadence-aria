@@ -187,6 +187,7 @@ fn initial_author_prompts_render_parser_derived_schema() {
         WorkspaceType::Story,
         WorkspaceType::Design,
         WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
     ] {
         let (_tmp, store) = setup();
         let (event_tx, _event_rx) = mpsc::channel(8);
@@ -220,6 +221,12 @@ fn initial_author_prompts_render_parser_derived_schema() {
                 "{workspace_type:?} author prompt must include required parser label `{label}`: {prompt}"
             );
         }
+        if workspace_type == WorkspaceType::WorkItemPlan {
+            assert!(prompt.contains("[TASK-001]"), "{prompt}");
+            for heading in &spec.required_headings {
+                assert!(prompt.contains(&format!("## {}", heading.label)), "{prompt}");
+            }
+        }
     }
 }
 
@@ -229,6 +236,7 @@ fn parser_derived_schema_contract_keeps_concrete_heading_and_id_examples() {
         WorkspaceType::Story,
         WorkspaceType::Design,
         WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
     ] {
         let schema = author_artifact_schema_contract_for(&workspace_type)
             .expect("Markdown workspace must have a schema contract");
@@ -253,7 +261,25 @@ fn parser_derived_schema_contract_keeps_concrete_heading_and_id_examples() {
                 id_rule.label
             );
         }
+        if workspace_type == WorkspaceType::WorkItemPlan {
+            assert!(schema.contains("[artifact_schema_contract]"), "{schema}");
+            assert!(schema.contains("[TASK-001]"), "{schema}");
+        }
     }
+}
+
+#[test]
+fn story_schema_contract_exposes_open_item_resolution_protocol() {
+    let schema = author_artifact_schema_contract_for(&WorkspaceType::Story)
+        .expect("Story must have a schema contract");
+    assert!(
+        schema.contains("已通过 AskUserQuestion 确认"),
+        "Story schema contract must teach the resolved-cue protocol for 待确认项: {schema}"
+    );
+    assert!(
+        schema.contains("无待确认项"),
+        "Story schema contract must teach the empty marker for 待确认项: {schema}"
+    );
 }
 
 #[test]
@@ -272,6 +298,7 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
         WorkspaceType::Story,
         WorkspaceType::Design,
         WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
     ] {
         let (_tmp, store) = setup();
         let (event_tx, _event_rx) = mpsc::channel(8);
@@ -310,6 +337,15 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
                     prompt.contains(label),
                     "{workspace_type:?} {kind} prompt must include parser label `{label}`: {prompt}"
                 );
+            }
+            if workspace_type == WorkspaceType::WorkItemPlan {
+                assert!(prompt.contains("[TASK-001]"), "{workspace_type:?} {kind}: {prompt}");
+                for heading in &spec.required_headings {
+                    assert!(
+                        prompt.contains(&format!("## {}", heading.label)),
+                        "{workspace_type:?} {kind}: {prompt}"
+                    );
+                }
             }
         }
     }
@@ -657,6 +693,57 @@ async fn pi_author_runs_from_story_design_and_work_item_entries_in_auto_mode() {
             &[(ProviderType::Pi, ProviderPermissionMode::Auto)],
             "the {workspace_type:?} author entry must select Pi and normalize it to Auto"
         );
+    }
+}
+
+#[tokio::test]
+async fn kimi_author_does_not_retry_missing_artifact() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_tmp, store) = setup();
+    let (tx, _rx) = mpsc::channel(64);
+    let mut session = make_session("sess_kimi_no_artifact_retry");
+    session.author_provider = ProviderName::KimiCode;
+    session.reviewer_provider = None;
+    let mut engine = WorkspaceEngine::new(store, tx, session);
+    let starts = Arc::new(AtomicUsize::new(0));
+    let provider = KimiIncompleteArtifactProvider {
+        starts: starts.clone(),
+    };
+
+    engine
+        .handle_user_message("start".to_string(), Arc::new(provider), empty_provider_commands())
+        .await;
+
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+}
+
+struct KimiIncompleteArtifactProvider {
+    starts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for KimiIncompleteArtifactProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let output = "Kimi returned an incomplete artifact.".to_string();
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::plain(output, None)))
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
     }
 }
 

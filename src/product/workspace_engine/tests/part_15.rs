@@ -44,7 +44,7 @@ async fn outline_human_confirm_revision_is_recoverable_before_provider_spawn() {
     let outcome = engine
         .handle_human_confirm(
             HumanConfirmDecision::RequestChange,
-            Some(serde_json::json!({"description": "补齐共享影响闭环"})),
+            Some(serde_json::json!({"description": "补齐共享影响闭环", "source": "human"})),
         )
         .await
         .expect("human request change");

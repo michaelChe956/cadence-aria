@@ -122,6 +122,32 @@ fn assert_coder_section_oracle(
 }
 
 #[test]
+fn kimi_code_coder_renderer_uses_full_profile() {
+    let compiled = compiled_fixture();
+    let rendered = renderer_for(&ProviderName::KimiCode)
+        .render_coder(&compiled.coder, &coder_execution_envelope_fixture())
+        .expect("Kimi Code coder renderer must render");
+
+    assert_eq!(
+        rendered.renderer_version,
+        "kimi-code-provider-projection-renderer-v1"
+    );
+    assert!(
+        rendered
+            .text
+            .contains("# Kimi Code Coder Work Item Projection")
+    );
+    assert!(
+        rendered
+            .text
+            .contains("Supervised mode supports per-tool approval")
+    );
+    assert!(rendered.text.contains(
+        "Return the requested Kimi Code result without altering the normative projection sections."
+    ));
+}
+
+#[test]
 fn provider_projection_renderer_coder_does_not_leak_reviewer_verdict_contract() {
     let compiled = compiled_fixture();
     let envelope = coder_execution_envelope_fixture();

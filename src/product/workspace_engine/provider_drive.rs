@@ -110,11 +110,14 @@ impl WorkspaceEngine {
         )
         .await;
 
+        // 第一阶段不实证 Kimi resume 稳定性，排除 artifact retry（同 Pi）
         let retry_context =
-            (self.session.author_provider != ProviderName::Pi).then(|| ArtifactRetryContext {
-                provider: provider.clone(),
-                input: input.clone(),
-                attempted: false,
+            provider_allows_artifact_retry(&self.session.author_provider).then(|| {
+                ArtifactRetryContext {
+                    provider: provider.clone(),
+                    input: input.clone(),
+                    attempted: false,
+                }
             });
         let session = provider.start(input, self.cancel.clone()).await;
         self.drive_provider_session(ProviderSessionDriveInput {
@@ -786,6 +789,22 @@ impl WorkspaceEngine {
             .await;
         self.enter_author_confirm(Some("等待用户确认 author 结果".to_string()))
             .await;
+    }
+}
+
+pub(crate) fn provider_allows_artifact_retry(provider: &ProviderName) -> bool {
+    !matches!(provider, ProviderName::Pi | ProviderName::KimiCode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kimi_is_excluded_from_artifact_retry() {
+        assert!(!provider_allows_artifact_retry(&ProviderName::KimiCode));
+        assert!(!provider_allows_artifact_retry(&ProviderName::Pi));
+        assert!(provider_allows_artifact_retry(&ProviderName::Codex));
     }
 }
 

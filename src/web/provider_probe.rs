@@ -68,6 +68,7 @@ pub fn snapshot_probe_message(snapshot: &ProviderHealthSnapshot, degraded: bool)
             ProviderName::ClaudeCode => "Claude Code",
             ProviderName::Codex => "Codex",
             ProviderName::Pi => "Pi",
+            ProviderName::KimiCode => "Kimi Code",
             ProviderName::Fake => continue,
         };
         let reason_code = entry
@@ -93,6 +94,7 @@ fn reason_code_text(code: ProviderHealthReasonCode) -> &'static str {
         ProviderHealthReasonCode::Timeout => "timeout",
         ProviderHealthReasonCode::NonZeroExit => "non_zero_exit",
         ProviderHealthReasonCode::VersionUnparseable => "version_unparseable",
+        ProviderHealthReasonCode::VersionTooLow => "version_too_low",
         ProviderHealthReasonCode::IoError => "io_error",
     }
 }
@@ -131,6 +133,7 @@ mod tests {
                 ProviderName::ClaudeCode => "claude --version",
                 ProviderName::Codex => "codex --version",
                 ProviderName::Pi => "pi --version",
+                ProviderName::KimiCode => "kimi --version",
                 ProviderName::Fake => "fake",
             }
             .to_string(),

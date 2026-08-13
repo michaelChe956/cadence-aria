@@ -19,6 +19,14 @@ pub(crate) fn human_confirm_payload_description(
     }
 }
 
+fn human_confirm_payload_source(payload: Option<&serde_json::Value>) -> Option<&str> {
+    payload?
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+}
+
 pub(crate) fn empty_design_context_capabilities() -> DesignContextCapabilities {
     DesignContextCapabilities {
         has_architecture: false,
@@ -387,7 +395,22 @@ impl WorkspaceEngine {
                 }
             },
             HumanConfirmDecision::RequestChange => {
+                let payload_source =
+                    human_confirm_payload_source(payload.as_ref()).map(str::to_owned);
                 let context = human_confirm_payload_description(payload);
+                let review_has_no_trusted_findings =
+                    self.latest_review_verdict.as_ref().is_some_and(|verdict| {
+                        verdict.review_gate == ReviewGate::UserTriageRequired
+                            && verdict.findings.is_empty()
+                    });
+                if review_has_no_trusted_findings
+                    && (context.is_none() || payload_source.as_deref() != Some("human"))
+                {
+                    return Err(
+                        "无可信 reviewer 修改目标时，请提供 source=human 的非空修改说明"
+                            .to_string(),
+                    );
+                }
                 if self.human_confirm_should_revise_work_item_plan_outline() {
                     let feedback = self
                         .prepare_work_item_plan_outline_revision(

@@ -49,6 +49,7 @@ impl ProviderRegistry {
             ProviderName::ClaudeCode,
             ProviderName::Codex,
             ProviderName::Pi,
+            ProviderName::KimiCode,
             ProviderName::Fake,
         ]
         .into_iter()
@@ -144,6 +145,7 @@ mod tests {
         registry.register(ProviderName::ClaudeCode, Arc::new(FakeStreamingProvider));
         registry.register(ProviderName::Codex, Arc::new(FakeStreamingProvider));
         registry.register(ProviderName::Pi, Arc::new(FakeStreamingProvider));
+        registry.register(ProviderName::KimiCode, Arc::new(FakeStreamingProvider));
 
         assert_eq!(
             registry.available_names(),
@@ -151,6 +153,7 @@ mod tests {
                 ProviderName::ClaudeCode,
                 ProviderName::Codex,
                 ProviderName::Pi,
+                ProviderName::KimiCode,
                 ProviderName::Fake
             ]
         );

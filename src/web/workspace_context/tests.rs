@@ -250,6 +250,36 @@ fn work_item_plan_output_schema_requires_single_session_task_sizing() {
 }
 
 #[test]
+fn work_item_plan_output_schema_gets_its_required_headings_only_from_the_canonical_contract() {
+    let schema = output_schema_for(&WorkspaceType::WorkItemPlan);
+
+    for heading in [
+        "计划范围",
+        "任务拆分",
+        "依赖图",
+        "验证计划",
+        "执行顺序",
+        "风险",
+        "追踪关系",
+    ] {
+        assert!(
+            schema.contains(heading),
+            "canonical contract is missing `{heading}`: {schema}"
+        );
+        assert_eq!(
+            schema.matches(heading).count(),
+            1,
+            "`{heading}` must not be duplicated outside the canonical contract: {schema}"
+        );
+    }
+    assert_eq!(
+        schema.matches("[TASK-001]").count(),
+        1,
+        "task token example must come from the canonical contract only: {schema}"
+    );
+}
+
+#[test]
 fn output_schemas_require_visible_source_id_traceability() {
     let story = output_schema_for(&WorkspaceType::Story);
     assert!(story.contains("source id") || story.contains("source ids"));
@@ -333,6 +363,22 @@ fn pi_story_context_requires_ask_user_tool() {
     assert!(guidance.contains("使用 `ask_user` 工具提问并等待回答"));
     assert!(guidance.contains("禁止输出文本 A/B/C 选择题"));
     assert!(!guidance.contains("Pi 未声明原生结构化交互能力"));
+}
+
+#[test]
+fn kimi_story_context_declares_structured_permission_and_choice_interactions() {
+    let guidance = workflow_discipline_for(&workspace_session_record(
+        WorkspaceType::Story,
+        ProviderName::KimiCode,
+    ));
+
+    assert!(guidance.contains("当前 author provider 是 Kimi Code"));
+    assert!(
+        guidance
+            .contains("Supervised 模式下工具操作必须使用结构化 permission request（逐工具审批）")
+    );
+    assert!(guidance.contains("AskUserQuestion（用户可选择选项或自由输入）"));
+    assert!(guidance.contains("等待用户审批或回答"));
 }
 
 #[test]

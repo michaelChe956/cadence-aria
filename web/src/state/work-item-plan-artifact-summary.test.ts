@@ -16,7 +16,7 @@ describe("workItemPlanArtifactUpdateSummary", () => {
         ],
         design_context_gaps: ["缺少入口布局"],
         exploration_summary: "需要人工确认范围",
-        allowed_actions: ["provide_context", "terminate"],
+        allowed_actions: ["provide_context", "abort"],
       },
     };
 
