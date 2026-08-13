@@ -5,9 +5,20 @@ export interface ChangelogEntry {
   highlights: string[];
 }
 
-export const CURRENT_VERSION = "0.0.6";
+export const CURRENT_VERSION = "0.0.7";
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.0.7",
+    date: "2026-08-13",
+    title: "v0.0.7 更新",
+    highlights: [
+      "新增 Kimi Code Provider：工作台可选 Kimi Code 作为作者/审核者，支持提问与 Supervised 审批",
+      "图片创建支持选择 Kimi Code 提供方",
+      "Kimi 会话稳定性修复：断线恢复、会话续接、超时跟随工作区总超时",
+      "修复 Work Item Plan 生成链路：outline 校验契约、设计上下文识别、阻塞状态操作引导",
+    ],
+  },
   {
     version: "0.0.6",
     date: "2026-08-08",
