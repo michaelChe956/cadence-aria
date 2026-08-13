@@ -77,6 +77,28 @@ impl IssueStore {
         read_json(&issue_path)
     }
 
+    /// 更新 issue 状态并落盘。
+    ///
+    /// 幂等：若当前状态已是目标状态，直接返回内存记录而不重复写盘
+    /// （避免 completed 接线重复触发时反复改写 `updated_at`）。
+    pub fn update_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        status: IssueStatus,
+    ) -> Result<IssueRecord, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let mut issue = self.get(project_id, issue_id)?;
+        if issue.status == status {
+            return Ok(issue);
+        }
+        issue.status = status;
+        issue.updated_at = Utc::now().to_rfc3339();
+        write_json(&self.issue_path(project_id, issue_id), &issue)?;
+        Ok(issue)
+    }
+
     pub fn create(&self, input: CreateProductIssueInput) -> Result<IssueRecord, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         if let Some(repo_id) = input.repo_id.as_deref() {
@@ -171,4 +193,54 @@ fn slugify(value: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const PROJECT_ID: &str = "project_0001";
+
+    fn setup_store() -> (TempDir, IssueStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = IssueStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        (tmp, store)
+    }
+
+    fn seed_issue(store: &IssueStore) -> IssueRecord {
+        store
+            .create(CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                title: "issue".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn update_status_persists_new_status_and_is_idempotent() {
+        let (_tmp, store) = setup_store();
+        let created = seed_issue(&store);
+        assert_eq!(created.status, IssueStatus::Draft);
+
+        let updated = store
+            .update_status(PROJECT_ID, &created.id, IssueStatus::Completed)
+            .unwrap();
+        assert_eq!(updated.status, IssueStatus::Completed);
+
+        // 写后 get 读到新 status（验证真实落盘而非内存返回）。
+        let read = store.get(PROJECT_ID, &created.id).unwrap();
+        assert_eq!(read.status, IssueStatus::Completed);
+
+        // 幂等重复写：同 status 再写不报错，落盘 status 保持 Completed。
+        let again = store
+            .update_status(PROJECT_ID, &created.id, IssueStatus::Completed)
+            .unwrap();
+        assert_eq!(again.status, IssueStatus::Completed);
+        let read_again = store.get(PROJECT_ID, &created.id).unwrap();
+        assert_eq!(read_again.status, IssueStatus::Completed);
+    }
 }

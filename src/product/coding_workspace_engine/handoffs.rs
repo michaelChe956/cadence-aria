@@ -1,8 +1,11 @@
 use super::*;
+use crate::product::coding_attempt_store::IssueDeliveryOverall;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingStageGateStatus, GroupFinalReadinessStatus,
 };
+use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
+use crate::product::models::IssueStatus;
 
 impl CodingWorkspaceEngine {
     pub(crate) fn active_work_item_id_for_attempt<'a>(
@@ -437,7 +440,28 @@ impl CodingWorkspaceEngine {
             self.active_work_item_id_for_attempt(&completed),
             &completed.id,
         )?;
+        self.maybe_complete_issue_delivery(&completed)?;
         Ok(completed)
+    }
+
+    /// 落盘判定接线：issue 下所有 Work Item 均已推送（`AllPushed`）时把 issue 标记
+    /// 为 `Completed`；否则不动。单仓/多仓共用，Legacy 单仓走同一路径（纯增量追加
+    /// 一次 Completed 落盘）。幂等由 `IssueStore::update_status` 保证。
+    pub(crate) fn maybe_complete_issue_delivery(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let summary = self
+            .store
+            .compute_issue_delivery_summary(&attempt.project_id, &attempt.issue_id)?;
+        if summary.overall == IssueDeliveryOverall::AllPushed {
+            IssueStore::new(self.store.paths()).update_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                IssueStatus::Completed,
+            )?;
+        }
+        Ok(())
     }
 
     /// 将已完成独立审查的 group attempt 交给人工最终确认。

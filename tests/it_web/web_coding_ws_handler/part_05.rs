@@ -9,6 +9,16 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
     );
 
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    // complete 路径新增的落盘判定会读 issue 聚合（T3），fixture 补齐 issue 记录。
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            title: "coding ws internal review issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("create issue");
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -86,6 +96,16 @@ fn app_with_code_review_rework_attempt(
     );
 
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    // complete 路径新增的落盘判定会读 issue 聚合（T3），fixture 补齐 issue 记录。
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            title: "coding ws code review rework issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("create issue");
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),

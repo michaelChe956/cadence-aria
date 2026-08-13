@@ -8,9 +8,11 @@ use crate::product::coding_models::{
     CodingAttemptPlanBinding, CodingAttemptScope, CodingExecutionUnitStatus, CodingProviderRole,
     CodingUnitRun, CodingUnitRunStatus, RemoteKind,
 };
+use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, LifecycleStore,
 };
+use crate::product::models::IssueStatus;
 use crate::product::models::{
     DependencyGraphRevision, HandoffRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
     LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason, ProviderConversationRef,
@@ -941,7 +943,18 @@ fn running_attempt_with_worktree() -> (
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("worktree dir");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // complete 路径新增的落盘判定会读 issue 聚合（T3），fixture 补齐 issue 记录。
+    IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            title: "issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("issue");
+    let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -1033,4 +1046,147 @@ fn run_test_git(cwd: &Path, args: &[&str]) -> std::process::Output {
         );
     }
     output
+}
+
+const DELIVERY_PROJECT_ID: &str = "project_0001";
+const DELIVERY_ISSUE_ID: &str = "issue_0001";
+
+fn delivery_fixture() -> (tempfile::TempDir, CodingAttemptStore, CodingWorkspaceEngine) {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: DELIVERY_PROJECT_ID.to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            title: "issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("issue");
+    let store = CodingAttemptStore::new(paths);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    (root, store, engine)
+}
+
+fn seed_delivery_work_item(store: &CodingAttemptStore, work_item_id: &str, repository_id: &str) {
+    LifecycleStore::new(store.paths())
+        .create_work_item(CreateWorkItemInput {
+            id: Some(work_item_id.to_string()),
+            project_id: DELIVERY_PROJECT_ID.to_string(),
+            issue_id: DELIVERY_ISSUE_ID.to_string(),
+            repository_id: repository_id.to_string(),
+            title: format!("work item {work_item_id}"),
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("work item");
+}
+
+fn seed_delivery_attempt(
+    store: &CodingAttemptStore,
+    work_item_id: &str,
+    repository_id: &str,
+    commit_sha: &str,
+) -> CodingExecutionAttempt {
+    seed_delivery_work_item(store, work_item_id, repository_id);
+    let created = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: DELIVERY_PROJECT_ID.to_string(),
+            issue_id: DELIVERY_ISSUE_ID.to_string(),
+            work_item_id: work_item_id.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: format!("aria/work-items/{work_item_id}/attempt-1"),
+            worktree_path: None,
+            provider_config_snapshot: delivery_provider_snapshot(),
+            target_snapshot: None,
+            max_auto_rework: 2,
+        })
+        .expect("attempt");
+    let attempt = CodingExecutionAttempt {
+        status: CodingAttemptStatus::Completed,
+        head_commit: Some(commit_sha.to_string()),
+        ..created
+    };
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("write attempt");
+    attempt
+}
+
+fn delivery_provider_snapshot() -> ProviderConfigSnapshot {
+    ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: Some(ProviderName::ClaudeCode),
+        review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+    }
+}
+
+fn seed_delivery_review_request(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    push_status: PushStatus,
+    push_error: Option<String>,
+) {
+    let request = ReviewRequest {
+        id: format!("review_request_{}", attempt.id),
+        attempt_id: attempt.id.clone(),
+        kind: ReviewRequestKind::GitBranchOnly,
+        remote_kind: RemoteKind::GenericGit,
+        remote: "origin".to_string(),
+        base_branch: "main".to_string(),
+        branch_name: attempt.branch_name.clone(),
+        commit_sha: attempt.head_commit.clone().unwrap_or_default(),
+        push_status,
+        external_url: None,
+        manual_instructions: Vec::new(),
+        push_error,
+        created_at: "2026-08-13T00:00:00Z".to_string(),
+        updated_at: "2026-08-13T00:00:00Z".to_string(),
+    };
+    store
+        .save_review_request(attempt, &request)
+        .expect("review request");
+}
+
+#[tokio::test]
+async fn maybe_complete_issue_delivery_marks_issue_completed_when_all_pushed() {
+    let (_root, store, engine) = delivery_fixture();
+    let attempt1 = seed_delivery_attempt(&store, "work_item_0001", "repo_alpha", "sha111");
+    seed_delivery_review_request(&store, &attempt1, PushStatus::Pushed, None);
+    let attempt2 = seed_delivery_attempt(&store, "work_item_0002", "repo_beta", "sha222");
+    seed_delivery_review_request(&store, &attempt2, PushStatus::Pushed, None);
+
+    engine
+        .maybe_complete_issue_delivery(&attempt2)
+        .expect("complete issue delivery");
+
+    let issue = IssueStore::new(store.paths())
+        .get(DELIVERY_PROJECT_ID, DELIVERY_ISSUE_ID)
+        .expect("issue");
+    assert_eq!(issue.status, IssueStatus::Completed);
+}
+
+#[tokio::test]
+async fn maybe_complete_issue_delivery_keeps_status_when_partial() {
+    let (_root, store, engine) = delivery_fixture();
+    let attempt1 = seed_delivery_attempt(&store, "work_item_0001", "repo_alpha", "sha111");
+    seed_delivery_review_request(&store, &attempt1, PushStatus::Pushed, None);
+    let attempt2 = seed_delivery_attempt(&store, "work_item_0002", "repo_beta", "sha222");
+    seed_delivery_review_request(
+        &store,
+        &attempt2,
+        PushStatus::Failed,
+        Some("push rejected".to_string()),
+    );
+
+    engine
+        .maybe_complete_issue_delivery(&attempt2)
+        .expect("complete issue delivery");
+
+    let issue = IssueStore::new(store.paths())
+        .get(DELIVERY_PROJECT_ID, DELIVERY_ISSUE_ID)
+        .expect("issue");
+    assert_eq!(issue.status, IssueStatus::Draft);
 }
