@@ -148,7 +148,7 @@ pub async fn create_group_coding_attempt(
         coding_store
             .validate_group_attempt_integrity(&existing)
             .map_err(coding_group_attempt_incomplete_api_error)?;
-        return Ok(Json(coding_attempt_dto(&existing)));
+        return Ok(Json(coding_attempt_dto(&coding_store, &existing)?));
     }
 
     lifecycle
@@ -262,7 +262,7 @@ pub async fn create_group_coding_attempt(
     coding_store
         .advance_group_initialization_phase(&journal, CodingGroupInitializationPhase::Completed)
         .map_err(coding_group_attempt_incomplete_api_error)?;
-    Ok(Json(coding_attempt_dto(&persisted_attempt)))
+    Ok(Json(coding_attempt_dto(&coding_store, &persisted_attempt)?))
 }
 
 fn group_target_snapshot(

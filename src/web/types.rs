@@ -399,6 +399,34 @@ pub struct IssueLifecycleResponse {
     pub work_item_repository_groups: Vec<WorkItemRepositoryGroupDto>,
     pub workspace_sessions: Vec<WorkspaceSessionSummaryDto>,
     pub coding_attempts: Vec<CodingAttemptDto>,
+    /// Issue 级交付状态聚合（`all_pushed` | `partial` | `none`）。向后兼容：
+    /// 旧客户端/旧响应不携带该字段时反序列化为空聚合。
+    #[serde(default)]
+    pub delivery_summary: IssueDeliverySummaryDto,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DeliveryEntryDto {
+    pub repository_name: String,
+    pub work_item_id: String,
+    /// `None` 表示该 Work Item 没有任何 attempt。
+    pub attempt_status: Option<String>,
+    pub branch_name: Option<String>,
+    pub commit_sha: Option<String>,
+    /// `None` 表示无 ReviewRequest。
+    pub push_status: Option<String>,
+    pub push_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueDeliverySummaryDto {
+    pub project_id: String,
+    pub issue_id: String,
+    pub entries: Vec<DeliveryEntryDto>,
+    /// "all_pushed" | "partial" | "none"
+    pub overall: String,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

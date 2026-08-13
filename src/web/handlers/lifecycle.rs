@@ -163,7 +163,7 @@ pub async fn issue_lifecycle(
             .get_attempt_for_work_item_group(&project_id, &issue_id, &plan.id)
             .map_err(product_store_api_error)?;
         let units_by_logical_id = if let Some(attempt) = group_attempt.as_ref() {
-            coding_attempts.push(coding_attempt_dto(attempt));
+            coding_attempts.push(coding_attempt_dto(&coding_store, attempt)?);
             let units = coding_store
                 .list_coding_units(&project_id, &issue_id, &attempt.id)
                 .map_err(product_store_api_error)?;
@@ -238,6 +238,10 @@ pub async fn issue_lifecycle(
                 &WorkspaceType::WorkItem,
             );
             let unit = units_by_logical_id.get(&human_projection.logical_work_item_id);
+            let latest_attempt = match group_attempt.as_ref() {
+                Some(attempt) => Some(coding_attempt_dto(&coding_store, attempt)?),
+                None => None,
+            };
             work_items.push(lifecycle_work_item_runtime_dto(
                 &lifecycle,
                 LifecycleWorkItemRuntimeDtoInput {
@@ -245,7 +249,7 @@ pub async fn issue_lifecycle(
                     plan_id: &plan.id,
                     runtime: &runtime,
                     human_projection,
-                    latest_attempt: group_attempt.as_ref().map(coding_attempt_dto),
+                    latest_attempt,
                     unit,
                     session_id: session.map(|session| session.id.as_str()),
                     require_execution_plan_confirm: plan.options.require_execution_plan_confirm,
@@ -272,8 +276,13 @@ pub async fn issue_lifecycle(
             let attempts = coding_store
                 .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
                 .map_err(product_store_api_error)?;
-            let latest_attempt = attempts.last().map(coding_attempt_dto);
-            coding_attempts.extend(attempts.iter().map(coding_attempt_dto));
+            let latest_attempt = match attempts.last() {
+                Some(attempt) => Some(coding_attempt_dto(&coding_store, attempt)?),
+                None => None,
+            };
+            for attempt in &attempts {
+                coding_attempts.push(coding_attempt_dto(&coding_store, attempt)?);
+            }
             let session = workspace_session_for_entity(
                 &workspace_sessions,
                 &work_item.id,
@@ -330,7 +339,10 @@ pub async fn issue_lifecycle(
                 let attempts = coding_store
                     .list_attempts_for_work_item(&project_id, &issue_id, &record.id)
                     .map_err(product_store_api_error)?;
-                let latest_attempt = attempts.last().map(coding_attempt_dto);
+                let latest_attempt = match attempts.last() {
+                    Some(attempt) => Some(coding_attempt_dto(&coding_store, attempt)?),
+                    None => None,
+                };
                 let session = workspace_session_for_entity(
                     &workspace_sessions,
                     &record.id,
@@ -351,6 +363,12 @@ pub async fn issue_lifecycle(
         .map(workspace_session_summary_dto)
         .collect();
 
+    let delivery_summary = issue_delivery_summary_dto(
+        coding_store
+            .compute_issue_delivery_summary(&project_id, &issue_id)
+            .map_err(product_store_api_error)?,
+    );
+
     Ok(Json(IssueLifecycleResponse {
         issue: product_issue_dto_with_binding(&app_paths, issue)?,
         story_specs,
@@ -360,6 +378,7 @@ pub async fn issue_lifecycle(
         work_item_repository_groups,
         workspace_sessions,
         coding_attempts,
+        delivery_summary,
     }))
 }
 
@@ -962,10 +981,16 @@ pub(crate) fn confirm_workspace_entity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::product::coding_models::{RemoteKind, ReviewRequest, ReviewRequestKind};
     use crate::product::issue_store::CreateProductIssueInput;
     use crate::product::lifecycle_store::CreateWorkItemInput;
-    use crate::product::logical_codebase::LogicalRepositoryId;
-    use crate::product::models::WorkItemPlanLineage;
+    use crate::product::logical_codebase::{
+        CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
+        IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
+        LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+        RepositorySourceIdentity, RepositoryType,
+    };
+    use crate::product::models::{RepositoryRecord, WorkItemPlanLineage};
     use crate::product::work_item_revision_store::WorkItemRevisionStore;
     use crate::web::app::build_web_router;
     use axum::body::Body;
@@ -978,7 +1003,8 @@ mod tests {
     const ISSUE_ID: &str = "issue_0001";
     const REPOSITORY_ID: &str = "repo-1";
 
-    /// 建 issue + 3 个 work item：wi-a/wi-b 带不同 target_repository_id，wi-c 无 target。
+    /// 建 issue + 3 个 work item：wi-a/wi-b 带不同 target_repository_id（有 logical codebase
+    /// 权威记录支撑），wi-c 无 target。
     fn seed_issue_and_work_items(lifecycle: &LifecycleStore, paths: &ProductAppPaths) {
         let issue = IssueStore::new(paths.clone())
             .create(CreateProductIssueInput {
@@ -991,9 +1017,16 @@ mod tests {
             .unwrap();
         assert_eq!(issue.id, ISSUE_ID);
 
+        let logical_a = LogicalRepositoryId(Uuid::new_v4());
+        let logical_b = LogicalRepositoryId(Uuid::new_v4());
+        seed_logical_codebase(
+            paths,
+            &[(logical_a, "checkout-wi-a"), (logical_b, "checkout-wi-b")],
+        );
+
         for (index, (id, target)) in [
-            ("wi-a", Some(Uuid::new_v4())),
-            ("wi-b", Some(Uuid::new_v4())),
+            ("wi-a", Some(logical_a)),
+            ("wi-b", Some(logical_b)),
             ("wi-c", None),
         ]
         .into_iter()
@@ -1012,8 +1045,163 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(work_item.id, id);
-            set_target_repository_id(lifecycle, id, target.map(LogicalRepositoryId));
+            set_target_repository_id(lifecycle, id, target);
         }
+    }
+
+    /// 播种 logical codebase 权威记录（manifest + selection + member + checkout + repos.json
+    /// 兼容投影），使 `resolve_logical_repository_strict` / `PlanningContextSetResolver` 都能解析。
+    /// 成员 alias 与 repository.name 统一为 `REPOSITORY_ID`，保持分组视图 alias 断言不变。
+    fn seed_logical_codebase(paths: &ProductAppPaths, members: &[(LogicalRepositoryId, &str)]) {
+        let manifest = LogicalCodebaseManifest::new(
+            PROJECT_ID,
+            paths.root().join("aggregate-root"),
+            members.iter().map(|(id, _)| *id).collect(),
+        );
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest(PROJECT_ID, &manifest)
+            .unwrap();
+        let now = "2026-08-13T00:00:00Z".to_string();
+        let mut repositories = Vec::new();
+        for (index, (logical_id, checkout_name)) in members.iter().enumerate() {
+            let physical_repository_id = format!("physical-{checkout_name}");
+            let checkout_path = paths.root().join(checkout_name);
+            let source_identity = RepositorySourceIdentity::from_git_parts(
+                &checkout_path,
+                checkout_path.join(".git"),
+                None,
+            );
+            let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+            LogicalCodebaseStore::new(paths.clone())
+                .save_member(
+                    PROJECT_ID,
+                    &CodebaseMemberRecord {
+                        logical_repository_id: *logical_id,
+                        physical_repository_id: physical_repository_id.clone(),
+                        alias: REPOSITORY_ID.to_string(),
+                        role: "repository".to_string(),
+                        ordinal: (index + 1) as u32,
+                        source_identity: source_identity.clone(),
+                        repo_type: RepositoryType::Unknown,
+                        tech_stack: Vec::new(),
+                        owner: None,
+                        tags: Vec::new(),
+                        default_ref: None,
+                        checkout_ids: vec![checkout_id],
+                        status: MemberStatus::Active,
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    },
+                )
+                .unwrap();
+            LogicalCodebaseStore::new(paths.clone())
+                .save_checkout(
+                    PROJECT_ID,
+                    &RepositoryCheckoutRecord {
+                        checkout_id,
+                        logical_repository_id: *logical_id,
+                        physical_repository_id: physical_repository_id.clone(),
+                        kind: CheckoutKind::Main,
+                        canonical_path: checkout_path.clone(),
+                        checkout_path_hash: format!("sha256:{checkout_name}"),
+                        git_dir_identity: source_identity.git_dir_identity(),
+                        revision: Some("abcdef".to_string()),
+                        availability: CheckoutAvailability::Available,
+                        observed_at: now.clone(),
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    },
+                )
+                .unwrap();
+            repositories.push(RepositoryRecord {
+                id: physical_repository_id,
+                project_id: PROJECT_ID.to_string(),
+                name: REPOSITORY_ID.to_string(),
+                path: checkout_path,
+                repo_hash: format!("sha256:{checkout_name}"),
+                runtime_root: paths.root().join(checkout_name).join(".aria/runtime"),
+                default_policy_preset: "manual-write".to_string(),
+                default_provider_mode: "fake".to_string(),
+                created_at: now.clone(),
+                logical_repository_id: Some(*logical_id),
+                primary_checkout_id: Some(checkout_id),
+                identity_schema_version: 1,
+                updated_at: now.clone(),
+            });
+        }
+        crate::product::json_store::write_json(
+            &paths.project_root(PROJECT_ID).join("repos.json"),
+            &repositories,
+        )
+        .unwrap();
+        IssueCodebaseSelectionStore::new(paths.clone())
+            .save(&IssueCodebaseSelection::explicit(
+                PROJECT_ID,
+                ISSUE_ID,
+                members.iter().map(|(id, _)| *id).collect(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            ))
+            .unwrap();
+    }
+
+    fn seed_completed_attempt(
+        store: &CodingAttemptStore,
+        work_item_id: &str,
+        branch_name: &str,
+        commit_sha: &str,
+    ) -> CodingExecutionAttempt {
+        let created = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: work_item_id.to_string(),
+                base_branch: "main".to_string(),
+                branch_name: branch_name.to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: Some(ProviderName::Fake),
+                    review_rounds: 1,
+                    permission_modes: WorkspaceRolePermissionModes::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+            })
+            .unwrap();
+        let attempt = CodingExecutionAttempt {
+            status: CodingAttemptStatus::Completed,
+            head_commit: Some(commit_sha.to_string()),
+            ..created
+        };
+        store.write_coding_attempt_for_test(&attempt).unwrap();
+        attempt
+    }
+
+    fn seed_review_request(
+        store: &CodingAttemptStore,
+        attempt: &CodingExecutionAttempt,
+        push_status: PushStatus,
+        push_error: Option<String>,
+    ) {
+        let request = ReviewRequest {
+            id: format!("review_request_{}", Uuid::new_v4().simple()),
+            attempt_id: attempt.id.clone(),
+            kind: ReviewRequestKind::GitBranchOnly,
+            remote_kind: RemoteKind::GenericGit,
+            remote: "origin".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: attempt.branch_name.clone(),
+            commit_sha: attempt.head_commit.clone().unwrap_or_default(),
+            push_status,
+            external_url: None,
+            manual_instructions: Vec::new(),
+            push_error,
+            created_at: "2026-08-13T00:00:00Z".to_string(),
+            updated_at: "2026-08-13T00:00:00Z".to_string(),
+        };
+        store.save_review_request(attempt, &request).unwrap();
     }
 
     /// create_work_item 恒置 target_repository_id=None，测试直接改写落盘 JSON。
@@ -1108,6 +1296,68 @@ mod tests {
             assert!(group["target_repository_id"].is_string());
             assert_eq!(group["alias"].as_str(), Some(REPOSITORY_ID));
         }
+    }
+
+    #[tokio::test]
+    async fn issue_lifecycle_returns_delivery_summary_with_partial_entries() {
+        let temp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        seed_issue_and_work_items(&lifecycle, &paths);
+
+        // 多仓 partial 场景：wi-a 已推（Pushed）、wi-b push 失败（Failed）、wi-c 无 attempt。
+        let coding_store = CodingAttemptStore::new(paths.clone());
+        let attempt_a =
+            seed_completed_attempt(&coding_store, "wi-a", "aria/wi-a/attempt-1", "sha111");
+        seed_review_request(&coding_store, &attempt_a, PushStatus::Pushed, None);
+        let attempt_b =
+            seed_completed_attempt(&coding_store, "wi-b", "aria/wi-b/attempt-1", "sha222");
+        seed_review_request(
+            &coding_store,
+            &attempt_b,
+            PushStatus::Failed,
+            Some("push rejected".to_string()),
+        );
+
+        let app = build_test_router(temp.path());
+        let response = get_issue_lifecycle(&app).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let summary = &value["delivery_summary"];
+        assert_eq!(summary["project_id"].as_str(), Some(PROJECT_ID));
+        assert_eq!(summary["issue_id"].as_str(), Some(ISSUE_ID));
+        assert_eq!(summary["overall"].as_str(), Some("partial"));
+
+        let entries = summary["entries"].as_array().expect("delivery entries");
+        assert_eq!(entries.len(), 3);
+
+        let entry = |work_item_id: &str| -> &serde_json::Value {
+            entries
+                .iter()
+                .find(|entry| entry["work_item_id"].as_str() == Some(work_item_id))
+                .unwrap_or_else(|| panic!("missing delivery entry for {work_item_id}"))
+        };
+
+        let wi_a = entry("wi-a");
+        assert_eq!(wi_a["repository_name"].as_str(), Some("checkout-wi-a"));
+        assert_eq!(wi_a["attempt_status"].as_str(), Some("completed"));
+        assert_eq!(wi_a["push_status"].as_str(), Some("pushed"));
+        assert!(wi_a["push_error"].is_null());
+
+        let wi_b = entry("wi-b");
+        assert_eq!(wi_b["repository_name"].as_str(), Some("checkout-wi-b"));
+        assert_eq!(wi_b["attempt_status"].as_str(), Some("completed"));
+        assert_eq!(wi_b["push_status"].as_str(), Some("failed"));
+        assert_eq!(wi_b["push_error"].as_str(), Some("push rejected"));
+
+        let wi_c = entry("wi-c");
+        assert!(wi_c["attempt_status"].is_null());
+        assert!(wi_c["push_status"].is_null());
+        assert!(wi_c["push_error"].is_null());
     }
 
     #[tokio::test]

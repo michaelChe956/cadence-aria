@@ -1,5 +1,8 @@
 use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
+use crate::product::coding_attempt_store::{
+    DeliveryEntry, IssueDeliveryOverall, IssueDeliverySummary,
+};
 use crate::product::models::WorkspaceSessionSummaryRecord;
 use crate::product::workspace_engine::WorkItemRepositoryGroup;
 pub(crate) fn issue_work_item_plan_detail_dto(
@@ -409,8 +412,25 @@ pub(crate) fn work_item_repository_group_dto(
     })
 }
 
-pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {
-    CodingAttemptDto {
+pub(crate) fn coding_attempt_dto(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> ApiResult<CodingAttemptDto> {
+    // 权威投影：push_status 取 list_review_requests 末元素的 ReviewRequest.push_status；
+    // 无 ReviewRequest 时保留既有 pushed_remote 推导（单仓红线：无 review request 路径行为不变）。
+    let push_status = match store
+        .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .last()
+    {
+        Some(review) => Some(push_status_text(&review.push_status).to_string()),
+        None => attempt
+            .pushed_remote
+            .as_ref()
+            .map(|_| push_status_text(&PushStatus::Pushed).to_string()),
+    };
+    Ok(CodingAttemptDto {
         attempt_id: attempt.id.clone(),
         project_id: attempt.project_id.clone(),
         issue_id: attempt.issue_id.clone(),
@@ -431,13 +451,43 @@ pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAtte
             .map(|path| path.to_string_lossy().to_string()),
         rework_count: attempt.rework_count,
         head_commit: attempt.head_commit.clone(),
-        push_status: attempt
-            .pushed_remote
-            .as_ref()
-            .map(|_| push_status_text(&PushStatus::Pushed).to_string()),
+        push_status,
         review_request_url: None,
         created_at: attempt.created_at.clone(),
         updated_at: attempt.updated_at.clone(),
+    })
+}
+
+pub(crate) fn issue_delivery_summary_dto(summary: IssueDeliverySummary) -> IssueDeliverySummaryDto {
+    IssueDeliverySummaryDto {
+        project_id: summary.project_id,
+        issue_id: summary.issue_id,
+        entries: summary
+            .entries
+            .into_iter()
+            .map(delivery_entry_dto)
+            .collect(),
+        overall: match summary.overall {
+            IssueDeliveryOverall::AllPushed => "all_pushed".to_string(),
+            IssueDeliveryOverall::Partial => "partial".to_string(),
+            IssueDeliveryOverall::None => "none".to_string(),
+        },
+    }
+}
+
+fn delivery_entry_dto(entry: DeliveryEntry) -> DeliveryEntryDto {
+    DeliveryEntryDto {
+        repository_name: entry.repository_name,
+        work_item_id: entry.work_item_id,
+        attempt_status: entry
+            .attempt_status
+            .map(|status| coding_attempt_status_text(&status).to_string()),
+        branch_name: entry.branch_name,
+        commit_sha: entry.commit_sha,
+        push_status: entry
+            .push_status
+            .map(|status| push_status_text(&status).to_string()),
+        push_error: entry.push_error,
     }
 }
 pub(crate) fn coding_execution_unit_dto(

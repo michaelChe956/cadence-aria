@@ -328,7 +328,7 @@ pub async fn create_coding_attempt(
         &work_items,
     );
 
-    Ok(Json(coding_attempt_dto(&attempt)))
+    Ok(Json(coding_attempt_dto(&coding_store, &attempt)?))
 }
 
 fn attempt_target_snapshot(
@@ -760,7 +760,7 @@ pub(crate) async fn get_coding_attempt(
     let provider_config_snapshot = attempt.provider_config_snapshot.clone();
 
     Ok(Json(CodingAttemptSnapshotResponse {
-        attempt: coding_attempt_dto(&attempt),
+        attempt: coding_attempt_dto(&coding_store, &attempt)?,
         attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
         work_item_group_id: attempt.work_item_group_id.clone(),
         current_work_item_id: attempt.current_work_item_id.clone(),
@@ -831,12 +831,12 @@ pub(crate) async fn abort_coding_attempt(
     let current = coding_store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
-    let engine = coding_workspace_engine_with_dummy_events(coding_store);
+    let engine = coding_workspace_engine_with_dummy_events(coding_store.clone());
     let aborted = engine
         .handle_abort(&current.project_id, &current.issue_id, &current.id)
         .await
         .map_err(coding_workspace_api_error)?;
-    Ok(Json(coding_attempt_dto(&aborted)))
+    Ok(Json(coding_attempt_dto(&coding_store, &aborted)?))
 }
 
 pub(crate) async fn delete_coding_attempt(
