@@ -1,12 +1,6 @@
 /// 默认托管配置 artifact 引用,经 gateway envelope 的 config_digest 复验。
 const AGGREGATE_CONFIG_ARTIFACT_REF: &str = "sha256:aggregate-initialization-managed-config";
 
-/// 聚合根在 envelope target 中使用的稳定逻辑标识。聚合 provider turn 的 cwd
-/// 是 canonical non-Git aggregate root(聚合根本身,非任何成员 checkout);此处用
-/// 一个 `aggregate-root` 占位标识表示「整个聚合根」,而非单个成员仓库。
-const AGGREGATE_ROOT_LOGICAL_REPO: &str = "aggregate-root";
-const AGGREGATE_ROOT_CHECKOUT: &str = "aggregate-root";
-
 /// Task 16:gateway-backed provider turn 驱动。
 ///
 /// 三个 provider turn(`pre_check`/`rule_and_mcp_config`/`openspec_and_examples`)
@@ -48,11 +42,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
         aggregate_root: &std::path::Path,
     ) -> crate::product::logical_codebase::SessionLaunchRequest {
         use crate::product::logical_codebase::{PolicyTarget, SessionPolicyAction};
-        let target = PolicyTarget::checkout(
-            AGGREGATE_ROOT_LOGICAL_REPO,
-            AGGREGATE_ROOT_CHECKOUT,
-            aggregate_root.to_path_buf(),
-        );
+        let target = PolicyTarget::aggregate_root(aggregate_root.to_path_buf());
         crate::product::logical_codebase::SessionLaunchRequest {
             project_id: project_id.to_string(),
             provider: self.provider.clone(),

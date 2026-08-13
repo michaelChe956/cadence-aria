@@ -717,6 +717,40 @@ mod tests {
     }
 
     #[test]
+    fn launch_request_target_is_aggregate_root_and_resolvable_by_production_resolver() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let aggregate_root = temp.path().join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+
+        let gateway = Arc::new(LogicalCodebaseProviderGateway::new(
+            crate::product::logical_codebase::AggregatePolicyArtifactStore::new(paths.clone()),
+            Arc::new(StaticCapabilitySource::new("1.4.0")),
+            Arc::new(PassthroughTargetResolver),
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(StubSyncAdapter),
+            always_available_gate(),
+        ));
+        let driver =
+            GatewayBackedAggregateProviderTurnDriver::claude_code(gateway, "cap_managed_snapshot");
+        let request = driver.launch_request("project_0001", &aggregate_root);
+
+        // 聚合根 planning 只读 target:logical/checkout id 均为空。
+        assert!(request.target.logical_repository_id.is_empty());
+        assert!(request.target.checkout_id.is_empty());
+
+        // 生产 resolver 可解析(仅 canonicalize 聚合根目录),防止占位 checkout 目标回归。
+        let resolver =
+            crate::product::logical_codebase::ProductionPolicyTargetResolver::new(paths);
+        let resolved = resolver.resolve_and_revalidate(&request).unwrap();
+        assert!(resolved.logical_repository_id.is_empty());
+        assert_eq!(
+            resolved.worktree,
+            std::fs::canonicalize(&aggregate_root).unwrap()
+        );
+    }
+
+    #[test]
     fn aggregate_coordinator_isolation_locked_against_single_repository_persistence_and_git_finalize()
      {
         // 隔离回归门:coordinator 生产代码(非测试、非 doc comment)不得引用
