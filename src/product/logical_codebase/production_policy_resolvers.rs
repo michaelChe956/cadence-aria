@@ -1,0 +1,282 @@
+//! Production `PolicyTargetResolver`: 三层身份复验 + TOCTOU 复验。
+//!
+//! 生产环境的 target resolver 不再直接信任请求中的 target,而是:
+//! - checkout 目标(`logical_repository_id` 非空):经
+//!   `RepositoryStore::resolve_logical_repository_strict` 复验三层身份
+//!   (member/checkout/repository),比对 checkout id,重新 canonicalize worktree
+//!   并确认 `.git` 存在。
+//! - 聚合根目标(`logical_repository_id` 为空):canonicalize 聚合根目录。
+//!
+//! 任一复验失败都 fail-closed 为 `ProviderGatewayError::{Target, TargetMismatch}`。
+
+use uuid::Uuid;
+
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::logical_codebase::policy::PolicyTarget;
+use crate::product::logical_codebase::{
+    LogicalRepositoryId, PolicyTargetResolver, ProviderGatewayError, SessionLaunchRequest,
+};
+use crate::product::repository_store::RepositoryStore;
+
+/// 生产 target resolver:持有 `RepositoryStore` 以在启动前重新解析三层身份。
+pub struct ProductionPolicyTargetResolver {
+    repository_store: RepositoryStore,
+}
+
+impl ProductionPolicyTargetResolver {
+    pub fn new(paths: ProductAppPaths) -> Self {
+        Self {
+            repository_store: RepositoryStore::new(paths),
+        }
+    }
+
+    /// checkout 目标复验:解析 logical id → 严格解析三层身份 → 比对 checkout id
+    /// → canonicalize worktree → 确认 `.git` 存在。任何一步失败都 fail-closed。
+    fn resolve_checkout_target(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        let logical_id = Uuid::parse_str(&request.target.logical_repository_id)
+            .map(LogicalRepositoryId)
+            .map_err(|_| {
+                ProviderGatewayError::Target("invalid logical repository id".to_string())
+            })?;
+
+        let (_member, checkout, _repository) = self
+            .repository_store
+            .resolve_logical_repository_strict(&request.project_id, logical_id)
+            .map_err(|error| ProviderGatewayError::Target(error.to_string()))?;
+
+        if checkout.checkout_id.0.to_string() != request.target.checkout_id {
+            return Err(ProviderGatewayError::TargetMismatch {
+                field: "checkout_id".to_string(),
+            });
+        }
+
+        let canonical_worktree = std::fs::canonicalize(&request.target.worktree)
+            .map_err(|_| ProviderGatewayError::Target("worktree missing".to_string()))?;
+
+        if !canonical_worktree.join(".git").exists() {
+            return Err(ProviderGatewayError::TargetMismatch {
+                field: "git_dir".to_string(),
+            });
+        }
+
+        Ok(PolicyTarget::checkout(
+            logical_id.0.to_string(),
+            checkout.checkout_id.0.to_string(),
+            canonical_worktree,
+        ))
+    }
+
+    /// 聚合根目标复验:仅 canonicalize 目录,失败 fail-closed。
+    fn resolve_aggregate_target(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        let canonical = std::fs::canonicalize(&request.target.worktree)
+            .map_err(|_| ProviderGatewayError::Target("aggregate root missing".to_string()))?;
+        Ok(PolicyTarget::aggregate_root(canonical))
+    }
+}
+
+impl PolicyTargetResolver for ProductionPolicyTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        if request.target.logical_repository_id.is_empty() {
+            self.resolve_aggregate_target(request)
+        } else {
+            self.resolve_checkout_target(request)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::logical_codebase::policy::SessionPolicyAction;
+    use crate::product::logical_codebase::{
+        LogicalCodebaseFeature, ProviderRef, RepositoryCheckoutId,
+    };
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
+    use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    /// 注册一个真实逻辑代码库(manifest + member + checkout + repository),并创建
+    /// 一个真实的 git worktree 目录(含 `.git`),供 target resolver 复验。
+    struct ResolverFixture {
+        _root: TempDir,
+        paths: ProductAppPaths,
+        project_id: String,
+        logical_id: LogicalRepositoryId,
+        checkout_id: RepositoryCheckoutId,
+        worktree: PathBuf,
+    }
+
+    fn resolver_fixture() -> ResolverFixture {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let project = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "resolver project".to_string(),
+                description: None,
+            })
+            .expect("create project");
+
+        let worktree = root.path().join("api");
+        fs::create_dir_all(&worktree).expect("create repository root");
+        run_git(&worktree, &["init", "--quiet"]);
+        run_git(
+            &worktree,
+            &["config", "user.email", "resolver@example.test"],
+        );
+        run_git(&worktree, &["config", "user.name", "Resolver Fixture"]);
+        fs::write(worktree.join("README.md"), "# api\n").expect("write initial file");
+        run_git(&worktree, &["add", "README.md"]);
+        run_git(&worktree, &["commit", "--quiet", "-m", "initial commit"]);
+
+        let repository = RepositoryStore::with_logical_codebase_feature(
+            paths.clone(),
+            LogicalCodebaseFeature::enabled(),
+        )
+        .create(CreateRepositoryInput {
+            project_id: project.id.clone(),
+            name: "api".to_string(),
+            path: worktree,
+            default_policy_preset: None,
+            default_provider_mode: None,
+            idempotency_key: "resolver-fixture".to_string(),
+        })
+        .expect("register logical repository");
+
+        ResolverFixture {
+            _root: root,
+            paths,
+            project_id: project.id,
+            logical_id: repository.logical_repository_id.expect("logical id"),
+            checkout_id: repository.primary_checkout_id.expect("checkout id"),
+            worktree: repository.path,
+        }
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("start git");
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
+
+    impl ResolverFixture {
+        fn resolver(&self) -> ProductionPolicyTargetResolver {
+            ProductionPolicyTargetResolver::new(self.paths.clone())
+        }
+
+        fn coding_request(&self, worktree: PathBuf) -> SessionLaunchRequest {
+            SessionLaunchRequest {
+                project_id: self.project_id.clone(),
+                provider: ProviderRef::claude_code("cap_claude_code_1_4_0"),
+                action: SessionPolicyAction::CodingTargetWrite,
+                target: PolicyTarget::checkout(
+                    self.logical_id.0.to_string(),
+                    self.checkout_id.0.to_string(),
+                    worktree.clone(),
+                ),
+                readable_roots: vec![self.paths.root().to_path_buf()],
+                writable_roots: vec![worktree],
+                config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+            }
+        }
+    }
+
+    #[test]
+    fn coding_target_resolves_and_canonicalizes_worktree() {
+        let fixture = resolver_fixture();
+        let request = fixture.coding_request(fixture.worktree.clone());
+
+        let resolved = fixture.resolver().resolve_and_revalidate(&request).unwrap();
+
+        assert_eq!(
+            resolved.worktree,
+            fs::canonicalize(&fixture.worktree).unwrap()
+        );
+        assert_eq!(
+            resolved.logical_repository_id,
+            fixture.logical_id.0.to_string()
+        );
+        assert_eq!(resolved.checkout_id, fixture.checkout_id.0.to_string());
+    }
+
+    #[test]
+    fn coding_target_rejects_missing_worktree() {
+        let fixture = resolver_fixture();
+        let missing = fixture._root.path().join("missing-worktree");
+        let request = fixture.coding_request(missing);
+
+        let error = fixture
+            .resolver()
+            .resolve_and_revalidate(&request)
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderGatewayError::Target(_)));
+    }
+
+    #[test]
+    fn coding_target_rejects_checkout_id_mismatch() {
+        let fixture = resolver_fixture();
+        let wrong_checkout = Uuid::new_v4().to_string();
+        let request = SessionLaunchRequest {
+            project_id: fixture.project_id.clone(),
+            provider: ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            action: SessionPolicyAction::CodingTargetWrite,
+            target: PolicyTarget::checkout(
+                fixture.logical_id.0.to_string(),
+                wrong_checkout,
+                fixture.worktree.clone(),
+            ),
+            readable_roots: vec![fixture.paths.root().to_path_buf()],
+            writable_roots: vec![fixture.worktree.clone()],
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        };
+
+        let error = fixture
+            .resolver()
+            .resolve_and_revalidate(&request)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ProviderGatewayError::TargetMismatch { ref field } if field == "checkout_id")
+        );
+    }
+
+    #[test]
+    fn aggregate_target_resolves_and_canonicalizes() {
+        let fixture = resolver_fixture();
+        let aggregate_root = fixture._root.path().join("aggregate");
+        fs::create_dir_all(&aggregate_root).unwrap();
+        let request = SessionLaunchRequest {
+            project_id: fixture.project_id.clone(),
+            provider: ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            action: SessionPolicyAction::PlanningReadOnly,
+            target: PolicyTarget::aggregate_root(aggregate_root.clone()),
+            readable_roots: vec![fixture.paths.root().to_path_buf()],
+            writable_roots: Vec::new(),
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        };
+
+        let resolved = fixture.resolver().resolve_and_revalidate(&request).unwrap();
+
+        assert_eq!(
+            resolved.worktree,
+            fs::canonicalize(&aggregate_root).unwrap()
+        );
+        assert!(resolved.logical_repository_id.is_empty());
+        assert!(resolved.checkout_id.is_empty());
+    }
+}

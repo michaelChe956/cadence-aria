@@ -9,6 +9,7 @@ pub mod planning_context;
 pub mod planning_context_resolver;
 pub mod planning_context_set;
 pub mod policy;
+pub mod production_policy_resolvers;
 pub mod provider_gateway;
 pub mod reference_scanner;
 pub mod registration;
@@ -59,6 +60,7 @@ pub use policy::{
     AggregatePolicyArtifact, AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect,
     SessionPolicyAction, SessionPolicyEnvelope,
 };
+pub use production_policy_resolvers::ProductionPolicyTargetResolver;
 pub use provider_gateway::{
     GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LogicalCodebaseProviderGateway,
     PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderGatewayError,
