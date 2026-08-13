@@ -126,8 +126,8 @@ impl IntoResponse for ApiError {
             | "shared_worktree_dirty_manual_gate"
             | "coding_workspace_exists" => StatusCode::CONFLICT,
             // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退 500。
-            // policy/target/registry/drift/resume 一律 409；capability 与 Codex
-            // danger-full-access 为 403；provider 不可用为 503；系统未接线为 500(防御)。
+            // policy/target/registry/drift/resume/managed_settings 一律 409；capability 与
+            // Codex danger-full-access 为 403；provider 不可用为 503；系统未接线为 500(防御)。
             "provider_gateway_policy_missing"
             | "provider_gateway_policy"
             | "provider_gateway_target"
@@ -135,7 +135,12 @@ impl IntoResponse for ApiError {
             | "provider_gateway_missing_cwd"
             | "provider_gateway_registry_lookup"
             | "provider_gateway_policy_drift"
-            | "provider_gateway_resume_not_supported" => StatusCode::CONFLICT,
+            | "provider_gateway_resume_not_supported"
+            | "provider_gateway_managed_settings_active" => StatusCode::CONFLICT,
+            // `codex_danger_full_access_unsupported` 为防御性死映射:生产活跃路径已把
+            // UnsupportedCapability("codex_danger_full_access_unsupported") 归一为
+            // `provider_gateway_capability`(两者同映射 403)。保留此码以防有路径直接上抛该
+            // reason 字符串。
             "provider_gateway_capability" | "codex_danger_full_access_unsupported" => {
                 StatusCode::FORBIDDEN
             }
@@ -399,6 +404,10 @@ mod tests {
             ("provider_gateway_policy_drift", StatusCode::CONFLICT),
             (
                 "provider_gateway_resume_not_supported",
+                StatusCode::CONFLICT,
+            ),
+            (
+                "provider_gateway_managed_settings_active",
                 StatusCode::CONFLICT,
             ),
             (

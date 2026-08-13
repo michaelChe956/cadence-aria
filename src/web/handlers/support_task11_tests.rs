@@ -254,3 +254,50 @@ fn cleanup_shared_worktree_by_routing_keeps_legacy_cleanup_for_legacy_routing() 
         "单仓 issue 删除必须继续走老 delete_issue_shared_worktree 逻辑"
     );
 }
+
+/// T11 fix round:生产路径级测试——coding 引擎 T6/T7 helper 把 `ProviderGatewayError`
+/// 压成 `CodingWorkspaceEngineError::ProviderStream(e.to_string())`,e.to_string() 前缀
+/// 即稳定码(`provider_gateway_*`)。转换点 `coding_workspace_api_error` 必须把它归一为
+/// 稳定码(HTTP 409/403),而非 generic `coding_workspace_engine_failed`(500)。
+#[test]
+fn gateway_error_reaches_http_with_stable_code_via_provider_stream() {
+    let cases = [
+        (
+            "provider_gateway_policy_missing: project_0001",
+            "provider_gateway_policy_missing",
+            StatusCode::CONFLICT,
+        ),
+        (
+            "provider_gateway_capability: codex_danger_full_access_unsupported",
+            "provider_gateway_capability",
+            StatusCode::FORBIDDEN,
+        ),
+    ];
+
+    for (details, expected_code, expected_status) in cases {
+        let error = coding_workspace_api_error(CodingWorkspaceEngineError::ProviderStream(
+            details.to_string(),
+        ));
+        assert_eq!(error.code, expected_code, "{details} code");
+        assert_eq!(
+            error.into_response().status(),
+            expected_status,
+            "{details} status mapping"
+        );
+    }
+}
+
+/// T11 fix round:coding 引擎 `start_streaming` 失败把 gateway 错误压成
+/// `ProviderAdapterError{details=error.to_string()}`(经 `provider_adapter_error_from_gateway`),
+/// 再经 `#[from]` 变成 `CodingWorkspaceEngineError::ProviderAdapter`。转换点必须同样
+/// 从 details 前缀归一稳定码,而非 generic 500。
+#[test]
+fn gateway_error_reaches_http_with_stable_code_via_provider_adapter() {
+    let error = coding_workspace_api_error(CodingWorkspaceEngineError::ProviderAdapter(
+        crate::cross_cutting::provider_adapter::ProviderAdapterError::provider_unavailable(
+            "provider_gateway_policy_drift: config_digest".to_string(),
+        ),
+    ));
+    assert_eq!(error.code, "provider_gateway_policy_drift");
+    assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+}
