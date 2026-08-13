@@ -74,10 +74,13 @@ impl CodingWorkspaceEngine {
             project_id: attempt.project_id.clone(),
             provider: provider_ref_for_name(&provider_name),
             action,
+            // CodingTargetWrite 的 single writable root 与 target worktree 都是当前 coding
+            // 嵌套 worktree（C-1 行为：checkout/.worktrees/aria-issues/{issue}），主 checkout
+            // 只提供身份（logical_repository_id/checkout_id 仍取 snapshot 身份）。
             target: PolicyTarget::checkout(
                 snapshot.logical_repository_id.0.to_string(),
                 snapshot.checkout_id.0.to_string(),
-                snapshot.canonical_path.clone(),
+                input.working_dir.clone(),
             ),
             readable_roots: vec![input.working_dir.clone()],
             writable_roots,

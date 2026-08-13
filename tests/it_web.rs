@@ -106,6 +106,8 @@ pub(crate) async fn create_repository_and_wait(
     panic!("repository initialization did not reach a terminal state: {last_snapshot}");
 }
 
+#[path = "it_web/issue_delivery_summary.rs"]
+mod issue_delivery_summary;
 #[path = "it_web/provider_gateway_envelope.rs"]
 mod provider_gateway_envelope;
 #[path = "it_web/web_api_handlers.rs"]

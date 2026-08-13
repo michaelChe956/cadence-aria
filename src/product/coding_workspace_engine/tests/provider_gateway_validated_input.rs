@@ -448,6 +448,59 @@ fn validated_streaming_input_for_role_produces_coding_target_write_for_coder() {
 }
 
 #[test]
+fn validated_streaming_input_targets_coding_worktree_not_primary_checkout() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+
+    // 覆盖 target_snapshot.canonical_path 为主 checkout（与嵌套 coding worktree 不同），
+    // 验证 CodingTargetWrite 的 target worktree 取 input.working_dir（嵌套 worktree）而非
+    // 主 checkout——与 C-1 多仓 worktree 路由（checkout/.worktrees/aria-issues/{issue}）一致。
+    let nested_worktree = logical_attempt
+        .worktree_path
+        .clone()
+        .expect("worktree path");
+    let primary_checkout = nested_worktree.parent().expect("parent").join("checkout");
+    let mut logical = logical_attempt.clone();
+    logical.target_snapshot = Some(AttemptTargetSnapshot {
+        logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
+        checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+        physical_repository_id: "repository_0001".to_string(),
+        canonical_path: primary_checkout,
+        git_dir_identity: "git-dir-identity".to_string(),
+        revision: None,
+        policy_digest: String::new(),
+        membership_revision: 1,
+        captured_at: "2026-08-09T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    });
+    let attempt_path = store
+        .paths()
+        .issue_lifecycle_root(&logical.project_id, &logical.issue_id)
+        .join("coding-attempts")
+        .join(format!("{}.json", logical.id));
+    crate::product::json_store::write_json(&attempt_path, &logical)
+        .expect("write attempt with nested-worktree snapshot");
+
+    let gateway = build_gateway(&store.paths(), &logical.project_id);
+    let engine = engine(&store, Some(gateway));
+    let input = streaming_input(nested_worktree.clone(), ProviderType::ClaudeCode);
+
+    let validated = engine
+        .validated_streaming_input_for_role(&logical, CodingProviderRole::Coder, input)
+        .expect("helper returns Ok")
+        .expect("logical attempt + gateway must produce validated input");
+
+    let (_input, policy) = validated.into_parts();
+    assert_eq!(
+        policy.envelope().action,
+        SessionPolicyAction::CodingTargetWrite
+    );
+    assert_eq!(policy.envelope().target.worktree, nested_worktree);
+    assert_eq!(policy.envelope().writable_roots, vec![nested_worktree]);
+}
+
+#[test]
 fn validated_streaming_input_for_role_rejects_codex_danger_full_access() {
     let (root, store, attempt) = running_attempt_with_worktree();
     let _root = root;

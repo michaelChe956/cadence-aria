@@ -3,6 +3,18 @@ use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::logical_codebase::{LogicalCodebaseStore, RepositoryRoutingErrorCode};
 use crate::product::repository_store::RepositoryStore;
 
+/// revision 是观察性字段：生产路径（repository registration 与 identity 迁移）从不持久化
+/// `RepositoryCheckoutRecord.revision`（恒为 `None`），而 `AttemptTargetSnapshot.revision` 是
+/// admission 时 `git rev-parse HEAD` 的冻结值。仅当 checkout 侧 revision 已观测（`Some`）时才
+/// 逐字比对，`None` 时跳过 revision 比对；其余身份字段（logical/checkout id、canonical path、
+/// git_dir_identity、membership_revision 等）仍严格比对，不变。
+fn revision_matches(checkout_revision: Option<&str>, snapshot_revision: Option<&str>) -> bool {
+    match checkout_revision {
+        Some(observed) => Some(observed) == snapshot_revision,
+        None => true,
+    }
+}
+
 /// 校验 attempt 快照仍与当前逻辑代码库权威记录完全一致。
 ///
 /// 快照存在时不得降级到物理仓库：无法验证的任何字段都统一视为不一致。
@@ -38,7 +50,7 @@ pub fn validate_snapshot_fields(
         || checkout.physical_repository_id != snapshot.physical_repository_id
         || checkout.canonical_path != snapshot.canonical_path
         || checkout.git_dir_identity != snapshot.git_dir_identity
-        || checkout.revision != snapshot.revision
+        || !revision_matches(checkout.revision.as_deref(), snapshot.revision.as_deref())
         || manifest.membership_revision != snapshot.membership_revision
     {
         return Err(RepositoryRoutingErrorCode::Inconsistent);
@@ -54,7 +66,10 @@ pub fn validate_snapshot_fields(
         || resolved_checkout.physical_repository_id != snapshot.physical_repository_id
         || resolved_checkout.canonical_path != snapshot.canonical_path
         || resolved_checkout.git_dir_identity != snapshot.git_dir_identity
-        || resolved_checkout.revision != snapshot.revision
+        || !revision_matches(
+            resolved_checkout.revision.as_deref(),
+            snapshot.revision.as_deref(),
+        )
         || resolved_repository.id != snapshot.physical_repository_id
     {
         return Err(RepositoryRoutingErrorCode::Inconsistent);
@@ -294,5 +309,53 @@ mod tests {
                 completed_at: None,
             },
         }
+    }
+
+    /// 构造仅 revision 字段可配置、其余身份一致的 fixture（membership_revision 一致），
+    /// 用于隔离验证 revision 比对语义。TempDir 由调用方持有。
+    fn snapshot_fixture_with_revisions(
+        root: &std::path::Path,
+        checkout_revision: Option<&str>,
+        snapshot_revision: Option<&str>,
+    ) -> SnapshotFixture {
+        let mut fixture = snapshot_with_stale_membership_revision(root);
+        // 把 membership_revision 对齐到 manifest（2），只测 revision 行为。
+        let snapshot = fixture.attempt.target_snapshot.as_mut().unwrap();
+        snapshot.membership_revision = 2;
+        snapshot.revision = snapshot_revision.map(str::to_string);
+
+        let authority = LogicalCodebaseStore::new(fixture.paths.clone());
+        let snapshot = fixture.attempt.target_snapshot.as_ref().unwrap();
+        let mut checkout = authority
+            .load_checkout("project_0001", snapshot.checkout_id)
+            .unwrap()
+            .unwrap();
+        checkout.revision = checkout_revision.map(str::to_string);
+        authority.save_checkout("project_0001", &checkout).unwrap();
+
+        fixture
+    }
+
+    #[test]
+    fn snapshot_validator_skips_revision_when_checkout_revision_unobserved() {
+        // 生产形态：checkout.revision 恒为 None（registration/迁移不持久化），snapshot.revision
+        // 为 admission 时冻结的 git HEAD。身份一致时不得因 revision 未观测而拒绝。
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = snapshot_fixture_with_revisions(temp.path(), None, Some("observed-head"));
+
+        assert!(validate_snapshot_fields(&fixture.paths, &fixture.attempt).is_ok());
+    }
+
+    #[test]
+    fn snapshot_validator_rejects_observed_revision_mismatch() {
+        // checkout.revision 已观测（Some）时仍严格拒绝漂移。
+        let temp = tempfile::tempdir().unwrap();
+        let fixture =
+            snapshot_fixture_with_revisions(temp.path(), Some("old-head"), Some("new-head"));
+
+        assert!(matches!(
+            validate_snapshot_fields(&fixture.paths, &fixture.attempt),
+            Err(RepositoryRoutingErrorCode::Inconsistent)
+        ));
     }
 }
