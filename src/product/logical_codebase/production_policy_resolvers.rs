@@ -14,9 +14,12 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::logical_codebase::policy::PolicyTarget;
+use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
+use crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
+use crate::product::logical_codebase::provider_gateway::CODEX_DANGER_FULL_ACCESS_UNSUPPORTED;
 use crate::product::logical_codebase::{
-    LogicalRepositoryId, PolicyTargetResolver, ProviderGatewayError, SessionLaunchRequest,
+    LogicalRepositoryId, PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource,
+    ProviderGatewayError, ProviderRef, ProviderRefType, SessionLaunchRequest,
 };
 use crate::product::repository_store::RepositoryStore;
 
@@ -91,6 +94,65 @@ impl PolicyTargetResolver for ProductionPolicyTargetResolver {
     }
 }
 
+/// 生产 capability source:store-backed,持有 `ProviderCapabilityStore` 与目标
+/// project id。`require_supported` 按记录缺失 → Codex 阻断 → snapshot 不一致 →
+/// action 不受支持 → 通过的顺序 fail-closed。
+pub struct StoreBackedProviderCapabilitySource {
+    store: ProviderCapabilityStore,
+    project_id: String,
+}
+
+impl StoreBackedProviderCapabilitySource {
+    pub fn new(paths: ProductAppPaths, project_id: String) -> Self {
+        Self {
+            store: ProviderCapabilityStore::new(paths),
+            project_id,
+        }
+    }
+}
+
+impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
+    fn require_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        let record = self
+            .store
+            .get(&self.project_id, provider.provider_type)
+            .map_err(ProviderGatewayError::policy)?
+            .ok_or_else(|| {
+                ProviderGatewayError::UnsupportedCapability("capability record missing".to_string())
+            })?;
+
+        if record.provider_type == ProviderRefType::Codex {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                CODEX_DANGER_FULL_ACCESS_UNSUPPORTED.to_string(),
+            ));
+        }
+
+        if record.capability_snapshot_ref != provider.capability_snapshot_ref {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                "capability snapshot mismatch".to_string(),
+            ));
+        }
+
+        if !record.supported_actions.contains(&action) {
+            return Err(ProviderGatewayError::UnsupportedCapability(format!(
+                "{action:?} not supported"
+            )));
+        }
+
+        Ok(ProviderCapability {
+            provider_type: record.provider_type,
+            version: record.version,
+            adapter_dialect: record.adapter_dialect,
+            capability_snapshot_ref: record.capability_snapshot_ref,
+            resume_evidence: record.resume_evidence,
+        })
+    }
+}
+
 /// 校验 worktree 的 `.git` 归属(REQ-ENV-03 的 git-dir identity 复验)。
 ///
 /// 真实 git worktree 的 `.git` 是指向 `<主仓>/.git/worktrees/<name>` 的文件,
@@ -156,7 +218,12 @@ fn revalidate_git_dir_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::product::logical_codebase::policy::ProviderDialect;
     use crate::product::logical_codebase::policy::SessionPolicyAction;
+    use crate::product::logical_codebase::provider_capability_store::{
+        CapabilityEvidence, ProviderCapabilityRecord,
+    };
+    use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
     use crate::product::logical_codebase::{
         LogicalCodebaseFeature, ProviderRef, RepositoryCheckoutId,
     };
@@ -392,6 +459,120 @@ mod tests {
 
         assert!(
             matches!(error, ProviderGatewayError::TargetMismatch { ref field } if field == "git_dir")
+        );
+    }
+
+    /// 构造一个已 bootstrap 的 store-backed capability source。TempDir 由调用方
+    /// 保持存活,确保 capability 文件在测试期间存在。
+    fn store_backed_source(project_id: &str) -> (TempDir, StoreBackedProviderCapabilitySource) {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        ProviderCapabilityStore::new(paths.clone())
+            .ensure_bootstrap(project_id)
+            .expect("bootstrap capabilities");
+        let source = StoreBackedProviderCapabilitySource::new(paths, project_id.to_string());
+        (root, source)
+    }
+
+    #[test]
+    fn store_backed_capability_claude_code_passes_for_supported_action() {
+        let (_root, source) = store_backed_source("project_0001");
+
+        let capability = source
+            .require_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap();
+
+        assert_eq!(capability.provider_type, ProviderRefType::ClaudeCode);
+        assert_eq!(capability.version, "0.0.0-managed");
+        assert_eq!(capability.adapter_dialect, ProviderDialect::ClaudeCodeCliV1);
+        assert_eq!(capability.capability_snapshot_ref, "cap_managed_snapshot");
+        assert_eq!(capability.resume_evidence, ResumeEvidenceState::Confirmed);
+    }
+
+    #[test]
+    fn store_backed_capability_codex_is_blocked_even_with_matching_snapshot() {
+        let (_root, source) = store_backed_source("project_0001");
+
+        let error = source
+            .require_supported(
+                &ProviderRef::codex("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason == CODEX_DANGER_FULL_ACCESS_UNSUPPORTED)
+        );
+    }
+
+    #[test]
+    fn store_backed_capability_missing_record_is_unsupported() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let source = StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string());
+
+        let error = source
+            .require_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason == "capability record missing")
+        );
+    }
+
+    #[test]
+    fn store_backed_capability_snapshot_mismatch_is_unsupported() {
+        let (_root, source) = store_backed_source("project_0001");
+
+        let error = source
+            .require_supported(
+                &ProviderRef::claude_code("cap_other_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason == "capability snapshot mismatch")
+        );
+    }
+
+    #[test]
+    fn store_backed_capability_action_not_in_supported_actions_is_unsupported() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = ProviderCapabilityStore::new(paths.clone());
+        store.ensure_bootstrap("project_0001").unwrap();
+        store
+            .upsert(
+                "project_0001",
+                &ProviderCapabilityRecord {
+                    provider_type: ProviderRefType::ClaudeCode,
+                    version: "0.0.0-managed".to_string(),
+                    adapter_dialect: ProviderDialect::ClaudeCodeCliV1,
+                    capability_snapshot_ref: "cap_managed_snapshot".to_string(),
+                    evidence: CapabilityEvidence::FixtureVerified,
+                    resume_evidence: ResumeEvidenceState::Confirmed,
+                    supported_actions: vec![SessionPolicyAction::ReviewReadOnly],
+                },
+            )
+            .unwrap();
+        let source = StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string());
+
+        let error = source
+            .require_supported(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason) if reason == "CodingTargetWrite not supported")
         );
     }
 }
