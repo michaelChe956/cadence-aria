@@ -508,6 +508,7 @@ export type CodingWsInMessage =
   | { type: "max_auto_rework_select"; max_auto_rework: number }
   | { type: "stage_gate_confirm"; stage: CodingExecutionStage }
   | { type: "final_confirm" }
+  | { type: "retry_push" }
   | { type: "abort_attempt" }
   | { type: "request_manual_pause" }
   | { type: "coding_ping" };

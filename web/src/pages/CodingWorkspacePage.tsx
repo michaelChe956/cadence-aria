@@ -467,6 +467,7 @@ export function CodingWorkspacePage({
             <CodingArtifactTabs
               address={address}
               activeTab={activeTab}
+              onRetryPush={api.retryPush}
               className="min-h-0"
             />
           ) : (

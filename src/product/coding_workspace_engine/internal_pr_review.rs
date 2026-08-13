@@ -840,6 +840,13 @@ impl CodingWorkspaceEngine {
                 commit_message: Some(commit_message.to_string()),
             },
         )?;
+        if journal.phase == CodingGitOperationPhase::Completed
+            && journal.push_status == Some(PushStatus::Failed)
+        {
+            journal = self
+                .store
+                .reopen_failed_review_git_operation(&attempt, &journal)?;
+        }
         if journal.phase == CodingGitOperationPhase::Compensated {
             return Err(CodingWorkspaceEngineError::Aborted);
         }

@@ -184,9 +184,15 @@ function findingLocation(finding: ReviewFinding) {
   return finding.line ? `${finding.file_path}:${finding.line}` : finding.file_path;
 }
 
-export function GitPanel() {
+export function GitPanel({ onRetryPush }: { onRetryPush: () => void }) {
   const store = useCodingWorkspaceStore();
   const request = store.reviewRequest;
+  const canRetryPush =
+    request?.push_status === "failed" &&
+    store.status !== null &&
+    store.status !== "completed" &&
+    store.status !== "failed" &&
+    store.status !== "aborted";
   return (
     <div className="space-y-3 text-xs">
       <dl className="space-y-2">
@@ -204,6 +210,15 @@ export function GitPanel() {
         >
           {request.push_error}
         </p>
+      ) : null}
+      {canRetryPush ? (
+        <button
+          type="button"
+          onClick={onRetryPush}
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]"
+        >
+          重新推送
+        </button>
       ) : null}
       {request?.external_url ? (
         <a

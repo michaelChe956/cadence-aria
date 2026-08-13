@@ -43,6 +43,7 @@ export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
     respondChoice: vi.fn(),
     respondGate: vi.fn(),
     finalConfirm: vi.fn(),
+    retryPush: vi.fn(),
     abortAttempt: vi.fn(),
     requestManualPause: vi.fn(),
     sendHello: vi.fn(),

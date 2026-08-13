@@ -181,6 +181,7 @@ pub enum CodingWsInMessage {
         stage: CodingExecutionStage,
     },
     FinalConfirm,
+    RetryPush,
     AbortAttempt,
     RequestManualPause,
     CodingPing,

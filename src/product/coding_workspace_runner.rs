@@ -26,6 +26,7 @@ pub enum CodingRunnerCommand {
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
     },
+    RetryPush,
     AbortAttempt,
 }
 

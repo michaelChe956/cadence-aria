@@ -233,6 +233,50 @@ impl super::CodingAttemptStore {
             Ok(current)
         })
     }
+
+    /// 重推（RetryPush）专用重开：仅当 journal 为 `Completed(Failed)` 时重开为
+    /// `PushStarted`（保留 `commit_sha`/`before_head`，清空 push 完成态字段），供
+    /// `execute_review_request` 幂等重入时重新 push。
+    ///
+    /// 红线：`Completed(Pushed)` 与其他非 Completed 相位绝不重开，一律返回
+    /// `IdentityMismatch`（编程错误，不静默）。
+    pub fn reopen_failed_review_git_operation(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        expected: &CodingGitOperationJournal,
+    ) -> Result<CodingGitOperationJournal, ProductStoreError> {
+        let current_attempt = self.validate_attempt_lineage(attempt)?;
+        let path = self.coding_git_operation_path(
+            &current_attempt.project_id,
+            &current_attempt.issue_id,
+            &current_attempt.id,
+        );
+
+        with_exclusive_lock(&path, || {
+            if !path.is_file() {
+                return Err(identity_mismatch(&current_attempt.id));
+            }
+            let mut current: CodingGitOperationJournal = read_json(&path)?;
+            validate_journal(&current, &current_attempt)?;
+            if !same_identity(&current, expected)
+                || current.kind != CodingGitOperationKind::ReviewRequest
+                || current.phase != CodingGitOperationPhase::Completed
+                || current.push_status != Some(PushStatus::Failed)
+                || current.commit_sha.is_none()
+            {
+                return Err(identity_mismatch(&current_attempt.id));
+            }
+            current.phase = CodingGitOperationPhase::PushStarted;
+            current.push_status = None;
+            current.push_error = None;
+            current.remote_kind = None;
+            current.review_request_id = None;
+            current.updated_at = Utc::now().to_rfc3339();
+            validate_phase_state(&current)?;
+            write_json(&path, &current)?;
+            Ok(current)
+        })
+    }
 }
 
 fn build_journal(

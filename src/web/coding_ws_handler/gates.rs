@@ -105,7 +105,8 @@ pub(crate) async fn await_stage_gate(
                             .await?;
                     }
                     CodingRunnerCommand::PermissionResponse { .. }
-                    | CodingRunnerCommand::ChoiceResponse { .. } => {}
+                    | CodingRunnerCommand::ChoiceResponse { .. }
+                    | CodingRunnerCommand::RetryPush => {}
                     CodingRunnerCommand::ProviderSelect { role, provider } => {
                         let (updated, changed_role, changed_provider) =
                             match update_provider_selection(

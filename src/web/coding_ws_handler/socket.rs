@@ -356,6 +356,63 @@ async fn handle_coding_socket(
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
+                } else if inbound == CodingWsInMessage::RetryPush {
+                    // runner 存活窗口内优先转发命令臂（覆盖 brief 窗口）；runner 已退出时
+                    // 直接处理（仿 FinalConfirm 臂），复用 execute_review_request 的
+                    // journal 幂等重入：Failed 重开重推，Pushed 幂等返回。
+                    if let Some(command_tx) = runner_command_tx.as_ref() {
+                        let _ = command_tx.send(CodingRunnerCommand::RetryPush).await;
+                        drop(mutation_lease);
+                        continue;
+                    }
+                    let engine = CodingWorkspaceEngine::new(
+                        coding_store.clone(),
+                        GitWorkspaceService::new(),
+                        event_tx.clone(),
+                    );
+                    if let Err(error) = engine
+                        .execute_review_request(
+                            &current_attempt,
+                            "origin",
+                            "feat: implement work item",
+                        )
+                        .await
+                    {
+                        drop(mutation_lease);
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_retry_push_failed".to_string(),
+                                message: error.to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                    let updated = match coding_store.get_attempt(
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        &current_attempt.id,
+                    ) {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_retry_push_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    drop(mutation_lease);
+                    flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
+                    if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
                 } else if let CodingWsInMessage::GateResponse {
                     gate_id,
                     action_id,
@@ -754,7 +811,9 @@ pub fn is_coding_ws_message_allowed(
         CodingExecutionStage::ReviewRequest => {
             matches!(
                 message,
-                CodingWsInMessage::StartCoding | CodingWsInMessage::AbortAttempt
+                CodingWsInMessage::StartCoding
+                    | CodingWsInMessage::RetryPush
+                    | CodingWsInMessage::AbortAttempt
             )
         }
         CodingExecutionStage::Coding
@@ -770,6 +829,7 @@ pub fn is_coding_ws_message_allowed(
             message,
             CodingWsInMessage::FinalConfirm
                 | CodingWsInMessage::GateResponse { .. }
+                | CodingWsInMessage::RetryPush
                 | CodingWsInMessage::AbortAttempt
         ),
     }

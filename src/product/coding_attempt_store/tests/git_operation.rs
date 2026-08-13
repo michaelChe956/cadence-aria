@@ -180,3 +180,128 @@ fn review_git_operation_requires_commit_identity_and_durable_completion_outcome(
         Err(ProductStoreError::IdentityMismatch { .. })
     ));
 }
+
+fn completed_review_journal(
+    store: &crate::product::coding_attempt_store::CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    push_status: PushStatus,
+) -> crate::product::coding_attempt_store::CodingGitOperationJournal {
+    // repo/worktree 路径与 setup() 约定一致；review journal 只校验 identity 不校验 git 事实。
+    let repo_path = PathBuf::from("/tmp/review-retry-repo");
+    let worktree_path =
+        PathBuf::from("/tmp/review-retry-repo/.worktrees/aria-work-items/work_item_0001/attempt-1");
+    let attempt = store
+        .update_attempt_worktree_path(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            worktree_path.clone(),
+        )
+        .expect("persist worktree");
+    let journal = store
+        .prepare_coding_git_operation(
+            &attempt,
+            PrepareCodingGitOperationInput {
+                kind: CodingGitOperationKind::ReviewRequest,
+                repo_path: repo_path.clone(),
+                worktree_path: worktree_path.clone(),
+                branch_name: attempt.branch_name.clone(),
+                base_branch: attempt.base_branch.clone(),
+                before_head: "before-head".to_string(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("feat: retry review journal".to_string()),
+            },
+        )
+        .expect("prepare review journal");
+    let commit_started = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("commit started");
+    let commit_created = store
+        .advance_coding_git_operation(
+            &attempt,
+            &commit_started,
+            CodingGitOperationPhase::CommitCreated,
+            Some("commit-sha".to_string()),
+        )
+        .expect("commit created");
+    let push_started = store
+        .advance_coding_git_operation(
+            &attempt,
+            &commit_created,
+            CodingGitOperationPhase::PushStarted,
+            None,
+        )
+        .expect("push started");
+    let push_error = (push_status == PushStatus::Failed).then(|| "rejected".to_string());
+    store
+        .complete_review_coding_git_operation(
+            &attempt,
+            &push_started,
+            CompleteReviewGitOperationInput {
+                push_status,
+                remote_kind: RemoteKind::GenericGit,
+                review_request_id: "review_request_0001".to_string(),
+                push_error,
+            },
+        )
+        .expect("complete review journal")
+}
+
+#[test]
+fn reopen_failed_review_git_operation_reopens_completed_failed_to_push_started() {
+    let (_tmp, store, attempt) = setup();
+    let completed = completed_review_journal(&store, &attempt, PushStatus::Failed);
+    assert_eq!(completed.phase, CodingGitOperationPhase::Completed);
+    assert_eq!(completed.push_status, Some(PushStatus::Failed));
+
+    let attempt = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt");
+    let reopened = store
+        .reopen_failed_review_git_operation(&attempt, &completed)
+        .expect("reopen failed review journal");
+    assert_eq!(reopened.phase, CodingGitOperationPhase::PushStarted);
+    assert_eq!(reopened.commit_sha.as_deref(), Some("commit-sha"));
+    assert_eq!(reopened.push_status, None);
+    assert_eq!(reopened.push_error, None);
+    assert_eq!(reopened.remote_kind, None);
+    assert_eq!(reopened.review_request_id, None);
+}
+
+#[test]
+fn reopen_failed_review_git_operation_rejects_completed_pushed() {
+    let (_tmp, store, attempt) = setup();
+    let completed = completed_review_journal(&store, &attempt, PushStatus::Pushed);
+
+    let attempt = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt");
+    let reopened = store.reopen_failed_review_git_operation(&attempt, &completed);
+    assert!(matches!(
+        reopened,
+        Err(ProductStoreError::IdentityMismatch { .. })
+    ));
+}
+
+#[test]
+fn reopen_failed_review_git_operation_rejects_non_terminal_phase() {
+    let (_tmp, store, attempt) = setup();
+    let completed = completed_review_journal(&store, &attempt, PushStatus::Failed);
+    let attempt = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("attempt");
+    let reopened = store
+        .reopen_failed_review_git_operation(&attempt, &completed)
+        .expect("reopen once");
+    // PushStarted 为非终态，不得再次重开（编程错误 → IdentityMismatch，绝不静默）。
+    let again = store.reopen_failed_review_git_operation(&attempt, &reopened);
+    assert!(matches!(
+        again,
+        Err(ProductStoreError::IdentityMismatch { .. })
+    ));
+}

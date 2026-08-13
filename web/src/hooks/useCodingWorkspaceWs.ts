@@ -164,6 +164,10 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
     sendJson({ type: "final_confirm" });
   }, [sendJson]);
 
+  const retryPush = useCallback(() => {
+    sendJson({ type: "retry_push" });
+  }, [sendJson]);
+
   const abortAttempt = useCallback(() => {
     sendJson({ type: "abort_attempt" });
   }, [sendJson]);
@@ -313,6 +317,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
     respondChoice,
     respondGate,
     finalConfirm,
+    retryPush,
     abortAttempt,
     requestManualPause,
     sendHello,
