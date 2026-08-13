@@ -1,4 +1,10 @@
 use super::*;
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::product::logical_codebase::{
+    LogicalCodebaseProviderGateway, PolicyTarget, ProviderGatewayError, ProviderRef,
+    SessionLaunchRequest, SessionPolicyAction,
+};
 use crate::product::workspace_engine::types::ReviewProviderRunFailure;
 
 impl WorkspaceEngine {
@@ -77,6 +83,219 @@ impl WorkspaceEngine {
                 )
                 .await;
                 let repair_session = provider.start(repair_input, self.cancel.clone()).await;
+                let repair_result = self
+                    .drive_reviewer_provider_session_once(
+                        repair_session,
+                        &mut command_rx,
+                        &reviewer,
+                    )
+                    .await;
+                let repaired_completion = match repair_result {
+                    ReviewProviderRunResult::Completed(completion) => completion,
+                    ReviewProviderRunResult::Aborted => {
+                        self.emit_execution_event(
+                            structured_output_repair_event(
+                                ProviderExecutionEventStatus::Failed,
+                                first_error.code(),
+                            ),
+                            repair_node_id,
+                            Some(reviewer.clone()),
+                        )
+                        .await;
+                        return;
+                    }
+                    ReviewProviderRunResult::Failed(_) => {
+                        self.emit_execution_event(
+                            structured_output_repair_event(
+                                ProviderExecutionEventStatus::Failed,
+                                first_error.code(),
+                            ),
+                            repair_node_id,
+                            Some(reviewer.clone()),
+                        )
+                        .await;
+                        let verdict =
+                            fallback_review_verdict(&first_completion, &first_error, true);
+                        self.complete_review(first_completion, verdict).await;
+                        return;
+                    }
+                };
+
+                match self.parse_review_completion_for_active_node(&repaired_completion) {
+                    Ok(mut verdict)
+                        if repair_payload_is_compatible(&first_error, &repaired_completion) =>
+                    {
+                        verdict.structured_output_diagnostic =
+                            Some(success_diagnostic(&first_error));
+                        let normalized = ProviderCompletion {
+                            full_output: format!(
+                                "{}\n{}",
+                                first_completion.full_output, repaired_completion.full_output
+                            ),
+                            readable_output: first_completion.readable_output,
+                            structured_output: repaired_completion.structured_output,
+                            provider_session_id: repaired_completion.provider_session_id,
+                        };
+                        self.emit_execution_event(
+                            structured_output_repair_event(
+                                ProviderExecutionEventStatus::Completed,
+                                first_error.code(),
+                            ),
+                            repair_node_id.clone(),
+                            Some(reviewer.clone()),
+                        )
+                        .await;
+                        self.complete_review(normalized, verdict).await;
+                    }
+                    Ok(_) => {
+                        let error = ReviewCompletionError::RepairPayloadChanged;
+                        self.emit_execution_event(
+                            structured_output_repair_event(
+                                ProviderExecutionEventStatus::Failed,
+                                error.code(),
+                            ),
+                            repair_node_id.clone(),
+                            Some(reviewer.clone()),
+                        )
+                        .await;
+                        let verdict = fallback_review_verdict(&first_completion, &error, true);
+                        self.complete_review(first_completion, verdict).await;
+                    }
+                    Err(second_error) => {
+                        let normalized = ProviderCompletion {
+                            full_output: format!(
+                                "{}\n{}",
+                                first_completion.full_output, repaired_completion.full_output
+                            ),
+                            readable_output: first_completion.readable_output,
+                            structured_output: repaired_completion.structured_output,
+                            provider_session_id: repaired_completion.provider_session_id,
+                        };
+                        self.emit_execution_event(
+                            structured_output_repair_event(
+                                ProviderExecutionEventStatus::Failed,
+                                second_error.code(),
+                            ),
+                            repair_node_id,
+                            Some(reviewer.clone()),
+                        )
+                        .await;
+                        let verdict = fallback_review_verdict(&normalized, &second_error, true);
+                        self.complete_review(normalized, verdict).await;
+                    }
+                }
+            }
+            Err(error) => {
+                let verdict = fallback_review_verdict(&first_completion, &error, false);
+                self.complete_review(first_completion, verdict).await;
+            }
+        }
+    }
+
+    /// 逻辑会话专属 review 驱动:镜像 `drive_review_session`,但三处 provider
+    /// 启动点(first + repair)改为经 `logical_provider_gateway` 的
+    /// `validate` + `start_streaming` 启动(每次用各自 input 重新组装 launch)。
+    ///
+    /// 仅在注入 `logical_provider_gateway` 后由 handler 调用(调用前先判
+    /// `logical_provider_gateway().is_some()`);None 属编程错误——生产正常序列
+    /// 该分支不可达,故 `expect` 直接暴露而非静默吞掉。
+    pub(crate) async fn drive_review_session_via_gateway(
+        &mut self,
+        command_rx: mpsc::Receiver<ProviderCommand>,
+    ) {
+        let gateway = self
+            .logical_provider_gateway
+            .clone()
+            .expect("drive_review_session_via_gateway requires a logical provider gateway");
+
+        let reviewer = self
+            .session
+            .reviewer_provider
+            .clone()
+            .unwrap_or(ProviderName::Codex);
+        let input = match self.build_review_input() {
+            Ok(input) => input,
+            Err(message) => {
+                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                self.finish_failed_run().await;
+                return;
+            }
+        };
+        if let Some(node_id) = self.active_node_id.clone() {
+            let _ = self
+                .persist_prompt_snapshot(&node_id, input.prompt.clone())
+                .await;
+            self.emit_execution_event(
+                provider_prompt_event(
+                    &node_id,
+                    input.prompt.clone(),
+                    "发送给 Workspace provider 的完整提示词",
+                ),
+                Some(node_id),
+                Some(reviewer.clone()),
+            )
+            .await;
+        }
+        // review 会话 repository 数据同 10a 来源:project_id 取
+        // `logical_planning_launch()`(repository_path 缺失时回退 session.project_id)。
+        let project_id = self
+            .logical_planning_launch()
+            .map(|(project_id, _)| project_id)
+            .unwrap_or_else(|| self.session.project_id.clone());
+        let mut command_rx = command_rx;
+        let first_session = start_review_session_via_gateway(
+            &gateway,
+            input.clone(),
+            project_id.clone(),
+            self.cancel.clone(),
+        )
+        .await;
+        let first_completion = match self
+            .drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
+            .await
+        {
+            ReviewProviderRunResult::Completed(completion) => completion,
+            ReviewProviderRunResult::Aborted => return,
+            ReviewProviderRunResult::Failed(failure) => {
+                self.finish_review_provider_run_failure(failure).await;
+                return;
+            }
+        };
+
+        match self.parse_review_completion_for_active_node(&first_completion) {
+            Ok(verdict) => self.complete_review(first_completion, verdict).await,
+            Err(first_error) if first_error.is_repairable() && reviewer != ProviderName::Pi => {
+                let repair_input = match self.build_review_repair_input(
+                    &input,
+                    &first_completion,
+                    &first_error,
+                    first_completion.provider_session_id.clone(),
+                ) {
+                    Ok(input) => input,
+                    Err(_) => {
+                        let verdict =
+                            fallback_review_verdict(&first_completion, &first_error, false);
+                        self.complete_review(first_completion, verdict).await;
+                        return;
+                    }
+                };
+                let repair_node_id = self.active_node_id.clone();
+                self.emit_execution_event(
+                    structured_output_repair_event(
+                        ProviderExecutionEventStatus::Started,
+                        first_error.code(),
+                    ),
+                    repair_node_id.clone(),
+                    Some(reviewer.clone()),
+                )
+                .await;
+                let repair_session = start_review_session_via_gateway(
+                    &gateway,
+                    repair_input,
+                    project_id,
+                    self.cancel.clone(),
+                )
+                .await;
                 let repair_result = self
                     .drive_reviewer_provider_session_once(
                         repair_session,
@@ -627,4 +846,38 @@ impl WorkspaceEngine {
             ReviewProviderRunResult::Completed(completion)
         }
     }
+}
+
+/// 逻辑 review 会话经 gateway 启动:组装 `ReviewReadOnly` launch → `validate` →
+/// `start_streaming`。gateway 错误映射为 `ProviderAdapterError`(与
+/// `drive_reviewer_provider_session_once` 的 `Start` 失败路径对齐)。
+async fn start_review_session_via_gateway(
+    gateway: &Arc<LogicalCodebaseProviderGateway>,
+    input: StreamingProviderInput,
+    project_id: String,
+    cancel: CancellationToken,
+) -> Result<ProviderSession, ProviderAdapterError> {
+    let request = SessionLaunchRequest {
+        project_id,
+        provider: ProviderRef::claude_code("cap_managed_snapshot"),
+        action: SessionPolicyAction::ReviewReadOnly,
+        target: PolicyTarget::aggregate_root(input.working_dir.clone()),
+        readable_roots: vec![input.working_dir.clone()],
+        writable_roots: Vec::new(),
+        config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+    };
+    let validated = gateway
+        .validate(request)
+        .map_err(map_gateway_error_to_adapter)?;
+    let validated_input = ValidatedStreamingProviderInput::new(input, validated);
+    gateway
+        .start_streaming(validated_input, cancel)
+        .await
+        .map_err(map_gateway_error_to_adapter)
+}
+
+/// gateway 错误到 adapter 错误的桥接:使调用点后续对 `Err` 的处理与直接
+/// `provider.start` 完全一致(`ReviewProviderRunFailure::Start`)。
+fn map_gateway_error_to_adapter(error: ProviderGatewayError) -> ProviderAdapterError {
+    ProviderAdapterError::provider_unavailable(error.to_string())
 }

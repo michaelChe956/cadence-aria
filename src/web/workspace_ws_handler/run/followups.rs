@@ -471,9 +471,15 @@ macro_rules! workspace_ws_provider_run_followups {
             $workspace_runs_for_task
                 .replace_command_tx_if_token(&$session_id_for_task, $run_token, review_command_tx)
                 .await;
-            $engine
-                .drive_review_session(provider_for_review, review_command_rx)
-                .await;
+            if $engine.logical_provider_gateway().is_some() {
+                $engine
+                    .drive_review_session_via_gateway(review_command_rx)
+                    .await;
+            } else {
+                $engine
+                    .drive_review_session(provider_for_review, review_command_rx)
+                    .await;
+            }
         }
         if $engine.session().workspace_type == WorkspaceType::WorkItemPlan
             && $engine.session().stage == WorkspaceStage::Running

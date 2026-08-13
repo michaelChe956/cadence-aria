@@ -114,9 +114,13 @@ pub(crate) async fn spawn_provider_run_from_handler(
                     .await;
             }
             ProviderRunKind::ReviewOnly => {
-                engine
-                    .drive_review_session(provider_for_run.clone(), command_rx)
-                    .await;
+                if engine.logical_provider_gateway().is_some() {
+                    engine.drive_review_session_via_gateway(command_rx).await;
+                } else {
+                    engine
+                        .drive_review_session(provider_for_run.clone(), command_rx)
+                        .await;
+                }
             }
             ProviderRunKind::WorkItemPlanAuthor
             | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
