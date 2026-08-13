@@ -96,15 +96,16 @@ impl StreamingProviderAdapter for UnimplementedStartCountingAdapter {
 }
 
 /// 构造一个携带逻辑代码库 target(`target_snapshot.is_some()`)的 running attempt,
-/// coder provider 为 `Codex`(真实 provider)。不注入 `logical_provider_gateway`,
-/// 因此 `validated_input` 为 `None`——这是 Task 12 需要关闭的场景。
-fn logical_coding_fixture_with_unimplemented_stream_start() -> LogicalCodingLegacyFallbackFixture {
+/// coder provider 由调用方指定。不注入 `logical_provider_gateway`,因此
+/// `validated_input` 为 `None`——这是 Task 12 需要关闭的场景。
+fn logical_coding_fixture_with_provider(
+    coder_provider: ProviderName,
+) -> LogicalCodingLegacyFallbackFixture {
     let (root, store, attempt) = running_attempt_with_worktree();
-    // 设为真实 provider(Codex),使逻辑路径不能以 Fake 例外放行。
     let mut provider_config = store
         .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("role provider config");
-    provider_config.coder = ProviderName::Codex;
+    provider_config.coder = coder_provider;
     store
         .update_role_provider_config_snapshot(
             &attempt.project_id,
@@ -157,7 +158,7 @@ async fn logical_coding_never_falls_back_to_legacy_stream_when_start_is_unimplem
     // fail-closed(`logical_provider_gateway_required`),不得回落到 legacy
     // `run_streaming` bridge,也不允许裸 `start` 启动真实 provider。这是「禁止裸
     // AdapterInput/StreamingProviderInput 直接启动真实 provider」的端到端断言。
-    let fixture = logical_coding_fixture_with_unimplemented_stream_start();
+    let fixture = logical_coding_fixture_with_provider(ProviderName::Codex);
     let error = fixture.run_coder().await.unwrap_err();
 
     assert!(
@@ -170,5 +171,21 @@ async fn logical_coding_never_falls_back_to_legacy_stream_when_start_is_unimplem
         fixture.adapter().legacy_run_streaming_calls(),
         0,
         "legacy run_streaming bridge must not be invoked for logical targets"
+    );
+}
+
+#[tokio::test]
+async fn logical_provider_gateway_required_applies_to_fake_provider() {
+    // Task 12 收紧 Fake 豁免后:逻辑代码库 target 即使 coder provider 为 `Fake`,
+    // 在无 gateway(无 validated_input)时也必须 fail-closed
+    // (`logical_provider_gateway_required`),不得因 Fake 例外直接裸 `start`。
+    let fixture = logical_coding_fixture_with_provider(ProviderName::Fake);
+    let error = fixture.run_coder().await.unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("logical_provider_gateway_required"),
+        "expected logical_provider_gateway_required error, got: {error}"
     );
 }

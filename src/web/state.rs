@@ -10,7 +10,6 @@ use crate::cross_cutting::bounded_command_runner::{
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::image_client::ImageClient;
-use crate::cross_cutting::pi_provider::PiProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_health::{
@@ -242,6 +241,15 @@ impl WebAppState {
             state.provider_registry.clone(),
             state.image_create_run_registry.clone(),
         ));
+        // T4 deferred minor:注入 registry 后必须用注入的 registry 同步重建
+        // `logical_gateway_factory`,否则 factory 持有旧 registry,后续注入 fake
+        // registry 时 gateway 解析不到 fake。
+        state.logical_gateway_factory = Some(Arc::new(LogicalCodebaseGatewayFactory::new(
+            ProductAppPaths::new(state.workspace_root.join(".aria")),
+            state.provider_registry.clone(),
+            state.provider_adapter.clone(),
+            state.provider_gate.clone(),
+        )));
         state
     }
 
@@ -376,37 +384,18 @@ fn default_provider_registry(
     provider_gate: Arc<ProviderAvailabilityGate>,
     test_provider_enabled: bool,
 ) -> Arc<ProviderRegistry> {
-    let mut registry = ProviderRegistry::new();
-    if test_provider_enabled {
-        registry.register(
-            ProviderName::Fake,
-            Arc::new(TestControlledFakeStreamingProvider::new(
-                test_controls.clone(),
-            )),
-        );
-        registry.register(
-            ProviderName::ClaudeCode,
-            Arc::new(TestControlledFakeStreamingProvider::new(
-                test_controls.clone(),
-            )),
-        );
-        registry.register(
-            ProviderName::Codex,
-            Arc::new(TestControlledFakeStreamingProvider::new(
-                test_controls.clone(),
-            )),
-        );
-        registry.register(
-            ProviderName::Pi,
-            Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
-        );
-        return Arc::new(registry);
-    }
+    let registry = if test_provider_enabled {
+        fake_mode_provider_registry(test_controls)
+    } else {
+        real_provider_registry(provider_gate)
+    };
+    Arc::new(registry)
+}
 
-    registry.register(
-        ProviderName::Fake,
-        Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
-    );
+/// 生产模式 registry:只注册真实 ClaudeCode/Codex 实现,不含 `ProviderName::Fake`,
+/// 也不注册 Pi。
+fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
     registry.register_gated(
         ProviderName::ClaudeCode,
         Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),
@@ -415,14 +404,38 @@ fn default_provider_registry(
     registry.register_gated(
         ProviderName::Codex,
         Arc::new(CodexProvider::new(PathBuf::from("codex"))),
-        provider_gate.clone(),
-    );
-    registry.register_gated(
-        ProviderName::Pi,
-        Arc::new(PiProvider::new(PathBuf::from("pi"))),
         provider_gate,
     );
-    Arc::new(registry)
+    registry
+}
+
+/// fake 模式 registry:保持既有 fake 分支全部内容(Fake + 冒充 ClaudeCode/Codex/Pi
+/// 的 `TestControlledFakeStreamingProvider`)。
+fn fake_mode_provider_registry(test_controls: TestControls) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::Fake,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Pi,
+        Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
+    );
+    registry
 }
 
 #[cfg(test)]
@@ -554,14 +567,57 @@ mod tests {
     }
 
     #[test]
-    fn production_default_provider_registry_registers_pi() {
+    fn default_provider_registry_real_mode_excludes_fake_and_pi() {
         let root = tempdir().expect("root");
         let runner = Arc::new(ScriptedRunner::new(Vec::new()));
         let health = provider_health(root.path(), runner);
         let gate = Arc::new(ProviderAvailabilityGate::new(health));
         let registry = default_provider_registry(TestControls::default(), gate, false);
 
+        assert!(registry.get(&ProviderName::ClaudeCode).is_some());
+        assert!(registry.get(&ProviderName::Codex).is_some());
+        assert!(registry.get(&ProviderName::Fake).is_none());
+        assert!(registry.get(&ProviderName::Pi).is_none());
+    }
+
+    #[test]
+    fn default_provider_registry_real_registry_only_holds_gated_claude_code_and_codex() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner);
+        let gate = Arc::new(ProviderAvailabilityGate::new(health));
+        let registry = real_provider_registry(gate);
+
+        assert!(registry.get(&ProviderName::ClaudeCode).is_some());
+        assert!(registry.get(&ProviderName::Codex).is_some());
+        assert!(registry.get(&ProviderName::Fake).is_none());
+        assert!(registry.get(&ProviderName::Pi).is_none());
+    }
+
+    #[test]
+    fn default_provider_registry_fake_mode_registry_keeps_legacy_fake_branch_contents() {
+        let registry = fake_mode_provider_registry(TestControls::default());
+
+        assert!(registry.get(&ProviderName::Fake).is_some());
+        assert!(registry.get(&ProviderName::ClaudeCode).is_some());
+        assert!(registry.get(&ProviderName::Codex).is_some());
         assert!(registry.get(&ProviderName::Pi).is_some());
+    }
+
+    #[test]
+    fn default_provider_registry_dispatches_on_test_provider_enabled() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner);
+        let gate = Arc::new(ProviderAvailabilityGate::new(health));
+
+        let real = default_provider_registry(TestControls::default(), gate.clone(), false);
+        assert!(real.get(&ProviderName::Fake).is_none());
+        assert!(real.get(&ProviderName::Pi).is_none());
+
+        let fake = default_provider_registry(TestControls::default(), gate, true);
+        assert!(fake.get(&ProviderName::Fake).is_some());
+        assert!(fake.get(&ProviderName::Pi).is_some());
     }
 
     #[test]

@@ -136,7 +136,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::web::events::EventHub;
     use crate::web::runtime::WebRuntime;
+    use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
 
     #[test]
     fn coding_provider_for_rejects_real_provider_when_health_is_unavailable() {
@@ -156,9 +159,18 @@ mod tests {
     #[test]
     fn coding_provider_for_allows_fake_provider_from_test_registry() {
         let root = tempdir().expect("workspace");
-        let state = WebAppState::new(
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            ProviderName::Fake,
+            Arc::new(TestControlledFakeStreamingProvider::new(
+                TestControls::default(),
+            )),
+        );
+        let state = WebAppState::with_events_and_provider_registry(
             root.path().to_path_buf(),
             WebRuntime::new_fake(root.path().to_path_buf()),
+            EventHub::new(),
+            Arc::new(registry),
         );
 
         assert!(provider_for(&state, &ProviderName::Fake, "coding provider").is_ok());

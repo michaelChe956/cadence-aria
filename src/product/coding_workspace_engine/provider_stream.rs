@@ -112,11 +112,11 @@ impl CodingWorkspaceEngine {
             validated_input,
         } = run;
         self.store.ensure_provider_run_allowed(attempt)?;
-        // Task 12:逻辑代码库 target(`attempt.target_snapshot.is_some()`)的真实 provider
+        // Task 12:逻辑代码库 target(`attempt.target_snapshot.is_some()`)的 provider
         // 必须经 `LogicalCodebaseProviderGateway`(表现为 `validated_input` 非空)。禁止:
-        // 1. 在无 gateway(`validated_input` 为 `None`)且 provider 非 Fake 时直接启动
-        //    真实 provider——这是「裸 `StreamingProviderInput` 不得启动真实 provider」的
-        //    fail-closed 门(Fake 例外:测试隔离路径不走 gateway)。
+        // 1. 在无 gateway(`validated_input` 为 `None`)时直接启动 provider(不论是否为
+        //    Fake)——这是「裸 `StreamingProviderInput` 不得启动真实 provider」的
+        //    fail-closed 门。
         // 2. 回落到 legacy `run_streaming` bridge——逻辑 target 的
         //    `allow_legacy_stream_fallback` 被强制为 `false`,使 `start` 未实现时不会
         //    调用 `provider.run_streaming`。
@@ -126,7 +126,7 @@ impl CodingWorkspaceEngine {
         } else {
             allow_legacy_stream_fallback
         };
-        if is_logical_target && validated_input.is_none() && provider_name != &ProviderName::Fake {
+        if is_logical_target && validated_input.is_none() {
             return Err(CodingWorkspaceEngineError::ProviderStream(
                 "logical_provider_gateway_required".to_string(),
             ));

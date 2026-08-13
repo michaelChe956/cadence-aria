@@ -261,4 +261,19 @@ mod tests {
             &injected
         ));
     }
+
+    #[test]
+    fn web_app_state_injected_registry_rebuilds_logical_gateway_factory() {
+        let root = tempdir().expect("root");
+        let injected = fake_registry();
+        let state = crate::web::state::WebAppState::with_events_and_provider_registry(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+            crate::web::events::EventHub::new(),
+            injected.clone(),
+        );
+
+        let factory = state.gateway_factory().expect("factory").clone();
+        assert!(Arc::ptr_eq(&factory.registry, &injected));
+    }
 }
