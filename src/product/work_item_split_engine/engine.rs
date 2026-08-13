@@ -283,10 +283,12 @@ pub(crate) fn map_provider_adapter_error(error: ProviderAdapterError) -> ApiErro
 }
 
 /// 把 `ProviderGatewayError` 映射为 web 层 `ApiError`。fail-closed 的政策/复验错误
-/// 保持独立 reason_code,使上游能区分「政策门拒绝」与「adapter 运行失败」。
+/// 保持独立稳定码(经 `provider_gateway_error_code` 前缀表),使上游能区分「政策门拒绝」
+/// 与「adapter 运行失败」。
 pub(crate) fn map_provider_gateway_error(error: ProviderGatewayError) -> ApiError {
+    let code = crate::web::handlers::provider_gateway_error_code(&error);
     ApiError::runtime(
-        "work_item_split_provider_gateway_error",
+        code,
         error.to_string(),
         json!({
             "error_kind": format!("{error:?}"),

@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::product::logical_codebase::{
-    LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode,
+    LogicalRepositoryId, ProviderGatewayError, RepositoryRouting, RepositoryRoutingErrorCode,
 };
 
 #[derive(Debug, Deserialize)]
@@ -480,6 +480,33 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
                 details,
             )
         }
+    }
+}
+
+/// `ProviderGatewayError` → 稳定码前缀表（T11 §3 收口）。
+///
+/// gateway 的 `thiserror` 前缀即稳定码；此处把 variant 集中归一为稳定码字符串，
+/// 供 web 层把「政策门/复验拒绝」与「adapter 运行失败」区分开，避免调用点各自解析
+/// `to_string()` 前缀导致错误码漂移。与 `web/error.rs` 的 HttpStatus 段构成
+/// 「variant → 稳定码 → HTTP 状态」两级集中映射。
+///
+/// 注：`ManagedSettingsActive` 自 Task 11 起不再产生（改为标注后放行），此处仍保留
+/// 其前缀映射以保持穷尽性；`Adapter` 是真实 provider 运行失败，归为
+/// `provider_gateway_adapter`（默认 500，非政策门）。
+pub(crate) fn provider_gateway_error_code(error: &ProviderGatewayError) -> &'static str {
+    match error {
+        ProviderGatewayError::PolicyMissing(_) => "provider_gateway_policy_missing",
+        ProviderGatewayError::Policy(_) => "provider_gateway_policy",
+        ProviderGatewayError::Target(_) => "provider_gateway_target",
+        ProviderGatewayError::TargetMismatch { .. } => "provider_gateway_target_mismatch",
+        ProviderGatewayError::MissingCwd => "provider_gateway_missing_cwd",
+        ProviderGatewayError::UnsupportedCapability(_) => "provider_gateway_capability",
+        ProviderGatewayError::ProviderUnavailable(_) => "provider_gateway_unavailable",
+        ProviderGatewayError::RegistryLookup(_) => "provider_gateway_registry_lookup",
+        ProviderGatewayError::PolicyDrift { .. } => "provider_gateway_policy_drift",
+        ProviderGatewayError::ResumeNotSupported => "provider_gateway_resume_not_supported",
+        ProviderGatewayError::ManagedSettingsActive => "provider_gateway_managed_settings_active",
+        ProviderGatewayError::Adapter(_) => "provider_gateway_adapter",
     }
 }
 

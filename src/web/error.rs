@@ -125,6 +125,22 @@ impl IntoResponse for ApiError {
             | "repository_initialization_in_progress"
             | "shared_worktree_dirty_manual_gate"
             | "coding_workspace_exists" => StatusCode::CONFLICT,
+            // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退 500。
+            // policy/target/registry/drift/resume 一律 409；capability 与 Codex
+            // danger-full-access 为 403；provider 不可用为 503；系统未接线为 500(防御)。
+            "provider_gateway_policy_missing"
+            | "provider_gateway_policy"
+            | "provider_gateway_target"
+            | "provider_gateway_target_mismatch"
+            | "provider_gateway_missing_cwd"
+            | "provider_gateway_registry_lookup"
+            | "provider_gateway_policy_drift"
+            | "provider_gateway_resume_not_supported" => StatusCode::CONFLICT,
+            "provider_gateway_capability" | "codex_danger_full_access_unsupported" => {
+                StatusCode::FORBIDDEN
+            }
+            "provider_gateway_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+            "logical_provider_gateway_required" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
@@ -362,6 +378,42 @@ mod tests {
             let response = ApiError::validation(code, "routing fail-closed").into_response();
             assert_eq!(response.status(), expected_status, "{code} status mapping");
             assert!(response.status().is_client_error(), "{code} must be 4xx");
+        }
+    }
+    #[test]
+    fn gateway_error_mapping_covers_stable_codes() {
+        // T11 §3 稳定码表收口：gateway 错误前缀 → HTTP 状态集中映射。
+        // 表驱动断言每个稳定码的 HTTP 状态，防止未知码回退到 500。
+        let cases = [
+            ("provider_gateway_policy_missing", StatusCode::CONFLICT),
+            ("provider_gateway_policy", StatusCode::CONFLICT),
+            ("provider_gateway_target", StatusCode::CONFLICT),
+            ("provider_gateway_target_mismatch", StatusCode::CONFLICT),
+            ("provider_gateway_missing_cwd", StatusCode::CONFLICT),
+            ("provider_gateway_capability", StatusCode::FORBIDDEN),
+            (
+                "codex_danger_full_access_unsupported",
+                StatusCode::FORBIDDEN,
+            ),
+            ("provider_gateway_registry_lookup", StatusCode::CONFLICT),
+            ("provider_gateway_policy_drift", StatusCode::CONFLICT),
+            (
+                "provider_gateway_resume_not_supported",
+                StatusCode::CONFLICT,
+            ),
+            (
+                "provider_gateway_unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                "logical_provider_gateway_required",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+
+        for (code, expected_status) in cases {
+            let response = ApiError::validation(code, "gateway fail-closed").into_response();
+            assert_eq!(response.status(), expected_status, "{code} status mapping");
         }
     }
     #[test]

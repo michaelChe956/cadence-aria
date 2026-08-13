@@ -1126,11 +1126,12 @@ mod task13_gateway_hardening {
         assert!(!provenance.is_aria_owned_only());
     }
 
-    /// 配置来源审计:policy 可据 managed settings 拒绝启动。
-    /// `enforce_config_source_policy` 在发现 managed settings active 且 policy
-    /// 配置为拒绝时返回 `ManagedSettingsActive`(fail-closed)。
+    /// 配置来源审计(Task 11 语义修正):managed settings 不再 fail-closed,而是
+    /// 在 `GatewayRunAudit` 追加标注(携带 config digest)后放行。`enforce_config_source_policy`
+    /// 返回 `Ok`,且 `managed_settings_annotations` 记录该已知 gap——绝不假装已覆盖,
+    /// 但不阻断启动。
     #[test]
-    fn gateway_rejects_launch_when_managed_settings_active_and_policy_forbids() {
+    fn gateway_annotates_managed_settings_active_without_blocking() {
         let fixture = gateway_fixture();
         fixture.install_bootstrap_policy();
         let worktree = fixture.real_worktree();
@@ -1149,13 +1150,53 @@ mod task13_gateway_hardening {
             "sha256:managed-config-artifact",
             provenance,
         );
-        let error = fixture
-            .gateway()
+        let gateway = fixture.gateway();
+        gateway
             .enforce_config_source_policy(&validated, &audit)
-            .unwrap_err();
+            .expect("managed settings must be annotated, not blocked");
+
+        let annotations = fixture.gateway_audit().managed_settings_annotations();
         assert!(
-            matches!(error, ProviderGatewayError::ManagedSettingsActive),
-            "expected ManagedSettingsActive, got {error:?}"
+            !annotations.is_empty(),
+            "managed settings must be annotated in the audit"
+        );
+        assert!(
+            annotations
+                .iter()
+                .any(|annotation| annotation.contains("managed settings")),
+            "annotation must mention managed settings: {annotations:?}"
+        );
+    }
+
+    /// Task 11 审计聚合:`start_streaming` 成功启动后,audit entry 冻结该次启动的
+    /// config digest(Some)与最终 argv(无真实 argv 源,应为空 Vec)。
+    #[tokio::test]
+    async fn start_streaming_audit_entry_carries_config_digest_and_argv() {
+        let fixture = gateway_fixture();
+        fixture.install_bootstrap_policy();
+        let worktree = fixture.real_worktree();
+        let launch = fixture.validated_planning_streaming_input(worktree.clone());
+
+        fixture
+            .gateway()
+            .start_streaming(launch, CancellationToken::new())
+            .await
+            .expect("streaming launch");
+
+        let audit = fixture.gateway_audit();
+        let entries = audit.entries.lock().unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.stack == GatewayRunStack::Stream)
+            .expect("stream entry");
+        assert!(
+            entry.config_digest.is_some(),
+            "config digest must be recorded: {entry:?}"
+        );
+        assert!(
+            entry.argv.is_empty(),
+            "no real argv source in launch inputs, expected empty argv: {:?}",
+            entry.argv
         );
     }
 }

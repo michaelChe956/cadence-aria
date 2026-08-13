@@ -399,8 +399,9 @@ pub enum ProviderGatewayError {
     #[error("provider_gateway_resume_not_supported")]
     ResumeNotSupported,
     /// 配置来源审计发现 provider 实际加载了 managed settings(非 Aria-owned),
-    /// 且当前 policy 配置为拒绝此类启动。fail-closed:绝不假装已覆盖 managed
-    /// settings;该已知 gap 仍可被 policy 配置为放行,但默认拒绝。
+    /// 且 policy 配置为拒绝此类启动。**Task 11 起不再产生**:`enforce_config_source_policy`
+    /// 改为在 `GatewayRunAudit` 追加 managed-settings 标注后放行,绝不假装已覆盖。
+    /// variant 保留仅供稳定码表与防御映射;若未来 policy 重新收紧为拒绝可恢复。
     #[error("provider_gateway_managed_settings_active")]
     ManagedSettingsActive,
     /// 真实 adapter 启动/运行失败。
@@ -440,8 +441,9 @@ pub trait ProviderCapabilitySource: Send + Sync {
 }
 
 /// gateway 成功启动的审计条目。Task 11 把同步/流式 provider 全入口接线到
-/// gateway,每条成功启动(sync 或 stream)都留下一份可核对的 policy digest,
-/// 使「逻辑代码库真实 provider 调用是否经 gateway」可被断言,而非仅靠代码审查。
+/// gateway,每条成功启动(sync 或 stream)都留下一份可核对的 policy digest、
+/// config digest 与最终 argv,使「逻辑代码库真实 provider 调用是否经 gateway」
+/// 可被断言,而非仅靠代码审查。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayRunAuditEntry {
     /// 启动栈:`Sync` 为同步 adapter run(work item split),`Stream` 为流式
@@ -449,6 +451,13 @@ pub struct GatewayRunAuditEntry {
     pub stack: GatewayRunStack,
     /// 该次启动冻结的 envelope policy digest(`SessionPolicyEnvelope::policy_digest`)。
     pub policy_digest: String,
+    /// 该次启动冻结的 config artifact digest(与 envelope 冻结值同型)。启动路径无
+    /// 真实 config artifact 引用时为 `None`(兼容既有构造;Task 11 起 gateway 启动
+    /// 路径会从 `ConfigSourceAudit` 聚合出 `Some`)。
+    pub config_digest: Option<String>,
+    /// 最终传递给 provider 的 argv。启动输入无真实 argv 源时为空 Vec(Task 11 现状,
+    /// 记录为空并保留字段以便后续接入 `/status` setting sources)。
+    pub argv: Vec<String>,
 }
 
 /// 审计记录的启动栈类别。
@@ -467,6 +476,10 @@ pub struct GatewayRunAudit {
     /// (如 `resume_fingerprint_mismatch`)。供外部断言 resume 漂移是否被正确
     /// 记录为 supersede 而非静默 resume。
     supersedes: std::sync::Mutex<Vec<GatewaySupersedeEntry>>,
+    /// managed-settings 标注(Task 11):`enforce_config_source_policy` 检测到
+    /// `managed_settings_active` 时不再 fail-closed,而是把携带 config digest 的
+    /// 标注追加到这里,供外部断言「已标注已知 gap」而非静默忽略。绝不假装已覆盖。
+    managed_settings_annotations: std::sync::Mutex<Vec<String>>,
 }
 
 /// resume 一致性审计条目:旧会话被 supersede 的记录。
@@ -483,12 +496,44 @@ impl GatewayRunAudit {
         Self::default()
     }
 
-    fn record(&self, stack: GatewayRunStack, policy_digest: String) {
+    fn record(
+        &self,
+        stack: GatewayRunStack,
+        policy_digest: String,
+        config_digest: Option<String>,
+        argv: Vec<String>,
+    ) {
         let mut entries = self.entries.lock().expect("gateway audit mutex poisoned");
         entries.push(GatewayRunAuditEntry {
             stack,
             policy_digest,
+            config_digest,
+            argv,
         });
+    }
+
+    /// 追加一条 managed-settings 标注(Task 11):记录检测到的非 Aria-owned managed
+    /// settings 及其 config digest。该标注是「已检测、已记录」的已知 gap,不阻断
+    /// 启动——是否放行由 policy 决定(当前默认放行并标注)。
+    fn annotate_managed_settings_active(&self, config_digest: &str) {
+        let mut annotations = self
+            .managed_settings_annotations
+            .lock()
+            .expect("gateway audit mutex poisoned");
+        annotations.push(format!(
+            "detected non-Aria-owned managed settings active; \
+             gateway cannot guarantee these are suppressed; \
+             known gap annotated (not blocked); config_digest={config_digest}"
+        ));
+    }
+
+    /// 返回已记录的 managed-settings 标注快照。空 Vec 表示尚未检测到。
+    pub fn managed_settings_annotations(&self) -> Vec<String> {
+        let annotations = self
+            .managed_settings_annotations
+            .lock()
+            .expect("gateway audit mutex poisoned");
+        annotations.clone()
     }
 
     /// 同步栈成功启动次数。
@@ -723,22 +768,22 @@ impl LogicalCodebaseProviderGateway {
         }
     }
 
-    /// 配置来源审计 policy 门禁(Task 13):据 `ConfigSourceAudit` 标注的 provenance
-    /// 决定是否放行启动。当前 policy 默认对 `managed_settings_active=true` 的
-    /// 启动 fail-closed(绝不假装已覆盖 managed settings)。该门禁独立于
-    /// envelope/config digest 复验:envelope 保证托管配置未被篡改,本门禁保证
-    /// provider 实际加载的配置来源可审计且不混入非 Aria-owned 的 managed
-    /// settings(除非 policy 显式放行,当前默认拒绝)。
+    /// 配置来源审计 policy 门禁(Task 13 → Task 11 语义修正):据 `ConfigSourceAudit`
+    /// 标注的 provenance 决定如何记录。当前 policy 默认对 `managed_settings_active=true`
+    /// 的启动**不再 fail-closed**:绝不假装已覆盖 managed settings,但也不阻断启动,
+    /// 而是在 `GatewayRunAudit` 追加标注(携带 config digest)后放行。该标注使「检测到
+    /// managed settings」这一已知 gap 可被外部审计,而非静默忽略。
     ///
-    /// fail-closed:`managed_settings_active` 且无 policy 放行证据 →
-    /// `ManagedSettingsActive`。
+    /// `ManagedSettingsActive` 错误 variant 保留但不再产生:保留是为了稳定码表与
+    /// 既有测试引用的可编译性,未来若 policy 重新收紧为拒绝,可直接恢复 fail-closed。
     pub fn enforce_config_source_policy(
         &self,
         _validated: &ValidatedSessionLaunchPolicy,
         audit: &ConfigSourceAudit,
     ) -> Result<(), ProviderGatewayError> {
         if audit.provenance.managed_settings_active {
-            return Err(ProviderGatewayError::ManagedSettingsActive);
+            self.audit
+                .annotate_managed_settings_active(&audit.config_digest);
         }
         Ok(())
     }
@@ -763,7 +808,25 @@ impl LogicalCodebaseProviderGateway {
             .start(input, cancel)
             .await
             .map_err(ProviderGatewayError::Adapter)?;
-        self.audit.record(GatewayRunStack::Stream, policy_digest);
+        // Task 11 审计聚合:在 gateway 启动路径内构造 ConfigSourceAudit。当前无
+        // provider `/status` setting sources 注入接口与真实 argv 源,故 sources 与
+        // argv 均为空(记录为空并保留字段);config digest 由 envelope 冻结的
+        // config_artifact_ref 重算。
+        let ConfigSourceAudit {
+            argv,
+            config_digest,
+            ..
+        } = ConfigSourceAudit::from_launch(
+            &[],
+            &validated.envelope().config_artifact_ref,
+            ConfigSourceProvenance::detect_from_setting_sources(&[]),
+        );
+        self.audit.record(
+            GatewayRunStack::Stream,
+            policy_digest,
+            Some(config_digest),
+            argv,
+        );
         Ok(session)
     }
 
@@ -788,7 +851,23 @@ impl LogicalCodebaseProviderGateway {
             .sync_adapter
             .run(&input)
             .map_err(ProviderGatewayError::Adapter)?;
-        self.audit.record(GatewayRunStack::Sync, policy_digest);
+        // Task 11 审计聚合:同 start_streaming,sources/argv 为空(无真实注入源),config
+        // digest 由 envelope 冻结的 config_artifact_ref 重算。
+        let ConfigSourceAudit {
+            argv,
+            config_digest,
+            ..
+        } = ConfigSourceAudit::from_launch(
+            &[],
+            &validated.envelope().config_artifact_ref,
+            ConfigSourceProvenance::detect_from_setting_sources(&[]),
+        );
+        self.audit.record(
+            GatewayRunStack::Sync,
+            policy_digest,
+            Some(config_digest),
+            argv,
+        );
         Ok(output)
     }
 
