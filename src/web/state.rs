@@ -18,11 +18,13 @@ use crate::cross_cutting::provider_health::{
 };
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCommand;
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
 };
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
+use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use crate::web::handlers::RepositoryRegistrationDependencies;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
@@ -129,6 +131,7 @@ pub struct WebAppState {
     pub repository_initialization_runs: RepositoryInitializationRunRegistry,
     pub image_create_run_registry: Arc<ImageCreateRunRegistry>,
     pub image_create_engine: Option<Arc<ImageCreateEngine>>,
+    pub logical_gateway_factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
 }
 
 impl WebAppState {
@@ -169,6 +172,12 @@ impl WebAppState {
             provider_registry.clone(),
             image_create_run_registry.clone(),
         ));
+        let logical_gateway_factory = Arc::new(LogicalCodebaseGatewayFactory::new(
+            ProductAppPaths::new(workspace_root.join(".aria")),
+            provider_registry.clone(),
+            provider_adapter.clone(),
+            provider_gate.clone(),
+        ));
         Self {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
@@ -190,6 +199,7 @@ impl WebAppState {
             repository_initialization_runs: RepositoryInitializationRunRegistry::default(),
             image_create_run_registry,
             image_create_engine,
+            logical_gateway_factory: Some(logical_gateway_factory),
         }
     }
 
@@ -241,6 +251,15 @@ impl WebAppState {
     ) -> Self {
         self.provider_adapter = provider_adapter;
         self
+    }
+
+    pub fn with_gateway_factory(mut self, factory: Arc<LogicalCodebaseGatewayFactory>) -> Self {
+        self.logical_gateway_factory = Some(factory);
+        self
+    }
+
+    pub fn gateway_factory(&self) -> Option<&Arc<LogicalCodebaseGatewayFactory>> {
+        self.logical_gateway_factory.as_ref()
     }
 
     pub fn with_provider_health(

@@ -2,6 +2,7 @@ pub mod app;
 pub mod coding_ws_handler;
 pub mod error;
 pub mod events;
+pub mod gateway_factory;
 pub mod handlers;
 pub mod issue_registry;
 pub mod provider_availability;
