@@ -18,6 +18,7 @@ mod group_review_store;
 mod group_terminal;
 mod group_validation;
 mod inputs;
+mod issue_delivery;
 pub(crate) mod locking;
 mod paths;
 mod plan_binding;
@@ -45,6 +46,7 @@ pub use git_operation::*;
 pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;
+pub use issue_delivery::{DeliveryEntry, IssueDeliveryOverall, IssueDeliverySummary};
 pub(crate) use recovery::{
     FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, is_failed_review_manual_retry,
 };
