@@ -1,3 +1,4 @@
+use super::cross_target_check::detect_cross_target_violation_for_delivery;
 use super::*;
 
 pub(crate) fn summarize_push_error(
@@ -786,6 +787,13 @@ impl CodingWorkspaceEngine {
                 attempt.id.clone(),
             ));
         };
+        // Task 15：交付前统一门。刚拿到 attempt 就检测，越界则根本不进入交付流程。
+        if let Err(code) = detect_cross_target_violation_for_delivery(&self.store.paths(), attempt)
+        {
+            return Err(CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(
+                code.as_str().to_string(),
+            ));
+        }
         let attempt = self.store.update_attempt_stage(
             &attempt.project_id,
             &attempt.issue_id,

@@ -118,9 +118,6 @@ pub(crate) fn capture_cross_target_baseline(
 /// - 任一成员主 checkout 的 HEAD 或工作区变更 → `cross_target_violation_detected`
 /// - baseline 文件缺失（崩溃重启/丢失）→ `cross_target_baseline_missing`
 /// - Legacy attempt 不检测，直接放行。
-///
-/// Task 15 统一门在交付前接线调用；本 Task 只定义能力与稳定码。
-#[allow(dead_code)]
 pub(crate) fn detect_cross_target_violation(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
@@ -156,6 +153,31 @@ pub(crate) fn detect_cross_target_violation(
     Ok(())
 }
 
+/// 交付前统一门（Task 15）：对 attempt 的全部 provider role run 逐个重采比对。
+///
+/// - Legacy attempt（`target_snapshot` 为 `None`）→ 单仓红线，直接放行；
+/// - 无 role run（未跑 provider run）→ 按无越界放行；
+/// - 每个 role run 经 [`detect_cross_target_violation`] 比对：任一越界 →
+///   `cross_target_violation_detected`，基线文件缺失（崩溃重启/丢失）→
+///   `cross_target_baseline_missing`，均阻断交付。
+pub(crate) fn detect_cross_target_violation_for_delivery(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<(), StableCode> {
+    if attempt.target_snapshot.is_none() {
+        // 单仓红线：Legacy attempt 不做任何越界检测。
+        return Ok(());
+    }
+    let store = CodingAttemptStore::new(paths.clone());
+    let role_runs = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(|_| StableCode::CrossTargetStoreFailure)?;
+    for role_run in &role_runs {
+        detect_cross_target_violation(paths, attempt, &role_run.id)?;
+    }
+    Ok(())
+}
+
 fn git_head(path: &Path) -> Result<String, StableCode> {
     git_stdout(path, &["rev-parse", "HEAD"]).map(|revision| revision.trim().to_string())
 }
@@ -181,7 +203,12 @@ mod tests {
     use super::*;
     use crate::product::coding_models::{
         AttemptTargetSnapshot, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
+        CodingProviderRole, CodingRoleRunTrigger,
     };
+    use crate::product::coding_workspace_engine::{
+        CodingWorkspaceEngine, CodingWorkspaceEngineError,
+    };
+    use crate::product::git_workspace_service::GitWorkspaceService;
     use crate::product::logical_codebase::{
         CheckoutAvailability, CodebaseMemberRecord, LogicalCodebaseManifest, LogicalCodebaseStore,
         MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity,
@@ -509,5 +536,112 @@ mod tests {
         );
         detect_cross_target_violation(&paths, &attempt, "coding_role_run_0001")
             .expect("legacy detection is a no-op");
+    }
+
+    /// 构造一个带 worktree_path 的多仓 fixture，并交付给 `execute_review_request`
+    /// 的交付门检测；worktree_path 指向成员主 checkout，仅用于通过入口检查。
+    fn fixture_with_worktree() -> Fixture {
+        let mut fixture = two_member_fixture();
+        fixture.attempt.worktree_path = Some(fixture.checkout_paths[0].clone());
+        fixture
+    }
+
+    fn delivery_engine(fixture: &Fixture) -> CodingWorkspaceEngine {
+        let store = CodingAttemptStore::new(fixture.paths.clone());
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx)
+    }
+
+    /// 创建一次 provider role run 并为其采集越界基线（role_run.id 即 run_id），
+    /// 返回 role_run.id。交付门按 role run 枚举并 detect 对应基线。
+    fn capture_baseline_for_new_role_run(fixture: &Fixture, store: &CodingAttemptStore) -> String {
+        let role_run = store
+            .create_role_run(
+                &fixture.attempt,
+                CodingExecutionStage::Coding,
+                CodingProviderRole::Coder,
+                CodingRoleRunTrigger::Initial,
+                None,
+            )
+            .expect("create role run");
+        capture_cross_target_baseline(&fixture.paths, &fixture.attempt, &role_run.id).unwrap();
+        role_run.id
+    }
+
+    #[tokio::test]
+    async fn execute_review_request_blocks_when_another_member_checkout_is_dirty() {
+        let fixture = fixture_with_worktree();
+        let store = CodingAttemptStore::new(fixture.paths.clone());
+        capture_baseline_for_new_role_run(&fixture, &store);
+
+        // 模拟他仓主 checkout 被写文件（工作区变更）。
+        fs::write(
+            fixture.checkout_paths[1].join("trespass.txt"),
+            "out of worktree write\n",
+        )
+        .expect("write into other member checkout");
+
+        let engine = delivery_engine(&fixture);
+        let result = engine
+            .execute_review_request(&fixture.attempt, "origin", "feat: blocked")
+            .await;
+
+        match result {
+            Err(CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(code)) => {
+                assert_eq!(code, "cross_target_violation_detected");
+            }
+            other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_review_request_blocks_when_baseline_file_missing() {
+        let fixture = fixture_with_worktree();
+        let store = CodingAttemptStore::new(fixture.paths.clone());
+        let run_id = capture_baseline_for_new_role_run(&fixture, &store);
+        fs::remove_file(baseline_path(&fixture, &run_id)).expect("simulate baseline loss");
+
+        let engine = delivery_engine(&fixture);
+        let result = engine
+            .execute_review_request(&fixture.attempt, "origin", "feat: blocked")
+            .await;
+
+        match result {
+            Err(CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(code)) => {
+                assert_eq!(code, "cross_target_baseline_missing");
+            }
+            other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_review_request_checks_every_role_run_baseline() {
+        let fixture = fixture_with_worktree();
+        let store = CodingAttemptStore::new(fixture.paths.clone());
+
+        // 第一个 provider run 的基线在干净状态采集。
+        capture_baseline_for_new_role_run(&fixture, &store);
+        // 越界发生在第一个 run 之后：写入他仓主 checkout。
+        fs::write(
+            fixture.checkout_paths[1].join("trespass.txt"),
+            "out of worktree write\n",
+        )
+        .expect("write into other member checkout");
+        // 第二个 provider run 的基线在已越界状态采集（相对自身基线“干净”）。
+        capture_baseline_for_new_role_run(&fixture, &store);
+
+        let engine = delivery_engine(&fixture);
+        let result = engine
+            .execute_review_request(&fixture.attempt, "origin", "feat: blocked")
+            .await;
+
+        // 交付门必须按 role run 枚举全部基线：第一个 run 的基线已被越界污染，
+        // 即使第二个 run 相对自身基线“干净”，也必须阻断。
+        match result {
+            Err(CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(code)) => {
+                assert_eq!(code, "cross_target_violation_detected");
+            }
+            other => panic!("expected CrossTargetDeliveryBlocked, got {other:?}"),
+        }
     }
 }

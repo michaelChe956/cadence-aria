@@ -60,6 +60,11 @@ pub enum CodingWorkspaceEngineError {
     VerificationGateFailed(String),
     #[error("work_item_diff_scope_violation: {0}")]
     WorkItemDiffScopeViolation(String),
+    /// 交付前统一门（Task 15）：任一 provider run 的越界检测基线被破坏（他仓主
+    /// checkout HEAD/工作区变更或基线缺失）时阻断 commit/push，稳定码经
+    /// `StableCode::as_str()` 转字符串填充。
+    #[error("cross_target_delivery_blocked: {0}")]
+    CrossTargetDeliveryBlocked(String),
 }
 
 #[derive(Debug, Clone)]
