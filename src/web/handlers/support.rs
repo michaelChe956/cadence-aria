@@ -759,18 +759,62 @@ pub(crate) fn coding_workspace_engine_with_dummy_events(
 
 pub(crate) fn coding_workspace_api_error(error: CodingWorkspaceEngineError) -> ApiError {
     let error_message = error.to_string();
-    if error_message.contains("shared_worktree_dirty_manual_gate") {
-        return ApiError::runtime(
+    let fallback = || {
+        ApiError::runtime(
+            "coding_workspace_engine_failed",
+            "coding workspace engine operation failed",
+            json!({"details": error_message}),
+        )
+    };
+    match &error {
+        CodingWorkspaceEngineError::SharedWorktreeDirtyManualGate(_) => ApiError::runtime(
             "shared_worktree_dirty_manual_gate",
             "shared worktree has uncommitted changes; manual cleanup required",
             json!({"details": error_message}),
-        );
+        ),
+        CodingWorkspaceEngineError::LegacySharedWorktreePresent(_) => ApiError::runtime(
+            "legacy_shared_worktree_present",
+            "legacy issue shared worktree blocks the repository worktree route",
+            json!({"details": error_message}),
+        ),
+        CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(stable_code) => {
+            // StableCode 字符串经 CrossTargetDeliveryBlocked(String) 承载：
+            // cross_target_violation_detected / cross_target_baseline_missing /
+            // cross_target_store_failure 显式透传，其余按未知码兜底 500。
+            let code = match stable_code.as_str() {
+                "cross_target_violation_detected"
+                | "cross_target_baseline_missing"
+                | "cross_target_store_failure" => stable_code.as_str(),
+                _ => "cross_target_delivery_blocked",
+            };
+            ApiError::runtime(
+                code,
+                "cross-target delivery is blocked",
+                json!({"details": error_message}),
+            )
+        }
+        CodingWorkspaceEngineError::Store(ProductStoreError::Io(message)) => {
+            match message.as_str() {
+                "target_snapshot_missing_for_logical" => ApiError::runtime(
+                    "target_snapshot_missing_for_logical",
+                    "logical coding attempt is missing its target snapshot",
+                    json!({}),
+                ),
+                "target_snapshot_identity_drifted" => ApiError::runtime(
+                    "target_snapshot_identity_drifted",
+                    "coding attempt target snapshot identity drifted",
+                    json!({}),
+                ),
+                "target_snapshot_policy_drifted" => ApiError::runtime(
+                    "target_snapshot_policy_drifted",
+                    "coding attempt target snapshot policy drifted",
+                    json!({}),
+                ),
+                _ => fallback(),
+            }
+        }
+        _ => fallback(),
     }
-    ApiError::runtime(
-        "coding_workspace_engine_failed",
-        "coding workspace engine operation failed",
-        json!({"details": error_message}),
-    )
 }
 
 pub(crate) fn git_workspace_diff_api_error(error: GitWorkspaceError) -> ApiError {
@@ -1057,6 +1101,79 @@ mod tests {
         );
         assert_eq!(error.details["work_item_id"], "work_item_1");
         assert_eq!(error.details["attempt_id"], "attempt_1");
+    }
+
+    #[test]
+    fn coding_workspace_api_error_maps_legacy_shared_worktree_present_to_409() {
+        let error =
+            coding_workspace_api_error(CodingWorkspaceEngineError::LegacySharedWorktreePresent(
+                "project_0001/issue_0001".to_string(),
+            ));
+
+        assert_eq!(error.code, "legacy_shared_worktree_present");
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn coding_workspace_api_error_maps_cross_target_blocked_stable_codes() {
+        let cases = [
+            ("cross_target_violation_detected", StatusCode::CONFLICT),
+            (
+                "cross_target_baseline_missing",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                "cross_target_store_failure",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+
+        for (stable_code, expected_status) in cases {
+            let error = coding_workspace_api_error(
+                CodingWorkspaceEngineError::CrossTargetDeliveryBlocked(stable_code.to_string()),
+            );
+            assert_eq!(error.code, stable_code, "{stable_code} code");
+            assert_eq!(
+                error.into_response().status(),
+                expected_status,
+                "{stable_code} status mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn coding_workspace_api_error_maps_target_snapshot_store_io_stable_codes() {
+        let cases = [
+            (
+                "target_snapshot_missing_for_logical",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("target_snapshot_identity_drifted", StatusCode::CONFLICT),
+            ("target_snapshot_policy_drifted", StatusCode::CONFLICT),
+        ];
+
+        for (stable_code, expected_status) in cases {
+            let error = coding_workspace_api_error(CodingWorkspaceEngineError::Store(
+                ProductStoreError::Io(stable_code.to_string()),
+            ));
+            assert_eq!(error.code, stable_code, "{stable_code} code");
+            assert_eq!(
+                error.into_response().status(),
+                expected_status,
+                "{stable_code} status mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn coding_workspace_api_error_falls_back_for_unknown_engine_errors() {
+        let error = coding_workspace_api_error(CodingWorkspaceEngineError::Aborted);
+
+        assert_eq!(error.code, "coding_workspace_engine_failed");
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     // Task 11 删除调用链改造测试拆分到独立文件（large_file_guard 1200 行红线）。

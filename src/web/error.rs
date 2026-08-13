@@ -76,8 +76,16 @@ impl IntoResponse for ApiError {
             "repository_project_not_found" | "repository_routing_target_unknown" => {
                 StatusCode::NOT_FOUND
             }
-            "repository_routing_target_missing" | "mixed_target_group_rejected" => {
-                StatusCode::UNPROCESSABLE_ENTITY
+            "repository_routing_target_missing"
+            | "mixed_target_group_rejected"
+            | "target_snapshot_missing_for_logical" => StatusCode::UNPROCESSABLE_ENTITY,
+            "target_snapshot_identity_drifted"
+            | "target_snapshot_policy_drifted"
+            | "legacy_shared_worktree_present"
+            | "repo_worktree_active"
+            | "cross_target_violation_detected" => StatusCode::CONFLICT,
+            "cross_target_baseline_missing" | "cross_target_store_failure" => {
+                StatusCode::INTERNAL_SERVER_ERROR
             }
             "repository_routing_inconsistent" | "repository_routing_ambiguous" => {
                 StatusCode::CONFLICT
@@ -354,6 +362,39 @@ mod tests {
             let response = ApiError::validation(code, "routing fail-closed").into_response();
             assert_eq!(response.status(), expected_status, "{code} status mapping");
             assert!(response.status().is_client_error(), "{code} must be 4xx");
+        }
+    }
+    #[test]
+    fn stable_code_http_contract_covers_all_9_codes() {
+        // §4.6 稳定码契约收口：未知码默认 500，必须显式声明。覆盖 Task 6/8/9/10/12/14/15
+        // 引入的全部 9 个稳定码的 HTTP 状态映射。
+        let cases = [
+            (
+                "target_snapshot_missing_for_logical",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("target_snapshot_identity_drifted", StatusCode::CONFLICT),
+            ("target_snapshot_policy_drifted", StatusCode::CONFLICT),
+            (
+                "mixed_target_group_rejected",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("legacy_shared_worktree_present", StatusCode::CONFLICT),
+            ("repo_worktree_active", StatusCode::CONFLICT),
+            ("cross_target_violation_detected", StatusCode::CONFLICT),
+            (
+                "cross_target_baseline_missing",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                "cross_target_store_failure",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+
+        for (code, expected_status) in cases {
+            let response = ApiError::validation(code, "stable code contract").into_response();
+            assert_eq!(response.status(), expected_status, "{code} status mapping");
         }
     }
     #[test]
