@@ -155,9 +155,30 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     invocation.worktree_path.clone(),
                     invocation.author_provider.clone(),
                 );
-                let provider_session = $provider_for_run
-                    .start(provider_input, $run_cancel.clone())
-                    .await;
+                let logical = $engine.logical_provider_gateway().and_then(|gateway| {
+                    $engine
+                        .logical_planning_launch()
+                        .map(|(project_id, working_dir)| LogicalPlanLaunch {
+                            gateway,
+                            project_id,
+                            working_dir,
+                            logical_repository_id: repository
+                                .logical_repository_id
+                                .as_ref()
+                                .map(|id| id.0.to_string()),
+                            checkout_id: repository
+                                .primary_checkout_id
+                                .as_ref()
+                                .map(|id| id.0.to_string()),
+                        })
+                });
+                let provider_session = start_work_item_plan_author(
+                    logical,
+                    $provider_for_run.clone(),
+                    provider_input,
+                    $run_cancel.clone(),
+                )
+                .await;
                 let full_output = match $engine
                     .drive_work_item_plan_provider_session_to_output(
                         provider_session,
@@ -315,9 +336,32 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 invocation.worktree_path.clone(),
                                 invocation.author_provider.clone(),
                             );
-                            let provider_session = $provider_for_run
-                                .start(provider_input, $run_cancel.clone())
-                                .await;
+                            let logical = $engine
+                                .logical_provider_gateway()
+                                .and_then(|gateway| {
+                                    $engine.logical_planning_launch().map(
+                                        |(project_id, working_dir)| LogicalPlanLaunch {
+                                            gateway,
+                                            project_id,
+                                            working_dir,
+                                            logical_repository_id: repository
+                                                .logical_repository_id
+                                                .as_ref()
+                                                .map(|id| id.0.to_string()),
+                                            checkout_id: repository
+                                                .primary_checkout_id
+                                                .as_ref()
+                                                .map(|id| id.0.to_string()),
+                                        },
+                                    )
+                                });
+                            let provider_session = start_work_item_plan_author(
+                                logical,
+                                $provider_for_run.clone(),
+                                provider_input,
+                                $run_cancel.clone(),
+                            )
+                            .await;
                             let full_output = match $engine
                                 .drive_work_item_plan_provider_session_to_output(
                                     provider_session,
@@ -596,9 +640,24 @@ macro_rules! workspace_ws_provider_run_followups {
                     Some(author_name.clone()),
                 )
                 .await;
-            let provider_session = provider_for_draft
-                .start(provider_input, $run_cancel.clone())
-                .await;
+            let logical = $engine.logical_provider_gateway().and_then(|gateway| {
+                $engine
+                    .logical_planning_launch()
+                    .map(|(project_id, working_dir)| LogicalPlanLaunch {
+                        gateway,
+                        project_id,
+                        working_dir,
+                        logical_repository_id: None,
+                        checkout_id: None,
+                    })
+            });
+            let provider_session = start_work_item_plan_author(
+                logical,
+                provider_for_draft.clone(),
+                provider_input,
+                $run_cancel.clone(),
+            )
+            .await;
             let full_output = match $engine
                 .drive_work_item_plan_provider_session_to_output(
                     provider_session,
@@ -726,7 +785,30 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             invocation.worktree_path.clone(),
             invocation.author_provider.clone(),
         );
-        let provider_session = provider.start(provider_input, run_cancel.clone()).await;
+        let logical = engine.logical_provider_gateway().and_then(|gateway| {
+            engine
+                .logical_planning_launch()
+                .map(|(project_id, working_dir)| LogicalPlanLaunch {
+                    gateway,
+                    project_id,
+                    working_dir,
+                    logical_repository_id: repository
+                        .logical_repository_id
+                        .as_ref()
+                        .map(|id| id.0.to_string()),
+                    checkout_id: repository
+                        .primary_checkout_id
+                        .as_ref()
+                        .map(|id| id.0.to_string()),
+                })
+        });
+        let provider_session = start_work_item_plan_author(
+            logical,
+            provider.clone(),
+            provider_input,
+            run_cancel.clone(),
+        )
+        .await;
         let full_output = engine
             .drive_work_item_plan_provider_session_to_output(
                 provider_session,

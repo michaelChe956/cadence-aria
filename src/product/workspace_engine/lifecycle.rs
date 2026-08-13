@@ -379,6 +379,24 @@ impl WorkspaceEngine {
         &self.session
     }
 
+    /// 克隆既有 `logical_provider_gateway` 字段。非空即逻辑会话(Task 11 注入)。
+    pub fn logical_provider_gateway(
+        &self,
+    ) -> Option<Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>> {
+        self.logical_provider_gateway.clone()
+    }
+
+    /// 逻辑会话的 planning launch 标识:(project_id, run cwd)。
+    ///
+    /// 仅当注入 `logical_provider_gateway` 且 `session.repository_path` 存在时返回
+    /// `Some`。`cwd` 取既有字段 `session.repository_path`(不新造数据源)——对逻辑
+    /// WorkItemPlan 该字段是选中成员 checkout(见 gateway_start.rs 的 deferred 说明)。
+    pub fn logical_planning_launch(&self) -> Option<(String, std::path::PathBuf)> {
+        self.logical_provider_gateway.as_ref()?;
+        let cwd = self.session.repository_path.clone()?;
+        Some((self.session.project_id.clone(), cwd))
+    }
+
     pub fn pending_author_choice_request_message(&self) -> Option<WsOutMessage> {
         let pending = self.pending_author_choice.as_ref()?;
         Some(WsOutMessage::ChoiceRequest {

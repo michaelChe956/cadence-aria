@@ -12,6 +12,9 @@ use followups::{
     combine_outline_auto_retry_feedback, drive_current_work_item_plan_outline_run,
     work_item_plan_retry_error,
 };
+#[path = "run/gateway_start.rs"]
+mod gateway_start;
+pub(crate) use gateway_start::{LogicalPlanLaunch, start_work_item_plan_author};
 #[path = "run/provider_run.rs"]
 mod provider_run;
 pub(crate) use provider_run::spawn_provider_run_from_handler;

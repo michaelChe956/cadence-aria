@@ -178,17 +178,42 @@ pub(crate) async fn handle_workspace_socket(
 
     let (engine_tx, engine_rx) = mpsc::channel::<EngineEvent>(64);
 
+    let is_logical_session = repository.logical_repository_id.is_some();
+
     let mut session = WorkspaceSession::from_record(session_record.clone());
     session.repository_path = Some(repository.path);
     if let Ok(checkpoints) = checkpoint_store.list_checkpoints(&session.session_id) {
         session.restore_checkpoint_ids(&checkpoints);
     }
-    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
-        checkpoint_store,
-        lifecycle,
-        engine_tx,
-        session,
-    )));
+    let mut engine_workspace =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, engine_tx, session);
+    if is_logical_session {
+        let gateway = match state.gateway_factory() {
+            Some(factory) => match factory.build(&session_record.project_id) {
+                Ok(gateway) => gateway,
+                Err(error) => {
+                    let err = WsOutMessage::Error {
+                        message: format!("logical gateway build failed: {error}"),
+                    };
+                    if let Ok(json) = serde_json::to_string(&err) {
+                        let _ = ws_sender.send(Message::Text(json.into())).await;
+                    }
+                    return;
+                }
+            },
+            None => {
+                let err = WsOutMessage::Error {
+                    message: "logical gateway factory unavailable".to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    let _ = ws_sender.send(Message::Text(json.into())).await;
+                }
+                return;
+            }
+        };
+        engine_workspace = engine_workspace.with_logical_provider_gateway(Arc::new(gateway));
+    }
+    let engine = Arc::new(Mutex::new(engine_workspace));
 
     let (session_state, restored_choice_request) = {
         let mut engine = engine.lock().await;

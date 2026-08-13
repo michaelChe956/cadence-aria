@@ -9,6 +9,8 @@ use crate::web::workspace_ws_types::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "tests/gateway_start.rs"]
+mod gateway_start;
 #[path = "tests/human_presentation.rs"]
 mod human_presentation;
 #[path = "tests/interrupted_run_recovery.rs"]
