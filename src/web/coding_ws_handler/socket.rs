@@ -737,6 +737,9 @@ pub fn is_coding_ws_message_allowed(
             CodingWsInMessage::GateResponse { .. } | CodingWsInMessage::AbortAttempt
         );
     }
+    if *status == CodingAttemptStatus::AwaitingManualRecovery {
+        return matches!(message, CodingWsInMessage::AbortAttempt);
+    }
     match stage {
         CodingExecutionStage::PrepareContext => matches!(
             message,

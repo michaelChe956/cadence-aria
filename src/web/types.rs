@@ -519,6 +519,7 @@ pub struct CodingAttemptDto {
     pub attempt_no: u32,
     pub status: String,
     pub stage: String,
+    pub manual_recovery_reason: Option<String>,
     pub branch_name: String,
     pub base_branch: String,
     pub worktree_path: Option<String>,

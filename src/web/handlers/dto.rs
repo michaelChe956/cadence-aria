@@ -422,6 +422,7 @@ pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAtte
         attempt_no: attempt.attempt_no,
         status: coding_attempt_status_text(&attempt.status).to_string(),
         stage: coding_execution_stage_text(&attempt.stage).to_string(),
+        manual_recovery_reason: attempt.manual_recovery_reason.clone(),
         branch_name: attempt.branch_name.clone(),
         base_branch: attempt.base_branch.clone(),
         worktree_path: attempt
@@ -796,3 +797,6 @@ pub(crate) fn issue_status_text(status: &IssueStatus) -> &'static str {
 
 #[cfg(test)]
 include!("dto/repository_initialization_tests.rs");
+
+#[cfg(test)]
+include!("dto/coding_attempt_dto_tests.rs");

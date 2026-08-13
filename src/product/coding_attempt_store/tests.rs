@@ -206,6 +206,46 @@ fn status_machine_rejects_direct_blocked_to_running_and_manual_recovery_only_to_
 }
 
 #[test]
+fn aborting_manual_recovery_attempt_preserves_reason_for_audit() {
+    let (_tmp, store, attempt) = setup();
+    let running = store
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("start attempt");
+    store
+        .write_coding_attempt_for_test(&CodingExecutionAttempt {
+            status: CodingAttemptStatus::AwaitingManualRecovery,
+            version: 0,
+            manual_recovery_reason: Some("attempt_awaiting_manual_recovery".to_string()),
+            admission_ticket_consumed_at: None,
+            ..running
+        })
+        .expect("seed manual-recovery attempt");
+
+    let aborted = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Aborted,
+        )
+        .expect("abort manual-recovery attempt");
+
+    assert_eq!(aborted.status, CodingAttemptStatus::Aborted);
+    assert_eq!(
+        aborted.manual_recovery_reason,
+        Some("attempt_awaiting_manual_recovery".to_string())
+    );
+
+    let reloaded = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reload aborted attempt");
+    assert_eq!(
+        reloaded.manual_recovery_reason,
+        Some("attempt_awaiting_manual_recovery".to_string())
+    );
+}
+
+#[test]
 fn status_machine_has_no_direct_entry_into_running_from_any_state() {
     // 进入 Running 的唯一途径是 admission CAS；`update_attempt_status` 对 Running 目标
     // 必须从任何源状态（含 Running 自身的幂等调用）返回 invalid_coding_attempt_status_transition。

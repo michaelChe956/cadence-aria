@@ -733,6 +733,51 @@ fn blocked_attempt_allows_gate_response_messages() {
 }
 
 #[test]
+fn awaiting_manual_recovery_attempt_allows_only_abort_message() {
+    // AbortAttempt 在任何 stage 下都应放行（该状态唯一可达的终态路径）。
+    assert!(is_coding_ws_message_allowed(
+        &CodingAttemptStatus::AwaitingManualRecovery,
+        &CodingExecutionStage::FinalConfirm,
+        &CodingWsInMessage::AbortAttempt,
+    ));
+    // 其余消息一律拒绝，即使 stage 维度本会放行（FinalConfirm stage 放行 FinalConfirm/GateResponse）。
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::AwaitingManualRecovery,
+        &CodingExecutionStage::FinalConfirm,
+        &CodingWsInMessage::FinalConfirm,
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::AwaitingManualRecovery,
+        &CodingExecutionStage::FinalConfirm,
+        &CodingWsInMessage::GateResponse {
+            gate_id: "coding_blocked_gate_0001".to_string(),
+            action_id: "manual_continue".to_string(),
+            extra_context: None,
+        },
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::AwaitingManualRecovery,
+        &CodingExecutionStage::CodeReview,
+        &CodingWsInMessage::StartCoding,
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::AwaitingManualRecovery,
+        &CodingExecutionStage::CodeReview,
+        &CodingWsInMessage::ProviderSelect {
+            role: "coder".to_string(),
+            provider: ProviderName::Fake,
+        },
+    ));
+    assert!(!is_coding_ws_message_allowed(
+        &CodingAttemptStatus::AwaitingManualRecovery,
+        &CodingExecutionStage::CodeReview,
+        &CodingWsInMessage::ContextNote {
+            content: "manual fix".to_string(),
+        },
+    ));
+}
+
+#[test]
 fn manual_continue_gate_response_does_not_auto_resume_runner() {
     let mut attempt = CodingExecutionAttempt {
         id: "coding_attempt_0001".to_string(),

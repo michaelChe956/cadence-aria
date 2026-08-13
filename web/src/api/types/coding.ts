@@ -38,6 +38,7 @@ export type CodingAttemptStatus =
   | "running"
   | "waiting_for_human"
   | "blocked"
+  | "awaiting_manual_recovery"
   | "awaiting_plan_amendment"
   | "applying_plan_amendment"
   | "amendment_apply_failed"
