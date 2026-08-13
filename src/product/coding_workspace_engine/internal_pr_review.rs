@@ -297,6 +297,14 @@ impl CodingWorkspaceEngine {
             streaming_input_from_adapter(&input, worktree_path.clone(), permission_mode);
         provider_input.workspace_session_id = Some(attempt.id.clone());
         provider_input.resume_provider_session_id = resume_provider_session_id;
+        // Task 7:review 路径经统一 helper 生产 validated input;同源 clone-then-move。
+        let validated_input = self
+            .validated_streaming_input_for_role(
+                &attempt,
+                CodingProviderRole::InternalReviewer,
+                provider_input.clone(),
+            )
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
         let full_output = self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
@@ -313,7 +321,7 @@ impl CodingWorkspaceEngine {
                 timeout: None,
                 timeout_reason_code: None,
                 suppress_failure_side_effects: false,
-                validated_input: None,
+                validated_input,
             })
             .await?;
         let raw_provider_output_ref = self.store.save_provider_raw_output(

@@ -381,6 +381,15 @@ impl CodingWorkspaceEngine {
                     return Err(error);
                 }
             };
+            // Task 7:review 路径同样经统一 helper 生产 validated input;同源
+            // clone-then-move(validated 包裹 clone,原值 move 进 run 结构)。
+            let validated_input = self
+                .validated_streaming_input_for_role(
+                    &invocation_attempt,
+                    CodingProviderRole::CodeReviewer,
+                    provider_input.clone(),
+                )
+                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
             let outcome = self
                 .run_provider_stream_invocation(CodingProviderStreamRun {
                     attempt: &invocation_attempt,
@@ -398,7 +407,7 @@ impl CodingWorkspaceEngine {
                     timeout: None,
                     timeout_reason_code: None,
                     suppress_failure_side_effects: true,
-                    validated_input: None,
+                    validated_input,
                 })
                 .await;
             if let Some(outcome) = self

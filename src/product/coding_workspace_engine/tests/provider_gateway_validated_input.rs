@@ -21,10 +21,11 @@ use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::product::coding_models::AttemptTargetSnapshot;
 use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
 use crate::product::logical_codebase::{
-    AggregatePolicyArtifactStore, GatewayRunAudit, LogicalCodebaseManifest,
-    LogicalCodebaseProviderGateway, LogicalRepositoryId, PolicyTarget, PolicyTargetResolver,
-    ProviderCapability, ProviderCapabilitySource, ProviderDialect, ProviderGatewayError,
-    ProviderRef, ProviderRefType, RepositoryCheckoutId, SessionLaunchRequest, SessionPolicyAction,
+    AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, GatewayRunAudit,
+    LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
+    LogicalRepositoryId, PolicyTarget, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, ProviderDialect, ProviderGatewayError, ProviderRef, ProviderRefType,
+    RepositoryCheckoutId, RepositoryCheckoutRecord, SessionLaunchRequest, SessionPolicyAction,
 };
 use crate::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 
@@ -119,6 +120,22 @@ fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
 
 /// 为 `project_id` 组装一个 bootstrap 政策就绪的 gateway。
 fn build_gateway(paths: &ProductAppPaths, project_id: &str) -> LogicalCodebaseProviderGateway {
+    build_gateway_with_registry(
+        paths,
+        project_id,
+        Arc::new(ProviderRegistry::new()),
+        Arc::new(GatewayRunAudit::new()),
+    )
+}
+
+/// 用注入的 registry 与 audit 组装 gateway,供 engine 级测试注册 fake streaming
+/// adapter 并断言 `GatewayRunAudit` 的 Stream 启动计数。
+fn build_gateway_with_registry(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    registry: Arc<ProviderRegistry>,
+    audit: Arc<GatewayRunAudit>,
+) -> LogicalCodebaseProviderGateway {
     let manifest = LogicalCodebaseManifest::new(project_id, paths.root().to_path_buf(), vec![]);
     let policies = AggregatePolicyArtifactStore::new(paths.clone());
     policies
@@ -128,10 +145,10 @@ fn build_gateway(paths: &ProductAppPaths, project_id: &str) -> LogicalCodebasePr
         policies,
         Arc::new(StaticCapabilitySource),
         Arc::new(PassThroughTargetResolver),
-        Arc::new(ProviderRegistry::new()),
+        registry,
         Arc::new(StubSyncAdapter),
         always_available_gate(),
-        Arc::new(GatewayRunAudit::new()),
+        audit,
     )
 }
 
@@ -167,6 +184,41 @@ fn with_target_snapshot(
     logical
 }
 
+/// Task 7 专用:为逻辑 attempt 播种 LogicalCodebaseStore 的 manifest 与主 checkout,
+/// 使 provider run 启动前的跨仓越界 baseline 采集(Task 14)能成功。
+fn seed_logical_codebase_checkout(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
+    let logical_store = LogicalCodebaseStore::new(store.paths());
+    let repository_id = LogicalRepositoryId(uuid::Uuid::nil());
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    let manifest = LogicalCodebaseManifest::new(
+        &attempt.project_id,
+        store.paths().root().to_path_buf(),
+        vec![repository_id],
+    );
+    logical_store
+        .save_manifest(&attempt.project_id, &manifest)
+        .expect("save manifest");
+    logical_store
+        .save_checkout(
+            &attempt.project_id,
+            &RepositoryCheckoutRecord {
+                checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+                logical_repository_id: repository_id,
+                physical_repository_id: "repository_0001".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: worktree,
+                checkout_path_hash: "checkout-path-hash".to_string(),
+                git_dir_identity: "git-dir-identity".to_string(),
+                revision: None,
+                availability: CheckoutAvailability::Available,
+                observed_at: "2026-08-09T00:00:00Z".to_string(),
+                created_at: "2026-08-09T00:00:00Z".to_string(),
+                updated_at: "2026-08-09T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save checkout");
+}
+
 fn engine(
     store: &CodingAttemptStore,
     gateway: Option<LogicalCodebaseProviderGateway>,
@@ -192,6 +244,142 @@ fn streaming_input(working_dir: PathBuf, provider_type: ProviderType) -> Streami
         env_vars: Default::default(),
         timeout_secs: 1,
     }
+}
+
+/// Task 7:注册进 gateway registry 的 review streaming adapter。`start` 立即完成
+/// 并输出固定 review JSON,使 engine 级 internal review 能唯一经 gateway 跑通。
+struct ReviewStreamingAdapter {
+    output: String,
+}
+
+impl ReviewStreamingAdapter {
+    fn new(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ReviewStreamingAdapter {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let structured_output_contract = input.structured_output_contract.clone();
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        let output = self.output.clone();
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+                        output,
+                        structured_output_contract.as_ref(),
+                        None,
+                    ),
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[test]
+fn validated_streaming_input_for_role_produces_review_read_only_for_review_roles() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    let gateway = build_gateway(&store.paths(), &logical_attempt.project_id);
+    let engine = engine(&store, Some(gateway));
+
+    for role in [
+        CodingProviderRole::CodeReviewer,
+        CodingProviderRole::InternalReviewer,
+    ] {
+        let input = streaming_input(
+            logical_attempt.worktree_path.clone().expect("worktree"),
+            ProviderType::ClaudeCode,
+        );
+        let validated = engine
+            .validated_streaming_input_for_role(&logical_attempt, role, input)
+            .expect("helper returns Ok")
+            .expect("logical attempt + gateway must produce validated input");
+        let (_input, policy) = validated.into_parts();
+        assert_eq!(
+            policy.envelope().action,
+            SessionPolicyAction::ReviewReadOnly
+        );
+        assert!(policy.envelope().writable_roots.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn logical_internal_review_launches_through_gateway() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    seed_logical_codebase_checkout(&store, &logical_attempt);
+
+    store
+        .save_review_request(
+            &logical_attempt,
+            &ReviewRequest {
+                id: "review_request_0001".to_string(),
+                attempt_id: logical_attempt.id.clone(),
+                kind: ReviewRequestKind::GitBranchOnly,
+                remote_kind: RemoteKind::GenericGit,
+                remote: "origin".to_string(),
+                base_branch: logical_attempt.base_branch.clone(),
+                branch_name: logical_attempt.branch_name.clone(),
+                commit_sha: git_stdout(
+                    logical_attempt.worktree_path.as_ref().unwrap(),
+                    &["rev-parse", "HEAD"],
+                ),
+                push_status: PushStatus::Pushed,
+                external_url: None,
+                manual_instructions: Vec::new(),
+                created_at: "2026-08-09T00:00:00Z".to_string(),
+                updated_at: "2026-08-09T00:00:00Z".to_string(),
+                push_error: None,
+            },
+        )
+        .expect("review request");
+
+    let audit = Arc::new(GatewayRunAudit::new());
+    let adapter = Arc::new(ReviewStreamingAdapter::new(
+        serde_json::json!({
+            "verdict": "approve",
+            "summary": "logical review ok",
+            "findings": []
+        })
+        .to_string(),
+    ));
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, adapter.clone());
+    let gateway = build_gateway_with_registry(
+        &store.paths(),
+        &logical_attempt.project_id,
+        Arc::new(registry),
+        audit.clone(),
+    );
+
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
+
+    let review = engine
+        .execute_internal_pr_review(&logical_attempt, adapter.as_ref())
+        .await
+        .expect("logical internal review must launch through gateway");
+
+    assert_eq!(review.verdict, ReviewVerdict::Approve);
+    assert_eq!(audit.stream_launches(), 1);
 }
 
 #[test]
