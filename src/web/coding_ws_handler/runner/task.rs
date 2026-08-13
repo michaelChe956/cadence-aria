@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -111,12 +113,18 @@ async fn run_coding_runner_task_body(
             }
         }
     }
-    let engine = CodingWorkspaceEngine::new(
+    let mut engine = CodingWorkspaceEngine::new(
         coding_store.clone(),
         GitWorkspaceService::new(),
         event_tx.clone(),
     )
     .with_cancellation(cancellation.clone());
+    if attempt.target_snapshot.is_some()
+        && let Some(factory) = state.gateway_factory()
+        && let Ok(gateway) = factory.build(&attempt.project_id)
+    {
+        engine = engine.with_logical_provider_gateway(Arc::new(gateway));
+    }
     let result = execute_start_coding_flow(
         &state,
         &coding_store,

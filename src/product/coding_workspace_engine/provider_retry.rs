@@ -236,6 +236,16 @@ impl CodingWorkspaceEngine {
                     return Err(error);
                 }
             };
+            // Task 6:逻辑 target + 已注入 gateway 时生产 validated input；否则为
+            // None（Legacy 直连）。provider_input 在 move 进 run 结构前先 clone,
+            // 保证 validated 与 input 同源。
+            let validated_input = self
+                .validated_streaming_input_for_role(
+                    &invocation_attempt,
+                    CodingProviderRole::Coder,
+                    provider_input.clone(),
+                )
+                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
             let outcome = self
                 .run_provider_stream_invocation(CodingProviderStreamRun {
                     attempt: &invocation_attempt,
@@ -253,7 +263,7 @@ impl CodingWorkspaceEngine {
                     timeout: None,
                     timeout_reason_code: None,
                     suppress_failure_side_effects: true,
-                    validated_input: None,
+                    validated_input,
                 })
                 .await;
             if let Some(outcome) = self

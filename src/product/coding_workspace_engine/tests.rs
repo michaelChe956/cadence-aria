@@ -539,6 +539,7 @@ mod plan_defect_entrypoints;
 mod provider_driven;
 mod provider_execution_context;
 mod provider_failure_recovery;
+mod provider_gateway_validated_input;
 mod provider_rework_context;
 mod provider_start_persistence;
 mod runtime_handoff_compatibility;

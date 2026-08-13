@@ -1,5 +1,11 @@
 use super::*;
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use crate::product::coding_models::CodingAttemptScope;
+use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
+use crate::product::logical_codebase::provider_gateway::{
+    ProviderGatewayError, SessionLaunchRequest,
+};
+use crate::product::work_item_split_engine::engine::provider_ref_for_name;
 use std::sync::Arc;
 
 impl CodingWorkspaceEngine {
@@ -27,6 +33,58 @@ impl CodingWorkspaceEngine {
     ) -> Self {
         self.logical_provider_gateway = Some(gateway);
         self
+    }
+
+    /// 逻辑 target + 已注入 gateway 时构造 validated input；否则 None（Legacy 直连）。
+    ///
+    /// `provider` 由 `input.provider_type` 反推（与 `provider_type_for_name` 1:1），
+    /// 再经 `provider_ref_for_name` 映射为 gateway 的 `ProviderRef`。Coder 角色映射
+    /// `CodingTargetWrite`（writable_roots 为 worktree），其余角色映射
+    /// `ReviewReadOnly`（writable_roots 为空）。
+    pub(crate) fn validated_streaming_input_for_role(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: CodingProviderRole,
+        input: StreamingProviderInput,
+    ) -> Result<Option<ValidatedStreamingProviderInput>, ProviderGatewayError> {
+        let Some(gateway) = self.logical_provider_gateway.as_ref() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = attempt.target_snapshot.as_ref() else {
+            return Ok(None);
+        };
+
+        let action = match role {
+            CodingProviderRole::Coder => SessionPolicyAction::CodingTargetWrite,
+            CodingProviderRole::CodeReviewer | CodingProviderRole::InternalReviewer => {
+                SessionPolicyAction::ReviewReadOnly
+            }
+        };
+        let writable_roots = match role {
+            CodingProviderRole::Coder => vec![input.working_dir.clone()],
+            CodingProviderRole::CodeReviewer | CodingProviderRole::InternalReviewer => Vec::new(),
+        };
+        let provider_name = match input.provider_type {
+            ProviderType::ClaudeCode => ProviderName::ClaudeCode,
+            ProviderType::Codex => ProviderName::Codex,
+            ProviderType::Pi => ProviderName::Pi,
+            ProviderType::Fake => ProviderName::Fake,
+        };
+        let request = SessionLaunchRequest {
+            project_id: attempt.project_id.clone(),
+            provider: provider_ref_for_name(&provider_name),
+            action,
+            target: PolicyTarget::checkout(
+                snapshot.logical_repository_id.0.to_string(),
+                snapshot.checkout_id.0.to_string(),
+                snapshot.canonical_path.clone(),
+            ),
+            readable_roots: vec![input.working_dir.clone()],
+            writable_roots,
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        };
+        let validated = gateway.validate(request)?;
+        Ok(Some(ValidatedStreamingProviderInput::new(input, validated)))
     }
 
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
