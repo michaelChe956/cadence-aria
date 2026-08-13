@@ -802,19 +802,32 @@ impl CodingWorkspaceEngine {
                 code.as_str().to_string(),
             ));
         }
-        let attempt = self.store.update_attempt_stage(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingExecutionStage::ReviewRequest,
-        )?;
+        // 重推路径判定：既有 journal 为 ReviewRequest + Completed + Failed + 有 commit_sha
+        // （与 reopen_failed_review_git_operation 的守卫同源）时跳过 stage 转换——attempt
+        // 已在 ReviewRequest 或 FinalConfirm，不应倒退 stage；首交路径保留无条件转换。
+        let existing_journal = self.store.get_coding_git_operation(attempt)?;
+        let is_retry = existing_journal.as_ref().is_some_and(|journal| {
+            journal.kind == CodingGitOperationKind::ReviewRequest
+                && journal.phase == CodingGitOperationPhase::Completed
+                && journal.push_status == Some(PushStatus::Failed)
+                && journal.commit_sha.is_some()
+        });
+        let attempt = if is_retry {
+            (*attempt).clone()
+        } else {
+            self.store.update_attempt_stage(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingExecutionStage::ReviewRequest,
+            )?
+        };
         let node = self.create_review_request_timeline_node(&attempt)?;
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
             .await;
 
-        let existing_journal = self.store.get_coding_git_operation(&attempt)?;
         let before_head = match existing_journal.as_ref() {
             Some(journal) if journal.kind == CodingGitOperationKind::ReviewRequest => {
                 journal.before_head.clone()

@@ -360,7 +360,15 @@ async fn handle_coding_socket(
                     // runner 存活窗口内优先转发命令臂（覆盖 brief 窗口）；runner 已退出时
                     // 直接处理（仿 FinalConfirm 臂），复用 execute_review_request 的
                     // journal 幂等重入：Failed 重开重推，Pushed 幂等返回。
-                    if let Some(command_tx) = runner_command_tx.as_ref() {
+                    // `runner_command_tx` 仅在 AbortAttempt 时置 None；runner 正常走完
+                    // （FinalConfirm/WaitingForHuman）退出后 receiver drop、channel 关闭，
+                    // sender 仍为 Some。若只看 is_some 转发，send 会返回 Err 被丢弃且
+                    // continue 跳过下方直接处理 → RetryPush 静默吞没。故用
+                    // `!is_closed()` 把「已关闭 sender」也归入直接处理路径。
+                    if let Some(command_tx) = runner_command_tx
+                        .as_ref()
+                        .filter(|tx| !tx.is_closed())
+                    {
                         let _ = command_tx.send(CodingRunnerCommand::RetryPush).await;
                         drop(mutation_lease);
                         continue;

@@ -355,3 +355,133 @@ async fn group_attempt_runs_group_final_review_when_review_request_push_fails() 
     ws.close(None).await.expect("close ws");
     server.abort();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn retry_push_after_runner_exit_falls_back_to_direct_handling() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_group_full_chain_attempt_and_provider(
+        root.path(),
+        Arc::new(IndependentCodeReviewPlanDefectProvider::approve_all()),
+    );
+    // 注入拒绝 push 的 hook，使第一次 review_request push 失败。
+    let hook = root.path().join("remote.git/hooks/pre-receive");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").expect("rejecting hook");
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod hook");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+
+    let mut confirmed_gates = HashSet::new();
+    let mut bound_first_handoff = false;
+    let mut saw_failed_review_request = false;
+    for _ in 0..320 {
+        match timeout(Duration::from_secs(2), recv_json(&mut ws)).await {
+            Ok(CodingWsOutMessage::CodingGateRequired { gate }) => {
+                if gate.kind == CodingGateKind::StageGate
+                    && let Some(stage) = gate.stage.clone()
+                    && confirmed_gates.insert(gate.gate_id)
+                {
+                    send_json(&mut ws, &CodingWsInMessage::StageGateConfirm { stage }).await;
+                }
+            }
+            Ok(CodingWsOutMessage::CodingSessionState {
+                current_work_item_id,
+                ..
+            }) if current_work_item_id.as_deref() == Some("work_item_0002")
+                && !bound_first_handoff =>
+            {
+                bind_completed_first_unit_handoff_revision(&store);
+                bound_first_handoff = true;
+            }
+            Ok(CodingWsOutMessage::ReviewRequestUpdate { review_request }) => {
+                if review_request.push_status == PushStatus::Failed {
+                    saw_failed_review_request = true;
+                }
+            }
+            Ok(CodingWsOutMessage::CodingSessionState { status, stage, .. })
+                if status == CodingAttemptStatus::WaitingForHuman
+                    && stage == CodingExecutionStage::FinalConfirm =>
+            {
+                break;
+            }
+            Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            Ok(_) => {}
+            Err(_) => panic!("timed out before FinalConfirm"),
+        }
+    }
+    assert!(saw_failed_review_request, "first push must fail");
+
+    // runner 已在 FinalConfirm 退出、command channel 关闭；移除 hook 让重推成功。
+    fs::remove_file(&hook).expect("remove rejecting hook");
+
+    send_json(&mut ws, &CodingWsInMessage::RetryPush).await;
+
+    // 观察重推的响应（修复前此处完全静默），直到直接处理路径推送 session state
+    // 或报错；超时继续等（execute_review_request 的 git push 可能较慢）。
+    let mut saw_retry_response = false;
+    let mut retried_pushed = false;
+    let mut observed = Vec::new();
+    for _ in 0..60 {
+        match timeout(Duration::from_secs(2), recv_json(&mut ws)).await {
+            Ok(CodingWsOutMessage::ReviewRequestUpdate { review_request }) => {
+                saw_retry_response = true;
+                observed.push(format!("review_request:{:?}", review_request.push_status));
+                if review_request.push_status == PushStatus::Pushed {
+                    retried_pushed = true;
+                }
+            }
+            Ok(CodingWsOutMessage::CodingSessionState { status, stage, .. }) => {
+                saw_retry_response = true;
+                observed.push(format!("state:{status:?}:{stage:?}"));
+                break;
+            }
+            Ok(CodingWsOutMessage::CodingProtocolError { code, message }) => {
+                saw_retry_response = true;
+                observed.push(format!("error:{code}:{message}"));
+                break;
+            }
+            Ok(other) => {
+                observed.push(format!("other:{other:?}"));
+            }
+            Err(_) => {}
+        }
+    }
+
+    // 权威断言：以 store 为准，重推必须把 push_status 从 Failed 转为 Pushed，
+    // 且 attempt stage 不得倒退（仍 FinalConfirm）。
+    let requests = store
+        .list_review_requests("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("review requests");
+    let request = requests.last().expect("review request persisted");
+    assert_eq!(
+        request.push_status,
+        PushStatus::Pushed,
+        "RetryPush after runner exit must retry the push; observed={observed:?} saw_retry_response={saw_retry_response} retried_pushed={retried_pushed}"
+    );
+    let attempt_after = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt after retry");
+    assert_eq!(
+        attempt_after.stage,
+        CodingExecutionStage::FinalConfirm,
+        "RetryPush must not regress the attempt stage from FinalConfirm"
+    );
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
