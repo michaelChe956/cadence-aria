@@ -146,7 +146,7 @@ mod tests {
         let root = tempdir().expect("workspace");
         let state = WebAppState::new(
             root.path().to_path_buf(),
-            WebRuntime::new_fake(root.path().to_path_buf()),
+            WebRuntime::new_real(root.path().to_path_buf()).expect("real runtime"),
         );
 
         let error = provider_for(&state, &ProviderName::Codex, "coding provider")

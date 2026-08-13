@@ -148,8 +148,12 @@ fn provider_state(
         4096,
     ));
     let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
-    let state = WebAppState::new(root.to_path_buf(), WebRuntime::new_fake(root.to_path_buf()))
-        .with_provider_health(health.clone(), gate, command_runner);
+    // fake runtime 现在默认 test mode；本 helper 测试真实 provider 健康门禁（gate 型
+    // availability + recheck 真实刷新 + 门禁阻断生命周期/coding），因此在注入 gate 前
+    // 显式切回真实模式语义。fake runtime 仍保证仓库注册走假路径（无网络 clone）。
+    let mut state = WebAppState::new(root.to_path_buf(), WebRuntime::new_fake(root.to_path_buf()));
+    state.test_provider_enabled = false;
+    let state = state.with_provider_health(health.clone(), gate, command_runner);
     (state, health)
 }
 

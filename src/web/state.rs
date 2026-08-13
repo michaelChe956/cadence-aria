@@ -140,7 +140,8 @@ impl WebAppState {
 
     pub fn with_events(workspace_root: PathBuf, mut runtime: WebRuntime, events: EventHub) -> Self {
         let test_controls = TestControls::default();
-        let test_provider_enabled = provider_mode_is_fake();
+        let test_provider_enabled =
+            provider_mode_is_fake() || !runtime.enforces_real_provider_availability();
         let command_runner: Arc<dyn BoundedCommandRunner> = Arc::new(TokioBoundedCommandRunner);
         let provider_health = Arc::new(ProviderHealthService::with_dependencies(
             AriaStatePaths::from_workspace_root(&workspace_root),
@@ -621,6 +622,32 @@ mod tests {
     }
 
     #[test]
+    fn web_app_state_fake_runtime_registers_fake_provider_without_env_flag() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _provider_mode = ProviderModeGuard::disabled();
+        let root = tempdir().expect("root");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+
+        assert!(state.provider_registry.get(&ProviderName::Fake).is_some());
+    }
+
+    #[test]
+    fn web_app_state_real_runtime_excludes_fake_provider() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _provider_mode = ProviderModeGuard::disabled();
+        let root = tempdir().expect("root");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_real(root.path().to_path_buf()).expect("real runtime"),
+        );
+
+        assert!(state.provider_registry.get(&ProviderName::Fake).is_none());
+    }
+
+    #[test]
     fn image_create_engine_is_constructed_without_changing_new_signature() {
         let root = tempdir().expect("root");
         let state = WebAppState::new(
@@ -713,7 +740,7 @@ mod tests {
             let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
             let state = WebAppState::new(
                 root.path().to_path_buf(),
-                WebRuntime::new_fake(root.path().to_path_buf()),
+                WebRuntime::new_real(root.path().to_path_buf()).expect("real runtime"),
             )
             .with_provider_health(health.clone(), gate, runner);
             assert!(!(state.provider_availability)(&ProviderName::Codex));
