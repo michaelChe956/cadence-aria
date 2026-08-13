@@ -100,6 +100,44 @@ describe("LifecycleCardDrawer", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("renders delivery status panel inside issue detail", () => {
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue-id",
+          kind: "issue",
+          title: "登录会话过期",
+          status: "draft",
+          version: null,
+        }}
+        deliverySummary={{
+          project_id: "project_0001",
+          issue_id: "issue-id",
+          overall: "partial",
+          entries: [
+            {
+              repository_name: "cadence-aria",
+              work_item_id: "work_item_0001",
+              attempt_status: "completed",
+              branch_name: "feat/delivery",
+              commit_sha: "abc123def",
+              push_status: "failed",
+              push_error: "remote rejected: non-fast-forward",
+            },
+          ],
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("delivery-status-panel")).toBeInTheDocument();
+    expect(screen.getByText("部分交付")).toBeInTheDocument();
+    expect(
+      screen.getByText("remote rejected: non-fast-forward"),
+    ).toBeInTheDocument();
+  });
+
   it("renders issue description, artifacts, and metadata", () => {
     render(
       <LifecycleCardDrawer

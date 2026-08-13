@@ -758,6 +758,14 @@ export function IssueLifecycleWorkbench({
                   lifecycle.issue.issue_id === focusedEntity.issueId,
               )?.coding_attempts ?? [],
             )}
+            deliverySummary={
+              focusedEntity.kind === "issue"
+                ? lifecycles.find(
+                    (lifecycle) =>
+                      lifecycle.issue.issue_id === focusedEntity.issueId,
+                  )?.delivery_summary
+                : undefined
+            }
             onClose={closeDrawer}
             onOpenWorkspace={() =>
               void handleOpenWorkspaceFromDrawer(focusedEntity)

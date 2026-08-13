@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   ArtifactVersion,
   CodingAttempt,
+  IssueDeliverySummaryDto,
   IssueWorkItemPlanDependencyEdgeDto,
   ProductIssueArtifact,
   WorkItemContextBudget,
@@ -27,6 +28,7 @@ import {
 } from "../../state/lifecycle-workbench-store";
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
+import { DeliveryStatusPanel } from "./DeliveryStatusPanel";
 
 export type DrawerEntityKind =
   | "issue"
@@ -73,6 +75,7 @@ interface LifecycleCardDrawerProps {
   onOpenCodingWorkspace?: () => void;
   onGenerateNext?: () => void;
   onDelete?: () => void;
+  deliverySummary?: IssueDeliverySummaryDto;
 }
 
 const KIND_LABELS: Record<DrawerEntityKind, string> = {
@@ -106,6 +109,7 @@ export function LifecycleCardDrawer({
   onOpenCodingWorkspace,
   onGenerateNext,
   onDelete,
+  deliverySummary,
 }: LifecycleCardDrawerProps) {
   const [showAllVersions, setShowAllVersions] = useState(false);
   const [selectedVersionIndex, setSelectedVersionIndex] = useState(0);
@@ -184,6 +188,7 @@ export function LifecycleCardDrawer({
           <IssueDetail
             entity={entity}
             onOpenPreview={() => setIssuePreviewOpen(true)}
+            deliverySummary={deliverySummary}
           />
         ) : versions.length > 0 ? (
           <section className="border-b border-[var(--aria-line)] px-4 py-3">
@@ -398,9 +403,11 @@ export function LifecycleCardDrawer({
 function IssueDetail({
   entity,
   onOpenPreview,
+  deliverySummary,
 }: {
   entity: DrawerEntity;
   onOpenPreview: () => void;
+  deliverySummary?: IssueDeliverySummaryDto;
 }) {
   const artifacts = entity.artifacts ?? [];
   return (
@@ -428,6 +435,9 @@ function IssueDetail({
             </div>
           </div>
         </section>
+      ) : null}
+      {deliverySummary ? (
+        <DeliveryStatusPanel summary={deliverySummary} />
       ) : null}
       {artifacts.length > 0 ? (
         <section className="border-b border-[var(--aria-line)] px-4 py-3">

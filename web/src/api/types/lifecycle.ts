@@ -1,4 +1,4 @@
-import type { CodingAttempt } from "./coding";
+import type { CodingAttempt, CodingAttemptStatus, PushStatus } from "./coding";
 import type {
   LifecycleConfirmationStatus,
   ProductIssue,
@@ -78,6 +78,26 @@ export type WorkItemRepositoryGroup = {
   items: LifecycleWorkItem[];
 };
 
+// 后端 IssueLifecycleResponse.delivery_summary 的单个条目投影（serde snake_case）。
+// attempt_status / push_status 为 null 表示对应 Work Item 尚无 attempt / ReviewRequest。
+export type DeliveryEntryDto = {
+  repository_name: string;
+  work_item_id: string;
+  attempt_status: CodingAttemptStatus | null;
+  branch_name: string | null;
+  commit_sha: string | null;
+  push_status: PushStatus | null;
+  push_error: string | null;
+};
+
+// Issue 级交付状态聚合（"all_pushed" | "partial" | "none"）。
+export type IssueDeliverySummaryDto = {
+  project_id: string;
+  issue_id: string;
+  entries: DeliveryEntryDto[];
+  overall: "all_pushed" | "partial" | "none";
+};
+
 export type IssueLifecycleResponse = {
   issue: ProductIssue;
   story_specs: StorySpec[];
@@ -88,6 +108,8 @@ export type IssueLifecycleResponse = {
   work_item_repository_groups: WorkItemRepositoryGroup[];
   workspace_sessions: WorkspaceSessionSummary[];
   coding_attempts: CodingAttempt[];
+  // 向后兼容：后端始终返回该字段；旧响应缺失时前端不渲染交付状态面板。
+  delivery_summary?: IssueDeliverySummaryDto;
 };
 
 export type GenerateStorySpecsRequest = ProviderWorkspaceConfigInput & {
