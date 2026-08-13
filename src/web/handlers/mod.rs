@@ -74,6 +74,7 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 pub mod aggregate_initialization;
 mod coding;
 mod dto;
+mod gateway_error_mapping;
 mod health;
 pub mod image_create;
 mod lifecycle;

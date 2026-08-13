@@ -1022,63 +1022,7 @@ pub(crate) struct GroupReviewExecutionResult {
     pub role_run_id: Option<String>,
 }
 
-#[cfg(test)]
-pub(crate) struct FakeGroupReviewExecutor {
-    results: Mutex<VecDeque<Result<GroupReviewExecutionResult, GroupReviewExecutionError>>>,
-    prompts: Mutex<Vec<String>>,
-}
-
-#[cfg(test)]
-impl FakeGroupReviewExecutor {
-    pub(crate) fn new(
-        results: Vec<Result<GroupReviewExecutionResult, GroupReviewExecutionError>>,
-    ) -> Self {
-        Self {
-            results: Mutex::new(results.into()),
-            prompts: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub(crate) fn push_result(
-        &self,
-        result: Result<GroupReviewExecutionResult, GroupReviewExecutionError>,
-    ) {
-        self.results
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_back(result);
-    }
-
-    pub(crate) fn prompts(&self) -> Vec<String> {
-        self.prompts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-}
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl GroupReviewExecutor for FakeGroupReviewExecutor {
-    async fn execute(
-        &self,
-        prompt: &str,
-    ) -> Result<GroupReviewExecutionResult, GroupReviewExecutionError> {
-        self.prompts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(prompt.to_string());
-        self.results
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pop_front()
-            .unwrap_or_else(|| {
-                Err(GroupReviewExecutionError::Internal(
-                    "fake_group_review_executor_exhausted".to_string(),
-                ))
-            })
-    }
-}
+include!("group_review_orchestrator_fake_executor.inc.rs");
 
 fn has_all_shard_reports(
     snapshot: &GroupReviewMaterialSnapshot,
