@@ -315,3 +315,121 @@ async fn aborted_git_commit_future_kills_hook_process_group_without_late_side_ef
     );
     assert_eq!(before, head(repo), "aborted git commit changed HEAD late");
 }
+
+fn remote_has_branch(remote: &Path, branch: &str) -> bool {
+    let output = StdCommand::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(remote)
+        .output()
+        .expect("show-ref remote branch");
+    output.status.success()
+}
+
+#[tokio::test]
+async fn delete_remote_branch_removes_pushed_branch_and_is_idempotent() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let remote = tmp.path().join("origin.git");
+    fs::create_dir_all(&repo).expect("create repo dir");
+    fs::create_dir_all(&remote).expect("create remote dir");
+    git(&remote, &["init", "--bare"]);
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-m", "base"]);
+    let branch = "aria/work-items/work_item_0001/attempt-1";
+    git(&repo, &["branch", branch]);
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    git(&repo, &["push", "origin", branch]);
+    assert!(
+        remote_has_branch(&remote, branch),
+        "remote branch must exist before deletion"
+    );
+
+    let service = GitWorkspaceService::new();
+    service
+        .delete_remote_branch(&repo, "origin", branch)
+        .await
+        .expect("delete remote branch");
+
+    assert!(
+        !remote_has_branch(&remote, branch),
+        "remote branch must be gone after deletion"
+    );
+
+    service
+        .delete_remote_branch(&repo, "origin", branch)
+        .await
+        .expect("repeat deletion of missing remote branch is idempotent");
+}
+
+#[tokio::test]
+async fn delete_remote_branch_rejects_missing_remote() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    git(repo, &["commit", "-m", "base"]);
+
+    let service = GitWorkspaceService::new();
+    let error = service
+        .delete_remote_branch(
+            repo,
+            "does-not-exist",
+            "aria/work-items/work_item_0001/attempt-1",
+        )
+        .await
+        .expect_err("missing remote must fail");
+    let GitWorkspaceError::CommandFailed { stderr, .. } = &error else {
+        panic!("missing remote must surface as CommandFailed, got {error:?}");
+    };
+    assert!(
+        stderr.contains("does-not-exist")
+            || stderr.contains("does not appear to be a git repository"),
+        "error must carry remote context, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn delete_remote_branch_rejects_unsafe_branch_name() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    git(repo, &["commit", "-m", "base"]);
+    git(
+        repo,
+        &["remote", "add", "origin", "https://example.test/origin.git"],
+    );
+
+    let service = GitWorkspaceService::new();
+    let error = service
+        .delete_remote_branch(repo, "origin", "release/v1")
+        .await
+        .expect_err("unsafe branch name must fail");
+    assert!(
+        matches!(error, GitWorkspaceError::UnsafePath(_)),
+        "unsafe branch name must surface as UnsafePath, got {error:?}"
+    );
+}

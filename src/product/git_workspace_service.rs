@@ -193,6 +193,32 @@ impl GitWorkspaceService {
             .map(|_| ())
     }
 
+    pub async fn delete_remote_branch(
+        &self,
+        repo_path: &Path,
+        remote: &str,
+        branch_name: &str,
+    ) -> Result<(), GitWorkspaceError> {
+        self.ensure_git_repo(repo_path).await?;
+        ensure_safe_aria_branch_name(branch_name)?;
+        let output = self
+            .run_git_allow_failure(repo_path, &["push", remote, "--delete", branch_name])
+            .await?;
+        if output.status_success {
+            return Ok(());
+        }
+        // 远端分支本就不存在：git 输出含 "remote ref does not exist" 且 exit != 0，
+        // 与 delete_local_branch 的 show-ref 幂等语义对齐，视为成功。
+        if remote_delete_output_is_missing_ref(&output.stderr) {
+            return Ok(());
+        }
+        Err(GitWorkspaceError::CommandFailed {
+            args: format!("push {remote} --delete {branch_name}"),
+            cwd: repo_path.display().to_string(),
+            stderr: output.stderr,
+        })
+    }
+
     pub async fn git_status(
         &self,
         worktree_path: &Path,
@@ -767,6 +793,12 @@ fn push_output_is_explicit_remote_rejection(stderr: &str) -> bool {
     stderr.contains("[remote rejected]")
         || stderr.contains("[rejected]")
         || stderr.contains("remote: error:")
+}
+
+fn remote_delete_output_is_missing_ref(stderr: &str) -> bool {
+    stderr
+        .to_ascii_lowercase()
+        .contains("remote ref does not exist")
 }
 
 fn parse_numstat_line(line: &str) -> Result<DiffFileStat, GitWorkspaceError> {

@@ -1,4 +1,33 @@
-use super::push_output_is_explicit_remote_rejection;
+use super::{push_output_is_explicit_remote_rejection, remote_delete_output_is_missing_ref};
+
+#[test]
+fn missing_remote_ref_delete_output_is_idempotent() {
+    for stderr in [
+        "error: unable to delete 'aria/work-items/work_item_0001/attempt-1': remote ref does not exist\nerror: failed to push some refs to 'origin'",
+        "remote: remote ref does not exist",
+    ] {
+        assert!(
+            remote_delete_output_is_missing_ref(stderr),
+            "expected missing-ref delete output: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn genuine_remote_delete_failures_are_not_missing_ref() {
+    for stderr in [
+        "fatal: 'does-not-exist' does not appear to be a git repository",
+        "fatal: Could not read from remote repository.",
+        "! [remote rejected] aria/work-items/work_item_0001/attempt-1 (pre-receive hook declined)",
+        "send-pack: unexpected disconnect while reading sideband packet",
+        "",
+    ] {
+        assert!(
+            !remote_delete_output_is_missing_ref(stderr),
+            "must remain a real failure: {stderr}"
+        );
+    }
+}
 
 #[test]
 fn porcelain_remote_rejections_are_terminal() {
